@@ -1,7 +1,11 @@
 [package]
+authors = ["Yao <yaojianpin@sohu.com>"]
+description = "a fast, tiny, extensiable workflow engine"
 edition = "2021"
+keywords = ["workflow"]
 license = "MIT"
 name = "act"
+repository = "https://github.com/yaojianpin/act.git"
 version = "0.1.0"
 
 [dependencies]
