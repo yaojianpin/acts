@@ -1,0 +1,51 @@
+[package]
+edition = "2021"
+license = "MIT"
+name = "act"
+version = "0.1.0"
+
+[dependencies]
+async-trait = "0.1.57"
+bincode = "1.3.3"
+chrono = "0.4.22"
+clap = {version = "3.2.20", features = ["derive"]}
+colored = "2.0.0"
+futures = "0.3.25"
+lru = "0.8.1"
+nanoid = "0.4.0"
+once_cell = "1.15.0"
+regex = "1.6.0"
+rhai = {version = "1.9.1", features = ["internals", "sync"]}
+rocksdb = {git = "https://github.com/rust-rocksdb/rust-rocksdb.git", features = ["lz4"]}
+serde = {version = "1.0.144", features = ["derive"]}
+serde_yaml = "0.9.11"
+sqlx = {version = "0.6.2", features = ["runtime-tokio-native-tls", "sqlite"]}
+thiserror = "1.0.34"
+tokio = {version = "1.21.0", features = ["full"]}
+
+[dev-dependencies]
+criterion = {version = "0.4.0"}
+
+[features]
+db_debug = []
+debug = [] # allowing debug print
+default = ["role", "org", "store"]
+mem = []
+org = [] # org plugin feature
+role = [] # role plugin feature
+sqlite = []
+store = []
+
+[[bin]]
+name = "act"
+required-features = []
+
+[[bench]]
+harness = false
+name = "workflow"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "z"
+strip = true

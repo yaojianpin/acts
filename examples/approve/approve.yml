@@ -1,0 +1,30 @@
+name: approve
+jobs:
+  - name: job1
+    id: job1
+    env:
+      rate: 0.5
+    steps:
+      - name: step 1
+        id: step1
+        subject:
+          matcher: some(rate)
+          on:
+            next: print("on next");
+          users: |
+            let a = ["a", "b"];
+            let b = role("admin");
+            let c = ["c"];
+
+            a.union(c).union(b)
+
+        on:
+          init: |
+            print("init");
+          next: |
+            print("success");
+          error: |
+            print("error");
+        run: |
+          print("step 1");
+      - name: step 2

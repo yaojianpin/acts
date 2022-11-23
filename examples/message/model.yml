@@ -1,0 +1,24 @@
+name: event_test
+outputs:
+  value: 0
+jobs:
+  - name: job1
+    steps:
+      - name: step 1
+        id: step1
+        accept: ["a"]
+        on:
+          init: |
+            print("init");
+            env.set("value", 10);
+          next: |
+            print("success");
+          error: |
+            print("error");
+          a: |
+            print("message received");
+        run: |
+          print("step 1");
+      - name: step 2
+      - name: step 3
+      - name: step 4
