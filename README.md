@@ -1,5 +1,5 @@
-# Act workflow engine
-`act` is a fast, tiny, extensiable workflow engine, which provides the abilities to execute workflow based on simple yml model.
+# Yao workflow engine
+`yao` is a fast, tiny, extensiable workflow engine, which provides the abilities to execute workflow based on simple yml model.
 
 The yml workflow model is not as same as the tranditional flow. such as bpmn.  It is inspired by Github actions. As a contrast, it added branch defination for more complex flow, for the purpose of business approval flow, it defines the `subject` property in step to support the top absolute rules for user, org and role. 
 
@@ -96,7 +96,7 @@ jobs:
           env.set("output_key", "output value");
 ```
 
-The `subject` is used to create the user ['Act'], which can wait util calling the `post_message` to complete by user.
+The `subject` is used to create the user [`Act`], which can wait util calling the `post_message` to complete by user.
 ```yml
 name: model name
 jobs:
