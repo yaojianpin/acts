@@ -21,7 +21,7 @@ Here are some examples:
 First, you should load a ymal workflow model, and call `engine.start` to start and call `engine.close` to stop it.
 
 ```no_run
-use act::{Engine, Vars, Workflow};
+use yao::{Engine, Vars, Workflow};
 
 #[tokio::main]
 async fn main() {
@@ -140,7 +140,7 @@ users: |
 
 ### Use builder to create model
 ```rust
-use act::{Workflow};
+use yao::{Workflow};
 
 let mut workflow = Workflow::new()
         .with_name("workflow builder")

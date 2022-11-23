@@ -18,7 +18,7 @@ use std::{
 /// a example to caculate the result from 1 to given input value
 ///
 ///```rust
-/// use act::{Engine, Workflow, Vars};
+/// use yao::{Engine, Workflow, Vars};
 ///
 /// #[tokio::main]
 /// async fn main() {
@@ -106,7 +106,7 @@ impl Engine {
     ///
     /// ## Example
     /// ```rust
-    /// use act::{Engine, Workflow, Vars};
+    /// use yao::{Engine, Workflow, Vars};
     ///
     /// #[tokio::main]
     /// async fn main() {
@@ -176,7 +176,7 @@ impl Engine {
     /// ## Example
     ///
     /// ```rust
-    /// use act::{Engine, Workflow, Vars};
+    /// use yao::{Engine, Workflow, Vars};
     /// #[tokio::main]
     /// async fn main() {
     ///     let engine = Engine::new();

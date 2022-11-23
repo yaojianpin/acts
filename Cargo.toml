@@ -4,7 +4,7 @@ description = "a fast, tiny, extensiable workflow engine"
 edition = "2021"
 keywords = ["workflow"]
 license = "MIT"
-name = "act"
+name = "yao"
 repository = "https://github.com/yaojianpin/act.git"
 version = "0.1.0"
 
@@ -41,7 +41,7 @@ sqlite = []
 store = []
 
 [[bin]]
-name = "act"
+name = "yao"
 required-features = []
 
 [[bench]]

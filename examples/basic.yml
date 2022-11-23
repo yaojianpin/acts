@@ -34,8 +34,8 @@ jobs:
           console::wran(`v=${v}`);
           console::error(`v=${v}`);
           //let a = env.get("cccc");
-          //act::abc(a);
-          //act::log("aaaaa");
+          //yao::abc(a);
+          //yao::log("aaaaa");
 
       - name: step 3
         env:

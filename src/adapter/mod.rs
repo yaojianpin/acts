@@ -32,7 +32,7 @@ pub trait SomeRule: Send + Sync {
 ///
 /// # Example
 /// ```no_run
-/// use act::{RuleAdapter, ActResult, Context, Step};
+/// use yao::{RuleAdapter, ActResult, Context, Step};
 /// struct TestAdapter;
 /// impl RuleAdapter for TestAdapter {
 ///     fn ord(&self, _name: &str, acts: &Vec<String>) -> ActResult<Vec<String>> {
@@ -59,7 +59,7 @@ pub trait RuleAdapter: Send + Sync {
 ///
 /// # Example
 /// ```no_run
-/// use act::{OrgAdapter};
+/// use yao::{OrgAdapter};
 /// struct TestAdapter;
 /// impl OrgAdapter for TestAdapter {
 ///     fn dept(&self, _name: &str) -> Vec<String> {
@@ -96,7 +96,7 @@ pub trait OrgAdapter: Send + Sync {
 ///
 /// # Example
 /// ```no_run
-/// use act::RoleAdapter;
+/// use yao::RoleAdapter;
 /// struct TestAdapter;
 /// impl RoleAdapter for TestAdapter {
 ///     fn role(&self, _name: &str) -> Vec<String> {
@@ -113,7 +113,7 @@ pub trait RoleAdapter: Send + Sync {
 ///
 /// # Example
 /// ```no_run
-/// use act::{store::{Proc,Task, Message, DataSet}, StoreAdapter};
+/// use yao::{store::{Proc,Task, Message, DataSet}, StoreAdapter};
 /// use std::sync::Arc;
 /// struct TestStore;
 /// impl StoreAdapter for TestStore {

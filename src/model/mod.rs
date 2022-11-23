@@ -5,7 +5,7 @@ pub mod job;
 pub mod step;
 pub mod workflow;
 
-pub use crate::model::act::Act;
+pub use act::Act;
 pub use branch::Branch;
 pub use job::Job;
 pub use step::Step;
