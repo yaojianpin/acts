@@ -162,7 +162,7 @@ impl Engine {
     ///     engine.register_action("add", add);
     /// }
     /// ```
-    pub fn register_action<ARGS, N, T, F>(&mut self, name: N, func: F) -> u64
+    pub(crate) fn register_action<ARGS, N, T, F>(&mut self, name: N, func: F) -> u64
     where
         N: AsRef<str> + Into<Identifier>,
         T: Variant + Clone,
