@@ -162,11 +162,11 @@ impl Engine {
     ///     engine.register_action("add", add);
     /// }
     /// ```
-    pub(crate) fn register_action<ARGS, N, T, F>(&mut self, name: N, func: F) -> u64
+    pub fn register_action<ARGS, N, T, F, S>(&mut self, name: N, func: F) -> u64
     where
         N: AsRef<str> + Into<Identifier>,
         T: Variant + Clone,
-        F: RegisterNativeFunction<ARGS, std::result::Result<T, Box<EvalAltResult>>>,
+        F: RegisterNativeFunction<ARGS, T, std::result::Result<S, Box<EvalAltResult>>>,
     {
         self.action.lock().unwrap().set_native_fn(name, func)
     }
