@@ -20,7 +20,7 @@ async fn plugin_init() {
     assert_eq!(*test_plugin.is_init.lock().unwrap(), true);
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct TestPlugin {
     is_init: Arc<Mutex<bool>>,
 }

@@ -43,6 +43,7 @@ async fn init() -> SqlitePool {
     }
 }
 
+#[derive(Debug)]
 pub struct SqliteStore {
     procs: Arc<ProcSet>,
     tasks: Arc<TaskSet>,
@@ -84,7 +85,7 @@ impl StoreAdapter for SqliteStore {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ProcSet;
 
 impl DataSet<Proc> for ProcSet {
@@ -203,7 +204,7 @@ impl DataSet<Proc> for ProcSet {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct TaskSet;
 
 impl DataSet<Task> for TaskSet {
@@ -338,7 +339,7 @@ impl DataSet<Task> for TaskSet {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct MessageSet;
 
 impl DataSet<Message> for MessageSet {

@@ -5,6 +5,7 @@ use crate::{
 };
 use std::sync::Arc;
 
+#[derive(Debug)]
 pub struct NoneStore {
     procs: ProcSet,
     tasks: TaskSet,
@@ -38,7 +39,7 @@ impl StoreAdapter for NoneStore {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ProcSet;
 
 impl DataSet<Proc> for ProcSet {
@@ -65,7 +66,7 @@ impl DataSet<Proc> for ProcSet {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct TaskSet;
 
 impl DataSet<Task> for TaskSet {
@@ -92,7 +93,7 @@ impl DataSet<Task> for TaskSet {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct MessageSet;
 
 impl DataSet<Message> for MessageSet {

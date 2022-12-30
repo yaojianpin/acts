@@ -120,6 +120,7 @@ fn concat_merge(
     Some(result)
 }
 
+#[derive(Debug)]
 pub struct LocalStore {
     procs: Arc<ProcSet>,
     tasks: Arc<TaskSet>,
@@ -171,7 +172,7 @@ impl StoreAdapter for LocalStore {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ProcSet {
     name: String,
 }
@@ -275,7 +276,7 @@ impl DataSet<Proc> for ProcSet {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct TaskSet {
     name: String,
 }
@@ -379,7 +380,7 @@ impl DataSet<Task> for TaskSet {
     }
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct MessageSet {
     name: String,
     // items: Tree,

@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 use std::collections::HashMap;
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Workflow {
     #[serde(default)]
     pub id: String,

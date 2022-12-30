@@ -20,11 +20,11 @@ pub async fn init(engine: &Engine) {
         .register_some_rule("rate", rule::Rate::default());
 }
 
-pub trait OrdRule: Send + Sync {
+pub trait OrdRule: std::fmt::Debug + Send + Sync {
     fn ord(&self, users: &Vec<String>) -> ActResult<Vec<String>>;
 }
 
-pub trait SomeRule: Send + Sync {
+pub trait SomeRule: std::fmt::Debug + Send + Sync {
     fn some(&self, step: &Step, ctx: &Context) -> ActResult<bool>;
 }
 
@@ -50,7 +50,7 @@ pub trait SomeRule: Send + Sync {
 ///     }
 /// }
 /// ```
-pub trait RuleAdapter: Send + Sync {
+pub trait RuleAdapter: std::fmt::Debug + Send + Sync {
     fn ord(&self, name: &str, acts: &Vec<String>) -> ActResult<Vec<String>>;
     fn some(&self, name: &str, step: &Step, ctx: &Context) -> ActResult<bool>;
 }
@@ -78,7 +78,7 @@ pub trait RuleAdapter: Send + Sync {
 ///     }
 /// }
 /// ```
-pub trait OrgAdapter: Send + Sync {
+pub trait OrgAdapter: std::fmt::Debug + Send + Sync {
     fn dept(&self, name: &str) -> Vec<String>;
     fn unit(&self, name: &str) -> Vec<String>;
 
@@ -104,7 +104,7 @@ pub trait OrgAdapter: Send + Sync {
 ///     }
 /// }
 /// ```
-pub trait RoleAdapter: Send + Sync {
+pub trait RoleAdapter: std::fmt::Debug + Send + Sync {
     fn role(&self, name: &str) -> Vec<String>;
 }
 
@@ -130,7 +130,7 @@ pub trait RoleAdapter: Send + Sync {
 ///     fn flush(&self) {}
 /// }
 /// ```
-pub trait StoreAdapter: Send + Sync {
+pub trait StoreAdapter: std::fmt::Debug + Send + Sync {
     fn init(&self);
 
     fn procs(&self) -> Arc<dyn DataSet<Proc>>;
@@ -140,7 +140,7 @@ pub trait StoreAdapter: Send + Sync {
     fn flush(&self);
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Adapter {
     role: ShareLock<Option<Arc<dyn RoleAdapter>>>,
     org: ShareLock<Option<Arc<dyn OrgAdapter>>>,

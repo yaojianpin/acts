@@ -6,7 +6,7 @@ use crate::{
 use std::sync::{Arc, Mutex, RwLock};
 use tokio::{runtime::Handle, sync::mpsc};
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Queue {
     receiver: Arc<Mutex<mpsc::Receiver<Signal>>>,
     sender: Arc<mpsc::Sender<Signal>>,

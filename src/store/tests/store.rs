@@ -144,6 +144,7 @@ fn create_workflow(id: &str) -> Workflow {
     workflow
 }
 
+#[derive(Debug)]
 struct TestStore;
 
 impl StoreAdapter for TestStore {

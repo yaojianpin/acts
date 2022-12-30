@@ -1,4 +1,4 @@
 mod org;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct OrgPlugin;

@@ -101,7 +101,7 @@ fn create_workflow() -> Workflow {
     workflow
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 struct TestAdapter {}
 impl TestAdapter {
     fn new() -> Self {

@@ -1,7 +1,7 @@
 use crate::{sch::Task, ActError, ActResult, Context, Step, TaskState};
 use regex::Regex;
 
-#[derive(Default, Clone)]
+#[derive(Debug, Default, Clone)]
 pub enum Matcher {
     #[default]
     Empty,

@@ -3,7 +3,7 @@ use crate::{sch::TaskState, ActValue, ShareLock, Workflow};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Job {
     #[serde(default)]
     pub id: String,

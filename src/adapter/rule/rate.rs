@@ -1,6 +1,6 @@
 use crate::{adapter::SomeRule, debug, ActError, ActResult, TaskState};
 
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Rate;
 
 impl SomeRule for Rate {

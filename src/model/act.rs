@@ -2,7 +2,7 @@ use crate::{sch::TaskState, ActValue, ShareLock};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Act {
     #[serde(default)]
     pub id: String,

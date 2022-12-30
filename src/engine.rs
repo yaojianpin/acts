@@ -41,7 +41,7 @@ use std::{
 ///     engine.start().await;
 /// }
 /// ```
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Engine {
     action: Arc<Mutex<ActModule>>,
     modules: Arc<Mutex<HashMap<String, ActModule>>>,

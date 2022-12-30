@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 use std::collections::HashMap;
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Subject {
     #[serde(default)]
     pub matcher: String,
@@ -83,4 +83,28 @@ pub struct Step {
 
     #[serde(skip)]
     pub(crate) act_matcher: ShareLock<Matcher>,
+}
+
+impl std::fmt::Debug for Step {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Step")
+            .field("name", &self.name)
+            .field("id", &self.id)
+            .field("env", &self.env)
+            .field("accept", &self.accept)
+            .field("run", &self.run)
+            .field("on", &self.on)
+            .field("r#if", &self.r#if)
+            .field("branches", &self.branches)
+            .field("next", &self.next)
+            .field("subject", &self.subject)
+            .field("acts", &self.acts)
+            .field("state", &self.state)
+            .field("start_time", &self.start_time)
+            .field("end_time", &self.end_time)
+            .field("act_ord", &self.act_ord)
+            .field("act_candidates", &self.act_candidates)
+            .field("act_matcher", &self.act_matcher)
+            .finish()
+    }
 }

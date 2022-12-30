@@ -107,7 +107,7 @@ async fn engine_builder() {
     assert_eq!(step.branches.len(), 2);
 }
 
-#[derive(Default, Clone)]
+#[derive(Debug, Default, Clone)]
 struct TestPlugin;
 
 impl ActPlugin for TestPlugin {

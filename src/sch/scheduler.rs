@@ -14,7 +14,7 @@ use crate::{
 use std::sync::Arc;
 use tokio::runtime::Handle;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Scheduler {
     queue: Arc<Queue>,
     cache: Arc<Cache>,

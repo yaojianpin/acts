@@ -8,7 +8,7 @@ use rhai::Engine as ScriptEngine;
 use std::sync::{Arc, Mutex};
 pub use vm::VirtualMachine;
 
-#[derive(Default, Clone)]
+#[derive(Debug, Default, Clone)]
 pub struct Enviroment {
     pub(crate) scr: Arc<Mutex<ScriptEngine>>,
 }

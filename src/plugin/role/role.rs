@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 static ADAPTER: OnceCell<Arc<Adapter>> = OnceCell::new();
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct RolePlugin;
 
 impl RolePlugin {

@@ -48,6 +48,22 @@ pub enum Event {
     OnTask(ActTaskHandle),
 }
 
+impl std::fmt::Debug for Event {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::OnStart(_) => f.debug_tuple("OnStart").finish(),
+            Self::OnComplete(_) => f.debug_tuple("OnComplete").finish(),
+            Self::OnMessage(_) => f.debug_tuple("OnMessage").finish(),
+            Self::OnJob(_) => f.debug_tuple("OnJob").finish(),
+            Self::OnStep(_) => f.debug_tuple("OnStep").finish(),
+            Self::OnAct(_) => f.debug_tuple("OnAct").finish(),
+            Self::OnError(_) => f.debug_tuple("OnError").finish(),
+            Self::OnProc(_) => f.debug_tuple("OnProc").finish(),
+            Self::OnTask(_) => f.debug_tuple("OnTask").finish(),
+        }
+    }
+}
+
 unsafe impl Send for Event {}
 unsafe impl Sync for Event {}
 
@@ -64,6 +80,12 @@ pub struct EventHub {
 
     procs: ShareLock<Vec<ActProcHandle>>,
     tasks: ShareLock<Vec<ActTaskHandle>>,
+}
+
+impl std::fmt::Debug for EventHub {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EventHub").finish()
+    }
 }
 
 impl std::fmt::Display for Event {
