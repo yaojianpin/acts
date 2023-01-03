@@ -41,7 +41,7 @@ use std::{
 ///     engine.start().await;
 /// }
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Engine {
     action: Arc<Mutex<ActModule>>,
     modules: Arc<Mutex<HashMap<String, ActModule>>>,
@@ -50,6 +50,17 @@ pub struct Engine {
     evts: Arc<Mutex<Vec<Event>>>,
     is_closed: Arc<Mutex<bool>>,
     pub(crate) plugins: Arc<Mutex<Vec<Box<dyn ActPlugin>>>>,
+}
+
+impl std::fmt::Debug for Engine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Engine")
+            .field("action", &self.action)
+            .field("modules", &self.modules)
+            .field("evts", &self.evts)
+            .field("is_closed", &self.is_closed)
+            .finish()
+    }
 }
 
 impl Engine {

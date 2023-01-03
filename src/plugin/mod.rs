@@ -36,7 +36,7 @@ mod tests;
 ///     }
 /// }
 /// ```
-pub trait ActPlugin: std::fmt::Debug + Send + Sync {
+pub trait ActPlugin: Send + Sync {
     fn on_init(&self, engine: &Engine);
 }
 

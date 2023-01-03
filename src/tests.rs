@@ -16,6 +16,23 @@ async fn engine_start() {
 }
 
 #[tokio::test]
+async fn engine_start_async() {
+    let engine = Engine::new();
+
+    let e = engine.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+        e.close();
+    });
+
+    tokio::spawn(async move {
+        engine.start().await;
+    });
+
+    assert!(true);
+}
+
+#[tokio::test]
 async fn engine_register_event() {
     let engine = Engine::new();
     engine.register_event(&Event::OnStart(Arc::new(|_w: &Workflow| {})));

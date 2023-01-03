@@ -84,7 +84,7 @@ async fn env_act_module() {
     let script = r#"
     let a = 5;
     let b = 4;
-    let result = yao::add(a, b);
+    let result = act::add(a, b);
 
     result
     "#;

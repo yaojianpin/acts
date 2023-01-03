@@ -14,7 +14,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Cache {
     procs: ShareLock<LruCache<String, Proc>>,
     store: Arc<Store>,

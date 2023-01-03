@@ -36,7 +36,6 @@ pub enum StoreKind {
     Extern,
 }
 
-#[derive(Debug)]
 pub struct Store {
     kind: Arc<Mutex<StoreKind>>,
     base: ShareLock<Arc<dyn StoreAdapter>>,

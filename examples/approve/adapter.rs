@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 use yao::{OrgAdapter, RoleAdapter, RuleAdapter};
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct User<'a> {
     pub id: &'a str,
     pub name: &'a str,
 }
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct Adapter<'a> {
     users: HashMap<String, Vec<User<'a>>>,
 }

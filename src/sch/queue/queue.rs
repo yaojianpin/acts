@@ -3,10 +3,10 @@ use crate::{
     sch::{queue::Signal, Scheduler},
     Engine, ShareLock,
 };
-use std::sync::{Arc, Mutex, RwLock};
-use tokio::{runtime::Handle, sync::mpsc};
+use std::sync::{Arc, RwLock};
+use tokio::{runtime::Handle, sync::mpsc, sync::Mutex};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Queue {
     receiver: Arc<Mutex<mpsc::Receiver<Signal>>>,
     sender: Arc<mpsc::Sender<Signal>>,
@@ -35,7 +35,7 @@ impl Queue {
 
     pub async fn next(&self) -> Option<Signal> {
         debug!("queue::next");
-        let receiver = &mut *self.receiver.lock().unwrap();
+        let receiver = &mut *self.receiver.lock().await;
         receiver.recv().await
     }
 
