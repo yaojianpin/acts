@@ -41,7 +41,7 @@ sqlite = []
 store = []
 
 [[bin]]
-name = "yao"
+name = "acts"
 required-features = []
 
 [[bench]]

@@ -1,6 +1,6 @@
 use criterion::*;
 use tokio::runtime::Runtime;
-use yao::{Engine, Workflow};
+use acts::{Engine, Workflow};
 
 fn simple_workflow(c: &mut Criterion) {
     let text = r#"
