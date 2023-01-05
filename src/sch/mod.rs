@@ -57,7 +57,7 @@ impl Engine {
     ///
     /// Example
     /// ```rust
-    /// use yao::{Engine, Workflow, Vars, Message};
+    /// use acts::{Engine, Workflow, Vars, Message};
     ///
     /// #[tokio::main]
     /// async fn main() {

@@ -15,7 +15,7 @@ mod tests;
 /// ## Example
 ///
 /// ```rust
-/// use yao::{ActPlugin, Message, Engine, Workflow};
+/// use acts::{ActPlugin, Message, Engine, Workflow};
 /// #[derive(Clone)]
 /// struct TestPlugin;
 ///
@@ -64,7 +64,7 @@ impl Engine {
     /// ## Example
     ///
     /// ```no_run
-    /// use yao::{ActPlugin, Message, Engine, Workflow};
+    /// use acts::{ActPlugin, Message, Engine, Workflow};
     ///
     /// #[derive(Clone)]
     /// struct TestPlugin;

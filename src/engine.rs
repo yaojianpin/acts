@@ -18,7 +18,7 @@ use std::{
 /// a example to caculate the result from 1 to given input value
 ///
 ///```rust
-/// use yao::{Engine, Workflow, Vars};
+/// use acts::{Engine, Workflow, Vars};
 ///
 /// #[tokio::main]
 /// async fn main() {
@@ -93,6 +93,36 @@ impl Engine {
         self.scher().push(workflow);
     }
 
+    pub fn post_user_message(
+        &self,
+        pid: &str,
+        action: &str,
+        uid: &str,
+        vars: Vars,
+    ) -> ActResult<()> {
+        debug!("post_user_message:{} action={} user={}", id, action, user);
+        let scher = self.scher();
+        let message = scher.message_by_uid(pid, uid);
+        match message {
+            Some(mut message) => {
+                message.data = Some(UserData {
+                    action: action.to_string(),
+                    user: uid.to_string(),
+                    vars,
+                });
+                scher.sched_message(&message);
+            }
+            None => {
+                return Err(ActError::MessageNotFoundError(format!(
+                    "pid={}, uid={}",
+                    pid, uid
+                )))
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn post_message(&self, id: &str, action: &str, user: &str, vars: Vars) -> ActResult<()> {
         debug!("post_message:{} action={} user={}", id, action, user);
 
@@ -117,7 +147,7 @@ impl Engine {
     ///
     /// ## Example
     /// ```rust
-    /// use yao::{Engine, Workflow, Vars};
+    /// use acts::{Engine, Workflow, Vars};
     ///
     /// #[tokio::main]
     /// async fn main() {
@@ -187,7 +217,7 @@ impl Engine {
     /// ## Example
     ///
     /// ```rust
-    /// use yao::{Engine, Workflow, Vars};
+    /// use acts::{Engine, Workflow, Vars};
     /// #[tokio::main]
     /// async fn main() {
     ///     let engine = Engine::new();

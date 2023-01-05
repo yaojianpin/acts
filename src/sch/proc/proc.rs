@@ -109,6 +109,19 @@ impl Proc {
         }
     }
 
+    pub fn message_by_uid(&self, uid: &str) -> Option<Message> {
+        let mut ret = None;
+        let messages = &*self.messages.read().unwrap();
+        for (_, m) in messages {
+            if m.user == uid {
+                ret = Some(m.clone());
+                break;
+            }
+        }
+
+        ret
+    }
+
     // pub fn needs(&self) -> Vec<String> {
     //     self.job.needs.clone()
     // }

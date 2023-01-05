@@ -103,6 +103,13 @@ impl Cache {
         None
     }
 
+    pub fn message_by_uid(&self, pid: &str, uid: &str) -> Option<Message> {
+        if let Some(proc) = self.proc(pid) {
+            return proc.message_by_uid(uid);
+        }
+        None
+    }
+
     fn remove(&self, pid: &str) {
         debug!("sch::cache::remove pid={}", pid);
         self.procs.write().unwrap().pop(pid);

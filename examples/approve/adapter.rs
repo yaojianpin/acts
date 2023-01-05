@@ -1,5 +1,5 @@
+use acts::{OrgAdapter, RoleAdapter, RuleAdapter};
 use std::collections::HashMap;
-use yao::{OrgAdapter, RoleAdapter, RuleAdapter};
 
 #[derive(Debug, Clone)]
 pub struct User<'a> {
@@ -27,11 +27,11 @@ impl<'a> Adapter<'a> {
 }
 
 impl<'a> RuleAdapter for Adapter<'a> {
-    fn ord(&self, _name: &str, _acts: &Vec<String>) -> yao::ActResult<Vec<String>> {
+    fn ord(&self, _name: &str, _acts: &Vec<String>) -> acts::ActResult<Vec<String>> {
         todo!()
     }
 
-    fn some(&self, _name: &str, _step: &yao::Step, _ctx: &yao::Context) -> yao::ActResult<bool> {
+    fn some(&self, _name: &str, _step: &acts::Step, _ctx: &acts::Context) -> acts::ActResult<bool> {
         todo!()
     }
 }

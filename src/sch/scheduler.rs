@@ -138,6 +138,10 @@ impl Scheduler {
         self.cache.message(id)
     }
 
+    pub(crate) fn message_by_uid(&self, pid: &str, uid: &str) -> Option<Message> {
+        self.cache.message_by_uid(pid, uid)
+    }
+
     pub fn evt(&self) -> Arc<EventHub> {
         self.evt.clone()
     }

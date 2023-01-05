@@ -4,9 +4,9 @@ description = "a fast, tiny, extensiable workflow engine"
 edition = "2021"
 keywords = ["workflow"]
 license = "MIT"
-name = "yao"
-repository = "https://github.com/yaojianpin/act.git"
-version = "0.1.4"
+name = "acts"
+repository = "https://github.com/yaojianpin/acts.git"
+version = "0.1.5"
 
 [dependencies]
 async-trait = "0.1.57"
