@@ -9,6 +9,7 @@ pub struct Message {
     pub create_time: i64,
     pub update_time: i64,
     pub uid: Option<String>,
+    pub vars: Vars,
     state: ShareLock<TaskState>,
 }
 
@@ -28,7 +29,7 @@ pub struct ActionOptions {
 }
 
 impl Message {
-    pub fn new(pid: &str, tid: &str, uid: Option<String>) -> Self {
+    pub fn new(pid: &str, tid: &str, uid: Option<String>, vars: Vars) -> Self {
         let id = utils::Id::new(pid, tid);
         Self {
             id: id.id(),
@@ -37,6 +38,7 @@ impl Message {
             uid,
             create_time: utils::time::time(),
             update_time: 0,
+            vars,
             state: Arc::new(RwLock::new(TaskState::None)),
         }
     }

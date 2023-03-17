@@ -365,7 +365,7 @@ impl DataSet<Message> for MessageSet {
         run(async {
             let pool = &*db();
             match sqlx::query(
-                r#"select id, pid, tid, user, create_time from act_message where id=$1"#,
+                r#"select id, pid, tid, user, create_time, vars from act_message where id=$1"#,
             )
             .bind(id)
             .fetch_one(pool)
@@ -377,6 +377,7 @@ impl DataSet<Message> for MessageSet {
                     tid: row.get(2),
                     user: row.get(3),
                     create_time: row.get(4),
+                    vars: row.get(5),
                 }),
                 Err(_) => None,
             }
@@ -390,7 +391,7 @@ impl DataSet<Message> for MessageSet {
             let pool = &*db();
 
             let a = &format!(
-                r#"select id, pid, tid, user, create_time from act_message {}"#,
+                r#"select id, pid, tid, user, create_time, vars from act_message {}"#,
                 q.sql()
             );
             println!("{}", a);
@@ -404,6 +405,7 @@ impl DataSet<Message> for MessageSet {
                             tid: row.get(2),
                             user: row.get(3),
                             create_time: row.get(4),
+                            vars: row.get(5),
                         });
                     }
 

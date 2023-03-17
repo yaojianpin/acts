@@ -238,8 +238,8 @@ impl Proc {
         *count += 1;
     }
 
-    pub(crate) fn make_message(&self, tid: &str, uid: Option<String>) -> Message {
-        let msg = Message::new(&self.pid, tid, uid);
+    pub(crate) fn make_message(&self, tid: &str, uid: Option<String>, vars: Vars) -> Message {
+        let msg = Message::new(&self.pid, tid, uid, vars);
         debug!("sch::proc::make_message(id={}, tid={})", msg.id, tid);
         self.messages
             .write()

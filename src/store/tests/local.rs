@@ -191,11 +191,13 @@ async fn local_task_delete() {
 async fn local_message_create() {
     let store = store().await;
     let table = store.messages();
+    let vars = utils::vars::to_string(&Vars::new());
     let msg = Message {
         id: utils::shortid(),
         pid: "pid".to_string(),
         tid: "tid".to_string(),
         user: "u1".to_string(),
+        vars,
         create_time: 0,
     };
     table.create(&msg).unwrap();
@@ -207,12 +209,14 @@ async fn local_message_query() {
     let store = store().await;
     let messages = store.messages();
     let pid = utils::shortid();
+    let vars = utils::vars::to_string(&Vars::new());
     for _ in 0..5 {
         let msg = Message {
             id: utils::shortid(),
             pid: pid.to_string(),
             tid: "tid".to_string(),
             user: "u1".to_string(),
+            vars: vars.clone(),
             create_time: 0,
         };
         messages.create(&msg).unwrap();
@@ -227,11 +231,13 @@ async fn local_message_query() {
 async fn local_message_update() {
     let store = store().await;
     let table = store.messages();
+    let vars = utils::vars::to_string(&Vars::new());
     let mut msg = Message {
         id: utils::shortid(),
         pid: "pid".to_string(),
         tid: "tid".to_string(),
         user: "u1".to_string(),
+        vars,
         create_time: 0,
     };
     table.create(&msg).unwrap();
@@ -247,11 +253,13 @@ async fn local_message_update() {
 async fn local_message_delete() {
     let store = store().await;
     let table = store.messages();
+    let vars = utils::vars::to_string(&Vars::new());
     let msg = Message {
         id: utils::shortid(),
         pid: "pid".to_string(),
         tid: "tid".to_string(),
         user: "u1".to_string(),
+        vars,
         create_time: 0,
     };
     table.create(&msg).unwrap();

@@ -53,6 +53,19 @@ impl Context {
         self.append_vars(&vars);
     }
 
+    fn vars(&self, task: &Task) -> Vars {
+        let mut vars = Vars::new();
+        match &task.node.data {
+            NodeData::Workflow(workflow) => vars = workflow.env.clone(),
+            NodeData::Job(job) => vars = job.env.clone(),
+            NodeData::Branch(branch) => vars = branch.env.clone(),
+            NodeData::Step(step) => vars = step.env.clone(),
+            NodeData::Act(_act) => {}
+        }
+
+        utils::fill_vars(&self.vm(), &vars)
+    }
+
     pub fn new(proc: &Proc, task: Arc<Task>) -> Self {
         let ctx = Context {
             proc: Arc::new(proc.clone()),
@@ -204,7 +217,7 @@ impl Context {
         if task.state() == TaskState::WaitingEvent {
             let tid = task.tid();
             let uid = task.uid();
-            let message = self.proc.make_message(&tid, uid);
+            let message = self.proc.make_message(&tid, uid, self.vars(task));
             self.proc.scher.evt().on_message(&message);
         }
     }

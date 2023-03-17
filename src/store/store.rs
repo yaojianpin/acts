@@ -205,6 +205,7 @@ impl Store {
                 pid: msg.pid.clone(),
                 tid: msg.tid.clone(),
                 user: uid.to_string(),
+                vars: utils::vars::to_string(&msg.vars),
                 create_time: msg.create_time,
             })
             .expect("store: create message");
@@ -274,7 +275,7 @@ impl Store {
             } else {
                 Some(m.user)
             };
-            proc.make_message(&m.tid, uid);
+            proc.make_message(&m.tid, uid, utils::vars::from_string(&m.vars));
         }
     }
 

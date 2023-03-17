@@ -6,5 +6,6 @@ pub struct Message {
     pub pid: String,
     pub tid: String,
     pub user: String,
+    pub vars: String,
     pub create_time: i64,
 }

@@ -33,7 +33,7 @@ pub use model::*;
 pub use plugin::ActPlugin;
 pub use rhai::Map;
 pub use rhai::Module as ActModule;
-pub use sch::{Context, Message, UserMessage};
+pub use sch::{ActionOptions, Context, Message, UserMessage};
 pub use serde_yaml::Value as ActValue;
 pub type Vars = HashMap<String, ActValue>;
 pub type ActResult<T> = std::result::Result<T, ActError>;

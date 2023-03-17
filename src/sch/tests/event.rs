@@ -73,6 +73,6 @@ async fn event_message() {
     evt.add_event(&Event::OnMessage(Arc::new(move |message: &Message| {
         assert!(message.id == "m1");
     })));
-    let m = Message::new("w1", "1", Some("u1".to_string()));
+    let m = Message::new("w1", "1", Some("u1".to_string()), Vars::new());
     evt.on_message(&m);
 }

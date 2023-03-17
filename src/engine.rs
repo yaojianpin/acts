@@ -160,3 +160,11 @@ impl Engine {
         self.scher.init(self).await;
     }
 }
+
+impl std::fmt::Debug for Engine {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Engine")
+            .field("is_closed", &self.is_closed)
+            .finish()
+    }
+}

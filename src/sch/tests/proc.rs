@@ -1,6 +1,6 @@
 use crate::{
     sch::{Proc, Scheduler},
-    utils, Workflow,
+    utils, Vars, Workflow,
 };
 use std::sync::Arc;
 
@@ -11,7 +11,7 @@ async fn proc_messages() {
     let (proc, scher) = create_proc(&mut workflow, &id);
     scher.sched_proc(&proc);
     let tid = utils::shortid();
-    let msg = proc.make_message(&tid, Some("u1".to_string()));
+    let msg = proc.make_message(&tid, Some("u1".to_string()), Vars::new());
 
     assert!(scher.message(&msg.id).is_some())
 }
