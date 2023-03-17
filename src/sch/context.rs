@@ -3,29 +3,35 @@ use crate::{
     env::VirtualMachine,
     sch::{
         consts,
-        event::{EventAction, EventData, UserData},
-        ActId, ActState, Proc, Task,
+        event::{ActionOptions, EventAction, EventData},
+        tree::NodeData,
+        ActId, Proc, Task,
     },
-    utils, ActResult, ActValue, Job, Message, ShareLock, TaskState, Vars, Workflow,
+    utils, ActResult, ActValue, ShareLock, State, TaskState, UserMessage, Vars,
 };
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex, RwLock},
+    time::SystemTime,
 };
+
+use super::Node;
 
 #[derive(Clone)]
 pub struct Context {
     pub proc: Arc<Proc>,
-    pub user_data: ShareLock<UserData>,
-    pub job: ShareLock<Option<Job>>,
-
-    pub tid: Arc<RwLock<Option<String>>>,
-
-    sync: Arc<Mutex<i32>>,
+    pub task: Arc<Task>,
+    // user_data: ShareLock<Option<UserData>>,
+    uid: ShareLock<Option<String>>,
+    action: ShareLock<Option<String>>,
+    options: ShareLock<ActionOptions>,
+    // pub job: ShareLock<Option<Job>>,
+    // sync: Arc<Mutex<i32>>,
 }
 
 impl Context {
     fn append_vars(&self, vars: &Vars) {
+        debug!("append_vars vars={:?}", vars);
         let env = &mut self.proc.vm.vars.write().unwrap();
         for (name, v) in vars {
             env.entry(name.to_string())
@@ -36,112 +42,42 @@ impl Context {
 
     fn init_vars(&self, task: &Task) {
         let mut vars = Vars::new();
-        match task {
-            Task::Workflow(_, workflow) => vars = workflow.env.clone(),
-            Task::Job(_, job) => vars = job.env.clone(),
-            Task::Branch(_, branch) => vars = branch.env.clone(),
-            Task::Step(_, step) => vars = step.env.clone(),
-            Task::Act(_, _act) => {}
+        match &task.node.data {
+            NodeData::Workflow(workflow) => vars = workflow.env.clone(),
+            NodeData::Job(job) => vars = job.env.clone(),
+            NodeData::Branch(branch) => vars = branch.env.clone(),
+            NodeData::Step(step) => vars = step.env.clone(),
+            NodeData::Act(_act) => {}
         }
 
         self.append_vars(&vars);
-        debug!("vars={:?}", vars);
     }
 
-    pub fn new(proc: &Proc) -> Self {
+    pub fn new(proc: &Proc, task: Arc<Task>) -> Self {
         let ctx = Context {
             proc: Arc::new(proc.clone()),
-            user_data: Arc::new(RwLock::new(UserData::default())),
-            job: Arc::new(RwLock::new(None)),
-            tid: Arc::new(RwLock::new(None)),
-            sync: Arc::new(Mutex::new(0)),
+            uid: Arc::new(RwLock::new(None)),
+            action: Arc::new(RwLock::new(None)),
+            options: Arc::new(RwLock::new(ActionOptions::default())),
+            task: task,
+            // sync: Arc::new(Mutex::new(0)),
         };
 
         ctx
     }
 
-    pub fn prepare(&self, task: &Task) {
-        self.init_vars(task);
+    pub fn prepare(&self) {
+        self.init_vars(&self.task);
+    }
 
-        //self.push_task(exec);
-        self.set_task(task);
-        if task.state() == TaskState::None {
-            self.dispatch(task, EventAction::Create);
+    pub fn set_message(&self, msg: &UserMessage) {
+        *self.uid.write().unwrap() = Some(msg.uid.clone());
+        *self.action.write().unwrap() = Some(msg.action.clone());
+
+        if let Some(options) = &msg.options {
+            self.append_vars(&options.vars);
+            *self.options.write().unwrap() = options.clone();
         }
-
-        let is_pass = task.check_pass(self);
-        if is_pass {
-            task.set_state(&TaskState::Running);
-        } else {
-            task.set_state(&TaskState::WaitingEvent);
-        }
-    }
-
-    pub fn post(&self, task: &Task) {
-        let mut count = self.sync.lock().unwrap();
-        match task {
-            Task::Workflow(_, workflow) => {
-                if workflow.is_finished() {
-                    let outputs = &workflow.outputs;
-                    let vars = utils::fill_vars(&self.proc.vm, outputs);
-                    workflow.set_outputs(vars);
-
-                    if workflow.state() == TaskState::Running {
-                        workflow.set_state(&TaskState::Success);
-                    }
-                    self.proc.complete();
-                }
-            }
-            Task::Job(_, job) => {
-                if task.state() == TaskState::Running {
-                    task.set_state(&TaskState::Success);
-                }
-                let outputs = &job.outputs;
-                let vars = utils::fill_vars(&self.proc.vm, outputs);
-                self.append_vars(&vars);
-            }
-            _ => {
-                if task.state() == TaskState::Running {
-                    task.set_state(&TaskState::Success);
-                }
-            }
-        }
-
-        self.dispatch(task, EventAction::Next);
-
-        *count += 1;
-    }
-
-    pub fn set_message(&self, msg: &Message) {
-        if let Some(user_data) = &msg.data {
-            let vars = user_data.vars.clone();
-            if !vars.is_empty() {
-                self.append_vars(&vars);
-            }
-            *self.user_data.write().unwrap() = user_data.clone();
-        }
-    }
-
-    pub fn job(&self) -> Option<Job> {
-        self.job.read().unwrap().clone()
-    }
-
-    pub fn workflow(&self) -> Arc<Workflow> {
-        self.proc.workflow()
-    }
-
-    pub fn user_data(&self) -> UserData {
-        self.user_data.read().unwrap().clone()
-    }
-
-    pub fn task(&self) -> Option<Task> {
-        if let Some(tid) = &*self.tid.read().unwrap() {
-            if let Some(node) = self.proc.tree.node(tid) {
-                return Some(node.data());
-            }
-        }
-
-        None
     }
 
     pub fn run(&self, script: &str) -> ActResult<bool> {
@@ -164,77 +100,89 @@ impl Context {
         &self.proc.vm
     }
 
-    pub(in crate::sch) fn user(&self) -> Option<String> {
-        let user = self.user_data().user;
-        if user.is_empty() {
-            return None;
-        }
-
-        return Some(user);
+    pub(in crate::sch) fn uid(&self) -> Option<String> {
+        self.uid.read().unwrap().clone()
     }
 
-    fn set_task(&self, task: &Task) {
-        *self.tid.write().unwrap() = Some(task.tid());
-
-        match task {
-            Task::Job(_, job) => {
-                *self.job.write().unwrap() = Some(job.clone());
-            }
-            _ => {}
-        }
+    #[allow(unused)]
+    pub(in crate::sch) fn action(&self) -> Option<String> {
+        self.action.read().unwrap().clone()
     }
 
-    pub fn send_message(&self, user: &str, task: &Task) {
-        match task.state() {
-            TaskState::Abort(err) | TaskState::Fail(err) => {
-                let state = &TaskState::Fail(err);
-                self.job().unwrap().set_state(state);
+    pub(in crate::sch) fn options(&self) -> ActionOptions {
+        let ret = self.options.read().unwrap();
+        ret.clone()
+    }
 
-                let workflow = self.workflow();
-                workflow.set_state(state);
-
-                self.proc.scher.evt().disp_workflow(&workflow);
-                self.proc.complete();
-            }
-            TaskState::WaitingEvent => {
-                let tid = task.tid();
-                let message = self.proc.make_message(&tid, user);
-                self.proc.scher.evt().disp_message(&message);
-            }
-            _ => {}
-        }
+    pub fn sched_task(&self, node: &Arc<Node>) {
+        let task = self.proc.create_task(&node, Some(self.task.clone()));
+        self.proc.scher.sched_task(&task);
     }
 
     pub fn dispatch(&self, task: &Task, action: EventAction) {
-        let mut user = "".to_string();
+        debug!("ctx::dispatch, task={:?} action={:?}", task, action);
+
         let data = EventData {
             pid: self.proc.pid(),
             state: task.state(),
             action: action.clone(),
             vars: self.vm().vars(),
         };
-        self.proc.scher.evt().disp_task(task, &data);
-        let mut on = HashMap::new();
-        match task {
-            Task::Workflow(_, workflow) => {
-                self.proc.scher.evt().disp_workflow(workflow);
+        self.proc.scher.evt().on_task(task, &data);
+        let mut on_event = HashMap::new();
+        match &task.node.data {
+            NodeData::Workflow(_) => {
+                if action == EventAction::Create {
+                    self.proc.set_state(&TaskState::Running);
+                    self.proc.set_start_time(utils::time::time());
+                } else {
+                    self.proc.set_state(&task.state());
+                    self.proc.set_end_time(utils::time::time());
+                }
+
+                self.proc.scher.evt().on_proc(&self.proc, &data);
             }
-            Task::Job(_, job) => {
-                self.proc.scher.evt().disp_job(job);
+            NodeData::Job(job) => {
+                let mut outputs = Vars::new();
+                if action == EventAction::Complete {
+                    outputs = utils::fill_vars(&self.proc.vm, &job.outputs);
+                    self.append_vars(&outputs);
+                }
+                let state = State {
+                    node: Arc::new(job.clone()),
+                    state: task.state(),
+                    start_time: task.start_time(),
+                    end_time: task.end_time(),
+                    outputs: outputs,
+                };
+                self.proc.scher.evt().on_job(&state);
             }
-            Task::Branch(_, _branch) => {}
-            Task::Step(_, step) => {
-                self.proc.scher.evt().disp_step(step);
-                on = step.on.clone();
+            NodeData::Branch(_branch) => {}
+            NodeData::Step(step) => {
+                let state = State {
+                    node: Arc::new(step.clone()),
+                    state: task.state(),
+                    start_time: task.start_time(),
+                    end_time: task.end_time(),
+                    outputs: Vars::new(),
+                };
+                self.proc.scher.evt().on_step(&state);
+                on_event = step.on.clone();
             }
-            Task::Act(_, act) => {
-                user = act.owner.clone();
-                self.proc.scher.evt().disp_act(act);
+            NodeData::Act(act) => {
+                let state = State {
+                    node: Arc::new(act.clone()),
+                    state: task.state(),
+                    start_time: task.start_time(),
+                    end_time: task.end_time(),
+                    outputs: Vars::new(),
+                };
+                self.proc.scher.evt().on_act(&state);
                 if let Some(step) = act.parent(self) {
-                    match step {
-                        Task::Step(_, step) => {
-                            if let Some(sub) = step.subject {
-                                on = sub.on.clone();
+                    match &step.node.data {
+                        NodeData::Step(step) => {
+                            if let Some(sub) = &step.subject {
+                                on_event = sub.on.clone();
                             }
                         }
                         _ => {}
@@ -243,8 +191,8 @@ impl Context {
             }
         }
 
-        let evt = self.get_action_name(&action);
-        if let Some(event) = on.get(&evt) {
+        let evt_name = self.get_action_name(&action);
+        if let Some(event) = on_event.get(&evt_name) {
             if event.is_string() {
                 let ret = self.run(event.as_str().unwrap());
                 if ret.is_err() {
@@ -253,16 +201,36 @@ impl Context {
             }
         }
 
-        self.send_message(&user, task);
+        if task.state() == TaskState::WaitingEvent {
+            let tid = task.tid();
+            let uid = task.uid();
+            let message = self.proc.make_message(&tid, uid);
+            self.proc.scher.evt().on_message(&message);
+        }
     }
 
     fn get_action_name(&self, action: &EventAction) -> String {
         match action {
             EventAction::Create => consts::EVT_INIT.to_string(),
-            EventAction::Next => consts::EVT_NEXT.to_string(),
+            EventAction::Complete => consts::EVT_COMPLETE.to_string(),
             EventAction::Back => consts::EVT_BACK.to_string(),
             EventAction::Cancel => consts::EVT_CANCEL.to_string(),
+            EventAction::Abort => consts::EVT_ABORT.to_string(),
+            EventAction::Submit => consts::EVT_SUBMIT.to_string(),
             EventAction::Error => consts::EVT_ERROR.to_string(),
+            EventAction::Skip => consts::EVT_SKIP.to_string(),
+            EventAction::Custom(name) => name.to_string(),
         }
+    }
+}
+
+impl std::fmt::Debug for Context {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Context")
+            .field("pid", &self.proc.pid())
+            .field("tid", &self.task.tid)
+            .field("uid", &self.uid())
+            .field("action", &self.action())
+            .finish()
     }
 }

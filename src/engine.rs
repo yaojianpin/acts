@@ -1,29 +1,35 @@
 use crate::{
     adapter::{self, Adapter},
     debug,
+    executor::Executor,
+    manager::Manager,
     model::Workflow,
     options::Options,
     plugin::{self, ActPlugin},
-    sch::{Event, Scheduler, UserData},
-    utils, ActError, ActModule, ActResult, Vars,
+    sch::{ActionOptions, Event, Scheduler},
+    utils, ActError, ActModule, ActResult, Emitter, Vars,
 };
 use rhai::{EvalAltResult, Identifier, RegisterNativeFunction, Variant};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Registry};
+
+static IS_GLOBAL_LOG: Mutex<bool> = Mutex::new(false);
+
 /// Workflow Engine
 ///
 /// ## Example:
 /// a example to caculate the result from 1 to given input value
 ///
 ///```rust
-/// use acts::{Engine, Workflow, Vars};
+/// use acts::{Engine, State, Workflow, Vars};
 ///
 /// #[tokio::main]
 /// async fn main() {
 ///     let engine = Engine::new();
-///
+///     
 ///     let model = include_str!("../examples/simple/model.yml");
 ///     let mut workflow = Workflow::from_str(model).unwrap();
 ///
@@ -31,10 +37,11 @@ use std::{
 ///     vars.insert("input".into(), 3.into());
 ///     workflow.set_env(vars);
 ///
-///     engine.push(&workflow);
+///     let executor = engine.executor();
+///     executor.start(&workflow);
 ///
 ///     let e = engine.clone();
-///     engine.on_workflow_complete(move |w: &Workflow| {
+///     engine.emitter().on_complete(move |w: &State<Workflow>| {
 ///         println!("{:?}", w.outputs());
 ///         e.close();
 ///     });
@@ -43,24 +50,12 @@ use std::{
 /// ```
 #[derive(Clone)]
 pub struct Engine {
-    action: Arc<Mutex<ActModule>>,
-    modules: Arc<Mutex<HashMap<String, ActModule>>>,
     scher: Arc<Scheduler>,
     adapter: Arc<Adapter>,
-    evts: Arc<Mutex<Vec<Event>>>,
+    emitter: Arc<Emitter>,
+    executor: Arc<Executor>,
+    mgr: Arc<Manager>,
     is_closed: Arc<Mutex<bool>>,
-    pub(crate) plugins: Arc<Mutex<Vec<Box<dyn ActPlugin>>>>,
-}
-
-impl std::fmt::Debug for Engine {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Engine")
-            .field("action", &self.action)
-            .field("modules", &self.modules)
-            .field("evts", &self.evts)
-            .field("is_closed", &self.is_closed)
-            .finish()
-    }
 }
 
 impl Engine {
@@ -70,15 +65,21 @@ impl Engine {
     }
 
     pub fn new_with(config: &Options) -> Self {
+        let mut v = IS_GLOBAL_LOG.lock().unwrap();
+        if *v == false {
+            Registry::default().with(fmt::layer()).init();
+            *v = true;
+        }
+
         let scher = Arc::new(Scheduler::new_with(config));
 
         let engine = Engine {
-            plugins: Arc::new(Mutex::new(Vec::new())),
-            action: Arc::new(Mutex::new(ActModule::new())),
-            modules: Arc::new(Mutex::new(HashMap::new())),
-            evts: Arc::new(Mutex::new(Vec::new())),
-            scher: scher,
+            scher: scher.clone(),
             adapter: Arc::new(Adapter::new()),
+            executor: Arc::new(Executor::new(&scher)),
+            emitter: Arc::new(Emitter::new(&scher)),
+            mgr: Arc::new(Manager::new()),
+
             is_closed: Arc::new(Mutex::new(false)),
         };
 
@@ -89,58 +90,19 @@ impl Engine {
         self.adapter.clone()
     }
 
-    pub fn push(&self, workflow: &Workflow) {
-        self.scher().push(workflow);
+    /// engine executor
+    pub fn executor(&self) -> Arc<Executor> {
+        self.executor.clone()
     }
 
-    pub fn post_user_message(
-        &self,
-        pid: &str,
-        action: &str,
-        uid: &str,
-        vars: Vars,
-    ) -> ActResult<()> {
-        debug!("post_user_message:{} action={} user={}", id, action, user);
-        let scher = self.scher();
-        let message = scher.message_by_uid(pid, uid);
-        match message {
-            Some(mut message) => {
-                message.data = Some(UserData {
-                    action: action.to_string(),
-                    user: uid.to_string(),
-                    vars,
-                });
-                scher.sched_message(&message);
-            }
-            None => {
-                return Err(ActError::MessageNotFoundError(format!(
-                    "pid={}, uid={}",
-                    pid, uid
-                )))
-            }
-        }
-
-        Ok(())
+    /// event emitter
+    pub fn emitter(&self) -> Arc<Emitter> {
+        self.emitter.clone()
     }
 
-    pub fn post_message(&self, id: &str, action: &str, user: &str, vars: Vars) -> ActResult<()> {
-        debug!("post_message:{} action={} user={}", id, action, user);
-
-        let scher = self.scher();
-        let message = scher.message(id);
-        match message {
-            Some(mut message) => {
-                message.data = Some(UserData {
-                    action: action.to_string(),
-                    user: user.to_string(),
-                    vars,
-                });
-                scher.sched_message(&message);
-            }
-            None => return Err(ActError::MessageNotFoundError(id.to_string())),
-        }
-
-        Ok(())
+    /// engine manager
+    pub fn mgr(&self) -> Arc<Manager> {
+        self.mgr.clone()
     }
 
     /// start engine
@@ -163,53 +125,7 @@ impl Engine {
     pub async fn start(&self) {
         self.init().await;
         let scher = self.scher();
-        loop {
-            let ret = scher.next().await;
-            if !ret {
-                break;
-            }
-        }
-    }
-
-    /// register module
-    ///
-    /// ## Example
-    /// ```rust
-    /// #[tokio::test]
-    /// async fn engine_register_module() {
-    ///     let engine = Engine::new();
-    ///     let mut module = Module::new();
-    ///     combine_with_exported_module!(&mut module, "role", test_module);
-    ///     engine.register_module("test", &module);
-    ///     assert!(engine.modules().contains_key("test"));
-    /// }
-    /// ```
-    pub fn register_module(&self, name: &str, module: &ActModule) {
-        self.modules
-            .lock()
-            .unwrap()
-            .insert(name.to_string(), module.clone());
-    }
-
-    /// register act function
-    ///
-    /// ## Example
-    ///
-    /// ```rust
-    /// #[tokio::test]
-    /// async fn engine_register_module() {
-    ///     let mut engine = Engine::new();
-    ///     let add = |a: i64, b: i64| Ok(a + b);
-    ///     engine.register_action("add", add);
-    /// }
-    /// ```
-    pub fn register_action<ARGS, N, T, F, S>(&mut self, name: N, func: F) -> u64
-    where
-        N: AsRef<str> + Into<Identifier>,
-        T: Variant + Clone,
-        F: RegisterNativeFunction<ARGS, T, std::result::Result<S, Box<EvalAltResult>>>,
-    {
-        self.action.lock().unwrap().set_native_fn(name, func)
+        scher.event_loop().await;
     }
 
     /// close engine
@@ -233,29 +149,14 @@ impl Engine {
         self.is_closed.lock().unwrap().clone()
     }
 
-    pub(crate) fn modules(&self) -> HashMap<String, ActModule> {
-        self.modules.lock().unwrap().clone()
-    }
-
-    pub(crate) fn action(&self) -> ActModule {
-        self.action.lock().unwrap().clone()
-    }
-
-    pub(crate) fn evts(&self) -> Vec<Event> {
-        self.evts.lock().unwrap().clone()
-    }
-
     pub(crate) fn scher(&self) -> Arc<Scheduler> {
         self.scher.clone()
-    }
-
-    pub(crate) fn register_event(&self, evt: &Event) {
-        self.evts.lock().unwrap().push(evt.clone());
     }
 
     async fn init(&self) {
         plugin::init(self).await;
         adapter::init(self).await;
+
         self.scher.init(self).await;
     }
 }

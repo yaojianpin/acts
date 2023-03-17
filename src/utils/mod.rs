@@ -1,11 +1,3 @@
-// #[macro_export]
-// macro_rules! debug {
-//   ($($arg:tt)*) => {
-//     #[cfg(feature = "debug")]
-//     println!($($arg)*);
-//   };
-// }
-
 mod convert;
 mod id;
 pub(crate) mod log;

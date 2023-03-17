@@ -6,17 +6,16 @@ jobs:
     steps:
       - name: step 1
         id: step1
-        accept: ["a"]
         on:
           init: |
             print("init");
             env.set("value", 10);
-          next: |
-            print("success");
+          complete: |
+            print("complete");
           error: |
             print("error");
           a: |
-            print("message received");
+            print("custom message");
         run: |
           print("step 1");
       - name: step 2

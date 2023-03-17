@@ -1,4 +1,4 @@
-use crate::{model::Step, sch::TaskState, ShareLock};
+use crate::{model::Step, ModelBase};
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 use std::collections::HashMap;
@@ -15,9 +15,6 @@ pub struct Branch {
     pub env: HashMap<String, Value>,
 
     #[serde(default)]
-    pub accept: Option<Value>,
-
-    #[serde(default)]
     pub run: Option<String>,
     pub uses: Option<String>,
 
@@ -31,11 +28,10 @@ pub struct Branch {
 
     #[serde(default)]
     pub next: Option<String>,
+}
 
-    #[serde(skip)]
-    pub(crate) state: ShareLock<TaskState>,
-    #[serde(skip)]
-    pub(crate) start_time: ShareLock<i64>,
-    #[serde(skip)]
-    pub(crate) end_time: ShareLock<i64>,
+impl ModelBase for Branch {
+    fn id(&self) -> &str {
+        &self.id
+    }
 }

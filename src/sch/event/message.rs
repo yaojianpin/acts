@@ -6,38 +6,37 @@ pub struct Message {
     pub id: String,
     pub pid: String,
     pub tid: String,
-    pub user: String,
     pub create_time: i64,
-    pub data: Option<UserData>,
+    pub update_time: i64,
+    pub uid: Option<String>,
     state: ShareLock<TaskState>,
 }
 
-impl std::fmt::Display for Message {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&format!(
-            "Message{{ id:{}, pid:{}, tid:{}, user:{} }}",
-            self.id, self.pid, self.tid, self.user
-        ))
-    }
+#[derive(Clone, Debug)]
+pub struct UserMessage {
+    // pub id: Option<String>,
+    pub pid: String,
+    pub uid: String,
+    pub action: String,
+    pub options: Option<ActionOptions>,
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct UserData {
-    pub user: String,
+pub struct ActionOptions {
     pub vars: Vars,
-    pub action: String,
+    pub to: Option<String>,
 }
 
 impl Message {
-    pub fn new(pid: &str, tid: &str, user: &str, data: Option<UserData>) -> Self {
+    pub fn new(pid: &str, tid: &str, uid: Option<String>) -> Self {
         let id = utils::Id::new(pid, tid);
         Self {
             id: id.id(),
             pid: pid.to_string(),
             tid: tid.to_string(),
-            user: user.to_string(),
+            uid,
             create_time: utils::time::time(),
-            data,
+            update_time: 0,
             state: Arc::new(RwLock::new(TaskState::None)),
         }
     }
@@ -52,5 +51,16 @@ impl Message {
 
     pub fn set_state(&self, state: TaskState) {
         *self.state.write().unwrap() = state;
+    }
+}
+
+impl UserMessage {
+    pub fn new(pid: &str, uid: &str, action: &str, options: Option<ActionOptions>) -> Self {
+        Self {
+            pid: pid.to_string(),
+            uid: uid.to_string(),
+            action: action.to_string(),
+            options,
+        }
     }
 }

@@ -1,4 +1,4 @@
-use acts::{Engine, Vars, Workflow};
+use acts::{Engine, State, Vars, Workflow};
 
 #[tokio::main]
 async fn main() {
@@ -42,16 +42,16 @@ async fn main() {
     vars.insert("count".into(), 100.into());
     workflow.set_env(vars);
 
-    engine.push(&workflow);
+    let executor = engine.executor();
+    executor.start(&workflow);
 
     let e = engine.clone();
-    engine.on_workflow_complete(move |w: &Workflow| {
+    engine.emitter().on_complete(move |w: &State<Workflow>| {
         println!(
             "on_workflow_complete: {:?}, cost={}ms",
             w.outputs(),
             w.cost()
         );
-        w.tree();
         e.close();
     });
     engine.start().await;

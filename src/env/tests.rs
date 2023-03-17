@@ -71,10 +71,10 @@ async fn env_console_module() {
 
 #[tokio::test]
 async fn env_act_module() {
-    let mut engine = Engine::new();
+    let engine = Engine::new();
 
     let add = |a: i64, b: i64| Ok(a + b);
-    engine.register_action("add", add);
+    engine.mgr().register_action("add", add);
 
     let env = Enviroment::new();
     env.registry_act_module(&engine);

@@ -1,7 +1,7 @@
 use core::{clone::Clone, convert::From, fmt};
 use serde::{Deserialize, Serialize};
 
-#[derive(Deserialize, Serialize, Default, Clone, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, Default, Clone, PartialEq)]
 pub enum TaskState {
     #[default]
     None,
@@ -9,17 +9,32 @@ pub enum TaskState {
     Pending,
     Success,
     WaitingEvent,
+    Backed,
+    Cancelled,
     Fail(String),
     Skip,
     Abort(String),
 }
 
 impl TaskState {
+    pub fn is_none(&self) -> bool {
+        *self == TaskState::None
+    }
     pub fn is_completed(&self) -> bool {
         match self {
-            TaskState::Success | TaskState::Fail(..) | TaskState::Skip | TaskState::Abort(..) => {
-                true
-            }
+            TaskState::Success
+            | TaskState::Backed
+            | TaskState::Cancelled
+            | TaskState::Fail(..)
+            | TaskState::Skip
+            | TaskState::Abort(..) => true,
+            _ => false,
+        }
+    }
+
+    pub fn is_abort(&self) -> bool {
+        match self {
+            TaskState::Abort(..) => true,
             _ => false,
         }
     }
@@ -30,12 +45,24 @@ impl TaskState {
             _ => false,
         }
     }
-}
 
-impl fmt::Debug for TaskState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
-        let s: String = self.into();
-        f.write_str(&s)
+    pub fn is_running(&self) -> bool {
+        *self == TaskState::Running
+    }
+
+    pub fn is_waiting(&self) -> bool {
+        *self == TaskState::WaitingEvent
+    }
+
+    pub fn is_success(&self) -> bool {
+        *self == TaskState::Success
+    }
+
+    pub fn is_next(&self) -> bool {
+        match self {
+            TaskState::Success | TaskState::Skip | TaskState::Running => true,
+            _ => false,
+        }
     }
 }
 
@@ -74,6 +101,8 @@ fn state_to_str(state: TaskState) -> String {
         TaskState::Fail(s) => format!("fail({})", s),
         TaskState::Skip => "skip".to_string(),
         TaskState::Abort(s) => format!("abort({})", s),
+        TaskState::Backed => "backed".to_string(),
+        TaskState::Cancelled => "cancelled".to_string(),
     };
 
     s
@@ -88,6 +117,8 @@ fn str_to_state(str: &str) -> TaskState {
         "running" => TaskState::Running,
         "success" => TaskState::Success,
         "skip" => TaskState::Skip,
+        "backed" => TaskState::Backed,
+        "cancelled" => TaskState::Cancelled,
         _ => {
             let caps = re.captures(str);
             if let Some(caps) = caps {

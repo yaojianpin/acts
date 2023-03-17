@@ -15,7 +15,7 @@ mod tests;
 /// ## Example
 ///
 /// ```rust
-/// use acts::{ActPlugin, Message, Engine, Workflow};
+/// use acts::{ActPlugin, State, Message, Engine, Workflow};
 /// #[derive(Clone)]
 /// struct TestPlugin;
 ///
@@ -30,9 +30,9 @@ mod tests;
 ///         println!("TestPlugin");
 ///         // engine.register_module("name", module);
 ///         // engine.register_action("func", func);
-///         engine.on_workflow_start(|w: &Workflow| {});
-///         engine.on_workflow_complete(|w: &Workflow| {});
-///         engine.on_message(|msg: &Message| {});
+///         engine.emitter().on_start(|state: &State<Workflow>| {});
+///         engine.emitter().on_complete(|state: &State<Workflow>| {});
+///         engine.emitter().on_message(|msg: &Message| {});
 ///     }
 /// }
 /// ```
@@ -42,7 +42,8 @@ pub trait ActPlugin: Send + Sync {
 
 pub async fn init(engine: &Engine) {
     debug!("plugin::init");
-    let mut plugins = &mut *engine.plugins.lock().unwrap();
+    let mrg = engine.mgr();
+    let mut plugins = &mut *mrg.plugins.lock().unwrap();
 
     register_plugins_default(&mut plugins);
     for plugin in plugins.into_iter() {
@@ -56,37 +57,4 @@ fn register_plugins_default(plugins: &mut Vec<Box<dyn ActPlugin>>) {
 
     #[cfg(feature = "org")]
     plugins.push(Box::new(OrgPlugin::new()));
-}
-
-impl Engine {
-    /// register plugin
-    ///
-    /// ## Example
-    ///
-    /// ```no_run
-    /// use acts::{ActPlugin, Message, Engine, Workflow};
-    ///
-    /// #[derive(Clone)]
-    /// struct TestPlugin;
-    /// impl TestPlugin {
-    ///     fn new() -> Self {
-    ///         Self
-    ///     }
-    /// }
-    /// impl ActPlugin for TestPlugin {
-    ///     fn on_init(&self, engine: &Engine) {
-    ///         println!("TestPlugin");
-    ///         // engine.register_module("name", module);
-    ///         // engine.register_action("func", func);
-    ///         engine.on_workflow_start(|_w: &Workflow| {});
-    ///         engine.on_workflow_complete(|_w: &Workflow| {});
-    ///         engine.on_message(|_msg: &Message| {});
-    ///     }
-    /// }
-    /// let engine = Engine::new();
-    /// engine.register_plugin(&TestPlugin::new());
-    /// ```
-    pub fn register_plugin<T: ActPlugin + 'static + Clone>(&self, plugin: &T) {
-        self.plugins.lock().unwrap().push(Box::new(plugin.clone()));
-    }
 }

@@ -5,11 +5,11 @@ use crate::{
     options::Options,
     sch::{
         cache::Cache,
-        event::{EventData, EventHub},
+        event::EventHub,
         queue::{Queue, Signal},
-        Context, Event, Proc, Task, TaskState,
+        Context, Proc, Task, TaskState,
     },
-    utils, ActError, ActResult, Engine, Message, RuleAdapter, RwLock, ShareLock, Step,
+    utils, ActError, ActResult, Engine, Message, RuleAdapter, RwLock, ShareLock, Step, UserMessage,
 };
 use std::sync::Arc;
 use tokio::runtime::Handle;
@@ -73,10 +73,9 @@ impl Scheduler {
         }
     }
 
-    pub fn push(&self, workflow: &Workflow) {
-        debug!("sch::push({})", workflow.id);
+    pub fn start(&self, workflow: &Workflow) {
+        debug!("sch::start({})", workflow.id);
         let proc = self.create_raw_proc(workflow);
-        self.cache.push(&proc);
         self.queue.send(&Signal::Proc(proc.clone()));
     }
 
@@ -84,23 +83,25 @@ impl Scheduler {
         debug!("sch::next");
         let mut handlers = Vec::new();
         if let Some(signal) = self.queue.next().await {
+            debug!("signal: {:?}", signal);
             match signal {
                 Signal::Proc(proc) => {
                     handlers.push(Handle::current().spawn(async move {
                         proc.start();
                     }));
                 }
-                Signal::Task(tid, proc) => {
-                    handlers.push(
-                        Handle::current().spawn(async move { proc.run_with_task(&tid).await }),
-                    );
+                Signal::Task(task) => {
+                    let proc = self.cache.proc(&task.pid).expect("failed to get proc");
+                    handlers.push(Handle::current().spawn(async move {
+                        proc.do_task(&task.tid);
+                    }));
                 }
                 Signal::Message(msg) => {
                     if let Some(proc) = self.cache.proc(&msg.pid) {
                         let proc = proc.clone();
-                        handlers.push(
-                            Handle::current().spawn(async move { proc.run_with_message(&msg) }),
-                        );
+                        handlers.push(Handle::current().spawn(async move {
+                            proc.do_message(&msg);
+                        }));
                     }
                 }
                 Signal::Terminal => {
@@ -112,18 +113,25 @@ impl Scheduler {
         return true;
     }
 
+    pub async fn event_loop(&self) {
+        loop {
+            let ret = self.next().await;
+            if !ret {
+                break;
+            }
+        }
+    }
     pub fn sched_proc(&self, proc: &Proc) {
         debug!("sch::sched_proc");
         self.queue.send(&Signal::Proc(proc.clone()));
     }
 
-    pub fn sched_task(&self, proc: &Proc, tid: &str) {
-        debug!("sch::sched_task");
-        self.queue
-            .send(&Signal::Task(tid.to_string(), proc.clone()));
+    pub fn sched_task(&self, task: &Task) {
+        debug!("sch::sched_task  task={:?}", task);
+        self.queue.send(&Signal::Task(task.clone()));
     }
 
-    pub fn sched_message(&self, message: &Message) {
+    pub fn sched_message(&self, message: &UserMessage) {
         debug!("sch::sched_message");
         self.queue.send(&Signal::Message(message.clone()));
     }
@@ -142,6 +150,10 @@ impl Scheduler {
         self.cache.message_by_uid(pid, uid)
     }
 
+    // pub(crate) fn nearest_done_task_by_uid(&self, pid: &str, uid: &str) -> Option<Arc<Task>> {
+    //     self.cache.nearest_done_task_by_uid(pid, uid)
+    // }
+
     pub fn evt(&self) -> Arc<EventHub> {
         self.evt.clone()
     }
@@ -155,28 +167,9 @@ impl Scheduler {
     }
 
     pub(crate) fn create_raw_proc(&self, workflow: &Workflow) -> Proc {
-        debug!("sch::create_raw_proc");
-        let state = &TaskState::None;
-        workflow.set_state(state);
-
         let scher = Arc::new(self.clone());
-        let proc = Proc::new(scher, &workflow, state);
+        let proc = Proc::new(scher, &workflow, &TaskState::None);
 
         proc
-    }
-
-    pub(crate) fn on_proc(&self, f: impl Fn(&Proc, &EventData) + Send + Sync + 'static) {
-        let evt = Event::OnProc(Arc::new(f));
-        self.evt.add_event(&evt);
-    }
-
-    pub(crate) fn on_task(&self, f: impl Fn(&Task, &EventData) + Send + Sync + 'static) {
-        let evt = Event::OnTask(Arc::new(f));
-        self.evt.add_event(&evt);
-    }
-
-    pub(crate) fn on_message(&self, f: impl Fn(&Message) + Send + Sync + 'static) {
-        let evt = Event::OnMessage(Arc::new(f));
-        self.evt.add_event(&evt);
     }
 }

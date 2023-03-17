@@ -1,5 +1,6 @@
 use crate::{
-    sch::{ActId, ActState, EventAction, EventData, Task},
+    debug,
+    sch::{EventAction, EventData, Task},
     store::{data, DataSet, Store, StoreKind},
     utils, Engine, StoreAdapter, TaskState, Workflow,
 };
@@ -87,13 +88,13 @@ async fn store_task_update() {
     let engine = Engine::new();
     let store = store(&engine).await;
     engine
-        .scher()
+        .emitter()
         .on_task(move |task: &Task, data: &EventData| {
-            println!("update task:{}, data={:?}", task.tid(), data);
+            debug!("update task:{}, data={:?}", task.tid(), data);
             if data.action == EventAction::Create {
-                store.create_task(task, &data.pid);
+                store.create_task(task);
             } else {
-                store.update_task(task, &task.tid(), &data.vars);
+                store.update_task(task, &data.vars);
             }
         });
 
@@ -103,7 +104,6 @@ async fn store_task_update() {
     let workflow = create_workflow(&id);
     let proc = engine.scher().create_raw_proc(&workflow);
     scher.cache().push(&proc);
-    let job = proc.task("job1").unwrap();
 
     // proc.start();
     scher.sched_proc(&proc);
@@ -113,10 +113,14 @@ async fn store_task_update() {
     scher.next().await;
     scher.next().await;
 
-    std::thread::sleep(std::time::Duration::from_millis(3000));
+    let tasks = proc.task_by_nid("job1");
+    let job = tasks.get(0).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(200));
 
     let p = store.proc(&proc.pid(), &engine.scher()).unwrap();
-    let loaded_job = p.task("job1").unwrap();
+
+    let tasks = p.task_by_nid("job1");
+    let loaded_job = tasks.get(0).unwrap();
     assert_eq!(job.state(), TaskState::Running);
     assert_eq!(loaded_job.state(), TaskState::Running);
 }

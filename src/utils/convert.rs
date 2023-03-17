@@ -36,15 +36,6 @@ pub fn dynamic_to_value(value: &Dynamic) -> Value {
     Value::Null
 }
 
-// pub fn dynamics_to_value(values: &Vec<Dynamic>) -> Value {
-//     let mut ret = Vec::new();
-//     for v in values {
-//         ret.push(dynamic_to_value(v));
-//     }
-
-//     Value::Sequence(ret)
-// }
-
 pub fn array_to_dynamic<'a>(values: &'a Vec<Value>) -> Vec<Dynamic> {
     let mut ret = Vec::new();
 

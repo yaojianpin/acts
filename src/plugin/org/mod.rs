@@ -1,4 +1,2 @@
-mod org;
-
-#[derive(Debug, Clone)]
-pub struct OrgPlugin;
+pub mod org;
+pub use org::OrgPlugin;

@@ -1,13 +1,12 @@
-use crate::{
-    adapter::Adapter,
-    plugin::{org::OrgPlugin, ActPlugin},
-    Engine, OrgAdapter,
-};
+use crate::{adapter::Adapter, plugin::ActPlugin, Engine, OrgAdapter};
 use once_cell::sync::OnceCell;
 use rhai::{combine_with_exported_module, export_module, Module};
 use std::sync::Arc;
 
 static ADAPTER: OnceCell<Arc<Adapter>> = OnceCell::new();
+
+#[derive(Debug, Clone)]
+pub struct OrgPlugin;
 
 impl OrgPlugin {
     pub fn new() -> Self {
@@ -26,7 +25,7 @@ impl ActPlugin for OrgPlugin {
         }
         let mut module = Module::new();
         combine_with_exported_module!(&mut module, "org", org_module);
-        engine.register_module("::org", &module);
+        engine.mgr().register_module("::org", &module);
 
         let adapter = engine.adapter();
         let result = ADAPTER.set(adapter);

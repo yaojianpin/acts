@@ -1,9 +1,6 @@
 use serde_yaml::Value;
 
-use crate::{
-    step::{Action, Subject},
-    Branch, Job, Step, Workflow,
-};
+use crate::{Action, Branch, Job, Step, Subject, Workflow};
 
 impl Workflow {
     pub fn new() -> Self {
@@ -115,11 +112,6 @@ impl Step {
         self
     }
 
-    pub fn with_accept(mut self, accept: &str) -> Self {
-        self.accept = Some(accept.into());
-        self
-    }
-
     pub fn with_action(mut self, act: Action) -> Self {
         self.action = Some(act);
         self
@@ -177,10 +169,10 @@ impl Branch {
         self
     }
 
-    pub fn with_accept(mut self, accept: &str) -> Self {
-        self.accept = Some(accept.into());
-        self
-    }
+    // pub fn with_accept(mut self, accept: &str) -> Self {
+    //     self.accept = Some(accept.into());
+    //     self
+    // }
 
     pub fn with_if(mut self, r#if: &str) -> Self {
         self.r#if = Some(r#if.to_string());

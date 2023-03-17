@@ -5,7 +5,7 @@ pub struct Rate;
 
 impl SomeRule for Rate {
     fn some(&self, step: &crate::Step, ctx: &crate::Context) -> ActResult<bool> {
-        let acts = step.acts();
+        let acts = ctx.proc.children(&ctx.task);
         if acts.len() == 0 {
             return Ok(false);
         }

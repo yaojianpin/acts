@@ -1,5 +1,5 @@
 use super::step::Step;
-use crate::{sch::TaskState, ActValue, ShareLock, Workflow};
+use crate::{sch::TaskState, ActValue, ModelBase, ShareLock, Workflow};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -28,16 +28,6 @@ pub struct Job {
 
     #[serde(default)]
     pub on: HashMap<String, ActValue>,
-
-    #[serde(skip)]
-    pub(crate) state: ShareLock<TaskState>,
-    #[serde(skip)]
-    pub(crate) start_time: ShareLock<i64>,
-    #[serde(skip)]
-    pub(crate) end_time: ShareLock<i64>,
-
-    #[serde(skip)]
-    pub(crate) workflow: ShareLock<Box<Workflow>>,
 }
 
 impl Job {
@@ -46,5 +36,11 @@ impl Job {
             Some(step) => Some(step),
             None => None,
         }
+    }
+}
+
+impl ModelBase for Job {
+    fn id(&self) -> &str {
+        &self.id
     }
 }

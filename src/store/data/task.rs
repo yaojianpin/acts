@@ -1,7 +1,7 @@
 use crate::TaskState;
 use serde::{Deserialize, Serialize};
 
-#[derive(Deserialize, Serialize, PartialEq, Clone)]
+#[derive(Debug, Deserialize, Serialize, PartialEq, Clone)]
 pub enum Tag {
     Workflow,
     Job,
@@ -10,12 +10,13 @@ pub enum Tag {
     Act,
 }
 
-#[derive(Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Task {
     pub id: String,
     pub tag: Tag,
     pub pid: String,
     pub tid: String,
+    pub nid: String,
     pub state: TaskState,
     pub start_time: i64,
     pub end_time: i64,

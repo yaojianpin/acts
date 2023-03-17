@@ -1,4 +1,7 @@
-use crate::{sch::Task, ActError, ActResult, Context, Step, TaskState};
+use crate::{
+    sch::{tree::NodeData, Task},
+    ActError, ActResult, Context, Step, TaskState,
+};
 use regex::Regex;
 
 #[derive(Debug, Default, Clone)]
@@ -16,9 +19,9 @@ pub enum Matcher {
 impl Matcher {
     pub fn capture(expr: &str) -> Matcher {
         let mut ret = Matcher::Empty;
-        if expr.starts_with("one") {
+        if expr == "one" {
             ret = Matcher::One;
-        } else if expr.starts_with("any") {
+        } else if expr == "any" {
             ret = Matcher::Any;
         } else if expr.starts_with("some") {
             let re = Regex::new(r"some\((.*)\)$").unwrap();
@@ -30,7 +33,7 @@ impl Matcher {
             } else {
                 ret = Matcher::Error;
             }
-        } else if expr.starts_with("all") {
+        } else if expr == "all" {
             ret = Matcher::All;
         } else if expr.starts_with("ord") {
             ret = Matcher::Ord(None);
@@ -42,18 +45,21 @@ impl Matcher {
                 let value = caps.get(1).map_or("", |m| m.as_str());
                 ret = Matcher::Ord(Some(value.to_string()));
             }
+        } else {
+            ret = Matcher::Error;
         }
 
         ret
     }
 
-    pub fn is_pass(&self, step: &Step, ctx: &Context) -> ActResult<bool> {
+    pub fn check(&self, step: &Step, ctx: &Context) -> ActResult<bool> {
         match self {
             Matcher::Empty | Matcher::Error => {
                 Err(ActError::SubjectError("matcher is empty".to_string()))
             }
             Matcher::One => {
-                if let Some(act) = step.acts().get(0) {
+                let tasks = ctx.proc.children(&ctx.task);
+                if let Some(act) = tasks.get(0) {
                     return Ok(act.state() == TaskState::Success);
                 }
 
@@ -61,38 +67,36 @@ impl Matcher {
             }
             Matcher::Any => {
                 let mut ret = false;
-                step.acts().iter().for_each(|act| {
-                    let state = act.state();
+                let tasks = ctx.proc.children(&ctx.task);
+                tasks.iter().for_each(|t| {
+                    let state = t.state();
                     if state == TaskState::Success {
                         ret = true;
-                    } else {
-                        act.set_state(&TaskState::Skip);
                     }
                 });
 
                 Ok(ret)
             }
             Matcher::All => {
-                let ret = step
-                    .acts()
-                    .iter()
-                    .all(|act| act.state() == TaskState::Success);
+                let tasks = ctx.proc.children(&ctx.task);
+                let ret = tasks.iter().all(|act| act.state() == TaskState::Success);
 
                 Ok(ret)
             }
             Matcher::Ord(_) => {
-                let ord = step.ord() + 1;
-                let len = step.candidates().len();
+                let cands = &mut *step.cands();
+                let ord = cands.ord + 1;
+                let len = cands.acts.len();
                 let ret = ord == len;
                 if !ret {
-                    if let Some(act) = step.candidates().get(ord) {
-                        act.set_state(&TaskState::WaitingEvent);
-                        step.set_ord(ord);
+                    if let Some(act) = cands.acts.get(ord) {
+                        cands.ord = ord;
                         step.push_act(&act);
 
-                        let task = Task::Act(act.id(), act.clone());
-                        ctx.proc.tree.push_act(&task, &act.step_task_id);
-                        ctx.send_message(&act.owner, &task);
+                        let data = NodeData::Act(act.clone());
+                        let node = ctx.proc.tree.push_act(&data, &act.step_id);
+
+                        ctx.sched_task(&node);
                     }
                 }
 
@@ -101,7 +105,8 @@ impl Matcher {
             Matcher::Some(rule) => match ctx.proc.scher.some(&rule, step, ctx) {
                 Ok(ret) => {
                     if ret {
-                        step.acts().iter().for_each(|act| {
+                        let acts = ctx.proc.children(&ctx.task);
+                        acts.iter().for_each(|act| {
                             let state = act.state();
                             if state != TaskState::Success {
                                 act.set_state(&TaskState::Skip);

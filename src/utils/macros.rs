@@ -2,7 +2,7 @@
 macro_rules! debug {
     ($($arg:tt)*) => {
       #[cfg(feature = "debug")]
-      println!($($arg)*);
+      tracing::debug!($($arg)*);
     };
 }
 
@@ -10,6 +10,6 @@ macro_rules! debug {
 macro_rules! db_debug {
   ($($arg:tt)*) => {
     #[cfg(feature = "db_debug")]
-    println!($($arg)*);
+    tracing::debug!($($arg)*);
   };
 }

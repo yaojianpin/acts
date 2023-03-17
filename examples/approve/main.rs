@@ -1,4 +1,4 @@
-use acts::{Engine, Message, Vars, Workflow};
+use acts::{Engine, Message, State, Vars, Workflow};
 
 mod adapter;
 
@@ -29,13 +29,14 @@ async fn main() {
     let text = include_str!("./approve.yml");
     let mut workflow = Workflow::from_str(text).unwrap();
     workflow.set_biz_id("workflow1");
-    engine.push(&workflow);
 
-    let e1 = engine.clone();
-    engine.on_message(move |message: &Message| {
+    let executor = engine.executor();
+    executor.start(&workflow);
+
+    engine.emitter().on_message(move |message: &Message| {
         println!("engine.on_message: {}", &message.id);
-        let vars = Vars::new();
-        let ret = e1.post_message(&message.id, "a", &message.user, vars);
+        let uid = message.uid.clone().unwrap();
+        let ret = executor.complete("workflow1", &uid, None);
         if ret.is_err() {
             eprintln!("{}", ret.err().unwrap());
             std::process::exit(1);
@@ -43,8 +44,12 @@ async fn main() {
     });
 
     let e2 = engine.clone();
-    engine.on_workflow_complete(move |w: &Workflow| {
-        w.tree();
+    engine.emitter().on_complete(move |w: &State<Workflow>| {
+        println!(
+            "on_workflow_complete: biz_id={} {:?}",
+            w.node.biz_id(),
+            w.outputs()
+        );
         e2.close();
     });
 

@@ -232,16 +232,17 @@ impl DataSet<Task> for TaskSet {
             {
                 Ok(row) => {
                     let tag: &str = row.get(0);
-                    let state: &str = row.get(4);
+                    let state: &str = row.get(5);
                     Some(Task {
                         tag: tag.into(),
                         id: row.get(1),
                         pid: row.get(2),
                         tid: row.get(3),
+                        nid: row.get(4),
                         state: state.into(),
-                        start_time: row.get(5),
-                        end_time: row.get(6),
-                        user: row.get(7),
+                        start_time: row.get(6),
+                        end_time: row.get(7),
+                        user: row.get(8),
                     })
                 }
                 Err(_) => None,
@@ -255,7 +256,7 @@ impl DataSet<Task> for TaskSet {
             let pool = db();
 
             let a = &format!(
-                r#"select tag, id, pid, tid, state, start_time, end_time, user from act_task {}"#,
+                r#"select tag, id, pid, tid, nid, state, start_time, end_time, user from act_task {}"#,
                 q.sql()
             );
             println!("{}", a);
@@ -264,16 +265,17 @@ impl DataSet<Task> for TaskSet {
                 Ok(rows) => {
                     for row in rows {
                         let tag: &str = row.get(0);
-                        let state: &str = row.get(4);
+                        let state: &str = row.get(5);
                         ret.push(Task {
                             tag: tag.into(),
                             id: row.get(1),
                             pid: row.get(2),
                             tid: row.get(3),
+                            nid: row.get(4),
                             state: state.into(),
-                            start_time: row.get(5),
-                            end_time: row.get(6),
-                            user: row.get(7),
+                            start_time: row.get(6),
+                            end_time: row.get(7),
+                            user: row.get(8),
                         });
                     }
 
@@ -292,12 +294,13 @@ impl DataSet<Task> for TaskSet {
 
             let tag: &str = task.tag.into();
             let sql = sqlx::query(
-                r#"insert into act_task (tag, id, pid, tid, state, start_time, end_time, user) values ($1,$2,$3,$4,$5,$6,$7,$8)"#,
+                r#"insert into act_task (tag, id, pid, tid, nid, state, start_time, end_time, user) values ($1,$2,$3,$4,$5,$6,$7,$8,$9)"#,
             )
             .bind(tag)
             .bind(task.id)
             .bind(task.pid)
             .bind(task.tid)
+            .bind(task.nid)
             .bind(task.state.to_string())
             .bind(task.start_time)
             .bind(task.end_time)

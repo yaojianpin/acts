@@ -3,6 +3,9 @@ use thiserror::Error;
 
 #[derive(Deserialize, Serialize, Error, Debug, Clone, PartialEq)]
 pub enum ActError {
+    #[error("{0}")]
+    SystemError(String),
+
     #[error("Error happend when parse yml ({0})")]
     ParseError(String),
 
@@ -52,8 +55,16 @@ pub enum ActError {
     StoreError(String),
 }
 
+// impl std::error::Error for ActError {}
+
 impl Into<String> for ActError {
     fn into(self) -> String {
         self.to_string()
+    }
+}
+
+impl From<std::io::Error> for ActError {
+    fn from(error: std::io::Error) -> Self {
+        ActError::SystemError(error.to_string())
     }
 }

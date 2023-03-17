@@ -1,0 +1,10 @@
+jobs:
+  - id: job1
+    name: job1
+    steps:
+      - name: step1
+        subject:
+          matcher: any
+          users: |
+            ["a"]
+        run: print("step1")

@@ -1,6 +1,6 @@
+use acts::{Engine, State, Workflow};
 use criterion::*;
 use tokio::runtime::Runtime;
-use acts::{Engine, Workflow};
 
 fn simple_workflow(c: &mut Criterion) {
     let text = r#"
@@ -13,16 +13,16 @@ fn simple_workflow(c: &mut Criterion) {
       steps:
         - name: step 1
           run: |
-            print("step 1")
+            //print("step 1")
         - name: step 2
           run: |
-            print("step 2");
+            //print("step 2");
             let v = 50;
-            console::log(`v=${v}`);
-            console::dbg(`v=${v}`);
-            console::info(`v=${v}`);
-            console::wran(`v=${v}`);
-            console::error(`v=${v}`);
+            //console::log(`v=${v}`);
+            //console::dbg(`v=${v}`);
+            //console::info(`v=${v}`);
+            //console::wran(`v=${v}`);
+            //console::error(`v=${v}`);
         - name: step 3
           env:
             e: abc
@@ -32,20 +32,20 @@ fn simple_workflow(c: &mut Criterion) {
               steps:
                 - name: branch 1.1
                   run: |
-                    print("branch 1.1");
+                    //print("branch 1.1");
                 - name: branch 1.2
-                  run: print("branch 1.2")
+                  run: // print("branch 1.2")
             - name: branch 2
               if: env.get("a") < 100
               steps:
                 - name:  branch 2.1
-                  run: print("branch 2.1")
+                  run: // print("branch 2.1")
           run: |
-            print("step 3");
+            // print("step 3");
 
         - name: step 4
           run: 
-            print(`step 4`);
+            // print(`step 4`);
   
   "#;
     c.bench_function("simple_workflow", |b| {
@@ -53,10 +53,12 @@ fn simple_workflow(c: &mut Criterion) {
         b.iter(move || {
             let engine = Engine::new();
             let workflow = Workflow::from_str(text).unwrap();
+
+            let executor = engine.executor();
             rt.block_on(async move {
-                engine.push(&workflow);
+                executor.start(&workflow);
                 let e = engine.clone();
-                engine.on_workflow_complete(move |_w: &Workflow| {
+                engine.emitter().on_complete(move |_w: &State<Workflow>| {
                     e.close();
                 });
                 engine.start().await;

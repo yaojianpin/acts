@@ -383,7 +383,6 @@ impl DataSet<Task> for TaskSet {
 #[derive(Debug, Clone)]
 pub struct MessageSet {
     name: String,
-    // items: Tree,
 }
 
 impl DataSet<Message> for MessageSet {

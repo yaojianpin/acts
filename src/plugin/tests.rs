@@ -1,13 +1,13 @@
-use crate::{plugin, ActPlugin, Engine, Message, Workflow};
+use crate::{plugin, ActPlugin, Engine, Message, State, Workflow};
 use std::sync::{Arc, Mutex};
 
 #[test]
 fn plugin_register() {
     let engine = Engine::new();
-
-    let plugin_count = engine.plugins.lock().unwrap().len();
-    engine.register_plugin(&TestPlugin::new());
-    assert_eq!(engine.plugins.lock().unwrap().len(), plugin_count + 1);
+    let mgr = engine.mgr();
+    let plugin_count = mgr.plugins.lock().unwrap().len();
+    engine.mgr().register_plugin(&TestPlugin::new());
+    assert_eq!(mgr.plugins.lock().unwrap().len(), plugin_count + 1);
 }
 
 #[tokio::test]
@@ -15,7 +15,7 @@ async fn plugin_init() {
     let engine = Engine::new();
 
     let test_plugin = TestPlugin::new();
-    engine.register_plugin(&test_plugin);
+    engine.mgr().register_plugin(&test_plugin);
     plugin::init(&engine).await;
     assert_eq!(*test_plugin.is_init.lock().unwrap(), true);
 }
@@ -40,9 +40,10 @@ impl ActPlugin for TestPlugin {
 
         // engine.register_module("name", module);
         // engine.register_action("func", func);
-        engine.on_workflow_start(|_w: &Workflow| {});
-        engine.on_workflow_complete(|_w: &Workflow| {});
+        let emitter = engine.emitter();
+        emitter.on_start(|_w: &State<Workflow>| {});
+        emitter.on_complete(|_w: &State<Workflow>| {});
 
-        engine.on_message(|_msg: &Message| {});
+        emitter.on_message(|_msg: &Message| {});
     }
 }

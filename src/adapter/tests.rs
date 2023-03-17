@@ -1,5 +1,5 @@
 use crate::{
-    sch::{Proc, Scheduler},
+    sch::{NodeData, Proc, Scheduler},
     Context, Engine, OrgAdapter, RoleAdapter, RuleAdapter, Workflow,
 };
 use std::sync::Arc;
@@ -37,16 +37,25 @@ async fn adapter_unit() {
 async fn adapter_some() {
     let engine = create_engine_with_adapter();
 
-    let workflow = create_workflow();
+    let mut workflow = create_workflow();
+    let (proc, _) = create_proc(&workflow);
+    let tree = crate::sch::NodeTree::build(&mut workflow);
+    if let Some(root) = &tree.root {
+        let flow = proc.create_task(root, None);
 
-    let job = workflow.jobs.get(0).unwrap();
-    let step = job.steps.get(0).unwrap();
+        let job = proc.create_task(&flow.node.children()[0], Some(flow));
+        let step = proc.create_task(&job.node.children()[0], Some(job));
 
-    let (task, _) = create_proc(&workflow);
-    let ctx = Context::new(&task);
-
-    let ret = engine.adapter().some("some1", step, &ctx);
-    assert_eq!(ret, Ok(true));
+        if let NodeData::Step(s) = step.node.data() {
+            let ctx = proc.create_context(step);
+            let ret = engine.adapter().some("some1", &s, &ctx);
+            assert_eq!(ret, Ok(true));
+        } else {
+            assert!(false);
+        }
+    } else {
+        assert!(false);
+    }
 }
 
 #[tokio::test]

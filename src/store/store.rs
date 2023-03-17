@@ -1,10 +1,10 @@
 use crate::{
     adapter::StoreAdapter,
     debug,
-    sch::{self, ActId, ActState, Scheduler},
+    sch::{self, ActId, NodeData, Scheduler},
     store::{none::NoneStore, Message, Proc, Query, Tag, Task},
     utils::{self, Id},
-    Engine, ShareLock, Vars, Workflow,
+    ActResult, Engine, ShareLock, Vars, Workflow,
 };
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -17,12 +17,12 @@ use crate::store::db::LocalStore;
 const LIMIT: usize = 10000;
 
 fn tag_of(task: &sch::Task) -> Tag {
-    match task {
-        sch::Task::Workflow(..) => Tag::Workflow,
-        sch::Task::Job(..) => Tag::Job,
-        sch::Task::Branch(..) => Tag::Branch,
-        sch::Task::Step(..) => Tag::Step,
-        sch::Task::Act(..) => Tag::Act,
+    match task.node.data {
+        NodeData::Workflow(..) => Tag::Workflow,
+        NodeData::Job(..) => Tag::Job,
+        NodeData::Branch(..) => Tag::Branch,
+        NodeData::Step(..) => Tag::Step,
+        NodeData::Act(..) => Tag::Act,
     }
 }
 
@@ -70,8 +70,6 @@ impl Store {
 
     pub fn init(&self, engine: &Engine) {
         debug!("store::init");
-
-        // let scher = engine.scher();
         if let Some(store) = engine.adapter().store() {
             *self.kind.lock().unwrap() = StoreKind::Extern;
             *self.base.write().unwrap() = store;
@@ -129,7 +127,7 @@ impl Store {
         procs.update(&proc).expect("store: create proc");
     }
 
-    pub fn remove_proc(&self, pid: &str) {
+    pub fn remove_proc(&self, pid: &str) -> ActResult<bool> {
         debug!("store::remove_proc({})", pid);
         let base = self.base();
         let procs = base.procs();
@@ -137,40 +135,46 @@ impl Store {
         let messages = base.messages();
 
         let query = Query::new().set_limit(LIMIT).push("pid", pid.into());
-        for m in messages.query(&query).expect("store: remove_proc") {
-            messages.delete(&m.id).expect("store: delete message");
+        for msg in messages.query(&query)? {
+            messages.delete(&msg.id)?;
         }
 
-        for task in tasks.query(&query).expect("store: remove_proc") {
-            tasks.delete(&task.id).expect("store: delete task");
+        for task in tasks.query(&query)? {
+            tasks.delete(&task.id)?;
         }
-        procs.delete(pid).expect("store: create proc");
+        procs.delete(pid)
     }
 
-    pub fn create_task(&self, task: &sch::Task, pid: &str) {
+    pub fn create_task(&self, task: &sch::Task) {
         let tid = task.tid();
-        debug!("store::create_task({})", tid);
+        let nid = task.nid();
+        debug!("store::create_task({:?})", task);
         let tasks = self.base().tasks();
-        let id = Id::new(pid, &tid);
+        let id = Id::new(&task.pid, &tid);
         let state = task.state();
 
         let task = Task {
-            id: id.id().to_string(),
+            id: id.id(),
             tag: tag_of(&task),
-            pid: pid.to_string(),
-            tid: tid.to_string(),
+            pid: task.pid.clone(),
+            tid: tid,
+            nid: nid,
             state,
             start_time: task.start_time(),
             end_time: task.end_time(),
-            user: task.user(),
+            user: match task.uid() {
+                Some(u) => u,
+                None => "".to_string(),
+            },
         };
         tasks.create(&task).expect("store: create task");
     }
 
-    pub fn update_task(&self, task: &sch::Task, pid: &str, vars: &Vars) {
+    pub fn update_task(&self, task: &sch::Task, vars: &Vars) {
         debug!("store::update_task({})", task.tid());
         let procs = self.base().procs();
         let tasks = self.base().tasks();
+        let pid = &task.pid;
 
         if let Some(mut proc) = procs.find(pid) {
             proc.vars = utils::vars::to_string(vars);
@@ -178,7 +182,7 @@ impl Store {
         }
 
         let tid = task.tid();
-        let id = Id::new(&pid, &tid);
+        let id = Id::new(pid, &tid);
         let state = task.state();
         if let Some(mut task) = tasks.find(&id.id()) {
             task.state = state;
@@ -190,12 +194,17 @@ impl Store {
         debug!("store::create_message({})", msg.id);
         let base = self.base();
         let messages = base.messages();
+
+        let uid = match &msg.uid {
+            Some(uid) => uid,
+            None => "",
+        };
         messages
             .create(&Message {
                 id: msg.id.clone(),
                 pid: msg.pid.clone(),
                 tid: msg.tid.clone(),
-                user: msg.user.clone(),
+                user: uid.to_string(),
                 create_time: msg.create_time,
             })
             .expect("store: create message");
@@ -215,7 +224,7 @@ impl Store {
                 let workflow = Workflow::from_str(&p.model).unwrap();
                 let vars = &utils::vars::from_string(&p.vars);
                 let mut proc = sch::Proc::new_raw(scher.clone(), &workflow, &p.pid, &p.state, vars);
-                // proc.set_state(&p.state);
+
                 self.load_proc_tasks(&mut proc);
                 self.load_proc_messages(&mut proc);
 
@@ -240,11 +249,16 @@ impl Store {
             if t.tag == Tag::Workflow {
                 proc.set_state(&t.state);
             }
-            if let Some(task) = proc.task(&t.tid) {
+
+            if let Some(node) = proc.node(&t.nid) {
+                let task = sch::Task::new(&proc.pid(), &t.tid, node);
                 task.set_state(&t.state);
                 task.set_start_time(t.start_time);
                 task.set_end_time(t.end_time);
-                task.set_user(&t.user);
+                if !t.user.is_empty() {
+                    task.set_uid(&t.user);
+                }
+                proc.push_task(Arc::new(task));
             }
         }
     }
@@ -255,7 +269,12 @@ impl Store {
         let query = Query::new().set_limit(LIMIT).push("pid", &proc.pid());
         let items = messages.query(&query).expect("store: load_proc_messages");
         for m in items {
-            proc.make_message(&m.tid, &m.user);
+            let uid = if m.user.is_empty() {
+                None
+            } else {
+                Some(m.user)
+            };
+            proc.make_message(&m.tid, uid);
         }
     }
 

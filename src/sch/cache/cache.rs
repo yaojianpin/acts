@@ -2,11 +2,11 @@ use crate::{
     debug,
     sch::{
         event::{EventAction, EventData},
-        ActId, Message, Proc, Scheduler, Task,
+        Message, Proc, Scheduler, Task,
     },
     store::Store,
     utils::{self},
-    Engine, ShareLock,
+    ActResult, Engine, ShareLock,
 };
 use lru::LruCache;
 use std::{
@@ -40,11 +40,15 @@ impl Cache {
         {
             let cache = self.clone();
             let s = scher.clone();
-            scher.on_proc(move |proc: &Proc, data: &EventData| {
+
+            let emitter = engine.emitter();
+            emitter.on_proc(move |proc: &Proc, data: &EventData| {
                 debug!("sch::cache::on_proc: {}", data);
-                if data.action == EventAction::Next {
+                if data.action == EventAction::Complete {
                     let pid = data.pid.clone();
-                    cache.remove(&pid);
+                    cache
+                        .remove(&pid)
+                        .expect(&format!("fail to remove pid={}", pid));
                     cache.restore(s.clone());
                 } else {
                     cache.store.update_proc(proc);
@@ -53,19 +57,22 @@ impl Cache {
         }
         {
             let cache = self.clone();
-            scher.on_task(move |task: &Task, data: &EventData| {
+
+            let emitter = engine.emitter();
+            emitter.on_task(move |task: &Task, data: &EventData| {
                 debug!("sch::cache::on_task: tid={}, data={}", task.tid(), data);
                 if data.action == EventAction::Create {
-                    cache.store.create_task(task, &task.tid());
+                    cache.store.create_task(task);
                 } else {
-                    cache.store.update_task(task, &task.tid(), &data.vars);
+                    cache.store.update_task(task, &data.vars);
                 }
             });
         }
         {
             let cache = self.clone();
-            scher.on_message(move |msg: &Message| {
-                debug!("sch::cache::on_message: {}", msg);
+            let emitter = engine.emitter();
+            emitter.on_message(move |msg: &Message| {
+                debug!("sch::cache::on_message: {:?}", msg);
                 cache.store.create_message(msg)
             });
         }
@@ -110,10 +117,22 @@ impl Cache {
         None
     }
 
-    fn remove(&self, pid: &str) {
+    // pub fn nearest_done_task_by_uid(&self, pid: &str, uid: &str) -> Option<Arc<Task>> {
+    //     if let Some(proc) = self.proc(pid) {
+    //         let mut tasks = proc.task_by_uid(uid, TaskState::Success);
+    //         if tasks.len() > 0 {
+    //             tasks.sort_by(|a, b| a.end_time().cmp(&b.end_time()));
+    //             let task = tasks.get(0).unwrap().clone();
+    //             return Some(task);
+    //         }
+    //     }
+    //     None
+    // }
+
+    pub fn remove(&self, pid: &str) -> ActResult<bool> {
         debug!("sch::cache::remove pid={}", pid);
         self.procs.write().unwrap().pop(pid);
-        self.store.remove_proc(&pid);
+        self.store.remove_proc(&pid)
     }
 
     fn restore(&self, scher: Arc<Scheduler>) {
@@ -127,21 +146,6 @@ impl Cache {
             }
         }
     }
-
-    // fn take(&self) {
-    //     let cap = self.cap();
-    //     debug!("sch::cache::take: cap={}", cap);
-    //     let procs = self.procs.read().unwrap();
-    //     let iter = procs.iter().take(cap);
-    //     for (_, proc) in iter {
-    //         self.send(proc);
-    //     }
-    // }
-
-    // fn cap(&self) -> usize {
-    //     let procs = self.procs.read().unwrap();
-    //     procs.cap().get() - procs.len()
-    // }
 
     fn send(&self, proc: &Proc) {
         if let Some(scher) = &*self.scher.read().unwrap() {

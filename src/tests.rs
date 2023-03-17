@@ -1,4 +1,4 @@
-use crate::{sch::Event, ActPlugin, Engine, Message, Workflow};
+use crate::{sch::Event, ActPlugin, Engine, Message, State, Workflow};
 use rhai::plugin::*;
 use std::sync::Arc;
 
@@ -33,41 +33,35 @@ async fn engine_start_async() {
 }
 
 #[tokio::test]
-async fn engine_register_event() {
-    let engine = Engine::new();
-    engine.register_event(&Event::OnStart(Arc::new(|_w: &Workflow| {})));
-    assert!(engine.evts().len() == 1);
-}
-
-#[tokio::test]
 async fn engine_register_plugin() {
     let engine = Engine::new();
+    let mgr = engine.mgr();
 
-    let plugin_count = engine.plugins.lock().unwrap().len();
-    engine.register_plugin(&TestPlugin::default());
+    let plugin_count = mgr.plugins.lock().unwrap().len();
+    mgr.register_plugin(&TestPlugin::default());
 
-    assert_eq!(engine.plugins.lock().unwrap().len(), plugin_count + 1);
+    assert_eq!(mgr.plugins.lock().unwrap().len(), plugin_count + 1);
 }
 
 #[tokio::test]
 async fn engine_register_action() {
-    let mut engine = Engine::new();
-
+    let engine = Engine::new();
+    let mgr = engine.mgr();
     let add = |a: i64, b: i64| Ok(a + b);
-    let hash = engine.register_action("add", add);
+    let hash = mgr.register_action("add", add);
 
-    assert!(engine.action().contains_fn(hash));
+    assert!(mgr.action().contains_fn(hash));
 }
 
 #[tokio::test]
 async fn engine_register_module() {
     let engine = Engine::new();
-
+    let mgr = engine.mgr();
     let mut module = Module::new();
     combine_with_exported_module!(&mut module, "role", test_module);
-    engine.register_module("test", &module);
+    mgr.register_module("test", &module);
 
-    assert!(engine.modules().contains_key("test"));
+    assert!(mgr.modules().contains_key("test"));
 }
 
 #[tokio::test]
@@ -81,11 +75,13 @@ async fn engine_on_message() {
 
     println!("{}", workflow.to_string().unwrap());
     let e = engine.clone();
-    engine.on_message(move |msg: &Message| {
-        assert_eq!(msg.user, "a");
+    engine.emitter().on_message(move |msg: &Message| {
+        assert_eq!(msg.uid, Some("a".to_string()));
         e.close();
     });
-    engine.push(&workflow);
+
+    let executor = engine.executor();
+    executor.start(&workflow);
     engine.start().await;
 }
 

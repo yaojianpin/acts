@@ -1,27 +1,20 @@
 use crate::{
-    debug,
     model::{Act, Step},
-    sch::{proc::matcher::Matcher, ActId, Context, Task, TaskState},
+    sch::{proc::matcher::Matcher, Context, NodeData, TaskState},
     ActError, ActTask,
 };
 use async_trait::async_trait;
 use core::clone::Clone;
-
-impl_act_state!(Step);
-impl_act_time!(Step);
-impl_act_acts!(Step);
-impl_act_id!(Step);
 
 impl Step {
     fn prepare_sub(&self, ctx: &Context) {
         if self.acts().len() == 0 {
             if let Some(sub) = &self.subject {
                 let matcher = Matcher::capture(&sub.matcher);
-                self.set_matcher(&matcher);
-
+                self.cands().matcher = matcher.clone();
                 match matcher {
                     Matcher::Empty | Matcher::Error => {
-                        self.set_state(&TaskState::Fail(
+                        ctx.task.set_state(&TaskState::Fail(
                             ActError::SubjectError(
                                 "matcher should be one of one, any, ord, ord(rule), some(rule)"
                                     .to_string(),
@@ -30,10 +23,10 @@ impl Step {
                         ));
                     }
                     Matcher::One => {
-                        let acts = self.prepare_users(ctx, &sub.users, None);
+                        let acts = self.prepare_cands(ctx, &sub.users, None);
 
                         if acts.len() != 1 {
-                            self.set_state(&TaskState::Fail(
+                            ctx.task.set_state(&TaskState::Fail(
                                 ActError::SubjectError(
                                     "matcher: the users is more then one".to_string(),
                                 )
@@ -42,49 +35,39 @@ impl Step {
                             return;
                         }
                         if let Some(act) = acts.get(0) {
-                            act.set_state(&TaskState::WaitingEvent);
                             self.push_act(act);
 
-                            let task = Task::Act(act.id(), act.clone());
-                            ctx.proc.tree.push_act(&task, &act.step_task_id);
-
-                            ctx.send_message(&act.owner, &task);
+                            let data = NodeData::Act(act.clone());
+                            ctx.proc.tree.push_act(&data, &act.step_id);
                         }
                     }
                     Matcher::Any | Matcher::All | Matcher::Some(_) => {
-                        let users = self.prepare_users(ctx, &sub.users, None);
-
+                        let users = self.prepare_cands(ctx, &sub.users, None);
                         for act in &users {
-                            act.set_state(&TaskState::WaitingEvent);
                             self.push_act(act);
 
-                            let task = Task::Act(act.id(), act.clone());
-                            ctx.proc.tree.push_act(&task, &act.step_task_id);
-
-                            ctx.send_message(&act.owner, &task);
+                            let data = NodeData::Act(act.clone());
+                            ctx.proc.tree.push_act(&data, &act.step_id);
                         }
                     }
                     Matcher::Ord(ord) => {
-                        let acts = self.prepare_users(ctx, &sub.users, ord);
+                        let acts = self.prepare_cands(ctx, &sub.users, ord);
                         if let Some(act) = acts.get(0) {
-                            act.set_state(&TaskState::WaitingEvent);
-                            self.set_ord(0);
+                            self.cands().ord = 0;
                             self.push_act(&act);
-                            let task = Task::Act(act.id(), act.clone());
-                            ctx.proc.tree.push_act(&task, &act.step_task_id);
-
-                            ctx.send_message(&act.owner, &task);
+                            let task = NodeData::Act(act.clone());
+                            ctx.proc.tree.push_act(&task, &act.step_id);
                         }
                     }
                 }
             }
         }
     }
-    fn prepare_users(&self, ctx: &Context, users: &str, ord: Option<String>) -> Vec<Act> {
+    fn prepare_cands(&self, ctx: &Context, users: &str, ord: Option<String>) -> Vec<Act> {
         let mut acts = Vec::new();
 
         if users.is_empty() {
-            self.set_state(&TaskState::Fail(
+            ctx.task.set_state(&TaskState::Fail(
                 ActError::SubjectError("users is empty".to_string()).into(),
             ));
             return acts;
@@ -101,20 +84,18 @@ impl Step {
                     match ctx.proc.scher.ord(&ord, &users) {
                         Ok(data) => users = data,
                         Err(err) => {
-                            self.set_state(&TaskState::Fail(err.into()));
+                            ctx.task.set_state(&TaskState::Fail(err.into()));
                             return acts;
                         }
                     }
                 }
 
-                if let Some(task) = ctx.task() {
-                    for user in users.iter() {
-                        acts.push(Act::new(&task.tid(), user));
-                    }
-                    self.set_candidates(&acts);
+                for user in users.iter() {
+                    acts.push(Act::new(&ctx.task.nid(), user));
                 }
+                self.cands().acts = acts.clone();
             }
-            Err(err) => self.set_state(&TaskState::Fail(err.into())),
+            Err(err) => ctx.task.set_state(&TaskState::Fail(err.into())),
         }
 
         acts
@@ -124,7 +105,7 @@ impl Step {
         if let Some(script) = &self.run {
             let ret = ctx.run(script);
             if let Some(err) = ret.err() {
-                self.set_state(&TaskState::Fail(err.into()));
+                ctx.task.set_state(&TaskState::Fail(err.into()));
             }
         }
     }
@@ -134,51 +115,11 @@ impl Step {
             act(ctx.vm());
         }
     }
-
-    fn check_event(&self, ctx: &Context) -> bool {
-        match &self.accept {
-            Some(m) => {
-                if m.is_sequence() {
-                    let seq = m.as_sequence().unwrap();
-                    return seq.iter().all(|evt| {
-                        let key = evt.as_str().unwrap();
-                        ctx.user_data().action == key
-                    });
-                }
-
-                true
-            }
-            None => true,
-        }
-    }
-    pub(in crate::sch) fn check_pass(&self, ctx: &Context) -> bool {
-        let acts = self.acts();
-        if acts.len() > 0 {
-            let matcher = self.matcher();
-            match matcher.is_pass(self, &ctx) {
-                Ok(ret) => {
-                    if !ret {
-                        return false;
-                    }
-
-                    return self.check_event(ctx);
-                }
-                Err(err) => {
-                    self.set_state(&TaskState::Fail(err.into()));
-                    true
-                }
-            }
-        } else {
-            return self.check_event(ctx);
-        }
-    }
 }
 
 #[async_trait]
 impl ActTask for Step {
-    fn prepare(&self, ctx: &Context) {
-        self.prepare_sub(ctx);
-    }
+    fn prepare(&self, _ctx: &Context) {}
 
     fn run(&self, ctx: &Context) {
         if let Some(expr) = &self.r#if {
@@ -187,15 +128,47 @@ impl ActTask for Step {
                     if cond {
                         self.process_action(ctx);
                         self.process_run(ctx);
+                        self.prepare_sub(ctx);
                     } else {
-                        self.set_state(&TaskState::Skip);
+                        ctx.task.set_state(&TaskState::Skip);
                     }
                 }
-                Err(err) => self.set_state(&TaskState::Fail(err.into())),
+                Err(err) => ctx.task.set_state(&TaskState::Fail(err.into())),
             }
         } else {
             self.process_action(ctx);
             self.process_run(ctx);
+            self.prepare_sub(ctx);
+        }
+    }
+
+    fn post(&self, ctx: &Context) {
+        let acts = self.acts();
+        if acts.len() > 0 {
+            let matcher = &self.cands().matcher;
+            match matcher.check(self, &ctx) {
+                Ok(ret) => {
+                    if ret {
+                        ctx.task.set_state(&TaskState::Success);
+                    }
+                }
+                Err(err) => {
+                    ctx.task.set_state(&TaskState::Fail(err.into()));
+                }
+            }
+
+            if ctx.task.state().is_completed() {
+                // skip all children tasks
+                for tid in &ctx.task.children() {
+                    if let Some(act) = ctx.proc.task(tid) {
+                        if act.state().is_waiting() {
+                            act.set_state(&TaskState::Skip);
+                        }
+                    }
+                }
+            }
+        } else {
+            ctx.task.set_state(&TaskState::Success);
         }
     }
 }

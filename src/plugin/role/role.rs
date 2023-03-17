@@ -25,7 +25,7 @@ impl ActPlugin for RolePlugin {
         }
         let mut module = Module::new();
         combine_with_exported_module!(&mut module, "role", role_module);
-        engine.register_module("::role", &module);
+        engine.mgr().register_module("::role", &module);
 
         let adapter = engine.adapter();
         let result = ADAPTER.set(adapter);

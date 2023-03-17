@@ -1,12 +1,19 @@
-pub mod act;
-pub mod branch;
+mod act;
+mod branch;
+mod job;
+mod state;
+mod step;
+mod workflow;
+
 pub mod builder;
-pub mod job;
-pub mod step;
-pub mod workflow;
 
 pub use act::Act;
 pub use branch::Branch;
 pub use job::Job;
-pub use step::Step;
+pub use state::State;
+pub use step::{Action, Step, Subject};
 pub use workflow::Workflow;
+
+pub trait ModelBase {
+    fn id(&self) -> &str;
+}

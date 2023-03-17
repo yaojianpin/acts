@@ -1,5 +1,5 @@
 use super::Job;
-use crate::{utils, ActError, ActResult, ShareLock, TaskState, Vars};
+use crate::{utils, ActError, ActResult, ModelBase, Vars};
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 use std::collections::HashMap;
@@ -27,18 +27,8 @@ pub struct Workflow {
     #[serde(default)]
     pub on: HashMap<String, Value>,
 
-    #[serde(skip)]
-    pub(crate) state: ShareLock<TaskState>,
-    #[serde(skip)]
-    pub(crate) start_time: ShareLock<i64>,
-    #[serde(skip)]
-    pub(crate) end_time: ShareLock<i64>,
-
     #[serde(default)]
     pub(crate) biz_id: String,
-
-    #[serde(skip)]
-    pub(crate) share_outputs: ShareLock<HashMap<String, Value>>,
 }
 
 impl Workflow {
@@ -59,30 +49,22 @@ impl Workflow {
         }
     }
 
-    pub fn outputs(&self) -> HashMap<String, Value> {
-        self.share_outputs.read().unwrap().clone()
-    }
-
-    pub fn tree(&self) {
-        utils::log::tree(self).expect("workflow: tree output");
-    }
-
-    pub fn cost(&self) -> i64 {
-        if self.state().is_completed() {
-            return self.end_time() - self.start_time();
-        }
-
-        0
+    pub fn print_tree(&self) -> ActResult<()> {
+        utils::log::print_tree(&self)
     }
 
     pub fn job(&self, id: &str) -> Option<&Job> {
         match self.jobs.iter().find(|job| job.id == id) {
             Some(job) => {
-                job.set_workflow(Box::new(self.clone()));
+                // job.set_workflow(Box::new(self.clone()));
                 Some(job)
             }
             None => None,
         }
+    }
+
+    pub fn set_id(&mut self, id: &str) {
+        self.id = id.to_string();
     }
 
     pub fn biz_id(&self) -> String {
@@ -98,5 +80,11 @@ impl Workflow {
             Ok(s) => Ok(s),
             Err(e) => Err(ActError::ParseError(e.to_string())),
         }
+    }
+}
+
+impl ModelBase for Workflow {
+    fn id(&self) -> &str {
+        &self.id
     }
 }

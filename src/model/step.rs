@@ -1,12 +1,13 @@
 use crate::{
     env::VirtualMachine,
     model::{Act, Branch},
-    sch::{Matcher, TaskState},
-    ShareLock,
+    sch::Matcher,
+    ModelBase, ShareLock,
 };
 use serde::{Deserialize, Serialize};
 use serde_yaml::Value;
 use std::collections::HashMap;
+use std::sync::RwLockWriteGuard;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Subject {
@@ -20,13 +21,12 @@ pub struct Subject {
     pub on: HashMap<String, Value>,
 }
 
-// #[derive(Clone, Default, Serialize, Deserialize)]
-// pub struct Action {
-//     #[serde(default)]
-//     pub name: String,
-//     #[serde(default)]
-//     pub with: HashMap<String, Value>,
-// }
+#[derive(Debug, Clone, Default)]
+pub struct Cands {
+    pub matcher: Matcher,
+    pub acts: Vec<Act>,
+    pub ord: usize,
+}
 
 pub type Action = fn(&VirtualMachine);
 
@@ -40,9 +40,6 @@ pub struct Step {
 
     #[serde(default)]
     pub env: HashMap<String, Value>,
-
-    #[serde(default)]
-    pub accept: Option<Value>,
 
     #[serde(default)]
     pub run: Option<String>,
@@ -69,20 +66,27 @@ pub struct Step {
     pub(crate) acts: ShareLock<Vec<Act>>,
 
     #[serde(skip)]
-    pub(crate) state: ShareLock<TaskState>,
-    #[serde(skip)]
-    pub(crate) start_time: ShareLock<i64>,
-    #[serde(skip)]
-    pub(crate) end_time: ShareLock<i64>,
+    pub(crate) cands: ShareLock<Cands>,
+}
 
-    #[serde(skip)]
-    pub(crate) act_ord: ShareLock<usize>,
+impl Step {
+    pub fn acts(&self) -> Vec<Act> {
+        self.acts.read().unwrap().clone()
+    }
 
-    #[serde(skip)]
-    pub(crate) act_candidates: ShareLock<Vec<Act>>,
+    pub(crate) fn push_act(&self, act: &Act) {
+        self.acts.write().unwrap().push(act.clone());
+    }
 
-    #[serde(skip)]
-    pub(crate) act_matcher: ShareLock<Matcher>,
+    pub(crate) fn cands(&self) -> RwLockWriteGuard<Cands> {
+        self.cands.as_ref().write().unwrap()
+    }
+}
+
+impl ModelBase for Step {
+    fn id(&self) -> &str {
+        &self.id
+    }
 }
 
 impl std::fmt::Debug for Step {
@@ -91,7 +95,6 @@ impl std::fmt::Debug for Step {
             .field("name", &self.name)
             .field("id", &self.id)
             .field("env", &self.env)
-            .field("accept", &self.accept)
             .field("run", &self.run)
             .field("on", &self.on)
             .field("r#if", &self.r#if)
@@ -99,12 +102,7 @@ impl std::fmt::Debug for Step {
             .field("next", &self.next)
             .field("subject", &self.subject)
             .field("acts", &self.acts)
-            .field("state", &self.state)
-            .field("start_time", &self.start_time)
-            .field("end_time", &self.end_time)
-            .field("act_ord", &self.act_ord)
-            .field("act_candidates", &self.act_candidates)
-            .field("act_matcher", &self.act_matcher)
+            .field("cands", &self.cands)
             .finish()
     }
 }

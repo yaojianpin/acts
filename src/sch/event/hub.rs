@@ -3,8 +3,9 @@ use crate::{
     sch::{
         event::{message::Message, EventData},
         proc::{Proc, Task},
+        EventAction,
     },
-    Act, Engine, Job, ShareLock, Step, TaskState, Workflow,
+    Act, Engine, Job, ShareLock, State, Step, Workflow,
 };
 use std::sync::{Arc, RwLock};
 use tokio::runtime::Handle;
@@ -21,11 +22,11 @@ macro_rules! dispatch_event {
     };
 }
 
-pub type ActWorkflowHandle = Arc<dyn Fn(&Workflow) + Send + Sync>;
+pub type ActWorkflowHandle = Arc<dyn Fn(&State<Workflow>) + Send + Sync>;
 pub type ActWorkflowMessageHandle = Arc<dyn Fn(&Message) + Send + Sync>;
-pub type ActJobHandle = Arc<dyn Fn(&Job) + Send + Sync>;
-pub type ActStepHandle = Arc<dyn Fn(&Step) + Send + Sync>;
-pub type ActActHandle = Arc<dyn Fn(&Act) + Send + Sync>;
+pub type ActJobHandle = Arc<dyn Fn(&State<Job>) + Send + Sync>;
+pub type ActStepHandle = Arc<dyn Fn(&State<Step>) + Send + Sync>;
+pub type ActActHandle = Arc<dyn Fn(&State<Act>) + Send + Sync>;
 pub type ActProcHandle = Arc<dyn Fn(&Proc, &EventData) + Send + Sync>;
 pub type ActTaskHandle = Arc<dyn Fn(&Task, &EventData) + Send + Sync>;
 
@@ -121,12 +122,8 @@ impl EventHub {
         }
     }
 
-    pub fn init(&self, engine: &Engine) {
+    pub fn init(&self, _engine: &Engine) {
         debug!("event::init");
-        let evts = engine.evts();
-        for evt in evts.iter() {
-            self.add_event(evt);
-        }
     }
 
     pub fn add_event(&self, evt: &Event) {
@@ -134,9 +131,7 @@ impl EventHub {
         match evt {
             Event::OnStart(func) => self.starts.write().unwrap().push(func.clone()),
             Event::OnComplete(func) => self.completes.write().unwrap().push(func.clone()),
-            Event::OnMessage(func) => {
-                self.messages.write().unwrap().push(func.clone());
-            }
+            Event::OnMessage(func) => self.messages.write().unwrap().push(func.clone()),
             Event::OnError(func) => self.errors.write().unwrap().push(func.clone()),
             Event::OnJob(func) => self.jobs.write().unwrap().push(func.clone()),
             Event::OnStep(func) => self.steps.write().unwrap().push(func.clone()),
@@ -146,67 +141,68 @@ impl EventHub {
         }
     }
 
-    pub(crate) fn disp_proc(&self, proc: &Proc, data: &EventData) {
-        debug!("disp_proc: {}", proc.pid());
+    pub(crate) fn on_proc(&self, proc: &Proc, data: &EventData) {
+        debug!("on_proc: {}", proc.pid());
         let proc = proc.clone();
         let data = data.clone();
+
+        let state = proc.workflow_state();
+        if data.action == EventAction::Create {
+            self.on_start(&state);
+        } else if data.action == EventAction::Complete || data.action == EventAction::Abort {
+            self.on_complete(&state);
+        } else {
+            self.on_complete(&state);
+            self.on_error(&state);
+        }
+
         dispatch_event!(self, procs, &proc, &data);
     }
 
-    pub(crate) fn disp_task(&self, task: &Task, data: &EventData) {
-        debug!("disp_task: {}", task.tid());
+    pub(crate) fn on_task(&self, task: &Task, data: &EventData) {
+        debug!("on_task: task={:?} data={:?}", task, data);
         let task = task.clone();
         let data = data.clone();
         dispatch_event!(self, tasks, &task, &data);
     }
 
-    pub(crate) fn disp_start(&self, workflow: &Workflow) {
-        debug!("disp_start: {}", workflow.id);
-        let workflow = workflow.clone();
-        dispatch_event!(self, starts, &workflow);
+    pub(crate) fn on_start(&self, state: &State<Workflow>) {
+        debug!("on_start: {:?}", state);
+        let state = state.clone();
+        dispatch_event!(self, starts, &state);
     }
-    pub(crate) fn disp_complete(&self, workflow: &Workflow) {
-        debug!("disp_complete: {}", workflow.id);
-        let workflow = workflow.clone();
-        dispatch_event!(self, completes, &workflow);
+    pub(crate) fn on_complete(&self, state: &State<Workflow>) {
+        debug!("on_complete: {:?}", state);
+        let state = state.clone();
+        dispatch_event!(self, completes, &state);
     }
-    pub(crate) fn disp_message(&self, msg: &Message) {
-        debug!("disp_message: {}", msg);
+    pub(crate) fn on_message(&self, msg: &Message) {
+        debug!("on_message: {:?}", msg);
         let msg = msg.clone();
         dispatch_event!(self, messages, &msg);
     }
 
-    pub(crate) fn disp_workflow(&self, workflow: &Workflow) {
-        debug!("disp_workflow: {}", workflow.id);
-        let state = workflow.state();
-        if state == TaskState::Running {
-            self.disp_start(workflow);
-        }
-
-        if state.is_completed() {
-            self.disp_complete(workflow);
-
-            if state.is_error() {
-                self.disp_error(workflow);
-            }
-        }
+    pub(crate) fn on_job(&self, job: &State<Job>) {
+        debug!("on_job: {:?}", job);
+        let state = job.clone();
+        dispatch_event!(self, jobs, &state);
     }
 
-    pub(crate) fn disp_job(&self, _job: &Job) {
-        debug!("disp_job: {}", _job.id);
+    pub(crate) fn on_step(&self, step: &State<Step>) {
+        debug!("on_step: {:?}", step);
+        let state = step.clone();
+        dispatch_event!(self, steps, &state);
     }
 
-    pub(crate) fn disp_step(&self, _step: &Step) {
-        debug!("disp_step: {}", _step.id);
+    pub(crate) fn on_act(&self, act: &State<Act>) {
+        debug!("on_act: {:?}", act);
+        let state = act.clone();
+        dispatch_event!(self, acts, &state);
     }
 
-    pub(crate) fn disp_act(&self, _act: &Act) {
-        debug!("disp_act: {}", _act.id);
-    }
-
-    pub(crate) fn disp_error(&self, workflow: &Workflow) {
-        debug!("disp_error: {}", workflow.id);
-        let workflow = workflow.clone();
-        dispatch_event!(self, errors, &workflow);
+    pub(crate) fn on_error(&self, state: &State<Workflow>) {
+        debug!("on_error: {:?}", state);
+        let state = state.clone();
+        dispatch_event!(self, errors, &state);
     }
 }
