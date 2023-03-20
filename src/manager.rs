@@ -53,11 +53,14 @@ impl Manager {
     ///     engine.register_action("add", add);
     /// }
     /// ```
-    pub fn register_action<ARGS, N, T, F, S>(&self, name: N, func: F) -> u64
+    pub fn register_action<A: 'static, const N: usize, const C: bool, T, F>(
+        &self,
+        name: impl AsRef<str> + Into<Identifier>,
+        func: F,
+    ) -> u64
     where
-        N: AsRef<str> + Into<Identifier>,
         T: Variant + Clone,
-        F: RegisterNativeFunction<ARGS, T, std::result::Result<S, Box<EvalAltResult>>>,
+        F: RegisterNativeFunction<A, N, C, T, true>,
     {
         self.action.lock().unwrap().set_native_fn(name, func)
     }
