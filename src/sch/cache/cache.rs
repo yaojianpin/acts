@@ -45,7 +45,7 @@ impl Cache {
             let emitter = engine.emitter();
             emitter.on_proc(move |proc: &Proc, data: &EventData| {
                 debug!("sch::cache::on_proc: {}", data);
-                if data.action == EventAction::Complete {
+                if data.action == EventAction::Next {
                     let pid = data.pid.clone();
                     cache
                         .remove(&pid)

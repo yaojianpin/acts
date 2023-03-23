@@ -9,7 +9,7 @@ pub use message::{ActionOptions, Message, UserMessage};
 #[derive(Debug, Clone, PartialEq)]
 pub enum EventAction {
     Create,
-    Complete,
+    Next,
     Submit,
     Skip,
     Back,
@@ -23,7 +23,7 @@ impl EventAction {
     pub fn parse(name: &str) -> EventAction {
         let ret = match name {
             "create" => EventAction::Create,
-            "complete" => EventAction::Complete,
+            "next" => EventAction::Next,
             "back" => EventAction::Back,
             "cancel" => EventAction::Cancel,
             "error" => EventAction::Error,
@@ -41,7 +41,7 @@ impl std::fmt::Display for EventAction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             EventAction::Create => f.write_str("create"),
-            EventAction::Complete => f.write_str("complete"),
+            EventAction::Next => f.write_str("complete"),
             EventAction::Back => f.write_str("back"),
             EventAction::Cancel => f.write_str("cancel"),
             EventAction::Error => f.write_str("error"),

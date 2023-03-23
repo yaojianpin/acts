@@ -1,4 +1,5 @@
 name: event_test
+id: m1
 outputs:
   value: 0
 jobs:

@@ -1,4 +1,4 @@
-use acts::{ActionOptions, Engine, Message, State, Vars, Workflow};
+use acts::{ActionOptions, Engine, Message, State, Workflow};
 
 #[tokio::main]
 async fn main() {

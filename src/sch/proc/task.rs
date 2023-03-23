@@ -233,7 +233,7 @@ impl Task {
             let action = EventAction::parse(&name);
             match action {
                 EventAction::Create => {}
-                EventAction::Complete | EventAction::Submit => {
+                EventAction::Next | EventAction::Submit => {
                     if ctx.task.state().is_running() {
                         self.run(ctx);
                     }
@@ -435,7 +435,7 @@ impl ActTask for Task {
         }
 
         if self.state().is_completed() {
-            ctx.dispatch(self, EventAction::Complete);
+            ctx.dispatch(self, EventAction::Next);
         }
 
         debug!(

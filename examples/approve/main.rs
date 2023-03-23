@@ -29,13 +29,15 @@ async fn main() {
     engine.start();
     let text = include_str!("./approve.yml");
     let workflow = Workflow::from_str(text).unwrap();
+
+    let biz_id = "approve_w1";
     let executor = engine.executor();
     executor.deploy(&workflow).expect("deploy model");
     executor
         .start(
             &workflow.id,
             ActionOptions {
-                biz_id: Some("w1".into()),
+                biz_id: Some(biz_id.into()),
                 ..Default::default()
             },
         )
@@ -44,7 +46,7 @@ async fn main() {
     engine.emitter().on_message(move |message: &Message| {
         println!("engine.on_message: {}", &message.id);
         let uid = message.uid.clone().unwrap();
-        let ret = executor.next("workflow1", &uid, None);
+        let ret = executor.next(biz_id, &uid, None);
         if ret.is_err() {
             eprintln!("{}", ret.err().unwrap());
             std::process::exit(1);
@@ -53,7 +55,12 @@ async fn main() {
 
     let e2 = engine.clone();
     engine.emitter().on_complete(move |w: &State<Workflow>| {
-        println!("on_workflow_complete: biz_id={} {:?}", w.pid(), w.outputs());
+        println!(
+            "on_workflow_complete: pid={} cost={}ms outputs={:?}",
+            w.pid(),
+            w.cost(),
+            w.outputs()
+        );
         e2.close();
     });
 

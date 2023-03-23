@@ -149,7 +149,7 @@ impl EventHub {
         let state = proc.workflow_state();
         if data.action == EventAction::Create {
             self.on_start(&state);
-        } else if data.action == EventAction::Complete || data.action == EventAction::Abort {
+        } else if data.action == EventAction::Next || data.action == EventAction::Abort {
             self.on_complete(&state);
         } else {
             self.on_complete(&state);

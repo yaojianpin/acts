@@ -156,7 +156,7 @@ impl Context {
             }
             NodeData::Job(job) => {
                 let mut outputs = Vars::new();
-                if action == EventAction::Complete {
+                if action == EventAction::Next {
                     outputs = utils::fill_vars(&self.proc.vm, &job.outputs);
                     self.append_vars(&outputs);
                 }
@@ -227,7 +227,7 @@ impl Context {
     fn get_action_name(&self, action: &EventAction) -> String {
         match action {
             EventAction::Create => consts::EVT_INIT.to_string(),
-            EventAction::Complete => consts::EVT_NEXT.to_string(),
+            EventAction::Next => consts::EVT_NEXT.to_string(),
             EventAction::Back => consts::EVT_BACK.to_string(),
             EventAction::Cancel => consts::EVT_CANCEL.to_string(),
             EventAction::Abort => consts::EVT_ABORT.to_string(),
