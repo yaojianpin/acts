@@ -20,8 +20,13 @@ impl ActTask for Branch {
                 Err(err) => ctx.task.set_state(&TaskState::Fail(err.into())),
             }
         } else {
-            ctx.task
-                .set_state(&TaskState::Fail(ActError::BranchIfError.into()));
+            ctx.task.set_state(&TaskState::Fail(
+                ActError::RuntimeError(format!(
+                    "cannot find branch expr in '{}'",
+                    ctx.task.node.id()
+                ))
+                .into(),
+            ));
         }
     }
 

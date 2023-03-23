@@ -1,4 +1,6 @@
-use crate::{sch::TaskState, utils, ShareLock, Vars};
+use crate::{sch::TaskState, utils, ActError, ActResult, ShareLock, Vars};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::sync::{Arc, RwLock};
 
 #[derive(Clone, Debug)]
@@ -22,10 +24,49 @@ pub struct UserMessage {
     pub options: Option<ActionOptions>,
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct ActionOptions {
     pub vars: Vars,
     pub to: Option<String>,
+    pub biz_id: Option<String>,
+}
+
+impl ActionOptions {
+    pub fn from_json(data: &str) -> ActResult<Self> {
+        let v: Value = match serde_json::from_str(data) {
+            Ok(v) => v,
+            Err(err) => return Err(ActError::ConvertError(err.to_string())),
+        };
+
+        let vars = match &v["vars"] {
+            Value::Object(map) => utils::vars::from_json(map),
+            _ => {
+                return Err(ActError::ConvertError(
+                    "json format error to convert ActionOptions".into(),
+                ))
+            }
+        };
+        let to = match &v["to"] {
+            Value::Null => None,
+            Value::String(to) => Some(to.clone()),
+            _ => {
+                return Err(ActError::ConvertError(
+                    "json format error to convert ActionOptions".into(),
+                ))
+            }
+        };
+
+        let biz_id = match &v["biz_id"] {
+            Value::Null => None,
+            Value::String(biz_id) => Some(biz_id.clone()),
+            _ => {
+                return Err(ActError::ConvertError(
+                    "json format error to convert ActionOptions".into(),
+                ))
+            }
+        };
+        Ok(ActionOptions { vars, to, biz_id })
+    }
 }
 
 impl Message {

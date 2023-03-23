@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub struct State<T> {
+    pub pid: String,
     pub node: Arc<T>,
     pub state: TaskState,
     pub start_time: i64,
@@ -39,6 +40,9 @@ where
 }
 
 impl State<Workflow> {
+    pub fn pid(&self) -> &str {
+        &self.pid
+    }
     /// Print the workflow tree
     pub fn print_tree(&self) -> ActResult<()> {
         self.node.print_tree()

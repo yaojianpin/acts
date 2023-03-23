@@ -18,9 +18,7 @@ async fn proc_messages() {
 
 fn create_proc(workflow: &mut Workflow, id: &str) -> (Proc, Arc<Scheduler>) {
     let scher = Scheduler::new();
-
-    workflow.set_biz_id(id);
-    let proc = scher.create_raw_proc(workflow);
+    let proc = scher.create_raw_proc(id, workflow);
 
     scher.cache().push(&proc);
     (proc.clone(), Arc::new(scher))

@@ -107,3 +107,15 @@ impl std::fmt::Debug for Node {
             .finish()
     }
 }
+
+impl std::fmt::Display for NodeKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            NodeKind::Workflow => f.write_str("Workflow"),
+            NodeKind::Job => f.write_str("Job"),
+            NodeKind::Branch => f.write_str("Branch"),
+            NodeKind::Step => f.write_str("Step"),
+            NodeKind::Act => f.write_str("Act"),
+        }
+    }
+}

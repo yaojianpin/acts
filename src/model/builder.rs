@@ -17,11 +17,6 @@ impl Workflow {
         self
     }
 
-    pub fn with_ver(mut self, ver: &str) -> Self {
-        self.ver = ver.to_string();
-        self
-    }
-
     pub fn with_env(mut self, name: &str, value: Value) -> Self {
         self.env.insert(name.to_string(), value);
         self
@@ -37,10 +32,10 @@ impl Workflow {
         self
     }
 
-    pub fn with_biz_id(mut self, biz_id: &str) -> Self {
-        self.set_biz_id(biz_id);
-        self
-    }
+    // pub fn with_biz_id(mut self, biz_id: &str) -> Self {
+    //     self.set_biz_id(biz_id);
+    //     self
+    // }
 
     pub fn with_job(mut self, build: fn(Job) -> Job) -> Self {
         let job = Job::default();

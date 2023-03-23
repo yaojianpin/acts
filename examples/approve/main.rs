@@ -1,4 +1,4 @@
-use acts::{Engine, Message, State, Vars, Workflow};
+use acts::{ActionOptions, Engine, Message, State, Workflow};
 
 mod adapter;
 
@@ -26,17 +26,25 @@ async fn main() {
         .adapter()
         .set_role_adapter("example_role", adapter.clone());
 
+    engine.start();
     let text = include_str!("./approve.yml");
-    let mut workflow = Workflow::from_str(text).unwrap();
-    workflow.set_biz_id("workflow1");
-
+    let workflow = Workflow::from_str(text).unwrap();
     let executor = engine.executor();
-    executor.start(&workflow);
+    executor.deploy(&workflow).expect("deploy model");
+    executor
+        .start(
+            &workflow.id,
+            ActionOptions {
+                biz_id: Some("w1".into()),
+                ..Default::default()
+            },
+        )
+        .expect("start workflow");
 
     engine.emitter().on_message(move |message: &Message| {
         println!("engine.on_message: {}", &message.id);
         let uid = message.uid.clone().unwrap();
-        let ret = executor.complete("workflow1", &uid, None);
+        let ret = executor.next("workflow1", &uid, None);
         if ret.is_err() {
             eprintln!("{}", ret.err().unwrap());
             std::process::exit(1);
@@ -45,13 +53,9 @@ async fn main() {
 
     let e2 = engine.clone();
     engine.emitter().on_complete(move |w: &State<Workflow>| {
-        println!(
-            "on_workflow_complete: biz_id={} {:?}",
-            w.node.biz_id(),
-            w.outputs()
-        );
+        println!("on_workflow_complete: biz_id={} {:?}", w.pid(), w.outputs());
         e2.close();
     });
 
-    engine.start().await;
+    engine.r#loop().await;
 }

@@ -16,6 +16,7 @@ async fn event_start() {
     })));
 
     let state = State {
+        pid: "w1".to_string(),
         node: Arc::new(workflow),
         state: TaskState::None,
         start_time: 0,
@@ -37,6 +38,7 @@ async fn event_finished() {
     })));
 
     let state = State {
+        pid: "w1".to_string(),
         node: Arc::new(workflow),
         state: TaskState::None,
         start_time: 0,
@@ -58,6 +60,7 @@ async fn event_error() {
     })));
 
     let state = State {
+        pid: "w1".to_string(),
         node: Arc::new(workflow),
         state: TaskState::None,
         start_time: 0,

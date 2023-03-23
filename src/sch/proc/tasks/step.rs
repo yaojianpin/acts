@@ -15,8 +15,8 @@ impl Step {
                 match matcher {
                     Matcher::Empty | Matcher::Error => {
                         ctx.task.set_state(&TaskState::Fail(
-                            ActError::SubjectError(
-                                "matcher should be one of one, any, ord, ord(rule), some(rule)"
+                            ActError::RuntimeError(
+                                "subject matcher should be one of 'one', 'any', 'ord', 'ord(rule)', 'some(rule)'"
                                     .to_string(),
                             )
                             .into(),
@@ -27,8 +27,8 @@ impl Step {
 
                         if acts.len() != 1 {
                             ctx.task.set_state(&TaskState::Fail(
-                                ActError::SubjectError(
-                                    "matcher: the users is more then one".to_string(),
+                                ActError::RuntimeError(
+                                    "subject matcher one: the users is more then one".to_string(),
                                 )
                                 .into(),
                             ));
@@ -68,7 +68,7 @@ impl Step {
 
         if users.is_empty() {
             ctx.task.set_state(&TaskState::Fail(
-                ActError::SubjectError("users is empty".to_string()).into(),
+                ActError::RuntimeError("subject users is required".to_string()).into(),
             ));
             return acts;
         }

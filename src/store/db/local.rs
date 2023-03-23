@@ -19,12 +19,14 @@ fn init() -> RocksDB {
     opts.set_max_total_wal_size(1024 * 1024);
     opts.set_merge_operator_associative("pid idx", concat_merge);
 
-    let cf_proc = ColumnFamilyDescriptor::new("p", opts.clone());
-    let cf_task = ColumnFamilyDescriptor::new("t", opts.clone());
-    let cf_message = ColumnFamilyDescriptor::new("m", opts.clone());
+    let cf_proc = ColumnFamilyDescriptor::new("proc", opts.clone());
+    let cf_task = ColumnFamilyDescriptor::new("task", opts.clone());
+    let cf_message = ColumnFamilyDescriptor::new("message", opts.clone());
+    let cf_model = ColumnFamilyDescriptor::new("model", opts.clone());
 
-    let db = RocksDB::open_cf_descriptors(&opts, "data", vec![cf_proc, cf_task, cf_message])
-        .expect("local: init");
+    let db =
+        RocksDB::open_cf_descriptors(&opts, "data", vec![cf_model, cf_proc, cf_task, cf_message])
+            .expect("local: init");
     db
 }
 
@@ -67,28 +69,31 @@ where
 
 fn find_by_idx(model_name: &str, q: &Query) -> Vec<String> {
     let db = db();
-    let cf = db.cf_handle(model_name).unwrap();
+    if let Some(cf) = db.cf_handle(model_name) {
+        let get_idx = |prop: &str, value: &str| {
+            let idx = idx_key(prop, value);
+            match db.get_cf(cf, idx) {
+                Ok(ref ret) => match ret {
+                    Some(data) => {
+                        let list = std::str::from_utf8(&data).unwrap();
+                        let ret = list
+                            .trim_end_matches(",")
+                            .split(",")
+                            .map(|it| it.to_string())
+                            .collect();
 
-    let get_idx = |prop: &str, value: &str| {
-        let idx = idx_key(prop, value);
-        match db.get_cf(cf, idx) {
-            Ok(ref ret) => match ret {
-                Some(data) => {
-                    let list = std::str::from_utf8(&data).unwrap();
-                    let ret = list
-                        .trim_end_matches(",")
-                        .split(",")
-                        .map(|it| it.to_string())
-                        .collect();
+                        ret
+                    }
+                    None => vec![],
+                },
+                Err(_) => vec![],
+            }
+        };
 
-                    ret
-                }
-                None => vec![],
-            },
-            Err(_) => vec![],
-        }
-    };
-    q.predicate(get_idx)
+        return q.predicate(get_idx);
+    }
+
+    vec![]
 }
 
 // fn update_idx(model_name: &str, prop: &str, key: &str, value: &str) {
@@ -122,6 +127,7 @@ fn concat_merge(
 
 #[derive(Debug)]
 pub struct LocalStore {
+    models: Arc<ModelSet>,
     procs: Arc<ProcSet>,
     tasks: Arc<TaskSet>,
     messages: Arc<MessageSet>,
@@ -130,14 +136,17 @@ pub struct LocalStore {
 impl LocalStore {
     pub fn new() -> Self {
         let db = Self {
+            models: Arc::new(ModelSet {
+                name: "model".to_string(),
+            }),
             procs: Arc::new(ProcSet {
-                name: "p".to_string(),
+                name: "proc".to_string(),
             }),
             tasks: Arc::new(TaskSet {
-                name: "t".to_string(),
+                name: "task".to_string(),
             }),
             messages: Arc::new(MessageSet {
-                name: "m".to_string(),
+                name: "message".to_string(),
             }),
         };
 
@@ -159,6 +168,10 @@ impl StoreAdapter for LocalStore {
         db.flush().expect("local flush data");
     }
 
+    fn models(&self) -> Arc<dyn DataSet<Model>> {
+        self.models.clone()
+    }
+
     fn procs(&self) -> Arc<dyn DataSet<Proc>> {
         self.procs.clone()
     }
@@ -169,6 +182,109 @@ impl StoreAdapter for LocalStore {
 
     fn messages(&self) -> Arc<dyn DataSet<Message>> {
         self.messages.clone()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelSet {
+    name: String,
+}
+
+impl DataSet<Model> for ModelSet {
+    fn exists(&self, id: &str) -> bool {
+        db_debug!("local::Model.exists({})", id);
+        let db = db();
+        let cf = db.cf_handle(&self.name).unwrap();
+        match db.get_cf(cf, mode_key(id)) {
+            Ok(opt) => match opt {
+                Some(_) => true,
+                None => false,
+            },
+            Err(_) => false,
+        }
+    }
+
+    fn find(&self, id: &str) -> Option<Model> {
+        db_debug!("local::Model.find({})", id);
+        let db = db();
+        let cf = db.cf_handle(&self.name).unwrap();
+        match db.get_cf(cf, mode_key(id)) {
+            Ok(opt) => match opt {
+                Some(data) => {
+                    let model: Model = bincode::deserialize(data.as_ref()).unwrap();
+                    Some(model)
+                }
+                None => None,
+            },
+            Err(_err) => None,
+        }
+    }
+
+    fn query(&self, q: &Query) -> ActResult<Vec<Model>> {
+        db_debug!("local::Model.query({:?})", q);
+        let mut ret = Vec::new();
+        let mut limit = q.limit();
+        if limit == 0 {
+            // should be a big number to take
+            limit = 10000;
+        }
+        if q.is_cond() {
+            for id in find_by_idx(&self.name, q) {
+                if let Some(it) = self.find(&id) {
+                    ret.push(it);
+                }
+            }
+        } else {
+            ret = get_all(&self.name, limit);
+        }
+
+        Ok(ret)
+    }
+
+    fn create(&self, model: &Model) -> ActResult<bool> {
+        db_debug!("local::Model.create({})", proc.id);
+        let data = bincode::serialize(model).unwrap();
+        let db = db();
+        let cf = db.cf_handle(&self.name).unwrap();
+        match db.put_cf(cf, mode_key(&model.id), data) {
+            Ok(_) => {
+                // let idx = idx_key("id", &proc.id);
+                // let value = &format!("{},", proc.id);
+                // db.merge_cf(cf, &idx, value).unwrap();
+                Ok(true)
+            }
+            Err(err) => Err(ActError::StoreError(err.to_string())),
+        }
+    }
+    fn update(&self, model: &Model) -> ActResult<bool> {
+        db_debug!("local::Model.update({})", proc.id);
+        let data = bincode::serialize(model).unwrap();
+        let db = db();
+        let cf = db.cf_handle(&self.name).unwrap();
+        match db.put_cf(cf, mode_key(&model.id), data) {
+            Ok(_) => Ok(true),
+            Err(err) => Err(ActError::StoreError(err.to_string())),
+        }
+    }
+    fn delete(&self, id: &str) -> ActResult<bool> {
+        db_debug!("local::Model.delete({})", id);
+        let db = db();
+        let cf = db.cf_handle(&self.name).unwrap();
+
+        match self.find(id) {
+            Some(item) => match db.delete_cf(cf, mode_key(id)) {
+                Ok(_) => {
+                    let idx = idx_key("id", &item.id);
+                    db.delete_cf(cf, &idx).unwrap();
+                    Ok(true)
+                }
+                Err(err) => Err(ActError::StoreError(err.to_string())),
+            },
+            None => Err(ActError::StoreError(format!(
+                "can not find the key: {}",
+                id
+            ))),
+        }
     }
 }
 
@@ -241,7 +357,7 @@ impl DataSet<Proc> for ProcSet {
 
                 Ok(true)
             }
-            Err(err) => Err(ActError::StepError(err.to_string())),
+            Err(err) => Err(ActError::StoreError(err.to_string())),
         }
     }
     fn update(&self, proc: &Proc) -> ActResult<bool> {
@@ -251,7 +367,7 @@ impl DataSet<Proc> for ProcSet {
         let cf = db.cf_handle(&self.name).unwrap();
         match db.put_cf(cf, mode_key(&proc.id), data) {
             Ok(_) => Ok(true),
-            Err(err) => Err(ActError::StepError(err.to_string())),
+            Err(err) => Err(ActError::StoreError(err.to_string())),
         }
     }
     fn delete(&self, id: &str) -> ActResult<bool> {
@@ -266,7 +382,7 @@ impl DataSet<Proc> for ProcSet {
                     db.delete_cf(cf, &idx).unwrap();
                     Ok(true)
                 }
-                Err(err) => Err(ActError::StepError(err.to_string())),
+                Err(err) => Err(ActError::StoreError(err.to_string())),
             },
             None => Err(ActError::StoreError(format!(
                 "can not find the key: {}",
@@ -346,7 +462,7 @@ impl DataSet<Task> for TaskSet {
                 db.merge_cf(cf, &idx_key, value).unwrap();
                 Ok(true)
             }
-            Err(err) => Err(ActError::StepError(err.to_string())),
+            Err(err) => Err(ActError::StoreError(err.to_string())),
         }
     }
     fn update(&self, task: &Task) -> ActResult<bool> {
@@ -356,7 +472,7 @@ impl DataSet<Task> for TaskSet {
         let cf = db.cf_handle(&self.name).unwrap();
         match db.put_cf(cf, mode_key(&task.id), data) {
             Ok(_) => Ok(true),
-            Err(err) => Err(ActError::StepError(err.to_string())),
+            Err(err) => Err(ActError::StoreError(err.to_string())),
         }
     }
     fn delete(&self, id: &str) -> ActResult<bool> {
@@ -370,7 +486,7 @@ impl DataSet<Task> for TaskSet {
                     db.delete_cf(cf, &idx).unwrap();
                     Ok(true)
                 }
-                Err(err) => Err(ActError::StepError(err.to_string())),
+                Err(err) => Err(ActError::StoreError(err.to_string())),
             },
             None => Err(ActError::StoreError(format!(
                 "can not find the key: {}",
@@ -450,7 +566,7 @@ impl DataSet<Message> for MessageSet {
                 db.merge_cf(cf, &idx_key, value).unwrap();
                 Ok(true)
             }
-            Err(err) => Err(ActError::StepError(err.to_string())),
+            Err(err) => Err(ActError::StoreError(err.to_string())),
         }
     }
     fn update(&self, msg: &Message) -> ActResult<bool> {
@@ -463,7 +579,7 @@ impl DataSet<Message> for MessageSet {
                 db.flush().unwrap();
                 Ok(true)
             }
-            Err(err) => Err(ActError::StepError(err.to_string())),
+            Err(err) => Err(ActError::StoreError(err.to_string())),
         }
     }
     fn delete(&self, id: &str) -> ActResult<bool> {
@@ -477,7 +593,7 @@ impl DataSet<Message> for MessageSet {
                     db.delete_cf(cf, &idx).unwrap();
                     Ok(true)
                 }
-                Err(err) => Err(ActError::StepError(err.to_string())),
+                Err(err) => Err(ActError::StoreError(err.to_string())),
             },
             None => Err(ActError::StoreError(format!(
                 "can not find the key: {}",

@@ -1,5 +1,4 @@
 use crate::env::VirtualMachine;
-use chrono::{DateTime, Local, TimeZone};
 use regex::Regex;
 use rhai::{Dynamic, Map};
 use serde_yaml::{Mapping, Value};
@@ -126,25 +125,25 @@ pub fn get_expr(text: &str) -> Option<String> {
     None
 }
 
-pub fn fmt_timestamp(
-    start_time_mills: i64,
-    end_time_mills: i64,
-    fmt: &str,
-) -> (String, String, i64) {
-    let start_time = parse_timestamp(start_time_mills);
-    let end_time = parse_timestamp(end_time_mills);
+// pub fn fmt_timestamp(
+//     start_time_mills: i64,
+//     end_time_mills: i64,
+//     fmt: &str,
+// ) -> (String, String, i64) {
+//     let start_time = parse_timestamp(start_time_mills);
+//     let end_time = parse_timestamp(end_time_mills);
 
-    let elapsed = end_time_mills - start_time_mills;
+//     let elapsed = end_time_mills - start_time_mills;
 
-    (
-        start_time.format(fmt).to_string(),
-        end_time.format(fmt).to_string(),
-        elapsed,
-    )
-}
+//     (
+//         start_time.format(fmt).to_string(),
+//         end_time.format(fmt).to_string(),
+//         elapsed,
+//     )
+// }
 
-fn parse_timestamp(mills: i64) -> DateTime<Local> {
-    let time: DateTime<Local> = Local.timestamp_millis(mills);
+// fn parse_timestamp(mills: i64) -> DateTime<Local> {
+//     let time: DateTime<Local> = Local.timestamp_millis(mills);
 
-    time
-}
+//     time
+// }

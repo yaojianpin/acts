@@ -6,7 +6,7 @@ use crate::{
     },
     store::Store,
     utils::{self},
-    ActResult, Engine, ShareLock,
+    ActError, ActResult, Engine, ShareLock, Workflow,
 };
 use lru::LruCache;
 use std::{
@@ -17,15 +17,16 @@ use std::{
 #[derive(Clone)]
 pub struct Cache {
     procs: ShareLock<LruCache<String, Proc>>,
-    store: Arc<Store>,
     scher: ShareLock<Option<Arc<Scheduler>>>,
+
+    store: ShareLock<Option<Arc<Store>>>,
 }
 
 impl Cache {
     pub fn new(cap: usize) -> Self {
         Self {
             procs: Arc::new(RwLock::new(LruCache::new(NonZeroUsize::new(cap).unwrap()))),
-            store: Arc::new(Store::new()),
+            store: Arc::new(RwLock::new(None)),
             scher: Arc::new(RwLock::new(None)),
         }
     }
@@ -34,11 +35,11 @@ impl Cache {
         debug!("cache::init");
         let scher = engine.scher();
         *self.scher.write().unwrap() = Some(scher.clone());
-
-        self.store.init(engine);
+        *self.store.write().unwrap() = Some(engine.store());
 
         {
             let cache = self.clone();
+
             let s = scher.clone();
 
             let emitter = engine.emitter();
@@ -51,20 +52,23 @@ impl Cache {
                         .expect(&format!("fail to remove pid={}", pid));
                     cache.restore(s.clone());
                 } else {
-                    cache.store.update_proc(proc);
+                    if let Some(store) = &*cache.store.read().unwrap() {
+                        store.update_proc(proc).expect("update proc");
+                    }
                 }
             });
         }
         {
             let cache = self.clone();
-
             let emitter = engine.emitter();
             emitter.on_task(move |task: &Task, data: &EventData| {
                 debug!("sch::cache::on_task: tid={}, data={}", task.tid(), data);
-                if data.action == EventAction::Create {
-                    cache.store.create_task(task);
-                } else {
-                    cache.store.update_task(task, &data.vars);
+                if let Some(store) = &*cache.store.read().unwrap() {
+                    if data.action == EventAction::Create {
+                        store.create_task(task);
+                    } else {
+                        store.update_task(task, &data.vars);
+                    }
                 }
             });
         }
@@ -73,19 +77,32 @@ impl Cache {
             let emitter = engine.emitter();
             emitter.on_message(move |msg: &Message| {
                 debug!("sch::cache::on_message: {:?}", msg);
-                cache.store.create_message(msg)
+                if let Some(store) = &*cache.store.read().unwrap() {
+                    store.create_message(msg)
+                }
             });
         }
     }
 
     pub fn close(&self) {
-        self.store.flush();
+        if let Some(store) = &*self.store.read().unwrap() {
+            store.flush();
+        }
     }
 
     pub fn push(&self, proc: &Proc) {
         debug!("sch::cache::push({})", proc.pid());
-        self.store.create_proc(proc);
         self.procs.write().unwrap().push(proc.pid(), proc.clone());
+        if let Some(store) = &*self.store.read().unwrap() {
+            store.create_proc(proc).expect("create proc");
+        }
+    }
+
+    pub fn model(&self, id: &str) -> ActResult<Workflow> {
+        match &*self.store.read().unwrap() {
+            Some(store) => store.model(id),
+            None => Err(ActError::RuntimeError(format!("store not init"))),
+        }
     }
 
     pub fn proc(&self, pid: &str) -> Option<Proc> {
@@ -94,7 +111,9 @@ impl Cache {
             Some(proc) => Some(proc.clone()),
             None => {
                 if let Some(scher) = &*self.scher.read().unwrap() {
-                    return self.store.proc(pid, scher);
+                    if let Some(store) = &*self.store.read().unwrap() {
+                        return store.proc(pid, scher);
+                    }
                 }
 
                 None
@@ -132,17 +151,23 @@ impl Cache {
     pub fn remove(&self, pid: &str) -> ActResult<bool> {
         debug!("sch::cache::remove pid={}", pid);
         self.procs.write().unwrap().pop(pid);
-        self.store.remove_proc(&pid)
+        if let Some(store) = &*self.store.read().unwrap() {
+            store.remove_proc(&pid)?;
+        }
+
+        Ok(true)
     }
 
     fn restore(&self, scher: Arc<Scheduler>) {
         debug!("sch::cache::restore");
-        let mut procs = self.procs.write().unwrap();
-        if procs.len() < procs.cap().get() / 2 {
-            let cap = procs.cap().get() - procs.len();
-            for ref proc in self.store.load(scher, cap) {
-                procs.push(proc.pid(), proc.clone());
-                self.send(proc);
+        if let Some(store) = &*self.store.read().unwrap() {
+            let mut procs = self.procs.write().unwrap();
+            if procs.len() < procs.cap().get() / 2 {
+                let cap = procs.cap().get() - procs.len();
+                for ref proc in store.load(scher, cap) {
+                    procs.push(proc.pid(), proc.clone());
+                    self.send(proc);
+                }
             }
         }
     }

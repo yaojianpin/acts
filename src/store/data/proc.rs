@@ -7,5 +7,7 @@ pub struct Proc {
     pub pid: String,
     pub model: String,
     pub state: TaskState,
+    pub start_time: i64,
+    pub end_time: i64,
     pub vars: String,
 }

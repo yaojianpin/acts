@@ -1,5 +1,5 @@
 name: add
-version: 1.0
+id: m1
 env:
   input: 4
 outputs:

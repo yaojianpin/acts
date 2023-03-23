@@ -1,7 +1,6 @@
 use crate::{
-    emitter,
     sch::{event::EventData, ActionOptions, Proc, Scheduler},
-    Emitter, Message, State, TaskState, UserMessage, Vars, Workflow,
+    Emitter, Message, State, TaskState, UserMessage, Workflow,
 };
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -16,7 +15,7 @@ async fn task_state() {
 #[tokio::test]
 async fn task_start() {
     let mut workflow = create_simple_workflow();
-    let (proc, scher, emitter) = create_proc(&mut workflow, "w1");
+    let (proc, _scher, emitter) = create_proc(&mut workflow, "w1");
 
     proc.start();
     emitter.on_proc(|proc: &Proc, _data: &EventData| {
@@ -102,7 +101,7 @@ async fn task_back() {
                 "back",
                 Some(ActionOptions {
                     to: Some("step1".to_string()),
-                    vars: Vars::new(),
+                    ..Default::default()
                 }),
             );
             s.sched_message(&message);
@@ -177,11 +176,9 @@ async fn task_submit() {
     assert!(*ret.lock().unwrap());
 }
 
-fn create_proc(workflow: &mut Workflow, id: &str) -> (Proc, Arc<Scheduler>, Arc<Emitter>) {
+fn create_proc(workflow: &mut Workflow, pid: &str) -> (Proc, Arc<Scheduler>, Arc<Emitter>) {
     let scher = Arc::new(Scheduler::new());
-
-    workflow.set_biz_id(id);
-    let proc = scher.create_raw_proc(workflow);
+    let proc = scher.create_raw_proc(pid, workflow);
 
     let emitter = Arc::new(Emitter::new(&scher));
 

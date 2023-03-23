@@ -1,5 +1,5 @@
 use crate::{ActModule, ActPlugin};
-use rhai::{EvalAltResult, Identifier, RegisterNativeFunction, Variant};
+use rhai::{Identifier, RegisterNativeFunction, Variant};
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},

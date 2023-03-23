@@ -30,6 +30,8 @@ async fn local_proc_create() {
         pid: "pid".to_string(),
         model: "".to_string(),
         state: TaskState::None,
+        start_time: 0,
+        end_time: 0,
         vars: "".to_string(),
     };
     store.procs().create(&proc).unwrap();
@@ -47,6 +49,8 @@ async fn local_proc_query() {
             pid: pid.to_string(),
             model: "".to_string(),
             state: TaskState::None,
+            start_time: 0,
+            end_time: 0,
             vars: "".to_string(),
         };
         procs.create(&proc).unwrap();
@@ -69,6 +73,8 @@ async fn local_proc_update() {
         pid: "pid".to_string(),
         model: "".to_string(),
         state: TaskState::None,
+        start_time: 0,
+        end_time: 0,
         vars: "".to_string(),
     };
     store.procs().create(&proc).unwrap();
@@ -90,6 +96,8 @@ async fn local_proc_delete() {
         pid: "pid".to_string(),
         model: "".to_string(),
         state: TaskState::None,
+        start_time: 0,
+        end_time: 0,
         vars: "".to_string(),
     };
     store.procs().create(&proc).unwrap();

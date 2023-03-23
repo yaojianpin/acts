@@ -1,19 +1,15 @@
 use crate::{
     adapter::{self, Adapter},
-    debug,
     executor::Executor,
     manager::Manager,
-    model::Workflow,
     options::Options,
-    plugin::{self, ActPlugin},
-    sch::{ActionOptions, Event, Scheduler},
-    utils, ActError, ActModule, ActResult, Emitter, Vars,
+    plugin::{self},
+    sch::Scheduler,
+    store::Store,
+    utils, Emitter,
 };
-use rhai::{EvalAltResult, Identifier, RegisterNativeFunction, Variant};
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc::Sender;
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Registry};
 
 static IS_GLOBAL_LOG: Mutex<bool> = Mutex::new(false);
@@ -24,28 +20,33 @@ static IS_GLOBAL_LOG: Mutex<bool> = Mutex::new(false);
 /// a example to caculate the result from 1 to given input value
 ///
 ///```rust
-/// use acts::{Engine, State, Workflow, Vars};
+/// use acts::{ActionOptions, Engine, State, Workflow, Vars};
 ///
 /// #[tokio::main]
 /// async fn main() {
 ///     let engine = Engine::new();
-///     
+///     engine.start();
+///
 ///     let model = include_str!("../examples/simple/model.yml");
 ///     let mut workflow = Workflow::from_str(model).unwrap();
 ///
 ///     let mut vars = Vars::new();
 ///     vars.insert("input".into(), 3.into());
 ///     workflow.set_env(vars);
-///
-///     let executor = engine.executor();
-///     executor.start(&workflow);
-///
-///     let e = engine.clone();
+///     
 ///     engine.emitter().on_complete(move |w: &State<Workflow>| {
 ///         println!("{:?}", w.outputs());
-///         e.close();
 ///     });
-///     engine.start().await;
+///
+///     let executor = engine.executor();
+///     executor.deploy(&workflow).expect("fail to deploy workflow");
+///     executor.start(
+///        &workflow.id,
+///        crate::ActionOptions {
+///            biz_id: Some("w1".to_string()),
+///            ..Default::default()
+///        },
+///    );
 /// }
 /// ```
 #[derive(Clone)]
@@ -55,6 +56,8 @@ pub struct Engine {
     emitter: Arc<Emitter>,
     executor: Arc<Executor>,
     mgr: Arc<Manager>,
+    store: Arc<Store>,
+    signal: Arc<Mutex<Option<Sender<i32>>>>,
     is_closed: Arc<Mutex<bool>>,
 }
 
@@ -64,7 +67,7 @@ impl Engine {
         Engine::new_with(&config)
     }
 
-    pub fn new_with(config: &Options) -> Self {
+    fn new_with(config: &Options) -> Self {
         let mut v = IS_GLOBAL_LOG.lock().unwrap();
         if *v == false {
             Registry::default().with(fmt::layer()).init();
@@ -72,14 +75,16 @@ impl Engine {
         }
 
         let scher = Arc::new(Scheduler::new_with(config));
-
+        let store = Arc::new(Store::new());
         let engine = Engine {
             scher: scher.clone(),
             adapter: Arc::new(Adapter::new()),
-            executor: Arc::new(Executor::new(&scher)),
+            executor: Arc::new(Executor::new(&scher, &store)),
             emitter: Arc::new(Emitter::new(&scher)),
             mgr: Arc::new(Manager::new()),
+            store: store.clone(),
 
+            signal: Arc::new(Mutex::new(None)),
             is_closed: Arc::new(Mutex::new(false)),
         };
 
@@ -114,18 +119,13 @@ impl Engine {
     /// #[tokio::main]
     /// async fn main() {
     ///     let engine = Engine::new();
-    ///     let e = engine.clone();
-    ///     tokio::spawn(async move {
-    ///         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-    ///         e.close();
-    ///     });
-    ///     engine.start().await;
+    ///     engine.start();
     /// }
     /// ```
-    pub async fn start(&self) {
-        self.init().await;
+    pub fn start(&self) {
+        self.init();
         let scher = self.scher();
-        scher.event_loop().await;
+        tokio::spawn(async move { scher.event_loop().await });
     }
 
     /// close engine
@@ -137,12 +137,27 @@ impl Engine {
     /// #[tokio::main]
     /// async fn main() {
     ///     let engine = Engine::new();
-    ///     engine.close()
+    ///     engine.close();
     /// }
     /// ```
     pub fn close(&self) {
-        *self.is_closed.lock().unwrap() = true;
+        let mut is_closed = self.is_closed.lock().unwrap();
+        if *is_closed {
+            return;
+        }
+        *is_closed = true;
         self.scher().close();
+
+        if let Some(sig) = &*self.signal.lock().unwrap() {
+            let s = sig.clone();
+            tokio::spawn(async move { s.send(1).await });
+        }
+    }
+
+    pub async fn r#loop(&self) {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        *self.signal.lock().unwrap() = Some(tx);
+        rx.recv().await;
     }
 
     pub fn is_closed(self) -> bool {
@@ -153,11 +168,16 @@ impl Engine {
         self.scher.clone()
     }
 
-    async fn init(&self) {
-        plugin::init(self).await;
-        adapter::init(self).await;
+    /// engine store
+    pub(crate) fn store(&self) -> Arc<Store> {
+        self.store.clone()
+    }
 
-        self.scher.init(self).await;
+    fn init(&self) {
+        plugin::init(self);
+        adapter::init(self);
+
+        self.scher.init(self);
     }
 }
 

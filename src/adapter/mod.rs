@@ -1,6 +1,6 @@
 use crate::{
     debug,
-    store::{DataSet, Message, Proc, Task},
+    store::{DataSet, Message, Model, Proc, Task},
     ActError, ActResult, Context, Engine, ShareLock, Step,
 };
 use std::collections::HashMap;
@@ -11,7 +11,7 @@ mod rule;
 #[cfg(test)]
 mod tests;
 
-pub async fn init(engine: &Engine) {
+pub fn init(engine: &Engine) {
     debug!("adapter::init");
 
     // register inner some rule
@@ -113,10 +113,14 @@ pub trait RoleAdapter: Send + Sync {
 ///
 /// # Example
 /// ```no_run
-/// use acts::{store::{Proc,Task, Message, DataSet}, StoreAdapter};
+/// use acts::{store::{Model, Proc, Task, Message, DataSet}, StoreAdapter};
 /// use std::sync::Arc;
 /// struct TestStore;
 /// impl StoreAdapter for TestStore {
+///
+///     fn models(&self) -> Arc<dyn DataSet<Model>> {
+///         todo!()
+///     }
 ///     fn procs(&self) -> Arc<dyn DataSet<Proc>> {
 ///         todo!()
 ///     }
@@ -133,6 +137,7 @@ pub trait RoleAdapter: Send + Sync {
 pub trait StoreAdapter: Send + Sync {
     fn init(&self);
 
+    fn models(&self) -> Arc<dyn DataSet<Model>>;
     fn procs(&self) -> Arc<dyn DataSet<Proc>>;
     fn tasks(&self) -> Arc<dyn DataSet<Task>>;
     fn messages(&self) -> Arc<dyn DataSet<Message>>;
@@ -212,7 +217,7 @@ impl RuleAdapter for Adapter {
                 let rule = &*self.rule.read().unwrap();
                 match rule {
                     Some(adapter) => adapter.ord(name, acts),
-                    None => Err(ActError::SubjectError(format!("ord rule error ({})", name))),
+                    None => Err(ActError::AdapterError(format!("ord rule error ({})", name))),
                 }
             }
         }
@@ -226,7 +231,7 @@ impl RuleAdapter for Adapter {
                 let rule = &*self.rule.read().unwrap();
                 match rule {
                     Some(adapter) => adapter.some(name, step, ctx),
-                    None => Err(ActError::SubjectError(format!("ord rule error ({})", name))),
+                    None => Err(ActError::AdapterError(format!("ord rule error ({})", name))),
                 }
             }
         }

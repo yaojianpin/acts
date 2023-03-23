@@ -9,6 +9,7 @@ const ALPHABETS: [char; 62] = [
 
 const ID_SEP: &str = ":";
 
+#[allow(unused)]
 pub fn longid() -> String {
     nanoid!(21, &ALPHABETS)
 }

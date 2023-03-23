@@ -9,7 +9,8 @@ use crate::{
         queue::{Queue, Signal},
         Context, Proc, Task, TaskState,
     },
-    utils, ActError, ActResult, Engine, Message, RuleAdapter, RwLock, ShareLock, Step, UserMessage,
+    utils, ActError, ActResult, ActionOptions, Engine, Message, RuleAdapter, RwLock, ShareLock,
+    Step, UserMessage,
 };
 use std::sync::Arc;
 use tokio::runtime::Handle;
@@ -41,7 +42,7 @@ impl Scheduler {
         }
     }
 
-    pub async fn init(&self, engine: &Engine) {
+    pub fn init(&self, engine: &Engine) {
         debug!("scher::init");
         *self.engine.write().unwrap() = Some(engine.clone());
 
@@ -58,7 +59,7 @@ impl Scheduler {
                 let adapter = engine.adapter();
                 adapter.ord(name, acts)
             }
-            None => Err(ActError::ScherError("sch::engine not found".to_string())),
+            None => Err(ActError::RuntimeError("sch::engine not found".to_string())),
         }
     }
 
@@ -69,14 +70,44 @@ impl Scheduler {
                 let adapter = engine.adapter();
                 adapter.some(name, step, ctx)
             }
-            None => Err(ActError::ScherError("sch::engine not found".to_string())),
+            None => Err(ActError::RuntimeError("sch::engine not found".to_string())),
         }
     }
 
-    pub fn start(&self, workflow: &Workflow) {
-        debug!("sch::start({})", workflow.id);
-        let proc = self.create_raw_proc(workflow);
-        self.queue.send(&Signal::Proc(proc.clone()));
+    pub fn start(&self, id: &str, options: ActionOptions) -> ActResult<bool> {
+        debug!("sch::start({})", id);
+        match &options.biz_id {
+            Some(biz_id) => {
+                if biz_id.is_empty() {
+                    return Err(ActError::OperateError("biz_id is empty in options".into()));
+                }
+
+                // the biz_id will use as the pid
+                // so just check the biz_id before start a new proc
+                let proc = self.cache.proc(&biz_id);
+                if proc.is_some() {
+                    return Err(ActError::OperateError(format!(
+                        "biz_id({biz_id}) is duplicated in running proc list"
+                    )));
+                }
+
+                let mut model = self.cache.model(id)?;
+                // merge vars in options and workflow.env
+                let mut vars = options.vars;
+                for (k, v) in &model.env {
+                    if !vars.contains_key(k) {
+                        vars.insert(k.to_string(), v.clone());
+                    }
+                }
+                model.set_env(vars);
+
+                let proc = self.create_raw_proc(biz_id, &model.clone());
+                self.queue.send(&Signal::Proc(proc.clone()));
+
+                Ok(true)
+            }
+            None => Err(ActError::OperateError("not found biz_id in options".into())),
+        }
     }
 
     pub async fn next(&self) -> bool {
@@ -142,11 +173,11 @@ impl Scheduler {
         self.cache.close();
     }
 
-    pub(crate) fn message(&self, id: &str) -> Option<Message> {
+    pub fn message(&self, id: &str) -> Option<Message> {
         self.cache.message(id)
     }
 
-    pub(crate) fn message_by_uid(&self, pid: &str, uid: &str) -> Option<Message> {
+    pub fn message_by_uid(&self, pid: &str, uid: &str) -> Option<Message> {
         self.cache.message_by_uid(pid, uid)
     }
 
@@ -166,9 +197,9 @@ impl Scheduler {
         self.cache.clone()
     }
 
-    pub(crate) fn create_raw_proc(&self, workflow: &Workflow) -> Proc {
+    pub(crate) fn create_raw_proc(&self, pid: &str, model: &Workflow) -> Proc {
         let scher = Arc::new(self.clone());
-        let proc = Proc::new(scher, &workflow, &TaskState::None);
+        let proc = Proc::new(pid, scher, &model, &TaskState::None);
 
         proc
     }

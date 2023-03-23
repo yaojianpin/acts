@@ -1,4 +1,4 @@
-use acts::{Engine, State, Workflow};
+use acts::{ActionOptions, Engine, State, Workflow};
 use criterion::*;
 use tokio::runtime::Runtime;
 
@@ -50,18 +50,29 @@ fn simple_workflow(c: &mut Criterion) {
   "#;
     c.bench_function("simple_workflow", |b| {
         let rt = Runtime::new().unwrap();
-        b.iter(move || {
-            let engine = Engine::new();
-            let workflow = Workflow::from_str(text).unwrap();
+        let engine = Engine::new();
+        engine.start();
+        let workflow = Workflow::from_str(text).unwrap();
+        let executor = engine.executor();
+        let e = engine.clone();
+        executor.deploy(&workflow).unwrap();
 
-            let executor = engine.executor();
+        engine.emitter().on_complete(move |_w: &State<Workflow>| {
+            //e.close();
+        });
+
+        b.iter(move || {
+            let workflow = Workflow::from_str(text).unwrap();
+            let exec = e.executor();
             rt.block_on(async move {
-                executor.start(&workflow);
-                let e = engine.clone();
-                engine.emitter().on_complete(move |_w: &State<Workflow>| {
-                    e.close();
-                });
-                engine.start().await;
+                exec.start(
+                    &workflow.id,
+                    ActionOptions {
+                        biz_id: Some("w1".into()),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
             });
         })
     });

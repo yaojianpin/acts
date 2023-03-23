@@ -1,9 +1,9 @@
-use acts::{Engine, State, Vars, Workflow};
+use acts::{ActionOptions, Engine, State, Vars, Workflow};
 
 #[tokio::main]
 async fn main() {
     let engine = Engine::new();
-
+    engine.start();
     let mut workflow = Workflow::new()
         .with_name("workflow builder")
         .with_output("result", 0.into())
@@ -43,7 +43,16 @@ async fn main() {
     workflow.set_env(vars);
 
     let executor = engine.executor();
-    executor.start(&workflow);
+    executor.deploy(&workflow).expect("deploy model");
+    executor
+        .start(
+            &workflow.id,
+            ActionOptions {
+                biz_id: Some("w1".into()),
+                ..Default::default()
+            },
+        )
+        .expect("start workflow");
 
     let e = engine.clone();
     engine.emitter().on_complete(move |w: &State<Workflow>| {
@@ -54,5 +63,5 @@ async fn main() {
         );
         e.close();
     });
-    engine.start().await;
+    engine.r#loop().await;
 }

@@ -45,6 +45,7 @@ async fn init() -> SqlitePool {
 
 #[derive(Debug)]
 pub struct SqliteStore {
+    models: Arc<ModelSet>,
     procs: Arc<ProcSet>,
     tasks: Arc<TaskSet>,
     messages: Arc<MessageSet>,
@@ -54,6 +55,7 @@ impl SqliteStore {
     #[allow(unused)]
     pub fn new() -> Self {
         let db = Self {
+            models: Arc::new(ModelSet),
             procs: Arc::new(ProcSet),
             tasks: Arc::new(TaskSet),
             messages: Arc::new(MessageSet),
@@ -72,6 +74,10 @@ impl StoreAdapter for SqliteStore {
     fn init(&self) {}
     fn flush(&self) {}
 
+    fn models(&self) -> Arc<dyn DataSet<Model>> {
+        self.models.clone()
+    }
+
     fn procs(&self) -> Arc<dyn DataSet<Proc>> {
         self.procs.clone()
     }
@@ -82,6 +88,110 @@ impl StoreAdapter for SqliteStore {
 
     fn messages(&self) -> Arc<dyn DataSet<Message>> {
         self.messages.clone()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ModelSet;
+
+impl DataSet<Model> for ModelSet {
+    fn exists(&self, id: &str) -> bool {
+        debug!("sqlite.model.exists({})", id);
+        let pool = db();
+        run(async {
+            let row = sqlx::query(r#"select count(id) from act_model where id=$1"#)
+                .bind(id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+            let count: i32 = row.get(0);
+            count > 0
+        })
+    }
+
+    fn find(&self, id: &str) -> Option<Model> {
+        debug!("sqlite.Model.find({})", id);
+        run(async {
+            let pool = db();
+            match sqlx::query(r#"select id, model, ver from act_model where id=$1"#)
+                .bind(id)
+                .fetch_one(pool)
+                .await
+            {
+                Ok(row) => Some(Model {
+                    id: row.get(0),
+                    model: row.get(1),
+                    ver: row.get(2),
+                }),
+                Err(_) => None,
+            }
+        })
+    }
+
+    fn query(&self, q: &Query) -> ActResult<Vec<Model>> {
+        debug!("sqlite.Model.query({})", q.sql());
+        run(async {
+            let mut ret = Vec::new();
+            let pool = db();
+            let sql = format!(r#"select id, model, ver from act_model {}"#, q.sql());
+            let query = sqlx::query(&sql);
+            match &query.fetch_all(pool).await {
+                Ok(rows) => {
+                    for row in rows {
+                        ret.push(Model {
+                            id: row.get(0),
+                            model: row.get(1),
+                            ver: row.get(2),
+                        });
+                    }
+
+                    Ok(ret)
+                }
+                Err(err) => Err(ActError::StoreError(err.to_string())),
+            }
+        })
+    }
+
+    fn create(&self, model: &Model) -> ActResult<bool> {
+        debug!("sqlite.Model.create({})", model.id);
+        let model = model.clone();
+        run(async move {
+            let pool = db();
+            let sql = sqlx::query(r#"insert into act_model (id, model, ver) values ($1,$2,$3)"#)
+                .bind(model.id)
+                .bind(model.model)
+                .bind(model.ver);
+            match sql.execute(pool).await {
+                Ok(_) => Ok(true),
+                Err(err) => Err(ActError::StoreError(err.to_string())),
+            }
+        })
+    }
+    fn update(&self, model: &Model) -> ActResult<bool> {
+        debug!("sqlite.Model.update({})", proc.id);
+        run(async {
+            let pool = db();
+            let sql = sqlx::query(r#"update act_model set model = $1, ver = $2 where id=$3"#)
+                .bind(model.model.to_string())
+                .bind(&model.ver)
+                .bind(&model.id);
+
+            match sql.execute(pool).await {
+                Ok(_) => Ok(true),
+                Err(err) => Err(ActError::StoreError(err.to_string())),
+            }
+        })
+    }
+    fn delete(&self, id: &str) -> ActResult<bool> {
+        debug!("sqlite.Model.delete({})", id);
+        run(async {
+            let pool = db();
+            let sql = sqlx::query(r#"delete from act_model where id=$1"#).bind(id);
+            match sql.execute(pool).await {
+                Ok(_) => Ok(true),
+                Err(err) => Err(ActError::StoreError(err.to_string())),
+            }
+        })
     }
 }
 
@@ -107,7 +217,7 @@ impl DataSet<Proc> for ProcSet {
         debug!("sqlite.proc.find({})", id);
         run(async {
             let pool = db();
-            match sqlx::query(r#"select id, pid, state, model, vars from act_proc where id=$1"#)
+            match sqlx::query(r#"select id, pid, state, model, vars, start_time, end_time from act_proc where id=$1"#)
                 .bind(id)
                 .fetch_one(pool)
                 .await
@@ -120,6 +230,8 @@ impl DataSet<Proc> for ProcSet {
                         state: state.into(),
                         model: row.get(3),
                         vars: row.get(4),
+                        start_time: row.get(5),
+                        end_time: row.get(6),
                     })
                 }
                 Err(_) => None,
@@ -147,6 +259,8 @@ impl DataSet<Proc> for ProcSet {
                             state: state.into(),
                             model: row.get(3),
                             vars: row.get(4),
+                            start_time: row.get(5),
+                            end_time: row.get(6),
                         });
                     }
 

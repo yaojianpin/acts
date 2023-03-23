@@ -11,8 +11,7 @@ use crate::{
 };
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, RwLock},
-    time::SystemTime,
+    sync::{Arc, RwLock},
 };
 
 use super::Node;
@@ -162,6 +161,7 @@ impl Context {
                     self.append_vars(&outputs);
                 }
                 let state = State {
+                    pid: self.proc.pid(),
                     node: Arc::new(job.clone()),
                     state: task.state(),
                     start_time: task.start_time(),
@@ -173,6 +173,7 @@ impl Context {
             NodeData::Branch(_branch) => {}
             NodeData::Step(step) => {
                 let state = State {
+                    pid: self.proc.pid(),
                     node: Arc::new(step.clone()),
                     state: task.state(),
                     start_time: task.start_time(),
@@ -184,6 +185,7 @@ impl Context {
             }
             NodeData::Act(act) => {
                 let state = State {
+                    pid: self.proc.pid(),
                     node: Arc::new(act.clone()),
                     state: task.state(),
                     start_time: task.start_time(),
@@ -225,7 +227,7 @@ impl Context {
     fn get_action_name(&self, action: &EventAction) -> String {
         match action {
             EventAction::Create => consts::EVT_INIT.to_string(),
-            EventAction::Complete => consts::EVT_COMPLETE.to_string(),
+            EventAction::Complete => consts::EVT_NEXT.to_string(),
             EventAction::Back => consts::EVT_BACK.to_string(),
             EventAction::Cancel => consts::EVT_CANCEL.to_string(),
             EventAction::Abort => consts::EVT_ABORT.to_string(),

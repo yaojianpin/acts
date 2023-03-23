@@ -14,10 +14,10 @@ async fn state_is_finished() {
     let state = TaskState::Skip;
     assert!(state.is_completed());
 
-    let state = TaskState::Fail(ActError::ConfigError.into());
+    let state = TaskState::Fail(ActError::RuntimeError("test error".into()).into());
     assert!(state.is_completed());
 
-    let state = TaskState::Abort(ActError::ConfigError.into());
+    let state = TaskState::Abort(ActError::RuntimeError("test error".into()).into());
     assert!(state.is_completed());
 }
 
@@ -35,10 +35,10 @@ async fn state_is_error() {
     let state = TaskState::Skip;
     assert!(!state.is_error());
 
-    let state = TaskState::Fail(ActError::ConfigError.into());
+    let state = TaskState::Fail(ActError::RuntimeError("test error".into()).into());
     assert!(state.is_error());
 
-    let state = TaskState::Abort(ActError::ConfigError.into());
+    let state = TaskState::Abort(ActError::RuntimeError("test error".into()).into());
     assert!(state.is_error());
 }
 

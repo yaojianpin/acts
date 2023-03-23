@@ -1,5 +1,4 @@
 use crate::{
-    debug,
     sch::{Event, EventData, Proc, Scheduler, Task},
     Message, State, Workflow,
 };
@@ -29,25 +28,32 @@ impl Emitter {
     ///
     /// Example
     /// ```rust
-    /// use acts::{Engine, Workflow, Vars, Message};
+    /// use acts::{ActionOptions, Engine, Workflow, Vars, Message};
     ///
     /// #[tokio::main]
     /// async fn main() {
     ///     let engine = Engine::new();
-    ///     let executor = engine.executor();
-    ///     let workflow = Workflow::new().with_job(|job| {
-    ///         job.with_step(|step| {
+    ///     engine.start();
+    ///
+    ///     let workflow = Workflow::new().with_id("m1").with_job(|job| {
+    ///         job.with_id("job1").with_step(|step| {
     ///             step.with_subject(|sub| sub.with_matcher("any").with_users(r#"["a"]"#))
     ///         })
     ///     });
-    ///     println!("{}", workflow.to_string().unwrap());
-    ///     let e = engine.clone();
+    ///
     ///     engine.emitter().on_message(move |msg: &Message| {
-    ///         e.close();
     ///         assert_eq!(msg.uid, Some("a".to_string()));
     ///     });
-    ///     executor.start(&workflow);
-    ///     engine.start().await;
+    ///
+    ///     let executor = engine.executor();
+    ///     executor.deploy(&workflow).expect("fail to deploy workflow");
+    ///     executor.start(
+    ///        &workflow.id,
+    ///        ActionOptions {
+    ///            biz_id: Some("w1".to_string()),
+    ///            ..Default::default()
+    ///        },
+    ///    );
     /// }
     /// ```
     pub fn on_message(&self, f: impl Fn(&Message) + Send + Sync + 'static) {

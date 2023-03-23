@@ -6,8 +6,7 @@ pub fn print_tree(workflow: &Workflow) -> ActResult<()> {
     let mut levels: Vec<bool> = Vec::new();
     writeln!(&mut buffer, "workflow: {}", workflow.name)?;
     writeln!(&mut buffer, "id: {}", workflow.id)?;
-    writeln!(&mut buffer, "biz_id: {}", workflow.biz_id)?;
-    writeln!(&mut buffer, "version: {}", workflow.ver)?;
+    writeln!(&mut buffer, "ver: {}", workflow.ver)?;
 
     for (i, job) in workflow.jobs.iter().map(|job| job.clone()).enumerate() {
         levels.push(i == workflow.jobs.len() - 1);

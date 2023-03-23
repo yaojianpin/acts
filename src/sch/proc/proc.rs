@@ -2,12 +2,13 @@ use crate::{
     debug,
     env::VirtualMachine,
     sch::{
+        consts::EVT_CANCEL,
         event::{Message, UserMessage},
         tree::TaskTree,
         tree::{Node, NodeTree},
         Context, Scheduler, Task, TaskState,
     },
-    utils, ShareLock, State, Vars, Workflow,
+    utils, ProcInfo, ShareLock, State, Vars, Workflow,
 };
 use std::{
     collections::HashMap,
@@ -34,16 +35,16 @@ pub struct Proc {
 }
 
 impl Proc {
-    pub fn new(scher: Arc<Scheduler>, workflow: &Workflow, state: &TaskState) -> Self {
+    pub fn new(pid: &str, scher: Arc<Scheduler>, workflow: &Workflow, state: &TaskState) -> Self {
         // set the pid with biz_id by default
-        let mut pid = workflow.biz_id();
-        if pid.is_empty() {
-            pid = utils::longid();
-        }
+        // let mut pid = workflow.biz_id.clone();
+        // if pid.is_empty() {
+        //     pid = utils::longid();
+        // }
 
         let vm = scher.env().vm();
         let vars = utils::fill_vars(&vm, &workflow.env);
-        Proc::new_raw(scher, workflow, &pid, state, &vars)
+        Proc::new_raw(scher, workflow, pid, state, &vars)
     }
 
     pub fn new_raw(
@@ -100,6 +101,7 @@ impl Proc {
 
     pub fn workflow_state(&self) -> State<Workflow> {
         State {
+            pid: self.pid(),
             node: self.workflow(),
             state: self.state(),
             start_time: self.start_time(),
@@ -116,6 +118,18 @@ impl Proc {
         self.workflow.clone()
     }
 
+    pub fn info(&self) -> ProcInfo {
+        let workflow = self.workflow();
+        ProcInfo {
+            pid: self.pid.clone(),
+            name: workflow.name.clone(),
+            model_id: workflow.id.clone(),
+            state: self.state(),
+            start_time: self.start_time(),
+            end_time: self.end_time(),
+            vars: self.vm().vars(),
+        }
+    }
     pub fn task(&self, tid: &str) -> Option<Arc<Task>> {
         self.tasks.read().unwrap().task_by_tid(tid)
     }
@@ -195,7 +209,7 @@ impl Proc {
     pub fn do_message(&self, msg: &UserMessage) {
         debug!("do_message msg={:?}", msg);
         let mut count = self.sync.lock().unwrap();
-        let tasks = if msg.action == "cancel" {
+        let tasks = if msg.action == EVT_CANCEL {
             self.task_by_uid(&msg.uid, TaskState::Success)
         } else {
             self.task_by_uid(&msg.uid, TaskState::WaitingEvent)

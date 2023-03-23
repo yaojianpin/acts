@@ -1,5 +1,5 @@
 name: store_test
-ver: 1.0
+id: m1
 jobs:
   - id: job1
     steps:

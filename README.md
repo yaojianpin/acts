@@ -23,25 +23,31 @@ Here are some examples:
 First, you should load a ymal workflow model, and call `engine.start` to start and call `engine.close` to stop it.
 
 ```no_run
-use acts::{Engine, Vars, State, Workflow};
+use acts::{ActionOptions, Engine, Vars, State, Workflow};
 
 #[tokio::main]
 async fn main() {
     let engine = Engine::new();
-    let executor = engine.executor();
+    engine.start();
+
     let text = include_str!("../examples/simple/model.yml");
     let mut workflow = Workflow::from_str(text).unwrap();
     let mut vars = Vars::new();
     vars.insert("input".into(), 3.into());
     workflow.set_env(vars);
 
-    executor.start(&workflow);
+    let executor = engine.executor();
+    executor.deploy(&workflow).expect("fail to deploy workflow");
+    executor.start(&workflow.id, ActionOptions {
+            biz_id: Some("w1".to_string()),
+            ..Default::default()
+        });
 
     let e = engine.clone();
     engine.emitter().on_complete(move |w: &State<Workflow>| {
-        e.close();
+        println!("outputs: {:?}", w.outputs());
     });
-    engine.start().await;
+    
 }
 ```
 

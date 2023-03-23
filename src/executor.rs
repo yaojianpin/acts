@@ -1,22 +1,54 @@
 use crate::{
     debug,
     sch::{ActionOptions, Scheduler},
-    ActResult, UserMessage, Workflow,
+    store::Store,
+    ActResult, ProcInfo, UserMessage, Workflow,
 };
 use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct Executor {
     scher: Arc<Scheduler>,
+    store: Arc<Store>,
 }
 
 impl Executor {
-    pub(crate) fn new(sch: &Arc<Scheduler>) -> Self {
-        Self { scher: sch.clone() }
+    pub(crate) fn new(sch: &Arc<Scheduler>, store: &Arc<Store>) -> Self {
+        Self {
+            scher: sch.clone(),
+            store: store.clone(),
+        }
     }
 
-    pub fn start(&self, workflow: &Workflow) {
-        self.scher.start(workflow);
+    pub fn deploy(&self, workflow: &Workflow) -> ActResult<bool> {
+        self.store.deploy(&workflow)
+    }
+
+    pub fn models(&self, limit: usize) -> ActResult<Vec<Workflow>> {
+        self.store.models(limit)
+    }
+
+    pub fn model(&self, id: &str) -> ActResult<Workflow> {
+        self.store.model(id)
+    }
+
+    pub fn remove(&self, model_id: &str) -> ActResult<bool> {
+        self.store.remove_model(model_id)
+    }
+
+    pub fn procs(&self, cap: usize) -> ActResult<Vec<ProcInfo>> {
+        self.store.proc_infos(cap)
+    }
+    pub fn proc(&self, pid: &str) -> ActResult<ProcInfo> {
+        self.store.proc_info(pid)
+    }
+
+    pub fn close(&self, pid: &str) -> ActResult<bool> {
+        self.scher.cache().remove(pid)
+    }
+
+    pub fn start(&self, id: &str, options: ActionOptions) -> ActResult<bool> {
+        self.scher.start(id, options)
     }
 
     pub fn submit(&self, pid: &str, uid: &str, options: Option<ActionOptions>) -> ActResult<()> {
@@ -31,16 +63,12 @@ impl Executor {
         self.do_action(pid, "cancel", uid, options)
     }
 
-    pub fn complete(&self, pid: &str, uid: &str, options: Option<ActionOptions>) -> ActResult<()> {
-        self.do_action(pid, "complete", uid, options)
+    pub fn next(&self, pid: &str, uid: &str, options: Option<ActionOptions>) -> ActResult<()> {
+        self.do_action(pid, "next", uid, options)
     }
 
     pub fn abort(&self, pid: &str, uid: &str, options: Option<ActionOptions>) -> ActResult<()> {
         self.do_action(pid, "abort", uid, options)
-    }
-
-    pub fn delete(&self, pid: &str) -> ActResult<bool> {
-        self.scher.cache().remove(pid)
     }
 
     fn do_action(

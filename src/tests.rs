@@ -1,6 +1,5 @@
-use crate::{sch::Event, ActPlugin, Engine, Message, State, Workflow};
+use crate::{utils, ActPlugin, Engine, Message, Workflow};
 use rhai::plugin::*;
-use std::sync::Arc;
 
 #[tokio::test]
 async fn engine_start() {
@@ -11,23 +10,21 @@ async fn engine_start() {
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         e.close();
     });
-    engine.start().await;
+    engine.start();
     assert!(true);
 }
 
 #[tokio::test]
 async fn engine_start_async() {
     let engine = Engine::new();
-
+    engine.start();
     let e = engine.clone();
     tokio::spawn(async move {
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         e.close();
     });
 
-    tokio::spawn(async move {
-        engine.start().await;
-    });
+    engine.r#loop().await;
 
     assert!(true);
 }
@@ -67,13 +64,14 @@ async fn engine_register_module() {
 #[tokio::test]
 async fn engine_on_message() {
     let engine = Engine::new();
-    let workflow = Workflow::new().with_job(|job| {
-        job.with_step(|step| {
+    engine.start();
+    let workflow = Workflow::new().with_id("m1").with_job(|job| {
+        job.with_id("job1").with_step(|step| {
             step.with_subject(|sub| sub.with_matcher("any").with_users(r#"["a"]"#))
         })
     });
 
-    println!("{}", workflow.to_string().unwrap());
+    // workflow.print_tree().unwrap();
     let e = engine.clone();
     engine.emitter().on_message(move |msg: &Message| {
         assert_eq!(msg.uid, Some("a".to_string()));
@@ -81,8 +79,18 @@ async fn engine_on_message() {
     });
 
     let executor = engine.executor();
-    executor.start(&workflow);
-    engine.start().await;
+
+    executor.deploy(&workflow).expect("fail to deploy workflow");
+    executor
+        .start(
+            &workflow.id,
+            crate::ActionOptions {
+                biz_id: Some(utils::longid()),
+                ..Default::default()
+            },
+        )
+        .expect("fail to start workflow");
+    engine.r#loop().await;
 }
 
 #[tokio::test]
@@ -118,6 +126,76 @@ async fn engine_builder() {
     let step = job.step("step1").unwrap();
     assert_eq!(step.name, "step1");
     assert_eq!(step.branches.len(), 2);
+}
+
+#[tokio::test]
+async fn engine_executor_start_no_biz_id_error() {
+    let engine = Engine::new();
+    let executor = engine.executor();
+    engine.start();
+    let workflow = Workflow::new().with_id("m1").with_job(|job| {
+        job.with_step(|step| {
+            step.with_subject(|sub| sub.with_matcher("any").with_users(r#"["a"]"#))
+        })
+    });
+
+    let result = executor.start(
+        &workflow.id,
+        crate::ActionOptions {
+            biz_id: None,
+            ..Default::default()
+        },
+    );
+    assert_eq!(result.is_err(), true);
+}
+
+#[tokio::test]
+async fn engine_executor_start_empty_biz_id_error() {
+    let engine = Engine::new();
+    let executor = engine.executor();
+    engine.start();
+    let workflow = Workflow::new().with_id("m1").with_job(|job| {
+        job.with_step(|step| {
+            step.with_subject(|sub| sub.with_matcher("any").with_users(r#"["a"]"#))
+        })
+    });
+
+    let result = executor.start(
+        &workflow.id,
+        crate::ActionOptions {
+            biz_id: Some("".to_string()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(result.is_err(), true);
+}
+
+#[tokio::test]
+async fn engine_executor_start_dup_biz_id_error() {
+    let engine = Engine::new();
+    let executor = engine.executor();
+    engine.start();
+
+    let biz_id = utils::longid();
+    let workflow = Workflow::new().with_id("m1").with_job(|job| {
+        job.with_step(|step| {
+            step.with_subject(|sub| sub.with_matcher("any").with_users(r#"["a"]"#))
+        })
+    });
+
+    let store = engine.store();
+    let proc = engine.scher().create_raw_proc(&biz_id, &workflow);
+    store.create_proc(&proc).expect("create proc");
+
+    executor.deploy(&workflow).expect("fail to deploy workflow");
+    let result = executor.start(
+        &workflow.id,
+        crate::ActionOptions {
+            biz_id: Some(biz_id.clone()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(result.is_err(), true);
 }
 
 #[derive(Debug, Default, Clone)]

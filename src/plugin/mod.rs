@@ -40,7 +40,7 @@ pub trait ActPlugin: Send + Sync {
     fn on_init(&self, engine: &Engine);
 }
 
-pub async fn init(engine: &Engine) {
+pub fn init(engine: &Engine) {
     debug!("plugin::init");
     let mrg = engine.mgr();
     let mut plugins = &mut *mrg.plugins.lock().unwrap();

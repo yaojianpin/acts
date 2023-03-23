@@ -2,9 +2,9 @@ use crate::{
     adapter::StoreAdapter,
     debug,
     sch::{self, ActId, NodeData, Scheduler},
-    store::{none::NoneStore, Message, Proc, Query, Tag, Task},
+    store::{none::NoneStore, Message, Model, Proc, Query, Tag, Task},
     utils::{self, Id},
-    ActResult, Engine, ShareLock, Vars, Workflow,
+    ActError, ActResult, Engine, ProcInfo, ShareLock, Vars, Workflow,
 };
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -81,13 +81,55 @@ impl Store {
         self.base.read().unwrap().flush();
     }
 
+    pub fn proc_infos(&self, cap: usize) -> ActResult<Vec<ProcInfo>> {
+        debug!("store::procs({})", cap);
+        let mut ret = Vec::new();
+
+        let base = self.base();
+        let procs = base.procs();
+        let query = Query::new().set_limit(cap);
+        let items = procs.query(&query).expect("store: load");
+        let mut iter = items.iter();
+        while let Some(p) = iter.next() {
+            let workflow = Workflow::from_str(&p.model).unwrap();
+            let info = ProcInfo {
+                pid: p.pid.clone(),
+                name: workflow.name,
+                model_id: workflow.id,
+                state: p.state.clone(),
+                start_time: p.start_time,
+                end_time: p.end_time,
+                vars: utils::vars::from_string(&p.vars),
+            };
+            ret.push(info);
+        }
+
+        Ok(ret)
+    }
+
+    pub fn proc_info(&self, pid: &str) -> ActResult<ProcInfo> {
+        debug!("store::procs({})", cap);
+        let base = self.base();
+        let procs = base.procs();
+        let p = procs.find(&pid).expect("find proc_info");
+        let workflow = Workflow::from_str(&p.model).unwrap();
+        Ok(ProcInfo {
+            pid: p.pid,
+            name: workflow.name,
+            model_id: workflow.id,
+            state: p.state,
+            start_time: p.start_time,
+            end_time: p.end_time,
+            vars: utils::vars::from_string(&p.vars),
+        })
+    }
+
     pub fn proc(&self, pid: &str, scher: &Scheduler) -> Option<sch::Proc> {
         debug!("store::proc({})", pid);
         let procs = self.base().procs();
         if let Some(p) = procs.find(pid) {
             let workflow = Workflow::from_str(&p.model).unwrap();
-            // workflow.output_tree();
-            let mut proc = scher.create_raw_proc(&workflow);
+            let mut proc = scher.create_raw_proc(pid, &workflow);
             proc.set_state(&p.state);
             self.load_proc_tasks(&mut proc);
             self.load_proc_messages(&mut proc);
@@ -97,7 +139,96 @@ impl Store {
         None
     }
 
-    pub fn create_proc(&self, proc: &sch::Proc) {
+    pub fn models(&self, cap: usize) -> ActResult<Vec<Workflow>> {
+        debug!("store::load_models({})", model.id);
+        let mut ret = Vec::new();
+        let query = Query::new().set_limit(cap);
+        let models = self.base().models();
+        let items = models.query(&query)?;
+        for m in items {
+            let mut workflow = Workflow::from_str(&m.model).unwrap();
+            workflow.ver = m.ver;
+            ret.push(workflow);
+        }
+
+        Ok(ret)
+    }
+
+    pub fn model(&self, id: &str) -> ActResult<Workflow> {
+        debug!("store::create_model({})", model.id);
+        let models = self.base().models();
+        let data = models.find(&id);
+        match data {
+            Some(data) => {
+                let mut workflow = Workflow::from_str(&data.model).unwrap();
+                workflow.ver = data.ver;
+
+                Ok(workflow)
+            }
+            None => Err(ActError::StoreError(format!(
+                "can not find model id={}",
+                id
+            ))),
+        }
+    }
+
+    pub fn deploy(&self, model: &Workflow) -> ActResult<bool> {
+        debug!("store::create_model({})", model.id);
+        if model.id.is_empty() {
+            return Err(ActError::OperateError("missing id in model".into()));
+        }
+        let models = self.base().models();
+
+        match models.find(&model.id) {
+            Some(m) => {
+                let data = Model {
+                    id: model.id.clone(),
+                    model: serde_yaml::to_string(model).unwrap(),
+                    ver: m.ver + 1,
+                };
+                models.update(&data)
+            }
+            None => {
+                let data = Model {
+                    id: model.id.clone(),
+                    model: serde_yaml::to_string(model).unwrap(),
+                    ver: 1,
+                };
+                models.create(&data)
+            }
+        }
+    }
+
+    // pub fn update_model(&self, model: &Workflow) -> ActResult<bool> {
+    //     debug!("store::update_model({})", model.id);
+    //     let base = self.base();
+    //     let models = base.models();
+
+    //     let data = models.find(&model.id);
+    //     if data.is_none() {
+    //         return Err(ActError::StoreError(format!(
+    //             "can not find model id={}",
+    //             model.id
+    //         )));
+    //     }
+
+    //     let data = data.unwrap();
+    //     let data = Model {
+    //         id: model.id.clone(),
+    //         model: serde_yaml::to_string(model).unwrap(),
+    //         ver: data.ver + 1,
+    //     };
+    //     models.update(&data)
+    // }
+
+    pub fn remove_model(&self, id: &str) -> ActResult<bool> {
+        debug!("store::remove_model({})", id);
+        let base = self.base();
+        let models = base.models();
+        models.delete(id)
+    }
+
+    pub fn create_proc(&self, proc: &sch::Proc) -> ActResult<bool> {
         debug!("store::create_proc({})", proc.pid());
         let procs = self.base().procs();
         let workflow = &*proc.workflow();
@@ -106,12 +237,14 @@ impl Store {
             pid: proc.pid(),
             model: serde_yaml::to_string(workflow).unwrap(),
             state: proc.state(),
+            start_time: proc.start_time(),
+            end_time: proc.end_time(),
             vars: utils::vars::to_string(&proc.vm().vars()),
         };
-        procs.create(&data).expect("store: create proc");
+        procs.create(&data)
     }
 
-    pub fn update_proc(&self, proc: &sch::Proc) {
+    pub fn update_proc(&self, proc: &sch::Proc) -> ActResult<bool> {
         debug!("store::update_proc({})", proc.pid());
         let base = self.base();
         let procs = base.procs();
@@ -122,9 +255,11 @@ impl Store {
             pid: proc.pid(),
             model: serde_yaml::to_string(workflow).unwrap(),
             state: proc.state(),
+            start_time: proc.start_time(),
+            end_time: proc.end_time(),
             vars: utils::vars::to_string(&proc.vm().vars()),
         };
-        procs.update(&proc).expect("store: create proc");
+        procs.update(&proc)
     }
 
     pub fn remove_proc(&self, pid: &str) -> ActResult<bool> {

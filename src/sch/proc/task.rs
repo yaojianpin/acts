@@ -4,7 +4,7 @@ use crate::{
         tree::{Node, NodeData},
         ActId, ActState, EventAction, TaskState,
     },
-    utils, ActTask, Context, ShareLock, State,
+    utils, ActTask, Context, ShareLock,
 };
 use async_trait::async_trait;
 use std::sync::{Arc, RwLock};

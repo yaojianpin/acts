@@ -1,6 +1,6 @@
 use crate::{
     sch::{NodeData, Proc, Scheduler},
-    Context, Engine, OrgAdapter, RoleAdapter, RuleAdapter, Workflow,
+    utils, Engine, OrgAdapter, RoleAdapter, RuleAdapter, Workflow,
 };
 use std::sync::Arc;
 
@@ -98,8 +98,8 @@ fn create_proc(workflow: &Workflow) -> (Proc, Arc<Scheduler>) {
     let scher = engine.scher();
     // let env = Arc::new(Enviroment::new());
     // let scher = Arc::new(Scheduler::new(&config));
-
-    let task = scher.create_raw_proc(workflow);
+    let pid = utils::longid();
+    let task = scher.create_raw_proc(&pid, workflow);
     (task.clone(), scher.clone())
 }
 

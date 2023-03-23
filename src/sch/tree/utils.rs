@@ -71,7 +71,10 @@ pub fn process_step(
                 Some(next) => {
                     *node.next.write().unwrap() = Arc::downgrade(&next);
                 }
-                None => tree.set_error(ActError::NextError(next_id).into()),
+                None => tree.set_error(
+                    ActError::RuntimeError(format!("found next node error next={}", next_id))
+                        .into(),
+                ),
             }
         }
         None => {

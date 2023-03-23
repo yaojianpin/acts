@@ -10,9 +10,6 @@ pub struct Workflow {
     pub id: String,
 
     #[serde(default)]
-    pub ver: String,
-
-    #[serde(default)]
     pub name: String,
 
     #[serde(default)]
@@ -27,8 +24,8 @@ pub struct Workflow {
     #[serde(default)]
     pub on: HashMap<String, Value>,
 
-    #[serde(default)]
-    pub(crate) biz_id: String,
+    #[serde(skip)]
+    pub(crate) ver: u32,
 }
 
 impl Workflow {
@@ -36,7 +33,7 @@ impl Workflow {
         let workflow = serde_yaml::from_str::<Workflow>(s);
         match workflow {
             Ok(v) => Ok(v),
-            Err(e) => Err(ActError::ParseError(format!("{}", e))),
+            Err(e) => Err(ActError::ModelError(format!("{}", e))),
         }
     }
 
@@ -67,18 +64,18 @@ impl Workflow {
         self.id = id.to_string();
     }
 
-    pub fn biz_id(&self) -> String {
-        self.biz_id.clone()
-    }
+    // pub fn biz_id(&self) -> String {
+    //     self.biz_id.clone()
+    // }
 
-    pub fn set_biz_id(&mut self, biz_id: &str) {
-        self.biz_id = biz_id.to_string();
-    }
+    // pub fn set_biz_id(&mut self, biz_id: &str) {
+    //     self.biz_id = biz_id.to_string();
+    // }
 
     pub fn to_string<'a>(&self) -> ActResult<String> {
         match serde_yaml::to_string(self) {
             Ok(s) => Ok(s),
-            Err(e) => Err(ActError::ParseError(e.to_string())),
+            Err(e) => Err(ActError::ModelError(e.to_string())),
         }
     }
 }

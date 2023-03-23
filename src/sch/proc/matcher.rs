@@ -1,7 +1,4 @@
-use crate::{
-    sch::{tree::NodeData, Task},
-    ActError, ActResult, Context, Step, TaskState,
-};
+use crate::{sch::tree::NodeData, ActError, ActResult, Context, Step, TaskState};
 use regex::Regex;
 
 #[derive(Debug, Default, Clone)]
@@ -18,6 +15,7 @@ pub enum Matcher {
 
 impl Matcher {
     pub fn capture(expr: &str) -> Matcher {
+        #[allow(unused_assignments)]
         let mut ret = Matcher::Empty;
         if expr == "one" {
             ret = Matcher::One;
@@ -54,9 +52,9 @@ impl Matcher {
 
     pub fn check(&self, step: &Step, ctx: &Context) -> ActResult<bool> {
         match self {
-            Matcher::Empty | Matcher::Error => {
-                Err(ActError::SubjectError("matcher is empty".to_string()))
-            }
+            Matcher::Empty | Matcher::Error => Err(ActError::RuntimeError(
+                "subject matcher is empty".to_string(),
+            )),
             Matcher::One => {
                 let tasks = ctx.proc.children(&ctx.task);
                 if let Some(act) = tasks.get(0) {

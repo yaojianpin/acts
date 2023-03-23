@@ -1,4 +1,4 @@
-use acts::{Engine, State, Workflow};
+use acts::{ActionOptions, Engine, State, Workflow};
 use clap::Parser;
 use std::{fs::File, io::Read};
 
@@ -15,15 +15,25 @@ async fn main() {
 
     let workflow = read_file_to_workflow(&args.model);
     let engine = Engine::new();
-
+    engine.start();
     let executor = engine.executor();
-    executor.start(&workflow);
+
+    executor.deploy(&workflow).expect("deploy model");
+    executor
+        .start(
+            &workflow.id,
+            ActionOptions {
+                biz_id: Some("w1".into()),
+                ..Default::default()
+            },
+        )
+        .expect("start workflow");
 
     let e = engine.clone();
     engine.emitter().on_complete(move |_w: &State<Workflow>| {
         e.close();
     });
-    engine.start().await;
+    engine.r#loop().await;
 }
 
 fn read_file_to_workflow(file_name: &str) -> Workflow {
