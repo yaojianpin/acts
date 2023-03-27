@@ -92,7 +92,7 @@ impl Scheduler {
                 }
 
                 let model = self.cache.model(id)?;
-                let mut w = model.Workflow()?;
+                let mut w = model.workflow()?;
                 // merge vars in options and workflow.env
                 let mut vars = options.vars;
                 for (k, v) in &w.env {

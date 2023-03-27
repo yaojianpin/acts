@@ -20,12 +20,11 @@ pub struct ModelInfo {
     pub ver: u32,
     pub size: u32,
     pub time: i64,
-
-    model: String,
+    pub model: String,
 }
 
 impl ModelInfo {
-    pub fn Workflow(&self) -> ActResult<Workflow> {
+    pub fn workflow(&self) -> ActResult<Workflow> {
         let m = serde_yaml::from_str(&self.model);
         match m {
             Ok(m) => Ok(m),
