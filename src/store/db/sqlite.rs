@@ -113,15 +113,20 @@ impl DataSet<Model> for ModelSet {
         debug!("sqlite.Model.find({})", id);
         run(async {
             let pool = db();
-            match sqlx::query(r#"select id, model, ver from act_model where id=$1"#)
-                .bind(id)
-                .fetch_one(pool)
-                .await
+            match sqlx::query(
+                r#"select id, name, ver, size, time, model from act_model where id=$1"#,
+            )
+            .bind(id)
+            .fetch_one(pool)
+            .await
             {
                 Ok(row) => Some(Model {
                     id: row.get(0),
-                    model: row.get(1),
+                    name: row.get(1),
                     ver: row.get(2),
+                    size: row.get(3),
+                    time: row.get(4),
+                    model: row.get(5),
                 }),
                 Err(_) => None,
             }
@@ -133,15 +138,21 @@ impl DataSet<Model> for ModelSet {
         run(async {
             let mut ret = Vec::new();
             let pool = db();
-            let sql = format!(r#"select id, model, ver from act_model {}"#, q.sql());
+            let sql = format!(
+                r#"select id, name, ver, size, time, model from act_model {}"#,
+                q.sql()
+            );
             let query = sqlx::query(&sql);
             match &query.fetch_all(pool).await {
                 Ok(rows) => {
                     for row in rows {
                         ret.push(Model {
                             id: row.get(0),
-                            model: row.get(1),
+                            name: row.get(1),
                             ver: row.get(2),
+                            size: row.get(3),
+                            time: row.get(4),
+                            model: row.get(5),
                         });
                     }
 
@@ -157,10 +168,14 @@ impl DataSet<Model> for ModelSet {
         let model = model.clone();
         run(async move {
             let pool = db();
-            let sql = sqlx::query(r#"insert into act_model (id, model, ver) values ($1,$2,$3)"#)
-                .bind(model.id)
-                .bind(model.model)
-                .bind(model.ver);
+            let sql = sqlx::query(
+                r#"insert into act_model (id, model, ver, size, time) values ($1,$2,$3,$4,$5)"#,
+            )
+            .bind(model.id)
+            .bind(model.model)
+            .bind(model.ver)
+            .bind(model.size)
+            .bind(model.time);
             match sql.execute(pool).await {
                 Ok(_) => Ok(true),
                 Err(err) => Err(ActError::StoreError(err.to_string())),

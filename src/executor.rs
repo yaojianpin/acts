@@ -2,7 +2,7 @@ use crate::{
     debug,
     sch::{ActionOptions, Scheduler},
     store::Store,
-    ActResult, ProcInfo, UserMessage, Workflow,
+    ActResult, ModelInfo, ProcInfo, UserMessage, Workflow,
 };
 use std::sync::Arc;
 
@@ -24,11 +24,11 @@ impl Executor {
         self.store.deploy(&workflow)
     }
 
-    pub fn models(&self, limit: usize) -> ActResult<Vec<Workflow>> {
+    pub fn models(&self, limit: usize) -> ActResult<Vec<ModelInfo>> {
         self.store.models(limit)
     }
 
-    pub fn model(&self, id: &str) -> ActResult<Workflow> {
+    pub fn model(&self, id: &str) -> ActResult<ModelInfo> {
         self.store.model(id)
     }
 

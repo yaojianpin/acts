@@ -6,7 +6,7 @@ use crate::{
     },
     store::Store,
     utils::{self},
-    ActError, ActResult, Engine, ShareLock, Workflow,
+    ActError, ActResult, Engine, ModelInfo, ShareLock, Workflow,
 };
 use lru::LruCache;
 use std::{
@@ -98,7 +98,7 @@ impl Cache {
         }
     }
 
-    pub fn model(&self, id: &str) -> ActResult<Workflow> {
+    pub fn model(&self, id: &str) -> ActResult<ModelInfo> {
         match &*self.store.read().unwrap() {
             Some(store) => store.model(id),
             None => Err(ActError::RuntimeError(format!("store not init"))),

@@ -4,7 +4,7 @@ use crate::{
     sch::{self, ActId, NodeData, Scheduler},
     store::{none::NoneStore, Message, Model, Proc, Query, Tag, Task},
     utils::{self, Id},
-    ActError, ActResult, Engine, ProcInfo, ShareLock, Vars, Workflow,
+    ActError, ActResult, Engine, ModelInfo, ProcInfo, ShareLock, Vars, Workflow,
 };
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -139,32 +139,25 @@ impl Store {
         None
     }
 
-    pub fn models(&self, cap: usize) -> ActResult<Vec<Workflow>> {
+    pub fn models(&self, cap: usize) -> ActResult<Vec<ModelInfo>> {
         debug!("store::load_models({})", model.id);
         let mut ret = Vec::new();
         let query = Query::new().set_limit(cap);
         let models = self.base().models();
         let items = models.query(&query)?;
         for m in items {
-            let mut workflow = Workflow::from_str(&m.model).unwrap();
-            workflow.ver = m.ver;
-            ret.push(workflow);
+            ret.push(m.into());
         }
 
         Ok(ret)
     }
 
-    pub fn model(&self, id: &str) -> ActResult<Workflow> {
+    pub fn model(&self, id: &str) -> ActResult<ModelInfo> {
         debug!("store::create_model({})", model.id);
         let models = self.base().models();
         let data = models.find(&id);
         match data {
-            Some(data) => {
-                let mut workflow = Workflow::from_str(&data.model).unwrap();
-                workflow.ver = data.ver;
-
-                Ok(workflow)
-            }
+            Some(data) => Ok(data.into()),
             None => Err(ActError::StoreError(format!(
                 "can not find model id={}",
                 id
@@ -181,18 +174,26 @@ impl Store {
 
         match models.find(&model.id) {
             Some(m) => {
+                let text = serde_yaml::to_string(model).unwrap();
                 let data = Model {
                     id: model.id.clone(),
-                    model: serde_yaml::to_string(model).unwrap(),
+                    name: model.name.clone(),
+                    model: text.clone(),
                     ver: m.ver + 1,
+                    size: text.len() as u32,
+                    time: utils::time::time(),
                 };
                 models.update(&data)
             }
             None => {
+                let text = serde_yaml::to_string(model).unwrap();
                 let data = Model {
                     id: model.id.clone(),
-                    model: serde_yaml::to_string(model).unwrap(),
+                    name: model.name.clone(),
+                    model: text.clone(),
                     ver: 1,
+                    size: text.len() as u32,
+                    time: utils::time::time(),
                 };
                 models.create(&data)
             }

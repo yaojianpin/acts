@@ -23,9 +23,6 @@ pub struct Workflow {
 
     #[serde(default)]
     pub on: HashMap<String, Value>,
-
-    #[serde(skip)]
-    pub(crate) ver: u32,
 }
 
 impl Workflow {

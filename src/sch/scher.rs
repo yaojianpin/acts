@@ -91,17 +91,18 @@ impl Scheduler {
                     )));
                 }
 
-                let mut model = self.cache.model(id)?;
+                let model = self.cache.model(id)?;
+                let mut w = model.Workflow()?;
                 // merge vars in options and workflow.env
                 let mut vars = options.vars;
-                for (k, v) in &model.env {
+                for (k, v) in &w.env {
                     if !vars.contains_key(k) {
                         vars.insert(k.to_string(), v.clone());
                     }
                 }
-                model.set_env(vars);
+                w.set_env(vars);
 
-                let proc = self.create_raw_proc(biz_id, &model.clone());
+                let proc = self.create_raw_proc(biz_id, &w.clone());
                 self.queue.send(&Signal::Proc(proc.clone()));
 
                 Ok(true)

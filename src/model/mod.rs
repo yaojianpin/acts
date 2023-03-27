@@ -1,7 +1,7 @@
 mod act;
 mod branch;
+mod info;
 mod job;
-mod proc_info;
 mod state;
 mod step;
 mod workflow;
@@ -10,8 +10,8 @@ pub mod builder;
 
 pub use act::Act;
 pub use branch::Branch;
+pub use info::{ModelInfo, ProcInfo};
 pub use job::Job;
-pub use proc_info::ProcInfo;
 pub use state::State;
 pub use step::{Action, Step, Subject};
 pub use workflow::Workflow;
