@@ -37,7 +37,7 @@ impl Enviroment {
         self.registry_console_module(engine);
         self.registry_env_module(engine);
 
-        let modules = engine.mgr().modules();
+        let modules = engine.extender().modules();
         for (name, module) in modules.iter() {
             if name.starts_with("::") {
                 self.register_global_module(module.clone());

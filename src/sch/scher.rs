@@ -74,8 +74,8 @@ impl Scheduler {
         }
     }
 
-    pub fn start(&self, id: &str, options: ActionOptions) -> ActResult<bool> {
-        debug!("sch::start({})", id);
+    pub fn start(&self, model: &Workflow, options: ActionOptions) -> ActResult<bool> {
+        debug!("sch::start({})", model.id);
         match &options.biz_id {
             Some(biz_id) => {
                 if biz_id.is_empty() {
@@ -91,9 +91,8 @@ impl Scheduler {
                     )));
                 }
 
-                let model = self.cache.model(id)?;
-                let mut w = model.workflow()?;
                 // merge vars in options and workflow.env
+                let mut w = model.clone();
                 let mut vars = options.vars;
                 for (k, v) in &w.env {
                     if !vars.contains_key(k) {
@@ -102,7 +101,7 @@ impl Scheduler {
                 }
                 w.set_env(vars);
 
-                let proc = self.create_raw_proc(biz_id, &w.clone());
+                let proc = self.create_raw_proc(biz_id, &w);
                 self.queue.send(&Signal::Proc(proc.clone()));
 
                 Ok(true)

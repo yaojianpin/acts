@@ -1,4 +1,5 @@
 use crate::{
+    sch::NodeKind,
     store::{data::*, db::LocalStore, Query},
     utils, StoreAdapter, TaskState, Vars,
 };
@@ -29,7 +30,7 @@ async fn local_proc_create() {
         id: utils::longid(),
         pid: "pid".to_string(),
         model: "".to_string(),
-        state: TaskState::None,
+        state: TaskState::None.into(),
         start_time: 0,
         end_time: 0,
         vars: "".to_string(),
@@ -48,7 +49,7 @@ async fn local_proc_query() {
             id: utils::longid(),
             pid: pid.to_string(),
             model: "".to_string(),
-            state: TaskState::None,
+            state: TaskState::None.into(),
             start_time: 0,
             end_time: 0,
             vars: "".to_string(),
@@ -72,14 +73,14 @@ async fn local_proc_update() {
         id: utils::shortid(),
         pid: "pid".to_string(),
         model: "".to_string(),
-        state: TaskState::None,
+        state: TaskState::None.into(),
         start_time: 0,
         end_time: 0,
         vars: "".to_string(),
     };
     store.procs().create(&proc).unwrap();
 
-    proc.state = TaskState::Running;
+    proc.state = TaskState::Running.into();
     proc.vars = serde_yaml::to_string(&vars).unwrap();
     store.procs().update(&proc).unwrap();
 
@@ -95,7 +96,7 @@ async fn local_proc_delete() {
         id: utils::shortid(),
         pid: "pid".to_string(),
         model: "".to_string(),
-        state: TaskState::None,
+        state: TaskState::None.into(),
         start_time: 0,
         end_time: 0,
         vars: "".to_string(),
@@ -111,15 +112,15 @@ async fn local_task_create() {
     let store = store().await;
     let tasks = store.tasks();
     let task = Task {
-        tag: Tag::Workflow,
+        kind: NodeKind::Workflow.into(),
         id: utils::shortid(),
         pid: "pid".to_string(),
         tid: "tid".to_string(),
         nid: "nid".to_string(),
-        state: TaskState::None,
+        state: TaskState::None.into(),
         start_time: 0,
         end_time: 0,
-        user: "".to_string(),
+        uid: "".to_string(),
     };
     tasks.create(&task).unwrap();
     assert_eq!(tasks.exists(&task.id), true);
@@ -132,15 +133,15 @@ async fn local_task_query() {
     let pid = utils::shortid();
     for _ in 0..5 {
         let task = Task {
-            tag: Tag::Workflow,
+            kind: NodeKind::Workflow.into(),
             id: utils::shortid(),
             pid: pid.to_string(),
             tid: "tid".to_string(),
             nid: "nid".to_string(),
-            state: TaskState::None,
+            state: TaskState::None.into(),
             start_time: 0,
             end_time: 0,
-            user: "".to_string(),
+            uid: "".to_string(),
         };
         tasks.create(&task).unwrap();
     }
@@ -155,19 +156,19 @@ async fn local_task_update() {
     let store = store().await;
     let table = store.tasks();
     let mut task = Task {
-        tag: Tag::Workflow,
+        kind: NodeKind::Workflow.into(),
         id: utils::shortid(),
         pid: "pid".to_string(),
         tid: "tid".to_string(),
         nid: "nid".to_string(),
-        state: TaskState::None,
+        state: TaskState::None.into(),
         start_time: 0,
         end_time: 0,
-        user: "".to_string(),
+        uid: "".to_string(),
     };
     table.create(&task).unwrap();
 
-    task.state = TaskState::Running;
+    task.state = TaskState::Running.into();
     table.update(&task).unwrap();
 
     let t = table.find(&task.id).unwrap();
@@ -179,15 +180,15 @@ async fn local_task_delete() {
     let store = store().await;
     let table = store.tasks();
     let task = Task {
-        tag: Tag::Workflow,
+        kind: NodeKind::Workflow.into(),
         id: utils::shortid(),
         pid: "pid".to_string(),
         tid: "tid".to_string(),
         nid: "nid".to_string(),
-        state: TaskState::None,
+        state: TaskState::None.into(),
         start_time: 0,
         end_time: 0,
-        user: "".to_string(),
+        uid: "".to_string(),
     };
     table.create(&task).unwrap();
     table.delete(&task.id).unwrap();
@@ -204,9 +205,11 @@ async fn local_message_create() {
         id: utils::shortid(),
         pid: "pid".to_string(),
         tid: "tid".to_string(),
-        user: "u1".to_string(),
+        uid: "u1".to_string(),
         vars,
+        state: 0,
         create_time: 0,
+        update_time: 0,
     };
     table.create(&msg).unwrap();
     assert_eq!(table.exists(&msg.id), true);
@@ -223,9 +226,11 @@ async fn local_message_query() {
             id: utils::shortid(),
             pid: pid.to_string(),
             tid: "tid".to_string(),
-            user: "u1".to_string(),
+            uid: "u1".to_string(),
             vars: vars.clone(),
+            state: 0,
             create_time: 0,
+            update_time: 0,
         };
         messages.create(&msg).unwrap();
     }
@@ -244,17 +249,19 @@ async fn local_message_update() {
         id: utils::shortid(),
         pid: "pid".to_string(),
         tid: "tid".to_string(),
-        user: "u1".to_string(),
+        uid: "u1".to_string(),
         vars,
+        state: 0,
         create_time: 0,
+        update_time: 0,
     };
     table.create(&msg).unwrap();
 
-    msg.user = "u2".to_string();
+    msg.uid = "u2".to_string();
     table.update(&msg).unwrap();
 
     let t = table.find(&msg.id).unwrap();
-    assert_eq!(t.user, msg.user);
+    assert_eq!(t.uid, msg.uid);
 }
 
 #[tokio::test]
@@ -266,9 +273,11 @@ async fn local_message_delete() {
         id: utils::shortid(),
         pid: "pid".to_string(),
         tid: "tid".to_string(),
-        user: "u1".to_string(),
+        uid: "u1".to_string(),
         vars,
+        state: 0,
         create_time: 0,
+        update_time: 0,
     };
     table.create(&msg).unwrap();
     table.delete(&msg.id).unwrap();

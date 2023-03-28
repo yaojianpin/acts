@@ -27,6 +27,8 @@ CREATE TABLE IF NOT EXISTS act_message (
     'id' VARCHAR(32) PRIMARY KEY NOT NULL,
     'pid' VARCHAR(24) NOT NULL,
     'tid' VARCHAR(8) NOT NULL,
-    'user' VARCHAR(200) NOT NULL,
-    'create_time' BIGINT
+    'uid' VARCHAR(200) NOT NULL,
+    'create_time' BIGINT,
+    'update_time' BIGINT,
+    'state' INT
 );

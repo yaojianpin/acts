@@ -74,7 +74,7 @@ async fn env_act_module() {
     let engine = Engine::new();
 
     let add = |a: i64, b: i64| Ok(a + b);
-    engine.mgr().register_action("add", add);
+    engine.extender().register_action("add", add);
 
     let env = Enviroment::new();
     env.registry_act_module(&engine);

@@ -85,6 +85,12 @@ impl From<&str> for TaskState {
     }
 }
 
+impl From<String> for TaskState {
+    fn from(str: String) -> Self {
+        str_to_state(&str)
+    }
+}
+
 impl From<&TaskState> for String {
     fn from(state: &TaskState) -> Self {
         state_to_str(state.clone())

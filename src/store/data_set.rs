@@ -87,7 +87,7 @@ impl Query {
 
 pub trait DataSet<T>: Send + Sync {
     fn exists(&self, id: &str) -> bool;
-    fn find(&self, id: &str) -> Option<T>;
+    fn find(&self, id: &str) -> ActResult<T>;
     fn query(&self, query: &Query) -> ActResult<Vec<T>>;
     fn create(&self, data: &T) -> ActResult<bool>;
     fn update(&self, data: &T) -> ActResult<bool>;

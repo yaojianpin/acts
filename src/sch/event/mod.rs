@@ -4,7 +4,7 @@ mod hub;
 mod message;
 
 pub use hub::{Event, EventHub};
-pub use message::{ActionOptions, Message, UserMessage};
+pub use message::{ActionOptions, Message, MessageState, UserMessage};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum EventAction {

@@ -1,60 +1,22 @@
 use crate::TaskState;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Deserialize, Serialize, PartialEq, Clone)]
-pub enum Tag {
-    Workflow,
-    Job,
-    Branch,
-    Step,
-    Act,
-}
-
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Task {
     pub id: String,
-    pub tag: Tag,
+    pub kind: String,
     pub pid: String,
     pub tid: String,
     pub nid: String,
-    pub state: TaskState,
+    pub state: String,
     pub start_time: i64,
     pub end_time: i64,
-    pub user: String,
-}
-
-impl<'a> From<Tag> for &'a str {
-    fn from(tag: Tag) -> Self {
-        let s = match tag {
-            Tag::Workflow => "w",
-            Tag::Job => "j",
-            Tag::Branch => "b",
-            Tag::Step => "s",
-            Tag::Act => "a",
-        };
-
-        s
-    }
-}
-
-impl From<&str> for Tag {
-    fn from(str: &str) -> Self {
-        let s = match str {
-            "w" => Tag::Workflow,
-            "j" => Tag::Job,
-            "b" => Tag::Branch,
-            "s" => Tag::Step,
-            "a" => Tag::Act,
-            _ => panic!("not found tag: {}", str),
-        };
-
-        s
-    }
+    pub uid: String,
 }
 
 impl Task {
     pub fn set_state(&mut self, state: TaskState) {
-        self.state = state;
+        self.state = state.into();
     }
     pub fn set_start_time(&mut self, time: i64) {
         self.start_time = time;
@@ -63,6 +25,6 @@ impl Task {
         self.end_time = time;
     }
     pub fn set_user(&mut self, user: &str) {
-        self.user = user.to_string();
+        self.uid = user.to_string();
     }
 }

@@ -1,6 +1,7 @@
 use crate::{
     adapter::{self, Adapter},
     executor::Executor,
+    extender::Extender,
     manager::Manager,
     options::Options,
     plugin::{self},
@@ -55,7 +56,8 @@ pub struct Engine {
     adapter: Arc<Adapter>,
     emitter: Arc<Emitter>,
     executor: Arc<Executor>,
-    mgr: Arc<Manager>,
+    manager: Arc<Manager>,
+    extender: Arc<Extender>,
     store: Arc<Store>,
     signal: Arc<Mutex<Option<Sender<i32>>>>,
     is_closed: Arc<Mutex<bool>>,
@@ -81,7 +83,8 @@ impl Engine {
             adapter: Arc::new(Adapter::new()),
             executor: Arc::new(Executor::new(&scher, &store)),
             emitter: Arc::new(Emitter::new(&scher)),
-            mgr: Arc::new(Manager::new()),
+            manager: Arc::new(Manager::new(&scher, &store)),
+            extender: Arc::new(Extender::new()),
             store: store.clone(),
 
             signal: Arc::new(Mutex::new(None)),
@@ -106,8 +109,13 @@ impl Engine {
     }
 
     /// engine manager
-    pub fn mgr(&self) -> Arc<Manager> {
-        self.mgr.clone()
+    pub fn manager(&self) -> Arc<Manager> {
+        self.manager.clone()
+    }
+
+    /// engine extender
+    pub fn extender(&self) -> Arc<Extender> {
+        self.extender.clone()
     }
 
     /// start engine

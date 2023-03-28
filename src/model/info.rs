@@ -1,16 +1,29 @@
 use serde::{Deserialize, Serialize};
 
-use crate::{sch::TaskState, store::Model, ActError, ActResult, Vars, Workflow};
+use crate::{
+    store::{Model, Proc, Task},
+    ActError, ActResult, Workflow,
+};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ProcInfo {
     pub pid: String,
     pub name: String,
-    pub model_id: String,
-    pub state: TaskState,
+    pub mid: String,
+    pub state: String,
     pub start_time: i64,
     pub end_time: i64,
-    pub vars: Vars,
+    // pub vars: Vars,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct TaskInfo {
+    pub pid: String,
+    pub tid: String,
+    pub nid: String,
+    pub state: String,
+    pub start_time: i64,
+    pub end_time: i64,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -25,9 +38,12 @@ pub struct ModelInfo {
 
 impl ModelInfo {
     pub fn workflow(&self) -> ActResult<Workflow> {
-        let m = serde_yaml::from_str(&self.model);
+        let m = serde_yaml::from_str::<Workflow>(&self.model);
         match m {
-            Ok(m) => Ok(m),
+            Ok(mut m) => {
+                m.set_ver(self.ver);
+                Ok(m)
+            }
             Err(err) => Err(ActError::ConvertError(err.to_string())),
         }
     }
@@ -43,6 +59,33 @@ impl From<Model> for ModelInfo {
             time: m.time,
 
             model: m.model,
+        }
+    }
+}
+
+impl From<&Proc> for ProcInfo {
+    fn from(p: &Proc) -> Self {
+        let model = Workflow::from_str(&p.model).unwrap();
+        Self {
+            pid: p.pid.clone(),
+            name: model.name,
+            mid: model.id,
+            state: p.state.clone().into(),
+            start_time: p.start_time,
+            end_time: p.end_time,
+        }
+    }
+}
+
+impl From<Task> for TaskInfo {
+    fn from(t: Task) -> Self {
+        Self {
+            pid: t.pid,
+            tid: t.tid,
+            nid: t.nid,
+            state: t.state.into(),
+            start_time: t.start_time,
+            end_time: t.end_time,
         }
     }
 }

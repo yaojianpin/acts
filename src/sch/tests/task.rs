@@ -32,7 +32,7 @@ async fn task_complete() {
     let s = scher.clone();
     emitter.on_message(move |msg: &Message| {
         let uid = &msg.uid.clone().unwrap();
-        let message = UserMessage::new(&msg.pid, uid, "complete", None);
+        let message = UserMessage::new(&msg.pid, uid, "next", None);
         s.sched_message(&message);
     });
 
@@ -60,7 +60,7 @@ async fn task_cancel() {
         let mut count = count.lock().unwrap();
         if msg.uid == Some("a".to_string()) && *count == 0 {
             let uid = &msg.uid.clone().unwrap();
-            let message = UserMessage::new(&msg.pid, uid, "complete", None);
+            let message = UserMessage::new(&msg.pid, uid, "next", None);
             s.sched_message(&message);
         } else if msg.uid == Some("b".to_string()) {
             // cancel the b's task by a
@@ -92,7 +92,7 @@ async fn task_back() {
         let mut count = count.lock().unwrap();
         if msg.uid == Some("a".to_string()) && *count == 0 {
             let uid = &msg.uid.clone().unwrap();
-            let message = UserMessage::new(&msg.pid, uid, "complete", None);
+            let message = UserMessage::new(&msg.pid, uid, "next", None);
             s.sched_message(&message);
         } else if msg.uid == Some("b".to_string()) {
             let message = UserMessage::new(

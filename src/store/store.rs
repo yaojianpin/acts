@@ -1,10 +1,9 @@
 use crate::{
     adapter::StoreAdapter,
     debug,
-    sch::{self, ActId, NodeData, Scheduler},
-    store::{none::NoneStore, Message, Model, Proc, Query, Tag, Task},
+    store::{none::NoneStore, Message, Model, Proc, Query, Task},
     utils::{self, Id},
-    ActError, ActResult, Engine, ModelInfo, ProcInfo, ShareLock, Vars, Workflow,
+    ActError, ActResult, Engine, ShareLock, Workflow,
 };
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -15,16 +14,6 @@ use crate::store::db::SqliteStore;
 use crate::store::db::LocalStore;
 
 const LIMIT: usize = 10000;
-
-fn tag_of(task: &sch::Task) -> Tag {
-    match task.node.data {
-        NodeData::Workflow(..) => Tag::Workflow,
-        NodeData::Job(..) => Tag::Job,
-        NodeData::Branch(..) => Tag::Branch,
-        NodeData::Step(..) => Tag::Step,
-        NodeData::Act(..) => Tag::Act,
-    }
-}
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum StoreKind {
@@ -81,88 +70,30 @@ impl Store {
         self.base.read().unwrap().flush();
     }
 
-    pub fn proc_infos(&self, cap: usize) -> ActResult<Vec<ProcInfo>> {
-        debug!("store::procs({})", cap);
-        let mut ret = Vec::new();
-
-        let base = self.base();
-        let procs = base.procs();
-        let query = Query::new().set_limit(cap);
-        let items = procs.query(&query).expect("store: load");
-        let mut iter = items.iter();
-        while let Some(p) = iter.next() {
-            let workflow = Workflow::from_str(&p.model).unwrap();
-            let info = ProcInfo {
-                pid: p.pid.clone(),
-                name: workflow.name,
-                model_id: workflow.id,
-                state: p.state.clone(),
-                start_time: p.start_time,
-                end_time: p.end_time,
-                vars: utils::vars::from_string(&p.vars),
-            };
-            ret.push(info);
-        }
-
-        Ok(ret)
-    }
-
-    pub fn proc_info(&self, pid: &str) -> ActResult<ProcInfo> {
-        debug!("store::procs({})", cap);
-        let base = self.base();
-        let procs = base.procs();
-        let p = procs.find(&pid).expect("find proc_info");
-        let workflow = Workflow::from_str(&p.model).unwrap();
-        Ok(ProcInfo {
-            pid: p.pid,
-            name: workflow.name,
-            model_id: workflow.id,
-            state: p.state,
-            start_time: p.start_time,
-            end_time: p.end_time,
-            vars: utils::vars::from_string(&p.vars),
-        })
-    }
-
-    pub fn proc(&self, pid: &str, scher: &Scheduler) -> Option<sch::Proc> {
-        debug!("store::proc({})", pid);
+    pub fn procs(&self, cap: usize) -> ActResult<Vec<Proc>> {
+        debug!("store::procs cap={}", cap);
         let procs = self.base().procs();
-        if let Some(p) = procs.find(pid) {
-            let workflow = Workflow::from_str(&p.model).unwrap();
-            let mut proc = scher.create_raw_proc(pid, &workflow);
-            proc.set_state(&p.state);
-            self.load_proc_tasks(&mut proc);
-            self.load_proc_messages(&mut proc);
-            return Some(proc);
-        }
-
-        None
+        let query = Query::new().set_limit(cap);
+        procs.query(&query)
     }
 
-    pub fn models(&self, cap: usize) -> ActResult<Vec<ModelInfo>> {
+    pub fn proc(&self, pid: &str) -> ActResult<Proc> {
+        debug!("store::proc pid={}", pid);
+        let procs = self.base().procs();
+        procs.find(&pid)
+    }
+
+    pub fn models(&self, cap: usize) -> ActResult<Vec<Model>> {
         debug!("store::load_models({})", model.id);
-        let mut ret = Vec::new();
         let query = Query::new().set_limit(cap);
         let models = self.base().models();
-        let items = models.query(&query)?;
-        for m in items {
-            ret.push(m.into());
-        }
-
-        Ok(ret)
+        models.query(&query)
     }
 
-    pub fn model(&self, id: &str) -> ActResult<ModelInfo> {
+    pub fn model(&self, id: &str) -> ActResult<Model> {
         debug!("store::create_model({})", model.id);
         let models = self.base().models();
-        let data = models.find(&id);
-        match data {
-            Some(data) => Ok(data.into()),
-            None => Err(ActError::StoreError(format!(
-                "can not find model id={}",
-                id
-            ))),
-        }
+        models.find(&id)
     }
 
     pub fn deploy(&self, model: &Workflow) -> ActResult<bool> {
@@ -173,7 +104,7 @@ impl Store {
         let models = self.base().models();
 
         match models.find(&model.id) {
-            Some(m) => {
+            Ok(m) => {
                 let text = serde_yaml::to_string(model).unwrap();
                 let data = Model {
                     id: model.id.clone(),
@@ -185,7 +116,7 @@ impl Store {
                 };
                 models.update(&data)
             }
-            None => {
+            Err(_) => {
                 let text = serde_yaml::to_string(model).unwrap();
                 let data = Model {
                     id: model.id.clone(),
@@ -200,28 +131,6 @@ impl Store {
         }
     }
 
-    // pub fn update_model(&self, model: &Workflow) -> ActResult<bool> {
-    //     debug!("store::update_model({})", model.id);
-    //     let base = self.base();
-    //     let models = base.models();
-
-    //     let data = models.find(&model.id);
-    //     if data.is_none() {
-    //         return Err(ActError::StoreError(format!(
-    //             "can not find model id={}",
-    //             model.id
-    //         )));
-    //     }
-
-    //     let data = data.unwrap();
-    //     let data = Model {
-    //         id: model.id.clone(),
-    //         model: serde_yaml::to_string(model).unwrap(),
-    //         ver: data.ver + 1,
-    //     };
-    //     models.update(&data)
-    // }
-
     pub fn remove_model(&self, id: &str) -> ActResult<bool> {
         debug!("store::remove_model({})", id);
         let base = self.base();
@@ -229,37 +138,14 @@ impl Store {
         models.delete(id)
     }
 
-    pub fn create_proc(&self, proc: &sch::Proc) -> ActResult<bool> {
+    pub fn create_proc(&self, proc: &Proc) -> ActResult<bool> {
         debug!("store::create_proc({})", proc.pid());
-        let procs = self.base().procs();
-        let workflow = &*proc.workflow();
-        let data = Proc {
-            id: proc.pid(), // pid is global unique id
-            pid: proc.pid(),
-            model: serde_yaml::to_string(workflow).unwrap(),
-            state: proc.state(),
-            start_time: proc.start_time(),
-            end_time: proc.end_time(),
-            vars: utils::vars::to_string(&proc.vm().vars()),
-        };
-        procs.create(&data)
+        self.base().procs().create(proc)
     }
 
-    pub fn update_proc(&self, proc: &sch::Proc) -> ActResult<bool> {
+    pub fn update_proc(&self, proc: &Proc) -> ActResult<bool> {
         debug!("store::update_proc({})", proc.pid());
-        let base = self.base();
-        let procs = base.procs();
-
-        let workflow = &*proc.workflow();
-        let proc = Proc {
-            id: proc.pid(), // pid is global unique id
-            pid: proc.pid(),
-            model: serde_yaml::to_string(workflow).unwrap(),
-            state: proc.state(),
-            start_time: proc.start_time(),
-            end_time: proc.end_time(),
-            vars: utils::vars::to_string(&proc.vm().vars()),
-        };
+        let procs = self.base().procs();
         procs.update(&proc)
     }
 
@@ -281,138 +167,65 @@ impl Store {
         procs.delete(pid)
     }
 
-    pub fn create_task(&self, task: &sch::Task) {
-        let tid = task.tid();
-        let nid = task.nid();
+    pub fn create_task(&self, task: &Task) -> ActResult<bool> {
         debug!("store::create_task({:?})", task);
         let tasks = self.base().tasks();
-        let id = Id::new(&task.pid, &tid);
-        let state = task.state();
-
-        let task = Task {
-            id: id.id(),
-            tag: tag_of(&task),
-            pid: task.pid.clone(),
-            tid: tid,
-            nid: nid,
-            state,
-            start_time: task.start_time(),
-            end_time: task.end_time(),
-            user: match task.uid() {
-                Some(u) => u,
-                None => "".to_string(),
-            },
-        };
-        tasks.create(&task).expect("store: create task");
+        tasks.create(&task)
     }
 
-    pub fn update_task(&self, task: &sch::Task, vars: &Vars) {
-        debug!("store::update_task({})", task.tid());
-        let procs = self.base().procs();
+    pub fn update_task(&self, task: &Task) -> ActResult<bool> {
+        debug!("store::update_task({})", task.tid);
         let tasks = self.base().tasks();
-        let pid = &task.pid;
+        tasks.update(task)
+    }
 
-        if let Some(mut proc) = procs.find(pid) {
-            proc.vars = utils::vars::to_string(vars);
-            procs.update(&proc).expect("store: update proc vars");
-        }
+    pub fn remove_task(&self, id: &str) -> ActResult<bool> {
+        debug!("store::remove_task({})", id);
+        let tasks = self.base().tasks();
+        tasks.delete(id)
+    }
 
-        let tid = task.tid();
+    pub fn tasks(&self, pid: &str) -> ActResult<Vec<Task>> {
+        debug!("store::tasks  pid={}", pid);
+        let tasks = self.base().tasks();
+        let query = Query::new().set_limit(LIMIT).push("pid", pid.into());
+        tasks.query(&query)
+    }
+
+    pub fn task(&self, pid: &str, tid: &str) -> ActResult<Task> {
+        debug!("store::task pid={}  tid={}", pid, tid);
+        let tasks = self.base().tasks();
         let id = Id::new(pid, &tid);
-        let state = task.state();
-        if let Some(mut task) = tasks.find(&id.id()) {
-            task.state = state;
-            tasks.update(&task).expect("store: update task");
-        }
+        tasks.find(&id.id())
     }
 
-    pub fn create_message(&self, msg: &sch::Message) {
+    pub fn messages(&self, pid: &str) -> ActResult<Vec<Message>> {
+        debug!("store::messages  pid={}", pid);
+        let messages = self.base().messages();
+        let query = Query::new().set_limit(LIMIT).push("pid", pid.into());
+        messages.query(&query)
+    }
+
+    pub fn message(&self, id: &str) -> ActResult<Message> {
+        debug!("store::message id={} ", id);
+        let messages = self.base().messages();
+        messages.find(id)
+    }
+
+    pub fn create_message(&self, msg: &Message) -> ActResult<bool> {
         debug!("store::create_message({})", msg.id);
-        let base = self.base();
-        let messages = base.messages();
-
-        let uid = match &msg.uid {
-            Some(uid) => uid,
-            None => "",
-        };
-        messages
-            .create(&Message {
-                id: msg.id.clone(),
-                pid: msg.pid.clone(),
-                tid: msg.tid.clone(),
-                user: uid.to_string(),
-                vars: utils::vars::to_string(&msg.vars),
-                create_time: msg.create_time,
-            })
-            .expect("store: create message");
+        let messages = self.base().messages();
+        messages.create(msg)
     }
 
-    pub fn load(&self, scher: Arc<Scheduler>, cap: usize) -> Vec<sch::Proc> {
-        debug!("store::load({})", cap);
-        let mut ret = Vec::new();
-        if cap > 0 {
-            let base = self.base();
-            let procs = base.procs();
-            let query = Query::new().set_limit(cap);
-            // query.push("state", &TaskState::None.to_string());
-            let items = procs.query(&query).expect("store: load");
-            let mut iter = items.iter();
-            while let Some(p) = iter.next() {
-                let workflow = Workflow::from_str(&p.model).unwrap();
-                let vars = &utils::vars::from_string(&p.vars);
-                let mut proc = sch::Proc::new_raw(scher.clone(), &workflow, &p.pid, &p.state, vars);
-
-                self.load_proc_tasks(&mut proc);
-                self.load_proc_messages(&mut proc);
-
-                ret.push(proc);
-            }
-        }
-
-        ret
+    pub fn update_message(&self, msg: &Message) -> ActResult<bool> {
+        debug!("store::create_message({})", msg.id);
+        let messages = self.base().messages();
+        messages.update(msg)
     }
 
     fn base(&self) -> Arc<dyn StoreAdapter> {
         self.base.read().unwrap().clone()
-    }
-
-    fn load_proc_tasks(&self, proc: &mut sch::Proc) {
-        let base = self.base();
-        let tasks = base.tasks();
-
-        let query = Query::new().set_limit(LIMIT).push("pid", &proc.pid());
-        let items = tasks.query(&query).expect("store: load_proc_tasks");
-        for t in items {
-            if t.tag == Tag::Workflow {
-                proc.set_state(&t.state);
-            }
-
-            if let Some(node) = proc.node(&t.nid) {
-                let task = sch::Task::new(&proc.pid(), &t.tid, node);
-                task.set_state(&t.state);
-                task.set_start_time(t.start_time);
-                task.set_end_time(t.end_time);
-                if !t.user.is_empty() {
-                    task.set_uid(&t.user);
-                }
-                proc.push_task(Arc::new(task));
-            }
-        }
-    }
-
-    fn load_proc_messages(&self, proc: &mut sch::Proc) {
-        let messages = self.base().messages();
-
-        let query = Query::new().set_limit(LIMIT).push("pid", &proc.pid());
-        let items = messages.query(&query).expect("store: load_proc_messages");
-        for m in items {
-            let uid = if m.user.is_empty() {
-                None
-            } else {
-                Some(m.user)
-            };
-            proc.make_message(&m.tid, uid, utils::vars::from_string(&m.vars));
-        }
     }
 
     #[cfg(test)]

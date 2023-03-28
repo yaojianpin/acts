@@ -23,6 +23,9 @@ pub struct Workflow {
 
     #[serde(default)]
     pub on: HashMap<String, Value>,
+
+    #[serde(default)]
+    ver: u32,
 }
 
 impl Workflow {
@@ -61,13 +64,9 @@ impl Workflow {
         self.id = id.to_string();
     }
 
-    // pub fn biz_id(&self) -> String {
-    //     self.biz_id.clone()
-    // }
-
-    // pub fn set_biz_id(&mut self, biz_id: &str) {
-    //     self.biz_id = biz_id.to_string();
-    // }
+    pub fn set_ver(&mut self, ver: u32) {
+        self.ver = ver;
+    }
 
     pub fn to_string<'a>(&self) -> ActResult<String> {
         match serde_yaml::to_string(self) {

@@ -1,5 +1,4 @@
 name: test1
-ver: 1.0
 env:
   a: "true"
   b: ${ 7 + 3 + 11 }

@@ -53,8 +53,11 @@ impl DataSet<Model> for ModelSet {
         false
     }
 
-    fn find(&self, _id: &str) -> Option<Model> {
-        None
+    fn find(&self, _id: &str) -> ActResult<Model> {
+        Err(crate::ActError::StoreError(format!(
+            "not found model id={}",
+            _id
+        )))
     }
 
     fn query(&self, _q: &Query) -> ActResult<Vec<Model>> {
@@ -80,8 +83,11 @@ impl DataSet<Proc> for ProcSet {
         false
     }
 
-    fn find(&self, _id: &str) -> Option<Proc> {
-        None
+    fn find(&self, _id: &str) -> ActResult<Proc> {
+        Err(crate::ActError::StoreError(format!(
+            "not found proc id={}",
+            _id
+        )))
     }
 
     fn query(&self, _q: &Query) -> ActResult<Vec<Proc>> {
@@ -107,8 +113,11 @@ impl DataSet<Task> for TaskSet {
         false
     }
 
-    fn find(&self, _id: &str) -> Option<Task> {
-        None
+    fn find(&self, _id: &str) -> ActResult<Task> {
+        Err(crate::ActError::StoreError(format!(
+            "not found task id={}",
+            _id
+        )))
     }
 
     fn query(&self, _q: &Query) -> ActResult<Vec<Task>> {
@@ -134,8 +143,11 @@ impl DataSet<Message> for MessageSet {
         false
     }
 
-    fn find(&self, _id: &str) -> Option<Message> {
-        None
+    fn find(&self, _id: &str) -> ActResult<Message> {
+        Err(crate::ActError::StoreError(format!(
+            "not found message id={}",
+            _id
+        )))
     }
 
     fn query(&self, _q: &Query) -> ActResult<Vec<Message>> {

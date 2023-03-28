@@ -1,7 +1,13 @@
-use crate::{sch::TaskState, utils, ActError, ActResult, ShareLock, Vars};
+use crate::{utils, ActError, ActResult, Vars};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::{Arc, RwLock};
+
+#[derive(Clone, Debug)]
+pub enum MessageState {
+    None = 0,
+    Sent = 1,
+    Received = 2,
+}
 
 #[derive(Clone, Debug)]
 pub struct Message {
@@ -12,12 +18,11 @@ pub struct Message {
     pub update_time: i64,
     pub uid: Option<String>,
     pub vars: Vars,
-    state: ShareLock<TaskState>,
+    pub state: MessageState,
 }
 
 #[derive(Clone, Debug)]
 pub struct UserMessage {
-    // pub id: Option<String>,
     pub pid: String,
     pub uid: String,
     pub action: String,
@@ -80,7 +85,7 @@ impl Message {
             create_time: utils::time::time(),
             update_time: 0,
             vars,
-            state: Arc::new(RwLock::new(TaskState::None)),
+            state: MessageState::None,
         }
     }
 
@@ -88,12 +93,12 @@ impl Message {
         self.id.clone()
     }
 
-    pub fn state(&self) -> TaskState {
-        self.state.read().unwrap().clone()
+    pub fn state(&self) -> MessageState {
+        self.state.clone()
     }
 
-    pub fn set_state(&self, state: TaskState) {
-        *self.state.write().unwrap() = state;
+    pub fn set_state(&mut self, state: MessageState) {
+        self.state = state;
     }
 }
 
@@ -104,6 +109,41 @@ impl UserMessage {
             uid: uid.to_string(),
             action: action.to_string(),
             options,
+        }
+    }
+}
+
+impl From<crate::store::Message> for Message {
+    fn from(m: crate::store::Message) -> Self {
+        Message {
+            id: m.id,
+            pid: m.pid,
+            tid: m.tid,
+            create_time: m.create_time,
+            update_time: m.update_time,
+            uid: if m.uid.is_empty() { None } else { Some(m.uid) },
+            vars: utils::vars::from_string(&m.vars),
+            state: m.state.into(),
+        }
+    }
+}
+
+impl From<u8> for MessageState {
+    fn from(v: u8) -> Self {
+        match v {
+            1 => MessageState::Sent,
+            2 => MessageState::Received,
+            _ => MessageState::None,
+        }
+    }
+}
+
+impl Into<u8> for MessageState {
+    fn into(self) -> u8 {
+        match self {
+            MessageState::None => 0,
+            MessageState::Sent => 1,
+            MessageState::Received => 2,
         }
     }
 }

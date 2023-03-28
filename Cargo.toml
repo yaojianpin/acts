@@ -6,7 +6,7 @@ keywords = ["workflow"]
 license = "MIT"
 name = "acts"
 repository = "https://github.com/yaojianpin/acts.git"
-version = "0.3.3"
+version = "0.3.4"
 
 [dependencies]
 async-trait = "0.1.57"

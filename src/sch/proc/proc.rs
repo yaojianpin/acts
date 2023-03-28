@@ -22,7 +22,7 @@ pub struct Proc {
     pub(in crate::sch) tree: Arc<NodeTree>,
 
     pid: String,
-    workflow: Arc<Workflow>,
+    model: Arc<Workflow>,
 
     messages: ShareLock<HashMap<String, Message>>,
     tasks: ShareLock<TaskTree>,
@@ -63,7 +63,7 @@ impl Proc {
             pid: pid.to_string(),
             vm: Arc::new(vm),
             scher,
-            workflow: Arc::new(workflow.clone()),
+            model: Arc::new(workflow.clone()),
             tree: tr,
             state: Arc::new(RwLock::new(state.clone())),
             start_time: Arc::new(RwLock::new(0)),
@@ -115,7 +115,7 @@ impl Proc {
     }
 
     pub fn workflow(&self) -> Arc<Workflow> {
-        self.workflow.clone()
+        self.model.clone()
     }
 
     pub fn info(&self) -> ProcInfo {
@@ -123,11 +123,11 @@ impl Proc {
         ProcInfo {
             pid: self.pid.clone(),
             name: workflow.name.clone(),
-            model_id: workflow.id.clone(),
-            state: self.state(),
+            mid: workflow.id.clone(),
+            state: self.state().into(),
             start_time: self.start_time(),
             end_time: self.end_time(),
-            vars: self.vm().vars(),
+            // vars: self.vm().vars(),
         }
     }
     pub fn task(&self, tid: &str) -> Option<Arc<Task>> {

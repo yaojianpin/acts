@@ -1,7 +1,9 @@
 use crate::{
+    sch::NodeKind,
     store::{data, DataSet, Store, StoreKind},
-    utils, Engine, StoreAdapter, TaskState, Workflow,
+    utils, Engine, StoreAdapter, TaskState, Vars, Workflow,
 };
+use data::{Proc, Task};
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
@@ -50,14 +52,14 @@ async fn store_load() {
     for _ in 0..100 {
         let id = format!("{}_{}", prefix, utils::longid());
         let workflow = create_workflow();
-        let proc = engine.scher().create_raw_proc(&id, &workflow);
+        let proc = create_proc(&id, TaskState::None, &workflow);
         store.create_proc(&proc).expect("create proc");
     }
 
-    let procs = store.load(engine.scher(), 10000);
+    let procs = store.procs(10000).unwrap();
     let procs = procs
         .iter()
-        .filter(|it| it.pid().starts_with(&prefix))
+        .filter(|it| it.pid.starts_with(&prefix))
         .collect::<Vec<_>>();
     assert_eq!(procs.len(), 100);
 }
@@ -143,30 +145,30 @@ async fn store_model_deploy_id_error() {
 }
 
 #[tokio::test]
-async fn store_proc_infos() {
+async fn store_procs() {
     let engine = Engine::new();
     let store = store(&engine).await;
     let id = utils::longid();
     let workflow = create_workflow();
-    let proc = engine.scher().create_raw_proc(&id, &workflow);
+    let proc = create_proc(&id, TaskState::None, &workflow);
     store.create_proc(&proc).expect("create proc");
 
-    let procs = store.proc_infos(1).unwrap();
+    let procs = store.procs(1).unwrap();
 
     assert_eq!(procs.len(), 1);
 }
 
 #[tokio::test]
-async fn store_proc_info() {
+async fn store_proc() {
     let engine = Engine::new();
     let store = store(&engine).await;
 
     let id = utils::longid();
     let workflow = create_workflow();
-    let proc = engine.scher().create_raw_proc(&id, &workflow);
+    let proc = create_proc(&id, TaskState::None, &workflow);
     store.create_proc(&proc).expect("create proc");
-    let info = store.proc_info(&id).unwrap();
-    assert_eq!(proc.pid(), info.pid);
+    let info = store.proc(&id).unwrap();
+    assert_eq!(proc.pid, info.pid);
 }
 
 #[tokio::test]
@@ -176,16 +178,16 @@ async fn store_proc_update() {
 
     let id = utils::longid();
     let workflow = create_workflow();
-    let proc = engine.scher().create_raw_proc(&id, &workflow);
+    let mut proc = create_proc(&id, TaskState::None, &workflow);
 
     store.create_proc(&proc).expect("create proc");
 
-    proc.set_state(&TaskState::Running);
+    proc.state = TaskState::Running.to_string();
     store.update_proc(&proc).expect("update proc");
 
-    let p = store.proc(&proc.pid(), &engine.scher()).unwrap();
-    assert_eq!(p.pid(), proc.pid());
-    assert_eq!(p.state(), TaskState::Running);
+    let p = store.proc(&proc.pid).unwrap();
+    assert_eq!(p.pid, proc.pid);
+    assert_eq!(p.state, TaskState::Running.to_string());
 }
 
 #[tokio::test]
@@ -195,16 +197,16 @@ async fn store_proc_remove() {
 
     let id = utils::longid();
     let workflow = create_workflow();
-    let proc = engine.scher().create_raw_proc(&id, &workflow);
+    let proc = create_proc(&id, TaskState::None, &workflow);
 
     store.create_proc(&proc).expect("create proc");
 
-    let proc = store.proc(&id, &engine.scher());
-    assert_eq!(proc.is_some(), true);
+    let proc = store.proc(&id);
+    assert_eq!(proc.is_ok(), true);
 
     store.remove_proc(&id).unwrap();
-    let proc = store.proc(&id, &engine.scher());
-    assert_eq!(proc.is_some(), false);
+    let proc = store.proc(&id);
+    assert_eq!(proc.is_ok(), false);
 }
 
 // #[tokio::test]
@@ -258,18 +260,83 @@ async fn store_proc_remove() {
 // }
 
 #[tokio::test]
-async fn store_remove() {
+async fn store_task_create() {
     let engine = Engine::new();
     let store = store(&engine).await;
 
-    let id = utils::longid();
-    let workflow = create_workflow();
-    let proc = engine.scher().create_raw_proc(&id, &workflow);
+    let pid = utils::longid();
+    let tid = utils::shortid();
+    let nid = utils::shortid();
+    let task = Task {
+        id: format!("{pid}:{tid}"),
+        kind: NodeKind::Step.to_string(),
+        pid: pid.clone(),
+        tid: tid.clone(),
+        nid: nid,
+        state: TaskState::None.to_string(),
+        start_time: 0,
+        end_time: 0,
+        uid: "".to_string(),
+    };
 
-    store.create_proc(&proc).expect("create proc");
-    store.remove_proc(&proc.pid()).expect("remove proc");
-    let ret = store.proc(&proc.pid(), &engine.scher());
-    assert!(ret.is_none());
+    store.create_task(&task).expect("create task");
+    let ret = store.task(&pid, &tid);
+    assert!(ret.is_ok());
+}
+
+#[tokio::test]
+async fn store_task_update() {
+    let engine = Engine::new();
+    let store = store(&engine).await;
+
+    let pid = utils::longid();
+    let tid = utils::shortid();
+    let nid = utils::shortid();
+    let task = Task {
+        id: format!("{pid}:{tid}"),
+        kind: NodeKind::Step.to_string(),
+        pid: pid.clone(),
+        tid: tid.clone(),
+        nid: nid,
+        state: TaskState::None.to_string(),
+        start_time: 0,
+        end_time: 0,
+        uid: "".to_string(),
+    };
+
+    store.create_task(&task).expect("create task");
+    let mut task = store.task(&pid, &tid).unwrap();
+    task.state = TaskState::Running.to_string();
+    store.update_task(&task).unwrap();
+
+    let task2 = store.task(&pid, &tid).unwrap();
+    assert_eq!(task.state, task2.state);
+}
+
+#[tokio::test]
+async fn store_task_remove() {
+    let engine = Engine::new();
+    let store = store(&engine).await;
+
+    let pid = utils::longid();
+    let tid = utils::shortid();
+    let nid = utils::shortid();
+    let task = Task {
+        id: format!("{pid}:{tid}"),
+        kind: NodeKind::Step.to_string(),
+        pid: pid.clone(),
+        tid: tid.clone(),
+        nid: nid,
+        state: TaskState::None.to_string(),
+        start_time: 0,
+        end_time: 0,
+        uid: "".to_string(),
+    };
+
+    store.create_task(&task).expect("create task");
+    store.remove_task(&task.id).expect("remove proc");
+    let ret = store.task(&pid, &tid);
+    assert!(ret.is_err());
 }
 
 fn create_workflow() -> Workflow {
@@ -277,6 +344,18 @@ fn create_workflow() -> Workflow {
     let workflow = Workflow::from_str(text).unwrap();
 
     workflow
+}
+
+fn create_proc(id: &str, state: TaskState, model: &Workflow) -> Proc {
+    Proc {
+        id: id.to_string(),
+        pid: id.to_string(),
+        model: model.to_string().unwrap(),
+        state: state.to_string(),
+        start_time: 0,
+        end_time: 0,
+        vars: "".to_string(),
+    }
 }
 
 #[derive(Debug)]

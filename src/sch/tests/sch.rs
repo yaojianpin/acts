@@ -17,7 +17,7 @@ async fn sch_next() {
     store.deploy(&workflow).unwrap();
     tokio::spawn(async move {
         s.start(
-            &workflow.id,
+            &workflow,
             crate::ActionOptions {
                 biz_id: Some(utils::longid()),
                 ..Default::default()

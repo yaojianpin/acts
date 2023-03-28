@@ -1,4 +1,4 @@
-use crate::{utils, ActPlugin, Engine, Message, Workflow};
+use crate::{sch::TaskState, store, utils, ActPlugin, Engine, Message, Workflow};
 use rhai::plugin::*;
 
 #[tokio::test]
@@ -32,33 +32,33 @@ async fn engine_start_async() {
 #[tokio::test]
 async fn engine_register_plugin() {
     let engine = Engine::new();
-    let mgr = engine.mgr();
+    let extender = engine.extender();
 
-    let plugin_count = mgr.plugins.lock().unwrap().len();
-    mgr.register_plugin(&TestPlugin::default());
+    let plugin_count = extender.plugins.lock().unwrap().len();
+    extender.register_plugin(&TestPlugin::default());
 
-    assert_eq!(mgr.plugins.lock().unwrap().len(), plugin_count + 1);
+    assert_eq!(extender.plugins.lock().unwrap().len(), plugin_count + 1);
 }
 
 #[tokio::test]
 async fn engine_register_action() {
     let engine = Engine::new();
-    let mgr = engine.mgr();
+    let extender = engine.extender();
     let add = |a: i64, b: i64| Ok(a + b);
-    let hash = mgr.register_action("add", add);
+    let hash = extender.register_action("add", add);
 
-    assert!(mgr.action().contains_fn(hash));
+    assert!(extender.action().contains_fn(hash));
 }
 
 #[tokio::test]
 async fn engine_register_module() {
     let engine = Engine::new();
-    let mgr = engine.mgr();
+    let extender = engine.extender();
     let mut module = Module::new();
     combine_with_exported_module!(&mut module, "role", test_module);
-    mgr.register_module("test", &module);
+    extender.register_module("test", &module);
 
-    assert!(mgr.modules().contains_key("test"));
+    assert!(extender.modules().contains_key("test"));
 }
 
 #[tokio::test]
@@ -79,7 +79,6 @@ async fn engine_on_message() {
     });
 
     let executor = engine.executor();
-
     executor.deploy(&workflow).expect("fail to deploy workflow");
     executor
         .start(
@@ -177,6 +176,74 @@ async fn engine_executor_start_dup_biz_id_error() {
     engine.start();
 
     let biz_id = utils::longid();
+    let model = Workflow::new().with_id("m1").with_job(|job| {
+        job.with_step(|step| {
+            step.with_subject(|sub| sub.with_matcher("any").with_users(r#"["a"]"#))
+        })
+    });
+
+    let store = engine.store();
+    let proc = store::Proc {
+        id: biz_id.clone(),
+        pid: biz_id.clone(),
+        model: model.to_string().unwrap(),
+        state: TaskState::None.to_string(),
+        start_time: 0,
+        end_time: 0,
+        vars: "".to_string(),
+    };
+    store.create_proc(&proc).expect("create proc");
+    executor.deploy(&model).expect("fail to deploy workflow");
+    let result = executor.start(
+        &model.id,
+        crate::ActionOptions {
+            biz_id: Some(biz_id.clone()),
+            ..Default::default()
+        },
+    );
+    assert_eq!(result.is_err(), true);
+}
+
+#[tokio::test]
+async fn engine_manager_models() {
+    let engine = Engine::new();
+    engine.start();
+    let manager = engine.manager();
+    let executor = engine.executor();
+    let workflow = Workflow::new().with_id("m1").with_job(|job| {
+        job.with_step(|step| {
+            step.with_subject(|sub| sub.with_matcher("any").with_users(r#"["a"]"#))
+        })
+    });
+
+    executor.deploy(&workflow).expect("deploy model");
+    let models = manager.models(100).expect("get models");
+    assert!(models.len() > 0);
+}
+
+#[tokio::test]
+async fn engine_manager_model() {
+    let engine = Engine::new();
+    engine.start();
+    let manager = engine.manager();
+    let executor = engine.executor();
+    let mut workflow = Workflow::new().with_id("m1").with_job(|job| {
+        job.with_step(|step| {
+            step.with_subject(|sub| sub.with_matcher("any").with_users(r#"["a"]"#))
+        })
+    });
+    workflow.id = utils::longid();
+    executor.deploy(&workflow).expect("deploy model");
+
+    let model = manager.model(&workflow.id);
+    assert_eq!(model.is_ok(), true);
+}
+
+#[tokio::test]
+async fn engine_manager_procs() {
+    let engine = Engine::new();
+    engine.start();
+    let manager = engine.manager();
     let workflow = Workflow::new().with_id("m1").with_job(|job| {
         job.with_step(|step| {
             step.with_subject(|sub| sub.with_matcher("any").with_users(r#"["a"]"#))
@@ -184,18 +251,48 @@ async fn engine_executor_start_dup_biz_id_error() {
     });
 
     let store = engine.store();
-    let proc = engine.scher().create_raw_proc(&biz_id, &workflow);
+    let pid = utils::longid();
+    let proc = store::Proc {
+        id: pid.clone(),
+        pid: pid.clone(),
+        model: workflow.to_string().unwrap(),
+        state: TaskState::None.to_string(),
+        start_time: 0,
+        end_time: 0,
+        vars: "".to_string(),
+    };
     store.create_proc(&proc).expect("create proc");
 
-    executor.deploy(&workflow).expect("fail to deploy workflow");
-    let result = executor.start(
-        &workflow.id,
-        crate::ActionOptions {
-            biz_id: Some(biz_id.clone()),
-            ..Default::default()
-        },
-    );
-    assert_eq!(result.is_err(), true);
+    let procs = manager.procs(100).expect("get procs");
+    assert!(procs.len() > 0);
+}
+
+#[tokio::test]
+async fn engine_manager_proc() {
+    let engine = Engine::new();
+    engine.start();
+    let manager = engine.manager();
+    let biz_id = utils::longid();
+    let workflow = Workflow::new().with_id("m1").with_job(|job| {
+        job.with_step(|step| {
+            step.with_subject(|sub| sub.with_matcher("any").with_users(r#"["a"]"#))
+        })
+    });
+
+    let store = engine.store();
+    let proc = store::Proc {
+        id: biz_id.clone(),
+        pid: biz_id.clone(),
+        model: workflow.to_string().unwrap(),
+        state: TaskState::None.to_string(),
+        start_time: 0,
+        end_time: 0,
+        vars: "".to_string(),
+    };
+    store.create_proc(&proc).expect("create proc");
+
+    let proc = manager.proc(&biz_id);
+    assert_eq!(proc.is_ok(), true);
 }
 
 #[derive(Debug, Default, Clone)]

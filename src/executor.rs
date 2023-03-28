@@ -2,7 +2,7 @@ use crate::{
     debug,
     sch::{ActionOptions, Scheduler},
     store::Store,
-    ActResult, ModelInfo, ProcInfo, UserMessage, Workflow,
+    ActResult, ModelInfo, UserMessage, Workflow,
 };
 use std::sync::Arc;
 
@@ -24,31 +24,10 @@ impl Executor {
         self.store.deploy(&workflow)
     }
 
-    pub fn models(&self, limit: usize) -> ActResult<Vec<ModelInfo>> {
-        self.store.models(limit)
-    }
-
-    pub fn model(&self, id: &str) -> ActResult<ModelInfo> {
-        self.store.model(id)
-    }
-
-    pub fn remove(&self, model_id: &str) -> ActResult<bool> {
-        self.store.remove_model(model_id)
-    }
-
-    pub fn procs(&self, cap: usize) -> ActResult<Vec<ProcInfo>> {
-        self.store.proc_infos(cap)
-    }
-    pub fn proc(&self, pid: &str) -> ActResult<ProcInfo> {
-        self.store.proc_info(pid)
-    }
-
-    pub fn close(&self, pid: &str) -> ActResult<bool> {
-        self.scher.cache().remove(pid)
-    }
-
     pub fn start(&self, id: &str, options: ActionOptions) -> ActResult<bool> {
-        self.scher.start(id, options)
+        let model: ModelInfo = self.store.model(id)?.into();
+        let w = model.workflow()?;
+        self.scher.start(&w, options)
     }
 
     pub fn submit(&self, pid: &str, uid: &str, options: Option<ActionOptions>) -> ActResult<()> {

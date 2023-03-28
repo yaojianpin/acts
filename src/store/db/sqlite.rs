@@ -109,7 +109,7 @@ impl DataSet<Model> for ModelSet {
         })
     }
 
-    fn find(&self, id: &str) -> Option<Model> {
+    fn find(&self, id: &str) -> ActResult<Model> {
         debug!("sqlite.Model.find({})", id);
         run(async {
             let pool = db();
@@ -120,7 +120,7 @@ impl DataSet<Model> for ModelSet {
             .fetch_one(pool)
             .await
             {
-                Ok(row) => Some(Model {
+                Ok(row) => Ok(Model {
                     id: row.get(0),
                     name: row.get(1),
                     ver: row.get(2),
@@ -128,7 +128,7 @@ impl DataSet<Model> for ModelSet {
                     time: row.get(4),
                     model: row.get(5),
                 }),
-                Err(_) => None,
+                Err(err) => Err(ActError::StoreError(err.to_string())),
             }
         })
     }
@@ -228,7 +228,7 @@ impl DataSet<Proc> for ProcSet {
         })
     }
 
-    fn find(&self, id: &str) -> Option<Proc> {
+    fn find(&self, id: &str) -> ActResult<Proc> {
         debug!("sqlite.proc.find({})", id);
         run(async {
             let pool = db();
@@ -238,18 +238,17 @@ impl DataSet<Proc> for ProcSet {
                 .await
             {
                 Ok(row) => {
-                    let state: &str = row.get(2);
-                    Some(Proc {
+                    Ok(Proc {
                         id: row.get(0),
                         pid: row.get(1),
-                        state: state.into(),
+                        state: row.get(2),
                         model: row.get(3),
                         vars: row.get(4),
                         start_time: row.get(5),
                         end_time: row.get(6),
                     })
                 }
-                Err(_) => None,
+                Err(err) => Err(ActError::StoreError(err.to_string())),
             }
         })
     }
@@ -350,31 +349,29 @@ impl DataSet<Task> for TaskSet {
             count > 0
         })
     }
-    fn find(&self, id: &str) -> Option<Task> {
+    fn find(&self, id: &str) -> ActResult<Task> {
         debug!("sqlite.task.find({})", id);
         run(async {
             let pool = db();
-            match sqlx::query(r#"select tag, id, pid, tid, state,start_time, end_time, user from act_task where id=$1"#)
+            match sqlx::query(r#"select tag, id, pid, tid, state,start_time, end_time, uid from act_task where id=$1"#)
                 .bind(id)
                 .fetch_one(pool)
                 .await
             {
                 Ok(row) => {
-                    let tag: &str = row.get(0);
-                    let state: &str = row.get(5);
-                    Some(Task {
-                        tag: tag.into(),
+                    Ok(Task {
+                        kind: row.get(0),
                         id: row.get(1),
                         pid: row.get(2),
                         tid: row.get(3),
                         nid: row.get(4),
-                        state: state.into(),
+                        state: row.get(5),
                         start_time: row.get(6),
                         end_time: row.get(7),
-                        user: row.get(8),
+                        uid: row.get(8),
                     })
                 }
-                Err(_) => None,
+                Err(err) => Err(ActError::StoreError(err.to_string())),
             }
         })
     }
@@ -385,7 +382,7 @@ impl DataSet<Task> for TaskSet {
             let pool = db();
 
             let a = &format!(
-                r#"select tag, id, pid, tid, nid, state, start_time, end_time, user from act_task {}"#,
+                r#"select kind, id, pid, tid, nid, state, start_time, end_time, uid from act_task {}"#,
                 q.sql()
             );
             println!("{}", a);
@@ -393,18 +390,16 @@ impl DataSet<Task> for TaskSet {
             match &sql.fetch_all(pool).await {
                 Ok(rows) => {
                     for row in rows {
-                        let tag: &str = row.get(0);
-                        let state: &str = row.get(5);
                         ret.push(Task {
-                            tag: tag.into(),
+                            kind: row.get(0),
                             id: row.get(1),
                             pid: row.get(2),
                             tid: row.get(3),
                             nid: row.get(4),
-                            state: state.into(),
+                            state: row.get(5),
                             start_time: row.get(6),
                             end_time: row.get(7),
-                            user: row.get(8),
+                            uid: row.get(8),
                         });
                     }
 
@@ -420,12 +415,10 @@ impl DataSet<Task> for TaskSet {
         let task = task.clone();
         run(async move {
             let pool = &*db();
-
-            let tag: &str = task.tag.into();
             let sql = sqlx::query(
-                r#"insert into act_task (tag, id, pid, tid, nid, state, start_time, end_time, user) values ($1,$2,$3,$4,$5,$6,$7,$8,$9)"#,
+                r#"insert into act_task (kind, id, pid, tid, nid, state, start_time, end_time, uid) values ($1,$2,$3,$4,$5,$6,$7,$8,$9)"#,
             )
-            .bind(tag)
+            .bind(task.kind)
             .bind(task.id)
             .bind(task.pid)
             .bind(task.tid)
@@ -433,7 +426,7 @@ impl DataSet<Task> for TaskSet {
             .bind(task.state.to_string())
             .bind(task.start_time)
             .bind(task.end_time)
-            .bind(task.user.clone());
+            .bind(task.uid.clone());
 
             match sql.execute(pool).await {
                 Ok(_) => Ok(true),
@@ -445,11 +438,12 @@ impl DataSet<Task> for TaskSet {
         debug!("sqlite.task.update({})", task.id);
         run(async {
             let pool = &*db();
-            let sql = sqlx::query(r#"update act_task set state = $1, start_time = $2, end_time = $3, user = $4 where id=$5"#)
+            let sql = sqlx::query(r#"update act_task set state = $1, start_time = $2, end_time = $3, uid = $4, kind = $5, where id=$6"#)
                 .bind(task.state.to_string())
                 .bind(task.start_time)
                 .bind(task.end_time)
-                .bind(task.user.clone())
+                .bind(task.uid.clone())
+                .bind(task.kind.clone())
                 .bind(&task.id);
 
             match sql.execute(pool).await {
@@ -489,26 +483,28 @@ impl DataSet<Message> for MessageSet {
         })
     }
 
-    fn find(&self, id: &str) -> Option<Message> {
+    fn find(&self, id: &str) -> ActResult<Message> {
         debug!("sqlite.message.find({})", id);
         run(async {
             let pool = &*db();
             match sqlx::query(
-                r#"select id, pid, tid, user, create_time, vars from act_message where id=$1"#,
+                r#"select id, pid, tid, uid, create_time,update_time, state, vars from act_message where id=$1"#,
             )
             .bind(id)
             .fetch_one(pool)
             .await
             {
-                Ok(row) => Some(Message {
+                Ok(row) => Ok(Message {
                     id: row.get(0),
                     pid: row.get(1),
                     tid: row.get(2),
-                    user: row.get(3),
+                    uid: row.get(3),
                     create_time: row.get(4),
-                    vars: row.get(5),
+                    update_time: row.get(5),
+                    state: row.get(6),
+                    vars: row.get(7),
                 }),
-                Err(_) => None,
+                Err(err) => Err(ActError::StoreError(err.to_string())),
             }
         })
     }
@@ -520,7 +516,7 @@ impl DataSet<Message> for MessageSet {
             let pool = &*db();
 
             let a = &format!(
-                r#"select id, pid, tid, user, create_time, vars from act_message {}"#,
+                r#"select id, pid, tid, uid, create_time,update_time,state, vars from act_message {}"#,
                 q.sql()
             );
             println!("{}", a);
@@ -532,9 +528,11 @@ impl DataSet<Message> for MessageSet {
                             id: row.get(0),
                             pid: row.get(1),
                             tid: row.get(2),
-                            user: row.get(3),
+                            uid: row.get(3),
                             create_time: row.get(4),
-                            vars: row.get(5),
+                            update_time: row.get(5),
+                            state: row.get(6),
+                            vars: row.get(7),
                         });
                     }
 
@@ -551,12 +549,12 @@ impl DataSet<Message> for MessageSet {
         run(async move {
             let pool = &*db();
             let sql = sqlx::query(
-                r#"insert into act_message (id, pid, tid, user, create_time) values ($1,$2,$3,$4,$5)"#,
+                r#"insert into act_message (id, pid, tid, uid, create_time) values ($1,$2,$3,$4,$5)"#,
             )
             .bind(msg.id)
             .bind(msg.pid)
             .bind(msg.tid)
-            .bind(msg.user)
+            .bind(msg.uid)
             .bind(msg.create_time);
 
             match sql.execute(pool).await {
@@ -569,8 +567,8 @@ impl DataSet<Message> for MessageSet {
         debug!("sqlite.message.update({})", msg.id);
         run(async {
             let pool = &*db();
-            let sql = sqlx::query(r#"update act_message set user = $1 where id=$2"#)
-                .bind(&msg.user)
+            let sql = sqlx::query(r#"update act_message set uid = $1 where id=$2"#)
+                .bind(&msg.uid)
                 .bind(&msg.id);
 
             match sql.execute(pool).await {

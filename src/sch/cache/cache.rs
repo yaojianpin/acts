@@ -1,12 +1,12 @@
 use crate::{
     debug,
     sch::{
+        cache::StoreMediator,
         event::{EventAction, EventData},
         Message, Proc, Scheduler, Task,
     },
-    store::Store,
     utils::{self},
-    ActError, ActResult, Engine, ModelInfo, ShareLock, Workflow,
+    ActResult, Engine, ShareLock,
 };
 use lru::LruCache;
 use std::{
@@ -18,16 +18,15 @@ use std::{
 pub struct Cache {
     procs: ShareLock<LruCache<String, Proc>>,
     scher: ShareLock<Option<Arc<Scheduler>>>,
-
-    store: ShareLock<Option<Arc<Store>>>,
+    store: ShareLock<Option<StoreMediator>>,
 }
 
 impl Cache {
     pub fn new(cap: usize) -> Self {
         Self {
             procs: Arc::new(RwLock::new(LruCache::new(NonZeroUsize::new(cap).unwrap()))),
-            store: Arc::new(RwLock::new(None)),
             scher: Arc::new(RwLock::new(None)),
+            store: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -35,7 +34,7 @@ impl Cache {
         debug!("cache::init");
         let scher = engine.scher();
         *self.scher.write().unwrap() = Some(scher.clone());
-        *self.store.write().unwrap() = Some(engine.store());
+        *self.store.write().unwrap() = Some(StoreMediator::new(engine.store()));
 
         {
             let cache = self.clone();
@@ -53,7 +52,7 @@ impl Cache {
                     cache.restore(s.clone());
                 } else {
                     if let Some(store) = &*cache.store.read().unwrap() {
-                        store.update_proc(proc).expect("update proc");
+                        store.update_proc(proc);
                     }
                 }
             });
@@ -94,14 +93,7 @@ impl Cache {
         debug!("sch::cache::push({})", proc.pid());
         self.procs.write().unwrap().push(proc.pid(), proc.clone());
         if let Some(store) = &*self.store.read().unwrap() {
-            store.create_proc(proc).expect("create proc");
-        }
-    }
-
-    pub fn model(&self, id: &str) -> ActResult<ModelInfo> {
-        match &*self.store.read().unwrap() {
-            Some(store) => store.model(id),
-            None => Err(ActError::RuntimeError(format!("store not init"))),
+            store.create_proc(proc);
         }
     }
 
@@ -112,7 +104,7 @@ impl Cache {
             None => {
                 if let Some(scher) = &*self.scher.read().unwrap() {
                     if let Some(store) = &*self.store.read().unwrap() {
-                        return store.proc(pid, scher);
+                        return store.load_proc(pid, scher);
                     }
                 }
 

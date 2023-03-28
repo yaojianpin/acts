@@ -25,7 +25,7 @@ impl ActPlugin for OrgPlugin {
         }
         let mut module = Module::new();
         combine_with_exported_module!(&mut module, "org", org_module);
-        engine.mgr().register_module("::org", &module);
+        engine.extender().register_module("::org", &module);
 
         let adapter = engine.adapter();
         let result = ADAPTER.set(adapter);

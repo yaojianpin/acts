@@ -19,7 +19,7 @@ pub use event::{ActionOptions, Event, EventAction, EventData, Message, UserMessa
 pub use proc::{Matcher, Proc, Task};
 pub use scher::Scheduler;
 pub use state::TaskState;
-pub use tree::{Node, NodeData, NodeTree};
+pub use tree::{Node, NodeData, NodeKind, NodeTree};
 
 #[async_trait]
 pub trait ActTask: Clone + Send {

@@ -1,106 +1,102 @@
-use crate::{ActModule, ActPlugin};
-use rhai::{Identifier, RegisterNativeFunction, Variant};
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use crate::{sch::Scheduler, store::Store, ActResult, Message, ModelInfo, ProcInfo, TaskInfo};
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct Manager {
-    action: Arc<Mutex<ActModule>>,
-    modules: Arc<Mutex<HashMap<String, ActModule>>>,
-    pub(crate) plugins: Arc<Mutex<Vec<Box<dyn ActPlugin>>>>,
+    scher: Arc<Scheduler>,
+    store: Arc<Store>,
 }
 
 impl Manager {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(sch: &Arc<Scheduler>, store: &Arc<Store>) -> Self {
         Self {
-            plugins: Arc::new(Mutex::new(Vec::new())),
-            action: Arc::new(Mutex::new(ActModule::new())),
-            modules: Arc::new(Mutex::new(HashMap::new())),
+            scher: sch.clone(),
+            store: store.clone(),
         }
     }
 
-    /// register module
-    ///
-    /// ## Example
-    /// ```rust
-    /// #[tokio::test]
-    /// async fn engine_register_module() {
-    ///     let engine = Engine::new();
-    ///     let mut module = Module::new();
-    ///     combine_with_exported_module!(&mut module, "role", test_module);
-    ///     engine.mgr().register_module("test", &module);
-    ///     assert!(engine.mgr().modules().contains_key("test"));
-    /// }
-    /// ```
-    pub fn register_module(&self, name: &str, module: &ActModule) {
-        self.modules
-            .lock()
-            .unwrap()
-            .insert(name.to_string(), module.clone());
+    pub fn models(&self, limit: usize) -> ActResult<Vec<ModelInfo>> {
+        match self.store.models(limit) {
+            Ok(models) => {
+                let mut ret = Vec::new();
+                for m in models {
+                    ret.push(m.into());
+                }
+
+                Ok(ret)
+            }
+            Err(err) => Err(err),
+        }
     }
 
-    /// register act function
-    ///
-    /// ## Example
-    ///
-    /// ```rust
-    /// #[tokio::test]
-    /// async fn engine_register_module() {
-    ///     let mut engine = Engine::new();
-    ///     let add = |a: i64, b: i64| Ok(a + b);
-    ///     engine.register_action("add", add);
-    /// }
-    /// ```
-    pub fn register_action<A: 'static, const N: usize, const C: bool, T, F>(
-        &self,
-        name: impl AsRef<str> + Into<Identifier>,
-        func: F,
-    ) -> u64
-    where
-        T: Variant + Clone,
-        F: RegisterNativeFunction<A, N, C, T, true>,
-    {
-        self.action.lock().unwrap().set_native_fn(name, func)
+    pub fn model(&self, id: &str) -> ActResult<ModelInfo> {
+        match self.store.model(id) {
+            Ok(m) => Ok(m.into()),
+            Err(err) => Err(err),
+        }
     }
 
-    /// register plugin
-    ///
-    /// ## Example
-    ///
-    /// ```no_run
-    /// use acts::{ActPlugin, State, Message, Engine, Workflow};
-    ///
-    /// #[derive(Clone)]
-    /// struct TestPlugin;
-    /// impl TestPlugin {
-    ///     fn new() -> Self {
-    ///         Self
-    ///     }
-    /// }
-    /// impl ActPlugin for TestPlugin {
-    ///     fn on_init(&self, engine: &Engine) {
-    ///         println!("TestPlugin");
-    ///         // engine.mgr().register_module("name", module);
-    ///         // engine.mgr().register_action("func", func);
-    ///         engine.emitter().on_start(|state: &State<Workflow>| {});
-    ///         engine.emitter().on_complete(|state: &State<Workflow>| {});
-    ///         engine.emitter().on_message(|_msg: &Message| {});
-    ///     }
-    /// }
-    /// let engine = Engine::new();
-    /// engine.mgr().register_plugin(&TestPlugin::new());
-    /// ```
-    pub fn register_plugin<T: ActPlugin + 'static + Clone>(&self, plugin: &T) {
-        self.plugins.lock().unwrap().push(Box::new(plugin.clone()));
+    pub fn remove(&self, model_id: &str) -> ActResult<bool> {
+        self.store.remove_model(model_id)
     }
 
-    pub(crate) fn modules(&self) -> HashMap<String, ActModule> {
-        self.modules.lock().unwrap().clone()
+    pub fn procs(&self, cap: usize) -> ActResult<Vec<ProcInfo>> {
+        match self.store.procs(cap) {
+            Ok(ref procs) => {
+                let mut ret = Vec::new();
+                for t in procs {
+                    ret.push(t.into());
+                }
+
+                Ok(ret)
+            }
+            Err(err) => Err(err),
+        }
     }
 
-    pub(crate) fn action(&self) -> ActModule {
-        self.action.lock().unwrap().clone()
+    pub fn proc(&self, pid: &str) -> ActResult<ProcInfo> {
+        match self.store.proc(pid) {
+            Ok(ref proc) => Ok(proc.into()),
+            Err(err) => Err(err),
+        }
+    }
+
+    pub fn tasks(&self, pid: &str) -> ActResult<Vec<TaskInfo>> {
+        match self.store.tasks(pid) {
+            Ok(tasks) => {
+                let mut ret = Vec::new();
+                for t in tasks {
+                    ret.push(t.into());
+                }
+
+                Ok(ret)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    pub fn task(&self, pid: &str, tid: &str) -> ActResult<TaskInfo> {
+        match self.store.task(pid, tid) {
+            Ok(t) => Ok(t.into()),
+            Err(err) => Err(err),
+        }
+    }
+
+    pub fn messages(&self, pid: &str) -> ActResult<Vec<Message>> {
+        match self.store.messages(pid) {
+            Ok(tasks) => {
+                let mut ret = Vec::new();
+                for t in tasks {
+                    ret.push(t.into());
+                }
+
+                Ok(ret)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    pub fn close(&self, pid: &str) -> ActResult<bool> {
+        self.scher.cache().remove(pid)
     }
 }

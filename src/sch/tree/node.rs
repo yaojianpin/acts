@@ -10,7 +10,7 @@ pub enum NodeData {
     Act(Act),
 }
 
-#[derive(PartialEq, Debug)]
+#[derive(PartialEq, Debug, Clone)]
 pub enum NodeKind {
     Workflow,
     Job,
@@ -110,12 +110,48 @@ impl std::fmt::Debug for Node {
 
 impl std::fmt::Display for NodeKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = self.clone().into();
+        f.write_str(s)
+    }
+}
+
+impl<'a> Into<&'a str> for NodeKind {
+    fn into(self) -> &'a str {
         match self {
-            NodeKind::Workflow => f.write_str("Workflow"),
-            NodeKind::Job => f.write_str("Job"),
-            NodeKind::Branch => f.write_str("Branch"),
-            NodeKind::Step => f.write_str("Step"),
-            NodeKind::Act => f.write_str("Act"),
+            NodeKind::Workflow => "Workflow",
+            NodeKind::Job => "Job",
+            NodeKind::Branch => "Branch",
+            NodeKind::Step => "Step",
+            NodeKind::Act => "Act",
         }
+    }
+}
+
+impl Into<String> for NodeKind {
+    fn into(self) -> String {
+        let s: &str = self.into();
+        s.to_string()
+    }
+}
+
+impl From<String> for NodeKind {
+    fn from(kind: String) -> Self {
+        let s: &str = &kind;
+        s.into()
+    }
+}
+
+impl From<&str> for NodeKind {
+    fn from(str: &str) -> Self {
+        let s = match str {
+            "Workflow" => NodeKind::Workflow,
+            "Job" => NodeKind::Job,
+            "Branch" => NodeKind::Branch,
+            "Step" => NodeKind::Step,
+            "Act" => NodeKind::Act,
+            _ => panic!("not found NodeKind: {}", str),
+        };
+
+        s
     }
 }

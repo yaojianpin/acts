@@ -204,7 +204,7 @@ impl DataSet<Model> for ModelSet {
         }
     }
 
-    fn find(&self, id: &str) -> Option<Model> {
+    fn find(&self, id: &str) -> ActResult<Model> {
         db_debug!("local::Model.find({})", id);
         let db = db();
         let cf = db.cf_handle(&self.name).unwrap();
@@ -212,11 +212,11 @@ impl DataSet<Model> for ModelSet {
             Ok(opt) => match opt {
                 Some(data) => {
                     let model: Model = bincode::deserialize(data.as_ref()).unwrap();
-                    Some(model)
+                    Ok(model)
                 }
-                None => None,
+                None => Err(ActError::StoreError(format!("cannot find model id={id}"))),
             },
-            Err(_err) => None,
+            Err(err) => Err(ActError::StoreError(err.to_string())),
         }
     }
 
@@ -230,7 +230,7 @@ impl DataSet<Model> for ModelSet {
         }
         if q.is_cond() {
             for id in find_by_idx(&self.name, q) {
-                if let Some(it) = self.find(&id) {
+                if let Ok(it) = self.find(&id) {
                     ret.push(it);
                 }
             }
@@ -272,7 +272,7 @@ impl DataSet<Model> for ModelSet {
         let cf = db.cf_handle(&self.name).unwrap();
 
         match self.find(id) {
-            Some(item) => match db.delete_cf(cf, mode_key(id)) {
+            Ok(item) => match db.delete_cf(cf, mode_key(id)) {
                 Ok(_) => {
                     let idx = idx_key("id", &item.id);
                     db.delete_cf(cf, &idx).unwrap();
@@ -280,10 +280,7 @@ impl DataSet<Model> for ModelSet {
                 }
                 Err(err) => Err(ActError::StoreError(err.to_string())),
             },
-            None => Err(ActError::StoreError(format!(
-                "can not find the key: {}",
-                id
-            ))),
+            Err(err) => Err(ActError::StoreError(err.to_string())),
         }
     }
 }
@@ -307,7 +304,7 @@ impl DataSet<Proc> for ProcSet {
         }
     }
 
-    fn find(&self, id: &str) -> Option<Proc> {
+    fn find(&self, id: &str) -> ActResult<Proc> {
         db_debug!("local::Proc.find({})", id);
         let db = db();
         let cf = db.cf_handle(&self.name).unwrap();
@@ -315,11 +312,11 @@ impl DataSet<Proc> for ProcSet {
             Ok(opt) => match opt {
                 Some(data) => {
                     let proc: Proc = bincode::deserialize(data.as_ref()).unwrap();
-                    Some(proc)
+                    Ok(proc)
                 }
-                None => None,
+                None => Err(ActError::StoreError(format!("cannot find proc id={id}"))),
             },
-            Err(_err) => None,
+            Err(err) => Err(ActError::StoreError(err.to_string())),
         }
     }
 
@@ -333,7 +330,7 @@ impl DataSet<Proc> for ProcSet {
         }
         if q.is_cond() {
             for id in find_by_idx(&self.name, q) {
-                if let Some(it) = self.find(&id) {
+                if let Ok(it) = self.find(&id) {
                     ret.push(it);
                 }
             }
@@ -376,7 +373,7 @@ impl DataSet<Proc> for ProcSet {
         let cf = db.cf_handle(&self.name).unwrap();
 
         match self.find(id) {
-            Some(item) => match db.delete_cf(cf, mode_key(id)) {
+            Ok(item) => match db.delete_cf(cf, mode_key(id)) {
                 Ok(_) => {
                     let idx = idx_key("pid", &item.pid);
                     db.delete_cf(cf, &idx).unwrap();
@@ -384,10 +381,7 @@ impl DataSet<Proc> for ProcSet {
                 }
                 Err(err) => Err(ActError::StoreError(err.to_string())),
             },
-            None => Err(ActError::StoreError(format!(
-                "can not find the key: {}",
-                id
-            ))),
+            Err(err) => Err(ActError::StoreError(err.to_string())),
         }
     }
 }
@@ -411,7 +405,7 @@ impl DataSet<Task> for TaskSet {
         }
     }
 
-    fn find(&self, id: &str) -> Option<Task> {
+    fn find(&self, id: &str) -> ActResult<Task> {
         db_debug!("local::Task.find({})", id);
         let db = db();
         let cf = db.cf_handle(&self.name).unwrap();
@@ -419,11 +413,11 @@ impl DataSet<Task> for TaskSet {
             Ok(opt) => match opt {
                 Some(data) => {
                     let task: Task = bincode::deserialize(data.as_ref()).unwrap();
-                    Some(task)
+                    Ok(task)
                 }
-                None => None,
+                None => Err(ActError::StoreError(format!("cannot find task id={id}"))),
             },
-            Err(_err) => None,
+            Err(err) => Err(ActError::StoreError(err.to_string())),
         }
     }
 
@@ -439,7 +433,7 @@ impl DataSet<Task> for TaskSet {
         }
         if q.is_cond() {
             for id in find_by_idx(&self.name, q) {
-                if let Some(it) = self.find(&id) {
+                if let Ok(it) = self.find(&id) {
                     ret.push(it);
                 }
             }
@@ -480,7 +474,7 @@ impl DataSet<Task> for TaskSet {
         let db = db();
         let cf = db.cf_handle(&self.name).unwrap();
         match self.find(id) {
-            Some(item) => match db.delete_cf(cf, mode_key(id)) {
+            Ok(item) => match db.delete_cf(cf, mode_key(id)) {
                 Ok(_) => {
                     let idx = idx_key("pid", &item.pid);
                     db.delete_cf(cf, &idx).unwrap();
@@ -488,10 +482,7 @@ impl DataSet<Task> for TaskSet {
                 }
                 Err(err) => Err(ActError::StoreError(err.to_string())),
             },
-            None => Err(ActError::StoreError(format!(
-                "can not find the key: {}",
-                id
-            ))),
+            Err(err) => Err(ActError::StoreError(err.to_string())),
         }
     }
 }
@@ -515,7 +506,7 @@ impl DataSet<Message> for MessageSet {
         }
     }
 
-    fn find(&self, id: &str) -> Option<Message> {
+    fn find(&self, id: &str) -> ActResult<Message> {
         db_debug!("local::Message.find({})", id);
         let db = db();
         let cf = db.cf_handle(&self.name).unwrap();
@@ -523,11 +514,11 @@ impl DataSet<Message> for MessageSet {
             Ok(opt) => match opt {
                 Some(data) => {
                     let msg: Message = bincode::deserialize(data.as_ref()).unwrap();
-                    Some(msg)
+                    Ok(msg)
                 }
-                None => None,
+                None => Err(ActError::StoreError(format!("cannot find message id={id}"))),
             },
-            Err(_err) => None,
+            Err(err) => Err(ActError::StoreError(err.to_string())),
         }
     }
 
@@ -543,7 +534,7 @@ impl DataSet<Message> for MessageSet {
         }
         if q.is_cond() {
             for id in find_by_idx(&self.name, q) {
-                if let Some(it) = self.find(&id) {
+                if let Ok(it) = self.find(&id) {
                     ret.push(it);
                 }
             }
@@ -587,7 +578,7 @@ impl DataSet<Message> for MessageSet {
         let db = db();
         let cf = db.cf_handle(&self.name).unwrap();
         match self.find(id) {
-            Some(item) => match db.delete_cf(cf, mode_key(id)) {
+            Ok(item) => match db.delete_cf(cf, mode_key(id)) {
                 Ok(_) => {
                     let idx = idx_key("pid", &item.pid);
                     db.delete_cf(cf, &idx).unwrap();
@@ -595,10 +586,7 @@ impl DataSet<Message> for MessageSet {
                 }
                 Err(err) => Err(ActError::StoreError(err.to_string())),
             },
-            None => Err(ActError::StoreError(format!(
-                "can not find the key: {}",
-                id
-            ))),
+            Err(err) => Err(ActError::StoreError(err.to_string())),
         }
     }
 }

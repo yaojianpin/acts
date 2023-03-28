@@ -6,4 +6,4 @@ mod task;
 pub use message::Message;
 pub use model::Model;
 pub use proc::Proc;
-pub use task::{Tag, Task};
+pub use task::Task;
