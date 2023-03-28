@@ -183,7 +183,7 @@ impl DataSet<Model> for ModelSet {
         })
     }
     fn update(&self, model: &Model) -> ActResult<bool> {
-        debug!("sqlite.Model.update({})", proc.id);
+        debug!("sqlite.Model.update({})", model.id);
         run(async {
             let pool = db();
             let sql = sqlx::query(r#"update act_model set model = $1, ver = $2 where id=$3"#)

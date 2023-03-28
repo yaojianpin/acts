@@ -10,7 +10,7 @@ pub mod builder;
 
 pub use act::Act;
 pub use branch::Branch;
-pub use info::{ModelInfo, ProcInfo, TaskInfo};
+pub use info::{MessageInfo, ModelInfo, ProcInfo, TaskInfo};
 pub use job::Job;
 pub use state::State;
 pub use step::{Action, Step, Subject};

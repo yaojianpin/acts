@@ -1,4 +1,4 @@
-use crate::{sch::Scheduler, store::Store, ActResult, Message, ModelInfo, ProcInfo, TaskInfo};
+use crate::{sch::Scheduler, store::Store, ActResult, MessageInfo, ModelInfo, ProcInfo, TaskInfo};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -82,11 +82,11 @@ impl Manager {
         }
     }
 
-    pub fn messages(&self, pid: &str) -> ActResult<Vec<Message>> {
+    pub fn messages(&self, pid: &str) -> ActResult<Vec<MessageInfo>> {
         match self.store.messages(pid) {
-            Ok(tasks) => {
+            Ok(messages) => {
                 let mut ret = Vec::new();
-                for t in tasks {
+                for t in messages {
                     ret.push(t.into());
                 }
 

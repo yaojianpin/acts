@@ -61,7 +61,7 @@ impl Cache {
             let cache = self.clone();
             let emitter = engine.emitter();
             emitter.on_task(move |task: &Task, data: &EventData| {
-                debug!("sch::cache::on_task: tid={}, data={}", task.tid(), data);
+                debug!("sch::cache::on_task: tid={}, data={}", task.tid, data);
                 if let Some(store) = &*cache.store.read().unwrap() {
                     if data.action == EventAction::Create {
                         store.create_task(task);

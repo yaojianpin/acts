@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    store::{Model, Proc, Task},
+    store::{Message, Model, Proc, Task},
     ActError, ActResult, Workflow,
 };
 
@@ -24,6 +24,17 @@ pub struct TaskInfo {
     pub state: String,
     pub start_time: i64,
     pub end_time: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct MessageInfo {
+    pub id: String,
+    pub pid: String,
+    pub tid: String,
+    pub create_time: i64,
+    pub update_time: i64,
+    pub uid: Option<String>,
+    pub state: u8,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -86,6 +97,20 @@ impl From<Task> for TaskInfo {
             state: t.state.into(),
             start_time: t.start_time,
             end_time: t.end_time,
+        }
+    }
+}
+
+impl From<Message> for MessageInfo {
+    fn from(m: Message) -> Self {
+        Self {
+            id: m.id,
+            pid: m.pid,
+            tid: m.tid,
+            state: m.state.into(),
+            create_time: m.create_time,
+            update_time: m.update_time,
+            uid: if m.uid.is_empty() { Some(m.uid) } else { None },
         }
     }
 }

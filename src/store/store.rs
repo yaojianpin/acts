@@ -84,14 +84,14 @@ impl Store {
     }
 
     pub fn models(&self, cap: usize) -> ActResult<Vec<Model>> {
-        debug!("store::load_models({})", model.id);
+        debug!("store::models({})", cap);
         let query = Query::new().set_limit(cap);
         let models = self.base().models();
         models.query(&query)
     }
 
     pub fn model(&self, id: &str) -> ActResult<Model> {
-        debug!("store::create_model({})", model.id);
+        debug!("store::create_model({})", id);
         let models = self.base().models();
         models.find(&id)
     }
@@ -139,12 +139,12 @@ impl Store {
     }
 
     pub fn create_proc(&self, proc: &Proc) -> ActResult<bool> {
-        debug!("store::create_proc({})", proc.pid());
+        debug!("store::create_proc({})", proc.pid);
         self.base().procs().create(proc)
     }
 
     pub fn update_proc(&self, proc: &Proc) -> ActResult<bool> {
-        debug!("store::update_proc({})", proc.pid());
+        debug!("store::update_proc({})", proc.pid);
         let procs = self.base().procs();
         procs.update(&proc)
     }
