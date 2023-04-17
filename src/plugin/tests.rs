@@ -1,4 +1,4 @@
-use crate::{plugin, ActPlugin, Engine, Message, State, Workflow};
+use crate::{event::Message, plugin, ActPlugin, Engine, State, Workflow};
 use std::sync::{Arc, Mutex};
 
 #[test]

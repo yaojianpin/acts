@@ -1,6 +1,7 @@
 use crate::{
-    sch::{event::EventData, ActionOptions, Proc, Scheduler},
-    Emitter, Message, State, TaskState, UserMessage, Workflow,
+    event::{ActionOptions, Emitter, EventData, Message, UserMessage},
+    sch::{Proc, Scheduler},
+    Engine, State, TaskState, Workflow,
 };
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -15,10 +16,10 @@ async fn task_state() {
 #[tokio::test]
 async fn task_start() {
     let mut workflow = create_simple_workflow();
-    let (proc, _scher, emitter) = create_proc(&mut workflow, "w1");
+    let (proc, scher, emitter) = create_proc(&mut workflow, "w1");
 
-    proc.start();
-    emitter.on_proc(|proc: &Proc, _data: &EventData| {
+    proc.start(&scher);
+    emitter.on_proc(|proc: &Arc<Proc>, _data: &EventData| {
         assert_eq!(proc.state(), TaskState::Running);
     });
 }
@@ -42,7 +43,7 @@ async fn task_complete() {
         *r.lock().unwrap() = true;
         s.close();
     });
-    proc.start();
+    proc.start(&scher);
     scher.event_loop().await;
     assert!(*ret.lock().unwrap());
 }
@@ -74,7 +75,7 @@ async fn task_cancel() {
         *count += 1;
     });
 
-    proc.start();
+    proc.start(&scher);
     scher.event_loop().await;
     assert!(*ret.lock().unwrap());
 }
@@ -113,7 +114,7 @@ async fn task_back() {
         *count += 1;
     });
 
-    proc.start();
+    proc.start(&scher);
     scher.event_loop().await;
     assert!(*ret.lock().unwrap());
 }
@@ -142,9 +143,10 @@ async fn task_abort() {
         *r.lock().unwrap() = w.state.is_abort();
         s2.close();
     });
-    proc.start();
+    proc.start(&scher);
     scher.event_loop().await;
-    assert!(*ret.lock().unwrap());
+    let result = *ret.lock().unwrap();
+    assert!(result);
 }
 
 #[tokio::test]
@@ -171,18 +173,19 @@ async fn task_submit() {
         *r.lock().unwrap() = w.state.is_success();
         s2.close();
     });
-    proc.start();
+    proc.start(&scher);
     scher.event_loop().await;
     assert!(*ret.lock().unwrap());
 }
 
-fn create_proc(workflow: &mut Workflow, pid: &str) -> (Proc, Arc<Scheduler>, Arc<Emitter>) {
-    let scher = Arc::new(Scheduler::new());
+fn create_proc(workflow: &mut Workflow, pid: &str) -> (Arc<Proc>, Arc<Scheduler>, Arc<Emitter>) {
+    let engine = Engine::new();
+    let scher = engine.scher();
     let proc = scher.create_raw_proc(pid, workflow);
 
-    let emitter = Arc::new(Emitter::new(&scher));
+    let emitter = scher.emitter();
 
-    (proc.clone(), scher, emitter)
+    (Arc::new(proc), scher, emitter)
 }
 
 fn create_simple_workflow() -> Workflow {

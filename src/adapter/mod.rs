@@ -1,10 +1,7 @@
-use crate::{
-    debug,
-    store::{DataSet, Message, Model, Proc, Task},
-    ActError, ActResult, Context, Engine, ShareLock, Step,
-};
+use crate::{sch::Context, store::StoreAdapter, ActError, ActResult, Engine, ShareLock, Step};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
+use tracing::debug;
 
 mod rule;
 
@@ -18,6 +15,8 @@ pub fn init(engine: &Engine) {
     engine
         .adapter()
         .register_some_rule("rate", rule::Rate::default());
+
+    // engine.adapter().set_store_adapter(name, store)
 }
 
 pub trait OrdRule: Send + Sync {
@@ -108,43 +107,6 @@ pub trait RoleAdapter: Send + Sync {
     fn role(&self, name: &str) -> Vec<String>;
 }
 
-/// Store adapter trait
-/// Used to implement custom storage
-///
-/// # Example
-/// ```no_run
-/// use acts::{store::{Model, Proc, Task, Message, DataSet}, StoreAdapter};
-/// use std::sync::Arc;
-/// struct TestStore;
-/// impl StoreAdapter for TestStore {
-///
-///     fn models(&self) -> Arc<dyn DataSet<Model>> {
-///         todo!()
-///     }
-///     fn procs(&self) -> Arc<dyn DataSet<Proc>> {
-///         todo!()
-///     }
-///     fn tasks(&self) -> Arc<dyn DataSet<Task>> {
-///         todo!()
-///     }
-///     fn messages(&self) -> Arc<dyn DataSet<Message>> {
-///         todo!()
-///     }
-///     fn init(&self) {}
-///     fn flush(&self) {}
-/// }
-/// ```
-pub trait StoreAdapter: Send + Sync {
-    fn init(&self);
-
-    fn models(&self) -> Arc<dyn DataSet<Model>>;
-    fn procs(&self) -> Arc<dyn DataSet<Proc>>;
-    fn tasks(&self) -> Arc<dyn DataSet<Task>>;
-    fn messages(&self) -> Arc<dyn DataSet<Message>>;
-
-    fn flush(&self);
-}
-
 #[derive(Clone)]
 pub struct Adapter {
     role: ShareLock<Option<Arc<dyn RoleAdapter>>>,
@@ -180,8 +142,8 @@ impl Adapter {
         debug!("set_rule_adapter: {}", _name);
         *self.rule.write().unwrap() = Some(Arc::new(rule));
     }
-    pub fn set_store_adapter<STORE: StoreAdapter + 'static>(&self, _name: &str, store: STORE) {
-        debug!("set_store_adapter: {}", _name);
+    pub fn set_store_adapter<STORE: StoreAdapter + 'static>(&self, store: STORE) {
+        debug!("set_store_adapter");
         *self.store.write().unwrap() = Some(Arc::new(store));
     }
 

@@ -1,5 +1,10 @@
-use crate::ActResult;
 use std::collections::HashMap;
+
+#[derive(Debug)]
+pub struct DbKey {
+    pub name: Box<[u8]>,
+    pub value: Box<[u8]>,
+}
 
 #[derive(Debug)]
 pub struct Query {
@@ -10,10 +15,15 @@ pub struct Query {
 impl Query {
     pub fn new() -> Self {
         Query {
-            limit: 0,
+            limit: 100000, // default to a big number
             conds: HashMap::new(),
         }
     }
+
+    pub fn queries(&self) -> HashMap<String, String> {
+        self.conds.clone()
+    }
+
     pub fn push(mut self, key: &str, value: &str) -> Self {
         self.conds.insert(key.to_string(), value.to_string());
 
@@ -74,22 +84,4 @@ impl Query {
     pub fn is_cond(&self) -> bool {
         self.conds.len() > 0
     }
-
-    // fn convert(v: &ActValue) -> String {
-    //     let ret: String = serde_yaml::to_string(v).unwrap();
-    //     if v.is_string() {
-    //         return format!("'{}'", v.as_str().unwrap());
-    //     }
-
-    //     ret
-    // }
-}
-
-pub trait DataSet<T>: Send + Sync {
-    fn exists(&self, id: &str) -> bool;
-    fn find(&self, id: &str) -> ActResult<T>;
-    fn query(&self, query: &Query) -> ActResult<Vec<T>>;
-    fn create(&self, data: &T) -> ActResult<bool>;
-    fn update(&self, data: &T) -> ActResult<bool>;
-    fn delete(&self, id: &str) -> ActResult<bool>;
 }

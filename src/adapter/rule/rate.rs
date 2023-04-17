@@ -1,10 +1,11 @@
-use crate::{adapter::SomeRule, debug, ActError, ActResult, TaskState};
+use crate::{adapter::SomeRule, sch::Context, ActError, ActResult, TaskState};
+use tracing::debug;
 
 #[derive(Debug, Default)]
 pub struct Rate;
 
 impl SomeRule for Rate {
-    fn some(&self, _step: &crate::Step, ctx: &crate::Context) -> ActResult<bool> {
+    fn some(&self, _step: &crate::Step, ctx: &Context) -> ActResult<bool> {
         let acts = ctx.proc.children(&ctx.task);
         if acts.len() == 0 {
             return Ok(false);

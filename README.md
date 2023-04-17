@@ -28,7 +28,7 @@ use acts::{ActionOptions, Engine, Vars, State, Workflow};
 #[tokio::main]
 async fn main() {
     let engine = Engine::new();
-    engine.start();
+    engine.start().await;
 
     let text = include_str!("../examples/simple/model.yml");
     let mut workflow = Workflow::from_str(text).unwrap();

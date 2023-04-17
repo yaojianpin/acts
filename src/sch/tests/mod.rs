@@ -1,4 +1,3 @@
-mod event;
 mod proc;
 mod sch;
 mod state;

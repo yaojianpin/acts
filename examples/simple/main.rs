@@ -3,7 +3,7 @@ use acts::{ActionOptions, Engine, State, Vars, Workflow};
 #[tokio::main]
 async fn main() {
     let engine = Engine::new();
-    engine.start();
+    engine.start().await;
 
     let executor = engine.executor();
     let text = include_str!("./model.yml");
@@ -15,13 +15,7 @@ async fn main() {
 
     executor.deploy(&workflow).expect("deploy model");
     executor
-        .start(
-            &workflow.id,
-            ActionOptions {
-                biz_id: Some("w1".into()),
-                ..Default::default()
-            },
-        )
+        .start(&workflow.id, ActionOptions::default())
         .expect("start workflow");
 
     let e = engine.clone();

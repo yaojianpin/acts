@@ -17,7 +17,7 @@ async fn store() -> &'static LocalStore {
     STORE.get_or_init(init).await
 }
 
-// #[tokio::test]
+// #[tokio::test(flavor = "multi_thread" )]
 // async fn local_init() {
 //     let store = store().await;
 //     assert_eq!(store.is_initialized(), true);
@@ -36,7 +36,7 @@ async fn local_proc_create() {
         vars: "".to_string(),
     };
     store.procs().create(&proc).unwrap();
-    assert_eq!(store.procs().exists(&proc.id), true);
+    assert_eq!(store.procs().exists(&proc.id).unwrap(), true);
 }
 
 #[tokio::test]
@@ -104,7 +104,7 @@ async fn local_proc_delete() {
     store.procs().create(&proc).unwrap();
     store.procs().delete(&proc.id).unwrap();
 
-    assert_eq!(store.procs().exists(&proc.id), false);
+    assert_eq!(store.procs().exists(&proc.id).unwrap(), false);
 }
 
 #[tokio::test]
@@ -123,7 +123,7 @@ async fn local_task_create() {
         uid: "".to_string(),
     };
     tasks.create(&task).unwrap();
-    assert_eq!(tasks.exists(&task.id), true);
+    assert_eq!(tasks.exists(&task.id).unwrap(), true);
 }
 
 #[tokio::test]
@@ -193,7 +193,7 @@ async fn local_task_delete() {
     table.create(&task).unwrap();
     table.delete(&task.id).unwrap();
 
-    assert_eq!(table.exists(&task.id), false);
+    assert_eq!(table.exists(&task.id).unwrap(), false);
 }
 
 #[tokio::test]
@@ -212,7 +212,7 @@ async fn local_message_create() {
         update_time: 0,
     };
     table.create(&msg).unwrap();
-    assert_eq!(table.exists(&msg.id), true);
+    assert_eq!(table.exists(&msg.id).unwrap(), true);
 }
 
 #[tokio::test]
@@ -282,5 +282,5 @@ async fn local_message_delete() {
     table.create(&msg).unwrap();
     table.delete(&msg.id).unwrap();
 
-    assert_eq!(table.exists(&msg.id), false);
+    assert_eq!(table.exists(&msg.id).unwrap(), false);
 }

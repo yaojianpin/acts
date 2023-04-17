@@ -3,13 +3,11 @@
 #![doc = include_str!("../README.md")]
 
 mod adapter;
-mod emitter;
 mod engine;
 mod env;
 mod error;
-mod executor;
-mod extender;
-mod manager;
+pub mod event;
+mod export;
 mod model;
 mod options;
 mod plugin;
@@ -24,19 +22,18 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::RwLock;
 
-pub use adapter::{OrgAdapter, RoleAdapter, RuleAdapter, StoreAdapter};
-pub use emitter::Emitter;
+pub use adapter::{OrgAdapter, RoleAdapter, RuleAdapter};
 pub use engine::Engine;
 pub use error::ActError;
-pub use executor::Executor;
-pub use extender::Extender;
-pub use manager::Manager;
+pub use event::{ActionOptions, Message, UserMessage};
+pub use export::{Emitter, Executor, Extender, Manager};
 pub use model::*;
 pub use plugin::ActPlugin;
 pub use rhai::Map;
 pub use rhai::Module as ActModule;
-pub use sch::{ActionOptions, Context, Message, UserMessage};
+pub use sch::Context;
 pub use serde_yaml::Value as ActValue;
+pub use store::{DbSet, Query, StoreAdapter};
 pub type Vars = HashMap<String, ActValue>;
 pub type ActResult<T> = std::result::Result<T, ActError>;
 

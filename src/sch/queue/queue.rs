@@ -1,10 +1,10 @@
 use crate::{
-    debug,
     sch::{queue::Signal, Scheduler},
     Engine, ShareLock,
 };
 use std::sync::{Arc, RwLock};
 use tokio::{runtime::Handle, sync::mpsc, sync::Mutex};
+use tracing::debug;
 
 #[derive(Clone)]
 pub struct Queue {

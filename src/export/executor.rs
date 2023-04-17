@@ -1,10 +1,11 @@
 use crate::{
-    debug,
-    sch::{ActionOptions, Scheduler},
-    store::Store,
-    ActResult, ModelInfo, UserMessage, Workflow,
+    event::{ActionOptions, UserMessage},
+    sch::Scheduler,
+    store::{Store, StoreAdapter},
+    ActResult, ModelInfo, Workflow,
 };
 use std::sync::Arc;
+use tracing::info;
 
 #[derive(Clone)]
 pub struct Executor {
@@ -20,12 +21,12 @@ impl Executor {
         }
     }
 
-    pub fn deploy(&self, workflow: &Workflow) -> ActResult<bool> {
-        self.store.deploy(&workflow)
+    pub fn deploy(&self, model: &Workflow) -> ActResult<bool> {
+        self.store.deploy(model)
     }
 
     pub fn start(&self, id: &str, options: ActionOptions) -> ActResult<bool> {
-        let model: ModelInfo = self.store.model(id)?.into();
+        let model: ModelInfo = self.store.models().find(id)?.into();
         let w = model.workflow()?;
         self.scher.start(&w, options)
     }
@@ -57,7 +58,7 @@ impl Executor {
         uid: &str,
         options: Option<ActionOptions>,
     ) -> ActResult<()> {
-        debug!(
+        info!(
             "do_action:{} action={} uid={} options={:?}",
             pid, action, uid, options
         );

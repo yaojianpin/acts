@@ -1,9 +1,9 @@
 use crate::{
     sch::NodeKind,
-    store::{data, DataSet, Store, StoreKind},
-    utils, Engine, StoreAdapter, TaskState, Vars, Workflow,
+    store::{data, DbSet, Store, StoreKind},
+    utils, Query, StoreAdapter, TaskState, Workflow,
 };
-use data::{Proc, Task};
+use data::{Message, Proc, Task};
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
@@ -13,17 +13,13 @@ async fn init() -> Store {
     s
 }
 
-async fn store(engine: &Engine) -> &'static Store {
-    let store = STORE.get_or_init(init).await;
-    store.init(&engine);
-
-    store
+async fn store() -> &'static Store {
+    STORE.get_or_init(init).await
 }
 
 #[tokio::test]
 async fn store_local() {
-    let engine = Engine::new();
-    let store = store(&engine).await;
+    let store = Store::new();
 
     #[cfg(feature = "store")]
     assert_eq!(store.kind(), StoreKind::Local);
@@ -33,7 +29,7 @@ async fn store_local() {
 }
 
 // #[tokio::test]
-// async fn store_extern() {
+//  fn store_extern() {
 //     let engine = Engine::new();
 
 //     let test_store = TestStore;
@@ -45,18 +41,18 @@ async fn store_local() {
 
 #[tokio::test]
 async fn store_load() {
-    let engine = Engine::new();
-    let store = store(&engine).await;
+    let store = store().await;
 
     let prefix = utils::shortid();
     for _ in 0..100 {
         let id = format!("{}_{}", prefix, utils::longid());
         let workflow = create_workflow();
         let proc = create_proc(&id, TaskState::None, &workflow);
-        store.create_proc(&proc).expect("create proc");
+        store.procs().create(&proc).expect("create proc");
     }
 
-    let procs = store.procs(10000).unwrap();
+    let q = Query::new().set_limit(10000);
+    let procs = store.procs().query(&q).unwrap();
     let procs = procs
         .iter()
         .filter(|it| it.pid.starts_with(&prefix))
@@ -66,8 +62,7 @@ async fn store_load() {
 
 #[tokio::test]
 async fn store_model_deploy() {
-    let engine = Engine::new();
-    let store = store(&engine).await;
+    let store = store().await;
     let workflow = create_workflow();
     let ok = store.deploy(&workflow).unwrap();
     assert_eq!(ok, true);
@@ -75,23 +70,21 @@ async fn store_model_deploy() {
 
 #[tokio::test]
 async fn store_model_deploy_ver_incr() {
-    let engine = Engine::new();
-    let store = store(&engine).await;
+    let store = store().await;
     let mut workflow = create_workflow();
     workflow.id = utils::longid();
     store.deploy(&workflow).unwrap();
-    let model = store.model(&workflow.id).unwrap();
+    let model = store.models().find(&workflow.id).unwrap();
 
     assert_eq!(model.ver, 1);
     store.deploy(&workflow).unwrap();
-    let model = store.model(&workflow.id).unwrap();
+    let model = store.models().find(&workflow.id).unwrap();
     assert_eq!(model.ver, 2);
 }
 
 #[tokio::test]
 async fn store_models() {
-    let engine = Engine::new();
-    let store = store(&engine).await;
+    let store = store().await;
 
     let mut workflow = create_workflow();
     workflow.id = utils::longid();
@@ -99,44 +92,43 @@ async fn store_models() {
 
     workflow.id = utils::longid();
     store.deploy(&workflow).unwrap();
-    let models = store.models(2).unwrap();
+
+    let q = Query::new().set_limit(2);
+    let models = store.models().query(&q).unwrap();
 
     assert_eq!(models.len(), 2);
 }
 
 #[tokio::test]
 async fn store_model_get() {
-    let engine = Engine::new();
-    let store = store(&engine).await;
+    let store = store().await;
     let workflow = create_workflow();
     store.deploy(&workflow).unwrap();
 
-    let model = store.model(&workflow.id).unwrap();
+    let model = store.models().find(&workflow.id).unwrap();
     assert_eq!(model.id, workflow.id);
 }
 
 #[tokio::test]
 async fn store_model_remove() {
-    let engine = Engine::new();
-    let store = store(&engine).await;
+    let store = store().await;
 
     let id = utils::longid();
     let mut workflow = create_workflow();
     workflow.id = id.clone();
     store.deploy(&workflow).unwrap();
 
-    let model = store.model(&id);
+    let model = store.models().find(&id);
     assert_eq!(model.is_ok(), true);
 
-    store.remove_model(&id).unwrap();
-    let model = store.model(&id);
+    store.models().delete(&id).unwrap();
+    let model = store.models().find(&id);
     assert_eq!(model.is_err(), true);
 }
 
 #[tokio::test]
 async fn store_model_deploy_id_error() {
-    let engine = Engine::new();
-    let store = store(&engine).await;
+    let store = store().await;
     let mut workflow = create_workflow();
     workflow.id = "".to_string();
     let result = store.deploy(&workflow);
@@ -146,71 +138,67 @@ async fn store_model_deploy_id_error() {
 
 #[tokio::test]
 async fn store_procs() {
-    let engine = Engine::new();
-    let store = store(&engine).await;
+    let store = store().await;
     let id = utils::longid();
     let workflow = create_workflow();
     let proc = create_proc(&id, TaskState::None, &workflow);
-    store.create_proc(&proc).expect("create proc");
+    store.procs().create(&proc).expect("create proc");
 
-    let procs = store.procs(1).unwrap();
-
+    let q = Query::new().set_limit(1);
+    let procs = store.procs().query(&q).unwrap();
     assert_eq!(procs.len(), 1);
 }
 
 #[tokio::test]
 async fn store_proc() {
-    let engine = Engine::new();
-    let store = store(&engine).await;
+    let store = store().await;
 
     let id = utils::longid();
     let workflow = create_workflow();
     let proc = create_proc(&id, TaskState::None, &workflow);
-    store.create_proc(&proc).expect("create proc");
-    let info = store.proc(&id).unwrap();
+    store.procs().create(&proc).expect("create proc");
+    let info = store.procs().find(&id).unwrap();
     assert_eq!(proc.pid, info.pid);
 }
 
 #[tokio::test]
 async fn store_proc_update() {
-    let engine = Engine::new();
-    let store = store(&engine).await;
+    let store = store().await;
 
     let id = utils::longid();
     let workflow = create_workflow();
     let mut proc = create_proc(&id, TaskState::None, &workflow);
 
-    store.create_proc(&proc).expect("create proc");
+    store.procs().create(&proc).expect("create proc");
 
     proc.state = TaskState::Running.to_string();
-    store.update_proc(&proc).expect("update proc");
+    store.procs().update(&proc).expect("update proc");
 
-    let p = store.proc(&proc.pid).unwrap();
+    let p = store.procs().find(&proc.pid).unwrap();
     assert_eq!(p.pid, proc.pid);
     assert_eq!(p.state, TaskState::Running.to_string());
 }
 
 #[tokio::test]
 async fn store_proc_remove() {
-    let engine = Engine::new();
-    let store = store(&engine).await;
+    let store = store().await;
 
     let id = utils::longid();
     let workflow = create_workflow();
     let proc = create_proc(&id, TaskState::None, &workflow);
 
-    store.create_proc(&proc).expect("create proc");
+    store.procs().create(&proc).expect("create proc");
 
-    let proc = store.proc(&id);
+    let proc = store.procs().find(&id);
     assert_eq!(proc.is_ok(), true);
 
-    store.remove_proc(&id).unwrap();
-    let proc = store.proc(&id);
+    store.procs().delete(&id).unwrap();
+    let proc = store.procs().find(&id);
     assert_eq!(proc.is_ok(), false);
 }
 
 // #[tokio::test]
-// async fn store_task_update() {
+//  fn store_task_update() {
 //     let engine = Engine::new();
 //     engine.start();
 
@@ -261,8 +249,7 @@ async fn store_proc_remove() {
 
 #[tokio::test]
 async fn store_task_create() {
-    let engine = Engine::new();
-    let store = store(&engine).await;
+    let store = store().await;
 
     let pid = utils::longid();
     let tid = utils::shortid();
@@ -279,15 +266,16 @@ async fn store_task_create() {
         uid: "".to_string(),
     };
 
-    store.create_task(&task).expect("create task");
-    let ret = store.task(&pid, &tid);
+    store.tasks().create(&task).expect("create task");
+
+    let id = utils::Id::new(&pid, &tid);
+    let ret = store.tasks().find(&id.id());
     assert!(ret.is_ok());
 }
 
 #[tokio::test]
 async fn store_task_update() {
-    let engine = Engine::new();
-    let store = store(&engine).await;
+    let store = store().await;
 
     let pid = utils::longid();
     let tid = utils::shortid();
@@ -304,19 +292,20 @@ async fn store_task_update() {
         uid: "".to_string(),
     };
 
-    store.create_task(&task).expect("create task");
-    let mut task = store.task(&pid, &tid).unwrap();
-    task.state = TaskState::Running.to_string();
-    store.update_task(&task).unwrap();
+    store.tasks().create(&task).expect("create task");
 
-    let task2 = store.task(&pid, &tid).unwrap();
+    let id = utils::Id::new(&pid, &tid);
+    let mut task = store.tasks().find(&id.id()).unwrap();
+    task.state = TaskState::Running.to_string();
+    store.tasks().update(&task).unwrap();
+
+    let task2 = store.tasks().find(&id.id()).unwrap();
     assert_eq!(task.state, task2.state);
 }
 
 #[tokio::test]
 async fn store_task_remove() {
-    let engine = Engine::new();
-    let store = store(&engine).await;
+    let store = store().await;
 
     let pid = utils::longid();
     let tid = utils::shortid();
@@ -333,9 +322,88 @@ async fn store_task_remove() {
         uid: "".to_string(),
     };
 
-    store.create_task(&task).expect("create task");
-    store.remove_task(&task.id).expect("remove proc");
-    let ret = store.task(&pid, &tid);
+    store.tasks().create(&task).expect("create task");
+    store.tasks().delete(&task.id).expect("remove proc");
+
+    let ret = store.tasks().find(&task.id);
+    assert!(ret.is_err());
+}
+
+#[tokio::test]
+async fn store_message_create() {
+    let store = store().await;
+
+    let id = utils::longid();
+    let time = utils::time::time();
+    let msg = Message {
+        id: id.clone(),
+        pid: "pid".to_string(),
+        tid: "tid".to_string(),
+        uid: "Tom".to_string(),
+        vars: "{}".to_string(),
+        create_time: time,
+        update_time: 0,
+        state: 0,
+    };
+
+    store.messages().create(&msg).expect("create message");
+    let ret = store.messages().find(&id).unwrap();
+    assert_eq!(ret.uid, "Tom");
+    assert_eq!(ret.vars, "{}");
+    assert_eq!(ret.create_time, time);
+}
+
+#[tokio::test]
+async fn store_message_update() {
+    let store = store().await;
+
+    let id = utils::longid();
+    let mut msg = Message {
+        id: id.clone(),
+        pid: "pid".to_string(),
+        tid: "tid".to_string(),
+        uid: "Tom".to_string(),
+        vars: "".to_string(),
+        create_time: 0,
+        update_time: 0,
+        state: 0,
+    };
+
+    store.messages().create(&msg).expect("create message");
+    msg.uid = "Job".to_string();
+    msg.vars = "vars".to_string();
+    msg.update_time = 1000;
+    let ret = store.messages().update(&msg);
+    let new_msg = store.messages().find(&id).unwrap();
+    assert!(ret.is_ok());
+    assert_eq!(new_msg.uid, "Job");
+    assert_eq!(new_msg.vars, "vars");
+    assert_eq!(new_msg.update_time, 1000);
+}
+
+#[tokio::test]
+async fn store_message_delete() {
+    let store = store().await;
+
+    let id = utils::longid();
+    let mut msg = Message {
+        id: id.clone(),
+        pid: "pid".to_string(),
+        tid: "tid".to_string(),
+        uid: "Tom".to_string(),
+        vars: "".to_string(),
+        create_time: 0,
+        update_time: 0,
+        state: 0,
+    };
+
+    store.messages().create(&msg).expect("create message");
+    msg.uid = "Job".to_string();
+    msg.vars = "vars".to_string();
+    msg.update_time = 1000;
+    let ret = store.messages().delete(&id);
+    assert!(ret.is_ok());
+    let ret = store.messages().find(&id);
     assert!(ret.is_err());
 }
 
@@ -362,19 +430,19 @@ fn create_proc(id: &str, state: TaskState, model: &Workflow) -> Proc {
 struct TestStore;
 
 impl StoreAdapter for TestStore {
-    fn models(&self) -> Arc<dyn DataSet<data::Model>> {
+    fn models(&self) -> Arc<dyn DbSet<Item = data::Model>> {
         todo!()
     }
 
-    fn procs(&self) -> Arc<dyn DataSet<data::Proc>> {
+    fn procs(&self) -> Arc<dyn DbSet<Item = data::Proc>> {
         todo!()
     }
 
-    fn tasks(&self) -> Arc<dyn DataSet<data::Task>> {
+    fn tasks(&self) -> Arc<dyn DbSet<Item = data::Task>> {
         todo!()
     }
 
-    fn messages(&self) -> Arc<dyn DataSet<data::Message>> {
+    fn messages(&self) -> Arc<dyn DbSet<Item = data::Message>> {
         todo!()
     }
 

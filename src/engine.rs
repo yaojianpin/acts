@@ -1,19 +1,19 @@
 use crate::{
     adapter::{self, Adapter},
-    executor::Executor,
-    extender::Extender,
-    manager::Manager,
+    export::{Emitter, Executor, Extender, Manager},
     options::Options,
     plugin::{self},
     sch::Scheduler,
     store::Store,
-    utils, Emitter,
+    utils,
 };
+use once_cell::sync::OnceCell;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::Sender;
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Registry};
+use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Registry};
 
-static IS_GLOBAL_LOG: Mutex<bool> = Mutex::new(false);
+static LOGGER: OnceCell<bool> = OnceCell::new();
+static STORE: OnceCell<Arc<Store>> = OnceCell::new();
 
 /// Workflow Engine
 ///
@@ -54,9 +54,9 @@ static IS_GLOBAL_LOG: Mutex<bool> = Mutex::new(false);
 pub struct Engine {
     scher: Arc<Scheduler>,
     adapter: Arc<Adapter>,
-    emitter: Arc<Emitter>,
     executor: Arc<Executor>,
     manager: Arc<Manager>,
+    emitter: Arc<Emitter>,
     extender: Arc<Extender>,
     store: Arc<Store>,
     signal: Arc<Mutex<Option<Sender<i32>>>>,
@@ -70,20 +70,26 @@ impl Engine {
     }
 
     fn new_with(config: &Options) -> Self {
-        let mut v = IS_GLOBAL_LOG.lock().unwrap();
-        if *v == false {
-            Registry::default().with(fmt::layer()).init();
-            *v = true;
-        }
+        let _ = LOGGER.get_or_init(|| {
+            // let file_appender = tracing_appender::rolling::hourly("log", "acts");
+            // let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
+            // tracing_subscriber::fmt().with_writer(non_blocking).init();
+            Registry::default()
+                .with(fmt::layer())
+                .with(EnvFilter::from_default_env())
+                .init();
 
-        let scher = Arc::new(Scheduler::new_with(config));
-        let store = Arc::new(Store::new());
+            true
+        });
+
+        let scher = Scheduler::new_with(config);
+        let store = STORE.get_or_init(|| Arc::new(Store::new()));
         let engine = Engine {
             scher: scher.clone(),
             adapter: Arc::new(Adapter::new()),
             executor: Arc::new(Executor::new(&scher, &store)),
-            emitter: Arc::new(Emitter::new(&scher)),
             manager: Arc::new(Manager::new(&scher, &store)),
+            emitter: Arc::new(Emitter::new(&scher)),
             extender: Arc::new(Extender::new()),
             store: store.clone(),
 
@@ -127,11 +133,11 @@ impl Engine {
     /// #[tokio::main]
     /// async fn main() {
     ///     let engine = Engine::new();
-    ///     engine.start();
+    ///     engine.start().await;
     /// }
     /// ```
-    pub fn start(&self) {
-        self.init();
+    pub async fn start(&self) {
+        self.init().await;
         let scher = self.scher();
         tokio::spawn(async move { scher.event_loop().await });
     }
@@ -181,11 +187,11 @@ impl Engine {
         self.store.clone()
     }
 
-    fn init(&self) {
+    async fn init(&self) {
         plugin::init(self);
         adapter::init(self);
-
-        self.scher.init(self);
+        self.store.init(self).await;
+        self.scher.init(self).await;
     }
 }
 

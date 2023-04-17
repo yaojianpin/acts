@@ -1,11 +1,11 @@
 use crate::{
-    debug,
-    store::{data::*, DataSet, Query},
-    ActError, ActResult, StoreAdapter,
+    store::{data::*, DbSet, Query, StoreAdapter},
+    ActError, ActResult,
 };
 use once_cell::sync::OnceCell;
 use sqlx::{sqlite::SqlitePoolOptions, Executor, Row, SqlitePool};
 use std::{fs::File, future::Future, path::Path, sync::Arc};
+use tracing::trace;
 
 const DATABASE_PATH: &str = "data/data.db";
 static DB: OnceCell<SqlitePool> = OnceCell::new();
@@ -74,19 +74,19 @@ impl StoreAdapter for SqliteStore {
     fn init(&self) {}
     fn flush(&self) {}
 
-    fn models(&self) -> Arc<dyn DataSet<Model>> {
+    fn models(&self) -> Arc<dyn DbSet<Item = Model>> {
         self.models.clone()
     }
 
-    fn procs(&self) -> Arc<dyn DataSet<Proc>> {
+    fn procs(&self) -> Arc<dyn DbSet<Item = Proc>> {
         self.procs.clone()
     }
 
-    fn tasks(&self) -> Arc<dyn DataSet<Task>> {
+    fn tasks(&self) -> Arc<dyn DbSet<Item = Task>> {
         self.tasks.clone()
     }
 
-    fn messages(&self) -> Arc<dyn DataSet<Message>> {
+    fn messages(&self) -> Arc<dyn DbSet<Item = Message>> {
         self.messages.clone()
     }
 }
@@ -94,9 +94,10 @@ impl StoreAdapter for SqliteStore {
 #[derive(Debug, Clone)]
 pub struct ModelSet;
 
-impl DataSet<Model> for ModelSet {
-    fn exists(&self, id: &str) -> bool {
-        debug!("sqlite.model.exists({})", id);
+impl DbSet for ModelSet {
+    type Item = Model;
+    fn exists(&self, id: &str) -> ActResult<bool> {
+        trace!("sqlite.model.exists({})", id);
         let pool = db();
         run(async {
             let row = sqlx::query(r#"select count(id) from act_model where id=$1"#)
@@ -105,12 +106,12 @@ impl DataSet<Model> for ModelSet {
                 .await
                 .unwrap();
             let count: i32 = row.get(0);
-            count > 0
+            Ok(count > 0)
         })
     }
 
     fn find(&self, id: &str) -> ActResult<Model> {
-        debug!("sqlite.Model.find({})", id);
+        trace!("sqlite.Model.find({})", id);
         run(async {
             let pool = db();
             match sqlx::query(
@@ -134,7 +135,7 @@ impl DataSet<Model> for ModelSet {
     }
 
     fn query(&self, q: &Query) -> ActResult<Vec<Model>> {
-        debug!("sqlite.Model.query({})", q.sql());
+        trace!("sqlite.Model.query({})", q.sql());
         run(async {
             let mut ret = Vec::new();
             let pool = db();
@@ -164,7 +165,7 @@ impl DataSet<Model> for ModelSet {
     }
 
     fn create(&self, model: &Model) -> ActResult<bool> {
-        debug!("sqlite.Model.create({})", model.id);
+        trace!("sqlite.Model.create({})", model.id);
         let model = model.clone();
         run(async move {
             let pool = db();
@@ -183,7 +184,7 @@ impl DataSet<Model> for ModelSet {
         })
     }
     fn update(&self, model: &Model) -> ActResult<bool> {
-        debug!("sqlite.Model.update({})", model.id);
+        trace!("sqlite.Model.update({})", model.id);
         run(async {
             let pool = db();
             let sql = sqlx::query(r#"update act_model set model = $1, ver = $2 where id=$3"#)
@@ -198,7 +199,7 @@ impl DataSet<Model> for ModelSet {
         })
     }
     fn delete(&self, id: &str) -> ActResult<bool> {
-        debug!("sqlite.Model.delete({})", id);
+        trace!("sqlite.Model.delete({})", id);
         run(async {
             let pool = db();
             let sql = sqlx::query(r#"delete from act_model where id=$1"#).bind(id);
@@ -213,9 +214,10 @@ impl DataSet<Model> for ModelSet {
 #[derive(Debug, Clone)]
 pub struct ProcSet;
 
-impl DataSet<Proc> for ProcSet {
-    fn exists(&self, id: &str) -> bool {
-        debug!("sqlite.proc.exists({})", id);
+impl DbSet for ProcSet {
+    type Item = Proc;
+    fn exists(&self, id: &str) -> ActResult<bool> {
+        trace!("sqlite.proc.exists({})", id);
         let pool = db();
         run(async {
             let row = sqlx::query(r#"select count(id) from act_proc where id=$1"#)
@@ -224,12 +226,12 @@ impl DataSet<Proc> for ProcSet {
                 .await
                 .unwrap();
             let count: i32 = row.get(0);
-            count > 0
+            Ok(count > 0)
         })
     }
 
     fn find(&self, id: &str) -> ActResult<Proc> {
-        debug!("sqlite.proc.find({})", id);
+        trace!("sqlite.proc.find({})", id);
         run(async {
             let pool = db();
             match sqlx::query(r#"select id, pid, state, model, vars, start_time, end_time from act_proc where id=$1"#)
@@ -254,7 +256,7 @@ impl DataSet<Proc> for ProcSet {
     }
 
     fn query(&self, q: &Query) -> ActResult<Vec<Proc>> {
-        debug!("sqlite.proc.query({})", q.sql());
+        trace!("sqlite.proc.query({})", q.sql());
         run(async {
             let mut ret = Vec::new();
             let pool = db();
@@ -286,7 +288,7 @@ impl DataSet<Proc> for ProcSet {
     }
 
     fn create(&self, proc: &Proc) -> ActResult<bool> {
-        debug!("sqlite.proc.create({})", proc.id);
+        trace!("sqlite.proc.create({})", proc.id);
         let proc = proc.clone();
         run(async move {
             let pool = db();
@@ -305,7 +307,7 @@ impl DataSet<Proc> for ProcSet {
         })
     }
     fn update(&self, proc: &Proc) -> ActResult<bool> {
-        debug!("sqlite.proc.update({})", proc.id);
+        trace!("sqlite.proc.update({})", proc.id);
         run(async {
             let pool = db();
             let sql = sqlx::query(r#"update act_proc set state = $1, vars = $2 where id=$3"#)
@@ -320,7 +322,7 @@ impl DataSet<Proc> for ProcSet {
         })
     }
     fn delete(&self, id: &str) -> ActResult<bool> {
-        debug!("sqlite.proc.delete({})", id);
+        trace!("sqlite.proc.delete({})", id);
         run(async {
             let pool = db();
             let sql = sqlx::query(r#"delete from act_proc where id=$1"#).bind(id);
@@ -335,9 +337,10 @@ impl DataSet<Proc> for ProcSet {
 #[derive(Debug, Clone)]
 pub struct TaskSet;
 
-impl DataSet<Task> for TaskSet {
-    fn exists(&self, id: &str) -> bool {
-        debug!("sqlite.task.exists({})", id);
+impl DbSet for TaskSet {
+    type Item = Task;
+    fn exists(&self, id: &str) -> ActResult<bool> {
+        trace!("sqlite.task.exists({})", id);
         let pool = db();
         run(async {
             let row = sqlx::query(r#"select count(id) from act_task where id=$1"#)
@@ -346,11 +349,11 @@ impl DataSet<Task> for TaskSet {
                 .await
                 .unwrap();
             let count: i32 = row.get(0);
-            count > 0
+            Ok(count > 0)
         })
     }
     fn find(&self, id: &str) -> ActResult<Task> {
-        debug!("sqlite.task.find({})", id);
+        trace!("sqlite.task.find({})", id);
         run(async {
             let pool = db();
             match sqlx::query(r#"select tag, id, pid, tid, state,start_time, end_time, uid from act_task where id=$1"#)
@@ -376,7 +379,7 @@ impl DataSet<Task> for TaskSet {
         })
     }
     fn query(&self, q: &Query) -> ActResult<Vec<Task>> {
-        debug!("sqlite.task.query({})", q.sql());
+        trace!("sqlite.task.query({})", q.sql());
         run(async {
             let mut ret = Vec::new();
             let pool = db();
@@ -411,7 +414,7 @@ impl DataSet<Task> for TaskSet {
     }
 
     fn create(&self, task: &Task) -> ActResult<bool> {
-        debug!("sqlite.task.create({})", task.id);
+        trace!("sqlite.task.create({})", task.id);
         let task = task.clone();
         run(async move {
             let pool = &*db();
@@ -435,7 +438,7 @@ impl DataSet<Task> for TaskSet {
         })
     }
     fn update(&self, task: &Task) -> ActResult<bool> {
-        debug!("sqlite.task.update({})", task.id);
+        trace!("sqlite.task.update({})", task.id);
         run(async {
             let pool = &*db();
             let sql = sqlx::query(r#"update act_task set state = $1, start_time = $2, end_time = $3, uid = $4, kind = $5, where id=$6"#)
@@ -453,7 +456,7 @@ impl DataSet<Task> for TaskSet {
         })
     }
     fn delete(&self, id: &str) -> ActResult<bool> {
-        debug!("sqlite.task.delete({})", id);
+        trace!("sqlite.task.delete({})", id);
         run(async {
             let pool = &*db();
             let sql = sqlx::query(r#"delete from act_task where id=$1"#).bind(id);
@@ -468,9 +471,10 @@ impl DataSet<Task> for TaskSet {
 #[derive(Debug, Clone)]
 pub struct MessageSet;
 
-impl DataSet<Message> for MessageSet {
-    fn exists(&self, id: &str) -> bool {
-        debug!("sqlite.message.exists({})", id);
+impl DbSet for MessageSet {
+    type Item = Message;
+    fn exists(&self, id: &str) -> ActResult<bool> {
+        trace!("sqlite.message.exists({})", id);
         let pool = &*db();
         run(async {
             let row = sqlx::query(r#"select count(id) from act_message where id=$1"#)
@@ -479,12 +483,12 @@ impl DataSet<Message> for MessageSet {
                 .await
                 .unwrap();
             let count: i32 = row.get(0);
-            count > 0
+            Ok(count > 0)
         })
     }
 
     fn find(&self, id: &str) -> ActResult<Message> {
-        debug!("sqlite.message.find({})", id);
+        trace!("sqlite.message.find({})", id);
         run(async {
             let pool = &*db();
             match sqlx::query(
@@ -510,7 +514,7 @@ impl DataSet<Message> for MessageSet {
     }
 
     fn query(&self, q: &Query) -> ActResult<Vec<Message>> {
-        debug!("sqlite.message.query({})", q.sql());
+        trace!("sqlite.message.query({})", q.sql());
         run(async {
             let mut ret = Vec::new();
             let pool = &*db();
@@ -544,7 +548,7 @@ impl DataSet<Message> for MessageSet {
     }
 
     fn create(&self, msg: &Message) -> ActResult<bool> {
-        debug!("sqlite.message.create({})", msg.id);
+        trace!("sqlite.message.create({})", msg.id);
         let msg = msg.clone();
         run(async move {
             let pool = &*db();
@@ -564,7 +568,7 @@ impl DataSet<Message> for MessageSet {
         })
     }
     fn update(&self, msg: &Message) -> ActResult<bool> {
-        debug!("sqlite.message.update({})", msg.id);
+        trace!("sqlite.message.update({})", msg.id);
         run(async {
             let pool = &*db();
             let sql = sqlx::query(r#"update act_message set uid = $1 where id=$2"#)
@@ -578,7 +582,7 @@ impl DataSet<Message> for MessageSet {
         })
     }
     fn delete(&self, id: &str) -> ActResult<bool> {
-        debug!("sqlite.message:delete({})", id);
+        trace!("sqlite.message:delete({})", id);
         run(async {
             let pool = &*db();
             let sql = sqlx::query(r#"delete from act_message where id=$1"#).bind(id);

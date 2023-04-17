@@ -1,9 +1,13 @@
-use crate::sch::{Proc, Task, UserMessage};
+use crate::{
+    event::UserMessage,
+    sch::{Proc, Task},
+};
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub enum Signal {
     Terminal,
-    Proc(Proc),
+    Proc(Arc<Proc>),
     Task(Task),
     Message(UserMessage),
 }

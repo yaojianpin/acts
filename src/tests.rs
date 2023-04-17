@@ -1,4 +1,9 @@
-use crate::{sch::TaskState, store, utils, ActPlugin, Engine, Message, Workflow};
+use crate::{
+    event::Message,
+    sch::TaskState,
+    store::{self, StoreAdapter},
+    utils, ActPlugin, Engine, Workflow,
+};
 use rhai::plugin::*;
 
 #[tokio::test]
@@ -10,14 +15,14 @@ async fn engine_start() {
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         e.close();
     });
-    engine.start();
+    engine.start().await;
     assert!(true);
 }
 
 #[tokio::test]
 async fn engine_start_async() {
     let engine = Engine::new();
-    engine.start();
+    engine.start().await;
     let e = engine.clone();
     tokio::spawn(async move {
         tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
@@ -64,7 +69,7 @@ async fn engine_register_module() {
 #[tokio::test]
 async fn engine_on_message() {
     let engine = Engine::new();
-    engine.start();
+    engine.start().await;
     let workflow = Workflow::new().with_id("m1").with_job(|job| {
         job.with_id("job1").with_step(|step| {
             step.with_subject(|sub| sub.with_matcher("any").with_users(r#"["a"]"#))
@@ -128,10 +133,10 @@ async fn engine_builder() {
 }
 
 #[tokio::test]
-async fn engine_executor_start_no_biz_id_error() {
+async fn engine_executor_start_no_biz_id() {
     let engine = Engine::new();
     let executor = engine.executor();
-    engine.start();
+    engine.start().await;
     let workflow = Workflow::new().with_id("m1").with_job(|job| {
         job.with_step(|step| {
             step.with_subject(|sub| sub.with_matcher("any").with_users(r#"["a"]"#))
@@ -145,14 +150,14 @@ async fn engine_executor_start_no_biz_id_error() {
             ..Default::default()
         },
     );
-    assert_eq!(result.is_err(), true);
+    assert_eq!(result.is_ok(), true);
 }
 
 #[tokio::test]
-async fn engine_executor_start_empty_biz_id_error() {
+async fn engine_executor_start_empty_biz_id() {
     let engine = Engine::new();
     let executor = engine.executor();
-    engine.start();
+    engine.start().await;
     let workflow = Workflow::new().with_id("m1").with_job(|job| {
         job.with_step(|step| {
             step.with_subject(|sub| sub.with_matcher("any").with_users(r#"["a"]"#))
@@ -166,14 +171,14 @@ async fn engine_executor_start_empty_biz_id_error() {
             ..Default::default()
         },
     );
-    assert_eq!(result.is_err(), true);
+    assert_eq!(result.is_ok(), true);
 }
 
 #[tokio::test]
 async fn engine_executor_start_dup_biz_id_error() {
     let engine = Engine::new();
     let executor = engine.executor();
-    engine.start();
+    engine.start().await;
 
     let biz_id = utils::longid();
     let model = Workflow::new().with_id("m1").with_job(|job| {
@@ -192,7 +197,7 @@ async fn engine_executor_start_dup_biz_id_error() {
         end_time: 0,
         vars: "".to_string(),
     };
-    store.create_proc(&proc).expect("create proc");
+    store.procs().create(&proc).expect("create proc");
     executor.deploy(&model).expect("fail to deploy workflow");
     let result = executor.start(
         &model.id,
@@ -207,7 +212,7 @@ async fn engine_executor_start_dup_biz_id_error() {
 #[tokio::test]
 async fn engine_manager_models() {
     let engine = Engine::new();
-    engine.start();
+    engine.start().await;
     let manager = engine.manager();
     let executor = engine.executor();
     let workflow = Workflow::new().with_id("m1").with_job(|job| {
@@ -224,7 +229,7 @@ async fn engine_manager_models() {
 #[tokio::test]
 async fn engine_manager_model() {
     let engine = Engine::new();
-    engine.start();
+    engine.start().await;
     let manager = engine.manager();
     let executor = engine.executor();
     let mut workflow = Workflow::new().with_id("m1").with_job(|job| {
@@ -242,7 +247,7 @@ async fn engine_manager_model() {
 #[tokio::test]
 async fn engine_manager_procs() {
     let engine = Engine::new();
-    engine.start();
+    engine.start().await;
     let manager = engine.manager();
     let workflow = Workflow::new().with_id("m1").with_job(|job| {
         job.with_step(|step| {
@@ -261,7 +266,7 @@ async fn engine_manager_procs() {
         end_time: 0,
         vars: "".to_string(),
     };
-    store.create_proc(&proc).expect("create proc");
+    store.procs().create(&proc).expect("create proc");
 
     let procs = manager.procs(100).expect("get procs");
     assert!(procs.len() > 0);
@@ -270,7 +275,7 @@ async fn engine_manager_procs() {
 #[tokio::test]
 async fn engine_manager_proc() {
     let engine = Engine::new();
-    engine.start();
+    engine.start().await;
     let manager = engine.manager();
     let biz_id = utils::longid();
     let workflow = Workflow::new().with_id("m1").with_job(|job| {
@@ -289,7 +294,7 @@ async fn engine_manager_proc() {
         end_time: 0,
         vars: "".to_string(),
     };
-    store.create_proc(&proc).expect("create proc");
+    store.procs().create(&proc).expect("create proc");
 
     let proc = manager.proc(&biz_id);
     assert_eq!(proc.is_ok(), true);

@@ -1,4 +1,3 @@
 mod cache;
-mod mediator;
+mod store_ex;
 pub use cache::Cache;
-pub use mediator::StoreMediator;

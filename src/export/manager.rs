@@ -1,4 +1,9 @@
-use crate::{sch::Scheduler, store::Store, ActResult, MessageInfo, ModelInfo, ProcInfo, TaskInfo};
+use crate::{
+    sch::Scheduler,
+    store::{Store, StoreAdapter},
+    utils::Id,
+    ActResult, MessageInfo, ModelInfo, ProcInfo, Query, TaskInfo,
+};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -16,7 +21,8 @@ impl Manager {
     }
 
     pub fn models(&self, limit: usize) -> ActResult<Vec<ModelInfo>> {
-        match self.store.models(limit) {
+        let query = Query::new().set_limit(limit);
+        match self.store.models().query(&query) {
             Ok(models) => {
                 let mut ret = Vec::new();
                 for m in models {
@@ -30,18 +36,19 @@ impl Manager {
     }
 
     pub fn model(&self, id: &str) -> ActResult<ModelInfo> {
-        match self.store.model(id) {
+        match self.store.models().find(id) {
             Ok(m) => Ok(m.into()),
             Err(err) => Err(err),
         }
     }
 
     pub fn remove(&self, model_id: &str) -> ActResult<bool> {
-        self.store.remove_model(model_id)
+        self.store.models().delete(model_id)
     }
 
     pub fn procs(&self, cap: usize) -> ActResult<Vec<ProcInfo>> {
-        match self.store.procs(cap) {
+        let query = Query::new().set_limit(cap);
+        match self.store.procs().query(&query) {
             Ok(ref procs) => {
                 let mut ret = Vec::new();
                 for t in procs {
@@ -55,14 +62,15 @@ impl Manager {
     }
 
     pub fn proc(&self, pid: &str) -> ActResult<ProcInfo> {
-        match self.store.proc(pid) {
+        match self.store.procs().find(pid) {
             Ok(ref proc) => Ok(proc.into()),
             Err(err) => Err(err),
         }
     }
 
     pub fn tasks(&self, pid: &str) -> ActResult<Vec<TaskInfo>> {
-        match self.store.tasks(pid) {
+        let query = Query::new().push("pid", pid);
+        match self.store.tasks().query(&query) {
             Ok(tasks) => {
                 let mut ret = Vec::new();
                 for t in tasks {
@@ -76,14 +84,16 @@ impl Manager {
     }
 
     pub fn task(&self, pid: &str, tid: &str) -> ActResult<TaskInfo> {
-        match self.store.task(pid, tid) {
+        let id = Id::new(pid, tid);
+        match self.store.tasks().find(&id.id()) {
             Ok(t) => Ok(t.into()),
             Err(err) => Err(err),
         }
     }
 
     pub fn messages(&self, pid: &str) -> ActResult<Vec<MessageInfo>> {
-        match self.store.messages(pid) {
+        let query = Query::new().push("pid", pid);
+        match self.store.messages().query(&query) {
             Ok(messages) => {
                 let mut ret = Vec::new();
                 for t in messages {

@@ -76,9 +76,8 @@ impl ActionOptions {
 
 impl Message {
     pub fn new(pid: &str, tid: &str, uid: Option<String>, vars: Vars) -> Self {
-        let id = utils::Id::new(pid, tid);
         Self {
-            id: id.id(),
+            id: format!("{pid}:{tid}"),
             pid: pid.to_string(),
             tid: tid.to_string(),
             uid,

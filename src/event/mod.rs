@@ -1,9 +1,13 @@
 use crate::{TaskState, Vars};
 
-mod hub;
+pub mod consts;
+mod emitter;
 mod message;
 
-pub use hub::{Event, EventHub};
+#[cfg(test)]
+mod tests;
+
+pub use emitter::{Emitter, Event};
 pub use message::{ActionOptions, Message, MessageState, UserMessage};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -41,7 +45,7 @@ impl std::fmt::Display for EventAction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             EventAction::Create => f.write_str("create"),
-            EventAction::Next => f.write_str("complete"),
+            EventAction::Next => f.write_str("next"),
             EventAction::Back => f.write_str("back"),
             EventAction::Cancel => f.write_str("cancel"),
             EventAction::Error => f.write_str("error"),

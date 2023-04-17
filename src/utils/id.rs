@@ -54,6 +54,7 @@ impl<'a> Id<'a> {
         self.pid
     }
 
+    #[allow(unused)]
     pub fn tid(&self) -> &'a str {
         self.tid
     }

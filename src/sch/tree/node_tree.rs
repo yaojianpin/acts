@@ -2,11 +2,12 @@ use super::{
     node::{Node, NodeData},
     utils,
 };
-use crate::{debug, ActError, ShareLock, Workflow};
+use crate::{ActError, ShareLock, Workflow};
 use std::{
     collections::HashMap,
     sync::{Arc, RwLock, Weak},
 };
+use tracing::debug;
 
 #[derive(Clone)]
 pub struct NodeTree {

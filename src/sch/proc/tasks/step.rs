@@ -81,7 +81,7 @@ impl Step {
                     .map(|c| c.clone().into_string().unwrap())
                     .collect();
                 if let Some(ord) = ord {
-                    match ctx.proc.scher.ord(&ord, &users) {
+                    match ctx.scher.ord(&ord, &users) {
                         Ok(data) => users = data,
                         Err(err) => {
                             ctx.task.set_state(&TaskState::Fail(err.into()));

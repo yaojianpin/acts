@@ -1,7 +1,6 @@
 mod convert;
 mod id;
 pub(crate) mod log;
-mod macros;
 pub(crate) mod time;
 pub(crate) mod vars;
 

@@ -21,6 +21,7 @@ pub struct TaskInfo {
     pub pid: String,
     pub tid: String,
     pub nid: String,
+    pub kind: String,
     pub state: String,
     pub start_time: i64,
     pub end_time: i64,
@@ -94,6 +95,7 @@ impl From<Task> for TaskInfo {
             pid: t.pid,
             tid: t.tid,
             nid: t.nid,
+            kind: t.kind,
             state: t.state.into(),
             start_time: t.start_time,
             end_time: t.end_time,
@@ -110,7 +112,7 @@ impl From<Message> for MessageInfo {
             state: m.state.into(),
             create_time: m.create_time,
             update_time: m.update_time,
-            uid: if m.uid.is_empty() { Some(m.uid) } else { None },
+            uid: if !m.uid.is_empty() { Some(m.uid) } else { None },
         }
     }
 }

@@ -1,13 +1,15 @@
 use crate::{
-    debug,
+    env::VirtualMachine,
+    event::EventAction,
     sch::{
         tree::{Node, NodeData},
-        ActId, ActState, EventAction, TaskState,
+        ActId, ActState, Context, Proc, TaskState,
     },
-    utils, ActTask, Context, ShareLock,
+    utils, ActTask, ShareLock, Vars,
 };
 use async_trait::async_trait;
 use std::sync::{Arc, RwLock};
+use tracing::debug;
 
 #[derive(Clone)]
 pub struct Task {
@@ -25,6 +27,8 @@ pub struct Task {
 
     // previous tid
     prev: ShareLock<Option<String>>,
+
+    vm: Arc<VirtualMachine>,
 }
 
 impl std::fmt::Debug for Task {
@@ -43,9 +47,9 @@ impl std::fmt::Debug for Task {
 }
 
 impl Task {
-    pub fn new(pid: &str, tid: &str, node: Arc<Node>) -> Self {
+    pub fn new(proc: &Proc, tid: &str, node: Arc<Node>) -> Self {
         let task = Self {
-            pid: pid.to_string(),
+            pid: proc.pid(),
             tid: tid.to_string(),
             node: node.clone(),
             state: Arc::new(RwLock::new(TaskState::None)),
@@ -55,6 +59,9 @@ impl Task {
 
             prev: Arc::new(RwLock::new(None)),
             children: Arc::new(RwLock::new(Vec::new())),
+
+            // vm refrence
+            vm: proc.vm(),
         };
 
         task
@@ -117,6 +124,19 @@ impl Task {
     pub fn children(&self) -> Vec<String> {
         let ret = self.children.read().unwrap();
         ret.clone()
+    }
+
+    pub fn vars(&self) -> Vars {
+        let mut vars = Vars::new();
+        match &self.node.data {
+            NodeData::Workflow(workflow) => vars = workflow.env.clone(),
+            NodeData::Job(job) => vars = job.env.clone(),
+            NodeData::Branch(branch) => vars = branch.env.clone(),
+            NodeData::Step(step) => vars = step.env.clone(),
+            NodeData::Act(_act) => {}
+        }
+
+        utils::fill_vars(&self.vm, &vars)
     }
 
     pub(crate) fn set_prev(&self, prev: Option<String>) {
@@ -182,8 +202,9 @@ impl Task {
                     ctx.task.post(ctx);
 
                     let mut parent = ctx.task.parent(ctx);
-                    while let Some(task) = parent.clone() {
-                        let ctx = &ctx.proc.create_context(task.clone());
+                    while let Some(task) = &parent.clone() {
+                        let proc = ctx.proc.clone();
+                        let ctx = &proc.create_context(&ctx.scher, task);
                         task.post(ctx);
                         if !task.state().is_completed() {
                             break;
@@ -308,7 +329,8 @@ impl Task {
                     // abort all tasks
                     let mut parent = ctx.task.parent(ctx);
                     while let Some(task) = parent {
-                        let ctx = &ctx.proc.create_context(task.clone());
+                        let proc = ctx.proc.clone();
+                        let ctx = proc.create_context(&ctx.scher, &task);
                         ctx.task.set_state(&state);
                         ctx.dispatch(&ctx.task, EventAction::Abort);
 
@@ -322,7 +344,7 @@ impl Task {
                             }
                         }
 
-                        parent = task.parent(ctx);
+                        parent = task.parent(&ctx);
                     }
                 }
                 EventAction::Skip => {}
@@ -337,10 +359,7 @@ impl Task {
         ctx.proc.set_state(&state);
         ctx.proc.set_end_time(utils::time::time());
         let state = ctx.proc.workflow_state();
-        ctx.proc.scher.evt().on_error(&state);
-
-        // on_complete used for all complete state including error;
-        ctx.proc.scher.evt().on_complete(&state);
+        ctx.scher.emitter().dispatch_error(&state);
     }
 }
 

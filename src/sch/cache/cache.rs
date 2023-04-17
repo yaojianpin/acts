@@ -1,24 +1,22 @@
 use crate::{
-    debug,
-    sch::{
-        cache::StoreMediator,
-        event::{EventAction, EventData},
-        Message, Proc, Scheduler, Task,
-    },
-    utils::{self},
-    ActResult, Engine, ShareLock,
+    event::{EventAction, EventData, Message},
+    sch::{Proc, Scheduler, Task},
+    store::{self, Store},
+    utils::{self, Id},
+    ActResult, Engine, ShareLock, StoreAdapter,
 };
 use lru::LruCache;
 use std::{
     num::NonZeroUsize,
     sync::{Arc, RwLock},
 };
+use tracing::debug;
 
 #[derive(Clone)]
 pub struct Cache {
-    procs: ShareLock<LruCache<String, Proc>>,
+    procs: ShareLock<LruCache<String, Arc<Proc>>>,
     scher: ShareLock<Option<Arc<Scheduler>>>,
-    store: ShareLock<Option<StoreMediator>>,
+    store: ShareLock<Option<Arc<Store>>>,
 }
 
 impl Cache {
@@ -32,55 +30,12 @@ impl Cache {
 
     pub fn init(&self, engine: &Engine) {
         debug!("cache::init");
+
+        // init store from adapter
+        *self.store.write().unwrap() = Some(engine.store());
+
         let scher = engine.scher();
         *self.scher.write().unwrap() = Some(scher.clone());
-        *self.store.write().unwrap() = Some(StoreMediator::new(engine.store()));
-
-        {
-            let cache = self.clone();
-
-            let s = scher.clone();
-
-            let emitter = engine.emitter();
-            emitter.on_proc(move |proc: &Proc, data: &EventData| {
-                debug!("sch::cache::on_proc: {}", data);
-                if data.action == EventAction::Next {
-                    let pid = data.pid.clone();
-                    cache
-                        .remove(&pid)
-                        .expect(&format!("fail to remove pid={}", pid));
-                    cache.restore(s.clone());
-                } else {
-                    if let Some(store) = &*cache.store.read().unwrap() {
-                        store.update_proc(proc);
-                    }
-                }
-            });
-        }
-        {
-            let cache = self.clone();
-            let emitter = engine.emitter();
-            emitter.on_task(move |task: &Task, data: &EventData| {
-                debug!("sch::cache::on_task: tid={}, data={}", task.tid, data);
-                if let Some(store) = &*cache.store.read().unwrap() {
-                    if data.action == EventAction::Create {
-                        store.create_task(task);
-                    } else {
-                        store.update_task(task, &data.vars);
-                    }
-                }
-            });
-        }
-        {
-            let cache = self.clone();
-            let emitter = engine.emitter();
-            emitter.on_message(move |msg: &Message| {
-                debug!("sch::cache::on_message: {:?}", msg);
-                if let Some(store) = &*cache.store.read().unwrap() {
-                    store.create_message(msg)
-                }
-            });
-        }
     }
 
     pub fn close(&self) {
@@ -89,15 +44,25 @@ impl Cache {
         }
     }
 
-    pub fn push(&self, proc: &Proc) {
-        debug!("sch::cache::push({})", proc.pid());
+    pub fn create_proc(&self, proc: &Arc<Proc>) {
+        debug!("sch::cache::create_proc({})", proc.pid());
         self.procs.write().unwrap().push(proc.pid(), proc.clone());
         if let Some(store) = &*self.store.read().unwrap() {
-            store.create_proc(proc);
+            let workflow = &*proc.workflow();
+            let data = store::Proc {
+                id: proc.pid(), // pid is global unique id
+                pid: proc.pid(),
+                model: serde_yaml::to_string(workflow).unwrap(),
+                state: proc.state().into(),
+                start_time: proc.start_time(),
+                end_time: proc.end_time(),
+                vars: utils::vars::to_string(&proc.vm().vars()),
+            };
+            store.procs().create(&data).expect("failed to create proc");
         }
     }
 
-    pub fn proc(&self, pid: &str) -> Option<Proc> {
+    pub fn proc(&self, pid: &str) -> Option<Arc<Proc>> {
         let mut procs = self.procs.write().unwrap();
         match procs.get(pid) {
             Some(proc) => Some(proc.clone()),
@@ -116,7 +81,7 @@ impl Cache {
     pub fn message(&self, id: &str) -> Option<Message> {
         let id = utils::Id::from(id);
         if let Some(proc) = self.proc(&id.pid()) {
-            return proc.message(&id.tid());
+            return proc.message(&id.id());
         }
         None
     }
@@ -144,13 +109,13 @@ impl Cache {
         debug!("sch::cache::remove pid={}", pid);
         self.procs.write().unwrap().pop(pid);
         if let Some(store) = &*self.store.read().unwrap() {
-            store.remove_proc(&pid)?;
+            store.procs().delete(&pid)?;
         }
 
         Ok(true)
     }
 
-    fn restore(&self, scher: Arc<Scheduler>) {
+    pub fn restore(&self, scher: Arc<Scheduler>) {
         debug!("sch::cache::restore");
         if let Some(store) = &*self.store.read().unwrap() {
             let mut procs = self.procs.write().unwrap();
@@ -164,7 +129,66 @@ impl Cache {
         }
     }
 
-    fn send(&self, proc: &Proc) {
+    pub fn upsert_task(&self, task: &Task, data: &EventData) {
+        if let Some(store) = &*self.store.read().unwrap() {
+            if data.action == EventAction::Create {
+                let tid = &task.tid;
+                let nid = task.nid();
+                let id = Id::new(&task.pid, tid);
+                let task = store::Task {
+                    id: id.id(),
+                    kind: task.node.kind().to_string(),
+                    pid: task.pid.clone(),
+                    tid: tid.clone(),
+                    nid: nid,
+                    state: task.state().into(),
+                    start_time: task.start_time(),
+                    end_time: task.end_time(),
+                    uid: match task.uid() {
+                        Some(u) => u,
+                        None => "".to_string(),
+                    },
+                };
+                store.tasks().create(&task).expect("failed to create task");
+            } else {
+                let pid = &task.pid;
+
+                let mut proc = store.procs().find(pid).expect("get store proc");
+                proc.vars = utils::vars::to_string(&data.vars);
+                store.procs().update(&proc).expect("update store proc vars");
+
+                let id = Id::new(pid, &task.tid);
+                let state = task.state();
+                let mut task = store.tasks().find(&id.id()).expect("get store task");
+                task.state = state.into();
+                store.tasks().update(&task).expect("failed to update task");
+            }
+        }
+    }
+
+    pub fn create_message(&self, msg: &Message) {
+        let uid = match &msg.uid {
+            Some(uid) => uid,
+            None => "",
+        };
+        if let Some(store) = &*self.store.read().unwrap() {
+            store
+                .messages()
+                .create(&store::Message {
+                    id: msg.id.clone(),
+                    pid: msg.pid.clone(),
+                    tid: msg.tid.clone(),
+                    uid: uid.to_string(),
+                    vars: utils::vars::to_string(&msg.vars),
+                    create_time: msg.create_time,
+                    update_time: msg.update_time,
+                    state: msg.state.clone().into(),
+                })
+                .expect("create proc message");
+        }
+    }
+
+    fn send(&self, proc: &Arc<Proc>) {
         if let Some(scher) = &*self.scher.read().unwrap() {
             scher.sched_proc(proc);
         }

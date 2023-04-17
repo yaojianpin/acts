@@ -1,4 +1,7 @@
-use crate::{sch::tree::NodeData, ActError, ActResult, Context, Step, TaskState};
+use crate::{
+    sch::{tree::NodeData, Context},
+    ActError, ActResult, Step, TaskState,
+};
 use regex::Regex;
 
 #[derive(Debug, Default, Clone)]
@@ -100,7 +103,7 @@ impl Matcher {
 
                 Ok(ret)
             }
-            Matcher::Some(rule) => match ctx.proc.scher.some(&rule, step, ctx) {
+            Matcher::Some(rule) => match ctx.scher.some(&rule, step, ctx) {
                 Ok(ret) => {
                     if ret {
                         let acts = ctx.proc.children(&ctx.task);

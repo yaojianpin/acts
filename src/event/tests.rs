@@ -1,15 +1,16 @@
 use crate::{
-    sch::{event::EventHub, Event, TaskState},
-    Message, ModelBase, State, Vars, Workflow,
+    event::{Emitter, Event, Message},
+    sch::TaskState,
+    ModelBase, State, Vars, Workflow,
 };
 use std::sync::Arc;
 
 #[tokio::test]
 async fn event_start() {
-    let text = include_str!("./models/simple.yml");
+    let text = include_str!("../../examples/simple.yml");
     let workflow = Workflow::from_str(text).unwrap();
 
-    let evt = EventHub::new();
+    let evt = Emitter::new();
     let workflow2 = workflow.clone();
     evt.add_event(&Event::OnStart(Arc::new(move |state: &State<Workflow>| {
         assert!(state.id() == workflow2.id);
@@ -23,15 +24,15 @@ async fn event_start() {
         end_time: 0,
         outputs: Vars::new(),
     };
-    evt.on_start(&state);
+    evt.dispatch_start_event(&state);
 }
 
 #[tokio::test]
 async fn event_finished() {
-    let text = include_str!("./models/simple.yml");
+    let text = include_str!("../../examples/simple.yml");
     let workflow = Workflow::from_str(text).unwrap();
 
-    let evt = EventHub::new();
+    let evt = Emitter::new();
     let workflow2 = workflow.clone();
     evt.add_event(&Event::OnComplete(Arc::new(move |w: &State<Workflow>| {
         assert!(w.id() == workflow2.id);
@@ -45,16 +46,16 @@ async fn event_finished() {
         end_time: 0,
         outputs: Vars::new(),
     };
-    evt.on_complete(&state);
+    evt.dispatch_complete_event(&state);
 }
 
 #[tokio::test]
 async fn event_error() {
-    let text = include_str!("./models/simple.yml");
+    let text = include_str!("../../examples/simple.yml");
     let workflow = Workflow::from_str(text).unwrap();
     let workflow_id = workflow.id.clone();
 
-    let evt = EventHub::new();
+    let evt = Emitter::new();
     evt.add_event(&Event::OnError(Arc::new(move |w: &State<Workflow>| {
         assert!(w.id() == workflow_id);
     })));
@@ -67,15 +68,15 @@ async fn event_error() {
         end_time: 0,
         outputs: Vars::new(),
     };
-    evt.on_error(&state);
+    evt.dispatch_error(&state);
 }
 
 #[tokio::test]
 async fn event_message() {
-    let evt = EventHub::new();
+    let evt = Emitter::new();
     evt.add_event(&Event::OnMessage(Arc::new(move |message: &Message| {
         assert!(message.id == "m1");
     })));
     let m = Message::new("w1", "1", Some("u1".to_string()), Vars::new());
-    evt.on_message(&m);
+    evt.dispatch_message(&m);
 }

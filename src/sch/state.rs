@@ -41,7 +41,7 @@ impl TaskState {
 
     pub fn is_error(&self) -> bool {
         match self {
-            TaskState::Fail(..) | TaskState::Abort(..) => true,
+            TaskState::Fail(..) => true,
             _ => false,
         }
     }

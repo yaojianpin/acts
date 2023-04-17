@@ -1,8 +1,8 @@
 use crate::{
-    debug,
     plugin::{org::OrgPlugin, role::RolePlugin},
     Engine,
 };
+use tracing::debug;
 
 mod org;
 mod role;

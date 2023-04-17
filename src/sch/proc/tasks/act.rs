@@ -1,5 +1,8 @@
 use crate::sch::ActTask;
-use crate::{sch::proc::Task, utils, Act, Context, TaskState, Vars};
+use crate::{
+    sch::{proc::Task, Context},
+    utils, Act, TaskState, Vars,
+};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 

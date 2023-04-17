@@ -3,7 +3,7 @@ use acts::{ActionOptions, Engine, State, Vars, Workflow};
 #[tokio::main]
 async fn main() {
     let engine = Engine::new();
-    engine.start();
+    engine.start().await;
     let mut workflow = Workflow::new()
         .with_name("workflow builder")
         .with_output("result", 0.into())

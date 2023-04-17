@@ -1,5 +1,5 @@
 use crate::{
-    sch::{NodeData, Proc, Scheduler},
+    sch::{Context, NodeData},
     utils, Engine, OrgAdapter, RoleAdapter, RuleAdapter, Workflow,
 };
 use std::sync::Arc;
@@ -36,9 +36,11 @@ async fn adapter_unit() {
 #[tokio::test]
 async fn adapter_some() {
     let engine = create_engine_with_adapter();
-
+    let scher = engine.scher();
     let mut workflow = create_workflow();
-    let (proc, _) = create_proc(&workflow);
+
+    let pid = utils::longid();
+    let proc = Arc::new(scher.create_raw_proc(&pid, &workflow));
     let tree = crate::sch::NodeTree::build(&mut workflow);
     if let Some(root) = &tree.root {
         let flow = proc.create_task(root, None);
@@ -47,7 +49,7 @@ async fn adapter_some() {
         let step = proc.create_task(&job.node.children()[0], Some(job));
 
         if let NodeData::Step(s) = step.node.data() {
-            let ctx = proc.create_context(step);
+            let ctx = proc.create_context(&scher, &step);
             let ret = engine.adapter().some("some1", &s, &ctx);
             assert_eq!(ret, Ok(true));
         } else {
@@ -93,16 +95,6 @@ fn create_engine_with_adapter() -> Engine {
     engine
 }
 
-fn create_proc(workflow: &Workflow) -> (Proc, Arc<Scheduler>) {
-    let engine = Engine::new();
-    let scher = engine.scher();
-    // let env = Arc::new(Enviroment::new());
-    // let scher = Arc::new(Scheduler::new(&config));
-    let pid = utils::longid();
-    let task = scher.create_raw_proc(&pid, workflow);
-    (task.clone(), scher.clone())
-}
-
 fn create_workflow() -> Workflow {
     let text = include_str!("../../examples/basic.yml");
     let workflow = Workflow::from_str(text).unwrap();
@@ -126,12 +118,7 @@ impl RuleAdapter for TestAdapter {
         Ok(ret)
     }
 
-    fn some(
-        &self,
-        _name: &str,
-        _step: &crate::Step,
-        _ctx: &crate::Context,
-    ) -> crate::ActResult<bool> {
+    fn some(&self, _name: &str, _step: &crate::Step, _ctx: &Context) -> crate::ActResult<bool> {
         Ok(true)
     }
 }

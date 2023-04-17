@@ -1,9 +1,7 @@
 use crate::{
-    debug,
     env::VirtualMachine,
+    event::{consts, Message, UserMessage},
     sch::{
-        consts::EVT_CANCEL,
-        event::{Message, UserMessage},
         tree::TaskTree,
         tree::{Node, NodeTree},
         Context, Scheduler, Task, TaskState,
@@ -14,11 +12,11 @@ use std::{
     collections::HashMap,
     sync::{Arc, Mutex, RwLock},
 };
+use tracing::debug;
 
 #[derive(Clone)]
 pub struct Proc {
     pub(in crate::sch) vm: Arc<VirtualMachine>,
-    pub(in crate::sch) scher: Arc<Scheduler>,
     pub(in crate::sch) tree: Arc<NodeTree>,
 
     pid: String,
@@ -61,8 +59,7 @@ impl Proc {
         let tr = NodeTree::build(&mut workflow);
         Proc {
             pid: pid.to_string(),
-            vm: Arc::new(vm),
-            scher,
+            vm,
             model: Arc::new(workflow.clone()),
             tree: tr,
             state: Arc::new(RwLock::new(state.clone())),
@@ -163,8 +160,12 @@ impl Proc {
         self.vm.clone()
     }
 
-    pub fn create_context(&self, task: Arc<Task>) -> Arc<Context> {
-        let ctx = Context::new(self, task);
+    pub fn create_context(
+        self: Arc<Self>,
+        scher: &Arc<Scheduler>,
+        task: &Arc<Task>,
+    ) -> Arc<Context> {
+        let ctx = Context::new(scher, &self, task);
         Arc::new(ctx)
     }
 
@@ -206,10 +207,10 @@ impl Proc {
         *self.end_time.write().unwrap() = time;
     }
 
-    pub fn do_message(&self, msg: &UserMessage) {
+    pub fn do_message(self: Arc<Self>, msg: &UserMessage, scher: &Arc<Scheduler>) {
         debug!("do_message msg={:?}", msg);
         let mut count = self.sync.lock().unwrap();
-        let tasks = if msg.action == EVT_CANCEL {
+        let tasks = if msg.action == consts::EVT_CANCEL {
             self.task_by_uid(&msg.uid, TaskState::Success)
         } else {
             self.task_by_uid(&msg.uid, TaskState::WaitingEvent)
@@ -217,37 +218,35 @@ impl Proc {
         if tasks.len() > 0 {
             // executes only one task every time
             if let Some(task) = tasks.get(0) {
-                let ctx = &self.create_context(task.clone());
+                let proc = self.clone();
+                let ctx = proc.create_context(scher, task);
                 ctx.set_message(msg);
-                task.exec(ctx);
+                task.exec(&ctx);
             }
         }
         *count += 1;
     }
 
-    pub fn do_task(&self, tid: &str) {
+    pub fn do_task(self: Arc<Self>, tid: &str, scher: &Arc<Scheduler>) {
         debug!("do_task pid={} tid={}", self.pid, tid);
-        let mut count = self.sync.lock().unwrap();
-
-        if let Some(task) = self.task(tid) {
+        if let Some(task) = &self.task(tid) {
             if !task.state().is_completed() {
-                let ctx = self.create_context(task.clone());
+                let ctx = self.create_context(scher, task);
                 task.complete(&ctx);
             }
         }
-        *count += 1;
     }
 
-    pub fn start(&self) {
+    pub fn start(self: Arc<Self>, scher: &Arc<Scheduler>) {
         debug!("proc::start({})", self.pid);
         let mut count = self.sync.lock().unwrap();
-        self.scher.cache().push(self);
+        scher.cache().create_proc(&self);
 
         let tr = self.tree.clone();
         self.set_state(&TaskState::Running);
         if let Some(root) = &tr.root {
             let task = self.create_task(root, None);
-            self.scher.sched_task(&task);
+            scher.sched_task(&task);
         }
         *count += 1;
     }
@@ -255,16 +254,28 @@ impl Proc {
     pub(crate) fn make_message(&self, tid: &str, uid: Option<String>, vars: Vars) -> Message {
         let msg = Message::new(&self.pid, tid, uid, vars);
         debug!("sch::proc::make_message(id={}, tid={})", msg.id, tid);
+
         self.messages
             .write()
             .unwrap()
-            .insert(tid.to_string(), msg.clone());
+            .insert(msg.id.clone(), msg.clone());
 
         msg
     }
 
+    // pub(crate) fn messages(&self) -> Vec<Message> {
+    //     let mut ret = Vec::new();
+    //     let messages = self.messages.read().unwrap();
+
+    //     for (k, v) in messages.iter() {
+    //         ret.push(v.clone());
+    //     }
+
+    //     ret
+    // }
+
     pub fn create_task(&self, node: &Arc<Node>, prev: Option<Arc<Task>>) -> Arc<Task> {
-        let task = Arc::new(Task::new(&self.pid, &utils::shortid(), node.clone()));
+        let task = Arc::new(Task::new(self, &utils::shortid(), node.clone()));
 
         if let Some(prev) = prev {
             task.set_prev(Some(prev.tid.clone()));

@@ -1,27 +1,17 @@
-use crate::{
-    sch::{Event, EventData, Proc, Scheduler, Task},
-    Message, State, Workflow,
-};
+use crate::{event, sch::Scheduler, Message, State, Workflow};
 use std::sync::Arc;
 
-#[derive(Clone)]
+/// Just a export struct for the event::Emitter
+///
 pub struct Emitter {
-    scher: Arc<Scheduler>,
+    evt: Arc<event::Emitter>,
 }
 
 impl Emitter {
-    pub(crate) fn new(sch: &Arc<Scheduler>) -> Self {
-        Self { scher: sch.clone() }
-    }
-
-    pub(crate) fn on_proc(&self, f: impl Fn(&Proc, &EventData) + Send + Sync + 'static) {
-        let evt = Event::OnProc(Arc::new(f));
-        self.scher.evt().add_event(&evt);
-    }
-
-    pub(crate) fn on_task(&self, f: impl Fn(&Task, &EventData) + Send + Sync + 'static) {
-        let evt = Event::OnTask(Arc::new(f));
-        self.scher.evt().add_event(&evt);
+    pub fn new(scher: &Arc<Scheduler>) -> Self {
+        Self {
+            evt: scher.emitter(),
+        }
     }
 
     ///  Receive act message
@@ -57,22 +47,18 @@ impl Emitter {
     /// }
     /// ```
     pub fn on_message(&self, f: impl Fn(&Message) + Send + Sync + 'static) {
-        let evt = Event::OnMessage(Arc::new(f));
-        self.scher.evt().add_event(&evt);
+        self.evt.on_message(f);
     }
 
     pub fn on_start(&self, f: impl Fn(&State<Workflow>) + Send + Sync + 'static) {
-        let evt = Event::OnStart(Arc::new(f));
-        self.scher.evt().add_event(&evt);
+        self.evt.on_start(f);
     }
 
     pub fn on_complete(&self, f: impl Fn(&State<Workflow>) + Send + Sync + 'static) {
-        let evt = Event::OnComplete(Arc::new(f));
-        self.scher.evt().add_event(&evt);
+        self.evt.on_complete(f);
     }
 
     pub fn on_error(&self, f: impl Fn(&State<Workflow>) + Send + Sync + 'static) {
-        let evt = Event::OnError(Arc::new(f));
-        self.scher.evt().add_event(&evt);
+        self.evt.on_error(f);
     }
 }

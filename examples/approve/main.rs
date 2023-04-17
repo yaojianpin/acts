@@ -26,27 +26,20 @@ async fn main() {
         .adapter()
         .set_role_adapter("example_role", adapter.clone());
 
-    engine.start();
+    engine.start().await;
     let text = include_str!("./approve.yml");
     let workflow = Workflow::from_str(text).unwrap();
 
-    let biz_id = "approve_w1";
     let executor = engine.executor();
     executor.deploy(&workflow).expect("deploy model");
     executor
-        .start(
-            &workflow.id,
-            ActionOptions {
-                biz_id: Some(biz_id.into()),
-                ..Default::default()
-            },
-        )
+        .start(&workflow.id, ActionOptions::default())
         .expect("start workflow");
 
     engine.emitter().on_message(move |message: &Message| {
-        println!("engine.on_message: {}", &message.id);
+        // println!("on_message: {:?}", &message);
         let uid = message.uid.clone().unwrap();
-        let ret = executor.next(biz_id, &uid, None);
+        let ret = executor.next(&message.pid, &uid, None);
         if ret.is_err() {
             eprintln!("{}", ret.err().unwrap());
             std::process::exit(1);

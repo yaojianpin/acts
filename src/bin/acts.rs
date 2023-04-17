@@ -15,7 +15,7 @@ async fn main() {
 
     let workflow = read_file_to_workflow(&args.model);
     let engine = Engine::new();
-    engine.start();
+    engine.start().await;
     let executor = engine.executor();
 
     executor.deploy(&workflow).expect("deploy model");

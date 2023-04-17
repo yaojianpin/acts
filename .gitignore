@@ -2,3 +2,4 @@
 /data
 /.vscode
 /Cargo.lock
+/log

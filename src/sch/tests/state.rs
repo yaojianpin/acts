@@ -39,7 +39,7 @@ async fn state_is_error() {
     assert!(state.is_error());
 
     let state = TaskState::Abort(ActError::RuntimeError("test error".into()).into());
-    assert!(state.is_error());
+    assert!(!state.is_error());
 }
 
 #[tokio::test]

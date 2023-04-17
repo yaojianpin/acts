@@ -3,9 +3,11 @@ mod moudle;
 mod tests;
 mod vm;
 
-use crate::{debug, ActError, ActModule, ActResult, Engine};
+use crate::{ActError, ActModule, ActResult, Engine};
 use rhai::Engine as ScriptEngine;
 use std::sync::{Arc, Mutex};
+use tracing::debug;
+
 pub use vm::VirtualMachine;
 
 #[derive(Debug, Default, Clone)]
@@ -26,8 +28,8 @@ impl Enviroment {
         env
     }
 
-    pub fn vm(&self) -> VirtualMachine {
-        VirtualMachine::new(&self)
+    pub fn vm(&self) -> Arc<VirtualMachine> {
+        Arc::new(VirtualMachine::new(&self))
     }
 
     pub fn init(&self, engine: &Engine) {
