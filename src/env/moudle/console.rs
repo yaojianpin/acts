@@ -1,9 +1,9 @@
-use crate::{env::Enviroment, Engine};
+use crate::env::Enviroment;
 use colored::Colorize;
 use rhai::{export_module, plugin::*};
 
 impl Enviroment {
-    pub fn registry_console_module(&self, _engine: &Engine) {
+    pub fn registry_console_module(&self) {
         let mut module = Module::new();
         combine_with_exported_module!(&mut module, "console", console);
         self.register_module("console", module)

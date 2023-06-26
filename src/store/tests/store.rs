@@ -1,9 +1,10 @@
 use crate::{
-    sch::NodeKind,
+    event::EventAction,
+    sch::{ActKind, NodeKind},
     store::{data, DbSet, Store, StoreKind},
     utils, Query, StoreAdapter, TaskState, Workflow,
 };
-use data::{Message, Proc, Task};
+use data::{Act, Proc, Task};
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
@@ -19,25 +20,14 @@ async fn store() -> &'static Store {
 
 #[tokio::test]
 async fn store_local() {
-    let store = Store::new();
+    let store = store().await;
 
-    #[cfg(feature = "store")]
+    #[cfg(not(feature = "sqlite"))]
     assert_eq!(store.kind(), StoreKind::Local);
 
     #[cfg(feature = "sqlite")]
     assert_eq!(store.kind(), StoreKind::Sqlite);
 }
-
-// #[tokio::test]
-//  fn store_extern() {
-//     let engine = Engine::new();
-
-//     let test_store = TestStore;
-//     engine.adapter().set_store_adapter("store", test_store);
-//     let store = store(&engine).await;
-
-//     assert_eq!(store.kind(), StoreKind::Extern);
-// }
 
 #[tokio::test]
 async fn store_load() {
@@ -102,7 +92,8 @@ async fn store_models() {
 #[tokio::test]
 async fn store_model_get() {
     let store = store().await;
-    let workflow = create_workflow();
+    let mut workflow = create_workflow();
+    workflow.id = utils::longid();
     store.deploy(&workflow).unwrap();
 
     let model = store.models().find(&workflow.id).unwrap();
@@ -197,56 +188,6 @@ async fn store_proc_remove() {
     assert_eq!(proc.is_ok(), false);
 }
 
-// #[tokio::test]
-//  fn store_task_update() {
-//     let engine = Engine::new();
-//     engine.start();
-
-//     let store = engine.store();
-//     let store2 = store.clone();
-//     engine
-//         .emitter()
-//         .on_task(move |task: &Task, data: &EventData| {
-//             println!(
-//                 "update task:{}, kind={} data={:?}",
-//                 task.tid,
-//                 task.node.kind(),
-//                 data
-//             );
-//             if data.action == EventAction::Create {
-//                 store.create_task(task);
-//             } else {
-//                 store.update_task(task, &data.vars);
-//             }
-//         });
-
-//     let scher = engine.scher();
-
-//     let id = utils::longid();
-//     let workflow = create_workflow();
-//     let proc = engine.scher().create_raw_proc(&id, &workflow);
-//     scher.cache().push(&proc);
-
-//     // proc.start();
-//     scher.sched_proc(&proc);
-//     // proc.start();
-//     scher.next().await;
-//     scher.next().await;
-//     scher.next().await;
-//     // scher.next().await;
-
-//     let tasks = proc.task_by_nid("job1");
-//     let job = tasks.get(0).unwrap();
-//     std::thread::sleep(std::time::Duration::from_millis(200));
-
-//     let p = store2.proc(&proc.pid(), &engine.scher()).unwrap();
-
-//     let tasks = p.task_by_nid("job1");
-//     let loaded_job = tasks.get(0).unwrap();
-//     assert_eq!(job.state(), TaskState::Running);
-//     assert_eq!(loaded_job.state(), TaskState::Running);
-// }
-
 #[tokio::test]
 async fn store_task_create() {
     let store = store().await;
@@ -263,7 +204,6 @@ async fn store_task_create() {
         state: TaskState::None.to_string(),
         start_time: 0,
         end_time: 0,
-        uid: "".to_string(),
     };
 
     store.tasks().create(&task).expect("create task");
@@ -289,7 +229,6 @@ async fn store_task_update() {
         state: TaskState::None.to_string(),
         start_time: 0,
         end_time: 0,
-        uid: "".to_string(),
     };
 
     store.tasks().create(&task).expect("create task");
@@ -319,7 +258,6 @@ async fn store_task_remove() {
         state: TaskState::None.to_string(),
         start_time: 0,
         end_time: 0,
-        uid: "".to_string(),
     };
 
     store.tasks().create(&task).expect("create task");
@@ -330,80 +268,85 @@ async fn store_task_remove() {
 }
 
 #[tokio::test]
-async fn store_message_create() {
+async fn store_act_create() {
     let store = store().await;
 
     let id = utils::longid();
     let time = utils::time::time();
-    let msg = Message {
+    let act = Act {
         id: id.clone(),
+        kind: ActKind::User.to_string(),
+        event: EventAction::Create.to_string(),
         pid: "pid".to_string(),
         tid: "tid".to_string(),
-        uid: "Tom".to_string(),
         vars: "{}".to_string(),
-        create_time: time,
-        update_time: 0,
-        state: 0,
+        start_time: time,
+        end_time: 0,
+        state: "none".to_string(),
+        active: false,
     };
 
-    store.messages().create(&msg).expect("create message");
-    let ret = store.messages().find(&id).unwrap();
-    assert_eq!(ret.uid, "Tom");
+    store.acts().create(&act).expect("create message");
+    let ret = store.acts().find(&id).unwrap();
+    assert_eq!(ret.active, false);
     assert_eq!(ret.vars, "{}");
-    assert_eq!(ret.create_time, time);
+    assert_eq!(ret.start_time, time);
 }
 
 #[tokio::test]
-async fn store_message_update() {
+async fn store_act_update() {
     let store = store().await;
 
     let id = utils::longid();
-    let mut msg = Message {
+    let mut act = Act {
         id: id.clone(),
+        kind: ActKind::User.to_string(),
+        event: EventAction::Create.to_string(),
         pid: "pid".to_string(),
         tid: "tid".to_string(),
-        uid: "Tom".to_string(),
-        vars: "".to_string(),
-        create_time: 0,
-        update_time: 0,
-        state: 0,
+        vars: "{}".to_string(),
+        start_time: 0,
+        end_time: 0,
+        state: "none".to_string(),
+        active: false,
     };
 
-    store.messages().create(&msg).expect("create message");
-    msg.uid = "Job".to_string();
-    msg.vars = "vars".to_string();
-    msg.update_time = 1000;
-    let ret = store.messages().update(&msg);
-    let new_msg = store.messages().find(&id).unwrap();
+    store.acts().create(&act).expect("create act");
+    act.vars = "vars".to_string();
+    act.end_time = 1000;
+    act.active = true;
+    let ret = store.acts().update(&act);
+    let new_act = store.acts().find(&id).unwrap();
     assert!(ret.is_ok());
-    assert_eq!(new_msg.uid, "Job");
-    assert_eq!(new_msg.vars, "vars");
-    assert_eq!(new_msg.update_time, 1000);
+    assert_eq!(new_act.active, true);
+    assert_eq!(new_act.vars, "vars");
+    assert_eq!(new_act.end_time, 1000);
 }
 
 #[tokio::test]
-async fn store_message_delete() {
+async fn store_act_delete() {
     let store = store().await;
 
     let id = utils::longid();
-    let mut msg = Message {
+    let mut act = Act {
         id: id.clone(),
+        kind: ActKind::User.to_string(),
+        event: EventAction::Create.to_string(),
         pid: "pid".to_string(),
         tid: "tid".to_string(),
-        uid: "Tom".to_string(),
-        vars: "".to_string(),
-        create_time: 0,
-        update_time: 0,
-        state: 0,
+        vars: "{}".to_string(),
+        start_time: 0,
+        end_time: 0,
+        state: "none".to_string(),
+        active: false,
     };
 
-    store.messages().create(&msg).expect("create message");
-    msg.uid = "Job".to_string();
-    msg.vars = "vars".to_string();
-    msg.update_time = 1000;
-    let ret = store.messages().delete(&id);
+    store.acts().create(&act).unwrap();
+    act.vars = "vars".to_string();
+    act.end_time = 1000;
+    let ret = store.acts().delete(&id);
     assert!(ret.is_ok());
-    let ret = store.messages().find(&id);
+    let ret = store.acts().find(&id);
     assert!(ret.is_err());
 }
 
@@ -442,7 +385,7 @@ impl StoreAdapter for TestStore {
         todo!()
     }
 
-    fn messages(&self) -> Arc<dyn DbSet<Item = data::Message>> {
+    fn acts(&self) -> Arc<dyn DbSet<Item = data::Act>> {
         todo!()
     }
 

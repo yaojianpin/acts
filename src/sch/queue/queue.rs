@@ -4,7 +4,6 @@ use crate::{
 };
 use std::sync::{Arc, RwLock};
 use tokio::{runtime::Handle, sync::mpsc, sync::Mutex};
-use tracing::debug;
 
 #[derive(Clone)]
 pub struct Queue {
@@ -15,8 +14,8 @@ pub struct Queue {
 }
 
 impl Queue {
-    pub fn new(buffer: usize) -> Arc<Self> {
-        let (tx, rx) = mpsc::channel::<Signal>(buffer);
+    pub fn new() -> Arc<Self> {
+        let (tx, rx) = mpsc::channel::<Signal>(100);
 
         let queue = Arc::new(Self {
             receiver: Arc::new(Mutex::new(rx)),
@@ -28,13 +27,11 @@ impl Queue {
     }
 
     pub fn init(&self, engine: &Engine) {
-        debug!("queue::init");
         let scher = engine.scher();
         *self.scher.write().unwrap() = Some(scher.clone());
     }
 
     pub async fn next(&self) -> Option<Signal> {
-        debug!("queue::next");
         let receiver = &mut *self.receiver.lock().await;
         receiver.recv().await
     }
@@ -46,7 +43,6 @@ impl Queue {
     }
 
     pub fn terminate(&self) {
-        debug!("queue::terminate");
         self.send(&Signal::Terminal);
     }
 }

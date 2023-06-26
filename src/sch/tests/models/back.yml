@@ -7,13 +7,13 @@ jobs:
         id: step1
         subject:
           matcher: any
-          users: |
+          cands: |
             ["a"]
         run: print("step1")
 
       - name: step2
         subject:
           matcher: any
-          users: |
+          cands: |
             ["b"]
         run: print("step2")

@@ -6,7 +6,7 @@ keywords = ["workflow"]
 license = "MIT"
 name = "acts"
 repository = "https://github.com/yaojianpin/acts.git"
-version = "0.4.0"
+version = "0.5.0"
 
 [dependencies]
 acts-tag = {version = "0.2.0"}
@@ -28,23 +28,13 @@ sqlx = {version = "0.6.2", features = ["runtime-tokio-native-tls", "sqlite"]}
 thiserror = "1.0.34"
 tokio = {version = "1.21.0", features = ["full"]}
 tracing = "0.1.37"
-tracing-appender = "0.2.2"
-tracing-subscriber = {version = "0.3.16", features = ["registry", "fmt", "env-filter"]}
 
 [dev-dependencies]
 criterion = {version = "0.4.0"}
 
 [features]
-default = ["role", "org", "store"]
-mem = []
-org = [] # org plugin feature
-role = [] # role plugin feature
+default = []
 sqlite = []
-store = []
-
-[[bin]]
-name = "acts"
-required-features = []
 
 [[bench]]
 harness = false

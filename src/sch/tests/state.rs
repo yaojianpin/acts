@@ -1,7 +1,7 @@
 use crate::{ActError, TaskState};
 
 #[tokio::test]
-async fn state_is_finished() {
+async fn sch_state_is_finished() {
     let state = TaskState::Running;
     assert!(!state.is_completed());
 
@@ -14,15 +14,15 @@ async fn state_is_finished() {
     let state = TaskState::Skip;
     assert!(state.is_completed());
 
-    let state = TaskState::Fail(ActError::RuntimeError("test error".into()).into());
+    let state = TaskState::Fail(ActError::Runtime("test error".into()).into());
     assert!(state.is_completed());
 
-    let state = TaskState::Abort(ActError::RuntimeError("test error".into()).into());
+    let state = TaskState::Abort;
     assert!(state.is_completed());
 }
 
 #[tokio::test]
-async fn state_is_error() {
+async fn sch_state_is_error() {
     let state = TaskState::Running;
     assert!(!state.is_error());
 
@@ -35,15 +35,15 @@ async fn state_is_error() {
     let state = TaskState::Skip;
     assert!(!state.is_error());
 
-    let state = TaskState::Fail(ActError::RuntimeError("test error".into()).into());
+    let state = TaskState::Fail(ActError::Runtime("test error".into()).into());
     assert!(state.is_error());
 
-    let state = TaskState::Abort(ActError::RuntimeError("test error".into()).into());
+    let state = TaskState::Abort;
     assert!(!state.is_error());
 }
 
 #[tokio::test]
-async fn state_to_string() {
+async fn sch_state_to_string() {
     let state = TaskState::Running;
     assert_eq!(state.to_string(), "running");
 
@@ -52,7 +52,7 @@ async fn state_to_string() {
 }
 
 #[tokio::test]
-async fn state_from_string() {
+async fn sch_state_from_string() {
     let str = "running";
     let state: TaskState = str.into();
     assert_eq!(state, TaskState::Running);
@@ -61,7 +61,7 @@ async fn state_from_string() {
     let state: TaskState = str.into();
     assert_eq!(state, TaskState::Fail("err info".to_string()));
 
-    let str = "abort(abort info)";
+    let str = "abort";
     let state: TaskState = str.into();
-    assert_eq!(state, TaskState::Abort("abort info".to_string()));
+    assert_eq!(state, TaskState::Abort);
 }

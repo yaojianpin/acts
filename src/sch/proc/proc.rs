@@ -1,29 +1,31 @@
 use crate::{
-    env::VirtualMachine,
-    event::{consts, Message, UserMessage},
+    env::Enviroment,
+    event::{Action, EventAction},
     sch::{
+        proc::Act,
         tree::TaskTree,
         tree::{Node, NodeTree},
         Context, Scheduler, Task, TaskState,
     },
-    utils, ProcInfo, ShareLock, State, Vars, Workflow,
+    utils, ActError, ActResult, ActionState, ProcInfo, ShareLock, Vars, Workflow, WorkflowState,
 };
 use std::{
     collections::HashMap,
+    fmt,
     sync::{Arc, Mutex, RwLock},
 };
-use tracing::debug;
+use tracing::instrument;
 
 #[derive(Clone)]
 pub struct Proc {
-    pub(in crate::sch) vm: Arc<VirtualMachine>,
+    pub(in crate::sch) env: Arc<Enviroment>,
     pub(in crate::sch) tree: Arc<NodeTree>,
 
     pid: String,
     model: Arc<Workflow>,
 
-    messages: ShareLock<HashMap<String, Message>>,
     tasks: ShareLock<TaskTree>,
+    acts: ShareLock<HashMap<String, Arc<Act>>>,
 
     state: ShareLock<TaskState>,
     start_time: ShareLock<i64>,
@@ -32,43 +34,49 @@ pub struct Proc {
     sync: Arc<Mutex<i32>>,
 }
 
-impl Proc {
-    pub fn new(pid: &str, scher: Arc<Scheduler>, workflow: &Workflow, state: &TaskState) -> Self {
-        // set the pid with biz_id by default
-        // let mut pid = workflow.biz_id.clone();
-        // if pid.is_empty() {
-        //     pid = utils::longid();
-        // }
+impl std::fmt::Debug for Proc {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Proc")
+            .field("pid", &self.pid)
+            .field("mid", &self.model.id)
+            .field("state", &self.state())
+            .field("start_time", &self.start_time())
+            .field("end_time", &self.end_time())
+            .finish()
+    }
+}
 
-        let vm = scher.env().vm();
-        let vars = utils::fill_vars(&vm, &workflow.env);
-        Proc::new_raw(scher, workflow, pid, state, &vars)
+impl Proc {
+    pub fn new(pid: &str, workflow: &Workflow, state: &TaskState) -> Self {
+        Proc::new_raw(workflow, pid, state)
     }
 
-    pub fn new_raw(
-        scher: Arc<Scheduler>,
-        workflow: &Workflow,
-        pid: &str,
-        state: &TaskState,
-        vars: &Vars,
-    ) -> Self {
-        let vm = scher.env().vm();
-        vm.append(vars.clone());
+    pub fn new_raw(workflow: &Workflow, pid: &str, state: &TaskState) -> Self {
+        let env = Arc::new(Enviroment::new());
+
+        // set both env and outputs as global vars
+        let vars = utils::fill_proc_vars(&env, &workflow.env);
+        env.append(&workflow.outputs);
+        env.append(&vars);
 
         let mut workflow = workflow.clone();
         let tr = NodeTree::build(&mut workflow);
         Proc {
             pid: pid.to_string(),
-            vm,
+            env: env.clone(),
             model: Arc::new(workflow.clone()),
             tree: tr,
             state: Arc::new(RwLock::new(state.clone())),
             start_time: Arc::new(RwLock::new(0)),
             end_time: Arc::new(RwLock::new(0)),
-            messages: Arc::new(RwLock::new(HashMap::new())),
             tasks: Arc::new(RwLock::new(TaskTree::new())),
+            acts: Arc::new(RwLock::new(HashMap::new())),
             sync: Arc::new(Mutex::new(0)),
         }
+    }
+
+    pub fn append_vars(&self, vars: &Vars) {
+        self.env.append(vars);
     }
 
     pub fn state(&self) -> TaskState {
@@ -84,7 +92,7 @@ impl Proc {
 
     pub fn outputs(&self) -> Vars {
         let outputs = &self.workflow().outputs;
-        let vars = utils::fill_vars(&self.vm, outputs);
+        let vars = utils::fill_proc_vars(&self.env, outputs);
         vars
     }
 
@@ -96,14 +104,16 @@ impl Proc {
         0
     }
 
-    pub fn workflow_state(&self) -> State<Workflow> {
-        State {
+    pub fn workflow_state(self: &Arc<Self>, event: &EventAction) -> WorkflowState {
+        WorkflowState {
             pid: self.pid(),
-            node: self.workflow(),
+            mid: self.workflow().id.clone(),
+            event: event.clone(),
             state: self.state(),
             start_time: self.start_time(),
             end_time: self.end_time(),
             outputs: self.outputs(),
+            // proc: self.clone(),
         }
     }
 
@@ -140,28 +150,25 @@ impl Proc {
         self.tree.node(nid)
     }
 
-    pub fn children(&self, task: &Task) -> Vec<Arc<Task>> {
-        let mut ret = Vec::new();
-
-        let tasks = self.tasks.read().unwrap();
-        for tid in task.children() {
-            if let Some(t) = tasks.task_by_tid(&tid) {
-                ret.push(t);
-            }
-        }
-        ret
+    pub fn tasks(&self) -> Vec<Arc<Task>> {
+        let ttree = self.tasks.read().unwrap();
+        ttree.tasks()
+    }
+    pub fn acts(&self) -> Vec<Arc<Act>> {
+        let acts = &*self.acts.read().unwrap();
+        acts.iter().map(|(_, act)| act.clone()).collect()
     }
 
     pub fn task_by_nid(&self, nid: &str) -> Vec<Arc<Task>> {
         self.tasks.read().unwrap().task_by_nid(nid)
     }
 
-    pub fn vm(&self) -> Arc<VirtualMachine> {
-        self.vm.clone()
+    pub fn last_task_by_nid(&self, nid: &str) -> Option<Arc<Task>> {
+        self.tasks.read().unwrap().last_task_by_nid(nid)
     }
 
     pub fn create_context(
-        self: Arc<Self>,
+        self: &Arc<Self>,
         scher: &Arc<Scheduler>,
         task: &Arc<Task>,
     ) -> Arc<Context> {
@@ -169,35 +176,17 @@ impl Proc {
         Arc::new(ctx)
     }
 
-    pub fn message(&self, id: &str) -> Option<Message> {
-        match self.messages.read().unwrap().get(id) {
-            Some(m) => Some(m.clone()),
-            None => None,
+    pub fn act(&self, id: &str) -> Option<Arc<Act>> {
+        self.acts.read().unwrap().get(id).cloned()
+    }
+
+    pub fn set_state(&self, state: TaskState) {
+        if state.is_completed() {
+            self.set_end_time(utils::time::time());
+        } else if state.is_running() {
+            self.set_start_time(utils::time::time());
         }
-    }
-
-    pub fn message_by_uid(&self, uid: &str) -> Option<Message> {
-        let mut ret = None;
-        let messages = &*self.messages.read().unwrap();
-        for (_, m) in messages {
-            if let Some(id) = &m.uid {
-                if uid == id {
-                    ret = Some(m.clone());
-                    break;
-                }
-            }
-        }
-
-        ret
-    }
-
-    pub fn task_by_uid(&self, uid: &str, state: TaskState) -> Vec<Arc<Task>> {
-        let tasks = &*self.tasks.read().unwrap();
-        tasks.task_by_uid(uid, state)
-    }
-
-    pub fn set_state(&self, state: &TaskState) {
-        *self.state.write().unwrap() = state.clone();
+        *self.state.write().unwrap() = state;
     }
 
     pub(crate) fn set_start_time(&self, time: i64) {
@@ -207,43 +196,67 @@ impl Proc {
         *self.end_time.write().unwrap() = time;
     }
 
-    pub fn do_message(self: Arc<Self>, msg: &UserMessage, scher: &Arc<Scheduler>) {
-        debug!("do_message msg={:?}", msg);
+    #[instrument]
+    pub fn do_ack(self: Arc<Self>, aid: &str, _scher: &Arc<Scheduler>) -> ActResult<ActionState> {
         let mut count = self.sync.lock().unwrap();
-        let tasks = if msg.action == consts::EVT_CANCEL {
-            self.task_by_uid(&msg.uid, TaskState::Success)
-        } else {
-            self.task_by_uid(&msg.uid, TaskState::WaitingEvent)
-        };
-        if tasks.len() > 0 {
-            // executes only one task every time
-            if let Some(task) = tasks.get(0) {
-                let proc = self.clone();
-                let ctx = proc.create_context(scher, task);
-                ctx.set_message(msg);
+        let mut state = ActionState::begin();
+        // todo: ack for message in the future
+        state.end();
+        *count += 1;
+
+        Ok(state)
+    }
+
+    #[instrument]
+    pub fn do_action(
+        self: Arc<Self>,
+        action: &Action,
+        scher: &Arc<Scheduler>,
+    ) -> ActResult<ActionState> {
+        let mut count = self.sync.lock().unwrap();
+        let mut state = ActionState::begin();
+        let act = self.act(&action.aid).ok_or(ActError::Action(format!(
+            "cannot find act by '{}'",
+            action.aid
+        )))?;
+
+        let ctx = act.create_context(scher);
+        act.exec(&ctx, action)?;
+
+        let event = action.event();
+        if event == EventAction::Complete
+            || event == EventAction::Abort
+            || event == EventAction::Error
+            || event == EventAction::Skip
+        {
+            act.post(&ctx)?;
+            act.next(&ctx)?;
+        }
+
+        state.end();
+        *count += 1;
+        Ok(state)
+    }
+
+    #[instrument]
+    pub fn do_task(self: Arc<Self>, tid: &str, scher: &Arc<Scheduler>) {
+        let mut count = self.sync.lock().unwrap();
+        if let Some(task) = &self.task(tid) {
+            if !task.state().is_completed() {
+                let ctx = self.create_context(scher, task);
                 task.exec(&ctx);
             }
         }
         *count += 1;
     }
 
-    pub fn do_task(self: Arc<Self>, tid: &str, scher: &Arc<Scheduler>) {
-        debug!("do_task pid={} tid={}", self.pid, tid);
-        if let Some(task) = &self.task(tid) {
-            if !task.state().is_completed() {
-                let ctx = self.create_context(scher, task);
-                task.complete(&ctx);
-            }
-        }
-    }
-
+    #[instrument]
     pub fn start(self: Arc<Self>, scher: &Arc<Scheduler>) {
-        debug!("proc::start({})", self.pid);
         let mut count = self.sync.lock().unwrap();
-        scher.cache().create_proc(&self);
+        scher.cache().push_proc(&self);
 
         let tr = self.tree.clone();
-        self.set_state(&TaskState::Running);
+        self.set_state(TaskState::Running);
         if let Some(root) = &tr.root {
             let task = self.create_task(root, None);
             scher.sched_task(&task);
@@ -251,31 +264,8 @@ impl Proc {
         *count += 1;
     }
 
-    pub(crate) fn make_message(&self, tid: &str, uid: Option<String>, vars: Vars) -> Message {
-        let msg = Message::new(&self.pid, tid, uid, vars);
-        debug!("sch::proc::make_message(id={}, tid={})", msg.id, tid);
-
-        self.messages
-            .write()
-            .unwrap()
-            .insert(msg.id.clone(), msg.clone());
-
-        msg
-    }
-
-    // pub(crate) fn messages(&self) -> Vec<Message> {
-    //     let mut ret = Vec::new();
-    //     let messages = self.messages.read().unwrap();
-
-    //     for (k, v) in messages.iter() {
-    //         ret.push(v.clone());
-    //     }
-
-    //     ret
-    // }
-
-    pub fn create_task(&self, node: &Arc<Node>, prev: Option<Arc<Task>>) -> Arc<Task> {
-        let task = Arc::new(Task::new(self, &utils::shortid(), node.clone()));
+    pub fn create_task(self: &Arc<Proc>, node: &Arc<Node>, prev: Option<Arc<Task>>) -> Arc<Task> {
+        let task = Arc::new(Task::new(&self, &utils::shortid(), node.clone()));
 
         if let Some(prev) = prev {
             task.set_prev(Some(prev.tid.clone()));
@@ -290,5 +280,11 @@ impl Proc {
     pub fn push_task(&self, task: Arc<Task>) {
         let mut tasks = self.tasks.write().unwrap();
         tasks.push(task);
+    }
+
+    #[instrument]
+    pub fn push_act(&self, act: &Arc<Act>) {
+        let mut acts = self.acts.write().unwrap();
+        acts.insert(act.id.clone(), act.clone());
     }
 }

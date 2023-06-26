@@ -8,15 +8,14 @@ jobs:
       - name: step 1
         id: step1
         on:
-          init: |
-            print("init");
-            env.set("value", 10);
-          complete: |
-            print("complete");
-          error: |
-            print("error");
-          a: |
-            print("custom message");
+          task:
+            init: |
+              print("init");
+              env.set("value", 10);
+            complete: |
+              print("complete");
+            error: |
+              print("error");
         run: |
           print("step 1");
       - name: step 2

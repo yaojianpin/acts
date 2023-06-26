@@ -11,7 +11,7 @@ use std::{ops::Deref, sync::Arc};
 impl ActTask for Job {
     fn run(&self, _ctx: &Context) {}
     fn post(&self, ctx: &Context) {
-        ctx.task.set_state(&TaskState::Success);
+        ctx.task.set_state(TaskState::Success);
     }
 }
 

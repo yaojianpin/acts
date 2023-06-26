@@ -7,9 +7,9 @@ pub use sqlite::SqliteStore;
 use crate::ActError;
 use std::error::Error;
 pub fn map_db_err(err: impl Error) -> ActError {
-    ActError::StoreError(err.to_string())
+    ActError::Store(err.to_string())
 }
 
 pub fn map_opt_err(err: String) -> ActError {
-    ActError::StoreError(err)
+    ActError::Store(err)
 }

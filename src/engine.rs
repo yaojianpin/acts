@@ -2,17 +2,15 @@ use crate::{
     adapter::{self, Adapter},
     export::{Emitter, Executor, Extender, Manager},
     options::Options,
-    plugin::{self},
+    plugin,
     sch::Scheduler,
     store::Store,
-    utils,
 };
 use once_cell::sync::OnceCell;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::Sender;
-use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Registry};
+use tracing::info;
 
-static LOGGER: OnceCell<bool> = OnceCell::new();
 static STORE: OnceCell<Arc<Store>> = OnceCell::new();
 
 /// Workflow Engine
@@ -21,7 +19,7 @@ static STORE: OnceCell<Arc<Store>> = OnceCell::new();
 /// a example to caculate the result from 1 to given input value
 ///
 ///```rust
-/// use acts::{ActionOptions, Engine, State, Workflow, Vars};
+/// use acts::{Engine, WorkflowState, Workflow, Vars};
 ///
 /// #[tokio::main]
 /// async fn main() {
@@ -30,24 +28,19 @@ static STORE: OnceCell<Arc<Store>> = OnceCell::new();
 ///
 ///     let model = include_str!("../examples/simple/model.yml");
 ///     let mut workflow = Workflow::from_str(model).unwrap();
-///
-///     let mut vars = Vars::new();
-///     vars.insert("input".into(), 3.into());
-///     workflow.set_env(vars);
 ///     
-///     engine.emitter().on_complete(move |w: &State<Workflow>| {
+///     engine.emitter().on_complete(move |w: &WorkflowState| {
 ///         println!("{:?}", w.outputs());
 ///     });
 ///
-///     let executor = engine.executor();
-///     executor.deploy(&workflow).expect("fail to deploy workflow");
-///     executor.start(
+///     engine.manager().deploy(&workflow).expect("fail to deploy workflow");
+///
+///     let mut vars = Vars::new();
+///     vars.insert("input".into(), 3.into());
+///     vars.insert("biz_id".into(), "w1".into());
+///     engine.executor().start(
 ///        &workflow.id,
-///        crate::ActionOptions {
-///            biz_id: Some("w1".to_string()),
-///            ..Default::default()
-///        },
-///    );
+///        &vars);
 /// }
 /// ```
 #[derive(Clone)]
@@ -65,25 +58,13 @@ pub struct Engine {
 
 impl Engine {
     pub fn new() -> Self {
-        let config = utils::default_config();
-        Engine::new_with(&config)
+        Self::new_with_options(&Options::default())
     }
 
-    fn new_with(config: &Options) -> Self {
-        let _ = LOGGER.get_or_init(|| {
-            // let file_appender = tracing_appender::rolling::hourly("log", "acts");
-            // let (non_blocking, _guard) = tracing_appender::non_blocking(file_appender);
-            // tracing_subscriber::fmt().with_writer(non_blocking).init();
-            Registry::default()
-                .with(fmt::layer())
-                .with(EnvFilter::from_default_env())
-                .init();
-
-            true
-        });
-
-        let scher = Scheduler::new_with(config);
-        let store = STORE.get_or_init(|| Arc::new(Store::new()));
+    pub fn new_with_options(opt: &Options) -> Self {
+        info!("options: {:?}", opt);
+        let scher = Scheduler::new_with(opt);
+        let store = STORE.get_or_init(|| Arc::new(Store::new_with_path(&opt.data_dir)));
         let engine = Engine {
             scher: scher.clone(),
             adapter: Arc::new(Adapter::new()),
@@ -133,11 +114,12 @@ impl Engine {
     /// #[tokio::main]
     /// async fn main() {
     ///     let engine = Engine::new();
-    ///     engine.start().await;
+    ///     engine.start();
     /// }
     /// ```
-    pub async fn start(&self) {
-        self.init().await;
+    pub fn start(&self) {
+        info!("start");
+        self.init();
         let scher = self.scher();
         tokio::spawn(async move { scher.event_loop().await });
     }
@@ -155,6 +137,7 @@ impl Engine {
     /// }
     /// ```
     pub fn close(&self) {
+        info!("close");
         let mut is_closed = self.is_closed.lock().unwrap();
         if *is_closed {
             return;
@@ -168,7 +151,7 @@ impl Engine {
         }
     }
 
-    pub async fn r#loop(&self) {
+    pub async fn eloop(&self) {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         *self.signal.lock().unwrap() = Some(tx);
         rx.recv().await;
@@ -187,18 +170,19 @@ impl Engine {
         self.store.clone()
     }
 
-    async fn init(&self) {
+    fn init(&self) {
+        info!("init");
         plugin::init(self);
         adapter::init(self);
-        self.store.init(self).await;
-        self.scher.init(self).await;
+        self.store.init(self);
+        self.scher.init(self);
     }
 }
 
 impl std::fmt::Debug for Engine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Engine")
-            .field("is_closed", &self.is_closed)
+            .field("store", &self.store().kind())
             .finish()
     }
 }

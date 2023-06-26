@@ -1,6 +1,6 @@
 use crate::{
-    event::{EventAction, EventData, Message},
-    sch::{Proc, Scheduler, Task},
+    event::EventData,
+    sch::{Act, Proc, Scheduler, Task},
     store::{self, Store},
     utils::{self, Id},
     ActResult, Engine, ShareLock, StoreAdapter,
@@ -10,13 +10,19 @@ use std::{
     num::NonZeroUsize,
     sync::{Arc, RwLock},
 };
-use tracing::debug;
+use tracing::instrument;
 
 #[derive(Clone)]
 pub struct Cache {
     procs: ShareLock<LruCache<String, Arc<Proc>>>,
     scher: ShareLock<Option<Arc<Scheduler>>>,
     store: ShareLock<Option<Arc<Store>>>,
+}
+
+impl std::fmt::Debug for Cache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Cache").finish()
+    }
 }
 
 impl Cache {
@@ -29,8 +35,6 @@ impl Cache {
     }
 
     pub fn init(&self, engine: &Engine) {
-        debug!("cache::init");
-
         // init store from adapter
         *self.store.write().unwrap() = Some(engine.store());
 
@@ -44,8 +48,12 @@ impl Cache {
         }
     }
 
-    pub fn create_proc(&self, proc: &Arc<Proc>) {
-        debug!("sch::cache::create_proc({})", proc.pid());
+    pub fn count(&self) -> usize {
+        self.procs.read().unwrap().len()
+    }
+
+    #[instrument]
+    pub fn push_proc(&self, proc: &Arc<Proc>) {
         self.procs.write().unwrap().push(proc.pid(), proc.clone());
         if let Some(store) = &*self.store.read().unwrap() {
             let workflow = &*proc.workflow();
@@ -56,7 +64,7 @@ impl Cache {
                 state: proc.state().into(),
                 start_time: proc.start_time(),
                 end_time: proc.end_time(),
-                vars: utils::vars::to_string(&proc.vm().vars()),
+                vars: utils::vars::to_string(&proc.env.vars()),
             };
             store.procs().create(&data).expect("failed to create proc");
         }
@@ -78,50 +86,30 @@ impl Cache {
         }
     }
 
-    pub fn message(&self, id: &str) -> Option<Message> {
-        let id = utils::Id::from(id);
-        if let Some(proc) = self.proc(&id.pid()) {
-            return proc.message(&id.id());
-        }
-        None
-    }
-
-    pub fn message_by_uid(&self, pid: &str, uid: &str) -> Option<Message> {
+    pub fn act(&self, pid: &str, aid: &str) -> Option<Arc<Act>> {
         if let Some(proc) = self.proc(pid) {
-            return proc.message_by_uid(uid);
+            return proc.act(aid);
         }
         None
     }
 
-    // pub fn nearest_done_task_by_uid(&self, pid: &str, uid: &str) -> Option<Arc<Task>> {
-    //     if let Some(proc) = self.proc(pid) {
-    //         let mut tasks = proc.task_by_uid(uid, TaskState::Success);
-    //         if tasks.len() > 0 {
-    //             tasks.sort_by(|a, b| a.end_time().cmp(&b.end_time()));
-    //             let task = tasks.get(0).unwrap().clone();
-    //             return Some(task);
-    //         }
-    //     }
-    //     None
-    // }
-
+    #[instrument]
     pub fn remove(&self, pid: &str) -> ActResult<bool> {
-        debug!("sch::cache::remove pid={}", pid);
         self.procs.write().unwrap().pop(pid);
         if let Some(store) = &*self.store.read().unwrap() {
-            store.procs().delete(&pid)?;
+            store.remove_proc(pid)?;
         }
 
         Ok(true)
     }
 
-    pub fn restore(&self, scher: Arc<Scheduler>) {
-        debug!("sch::cache::restore");
+    #[instrument]
+    pub fn restore(&self) {
         if let Some(store) = &*self.store.read().unwrap() {
             let mut procs = self.procs.write().unwrap();
             if procs.len() < procs.cap().get() / 2 {
                 let cap = procs.cap().get() - procs.len();
-                for ref proc in store.load(scher, cap) {
+                for ref proc in store.load(cap) {
                     procs.push(proc.pid(), proc.clone());
                     self.send(proc);
                 }
@@ -129,62 +117,82 @@ impl Cache {
         }
     }
 
+    #[instrument]
     pub fn upsert_task(&self, task: &Task, data: &EventData) {
         if let Some(store) = &*self.store.read().unwrap() {
-            if data.action == EventAction::Create {
-                let tid = &task.tid;
-                let nid = task.nid();
-                let id = Id::new(&task.pid, tid);
-                let task = store::Task {
-                    id: id.id(),
-                    kind: task.node.kind().to_string(),
-                    pid: task.pid.clone(),
-                    tid: tid.clone(),
-                    nid: nid,
-                    state: task.state().into(),
-                    start_time: task.start_time(),
-                    end_time: task.end_time(),
-                    uid: match task.uid() {
-                        Some(u) => u,
-                        None => "".to_string(),
-                    },
-                };
-                store.tasks().create(&task).expect("failed to create task");
-            } else {
-                let pid = &task.pid;
+            let id = Id::new(&task.pid, &task.tid);
+            match store.tasks().find(&id.id()) {
+                Ok(mut store_task) => {
+                    let pid = &task.pid;
 
-                let mut proc = store.procs().find(pid).expect("get store proc");
-                proc.vars = utils::vars::to_string(&data.vars);
-                store.procs().update(&proc).expect("update store proc vars");
+                    let mut proc = store.procs().find(pid).expect("get store proc");
+                    proc.vars = utils::vars::to_string(&task.proc.env.vars());
+                    store.procs().update(&proc).expect("update store proc vars");
 
-                let id = Id::new(pid, &task.tid);
-                let state = task.state();
-                let mut task = store.tasks().find(&id.id()).expect("get store task");
-                task.state = state.into();
-                store.tasks().update(&task).expect("failed to update task");
+                    let state = task.state();
+                    store_task.state = state.into();
+                    store_task.end_time = task.end_time();
+                    store
+                        .tasks()
+                        .update(&store_task)
+                        .expect("failed to update task");
+                }
+                Err(_) => {
+                    let tid = &task.tid;
+                    let nid = task.nid();
+                    let task = store::Task {
+                        id: id.id(),
+                        kind: task.node.kind().to_string(),
+                        pid: task.pid.clone(),
+                        tid: tid.clone(),
+                        nid: nid,
+                        state: task.state().into(),
+                        start_time: task.start_time(),
+                        end_time: task.end_time(),
+                    };
+                    store.tasks().create(&task).expect("failed to create task");
+                }
             }
         }
     }
 
-    pub fn create_message(&self, msg: &Message) {
-        let uid = match &msg.uid {
-            Some(uid) => uid,
-            None => "",
-        };
+    #[instrument]
+    pub fn upsert_act(&self, act: &Act, data: &EventData) {
         if let Some(store) = &*self.store.read().unwrap() {
-            store
-                .messages()
-                .create(&store::Message {
-                    id: msg.id.clone(),
-                    pid: msg.pid.clone(),
-                    tid: msg.tid.clone(),
-                    uid: uid.to_string(),
-                    vars: utils::vars::to_string(&msg.vars),
-                    create_time: msg.create_time,
-                    update_time: msg.update_time,
-                    state: msg.state.clone().into(),
-                })
-                .expect("create proc message");
+            match store.acts().find(&act.id) {
+                Ok(mut store_act) => {
+                    let mut proc = store.procs().find(&act.pid).expect("get store proc");
+                    proc.vars = utils::vars::to_string(&act.task.proc.env.vars());
+                    store.procs().update(&proc).expect("update store proc vars");
+
+                    store_act.state = act.state().into();
+                    store_act.end_time = act.end_time();
+                    store_act.active = act.active();
+                    store_act.vars = utils::vars::to_string(&act.vars);
+                    store
+                        .acts()
+                        .update(&store_act)
+                        .expect("failed to update act");
+                }
+                Err(_) => {
+                    let store_act = store::Act {
+                        id: act.id.clone(),
+                        kind: act.kind.to_string(),
+                        pid: act.pid.clone(),
+                        tid: act.tid.clone(),
+                        state: act.state().into(),
+                        start_time: act.start_time(),
+                        end_time: act.end_time(),
+                        vars: utils::vars::to_string(&act.vars),
+                        event: data.event.to_string(),
+                        active: act.active(),
+                    };
+                    store
+                        .acts()
+                        .create(&store_act)
+                        .expect("failed to create act");
+                }
+            }
         }
     }
 

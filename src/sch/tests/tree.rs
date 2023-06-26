@@ -1,28 +1,19 @@
 use crate::{
-    sch::{
-        tree::{NodeData, NodeTree},
-        ActId,
-    },
+    sch::tree::{NodeData, NodeTree},
     Workflow,
 };
 
 #[derive(Clone)]
 struct Data(i32);
 
-impl ActId for Data {
-    fn tid(&self) -> String {
-        self.0.to_string()
-    }
-}
-
 impl std::fmt::Display for Data {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.tid().to_string())
+        f.write_str(&self.0.to_string())
     }
 }
 
 #[tokio::test]
-async fn tree_from() {
+async fn sch_tree_from() {
     let text = include_str!("./models/simple.yml");
     let mut workflow = Workflow::from_str(text).unwrap();
     let tr = NodeTree::build(&mut workflow);
@@ -30,7 +21,7 @@ async fn tree_from() {
 }
 
 #[tokio::test]
-async fn tree_get() {
+async fn sch_tree_get() {
     let text = include_str!("./models/simple.yml");
     let mut workflow = Workflow::from_str(text).unwrap();
 
@@ -41,7 +32,7 @@ async fn tree_get() {
 }
 
 #[tokio::test]
-async fn tree_new() {
+async fn sch_tree_new() {
     let mut tr = NodeTree::new();
 
     let mut workflow = Workflow::default();
@@ -54,7 +45,7 @@ async fn tree_new() {
 }
 
 #[tokio::test]
-async fn tree_set_parent() {
+async fn sch_tree_set_parent() {
     let tr = NodeTree::new();
     let mut workflow = Workflow::default();
     workflow.set_id("1");
@@ -72,7 +63,7 @@ async fn tree_set_parent() {
 }
 
 #[tokio::test]
-async fn tree_set_next() {
+async fn sch_tree_set_next() {
     let tr = NodeTree::new();
 
     let mut workflow = Workflow::default();

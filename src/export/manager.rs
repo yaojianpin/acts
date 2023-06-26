@@ -2,7 +2,7 @@ use crate::{
     sch::Scheduler,
     store::{Store, StoreAdapter},
     utils::Id,
-    ActResult, MessageInfo, ModelInfo, ProcInfo, Query, TaskInfo,
+    ActInfo, ActResult, ActionState, ModelInfo, ProcInfo, Query, TaskInfo, Workflow,
 };
 use std::sync::Arc;
 
@@ -18,6 +18,14 @@ impl Manager {
             scher: sch.clone(),
             store: store.clone(),
         }
+    }
+
+    pub fn deploy(&self, model: &Workflow) -> ActResult<ActionState> {
+        let mut state = ActionState::begin();
+        self.store.deploy(model)?;
+        state.end();
+
+        Ok(state)
     }
 
     pub fn models(&self, limit: usize) -> ActResult<Vec<ModelInfo>> {
@@ -91,12 +99,15 @@ impl Manager {
         }
     }
 
-    pub fn messages(&self, pid: &str) -> ActResult<Vec<MessageInfo>> {
-        let query = Query::new().push("pid", pid);
-        match self.store.messages().query(&query) {
-            Ok(messages) => {
+    pub fn acts(&self, pid: &str, tid: Option<&str>) -> ActResult<Vec<ActInfo>> {
+        let mut query = Query::new().push("pid", pid);
+        if let Some(tid) = tid {
+            query = query.push("tid", tid);
+        }
+        match self.store.acts().query(&query) {
+            Ok(acts) => {
                 let mut ret = Vec::new();
-                for t in messages {
+                for t in acts {
                     ret.push(t.into());
                 }
 

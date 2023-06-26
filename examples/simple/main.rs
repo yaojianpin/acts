@@ -1,25 +1,21 @@
-use acts::{ActionOptions, Engine, State, Vars, Workflow};
+use acts::{Engine, Vars, Workflow, WorkflowState};
 
 #[tokio::main]
 async fn main() {
     let engine = Engine::new();
-    engine.start().await;
+    engine.start();
 
     let executor = engine.executor();
     let text = include_str!("./model.yml");
-    let mut workflow = Workflow::from_str(text).unwrap();
+    let workflow = Workflow::from_str(text).unwrap();
+    engine.manager().deploy(&workflow).expect("deploy model");
 
     let mut vars = Vars::new();
-    vars.insert("input".into(), 100.into());
-    workflow.set_env(vars);
-
-    executor.deploy(&workflow).expect("deploy model");
-    executor
-        .start(&workflow.id, ActionOptions::default())
-        .expect("start workflow");
+    vars.insert("input".into(), 10.into());
+    executor.start(&workflow.id, &vars).expect("start workflow");
 
     let e = engine.clone();
-    engine.emitter().on_complete(move |s: &State<Workflow>| {
+    engine.emitter().on_complete(move |s: &WorkflowState| {
         println!(
             "on_workflow_complete: state={} cost={}ms output={:?}",
             s.state,
@@ -27,8 +23,8 @@ async fn main() {
             s.outputs()
         );
 
-        s.print_tree().unwrap();
+        //s.tree().unwrap();
         e.close();
     });
-    engine.r#loop().await;
+    engine.eloop().await;
 }

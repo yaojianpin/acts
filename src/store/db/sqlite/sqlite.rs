@@ -48,7 +48,7 @@ pub struct SqliteStore {
     models: Arc<ModelSet>,
     procs: Arc<ProcSet>,
     tasks: Arc<TaskSet>,
-    messages: Arc<MessageSet>,
+    messages: Arc<ActSet>,
 }
 
 impl SqliteStore {
@@ -58,7 +58,7 @@ impl SqliteStore {
             models: Arc::new(ModelSet),
             procs: Arc::new(ProcSet),
             tasks: Arc::new(TaskSet),
-            messages: Arc::new(MessageSet),
+            messages: Arc::new(ActSet),
         };
 
         db.init();
@@ -86,7 +86,7 @@ impl StoreAdapter for SqliteStore {
         self.tasks.clone()
     }
 
-    fn messages(&self) -> Arc<dyn DbSet<Item = Message>> {
+    fn acts(&self) -> Arc<dyn DbSet<Item = Act>> {
         self.messages.clone()
     }
 }
@@ -115,7 +115,7 @@ impl DbSet for ModelSet {
         run(async {
             let pool = db();
             match sqlx::query(
-                r#"select id, name, ver, size, time, model from act_model where id=$1"#,
+                r#"select id, name, ver, size, time, model, topic from act_model where id=$1"#,
             )
             .bind(id)
             .fetch_one(pool)
@@ -128,8 +128,9 @@ impl DbSet for ModelSet {
                     size: row.get(3),
                     time: row.get(4),
                     model: row.get(5),
+                    topic: row.get(6),
                 }),
-                Err(err) => Err(ActError::StoreError(err.to_string())),
+                Err(err) => Err(ActError::Store(err.to_string())),
             }
         })
     }
@@ -140,7 +141,7 @@ impl DbSet for ModelSet {
             let mut ret = Vec::new();
             let pool = db();
             let sql = format!(
-                r#"select id, name, ver, size, time, model from act_model {}"#,
+                r#"select id, name, ver, size, time, model, topic from act_model {}"#,
                 q.sql()
             );
             let query = sqlx::query(&sql);
@@ -154,12 +155,13 @@ impl DbSet for ModelSet {
                             size: row.get(3),
                             time: row.get(4),
                             model: row.get(5),
+                            topic: row.get(6),
                         });
                     }
 
                     Ok(ret)
                 }
-                Err(err) => Err(ActError::StoreError(err.to_string())),
+                Err(err) => Err(ActError::Store(err.to_string())),
             }
         })
     }
@@ -170,16 +172,17 @@ impl DbSet for ModelSet {
         run(async move {
             let pool = db();
             let sql = sqlx::query(
-                r#"insert into act_model (id, model, ver, size, time) values ($1,$2,$3,$4,$5)"#,
+                r#"insert into act_model (id, model, ver, size, time, topic) values ($1,$2,$3,$4,$5,$6)"#,
             )
             .bind(model.id)
             .bind(model.model)
             .bind(model.ver)
             .bind(model.size)
-            .bind(model.time);
+            .bind(model.time)
+            .bind(model.topic);
             match sql.execute(pool).await {
                 Ok(_) => Ok(true),
-                Err(err) => Err(ActError::StoreError(err.to_string())),
+                Err(err) => Err(ActError::Store(err.to_string())),
             }
         })
     }
@@ -187,14 +190,16 @@ impl DbSet for ModelSet {
         trace!("sqlite.Model.update({})", model.id);
         run(async {
             let pool = db();
-            let sql = sqlx::query(r#"update act_model set model = $1, ver = $2 where id=$3"#)
-                .bind(model.model.to_string())
-                .bind(&model.ver)
-                .bind(&model.id);
+            let sql =
+                sqlx::query(r#"update act_model set model = $1, ver = $2, topic = $3 where id=$4"#)
+                    .bind(model.model.to_string())
+                    .bind(&model.ver)
+                    .bind(&model.topic)
+                    .bind(&model.id);
 
             match sql.execute(pool).await {
                 Ok(_) => Ok(true),
-                Err(err) => Err(ActError::StoreError(err.to_string())),
+                Err(err) => Err(ActError::Store(err.to_string())),
             }
         })
     }
@@ -205,7 +210,7 @@ impl DbSet for ModelSet {
             let sql = sqlx::query(r#"delete from act_model where id=$1"#).bind(id);
             match sql.execute(pool).await {
                 Ok(_) => Ok(true),
-                Err(err) => Err(ActError::StoreError(err.to_string())),
+                Err(err) => Err(ActError::Store(err.to_string())),
             }
         })
     }
@@ -250,7 +255,7 @@ impl DbSet for ProcSet {
                         end_time: row.get(6),
                     })
                 }
-                Err(err) => Err(ActError::StoreError(err.to_string())),
+                Err(err) => Err(ActError::Store(err.to_string())),
             }
         })
     }
@@ -282,7 +287,7 @@ impl DbSet for ProcSet {
 
                     Ok(ret)
                 }
-                Err(err) => Err(ActError::StoreError(err.to_string())),
+                Err(err) => Err(ActError::Store(err.to_string())),
             }
         })
     }
@@ -302,7 +307,7 @@ impl DbSet for ProcSet {
             .bind(proc.vars);
             match sql.execute(pool).await {
                 Ok(_) => Ok(true),
-                Err(err) => Err(ActError::StoreError(err.to_string())),
+                Err(err) => Err(ActError::Store(err.to_string())),
             }
         })
     }
@@ -310,14 +315,14 @@ impl DbSet for ProcSet {
         trace!("sqlite.proc.update({})", proc.id);
         run(async {
             let pool = db();
-            let sql = sqlx::query(r#"update act_proc set state = $1, vars = $2 where id=$3"#)
+            let sql = sqlx::query(r#"update act_proc set state = $1, vars = $2 where id=$4"#)
                 .bind(proc.state.to_string())
                 .bind(&proc.vars)
                 .bind(&proc.id);
 
             match sql.execute(pool).await {
                 Ok(_) => Ok(true),
-                Err(err) => Err(ActError::StoreError(err.to_string())),
+                Err(err) => Err(ActError::Store(err.to_string())),
             }
         })
     }
@@ -328,7 +333,7 @@ impl DbSet for ProcSet {
             let sql = sqlx::query(r#"delete from act_proc where id=$1"#).bind(id);
             match sql.execute(pool).await {
                 Ok(_) => Ok(true),
-                Err(err) => Err(ActError::StoreError(err.to_string())),
+                Err(err) => Err(ActError::Store(err.to_string())),
             }
         })
     }
@@ -356,25 +361,24 @@ impl DbSet for TaskSet {
         trace!("sqlite.task.find({})", id);
         run(async {
             let pool = db();
-            match sqlx::query(r#"select tag, id, pid, tid, state,start_time, end_time, uid from act_task where id=$1"#)
-                .bind(id)
-                .fetch_one(pool)
-                .await
+            match sqlx::query(
+                r#"select tag, id, pid, tid, state,start_time, end_time from act_task where id=$1"#,
+            )
+            .bind(id)
+            .fetch_one(pool)
+            .await
             {
-                Ok(row) => {
-                    Ok(Task {
-                        kind: row.get(0),
-                        id: row.get(1),
-                        pid: row.get(2),
-                        tid: row.get(3),
-                        nid: row.get(4),
-                        state: row.get(5),
-                        start_time: row.get(6),
-                        end_time: row.get(7),
-                        uid: row.get(8),
-                    })
-                }
-                Err(err) => Err(ActError::StoreError(err.to_string())),
+                Ok(row) => Ok(Task {
+                    kind: row.get(0),
+                    id: row.get(1),
+                    pid: row.get(2),
+                    tid: row.get(3),
+                    nid: row.get(4),
+                    state: row.get(5),
+                    start_time: row.get(6),
+                    end_time: row.get(7),
+                }),
+                Err(err) => Err(ActError::Store(err.to_string())),
             }
         })
     }
@@ -385,7 +389,7 @@ impl DbSet for TaskSet {
             let pool = db();
 
             let a = &format!(
-                r#"select kind, id, pid, tid, nid, state, start_time, end_time, uid from act_task {}"#,
+                r#"select kind, id, pid, tid, nid, state, start_time, end_time from act_task {}"#,
                 q.sql()
             );
             println!("{}", a);
@@ -402,13 +406,12 @@ impl DbSet for TaskSet {
                             state: row.get(5),
                             start_time: row.get(6),
                             end_time: row.get(7),
-                            uid: row.get(8),
                         });
                     }
 
                     Ok(ret)
                 }
-                Err(err) => Err(ActError::StoreError(err.to_string())),
+                Err(err) => Err(ActError::Store(err.to_string())),
             }
         })
     }
@@ -419,7 +422,7 @@ impl DbSet for TaskSet {
         run(async move {
             let pool = &*db();
             let sql = sqlx::query(
-                r#"insert into act_task (kind, id, pid, tid, nid, state, start_time, end_time, uid) values ($1,$2,$3,$4,$5,$6,$7,$8,$9)"#,
+                r#"insert into act_task (kind, id, pid, tid, nid, state, start_time, end_time) values ($1,$2,$3,$4,$5,$6,$7,$8)"#,
             )
             .bind(task.kind)
             .bind(task.id)
@@ -428,12 +431,11 @@ impl DbSet for TaskSet {
             .bind(task.nid)
             .bind(task.state.to_string())
             .bind(task.start_time)
-            .bind(task.end_time)
-            .bind(task.uid.clone());
+            .bind(task.end_time);
 
             match sql.execute(pool).await {
                 Ok(_) => Ok(true),
-                Err(err) => Err(ActError::StoreError(err.to_string())),
+                Err(err) => Err(ActError::Store(err.to_string())),
             }
         })
     }
@@ -441,17 +443,16 @@ impl DbSet for TaskSet {
         trace!("sqlite.task.update({})", task.id);
         run(async {
             let pool = &*db();
-            let sql = sqlx::query(r#"update act_task set state = $1, start_time = $2, end_time = $3, uid = $4, kind = $5, where id=$6"#)
+            let sql = sqlx::query(r#"update act_task set state = $1, start_time = $2, end_time = $3, kind = $4, where id=$5"#)
                 .bind(task.state.to_string())
                 .bind(task.start_time)
                 .bind(task.end_time)
-                .bind(task.uid.clone())
                 .bind(task.kind.clone())
                 .bind(&task.id);
 
             match sql.execute(pool).await {
                 Ok(_) => Ok(true),
-                Err(err) => Err(ActError::StoreError(err.to_string())),
+                Err(err) => Err(ActError::Store(err.to_string())),
             }
         })
     }
@@ -462,22 +463,22 @@ impl DbSet for TaskSet {
             let sql = sqlx::query(r#"delete from act_task where id=$1"#).bind(id);
             match sql.execute(pool).await {
                 Ok(_) => Ok(true),
-                Err(err) => Err(ActError::StoreError(err.to_string())),
+                Err(err) => Err(ActError::Store(err.to_string())),
             }
         })
     }
 }
 
 #[derive(Debug, Clone)]
-pub struct MessageSet;
+pub struct ActSet;
 
-impl DbSet for MessageSet {
-    type Item = Message;
+impl DbSet for ActSet {
+    type Item = Act;
     fn exists(&self, id: &str) -> ActResult<bool> {
-        trace!("sqlite.message.exists({})", id);
+        trace!("sqlite.act.exists({})", id);
         let pool = &*db();
         run(async {
-            let row = sqlx::query(r#"select count(id) from act_message where id=$1"#)
+            let row = sqlx::query(r#"select count(id) from act_act where id=$1"#)
                 .bind(id)
                 .fetch_one(pool)
                 .await
@@ -487,40 +488,42 @@ impl DbSet for MessageSet {
         })
     }
 
-    fn find(&self, id: &str) -> ActResult<Message> {
-        trace!("sqlite.message.find({})", id);
+    fn find(&self, id: &str) -> ActResult<Act> {
+        trace!("sqlite.act.find({})", id);
         run(async {
             let pool = &*db();
             match sqlx::query(
-                r#"select id, pid, tid, uid, create_time,update_time, state, vars from act_message where id=$1"#,
+                r#"select id, kind, event, pid, tid, create_time,update_time, state, vars, active from act_act where id=$1"#,
             )
             .bind(id)
             .fetch_one(pool)
             .await
             {
-                Ok(row) => Ok(Message {
+                Ok(row) => Ok(Act {
                     id: row.get(0),
-                    pid: row.get(1),
-                    tid: row.get(2),
-                    uid: row.get(3),
-                    create_time: row.get(4),
-                    update_time: row.get(5),
-                    state: row.get(6),
-                    vars: row.get(7),
+                    kind: row.get(1),
+                    event: row.get(2),
+                    pid: row.get(3),
+                    tid: row.get(4),
+                    start_time: row.get(5),
+                    end_time: row.get(6),
+                    state: row.get(7),
+                    vars: row.get(8),
+                    active: row.get(9),
                 }),
-                Err(err) => Err(ActError::StoreError(err.to_string())),
+                Err(err) => Err(ActError::Store(err.to_string())),
             }
         })
     }
 
-    fn query(&self, q: &Query) -> ActResult<Vec<Message>> {
-        trace!("sqlite.message.query({})", q.sql());
+    fn query(&self, q: &Query) -> ActResult<Vec<Act>> {
+        trace!("sqlite.act.query({})", q.sql());
         run(async {
             let mut ret = Vec::new();
             let pool = &*db();
 
             let a = &format!(
-                r#"select id, pid, tid, uid, create_time,update_time,state, vars from act_message {}"#,
+                r#"select id, kind, event, pid, tid, create_time,update_time,state, vars, active from act_act {}"#,
                 q.sql()
             );
             println!("{}", a);
@@ -528,56 +531,64 @@ impl DbSet for MessageSet {
             match &sql.fetch_all(pool).await {
                 Ok(rows) => {
                     for row in rows {
-                        ret.push(Message {
+                        ret.push(Act {
                             id: row.get(0),
-                            pid: row.get(1),
-                            tid: row.get(2),
-                            uid: row.get(3),
-                            create_time: row.get(4),
-                            update_time: row.get(5),
-                            state: row.get(6),
-                            vars: row.get(7),
+                            kind: row.get(1),
+                            event: row.get(2),
+                            pid: row.get(3),
+                            tid: row.get(4),
+                            start_time: row.get(5),
+                            end_time: row.get(6),
+                            state: row.get(7),
+                            vars: row.get(8),
+                            active: row.get(9),
                         });
                     }
 
                     Ok(ret)
                 }
-                Err(err) => Err(ActError::StoreError(err.to_string())),
+                Err(err) => Err(ActError::Store(err.to_string())),
             }
         })
     }
 
-    fn create(&self, msg: &Message) -> ActResult<bool> {
-        trace!("sqlite.message.create({})", msg.id);
-        let msg = msg.clone();
+    fn create(&self, msg: &Act) -> ActResult<bool> {
+        trace!("sqlite.act.create({})", msg.id);
+        let act = msg.clone();
         run(async move {
             let pool = &*db();
             let sql = sqlx::query(
-                r#"insert into act_message (id, pid, tid, uid, create_time) values ($1,$2,$3,$4,$5)"#,
+                r#"insert into act_act (id, kind, event, pid, tid, create_time, vars, active) values ($1,$2,$3,$4,$5,$6,$7,$8,$9)"#,
             )
-            .bind(msg.id)
-            .bind(msg.pid)
-            .bind(msg.tid)
-            .bind(msg.uid)
-            .bind(msg.create_time);
+            .bind(act.id)
+            .bind(act.kind)
+            .bind(act.event)
+            .bind(act.pid)
+            .bind(act.tid)
+            .bind(act.start_time)
+            .bind(act.vars)
+            .bind(act.active);
 
             match sql.execute(pool).await {
                 Ok(_) => Ok(true),
-                Err(err) => Err(ActError::StoreError(err.to_string())),
+                Err(err) => Err(ActError::Store(err.to_string())),
             }
         })
     }
-    fn update(&self, msg: &Message) -> ActResult<bool> {
-        trace!("sqlite.message.update({})", msg.id);
+    fn update(&self, msg: &Act) -> ActResult<bool> {
+        trace!("sqlite.act.update({})", msg.id);
         run(async {
             let pool = &*db();
-            let sql = sqlx::query(r#"update act_message set uid = $1 where id=$2"#)
-                .bind(&msg.uid)
-                .bind(&msg.id);
+            let sql =
+                sqlx::query(r#"update act_act set vars=$1, update_time=$2, active=$3 where id=$4"#)
+                    .bind(&msg.vars)
+                    .bind(&msg.end_time)
+                    .bind(&msg.active)
+                    .bind(&msg.id);
 
             match sql.execute(pool).await {
                 Ok(_) => Ok(true),
-                Err(err) => Err(ActError::StoreError(err.to_string())),
+                Err(err) => Err(ActError::Store(err.to_string())),
             }
         })
     }
@@ -585,10 +596,10 @@ impl DbSet for MessageSet {
         trace!("sqlite.message:delete({})", id);
         run(async {
             let pool = &*db();
-            let sql = sqlx::query(r#"delete from act_message where id=$1"#).bind(id);
+            let sql = sqlx::query(r#"delete from act_act where id=$1"#).bind(id);
             match sql.execute(pool).await {
                 Ok(_) => Ok(true),
-                Err(err) => Err(ActError::StoreError(err.to_string())),
+                Err(err) => Err(ActError::Store(err.to_string())),
             }
         })
     }

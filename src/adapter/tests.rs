@@ -1,151 +1,98 @@
 use crate::{
-    sch::{Context, NodeData},
-    utils, Engine, OrgAdapter, RoleAdapter, RuleAdapter, Workflow,
+    store::{Act, DbSet, Model, Proc, Query, StoreAdapter, StoreKind, Task},
+    ActResult, Engine,
 };
 use std::sync::Arc;
 
 #[tokio::test]
-async fn adapter_role() {
-    let engine = create_engine_with_adapter();
-    let users = engine.adapter().role("admin");
-    assert_eq!(users, vec!["a1".to_string()]);
-}
-
-#[tokio::test]
-async fn adapter_dept() {
-    let engine = create_engine_with_adapter();
-    let users = engine.adapter().dept("d1");
-    assert_eq!(users, vec!["u1".to_string(), "u2".to_string()]);
-}
-
-#[tokio::test]
-async fn adapter_unit() {
-    let engine = create_engine_with_adapter();
-    let users = engine.adapter().unit("u1");
-    assert_eq!(
-        users,
-        vec![
-            "u1".to_string(),
-            "u2".to_string(),
-            "u3".to_string(),
-            "u4".to_string()
-        ]
-    );
-}
-
-#[tokio::test]
-async fn adapter_some() {
-    let engine = create_engine_with_adapter();
-    let scher = engine.scher();
-    let mut workflow = create_workflow();
-
-    let pid = utils::longid();
-    let proc = Arc::new(scher.create_raw_proc(&pid, &workflow));
-    let tree = crate::sch::NodeTree::build(&mut workflow);
-    if let Some(root) = &tree.root {
-        let flow = proc.create_task(root, None);
-
-        let job = proc.create_task(&flow.node.children()[0], Some(flow));
-        let step = proc.create_task(&job.node.children()[0], Some(job));
-
-        if let NodeData::Step(s) = step.node.data() {
-            let ctx = proc.create_context(&scher, &step);
-            let ret = engine.adapter().some("some1", &s, &ctx);
-            assert_eq!(ret, Ok(true));
-        } else {
-            assert!(false);
-        }
-    } else {
-        assert!(false);
-    }
-}
-
-#[tokio::test]
-async fn adapter_ord() {
-    let engine = create_engine_with_adapter();
-
-    let acts = vec!["u1".to_string(), "u2".to_string()];
-
-    let users = engine.adapter().ord("ord1", &acts).unwrap();
-    assert_eq!(users, vec!["u2".to_string(), "u1".to_string(),]);
-}
-
-#[tokio::test]
-async fn adapter_relate() {
-    let engine = create_engine_with_adapter();
-
-    let users = engine.adapter().relate("p", "p1", "d.owner");
-    assert_eq!(users, vec!["p1".to_string()]);
-}
-
-fn create_engine_with_adapter() -> Engine {
+async fn adapter_set_extern_store_test() {
     let engine = Engine::new();
+    let store = TestStore::new();
+    engine.adapter().set_extern_store(&store);
+    engine.start();
 
-    let adapter = TestAdapter::new();
-    engine
-        .adapter()
-        .set_role_adapter("test_role", adapter.clone());
-    engine
-        .adapter()
-        .set_org_adapter("test_org", adapter.clone());
-    engine
-        .adapter()
-        .set_rule_adapter("test_rule", adapter.clone());
-
-    engine
-}
-
-fn create_workflow() -> Workflow {
-    let text = include_str!("../../examples/basic.yml");
-    let workflow = Workflow::from_str(text).unwrap();
-
-    workflow
+    assert_eq!(engine.store().kind(), StoreKind::Extern);
+    engine.store().reset();
 }
 
 #[derive(Debug, Clone)]
-struct TestAdapter {}
-impl TestAdapter {
-    fn new() -> Self {
-        Self {}
+pub struct TestStore {
+    models: Collect<Model>,
+    procs: Collect<Proc>,
+    tasks: Collect<Task>,
+    acts: Collect<Act>,
+}
+
+impl TestStore {
+    pub fn new() -> Self {
+        Self {
+            models: Collect::new(),
+            procs: Collect::new(),
+            tasks: Collect::new(),
+            acts: Collect::new(),
+        }
     }
 }
 
-impl RuleAdapter for TestAdapter {
-    fn ord(&self, _name: &str, acts: &Vec<String>) -> crate::ActResult<Vec<String>> {
-        let mut ret = acts.clone();
-        ret.reverse();
+impl StoreAdapter for TestStore {
+    fn init(&self) {}
+    fn flush(&self) {}
 
-        Ok(ret)
+    fn models(&self) -> Arc<dyn DbSet<Item = Model>> {
+        Arc::new(self.models.clone())
     }
 
-    fn some(&self, _name: &str, _step: &crate::Step, _ctx: &Context) -> crate::ActResult<bool> {
-        Ok(true)
-    }
-}
-
-impl OrgAdapter for TestAdapter {
-    fn dept(&self, _name: &str) -> Vec<String> {
-        vec!["u1".to_string(), "u2".to_string()]
+    fn procs(&self) -> Arc<dyn DbSet<Item = Proc>> {
+        Arc::new(self.procs.clone())
     }
 
-    fn unit(&self, _name: &str) -> Vec<String> {
-        vec![
-            "u1".to_string(),
-            "u2".to_string(),
-            "u3".to_string(),
-            "u4".to_string(),
-        ]
+    fn tasks(&self) -> Arc<dyn DbSet<Item = Task>> {
+        Arc::new(self.tasks.clone())
     }
 
-    fn relate(&self, _t: &str, _id: &str, _r: &str) -> Vec<String> {
-        vec!["p1".to_string()]
+    fn acts(&self) -> Arc<dyn DbSet<Item = Act>> {
+        Arc::new(self.acts.clone())
     }
 }
 
-impl RoleAdapter for TestAdapter {
-    fn role(&self, _name: &str) -> Vec<String> {
-        vec!["a1".to_string()]
+#[derive(Debug, Clone)]
+pub struct Collect<T> {
+    _data: Vec<T>,
+}
+
+impl<T> Collect<T> {
+    pub fn new() -> Self {
+        Self { _data: Vec::new() }
     }
 }
 
-// impl ActAdapter for TestAdapter {}
+impl<T> DbSet for Collect<T>
+where
+    T: Send + Sync,
+{
+    type Item = T;
+    fn exists(&self, _id: &str) -> ActResult<bool> {
+        Ok(false)
+    }
+
+    fn find(&self, _id: &str) -> ActResult<Self::Item> {
+        Err(crate::ActError::Store(format!(
+            "not found model id={}",
+            _id
+        )))
+    }
+
+    fn query(&self, _q: &Query) -> ActResult<Vec<Self::Item>> {
+        Ok(vec![])
+    }
+
+    fn create(&self, _data: &Self::Item) -> ActResult<bool> {
+        Ok(false)
+    }
+    fn update(&self, _data: &Self::Item) -> ActResult<bool> {
+        Ok(false)
+    }
+    fn delete(&self, _id: &str) -> ActResult<bool> {
+        Ok(false)
+    }
+}

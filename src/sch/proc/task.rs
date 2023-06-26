@@ -1,23 +1,29 @@
 use crate::{
     env::VirtualMachine,
-    event::EventAction,
+    event::{EventAction, MessageKind},
     sch::{
+        proc::Act,
         tree::{Node, NodeData},
-        ActId, ActState, Context, Proc, TaskState,
+        Context, Proc, Scheduler, TaskState,
     },
-    utils, ActTask, ShareLock, Vars,
+    utils, ActTask, Message, ShareLock, Vars,
 };
 use async_trait::async_trait;
-use std::sync::{Arc, RwLock};
-use tracing::debug;
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+};
+use tracing::{debug, instrument};
+
+use super::ActKind;
 
 #[derive(Clone)]
 pub struct Task {
     pub pid: String,
     pub tid: String,
     pub node: Arc<Node>,
+    pub env: Arc<VirtualMachine>,
 
-    uid: ShareLock<Option<String>>,
     state: ShareLock<TaskState>,
     start_time: ShareLock<i64>,
     end_time: ShareLock<i64>,
@@ -28,26 +34,33 @@ pub struct Task {
     // previous tid
     prev: ShareLock<Option<String>>,
 
-    vm: Arc<VirtualMachine>,
+    pub(crate) proc: Arc<Proc>,
 }
 
 impl std::fmt::Debug for Task {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Task")
+            .field("kind", &self.node.kind())
             .field("pid", &self.pid)
             .field("tid", &self.tid)
             .field("nid", &self.node.id())
-            .field("kind", &self.node.kind())
-            .field("state", &self.state.read().unwrap())
-            .field("start_time", &self.start_time.read().unwrap())
-            .field("end_time", &self.end_time.read().unwrap())
-            .field("uid", &self.uid.read().unwrap())
+            .field("state", &self.state())
+            .field("start_time", &self.start_time())
+            .field("end_time", &self.end_time())
+            .field("vars", &self.vars())
             .finish()
     }
 }
 
 impl Task {
-    pub fn new(proc: &Proc, tid: &str, node: Arc<Node>) -> Self {
+    pub fn new(proc: &Arc<Proc>, tid: &str, node: Arc<Node>) -> Self {
+        // create new env for each task
+        let vm = proc.env.vm();
+        if let NodeData::Job(job) = node.data() {
+            // set the job env as global vars
+            let vars = utils::fill_vars(&vm, &job.env);
+            vm.output(&vars);
+        }
         let task = Self {
             pid: proc.pid(),
             tid: tid.to_string(),
@@ -55,13 +68,11 @@ impl Task {
             state: Arc::new(RwLock::new(TaskState::None)),
             start_time: Arc::new(RwLock::new(0)),
             end_time: Arc::new(RwLock::new(0)),
-            uid: Arc::new(RwLock::new(node.data().owner())),
-
             prev: Arc::new(RwLock::new(None)),
             children: Arc::new(RwLock::new(Vec::new())),
+            env: vm,
 
-            // vm refrence
-            vm: proc.vm(),
+            proc: proc.clone(),
         };
 
         task
@@ -79,10 +90,9 @@ impl Task {
         state.clone()
     }
 
-    pub fn uid(&self) -> Option<String> {
-        self.uid.read().unwrap().clone()
+    pub fn tid(&self) -> String {
+        self.tid.clone()
     }
-
     pub fn nid(&self) -> String {
         self.node.id()
     }
@@ -93,6 +103,31 @@ impl Task {
         }
 
         0
+    }
+
+    pub fn create_context(self: &Arc<Self>, scher: &Arc<Scheduler>) -> Arc<Context> {
+        self.proc.create_context(scher, self)
+    }
+
+    pub fn create_message(&self, event: &EventAction) -> Message {
+        let workflow = self.proc.workflow();
+
+        let outputs = self.outputs();
+        let mut vars = self.vars();
+        vars.extend(outputs);
+
+        Message {
+            kind: MessageKind::Task,
+            event: event.clone(),
+            mid: workflow.id.clone(),
+            topic: workflow.topic.clone(),
+            nkind: self.node.kind().to_string(),
+            nid: self.nid(),
+            pid: self.pid.clone(),
+            tid: self.tid.clone(),
+            key: None,
+            vars: vars,
+        }
     }
 
     pub fn prev(&self) -> Option<String> {
@@ -106,7 +141,7 @@ impl Task {
             match ctx.proc.task(&tid) {
                 Some(task) => {
                     if task.node.level < self.node.level {
-                        return Some(task);
+                        return Some(task.clone());
                     }
 
                     prev = task.prev();
@@ -126,68 +161,97 @@ impl Task {
         ret.clone()
     }
 
-    pub fn vars(&self) -> Vars {
-        let mut vars = Vars::new();
-        match &self.node.data {
-            NodeData::Workflow(workflow) => vars = workflow.env.clone(),
-            NodeData::Job(job) => vars = job.env.clone(),
-            NodeData::Branch(branch) => vars = branch.env.clone(),
-            NodeData::Step(step) => vars = step.env.clone(),
-            NodeData::Act(_act) => {}
-        }
-
-        utils::fill_vars(&self.vm, &vars)
+    pub fn acts(&self) -> Vec<Arc<Act>> {
+        self.proc
+            .acts()
+            .iter()
+            .filter(|act| act.tid == self.tid)
+            .cloned()
+            .collect()
     }
 
-    pub(crate) fn set_prev(&self, prev: Option<String>) {
+    pub fn vars(&self) -> Vars {
+        let vars = match &self.node.data {
+            NodeData::Workflow(workflow) => workflow.env.clone(),
+            NodeData::Job(job) => job.env.clone(),
+            NodeData::Branch(branch) => branch.env.clone(),
+            NodeData::Step(step) => step.env.clone(),
+        };
+
+        utils::fill_vars(&self.env, &vars)
+    }
+
+    pub fn outputs(&self) -> Vars {
+        let vars = match &self.node.data {
+            NodeData::Workflow(workflow) => workflow.outputs.clone(),
+            NodeData::Job(job) => job.outputs.clone(),
+            _ => Vars::new(),
+        };
+
+        utils::fill_vars(&self.env, &vars)
+    }
+
+    pub fn set_prev(&self, prev: Option<String>) {
         *self.prev.write().unwrap() = prev;
     }
 
-    pub fn set_state(&self, state: &TaskState) {
-        *self.state.write().unwrap() = state.clone();
+    pub fn set_state(&self, state: TaskState) {
+        if state.is_completed() {
+            self.set_end_time(utils::time::time());
+        } else if state.is_running() {
+            self.set_start_time(utils::time::time());
+        }
+        *self.state.write().unwrap() = state;
     }
-    pub(crate) fn set_start_time(&self, time: i64) {
+
+    pub fn set_pure_state(&self, state: TaskState) {
+        *self.state.write().unwrap() = state;
+    }
+
+    pub fn set_start_time(&self, time: i64) {
         *self.start_time.write().unwrap() = time;
     }
-    pub(crate) fn set_end_time(&self, time: i64) {
+    pub fn set_end_time(&self, time: i64) {
         *self.end_time.write().unwrap() = time;
     }
 
-    pub fn set_uid(&self, uid: &str) {
-        *self.uid.write().unwrap() = Some(uid.to_string());
+    pub fn push_act(self: &Arc<Self>, kind: ActKind, vars: &Vars) -> Arc<Act> {
+        let act = Act::new(self, kind, vars);
+        self.proc.push_act(&act);
+
+        act
     }
 
-    pub(crate) fn push_back(&self, next: &str) {
+    pub fn push_back(&self, next: &str) {
         let mut children = self.children.write().unwrap();
         children.push(next.to_string());
     }
 
-    pub fn complete(&self, ctx: &Context) {
-        debug!("task::complete({:?})", self);
-        self.prepare(ctx);
+    #[instrument]
+    pub fn exec(&self, ctx: &Context) {
+        if ctx.task.state().is_none() {
+            self.prepare(ctx);
+        }
+
         if ctx.task.state().is_running() {
             self.run(ctx);
         }
-
         if ctx.task.state().is_next() {
             self.next(ctx);
         }
+
+        if ctx.task.state().is_error() {
+            ctx.dispatch_task(self, EventAction::Error);
+        }
     }
 
-    fn next(&self, ctx: &Context) {
+    #[instrument]
+    pub fn next(&self, ctx: &Context) {
         let node = self.node.clone();
         let children = node.children();
-        debug!(
-            "task::next node={:?} kind={:?} children={:?}  ctx={:?} task={:?}",
-            node.id(),
-            node.kind(),
-            children.len(),
-            ctx,
-            self
-        );
         if children.len() > 0 {
             for child in children {
-                if self.check_cond(&child, ctx) {
+                if self.is_cond(&child, ctx) {
                     ctx.sched_task(&child);
                 }
             }
@@ -226,7 +290,24 @@ impl Task {
         }
     }
 
-    fn check_cond(&self, node: &Node, ctx: &Context) -> bool {
+    pub fn on_event(&self, event: &str, ctx: &Context) {
+        let mut on_events = HashMap::new();
+        if let NodeData::Step(step) = self.node.data() {
+            if let Some(on) = step.on {
+                on_events = on.task.clone();
+            }
+        }
+        if let Some(event) = on_events.get(event) {
+            if event.is_string() {
+                let ret = ctx.run(event.as_str().unwrap());
+                if !self.state().is_error() && ret.is_err() {
+                    self.set_state(TaskState::Fail(ret.err().unwrap().into()));
+                }
+            }
+        }
+    }
+    /// check if the condition expr is ok
+    fn is_cond(&self, node: &Node, ctx: &Context) -> bool {
         let mut expr = None;
         match &node.data {
             NodeData::Branch(branch) => expr = branch.r#if.clone(),
@@ -246,148 +327,12 @@ impl Task {
 
         true
     }
-
-    pub fn exec(&self, ctx: &Context) {
-        debug!("task::exec action={:?} task={:?}", ctx.action(), self);
-        self.prepare(ctx);
-        if let Some(name) = ctx.action() {
-            let action = EventAction::parse(&name);
-            match action {
-                EventAction::Create => {}
-                EventAction::Next | EventAction::Submit => {
-                    if ctx.task.state().is_running() {
-                        self.run(ctx);
-                    }
-                    if ctx.task.state().is_next() {
-                        self.next(ctx);
-                    }
-                }
-                EventAction::Back => {
-                    ctx.task.set_state(&TaskState::Backed);
-                    ctx.dispatch(&ctx.task, EventAction::Back);
-                    if let Some(parent) = ctx.task.parent(ctx) {
-                        for tid in parent.children() {
-                            if let Some(task) = ctx.proc.task(&tid) {
-                                if task.state().is_completed() {
-                                    break;
-                                }
-                                task.set_uid(&ctx.uid().expect("get action uid"));
-                                task.set_state(&TaskState::Skip);
-                                ctx.dispatch(&ctx.task, EventAction::Skip);
-                            }
-                        }
-                    }
-                    match &ctx.options().to {
-                        Some(to) => match ctx.proc.node(to) {
-                            Some(node) => {
-                                ctx.sched_task(&node);
-                            }
-                            None => {
-                                ctx.task.set_state(&TaskState::Fail(format!(
-                                    "not find back node by '{}'",
-                                    to
-                                )));
-                            }
-                        },
-                        None => {
-                            ctx.task.set_state(&TaskState::Fail(
-                                "not set 'to' in back options".to_string(),
-                            ));
-                        }
-                    }
-                }
-                EventAction::Cancel => {
-                    if let Some(parent) = ctx.task.parent(ctx) {
-                        // cancel next tasks
-                        let nexts = ctx.proc.find_next_tasks(&parent.tid);
-                        for n in nexts {
-                            n.set_state(&TaskState::Cancelled);
-                            ctx.dispatch(&n, EventAction::Cancel);
-                            for tid in n.children() {
-                                if let Some(task) = ctx.proc.task(&tid) {
-                                    if task.state().is_completed() {
-                                        break;
-                                    }
-                                    task.set_uid(&ctx.uid().expect("get action uid"));
-                                    task.set_state(&TaskState::Cancelled);
-                                    ctx.dispatch(&task, EventAction::Cancel);
-                                }
-                            }
-                        }
-
-                        // re-create new task
-                        if let Some(node) = ctx.proc.node(&parent.nid()) {
-                            ctx.sched_task(&node);
-                        }
-                    }
-                }
-                EventAction::Abort => {
-                    let state = TaskState::Abort(format!("abort by uid({:?})", ctx.uid()));
-                    ctx.task.set_state(&state);
-                    ctx.dispatch(&ctx.task, EventAction::Abort);
-
-                    // abort all tasks
-                    let mut parent = ctx.task.parent(ctx);
-                    while let Some(task) = parent {
-                        let proc = ctx.proc.clone();
-                        let ctx = proc.create_context(&ctx.scher, &task);
-                        ctx.task.set_state(&state);
-                        ctx.dispatch(&ctx.task, EventAction::Abort);
-
-                        for tid in task.children() {
-                            if let Some(task) = ctx.proc.task(&tid) {
-                                if task.state().is_waiting() || task.state().is_running() {
-                                    task.set_uid(&ctx.uid().expect("get action uid"));
-                                    task.set_state(&state);
-                                    ctx.dispatch(&task, EventAction::Abort);
-                                }
-                            }
-                        }
-
-                        parent = task.parent(&ctx);
-                    }
-                }
-                EventAction::Skip => {}
-                EventAction::Error => {}
-                EventAction::Custom(_) => {}
-            }
-        }
-    }
-
-    fn error(&self, ctx: &Context) {
-        let state = ctx.task.state();
-        ctx.proc.set_state(&state);
-        ctx.proc.set_end_time(utils::time::time());
-        let state = ctx.proc.workflow_state();
-        ctx.scher.emitter().dispatch_error(&state);
-    }
-}
-
-impl ActId for Task {
-    fn tid(&self) -> String {
-        self.tid.clone()
-    }
-}
-impl ActState for Task {
-    fn state(&self) -> TaskState {
-        self.state.read().unwrap().clone()
-    }
-
-    fn set_state(&self, state: &TaskState) {
-        *self.state.write().unwrap() = state.clone();
-    }
 }
 
 #[async_trait]
 impl ActTask for Task {
+    #[instrument]
     fn prepare(&self, ctx: &Context) {
-        debug!(
-            "prepare tid={} nid={}, state={:?} vars={:?}",
-            self.tid(),
-            self.nid(),
-            self.state(),
-            ctx.vm().vars()
-        );
         ctx.prepare();
         match &self.node.data {
             NodeData::Workflow(workflow) => {
@@ -400,42 +345,26 @@ impl ActTask for Task {
             NodeData::Step(step) => {
                 step.prepare(ctx);
             }
-            NodeData::Act(act) => {
-                act.prepare(ctx);
-            }
         }
 
         if self.state().is_none() {
-            self.set_state(&TaskState::Running);
+            self.set_state(TaskState::Running);
         }
 
-        if ctx.task.state().is_error() {
-            self.error(ctx);
-        }
-        ctx.dispatch(&ctx.task, EventAction::Create);
+        ctx.dispatch_task(&ctx.task, EventAction::Create);
     }
 
+    #[instrument]
     fn run(&self, ctx: &Context) {
-        debug!(
-            "run tid={} nid={} state={:?}",
-            self.tid(),
-            self.nid(),
-            self.state()
-        );
         match &self.node.data {
             NodeData::Workflow(workflow) => workflow.run(ctx),
             NodeData::Job(job) => job.run(ctx),
             NodeData::Branch(branch) => branch.run(ctx),
             NodeData::Step(step) => step.run(ctx),
-            NodeData::Act(act) => {
-                act.run(ctx);
-            }
-        }
-        if ctx.task.state().is_error() {
-            self.error(ctx);
         }
     }
 
+    #[instrument]
     fn post(&self, ctx: &Context) {
         match &self.node.data {
             NodeData::Workflow(workflow) => {
@@ -448,22 +377,10 @@ impl ActTask for Task {
             NodeData::Step(step) => {
                 step.post(ctx);
             }
-            NodeData::Act(act) => {
-                act.post(ctx);
-            }
         }
 
         if self.state().is_completed() {
-            ctx.dispatch(self, EventAction::Next);
+            ctx.dispatch_task(self, EventAction::Complete);
         }
-
-        debug!(
-            "post tid={} nid={}, kind={:?} state={:?} vars={:?}",
-            self.tid(),
-            self.nid(),
-            self.node.kind(),
-            self.state(),
-            ctx.vm().vars()
-        );
     }
 }

@@ -1,6 +1,5 @@
 mod data;
 mod db;
-mod none;
 mod query;
 mod store;
 
@@ -29,7 +28,7 @@ pub trait DbSet: Send + Sync {
 ///
 /// # Example
 /// ```no_run
-/// use acts::{store::{Model, Proc, Task, Message, DbSet}, StoreAdapter};
+/// use acts::{store::{Model, Act, Proc, Task, DbSet}, StoreAdapter};
 /// use std::sync::Arc;
 /// struct TestStore;
 /// impl StoreAdapter for TestStore {
@@ -43,7 +42,7 @@ pub trait DbSet: Send + Sync {
 ///     fn tasks(&self) -> Arc<dyn DbSet<Item =Task>> {
 ///         todo!()
 ///     }
-///     fn messages(&self) -> Arc<dyn DbSet<Item =Message>> {
+///     fn acts(&self) -> Arc<dyn DbSet<Item =Act>> {
 ///         todo!()
 ///     }
 ///     fn init(&self) {}
@@ -56,7 +55,7 @@ pub trait StoreAdapter: Send + Sync {
     fn models(&self) -> Arc<dyn DbSet<Item = Model>>;
     fn procs(&self) -> Arc<dyn DbSet<Item = Proc>>;
     fn tasks(&self) -> Arc<dyn DbSet<Item = Task>>;
-    fn messages(&self) -> Arc<dyn DbSet<Item = Message>>;
+    fn acts(&self) -> Arc<dyn DbSet<Item = Act>>;
 
     fn flush(&self);
 }

@@ -29,6 +29,7 @@ impl<'a> Id<'a> {
         Self { pid: pid, tid: tid }
     }
 
+    #[allow(unused)]
     pub fn from(id: &'a str) -> Self {
         let parts: Vec<&str> = id.split(ID_SEP).collect();
         let pid = parts.get(0).unwrap();
@@ -50,6 +51,7 @@ impl<'a> Id<'a> {
         id
     }
 
+    #[allow(unused)]
     pub fn pid(&self) -> &'a str {
         self.pid
     }

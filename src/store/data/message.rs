@@ -9,13 +9,13 @@ pub struct Message {
     #[tag]
     pub pid: String,
     #[tag]
-    pub tid: String,
-    #[tag]
-    pub uid: String,
-    pub vars: String,
-    pub create_time: i64,
-    pub update_time: i64,
-    pub state: u8,
+    pub key: String,
+    pub kind: String,
+    pub event: String,
+    pub state: String,
+    pub start_time: i64,
+    pub end_time: i64,
+    pub ack: bool,
 }
 
 impl DbModel for Message {

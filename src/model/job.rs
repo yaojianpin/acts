@@ -1,7 +1,6 @@
 use super::step::Step;
-use crate::{ActValue, ModelBase};
+use crate::{ActValue, ModelBase, Vars};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Job {
@@ -18,16 +17,16 @@ pub struct Job {
     pub needs: Vec<String>,
 
     #[serde(default)]
-    pub env: HashMap<String, ActValue>,
+    pub env: Vars,
 
     #[serde(default)]
     pub accept: Option<ActValue>,
 
     #[serde(default)]
-    pub outputs: HashMap<String, ActValue>,
+    pub outputs: Vars,
 
     #[serde(default)]
-    pub on: HashMap<String, ActValue>,
+    pub on: Vars,
 }
 
 impl Job {

@@ -23,28 +23,26 @@ Here are some examples:
 First, you should load a ymal workflow model, and call `engine.start` to start and call `engine.close` to stop it.
 
 ```no_run
-use acts::{ActionOptions, Engine, Vars, State, Workflow};
+use acts::{Engine, Vars, WorkflowState, Workflow};
 
 #[tokio::main]
 async fn main() {
     let engine = Engine::new();
-    engine.start().await;
+    engine.start();
 
     let text = include_str!("../examples/simple/model.yml");
     let mut workflow = Workflow::from_str(text).unwrap();
-    let mut vars = Vars::new();
-    vars.insert("input".into(), 3.into());
-    workflow.set_env(vars);
 
     let executor = engine.executor();
-    executor.deploy(&workflow).expect("fail to deploy workflow");
-    executor.start(&workflow.id, ActionOptions {
-            biz_id: Some("w1".to_string()),
-            ..Default::default()
-        });
+    engine.manager().deploy(&workflow).expect("fail to deploy workflow");
+
+    let mut vars = Vars::new();
+    vars.insert("input".into(), 3.into());
+    vars.insert("biz_id".to_string(), "w1".into());
+    executor.start(&workflow.id, &vars);
 
     let e = engine.clone();
-    engine.emitter().on_complete(move |w: &State<Workflow>| {
+    engine.emitter().on_complete(move |w: &WorkflowState| {
         println!("outputs: {:?}", w.outputs());
     });
     
@@ -108,7 +106,7 @@ jobs:
       - name: step1
         subject: 
             matcher: any
-            users: |
+            cands: |
                 let a = ["u1"];
                 let b = ["u2"];
                 a.union(b)
@@ -159,13 +157,12 @@ let mut workflow = Workflow::new()
                                 .with_if(r#"env.get("index") <= env.get("count")"#)
                                 .with_step(|step| {
                                     step.with_id("c1")
-                                        .with_action(|env| {
-                                            let result =
-                                                env.get("result").unwrap().as_i64().unwrap();
-                                            let index = env.get("index").unwrap().as_i64().unwrap();
-                                            env.set("result", (result + index).into());
-                                            env.set("index", (index + 1).into());
-                                        })
+                                        .with_run(r#"
+                                          let index = env.get("index");
+                                          let value = env.get("value");
+                                          env.set("value", value + index);
+                                          env.set("index", index + 1);
+                                        "#)
                                         .with_next("cond")
                                 })
                         })
@@ -175,7 +172,7 @@ let mut workflow = Workflow::new()
                 })
                 .with_step(|step| {
                     step.with_name("step2")
-                        .with_action(|env| println!("result={:?}", env.get("result").unwrap()))
+                        .with_run(r#"println!("result={:?}", env.get("result").unwrap()))"#)
                 })
         });
 ```

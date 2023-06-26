@@ -1,23 +1,25 @@
-use crate::env::VirtualMachine;
+use crate::{
+    env::{Enviroment, VirtualMachine},
+    ActValue, Vars,
+};
 use regex::Regex;
 use rhai::{Dynamic, Map};
-use serde_yaml::{Mapping, Value};
-use std::collections::HashMap;
+use serde_json::Map as JsonMap;
 
-pub fn value_to_dymainc(v: &Value) -> Dynamic {
+pub fn value_to_dymainc(v: &ActValue) -> Dynamic {
     match v {
-        Value::Null => Dynamic::UNIT,
-        Value::Bool(b) => Dynamic::from(b.clone()),
-        Value::String(s) => Dynamic::from(s.clone()),
-        Value::Number(n) if n.is_i64() => Dynamic::from(n.as_i64().unwrap()),
-        Value::Number(n) if n.is_f64() => Dynamic::from(n.as_f64().unwrap()),
-        Value::Sequence(s) => Dynamic::from(array_to_dynamic(&s.clone())),
-        Value::Mapping(m) => Dynamic::from(map_to_dynamic(m.clone())),
+        ActValue::Null => Dynamic::UNIT,
+        ActValue::Bool(b) => Dynamic::from(b.clone()),
+        ActValue::String(s) => Dynamic::from(s.clone()),
+        ActValue::Number(n) if n.is_i64() => Dynamic::from(n.as_i64().unwrap()),
+        ActValue::Number(n) if n.is_f64() => Dynamic::from(n.as_f64().unwrap()),
+        ActValue::Array(s) => Dynamic::from(array_to_dynamic(s)),
+        ActValue::Object(m) => Dynamic::from(map_to_dynamic(m)),
         _ => Dynamic::default(),
     }
 }
 
-pub fn dynamic_to_value(value: &Dynamic) -> Value {
+pub fn dynamic_to_value(value: &Dynamic) -> ActValue {
     if value.is::<rhai::INT>() {
         let int = value.as_int().unwrap() as i64;
         return int.into();
@@ -30,12 +32,17 @@ pub fn dynamic_to_value(value: &Dynamic) -> Value {
     } else if value.is::<rhai::ImmutableString>() {
         let s = value.clone().into_string().unwrap();
         return s.into();
+    } else if value.is::<rhai::Array>() {
+        let arr = value.clone().into_array().unwrap();
+        let arr_values: Vec<_> = arr.iter().map(|v| dynamic_to_value(v)).collect();
+
+        return ActValue::Array(arr_values);
     }
 
-    Value::Null
+    ActValue::Null
 }
 
-pub fn array_to_dynamic<'a>(values: &'a Vec<Value>) -> Vec<Dynamic> {
+pub fn array_to_dynamic<'a>(values: &'a Vec<ActValue>) -> Vec<Dynamic> {
     let mut ret = Vec::new();
 
     for v in values {
@@ -45,10 +52,10 @@ pub fn array_to_dynamic<'a>(values: &'a Vec<Value>) -> Vec<Dynamic> {
     ret
 }
 
-pub fn map_to_dynamic<'a>(map: Mapping) -> Map {
+pub fn map_to_dynamic<'a>(map: &JsonMap<String, ActValue>) -> Map {
     let mut ret: Map = Map::new();
-    for (k, v) in &map {
-        let key = k.as_str().unwrap().to_string();
+    for (k, v) in map {
+        let key = k.to_string();
         ret.insert(key.into(), value_to_dymainc(v));
     }
 
@@ -81,20 +88,17 @@ pub fn map_to_dynamic<'a>(map: Mapping) -> Map {
 
 /// fill the vars
 /// 1. if the outputs is an expression, just calculate it
-/// 2. if the env and the outpus both has the same key, using the env to replace the one in outputs
-pub fn fill_vars<'a>(
-    vm: &VirtualMachine,
-    values: &'a HashMap<String, Value>,
-) -> HashMap<String, Value> {
-    let mut ret = HashMap::new();
+/// 2. if the env and the outpus both has the same key, using the env to replace the it in outputs
+pub fn fill_vars<'a>(env: &VirtualMachine, values: &'a Vars) -> Vars {
+    let mut ret = Vars::new();
 
     for (k, v) in values {
-        if let Value::String(string) = v {
+        if let ActValue::String(string) = v {
             if let Some(expr) = get_expr(string) {
-                let result = vm.eval::<Dynamic>(&expr);
+                let result = env.eval::<Dynamic>(&expr);
                 let new_value = match result {
                     Ok(v) => dynamic_to_value(&v),
-                    Err(_err) => Value::Null,
+                    Err(_err) => ActValue::Null,
                 };
 
                 // satisfies the rule 1
@@ -104,8 +108,36 @@ pub fn fill_vars<'a>(
         }
 
         // rule 2
-        match vm.get(k) {
-            Some(env_value) => ret.insert(k.to_string(), env_value),
+        match env.get(k) {
+            Some(v) => ret.insert(k.to_string(), v.clone()),
+            None => ret.insert(k.to_string(), v.clone()),
+        };
+    }
+
+    ret
+}
+
+pub fn fill_proc_vars<'a>(env: &Enviroment, values: &'a Vars) -> Vars {
+    let mut ret = Vars::new();
+
+    for (k, v) in values {
+        if let ActValue::String(string) = v {
+            if let Some(expr) = get_expr(string) {
+                let result = env.eval::<Dynamic>(&expr);
+                let new_value = match result {
+                    Ok(v) => dynamic_to_value(&v),
+                    Err(_err) => ActValue::Null,
+                };
+
+                // satisfies the rule 1
+                ret.insert(k.to_string(), new_value);
+                continue;
+            }
+        }
+
+        // rule 2
+        match env.get(k) {
+            Some(v) => ret.insert(k.to_string(), v.clone()),
             None => ret.insert(k.to_string(), v.clone()),
         };
     }

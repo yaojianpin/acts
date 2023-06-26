@@ -1,148 +1,247 @@
-use crate::{utils, ActError, ActResult, Vars};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
-#[derive(Clone, Debug)]
-pub enum MessageState {
-    None = 0,
-    Sent = 1,
-    Received = 2,
+use crate::{event::EventAction, sch::ActKind, utils, ActValue, Vars};
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub enum MessageKind {
+    Task,
+    Act(ActKind),
+    Notice,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct Message {
-    pub id: String,
+    pub kind: MessageKind,
+    pub event: EventAction,
+    pub mid: String,
+    pub topic: String,
+    pub nkind: String,
+    pub nid: String,
     pub pid: String,
     pub tid: String,
-    pub create_time: i64,
-    pub update_time: i64,
-    pub uid: Option<String>,
+    pub key: Option<String>,
     pub vars: Vars,
-    pub state: MessageState,
 }
 
 #[derive(Clone, Debug)]
-pub struct UserMessage {
-    pub pid: String,
-    pub uid: String,
-    pub action: String,
-    pub options: Option<ActionOptions>,
+pub struct TaskMessage<'a> {
+    pub event: &'a EventAction,
+    pub mid: &'a str,
+    pub mname: &'a str,
+    pub nkind: &'a str,
+    pub nid: &'a str,
+    pub pid: &'a str,
+    pub tid: &'a str,
+    pub vars: &'a Vars,
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
-pub struct ActionOptions {
-    pub vars: Vars,
-    pub to: Option<String>,
-    pub biz_id: Option<String>,
+#[derive(Clone, Debug)]
+pub struct UserMessage<'a> {
+    pub event: &'a EventAction,
+    pub mid: &'a str,
+    pub mname: &'a str,
+    pub nkind: &'a str,
+    pub nid: &'a str,
+    pub pid: &'a str,
+    pub aid: &'a str,
+    pub uid: &'a str,
+    pub vars: &'a Vars,
 }
 
-impl ActionOptions {
-    pub fn from_json(data: &str) -> ActResult<Self> {
-        let v: Value = match serde_json::from_str(data) {
-            Ok(v) => v,
-            Err(err) => return Err(ActError::ConvertError(err.to_string())),
+#[derive(Clone, Debug)]
+pub struct CandidateMessage<'a> {
+    pub event: &'a EventAction,
+    pub mid: &'a str,
+    pub mname: &'a str,
+    pub nkind: &'a str,
+    pub nid: &'a str,
+    pub pid: &'a str,
+    pub aid: &'a str,
+    pub cands: ActValue,
+    pub matcher: &'a str,
+    pub vars: &'a Vars,
+}
+
+#[derive(Clone, Debug)]
+pub struct ActionMessage<'a> {
+    pub event: &'a EventAction,
+    pub mid: &'a str,
+    pub mname: &'a str,
+    pub nkind: &'a str,
+    pub nid: &'a str,
+    pub pid: &'a str,
+    pub aid: &'a str,
+    pub action: &'a str,
+    pub vars: &'a Vars,
+}
+
+#[derive(Clone, Debug)]
+pub struct NoticeMessage<'a> {
+    pub pid: &'a str,
+    pub mid: &'a str,
+    pub mname: &'a str,
+    pub nkind: &'a str,
+    pub nid: &'a str,
+    pub key: &'a str,
+    pub vars: &'a Vars,
+}
+
+#[derive(Clone, Debug)]
+pub struct SomeMessage<'a> {
+    pub event: &'a EventAction,
+    pub mid: &'a str,
+    pub mname: &'a str,
+    pub nkind: &'a str,
+    pub nid: &'a str,
+    pub pid: &'a str,
+    pub aid: &'a str,
+    pub some: &'a str,
+    pub vars: &'a Vars,
+}
+
+impl std::fmt::Display for MessageKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let name = match self {
+            MessageKind::Task => "task".to_string(),
+            MessageKind::Act(act) => format!("act:{act}"),
+            MessageKind::Notice => format!("notice"),
         };
 
-        let vars = match &v["vars"] {
-            Value::Object(map) => utils::vars::from_json(map),
-            _ => {
-                return Err(ActError::ConvertError(
-                    "json format error to convert ActionOptions".into(),
-                ))
-            }
-        };
-        let to = match &v["to"] {
-            Value::Null => None,
-            Value::String(to) => Some(to.clone()),
-            _ => {
-                return Err(ActError::ConvertError(
-                    "json format error to convert ActionOptions".into(),
-                ))
-            }
-        };
+        f.write_str(&name)
+    }
+}
 
-        let biz_id = match &v["biz_id"] {
-            Value::Null => None,
-            Value::String(biz_id) => Some(biz_id.clone()),
-            _ => {
-                return Err(ActError::ConvertError(
-                    "json format error to convert ActionOptions".into(),
-                ))
-            }
-        };
-        Ok(ActionOptions { vars, to, biz_id })
+impl From<&str> for MessageKind {
+    fn from(value: &str) -> Self {
+        match value {
+            "task" => MessageKind::Task,
+            "notice" => MessageKind::Notice,
+            act => MessageKind::Act(ActKind::from(act.replace("act:", "").as_ref())),
+        }
     }
 }
 
 impl Message {
-    pub fn new(pid: &str, tid: &str, uid: Option<String>, vars: Vars) -> Self {
-        Self {
-            id: format!("{pid}:{tid}"),
-            pid: pid.to_string(),
-            tid: tid.to_string(),
-            uid,
-            create_time: utils::time::time(),
-            update_time: 0,
-            vars,
-            state: MessageState::None,
+    pub fn as_task_message(&self) -> Option<TaskMessage> {
+        match &self.kind {
+            MessageKind::Task => Some(TaskMessage {
+                mid: &self.mid,
+                mname: &self.topic,
+                nkind: &self.nkind,
+                nid: &self.nid,
+                pid: &self.pid,
+                event: &self.event,
+                tid: &self.tid,
+                vars: &self.vars,
+            }),
+            _ => None,
         }
     }
 
-    pub fn id(&self) -> String {
-        self.id.clone()
-    }
-
-    pub fn state(&self) -> MessageState {
-        self.state.clone()
-    }
-
-    pub fn set_state(&mut self, state: MessageState) {
-        self.state = state;
-    }
-}
-
-impl UserMessage {
-    pub fn new(pid: &str, uid: &str, action: &str, options: Option<ActionOptions>) -> Self {
-        Self {
-            pid: pid.to_string(),
-            uid: uid.to_string(),
-            action: action.to_string(),
-            options,
+    pub fn as_user_message(&self) -> Option<UserMessage> {
+        match &self.kind {
+            MessageKind::Act(kind) => match kind {
+                ActKind::User => Some(UserMessage {
+                    mid: &self.mid,
+                    mname: &self.topic,
+                    nkind: &self.nkind,
+                    nid: &self.nid,
+                    pid: &self.pid,
+                    event: &self.event,
+                    aid: self.key.as_ref().unwrap(),
+                    vars: &self.vars,
+                    uid: self.vars.get("owner").unwrap().as_str().unwrap(),
+                }),
+                _ => None,
+            },
+            _ => None,
         }
     }
-}
-
-impl From<crate::store::Message> for Message {
-    fn from(m: crate::store::Message) -> Self {
-        Message {
-            id: m.id,
-            pid: m.pid,
-            tid: m.tid,
-            create_time: m.create_time,
-            update_time: m.update_time,
-            uid: if m.uid.is_empty() { None } else { Some(m.uid) },
-            vars: utils::vars::from_string(&m.vars),
-            state: m.state.into(),
+    pub fn as_action_message(&self) -> Option<ActionMessage> {
+        match &self.kind {
+            MessageKind::Act(kind) => match kind {
+                ActKind::Action => Some(ActionMessage {
+                    mid: &self.mid,
+                    mname: &self.topic,
+                    nkind: &self.nkind,
+                    nid: &self.nid,
+                    pid: &self.pid,
+                    event: &self.event,
+                    aid: self.key.as_ref().unwrap(),
+                    vars: &self.vars,
+                    action: self.vars.get("action").unwrap().as_str().unwrap(),
+                }),
+                _ => None,
+            },
+            _ => None,
         }
     }
-}
 
-impl From<u8> for MessageState {
-    fn from(v: u8) -> Self {
-        match v {
-            1 => MessageState::Sent,
-            2 => MessageState::Received,
-            _ => MessageState::None,
+    pub fn as_notice_message(&self) -> Option<NoticeMessage> {
+        match &self.kind {
+            MessageKind::Notice => Some(NoticeMessage {
+                mid: &self.mid,
+                mname: &self.topic,
+                nkind: &self.nkind,
+                nid: &self.nid,
+                pid: &self.pid,
+                vars: &self.vars,
+                key: self.key.as_ref().unwrap(),
+            }),
+            _ => None,
         }
     }
-}
 
-impl Into<u8> for MessageState {
-    fn into(self) -> u8 {
-        match self {
-            MessageState::None => 0,
-            MessageState::Sent => 1,
-            MessageState::Received => 2,
+    pub fn as_canidate_message(&self) -> Option<CandidateMessage> {
+        match &self.kind {
+            MessageKind::Act(kind) => match kind {
+                ActKind::Candidate => {
+                    let cand_value = self.vars.get(utils::consts::SUBJECT_CANDS).unwrap();
+                    let cands = cand_value.clone().into();
+
+                    let matcher = self
+                        .vars
+                        .get(utils::consts::SUBJECT_MATCHER)
+                        .unwrap()
+                        .as_str()
+                        .unwrap();
+
+                    Some(CandidateMessage {
+                        mid: &self.mid,
+                        mname: &self.topic,
+                        nkind: &self.nkind,
+                        nid: &self.nid,
+                        pid: &self.pid,
+                        event: &self.event,
+                        aid: self.key.as_ref().unwrap(),
+                        vars: &self.vars,
+                        cands,
+                        matcher,
+                    })
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    pub fn as_some_message(&self) -> Option<SomeMessage> {
+        match &self.kind {
+            MessageKind::Act(kind) => match kind {
+                ActKind::Some => Some(SomeMessage {
+                    mid: &self.mid,
+                    mname: &self.topic,
+                    nkind: &self.nkind,
+                    nid: &self.nid,
+                    pid: &self.pid,
+                    event: &self.event,
+                    aid: self.key.as_ref().unwrap(),
+                    vars: &self.vars,
+                    some: self.vars.get("some").unwrap().as_str().unwrap(),
+                }),
+                _ => None,
+            },
+            _ => None,
         }
     }
 }

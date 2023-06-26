@@ -1,4 +1,4 @@
-use crate::{event, sch::Scheduler, Message, State, Workflow};
+use crate::{event, sch::Scheduler, Message, WorkflowState};
 use std::sync::Arc;
 
 /// Just a export struct for the event::Emitter
@@ -18,7 +18,7 @@ impl Emitter {
     ///
     /// Example
     /// ```rust
-    /// use acts::{ActionOptions, Engine, Workflow, Vars, Message};
+    /// use acts::{Engine, Workflow, Vars, Message};
     ///
     /// #[tokio::main]
     /// async fn main() {
@@ -27,22 +27,22 @@ impl Emitter {
     ///
     ///     let workflow = Workflow::new().with_id("m1").with_job(|job| {
     ///         job.with_id("job1").with_step(|step| {
-    ///             step.with_subject(|sub| sub.with_matcher("any").with_users(r#"["a"]"#))
+    ///             step.with_subject(|sub| sub.with_matcher("any").with_cands(r#"["a"]"#))
     ///         })
     ///     });
     ///
     ///     engine.emitter().on_message(move |msg: &Message| {
-    ///         assert_eq!(msg.uid, Some("a".to_string()));
+    ///         if let Some(msg) = msg.as_user_message() {
+    ///             println!("act message: aid={} event={} uid={}", msg.aid, msg.event, msg.uid);
+    ///         }
     ///     });
     ///
-    ///     let executor = engine.executor();
-    ///     executor.deploy(&workflow).expect("fail to deploy workflow");
-    ///     executor.start(
+    ///     engine.manager().deploy(&workflow).expect("fail to deploy workflow");
+    ///     let mut vars = Vars::new();
+    ///     vars.insert("biz_id".into(), "w1".into());
+    ///     engine.executor().start(
     ///        &workflow.id,
-    ///        ActionOptions {
-    ///            biz_id: Some("w1".to_string()),
-    ///            ..Default::default()
-    ///        },
+    ///        &vars,
     ///    );
     /// }
     /// ```
@@ -50,15 +50,15 @@ impl Emitter {
         self.evt.on_message(f);
     }
 
-    pub fn on_start(&self, f: impl Fn(&State<Workflow>) + Send + Sync + 'static) {
+    pub fn on_start(&self, f: impl Fn(&WorkflowState) + Send + Sync + 'static) {
         self.evt.on_start(f);
     }
 
-    pub fn on_complete(&self, f: impl Fn(&State<Workflow>) + Send + Sync + 'static) {
+    pub fn on_complete(&self, f: impl Fn(&WorkflowState) + Send + Sync + 'static) {
         self.evt.on_complete(f);
     }
 
-    pub fn on_error(&self, f: impl Fn(&State<Workflow>) + Send + Sync + 'static) {
+    pub fn on_error(&self, f: impl Fn(&WorkflowState) + Send + Sync + 'static) {
         self.evt.on_error(f);
     }
 }

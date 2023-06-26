@@ -7,7 +7,6 @@ use std::{
     collections::HashMap,
     sync::{Arc, RwLock, Weak},
 };
-use tracing::debug;
 
 #[derive(Clone)]
 pub struct NodeTree {
@@ -52,19 +51,6 @@ impl NodeTree {
 
     pub fn set_root(&mut self, node: &Arc<Node>) {
         self.root = Some(node.clone());
-    }
-
-    pub fn push_act(&self, act: &NodeData, step_id: &str) -> Arc<Node> {
-        debug!("push_act step_id={} act={:?}", step_id, act);
-        let parent = self.node(step_id).unwrap();
-        let node = self.make(&parent.root, act.clone(), parent.level + 1);
-        node.set_parent(&parent);
-        self.node_map
-            .write()
-            .unwrap()
-            .insert(act.id(), node.clone());
-
-        node
     }
 
     pub fn node(&self, key: &str) -> Option<Arc<Node>> {

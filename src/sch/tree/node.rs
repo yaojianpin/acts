@@ -1,4 +1,4 @@
-use crate::{Act, Branch, Job, Step, Workflow};
+use crate::{Branch, Job, Step, Workflow};
 use std::sync::{Arc, RwLock, Weak};
 
 #[derive(Debug, Clone)]
@@ -7,7 +7,6 @@ pub enum NodeData {
     Job(Job),
     Branch(Branch),
     Step(Step),
-    Act(Act),
 }
 
 #[derive(PartialEq, Debug, Clone)]
@@ -16,7 +15,6 @@ pub enum NodeKind {
     Job,
     Branch,
     Step,
-    Act,
 }
 
 #[derive(Clone)]
@@ -36,14 +34,15 @@ impl NodeData {
             NodeData::Job(data) => data.id.clone(),
             NodeData::Branch(data) => data.id.clone(),
             NodeData::Step(data) => data.id.clone(),
-            NodeData::Act(data) => data.id.clone(),
         }
     }
 
-    pub fn owner(&self) -> Option<String> {
+    pub fn name(&self) -> String {
         match self {
-            NodeData::Act(data) => Some(data.owner.clone()),
-            _ => None,
+            NodeData::Workflow(data) => data.name.clone(),
+            NodeData::Job(data) => data.name.clone(),
+            NodeData::Branch(data) => data.name.clone(),
+            NodeData::Step(data) => data.name.clone(),
         }
     }
 }
@@ -91,7 +90,6 @@ impl Node {
             NodeData::Job(_) => NodeKind::Job,
             NodeData::Branch(_) => NodeKind::Branch,
             NodeData::Step(_) => NodeKind::Step,
-            NodeData::Act(_) => NodeKind::Act,
         }
     }
 }
@@ -118,11 +116,10 @@ impl std::fmt::Display for NodeKind {
 impl<'a> Into<&'a str> for NodeKind {
     fn into(self) -> &'a str {
         match self {
-            NodeKind::Workflow => "Workflow",
-            NodeKind::Job => "Job",
-            NodeKind::Branch => "Branch",
-            NodeKind::Step => "Step",
-            NodeKind::Act => "Act",
+            NodeKind::Workflow => "workflow",
+            NodeKind::Job => "job",
+            NodeKind::Branch => "branch",
+            NodeKind::Step => "step",
         }
     }
 }
@@ -144,11 +141,10 @@ impl From<String> for NodeKind {
 impl From<&str> for NodeKind {
     fn from(str: &str) -> Self {
         let s = match str {
-            "Workflow" => NodeKind::Workflow,
-            "Job" => NodeKind::Job,
-            "Branch" => NodeKind::Branch,
-            "Step" => NodeKind::Step,
-            "Act" => NodeKind::Act,
+            "workflow" => NodeKind::Workflow,
+            "job" => NodeKind::Job,
+            "branch" => NodeKind::Branch,
+            "step" => NodeKind::Step,
             _ => panic!("not found NodeKind: {}", str),
         };
 

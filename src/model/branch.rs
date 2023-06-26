@@ -1,7 +1,5 @@
-use crate::{model::Step, ModelBase};
+use crate::{model::Step, ModelBase, Vars};
 use serde::{Deserialize, Serialize};
-use serde_yaml::Value;
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Branch {
@@ -12,7 +10,7 @@ pub struct Branch {
     pub id: String,
 
     #[serde(default)]
-    pub env: HashMap<String, Value>,
+    pub env: Vars,
 
     #[serde(default)]
     pub run: Option<String>,

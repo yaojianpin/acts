@@ -1,31 +1,38 @@
 name: approve
 id: m1
+env:
+  custom:
 jobs:
   - name: job1
     id: job1
-    env:
-      rate: 0.5
     steps:
       - name: step 1
         id: step1
+        action: abc
         subject:
-          matcher: some(rate)
-          on:
-            next: print("on next");
-          users: |
+          matcher: all
+          cands: |
             let a = ["a", "b"];
-            let b = role("admin");
+            let b = act.role("admin");
             let c = ["c"];
-
             a.union(c).union(b)
-
         on:
-          init: |
-            print("init");
-          next: |
-            print("success");
-          error: |
-            print("error");
+          task:
+            init: |
+              print("task init");
+            complete: |
+              print("task success");
+              act.send("message_test");
+            error: |
+              print("task error");
+          act:
+            init: print("act init");
+            complete: print("act next");
+            error: |
+              print("act error");
         run: |
           print("step 1");
       - name: step 2
+        run: |
+          print("step 2");
+          print("custom=" + env.get("custom"));

@@ -2,6 +2,8 @@ name: add
 id: m1
 env:
   input: 4
+  index: 0
+  value: 0
 outputs:
   result:
 jobs:

@@ -1,14 +1,13 @@
 use crate::{
-    env::Enviroment,
-    event::{ActionOptions, Emitter, EventAction, EventData, Message, UserMessage},
+    event::{Action, Emitter, EventAction, EventData},
     model::Workflow,
     options::Options,
     sch::{
         cache::Cache,
         queue::{Queue, Signal},
-        Context, Proc, Task, TaskState,
+        Act, Proc, Task, TaskState,
     },
-    utils, ActError, ActResult, Engine, RuleAdapter, RwLock, ShareLock, Step,
+    utils, ActError, ActResult, ActionState, Engine, RwLock, ShareLock, Vars,
 };
 use std::sync::Arc;
 use tokio::runtime::Handle;
@@ -19,92 +18,72 @@ pub struct Scheduler {
     queue: Arc<Queue>,
     cache: Arc<Cache>,
     emitter: Arc<Emitter>,
-    env: Arc<Enviroment>,
-
     engine: ShareLock<Option<Engine>>,
+}
+
+impl std::fmt::Debug for Scheduler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Scheduler")
+            .field("count", &self.cache.count())
+            .finish()
+    }
 }
 
 impl Scheduler {
     pub fn new() -> Arc<Self> {
-        let config = utils::default_config();
-        Scheduler::new_with(&config)
+        let opt = Options::default();
+        Scheduler::new_with(&opt)
     }
 
     pub fn new_with(options: &Options) -> Arc<Self> {
         let scher = Arc::new(Self {
-            queue: Queue::new(options.scher_cap),
+            queue: Queue::new(),
             cache: Arc::new(Cache::new(options.cache_cap)),
             emitter: Arc::new(Emitter::new()),
-            env: Arc::new(Enviroment::new()),
-
             engine: Arc::new(RwLock::new(None)),
         });
-        Self::init_events(&scher);
-
+        Self::initialize(&scher);
         scher
     }
 
-    pub async fn init(&self, engine: &Engine) {
+    pub fn init(&self, engine: &Engine) {
         debug!("scher::init");
         *self.engine.write().unwrap() = Some(engine.clone());
 
-        self.env.init(engine);
         self.queue.init(engine);
         self.cache.init(engine);
     }
 
-    pub fn ord(&self, name: &str, acts: &Vec<String>) -> ActResult<Vec<String>> {
-        debug!("sch::ord({})", name);
-        match &*self.engine.read().unwrap() {
-            Some(engine) => {
-                let adapter = engine.adapter();
-                adapter.ord(name, acts)
-            }
-            None => Err(ActError::RuntimeError("sch::engine not found".to_string())),
-        }
-    }
-
-    pub fn some(&self, name: &str, step: &Step, ctx: &Context) -> ActResult<bool> {
-        debug!("sch::some({})", name);
-        match &*self.engine.read().unwrap() {
-            Some(engine) => {
-                let adapter = engine.adapter();
-                adapter.some(name, step, ctx)
-            }
-            None => Err(ActError::RuntimeError("sch::engine not found".to_string())),
-        }
-    }
-
-    pub fn start(&self, model: &Workflow, options: ActionOptions) -> ActResult<bool> {
+    pub fn start(&self, model: &Workflow, options: &Vars) -> ActResult<ActionState> {
         debug!("sch::start({})", model.id);
 
         let mut pid = utils::longid();
-        if let Some(biz_id) = options.biz_id {
+        if let Some(biz_id) = &options.get("biz_id") {
             // the biz_id will use as the pid
-            pid = biz_id;
+            pid = biz_id.as_str().unwrap().to_string();
         }
 
         let proc = self.cache.proc(&pid);
         if proc.is_some() {
-            return Err(ActError::OperateError(format!(
+            return Err(ActError::Action(format!(
                 "pid({pid}) is duplicated in running proc list"
             )));
         }
 
-        // merge vars in options and workflow.env
+        let mut state = ActionState::begin();
+
+        // merge vars with workflow.env
         let mut w = model.clone();
-        let mut vars = options.vars;
-        for (k, v) in &w.env {
-            if !vars.contains_key(k) {
-                vars.insert(k.to_string(), v.clone());
-            }
-        }
-        w.set_env(vars);
+        w.set_env(&options);
 
-        let proc = self.create_raw_proc(&pid, &w);
-        self.queue.send(&Signal::Proc(Arc::new(proc)));
+        let proc = Arc::new(self.create_raw_proc(&pid, &w));
+        self.queue.send(&Signal::Proc(proc));
 
-        Ok(true)
+        // add pid to state
+        state.insert("pid", pid.into());
+
+        state.end();
+        Ok(state)
     }
 
     pub async fn next(self: &Arc<Self>) -> bool {
@@ -124,15 +103,6 @@ impl Scheduler {
                     handlers.push(Handle::current().spawn(async move {
                         proc.do_task(&task.tid, &scher);
                     }));
-                }
-                Signal::Message(msg) => {
-                    if let Some(proc) = self.cache.proc(&msg.pid) {
-                        let proc = proc.clone();
-                        let scher = self.clone();
-                        handlers.push(Handle::current().spawn(async move {
-                            proc.do_message(&msg, &scher);
-                        }));
-                    }
                 }
                 Signal::Terminal => {
                     return false;
@@ -161,9 +131,18 @@ impl Scheduler {
         self.queue.send(&Signal::Task(task.clone()));
     }
 
-    pub fn sched_message(&self, message: &UserMessage) {
-        debug!("sch::sched_message");
-        self.queue.send(&Signal::Message(message.clone()));
+    pub fn do_action(self: &Arc<Self>, act: &Action) -> ActResult<ActionState> {
+        match self.cache.proc(&act.pid) {
+            Some(proc) => proc.do_action(&act, self),
+            None => Err(ActError::Runtime(format!("cannot find proc '{}'", act.pid))),
+        }
+    }
+
+    pub fn do_ack(self: &Arc<Self>, pid: &str, aid: &str) -> ActResult<ActionState> {
+        match self.cache.proc(pid) {
+            Some(proc) => proc.do_ack(aid, self),
+            None => Err(ActError::Runtime(format!("cannot find proc '{pid}'"))),
+        }
     }
 
     pub fn close(&self) {
@@ -172,38 +151,30 @@ impl Scheduler {
         self.queue.terminate();
     }
 
-    pub fn message(&self, id: &str) -> Option<Message> {
-        self.cache.message(id)
+    pub fn act(&self, pid: &str, aid: &str) -> Option<Arc<Act>> {
+        self.cache.act(pid, aid)
     }
-
-    pub fn message_by_uid(&self, pid: &str, uid: &str) -> Option<Message> {
-        self.cache.message_by_uid(pid, uid)
-    }
-
-    // pub(crate) fn nearest_done_task_by_uid(&self, pid: &str, uid: &str) -> Option<Arc<Task>> {
-    //     self.cache.nearest_done_task_by_uid(pid, uid)
-    // }
 
     pub fn emitter(&self) -> Arc<Emitter> {
         self.emitter.clone()
-    }
-
-    pub fn env(&self) -> Arc<Enviroment> {
-        self.env.clone()
     }
 
     pub fn cache(&self) -> Arc<Cache> {
         self.cache.clone()
     }
 
-    pub(crate) fn create_raw_proc(&self, pid: &str, model: &Workflow) -> Proc {
-        let scher = Arc::new(self.clone());
-        let proc = Proc::new(pid, scher, &model, &TaskState::None);
-
+    #[allow(unused)]
+    pub(crate) fn create_proc(&self, pid: &str, model: &Workflow) -> Arc<Proc> {
+        let proc = Arc::new(Proc::new(pid, &model, &TaskState::None));
+        self.cache.push_proc(&proc);
         proc
     }
 
-    fn init_events(scher: &Arc<Scheduler>) {
+    pub(crate) fn create_raw_proc(&self, pid: &str, model: &Workflow) -> Proc {
+        Proc::new(pid, &model, &TaskState::None)
+    }
+
+    fn initialize(scher: &Arc<Scheduler>) {
         {
             let scher = scher.clone();
             let cache = scher.cache.clone();
@@ -211,18 +182,18 @@ impl Scheduler {
             evt.on_proc(move |proc: &Arc<Proc>, data: &EventData| {
                 info!("on_proc: {}", data);
 
-                let state = proc.workflow_state();
-                if data.action == EventAction::Create {
-                    cache.create_proc(proc);
+                let state = proc.workflow_state(&data.event);
+                if data.event == EventAction::Create {
+                    cache.push_proc(proc);
                     scher.emitter().dispatch_start_event(&state);
                 } else {
                     let pid = data.pid.clone();
                     cache
                         .remove(&pid)
                         .expect(&format!("fail to remove pid={}", pid));
-                    cache.restore(scher.clone());
+                    cache.restore();
 
-                    if data.action == EventAction::Next || data.action == EventAction::Abort {
+                    if data.event == EventAction::Complete || data.event == EventAction::Abort {
                         scher.emitter().dispatch_complete_event(&state);
                     } else {
                         scher.emitter().dispatch_error(&state);
@@ -234,7 +205,7 @@ impl Scheduler {
             let scher = scher.clone();
             let cache = scher.cache.clone();
             let evt = scher.emitter();
-            evt.on_task(move |proc: &Proc, task: &Task, data: &EventData| {
+            evt.on_task(move |task: &Task, data: &EventData| {
                 info!(
                     "on_task: tid={}, kind={} state={} data={}",
                     task.tid,
@@ -244,12 +215,28 @@ impl Scheduler {
                 );
 
                 cache.upsert_task(task, data);
-                // dispatch message
-                if task.state() == TaskState::WaitingEvent {
-                    let msg = proc.make_message(&task.tid, task.uid(), task.vars());
-                    cache.create_message(&msg);
-                    scher.emitter().dispatch_message(&msg);
-                }
+
+                let msg = task.create_message(&data.event);
+                scher.emitter().dispatch_message(&msg);
+            });
+        }
+        {
+            let scher = scher.clone();
+            let cache = scher.cache.clone();
+            let evt = scher.emitter();
+            evt.on_act(move |act: &Act, data: &EventData| {
+                info!(
+                    "on_act: tid={}, kind={} task.state={} act.state={} data={}",
+                    act.tid,
+                    act.task.node.kind(),
+                    act.task.state(),
+                    act.state(),
+                    data
+                );
+
+                cache.upsert_act(act, data);
+                let msg = act.create_message(&data.event);
+                scher.emitter().dispatch_message(&msg);
             });
         }
     }

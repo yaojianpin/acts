@@ -1,25 +1,25 @@
 use crate::Vars;
-use serde_yaml::Value;
-use std::collections::HashMap;
+use serde_json::Value;
 
 pub fn to_string(vars: &Vars) -> String {
-    serde_yaml::to_string(vars).unwrap()
+    serde_json::to_string(vars).unwrap()
 }
 
 pub fn from_string(str: &str) -> Vars {
-    let mut vars = HashMap::new();
+    let mut vars = Vars::new();
     if str.is_empty() {
         return vars;
     }
-    let map: Value = serde_yaml::from_str(str).unwrap();
-    let map = map.as_mapping().unwrap();
+    let map: Value = serde_json::from_str(str).unwrap();
+    let map = map.as_object().unwrap();
     for (k, v) in map {
-        vars.insert(k.as_str().unwrap().to_string(), v.clone());
+        vars.insert(k.as_str().to_string(), v.clone());
     }
 
     vars
 }
 
+#[allow(unused)]
 pub fn from_json(map: &serde_json::Map<String, serde_json::Value>) -> Vars {
     let mut vars = Vars::new();
 
@@ -39,7 +39,8 @@ pub fn from_json(map: &serde_json::Map<String, serde_json::Value>) -> Vars {
     vars
 }
 
-fn from_json_array(arr: &Vec<serde_json::Value>) -> serde_yaml::Value {
+#[allow(unused)]
+fn from_json_array(arr: &Vec<serde_json::Value>) -> Value {
     let mut ret = Vec::new();
     for v in arr {
         let value = match v {
@@ -53,11 +54,12 @@ fn from_json_array(arr: &Vec<serde_json::Value>) -> serde_yaml::Value {
         ret.push(value);
     }
 
-    Value::Sequence(ret)
+    Value::Array(ret)
 }
 
+#[allow(unused)]
 fn from_json_object(o: &serde_json::Map<String, serde_json::Value>) -> Value {
-    let mut map = serde_yaml::Mapping::new();
+    let mut map = serde_json::Map::new();
     for (k, v) in o {
         let value = match v {
             serde_json::Value::Null => Value::Null,
@@ -68,18 +70,19 @@ fn from_json_object(o: &serde_json::Map<String, serde_json::Value>) -> Value {
             serde_json::Value::Object(v) => from_json_object(v),
         };
 
-        map.insert(Value::String(k.to_string()), value);
+        map.insert(k.to_string(), value);
     }
 
-    Value::Mapping(map)
+    Value::Object(map)
 }
 
+#[allow(unused)]
 fn from_json_number(n: &serde_json::Number) -> Value {
     if n.is_i64() {
-        return Value::Number(serde_yaml::Number::from(n.as_i64().unwrap()));
+        return Value::Number(serde_json::Number::from(n.as_i64().unwrap()));
     } else if n.is_u64() {
-        return Value::Number(serde_yaml::Number::from(n.as_u64().unwrap()));
+        return Value::Number(serde_json::Number::from(n.as_u64().unwrap()));
     } else {
-        return Value::Number(serde_yaml::Number::from(n.as_f64().unwrap()));
+        return Value::Number(serde_json::Number::from_f64(n.as_f64().unwrap()).unwrap());
     }
 }

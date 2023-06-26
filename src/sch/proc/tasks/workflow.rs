@@ -27,14 +27,14 @@ impl ActTask for Workflow {
         }
 
         if success_count == self.jobs.len() {
-            // all jobs finished, mark the workflow task as success
-            ctx.task.set_state(&TaskState::Success);
+            // all jobs finished, marks the workflow task as success
+            ctx.task.set_state(TaskState::Success);
         } else {
             for (is_success, job) in jobs.values() {
                 if !is_success {
                     let ready = job.needs.iter().all(|it| jobs.get(it).unwrap().0);
                     if ready {
-                        // schedule a new job task
+                        // schedules a new job task
                         if let Some(node) = ctx.proc.node(&job.id) {
                             ctx.sched_task(&node);
                         }

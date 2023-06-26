@@ -1,4 +1,4 @@
-mod message;
+mod act;
 mod model;
 mod proc;
 mod task;
@@ -8,7 +8,7 @@ use crate::{ActError, ActResult};
 use acts_tag::{Tags, Value};
 use serde::{de::DeserializeOwned, Serialize};
 
-pub use message::Message;
+pub use act::Act;
 pub use model::Model;
 pub use proc::Proc;
 pub use task::Task;
@@ -28,9 +28,7 @@ pub trait DbModel: Tags + Serialize + DeserializeOwned {
     fn get(&self, name: &str) -> ActResult<Vec<u8>> {
         match self.value(name) {
             Some(v) => Ok(v.data().to_vec()),
-            None => Err(ActError::StoreError(format!(
-                "fail to get model key '{name}'"
-            ))),
+            None => Err(ActError::Store(format!("fail to get model key '{name}'"))),
         }
     }
 }

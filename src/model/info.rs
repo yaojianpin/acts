@@ -1,9 +1,11 @@
-use serde::{Deserialize, Serialize};
-
 use crate::{
-    store::{Message, Model, Proc, Task},
+    sch::{self, Act},
+    store::{self, Model, Proc, Task},
     ActError, ActResult, Workflow,
 };
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::sync::Arc;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ProcInfo {
@@ -28,14 +30,14 @@ pub struct TaskInfo {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct MessageInfo {
-    pub id: String,
+pub struct ActInfo {
     pub pid: String,
     pub tid: String,
-    pub create_time: i64,
-    pub update_time: i64,
-    pub uid: Option<String>,
-    pub state: u8,
+    pub aid: String,
+    pub kind: String,
+    pub state: String,
+    pub start_time: i64,
+    pub end_time: i64,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -46,6 +48,7 @@ pub struct ModelInfo {
     pub size: u32,
     pub time: i64,
     pub model: String,
+    pub topic: String,
 }
 
 impl ModelInfo {
@@ -56,7 +59,7 @@ impl ModelInfo {
                 m.set_ver(self.ver);
                 Ok(m)
             }
-            Err(err) => Err(ActError::ConvertError(err.to_string())),
+            Err(err) => Err(ActError::Convert(err.to_string())),
         }
     }
 }
@@ -71,6 +74,7 @@ impl From<Model> for ModelInfo {
             time: m.time,
 
             model: m.model,
+            topic: m.topic,
         }
     }
 }
@@ -103,16 +107,99 @@ impl From<Task> for TaskInfo {
     }
 }
 
-impl From<Message> for MessageInfo {
-    fn from(m: Message) -> Self {
+impl Into<serde_json::Value> for ActInfo {
+    fn into(self) -> serde_json::Value {
+        json!({
+            "pid": self.pid,
+            "tid": self.tid,
+            "aid": self.aid,
+            "kind": self.kind,
+            "state": self.state,
+            "start_time": self.start_time,
+            "end_time": self.end_time,
+        })
+    }
+}
+
+impl Into<serde_json::Value> for TaskInfo {
+    fn into(self) -> serde_json::Value {
+        json!({
+            "pid": self.pid,
+            "tid": self.tid,
+            "nid": self.nid,
+            "kind": self.kind,
+            "state": self.state,
+            "start_time": self.start_time,
+            "end_time": self.end_time,
+        })
+    }
+}
+
+impl Into<serde_json::Value> for ProcInfo {
+    fn into(self) -> serde_json::Value {
+        json!({
+            "pid": self.pid,
+            "mid": self.mid,
+            "name": self.name,
+            "state": self.state,
+            "start_time": self.start_time,
+            "end_time": self.end_time,
+        })
+    }
+}
+
+impl Into<serde_json::Value> for ModelInfo {
+    fn into(self) -> serde_json::Value {
+        json!({
+            "id": self.id,
+            "name": self.name,
+            "ver": self.ver,
+            "size": self.size,
+            "time": self.time,
+            "model": self.model,
+            "topic": self.topic,
+        })
+    }
+}
+
+impl From<&Arc<Act>> for ActInfo {
+    fn from(act: &Arc<Act>) -> Self {
         Self {
-            id: m.id,
-            pid: m.pid,
-            tid: m.tid,
-            state: m.state.into(),
-            create_time: m.create_time,
-            update_time: m.update_time,
-            uid: if !m.uid.is_empty() { Some(m.uid) } else { None },
+            pid: act.pid.clone(),
+            tid: act.tid.clone(),
+            aid: act.id.clone(),
+            kind: act.kind.to_string(),
+            state: act.state().into(),
+            start_time: act.start_time(),
+            end_time: act.end_time(),
+        }
+    }
+}
+
+impl From<store::Act> for ActInfo {
+    fn from(act: store::Act) -> Self {
+        Self {
+            pid: act.pid.clone(),
+            tid: act.tid.clone(),
+            aid: act.id.clone(),
+            kind: act.kind,
+            state: act.state,
+            start_time: act.start_time,
+            end_time: act.end_time,
+        }
+    }
+}
+
+impl From<&Arc<sch::Task>> for TaskInfo {
+    fn from(t: &Arc<sch::Task>) -> Self {
+        Self {
+            pid: t.pid.clone(),
+            tid: t.tid.clone(),
+            nid: t.nid(),
+            kind: t.node.kind().into(),
+            state: t.state().into(),
+            start_time: t.start_time(),
+            end_time: t.end_time(),
         }
     }
 }

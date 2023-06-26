@@ -1,6 +1,6 @@
 use crate::{
     store::{
-        data::{Message, Model, Proc, Task},
+        data::{Act, Model, Proc, Task},
         DbSet, Query, StoreAdapter,
     },
     ActResult,
@@ -12,7 +12,7 @@ pub struct NoneStore {
     models: Collect<Model>,
     procs: Collect<Proc>,
     tasks: Collect<Task>,
-    messages: Collect<Message>,
+    acts: Collect<Act>,
 }
 
 impl NoneStore {
@@ -21,7 +21,7 @@ impl NoneStore {
             models: Collect::new(),
             procs: Collect::new(),
             tasks: Collect::new(),
-            messages: Collect::new(),
+            acts: Collect::new(),
         }
     }
 }
@@ -42,8 +42,8 @@ impl StoreAdapter for NoneStore {
         Arc::new(self.tasks.clone())
     }
 
-    fn messages(&self) -> Arc<dyn DbSet<Item = Message>> {
-        Arc::new(self.messages.clone())
+    fn acts(&self) -> Arc<dyn DbSet<Item = Act>> {
+        Arc::new(self.acts.clone())
     }
 }
 
@@ -68,7 +68,7 @@ where
     }
 
     fn find(&self, _id: &str) -> ActResult<Self::Item> {
-        Err(crate::ActError::StoreError(format!(
+        Err(crate::ActError::Store(format!(
             "not found model id={}",
             _id
         )))

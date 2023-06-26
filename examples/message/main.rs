@@ -1,31 +1,33 @@
-use acts::{ActionOptions, Engine, Message, State, Workflow};
+use acts::{Engine, Message, Vars, Workflow, WorkflowState};
 
 #[tokio::main]
 async fn main() {
     let engine = Engine::new();
-    engine.start().await;
+    engine.start();
     let executor = engine.executor();
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_str(text).unwrap();
-    executor.deploy(&workflow).expect("deploy model");
+    engine.manager().deploy(&workflow).expect("deploy model");
     executor
-        .start(&workflow.id, ActionOptions::default())
+        .start(&workflow.id, &Vars::new())
         .expect("start workflow");
 
     engine.emitter().on_message(move |message: &Message| {
         println!("on_message: {:?}", message);
-        let ret = executor.next(&message.pid, "user", None);
-        if ret.is_err() {
-            eprintln!("{}", ret.err().unwrap());
-            std::process::exit(1);
+        if let Some(msg) = message.as_user_message() {
+            let ret = executor.complete(msg.pid, &msg.aid, &Vars::new());
+            if ret.is_err() {
+                eprintln!("{}", ret.err().unwrap());
+                std::process::exit(1);
+            }
         }
     });
 
     let e = engine.clone();
-    engine.emitter().on_complete(move |w: &State<Workflow>| {
+    engine.emitter().on_complete(move |w: &WorkflowState| {
         println!("{:?}", w.outputs());
         e.close();
     });
 
-    engine.r#loop().await;
+    engine.eloop().await;
 }

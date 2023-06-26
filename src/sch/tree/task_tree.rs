@@ -1,4 +1,4 @@
-use crate::sch::{Task, TaskState};
+use crate::sch::Task;
 use std::{collections::HashMap, sync::Arc};
 
 #[derive(Debug)]
@@ -15,11 +15,16 @@ impl TaskTree {
         }
     }
 
+    pub fn tasks(&self) -> Vec<Arc<Task>> {
+        self.maps.values().cloned().collect()
+    }
+
     pub fn task_by_tid(&self, tid: &str) -> Option<Arc<Task>> {
-        match self.maps.get(tid) {
-            Some(task) => Some(task.clone()),
-            None => None,
-        }
+        self.maps.get(tid).map(|t| t.clone())
+        // match self.maps.get(tid) {
+        //     Some(task) => Some(task.clone()),
+        //     None => None,
+        // }
     }
 
     pub fn find_next_tasks(&self, tid: &str) -> Vec<Arc<Task>> {
@@ -44,16 +49,23 @@ impl TaskTree {
         tasks
     }
 
-    pub fn task_by_uid(&self, uid: &str, state: TaskState) -> Vec<Arc<Task>> {
-        let mut tasks = Vec::new();
-        for (_, t) in &self.maps {
-            if t.uid() == Some(uid.to_string()) && t.state() == state {
-                tasks.push(t.clone());
-            }
-        }
+    pub fn last_task_by_nid(&self, nid: &str) -> Option<Arc<Task>> {
+        let mut tasks = self.task_by_nid(nid);
+        tasks.sort_by(|a, b| b.end_time().cmp(&a.end_time()));
 
-        tasks
+        tasks.first().cloned()
     }
+
+    // pub fn task_by_uid(&self, uid: &str, state: TaskState) -> Vec<Arc<Task>> {
+    //     let mut tasks = Vec::new();
+    //     for (_, t) in &self.maps {
+    //         if t.uid() == Some(uid.to_string()) && t.state() == state {
+    //             tasks.push(t.clone());
+    //         }
+    //     }
+
+    //     tasks
+    // }
 
     pub fn push(&mut self, task: Arc<Task>) {
         self.maps.insert(task.tid.clone(), task.clone());

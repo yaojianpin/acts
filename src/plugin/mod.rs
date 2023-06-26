@@ -1,11 +1,5 @@
-use crate::{
-    plugin::{org::OrgPlugin, role::RolePlugin},
-    Engine,
-};
+use crate::Engine;
 use tracing::debug;
-
-mod org;
-mod role;
 
 #[cfg(test)]
 mod tests;
@@ -15,7 +9,7 @@ mod tests;
 /// ## Example
 ///
 /// ```rust
-/// use acts::{ActPlugin, State, Message, Engine, Workflow};
+/// use acts::{ActPlugin, WorkflowState, Message, Engine, Workflow};
 /// #[derive(Clone)]
 /// struct TestPlugin;
 ///
@@ -29,9 +23,8 @@ mod tests;
 ///     fn on_init(&self, engine: &Engine) {
 ///         println!("TestPlugin");
 ///         // engine.register_module("name", module);
-///         // engine.register_action("func", func);
-///         engine.emitter().on_start(|state: &State<Workflow>| {});
-///         engine.emitter().on_complete(|state: &State<Workflow>| {});
+///         engine.emitter().on_start(|state: &WorkflowState| {});
+///         engine.emitter().on_complete(|state: &WorkflowState| {});
 ///         engine.emitter().on_message(|msg: &Message| {});
 ///     }
 /// }
@@ -51,10 +44,4 @@ pub fn init(engine: &Engine) {
     }
 }
 
-fn register_plugins_default(plugins: &mut Vec<Box<dyn ActPlugin>>) {
-    #[cfg(feature = "role")]
-    plugins.push(Box::new(RolePlugin::new()));
-
-    #[cfg(feature = "org")]
-    plugins.push(Box::new(OrgPlugin::new()));
-}
+fn register_plugins_default(_plugins: &mut Vec<Box<dyn ActPlugin>>) {}

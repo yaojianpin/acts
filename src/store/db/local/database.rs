@@ -120,10 +120,14 @@ impl Database {
         cf: &impl AsColumnFamilyRef,
         key: K,
     ) -> ActResult<Vec<u8>> {
+        let key_name = key.as_ref().to_vec();
         self.db
             .get_cf(cf, key)
             .map_err(map_db_err)?
-            .ok_or(map_opt_err(format!("get_cf error")))
+            .ok_or(map_opt_err(format!(
+                "get_cf error '{}'",
+                String::from_utf8(key_name).unwrap()
+            )))
     }
 
     pub fn put_cf<K, V>(&self, cf: &impl AsColumnFamilyRef, key: K, value: V) -> ActResult<bool>
@@ -152,6 +156,16 @@ impl Database {
         mode: IteratorMode,
     ) -> QueryIter<'a> {
         let iter = self.db.iterator_cf(cf_handle, mode);
+        QueryIter::new(&self, iter)
+    }
+
+    #[allow(unused)]
+    pub fn prefix_iterator_cf<'a: 'b, 'b, P: AsRef<[u8]>>(
+        &'a self,
+        cf_handle: &impl AsColumnFamilyRef,
+        prefix: P,
+    ) -> QueryIter<'a> {
+        let iter = self.db.prefix_iterator_cf(cf_handle, prefix);
         QueryIter::new(&self, iter)
     }
 

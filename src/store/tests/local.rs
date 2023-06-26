@@ -1,5 +1,6 @@
 use crate::{
-    sch::NodeKind,
+    event::EventAction,
+    sch::{ActKind, NodeKind},
     store::{data::*, db::LocalStore, Query},
     utils, StoreAdapter, TaskState, Vars,
 };
@@ -120,7 +121,6 @@ async fn local_task_create() {
         state: TaskState::None.into(),
         start_time: 0,
         end_time: 0,
-        uid: "".to_string(),
     };
     tasks.create(&task).unwrap();
     assert_eq!(tasks.exists(&task.id).unwrap(), true);
@@ -141,7 +141,6 @@ async fn local_task_query() {
             state: TaskState::None.into(),
             start_time: 0,
             end_time: 0,
-            uid: "".to_string(),
         };
         tasks.create(&task).unwrap();
     }
@@ -164,7 +163,6 @@ async fn local_task_update() {
         state: TaskState::None.into(),
         start_time: 0,
         end_time: 0,
-        uid: "".to_string(),
     };
     table.create(&task).unwrap();
 
@@ -188,7 +186,6 @@ async fn local_task_delete() {
         state: TaskState::None.into(),
         start_time: 0,
         end_time: 0,
-        uid: "".to_string(),
     };
     table.create(&task).unwrap();
     table.delete(&task.id).unwrap();
@@ -197,90 +194,102 @@ async fn local_task_delete() {
 }
 
 #[tokio::test]
-async fn local_message_create() {
+async fn local_act_create() {
     let store = store().await;
-    let table = store.messages();
+    let table = store.acts();
     let vars = utils::vars::to_string(&Vars::new());
-    let msg = Message {
+    let act = Act {
         id: utils::shortid(),
+        kind: ActKind::User.to_string(),
+        event: EventAction::Create.to_string(),
         pid: "pid".to_string(),
         tid: "tid".to_string(),
-        uid: "u1".to_string(),
-        vars,
-        state: 0,
+        vars: "{}".to_string(),
         create_time: 0,
         update_time: 0,
+        state: "none".to_string(),
+        ack: false,
+        active: false,
     };
-    table.create(&msg).unwrap();
-    assert_eq!(table.exists(&msg.id).unwrap(), true);
+    table.create(&act).unwrap();
+    assert_eq!(table.exists(&act.id).unwrap(), true);
 }
 
 #[tokio::test]
-async fn local_message_query() {
+async fn local_act_query() {
     let store = store().await;
-    let messages = store.messages();
+    let acts = store.acts();
     let pid = utils::shortid();
     let vars = utils::vars::to_string(&Vars::new());
     for _ in 0..5 {
-        let msg = Message {
+        let act = Act {
             id: utils::shortid(),
-            pid: pid.to_string(),
+            kind: ActKind::User.to_string(),
+            event: EventAction::Create.to_string(),
+            pid: "pid".to_string(),
             tid: "tid".to_string(),
-            uid: "u1".to_string(),
-            vars: vars.clone(),
-            state: 0,
+            vars: "{}".to_string(),
             create_time: 0,
             update_time: 0,
+            state: "none".to_string(),
+            ack: false,
+            active: false,
         };
-        messages.create(&msg).unwrap();
+        acts.create(&act).unwrap();
     }
 
     let q = Query::new().push("pid", &pid).set_limit(5);
-    let items = messages.query(&q).unwrap();
+    let items = acts.query(&q).unwrap();
     assert_eq!(items.len(), 5);
 }
 
 #[tokio::test]
-async fn local_message_update() {
+async fn local_act_update() {
     let store = store().await;
-    let table = store.messages();
+    let table = store.acts();
     let vars = utils::vars::to_string(&Vars::new());
-    let mut msg = Message {
+    let mut act = Act {
         id: utils::shortid(),
+        kind: ActKind::User.to_string(),
+        event: EventAction::Create.to_string(),
         pid: "pid".to_string(),
         tid: "tid".to_string(),
-        uid: "u1".to_string(),
-        vars,
-        state: 0,
+        vars: "{}".to_string(),
         create_time: 0,
         update_time: 0,
+        state: "none".to_string(),
+        ack: false,
+        active: false,
     };
-    table.create(&msg).unwrap();
+    table.create(&act).unwrap();
 
-    msg.uid = "u2".to_string();
-    table.update(&msg).unwrap();
+    act.vars = "u2".to_string();
+    table.update(&act).unwrap();
 
-    let t = table.find(&msg.id).unwrap();
-    assert_eq!(t.uid, msg.uid);
+    let t = table.find(&act.id).unwrap();
+    assert_eq!(t.vars, act.vars);
 }
 
 #[tokio::test]
-async fn local_message_delete() {
+async fn local_act_delete() {
     let store = store().await;
-    let table = store.messages();
+    let table = store.acts();
     let vars = utils::vars::to_string(&Vars::new());
-    let msg = Message {
+    let act = Act {
         id: utils::shortid(),
+        kind: ActKind::User.to_string(),
+        event: EventAction::Create.to_string(),
         pid: "pid".to_string(),
         tid: "tid".to_string(),
-        uid: "u1".to_string(),
-        vars,
-        state: 0,
+        vars: "{}".to_string(),
         create_time: 0,
         update_time: 0,
+        state: "none".to_string(),
+        ack: false,
+        active: false,
     };
-    table.create(&msg).unwrap();
-    table.delete(&msg.id).unwrap();
+    table.create(&act).unwrap();
+    table.delete(&act.id).unwrap();
 
-    assert_eq!(table.exists(&msg.id).unwrap(), false);
+    assert_eq!(table.exists(&act.id).unwrap(), false);
 }

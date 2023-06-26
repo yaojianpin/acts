@@ -1,6 +1,6 @@
-use serde_yaml::Value;
+use crate::{ActValue, Branch, Job, Step, Subject, Workflow};
 
-use crate::{Action, Branch, Job, Step, Subject, Workflow};
+use super::step::OnCallback;
 
 impl Workflow {
     pub fn new() -> Self {
@@ -17,25 +17,20 @@ impl Workflow {
         self
     }
 
-    pub fn with_env(mut self, name: &str, value: Value) -> Self {
+    pub fn with_env(mut self, name: &str, value: ActValue) -> Self {
         self.env.insert(name.to_string(), value);
         self
     }
 
-    pub fn with_output(mut self, name: &str, value: Value) -> Self {
+    pub fn with_output(mut self, name: &str, value: ActValue) -> Self {
         self.outputs.insert(name.to_string(), value);
         self
     }
 
-    pub fn with_on(mut self, name: &str, value: Value) -> Self {
+    pub fn with_on(mut self, name: &str, value: ActValue) -> Self {
         self.on.insert(name.to_string(), value.into());
         self
     }
-
-    // pub fn with_biz_id(mut self, biz_id: &str) -> Self {
-    //     self.set_biz_id(biz_id);
-    //     self
-    // }
 
     pub fn with_job(mut self, build: fn(Job) -> Job) -> Self {
         let job = Job::default();
@@ -60,7 +55,7 @@ impl Job {
         self
     }
 
-    pub fn with_env(mut self, name: &str, value: Value) -> Self {
+    pub fn with_env(mut self, name: &str, value: ActValue) -> Self {
         self.env.insert(name.to_string(), value);
         self
     }
@@ -75,12 +70,12 @@ impl Job {
         self
     }
 
-    pub fn with_output(mut self, name: &str, value: Value) -> Self {
+    pub fn with_output(mut self, name: &str, value: ActValue) -> Self {
         self.outputs.insert(name.to_string(), value);
         self
     }
 
-    pub fn with_on(mut self, name: &str, value: Value) -> Self {
+    pub fn with_on(mut self, name: &str, value: ActValue) -> Self {
         self.on.insert(name.to_string(), value.into());
         self
     }
@@ -107,8 +102,8 @@ impl Step {
         self
     }
 
-    pub fn with_action(mut self, act: Action) -> Self {
-        self.action = Some(act);
+    pub fn with_action(mut self, act: &str) -> Self {
+        self.action = Some(act.to_string());
         self
     }
 
@@ -133,14 +128,15 @@ impl Step {
         self
     }
 
-    pub fn with_on(mut self, name: &str, value: Value) -> Self {
-        self.on.insert(name.to_string(), value.into());
-        self
-    }
-
     pub fn with_branch(mut self, build: fn(Branch) -> Branch) -> Self {
         let branch = Branch::default();
         self.branches.push(build(branch));
+        self
+    }
+
+    pub fn with_on(mut self, build: fn(OnCallback) -> OnCallback) -> Self {
+        let on = OnCallback::default();
+        self.on = Some(build(on));
         self
     }
 }
@@ -191,28 +187,24 @@ impl Subject {
         self
     }
 
-    pub fn with_users(mut self, users: &str) -> Self {
-        self.users = users.to_string();
-        self
-    }
-
-    pub fn with_on(mut self, name: &str, value: Value) -> Self {
-        self.on.insert(name.to_string(), value.into());
+    pub fn with_cands(mut self, cands: &str) -> Self {
+        self.cands = cands.to_string();
         self
     }
 }
 
-// impl Action {
-//     pub fn new() -> Self {
-//         Default::default()
-//     }
-//     pub fn with_name(mut self, name: &str) -> Self {
-//         self.name = name.to_string();
-//         self
-//     }
+impl OnCallback {
+    pub fn new() -> Self {
+        Default::default()
+    }
 
-//     pub fn with_param(mut self, name: &str, value: Value) -> Self {
-//         self.with.insert(name.to_string(), value.into());
-//         self
-//     }
-// }
+    pub fn with_task(mut self, name: &str, value: ActValue) -> Self {
+        self.task.insert(name.to_string(), value);
+        self
+    }
+
+    pub fn with_act(mut self, name: &str, value: ActValue) -> Self {
+        self.act.insert(name.to_string(), value);
+        self
+    }
+}

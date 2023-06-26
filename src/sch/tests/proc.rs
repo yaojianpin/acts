@@ -1,25 +1,40 @@
 use crate::{
-    sch::{Proc, Scheduler},
+    sch::{Act, ActKind, NodeTree, Proc, Scheduler},
     utils, Vars, Workflow,
 };
 use std::sync::Arc;
 
 #[tokio::test]
-async fn proc_messages() {
+async fn sch_proc_task() {
     let mut workflow = create_workflow();
     let id = utils::longid();
+
+    let tr = NodeTree::build(&mut workflow);
+    let (proc, _) = create_proc(&mut workflow, &id);
+
+    let node = tr.root.as_ref().unwrap();
+    let task = proc.create_task(node, None);
+    assert!(proc.task(&task.tid).is_some())
+}
+
+#[tokio::test]
+async fn sch_proc_acts() {
+    let mut workflow = create_workflow();
+    let id = utils::longid();
+
+    let tr = NodeTree::build(&mut workflow);
     let (proc, scher) = create_proc(&mut workflow, &id);
+
+    let task = proc.create_task(tr.root.as_ref().unwrap(), None);
     scher.sched_proc(&proc);
-    let tid = utils::shortid();
-    let msg = proc.make_message(&tid, Some("u1".to_string()), Vars::new());
-    assert!(scher.message(&msg.id).is_some())
+    let act = Act::new(&task, ActKind::Action, &Vars::new());
+    proc.push_act(&act);
+    assert!(scher.act(&proc.pid(), &act.id).is_some())
 }
 
 fn create_proc(workflow: &mut Workflow, id: &str) -> (Arc<Proc>, Arc<Scheduler>) {
     let scher = Scheduler::new();
-    let proc = Arc::new(scher.create_raw_proc(id, workflow));
-
-    scher.cache().create_proc(&proc);
+    let proc = scher.create_proc(id, workflow);
     (proc, scher)
 }
 

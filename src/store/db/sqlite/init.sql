@@ -23,12 +23,16 @@ CREATE TABLE IF NOT EXISTS act_task (
     'start_time' BIGINT,
     'end_time' BIGINT
 );
-CREATE TABLE IF NOT EXISTS act_message (
+CREATE TABLE IF NOT EXISTS act_act (
     'id' VARCHAR(32) PRIMARY KEY NOT NULL,
+    'kind' VARCHAR(32) NOT NULL,
+    'event' VARCHAR(32) NOT NULL,
     'pid' VARCHAR(24) NOT NULL,
-    'tid' VARCHAR(8) NOT NULL,
-    'uid' VARCHAR(200) NOT NULL,
+    'tid' VARCHAR(32) NOT NULL,
+    'vars' VARCHAR(2000) NOT NULL,
     'create_time' BIGINT,
     'update_time' BIGINT,
-    'state' INT
+    'state' INT,
+    'ack' BIT,
+    'active' BIT
 );

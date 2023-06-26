@@ -1,8 +1,9 @@
 use crate::{
-    event::{ActionOptions, UserMessage},
+    event::Action,
     sch::Scheduler,
     store::{Store, StoreAdapter},
-    ActResult, ModelInfo, Workflow,
+    utils::consts,
+    ActError, ActResult, ActionState, ModelInfo, Vars,
 };
 use std::sync::Arc;
 use tracing::info;
@@ -21,51 +22,71 @@ impl Executor {
         }
     }
 
-    pub fn deploy(&self, model: &Workflow) -> ActResult<bool> {
-        self.store.deploy(model)
+    pub fn start(&self, mid: &str, options: &Vars) -> ActResult<ActionState> {
+        let model: ModelInfo = self.store.models().find(mid)?.into();
+        let workflow = model.workflow()?;
+
+        let mut vars = options.clone();
+        // set the workflow initiator
+        if let Some(uid) = options.get("uid") {
+            vars.insert(consts::INITIATOR.to_string(), uid.clone());
+        }
+
+        self.scher.start(&workflow, &vars)
     }
 
-    pub fn start(&self, id: &str, options: ActionOptions) -> ActResult<bool> {
-        let model: ModelInfo = self.store.models().find(id)?.into();
-        let w = model.workflow()?;
-        self.scher.start(&w, options)
+    pub fn submit(&self, mid: &str, options: &Vars) -> ActResult<ActionState> {
+        let uid = options
+            .get(consts::UID)
+            .ok_or(ActError::Action(format!("cannot find uid in options")))?;
+        let model: ModelInfo = self.store.models().find(mid)?.into();
+        let workflow = model.workflow()?;
+
+        let mut vars = options.clone();
+        vars.insert(consts::AUTO_SUBMIT.to_string(), true.into());
+        vars.insert(consts::INITIATOR.to_string(), uid.clone());
+
+        self.scher.start(&workflow, &vars)
     }
 
-    pub fn submit(&self, pid: &str, uid: &str, options: Option<ActionOptions>) -> ActResult<()> {
-        self.do_action(pid, "submit", uid, options)
+    pub fn back(&self, pid: &str, aid: &str, options: &Vars) -> ActResult<ActionState> {
+        self.do_action(pid, consts::EVT_BACK, aid, options)
     }
 
-    pub fn back(&self, pid: &str, uid: &str, options: Option<ActionOptions>) -> ActResult<()> {
-        self.do_action(pid, "back", uid, options)
+    pub fn cancel(&self, pid: &str, aid: &str, options: &Vars) -> ActResult<ActionState> {
+        self.do_action(pid, consts::EVT_CANCEL, aid, options)
     }
 
-    pub fn cancel(&self, pid: &str, uid: &str, options: Option<ActionOptions>) -> ActResult<()> {
-        self.do_action(pid, "cancel", uid, options)
+    pub fn complete(&self, pid: &str, aid: &str, options: &Vars) -> ActResult<ActionState> {
+        self.do_action(pid, consts::EVT_COMPLETE, aid, options)
     }
 
-    pub fn next(&self, pid: &str, uid: &str, options: Option<ActionOptions>) -> ActResult<()> {
-        self.do_action(pid, "next", uid, options)
+    pub fn abort(&self, pid: &str, aid: &str, options: &Vars) -> ActResult<ActionState> {
+        self.do_action(pid, consts::EVT_ABORT, aid, options)
     }
 
-    pub fn abort(&self, pid: &str, uid: &str, options: Option<ActionOptions>) -> ActResult<()> {
-        self.do_action(pid, "abort", uid, options)
+    pub fn update(&self, pid: &str, aid: &str, options: &Vars) -> ActResult<ActionState> {
+        self.do_action(pid, consts::EVT_UPDATE, aid, options)
+    }
+
+    pub fn ack(&self, pid: &str, aid: &str) -> ActResult<ActionState> {
+        info!("ack pid={} aid={}", pid, aid);
+        self.scher.do_ack(pid, aid)
     }
 
     fn do_action(
         &self,
         pid: &str,
         action: &str,
-        uid: &str,
-        options: Option<ActionOptions>,
-    ) -> ActResult<()> {
+        aid: &str,
+        options: &Vars,
+    ) -> ActResult<ActionState> {
         info!(
-            "do_action:{} action={} uid={} options={:?}",
-            pid, action, uid, options
+            "do_action action={} pid={}, aid={} options={:?}",
+            action, pid, aid, options
         );
 
-        let message = UserMessage::new(pid, uid, action, options);
-        self.scher.sched_message(&message);
-
-        Ok(())
+        let act = Action::new(pid, aid, action, options);
+        self.scher.do_action(&act)
     }
 }

@@ -6,6 +6,6 @@ jobs:
       - name: step1
         subject:
           matcher: any
-          users: |
+          cands: |
             ["a"]
         run: print("step1")

@@ -4,7 +4,10 @@ jobs:
     name: job1
     steps:
       - name: step1
+        env: 
+          role: submit
+      - name: step2
         subject:
           matcher: any
-          users: |
+          cands: |
             ["a"]

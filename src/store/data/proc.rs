@@ -8,8 +8,9 @@ pub struct Proc {
     pub id: String,
     #[tag]
     pub pid: String,
-    pub model: String,
+    #[tag]
     pub state: String,
+    pub model: String,
     pub start_time: i64,
     pub end_time: i64,
     pub vars: String,

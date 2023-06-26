@@ -1,8 +1,6 @@
 use super::Job;
 use crate::{utils, ActError, ActResult, ModelBase, Vars};
 use serde::{Deserialize, Serialize};
-use serde_yaml::Value;
-use std::collections::HashMap;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Workflow {
@@ -13,16 +11,19 @@ pub struct Workflow {
     pub name: String,
 
     #[serde(default)]
+    pub topic: String,
+
+    #[serde(default)]
     pub jobs: Vec<Job>,
 
     #[serde(default)]
-    pub env: HashMap<String, Value>,
+    pub env: Vars,
 
     #[serde(default)]
-    pub outputs: HashMap<String, Value>,
+    pub outputs: Vars,
 
     #[serde(default)]
-    pub on: HashMap<String, Value>,
+    pub on: Vars,
 
     #[serde(default)]
     ver: u32,
@@ -33,16 +34,16 @@ impl Workflow {
         let workflow = serde_yaml::from_str::<Workflow>(s);
         match workflow {
             Ok(v) => Ok(v),
-            Err(e) => Err(ActError::ModelError(format!("{}", e))),
+            Err(e) => Err(ActError::Model(format!("{}", e))),
         }
     }
 
-    pub fn set_env(&mut self, vars: Vars) {
+    pub fn set_env(&mut self, vars: &Vars) {
         for (name, value) in vars {
             self.env
-                .entry(name)
+                .entry(name.clone())
                 .and_modify(|v| *v = value.clone())
-                .or_insert(value);
+                .or_insert(value.clone());
         }
     }
 
@@ -71,7 +72,7 @@ impl Workflow {
     pub fn to_string<'a>(&self) -> ActResult<String> {
         match serde_yaml::to_string(self) {
             Ok(s) => Ok(s),
-            Err(e) => Err(ActError::ModelError(e.to_string())),
+            Err(e) => Err(ActError::Model(e.to_string())),
         }
     }
 }

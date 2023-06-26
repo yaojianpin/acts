@@ -1,13 +1,6 @@
-use crate::{
-    env::VirtualMachine,
-    model::{Act, Branch},
-    sch::Matcher,
-    ModelBase, ShareLock,
-};
+use crate::{model::Branch, ActValue, ModelBase, Vars};
 use serde::{Deserialize, Serialize};
-use serde_yaml::Value;
 use std::collections::HashMap;
-use std::sync::RwLockWriteGuard;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Subject {
@@ -15,20 +8,16 @@ pub struct Subject {
     pub matcher: String,
 
     #[serde(default)]
-    pub users: String,
+    pub cands: String,
+}
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OnCallback {
     #[serde(default)]
-    pub on: HashMap<String, Value>,
+    pub task: HashMap<String, ActValue>,
+    #[serde(default)]
+    pub act: HashMap<String, ActValue>,
 }
-
-#[derive(Debug, Clone, Default)]
-pub struct Cands {
-    pub matcher: Matcher,
-    pub acts: Vec<Act>,
-    pub ord: usize,
-}
-
-pub type Action = fn(&VirtualMachine);
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Step {
@@ -39,19 +28,16 @@ pub struct Step {
     pub id: String,
 
     #[serde(default)]
-    pub env: HashMap<String, Value>,
+    pub env: Vars,
 
     #[serde(default)]
     pub run: Option<String>,
 
     #[serde(default)]
-    pub on: HashMap<String, Value>,
+    pub on: Option<OnCallback>,
 
     #[serde(default)]
     pub r#if: Option<String>,
-
-    #[serde(skip)]
-    pub action: Option<Action>,
 
     #[serde(default)]
     pub branches: Vec<Branch>,
@@ -62,25 +48,8 @@ pub struct Step {
     #[serde(default)]
     pub subject: Option<Subject>,
 
-    #[serde(skip)]
-    pub(crate) acts: ShareLock<Vec<Act>>,
-
-    #[serde(skip)]
-    pub(crate) cands: ShareLock<Cands>,
-}
-
-impl Step {
-    pub fn acts(&self) -> Vec<Act> {
-        self.acts.read().unwrap().clone()
-    }
-
-    pub(crate) fn push_act(&self, act: &Act) {
-        self.acts.write().unwrap().push(act.clone());
-    }
-
-    pub(crate) fn cands(&self) -> RwLockWriteGuard<Cands> {
-        self.cands.as_ref().write().unwrap()
-    }
+    #[serde(default)]
+    pub action: Option<String>,
 }
 
 impl ModelBase for Step {
@@ -101,8 +70,6 @@ impl std::fmt::Debug for Step {
             .field("branches", &self.branches)
             .field("next", &self.next)
             .field("subject", &self.subject)
-            .field("acts", &self.acts)
-            .field("cands", &self.cands)
             .finish()
     }
 }

@@ -5,8 +5,8 @@ use crate::{
 };
 use acts_tag::Value;
 use rocksdb::{Direction, IteratorMode};
-use std::collections::HashMap;
-use tracing::trace;
+use std::collections::{HashMap, HashSet};
+use tracing::debug;
 
 #[derive(Debug)]
 pub struct Collect<T> {
@@ -65,7 +65,7 @@ where
     T: DbModel,
 {
     fn exists(&self, id: &str) -> ActResult<bool> {
-        trace!("local::{}.exists({})", self.name, id);
+        debug!("local::{}.exists({})", self.name, id);
         let db = self.db.read().unwrap();
         let cf = db.cf_handle(&self.name).unwrap();
         let ret = db.get_cf(&cf, id.as_bytes());
@@ -74,7 +74,7 @@ where
     }
 
     fn find(&self, id: &str) -> ActResult<T> {
-        trace!("local::{}.find({})", self.name, id);
+        debug!("local::{}.find({})", self.name, id);
         let db = self.db.read().unwrap();
         let cf = db.cf_handle(&self.name)?;
         let data = db.get_cf(&cf, id.as_bytes())?;
@@ -83,7 +83,7 @@ where
     }
 
     fn query(&self, q: &Query) -> ActResult<Vec<T>> {
-        trace!("local::{}.query({:?})", self.name, q);
+        debug!("local::{}.query({:?})", self.name, q);
         let db = self.db.read().unwrap();
         let mut limit = q.limit();
         if limit == 0 {
@@ -93,24 +93,27 @@ where
 
         let ret = if q.is_cond() {
             let mut key_count: HashMap<Box<[u8]>, usize> = HashMap::new();
-            let mut query_results: Vec<Box<[u8]>> = Vec::new();
+            let mut query_results: HashSet<Box<[u8]>> = HashSet::new();
             let cond_len = q.queries().len();
-            for (qk, qv) in &q.queries() {
-                let cf = db.cf_idx_handle(&self.name, &qk)?;
+            for (k, v) in &q.queries() {
+                let cf = db.cf_idx_handle(&self.name, &k)?;
 
-                let value = Value::from(qv).unwrap();
+                let value = Value::from(v).unwrap();
                 let mut iter =
                     db.iterator_cf(&cf, IteratorMode::From(value.data(), Direction::Forward));
-
+                // let mut iter = db.prefix_iterator_cf(&cf, value.data());
                 while let Some(r) = iter.next() {
                     let db_key = db.make_db_key(&r.key);
+                    if db_key.idx_key.as_ref() != value.data() {
+                        break;
+                    }
                     if db.is_expired(&db_key.p_key, &r.value) {
                         db.delete_update(&db_key.p_key)?;
                         continue;
                     }
 
                     // query_results.push(value)
-                    query_results.push(db_key.p_key.clone());
+                    query_results.insert(db_key.p_key.clone());
 
                     // count the model id
                     if let Some(value) = key_count.get_mut(&db_key.p_key) {
@@ -135,7 +138,7 @@ where
     }
 
     fn create(&self, model: &T) -> ActResult<bool> {
-        trace!("local::{}.create({})", self.name, model.id());
+        debug!("local::{}.create({})", self.name, model.id());
         let db = self.db.read().unwrap();
         let data = model.to_vec()?;
         let cf = db.cf_handle(&self.name)?;
@@ -156,7 +159,7 @@ where
         Ok(true)
     }
     fn update(&self, model: &T) -> ActResult<bool> {
-        trace!("local::{}.update({})", self.name, model.id());
+        debug!("local::{}.update({})", self.name, model.id());
         let db = self.db.read().unwrap();
         let data = model.to_vec()?;
         let cf = db.cf_handle(&self.name)?;
@@ -178,7 +181,7 @@ where
         Ok(true)
     }
     fn delete(&self, id: &str) -> ActResult<bool> {
-        trace!("local::{}.delete({})", self.name, id);
+        debug!("local::{}.delete({})", self.name, id);
         let db = self.db.read().unwrap();
         let cf = db.cf_handle(&self.name)?;
         let item = self.find(id)?;

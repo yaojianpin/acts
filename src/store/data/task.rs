@@ -13,8 +13,6 @@ pub struct Task {
     pub tid: String,
     #[tag]
     pub nid: String,
-    #[tag]
-    pub uid: String,
     pub kind: String,
     pub state: String,
     pub start_time: i64,
@@ -30,9 +28,6 @@ impl Task {
     }
     pub fn set_end_time(&mut self, time: i64) {
         self.end_time = time;
-    }
-    pub fn set_user(&mut self, user: &str) {
-        self.uid = user.to_string();
     }
 }
 

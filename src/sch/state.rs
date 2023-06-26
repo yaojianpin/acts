@@ -13,7 +13,7 @@ pub enum TaskState {
     Cancelled,
     Fail(String),
     Skip,
-    Abort(String),
+    Abort,
 }
 
 impl TaskState {
@@ -27,14 +27,14 @@ impl TaskState {
             | TaskState::Cancelled
             | TaskState::Fail(..)
             | TaskState::Skip
-            | TaskState::Abort(..) => true,
+            | TaskState::Abort => true,
             _ => false,
         }
     }
 
     pub fn is_abort(&self) -> bool {
         match self {
-            TaskState::Abort(..) => true,
+            TaskState::Abort => true,
             _ => false,
         }
     }
@@ -106,7 +106,7 @@ fn state_to_str(state: TaskState) -> String {
         TaskState::Success => "success".to_string(),
         TaskState::Fail(s) => format!("fail({})", s),
         TaskState::Skip => "skip".to_string(),
-        TaskState::Abort(s) => format!("abort({})", s),
+        TaskState::Abort => "abort".to_string(),
         TaskState::Backed => "backed".to_string(),
         TaskState::Cancelled => "cancelled".to_string(),
     };
@@ -125,6 +125,7 @@ fn str_to_state(str: &str) -> TaskState {
         "skip" => TaskState::Skip,
         "backed" => TaskState::Backed,
         "cancelled" => TaskState::Cancelled,
+        "abort" => TaskState::Abort,
         _ => {
             let caps = re.captures(str);
             if let Some(caps) = caps {
@@ -133,10 +134,6 @@ fn str_to_state(str: &str) -> TaskState {
 
                 if name == "fail" {
                     return TaskState::Fail(err.to_string());
-                }
-
-                if name == "abort" {
-                    return TaskState::Abort(err.to_string());
                 }
             }
 

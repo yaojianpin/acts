@@ -1,17 +1,9 @@
+pub mod consts;
 mod convert;
 mod id;
-pub(crate) mod log;
-pub(crate) mod time;
-pub(crate) mod vars;
+pub mod log;
+pub mod time;
+pub mod vars;
 
 pub use convert::*;
 pub use id::*;
-
-use crate::options::Options;
-
-pub fn default_config() -> Options {
-    Options {
-        cache_cap: 100,
-        scher_cap: 20,
-    }
-}

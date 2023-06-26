@@ -12,16 +12,16 @@ impl ActTask for Branch {
             match ctx.eval(expr) {
                 Ok(cond) => {
                     if cond {
-                        ctx.task.set_state(&TaskState::Success);
+                        ctx.task.set_state(TaskState::Success);
                     } else {
-                        ctx.task.set_state(&TaskState::Skip);
+                        ctx.task.set_state(TaskState::Skip);
                     }
                 }
-                Err(err) => ctx.task.set_state(&TaskState::Fail(err.into())),
+                Err(err) => ctx.task.set_state(TaskState::Fail(err.into())),
             }
         } else {
-            ctx.task.set_state(&TaskState::Fail(
-                ActError::RuntimeError(format!(
+            ctx.task.set_state(TaskState::Fail(
+                ActError::Runtime(format!(
                     "cannot find branch expr in '{}'",
                     ctx.task.node.id()
                 ))
@@ -31,6 +31,6 @@ impl ActTask for Branch {
     }
 
     fn post(&self, ctx: &Context) {
-        ctx.task.set_state(&TaskState::Success);
+        ctx.task.set_state(TaskState::Success);
     }
 }

@@ -1,14 +1,14 @@
 use crate::{
-    event::ActionOptions,
     sch::{Proc, Scheduler},
-    utils, Engine, TaskState, Workflow,
+    utils, Engine, TaskState, Vars, Workflow,
 };
+use serde_json::json;
 use std::sync::Arc;
 
 #[tokio::test]
-async fn sch_next() {
+async fn sch_scher_next() {
     let engine = Engine::new();
-    engine.start().await;
+    engine.start();
     let store = engine.store();
     let scher = engine.scher();
     let text = include_str!("./models/simple.yml");
@@ -17,14 +17,9 @@ async fn sch_next() {
     let s = scher.clone();
     store.deploy(&workflow).unwrap();
     tokio::spawn(async move {
-        s.start(
-            &workflow,
-            ActionOptions {
-                biz_id: Some(utils::longid()),
-                ..Default::default()
-            },
-        )
-        .unwrap();
+        let mut options = Vars::new();
+        options.insert("biz_id".to_string(), json!(utils::longid()));
+        s.start(&workflow, &options).unwrap();
     });
 
     let ret = scher.next().await;
@@ -32,7 +27,7 @@ async fn sch_next() {
 }
 
 #[tokio::test]
-async fn sch_schedule_task() {
+async fn sch_scher_task() {
     let scher = Scheduler::new();
 
     let text = include_str!("./models/simple.yml");
@@ -40,7 +35,7 @@ async fn sch_schedule_task() {
     let pid = utils::longid();
     let s = scher.clone();
     tokio::spawn(async move {
-        let proc = Arc::new(Proc::new(&pid, s.clone(), &workflow, &TaskState::Pending));
+        let proc = Arc::new(Proc::new(&pid, &workflow, &TaskState::Pending));
         s.sched_proc(&proc)
     });
 
