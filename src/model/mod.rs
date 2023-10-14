@@ -1,5 +1,6 @@
+mod act;
 mod branch;
-mod candidate;
+mod cand;
 mod info;
 mod job;
 mod state;
@@ -11,13 +12,14 @@ mod tests;
 
 pub mod builder;
 
+pub use act::{Act, ActAlias, ActFor};
 pub use branch::Branch;
-pub use candidate::{Candidate, Operation, OrgAdapter, RoleAdapter};
-pub use info::{ActInfo, ModelInfo, ProcInfo, TaskInfo};
+pub use cand::{Candidate, Operation, OrgAdapter, RoleAdapter};
+pub use info::{ModelInfo, ProcInfo, TaskInfo};
 pub use job::Job;
-pub use state::{ActionState, WorkflowState};
-pub use step::{Step, Subject};
-pub use workflow::Workflow;
+pub use state::{ActionResult, WorkflowState};
+pub use step::Step;
+pub use workflow::{Workflow, WorkflowAction};
 
 pub trait ModelBase {
     fn id(&self) -> &str;

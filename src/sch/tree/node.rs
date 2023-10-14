@@ -1,4 +1,6 @@
-use crate::{Branch, Job, Step, Workflow};
+use serde::{Deserialize, Serialize};
+
+use crate::{Act, Branch, Job, ModelBase, Step, Vars, Workflow};
 use std::sync::{Arc, RwLock, Weak};
 
 #[derive(Debug, Clone)]
@@ -7,24 +9,30 @@ pub enum NodeData {
     Job(Job),
     Branch(Branch),
     Step(Step),
+    Act(Act),
 }
 
-#[derive(PartialEq, Debug, Clone)]
+#[derive(PartialEq, Default, Debug, Clone, Serialize, Deserialize)]
 pub enum NodeKind {
+    #[default]
     Workflow,
     Job,
     Branch,
     Step,
+    Act,
 }
 
 #[derive(Clone)]
 pub struct Node {
-    pub root: String,
     pub data: NodeData,
     pub level: usize,
     pub parent: Arc<RwLock<Weak<Node>>>,
     pub children: Arc<RwLock<Vec<Arc<Node>>>>,
+    pub prev: Arc<RwLock<Weak<Node>>>,
     pub next: Arc<RwLock<Weak<Node>>>,
+
+    /// used for recording visit count
+    pub(in crate::sch) visit_count: Arc<RwLock<usize>>,
 }
 
 impl NodeData {
@@ -34,6 +42,7 @@ impl NodeData {
             NodeData::Job(data) => data.id.clone(),
             NodeData::Branch(data) => data.id.clone(),
             NodeData::Step(data) => data.id.clone(),
+            NodeData::Act(data) => data.id().to_string(),
         }
     }
 
@@ -43,6 +52,27 @@ impl NodeData {
             NodeData::Job(data) => data.name.clone(),
             NodeData::Branch(data) => data.name.clone(),
             NodeData::Step(data) => data.name.clone(),
+            NodeData::Act(data) => data.name.clone(),
+        }
+    }
+
+    pub fn inputs(&self) -> Vars {
+        match self {
+            NodeData::Workflow(data) => data.env.clone(),
+            NodeData::Job(data) => data.inputs.clone(),
+            NodeData::Branch(data) => data.inputs.clone(),
+            NodeData::Step(data) => data.inputs.clone(),
+            NodeData::Act(data) => data.inputs.clone(),
+        }
+    }
+
+    pub fn outputs(&self) -> Vars {
+        match self {
+            NodeData::Workflow(data) => data.outputs.clone(),
+            NodeData::Job(data) => data.outputs.clone(),
+            NodeData::Branch(data) => data.outputs.clone(),
+            NodeData::Step(data) => data.outputs.clone(),
+            NodeData::Act(data) => data.outputs.clone(),
         }
     }
 }
@@ -50,7 +80,15 @@ impl NodeData {
 impl Node {
     pub fn parent(&self) -> Option<Arc<Node>> {
         let node = self.parent.read().unwrap();
-        node.upgrade()
+        if let Some(parent) = node.upgrade() {
+            return Some(parent);
+        }
+
+        if let Some(prev) = self.prev().upgrade() {
+            return prev.parent();
+        }
+
+        None
     }
 
     pub fn set_parent(&self, parent: &Arc<Node>) {
@@ -62,8 +100,11 @@ impl Node {
             .push(Arc::new(self.clone()));
     }
 
-    pub fn set_next(&self, node: &Arc<Node>) {
+    pub fn set_next(self: &Arc<Node>, node: &Arc<Node>, is_prev: bool) {
         *self.next.write().unwrap() = Arc::downgrade(node);
+        if is_prev {
+            *node.prev.write().unwrap() = Arc::downgrade(self);
+        }
     }
 
     pub fn children(&self) -> Vec<Arc<Node>> {
@@ -76,6 +117,11 @@ impl Node {
         next.clone()
     }
 
+    pub fn prev(&self) -> Weak<Node> {
+        let prev = self.prev.read().unwrap();
+        prev.clone()
+    }
+
     pub fn data(&self) -> NodeData {
         self.data.clone()
     }
@@ -84,13 +130,46 @@ impl Node {
         self.data.id()
     }
 
+    pub fn name(&self) -> String {
+        self.data.name()
+    }
+
+    pub fn inputs(&self) -> Vars {
+        self.data.inputs()
+    }
+
+    pub fn outputs(&self) -> Vars {
+        self.data.outputs()
+    }
+
     pub fn kind(&self) -> NodeKind {
         match self.data() {
             NodeData::Workflow(_) => NodeKind::Workflow,
             NodeData::Job(_) => NodeKind::Job,
             NodeData::Branch(_) => NodeKind::Branch,
             NodeData::Step(_) => NodeKind::Step,
+            NodeData::Act(_) => NodeKind::Act,
         }
+    }
+
+    pub fn tag(&self) -> String {
+        match self.data() {
+            NodeData::Workflow(data) => data.tag,
+            NodeData::Job(data) => data.tag,
+            NodeData::Branch(data) => data.tag,
+            NodeData::Step(data) => data.tag,
+            NodeData::Act(data) => data.tag,
+        }
+    }
+
+    pub(in crate::sch) fn visit_count(&self) -> usize {
+        let visit_count = self.visit_count.read().unwrap();
+        *visit_count
+    }
+
+    pub(in crate::sch) fn visit(&self) {
+        let mut visit_count = self.visit_count.write().unwrap();
+        *visit_count += 1;
     }
 }
 
@@ -120,6 +199,7 @@ impl<'a> Into<&'a str> for NodeKind {
             NodeKind::Job => "job",
             NodeKind::Branch => "branch",
             NodeKind::Step => "step",
+            NodeKind::Act => "act",
         }
     }
 }
@@ -145,6 +225,7 @@ impl From<&str> for NodeKind {
             "job" => NodeKind::Job,
             "branch" => NodeKind::Branch,
             "step" => NodeKind::Step,
+            "act" => NodeKind::Act,
             _ => panic!("not found NodeKind: {}", str),
         };
 

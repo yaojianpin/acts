@@ -10,14 +10,16 @@ pub struct Branch {
     pub id: String,
 
     #[serde(default)]
-    pub env: Vars,
+    pub inputs: Vars,
+
+    #[serde(default)]
+    pub outputs: Vars,
+
+    #[serde(default)]
+    pub tag: String,
 
     #[serde(default)]
     pub run: Option<String>,
-    pub uses: Option<String>,
-
-    #[serde(default)]
-    pub on: Vec<String>,
 
     pub r#if: Option<String>,
 
@@ -26,6 +28,12 @@ pub struct Branch {
 
     #[serde(default)]
     pub next: Option<String>,
+
+    #[serde(default)]
+    pub default: bool,
+
+    #[serde(default)]
+    pub needs: Vec<String>,
 }
 
 impl ModelBase for Branch {

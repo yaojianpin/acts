@@ -48,6 +48,7 @@ impl Query {
         self
     }
 
+    
     pub fn queries(&self) -> Vec<DbQueryValue> {
         self.conds
     }
@@ -76,22 +77,22 @@ impl Query {
     //     ret
     // }
 
-    pub fn predicate<F: Fn(&str, &str) -> Vec<String>>(&self, f: F) -> Vec<String> {
-        let mut ret = Vec::new();
-        for (key, value) in &self.conds {
-            let list = f(key, value);
-            if ret.len() == 0 {
-                ret = list;
-            } else {
-                ret = ret.into_iter().filter(|it| list.contains(it)).collect();
-            }
-        }
+    // pub fn predicate<F: Fn(&str, &str) -> Vec<String>>(&self, f: F) -> Vec<String> {
+    //     let mut ret = Vec::new();
+    //     for (key, value) in &self.conds {
+    //         let list = f(key, value);
+    //         if ret.len() == 0 {
+    //             ret = list;
+    //         } else {
+    //             ret = ret.into_iter().filter(|it| list.contains(it)).collect();
+    //         }
+    //     }
 
-        if self.limit > 0 {
-            ret = ret.into_iter().take(self.limit).collect();
-        }
-        ret
-    }
+    //     if self.limit > 0 {
+    //         ret = ret.into_iter().take(self.limit).collect();
+    //     }
+    //     ret
+    // }
 
     pub fn set_limit(mut self, limit: usize) -> Self {
         self.limit = limit;

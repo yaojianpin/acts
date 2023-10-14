@@ -1,16 +1,16 @@
 use crate::{
-    event::EventAction,
-    sch::{ActKind, NodeKind},
-    store::{data, DbSet, Store, StoreKind},
+    event::ActionState,
+    sch::NodeKind,
+    store::{data, Cond, DbSet, Expr, Store, StoreKind},
     utils, Query, StoreAdapter, TaskState, Workflow,
 };
-use data::{Act, Proc, Task};
+use data::{Proc, Task};
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
 static STORE: OnceCell<Store> = OnceCell::const_new();
 async fn init() -> Store {
-    let s = Store::new();
+    let s = Store::local("data");
     s
 }
 
@@ -21,16 +21,11 @@ async fn store() -> &'static Store {
 #[tokio::test]
 async fn store_local() {
     let store = store().await;
-
-    #[cfg(not(feature = "sqlite"))]
     assert_eq!(store.kind(), StoreKind::Local);
-
-    #[cfg(feature = "sqlite")]
-    assert_eq!(store.kind(), StoreKind::Sqlite);
 }
 
 #[tokio::test]
-async fn store_load() {
+async fn store_load_by_limit() {
     let store = store().await;
 
     let prefix = utils::shortid();
@@ -45,9 +40,50 @@ async fn store_load() {
     let procs = store.procs().query(&q).unwrap();
     let procs = procs
         .iter()
-        .filter(|it| it.pid.starts_with(&prefix))
+        .filter(|it| it.id.starts_with(&prefix))
         .collect::<Vec<_>>();
     assert_eq!(procs.len(), 100);
+}
+
+#[tokio::test]
+async fn store_load_by_state() {
+    let store = store().await;
+
+    let prefix = utils::shortid();
+    for _ in 0..100 {
+        let id = format!("{}_{}", prefix, utils::longid());
+        let workflow = create_workflow();
+        let proc = create_proc(&id, TaskState::Running, &workflow);
+        store.procs().create(&proc).expect("create proc");
+    }
+
+    for _ in 0..100 {
+        let id = format!("{}_{}", prefix, utils::longid());
+        let workflow = create_workflow();
+        let proc = create_proc(&id, TaskState::Pending, &workflow);
+        store.procs().create(&proc).expect("create proc");
+    }
+
+    for _ in 0..100 {
+        let id = format!("{}_{}", prefix, utils::longid());
+        let workflow = create_workflow();
+        let proc = create_proc(&id, TaskState::Success, &workflow);
+        store.procs().create(&proc).expect("create proc");
+    }
+
+    let q = Query::new()
+        .push(
+            Cond::or()
+                .push(Expr::eq("state", "running"))
+                .push(Expr::eq("state", "pending")),
+        )
+        .set_limit(10000);
+    let procs = store.procs().query(&q).unwrap();
+    let procs = procs
+        .iter()
+        .filter(|it| it.id.starts_with(&prefix))
+        .collect::<Vec<_>>();
+    assert_eq!(procs.len(), 200);
 }
 
 #[tokio::test]
@@ -149,7 +185,7 @@ async fn store_proc() {
     let proc = create_proc(&id, TaskState::None, &workflow);
     store.procs().create(&proc).expect("create proc");
     let info = store.procs().find(&id).unwrap();
-    assert_eq!(proc.pid, info.pid);
+    assert_eq!(proc.id, info.id);
 }
 
 #[tokio::test]
@@ -165,8 +201,8 @@ async fn store_proc_update() {
     proc.state = TaskState::Running.to_string();
     store.procs().update(&proc).expect("update proc");
 
-    let p = store.procs().find(&proc.pid).unwrap();
-    assert_eq!(p.pid, proc.pid);
+    let p = store.procs().find(&proc.id).unwrap();
+    assert_eq!(p.id, proc.id);
     assert_eq!(p.state, TaskState::Running.to_string());
 }
 
@@ -197,13 +233,18 @@ async fn store_task_create() {
     let nid = utils::shortid();
     let task = Task {
         id: format!("{pid}:{tid}"),
+        name: "test".to_string(),
+        prev: None,
         kind: NodeKind::Step.to_string(),
-        pid: pid.clone(),
-        tid: tid.clone(),
-        nid: nid,
+        proc_id: pid.clone(),
+        task_id: tid.clone(),
+        node_id: nid,
         state: TaskState::None.to_string(),
+        action_state: ActionState::None.to_string(),
         start_time: 0,
         end_time: 0,
+        vars: "{}".to_string(),
+        timestamp: 0,
     };
 
     store.tasks().create(&task).expect("create task");
@@ -222,13 +263,18 @@ async fn store_task_update() {
     let nid = utils::shortid();
     let task = Task {
         id: format!("{pid}:{tid}"),
+        name: "test".to_string(),
+        prev: None,
         kind: NodeKind::Step.to_string(),
-        pid: pid.clone(),
-        tid: tid.clone(),
-        nid: nid,
+        proc_id: pid.clone(),
+        task_id: tid.clone(),
+        node_id: nid,
         state: TaskState::None.to_string(),
+        action_state: ActionState::None.to_string(),
         start_time: 0,
         end_time: 0,
+        vars: "{}".to_string(),
+        timestamp: 0,
     };
 
     store.tasks().create(&task).expect("create task");
@@ -251,13 +297,18 @@ async fn store_task_remove() {
     let nid = utils::shortid();
     let task = Task {
         id: format!("{pid}:{tid}"),
+        name: "test".to_string(),
+        prev: None,
         kind: NodeKind::Step.to_string(),
-        pid: pid.clone(),
-        tid: tid.clone(),
-        nid: nid,
+        proc_id: pid.clone(),
+        task_id: tid.clone(),
+        node_id: nid,
         state: TaskState::None.to_string(),
+        action_state: ActionState::None.to_string(),
         start_time: 0,
         end_time: 0,
+        vars: "{}".to_string(),
+        timestamp: 0,
     };
 
     store.tasks().create(&task).expect("create task");
@@ -267,105 +318,24 @@ async fn store_task_remove() {
     assert!(ret.is_err());
 }
 
-#[tokio::test]
-async fn store_act_create() {
-    let store = store().await;
-
-    let id = utils::longid();
-    let time = utils::time::time();
-    let act = Act {
-        id: id.clone(),
-        kind: ActKind::User.to_string(),
-        event: EventAction::Create.to_string(),
-        pid: "pid".to_string(),
-        tid: "tid".to_string(),
-        vars: "{}".to_string(),
-        start_time: time,
-        end_time: 0,
-        state: "none".to_string(),
-        active: false,
-    };
-
-    store.acts().create(&act).expect("create message");
-    let ret = store.acts().find(&id).unwrap();
-    assert_eq!(ret.active, false);
-    assert_eq!(ret.vars, "{}");
-    assert_eq!(ret.start_time, time);
-}
-
-#[tokio::test]
-async fn store_act_update() {
-    let store = store().await;
-
-    let id = utils::longid();
-    let mut act = Act {
-        id: id.clone(),
-        kind: ActKind::User.to_string(),
-        event: EventAction::Create.to_string(),
-        pid: "pid".to_string(),
-        tid: "tid".to_string(),
-        vars: "{}".to_string(),
-        start_time: 0,
-        end_time: 0,
-        state: "none".to_string(),
-        active: false,
-    };
-
-    store.acts().create(&act).expect("create act");
-    act.vars = "vars".to_string();
-    act.end_time = 1000;
-    act.active = true;
-    let ret = store.acts().update(&act);
-    let new_act = store.acts().find(&id).unwrap();
-    assert!(ret.is_ok());
-    assert_eq!(new_act.active, true);
-    assert_eq!(new_act.vars, "vars");
-    assert_eq!(new_act.end_time, 1000);
-}
-
-#[tokio::test]
-async fn store_act_delete() {
-    let store = store().await;
-
-    let id = utils::longid();
-    let mut act = Act {
-        id: id.clone(),
-        kind: ActKind::User.to_string(),
-        event: EventAction::Create.to_string(),
-        pid: "pid".to_string(),
-        tid: "tid".to_string(),
-        vars: "{}".to_string(),
-        start_time: 0,
-        end_time: 0,
-        state: "none".to_string(),
-        active: false,
-    };
-
-    store.acts().create(&act).unwrap();
-    act.vars = "vars".to_string();
-    act.end_time = 1000;
-    let ret = store.acts().delete(&id);
-    assert!(ret.is_ok());
-    let ret = store.acts().find(&id);
-    assert!(ret.is_err());
-}
-
 fn create_workflow() -> Workflow {
-    let text = include_str!("../../../examples/store_test.yml");
-    let workflow = Workflow::from_str(text).unwrap();
-
-    workflow
+    Workflow::new().with_id("m1").with_job(|job| {
+        job.with_id("job1")
+            .with_step(|step| step.with_name("step1"))
+    })
 }
 
 fn create_proc(id: &str, state: TaskState, model: &Workflow) -> Proc {
     Proc {
         id: id.to_string(),
-        pid: id.to_string(),
-        model: model.to_string().unwrap(),
+        name: model.name.clone(),
+        mid: model.id.clone(),
         state: state.to_string(),
         start_time: 0,
         end_time: 0,
         vars: "".to_string(),
+        timestamp: utils::time::timestamp(),
+        model: model.to_json().unwrap(),
     }
 }
 
@@ -382,10 +352,6 @@ impl StoreAdapter for TestStore {
     }
 
     fn tasks(&self) -> Arc<dyn DbSet<Item = data::Task>> {
-        todo!()
-    }
-
-    fn acts(&self) -> Arc<dyn DbSet<Item = data::Act>> {
         todo!()
     }
 

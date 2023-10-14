@@ -9,10 +9,9 @@ use std::sync::Arc;
 async fn sch_scher_next() {
     let engine = Engine::new();
     engine.start();
-    let store = engine.store();
+    let store = engine.scher().cache().store();
     let scher = engine.scher();
-    let text = include_str!("./models/simple.yml");
-    let workflow = Workflow::from_str(text).unwrap();
+    let workflow = Workflow::new().with_id(&utils::longid());
 
     let s = scher.clone();
     store.deploy(&workflow).unwrap();
@@ -29,14 +28,14 @@ async fn sch_scher_next() {
 #[tokio::test]
 async fn sch_scher_task() {
     let scher = Scheduler::new();
-
-    let text = include_str!("./models/simple.yml");
-    let workflow = Workflow::from_str(text).unwrap();
+    let workflow = Workflow::new();
     let pid = utils::longid();
     let s = scher.clone();
     tokio::spawn(async move {
-        let proc = Arc::new(Proc::new(&pid, &workflow, &TaskState::Pending));
-        s.sched_proc(&proc)
+        let proc = Proc::new(&pid);
+        proc.load(&workflow);
+        proc.set_state(TaskState::Pending);
+        s.launch(&Arc::new(proc))
     });
 
     let ret = scher.next().await;

@@ -1,10 +1,8 @@
-use super::{proc::Dispatcher, ActKind};
 use crate::{
-    env::VirtualMachine,
-    event::{Action, EventAction, EventData, MessageKind},
-    sch::{proc::Act, tree::NodeData, Node, Proc, Scheduler, Task},
-    utils::{self, consts},
-    ActError, ActResult, ActValue, ShareLock, TaskState,
+    event::{Action, ActionState, EventAction},
+    model,
+    sch::{tree::NodeData, Node, Proc, Scheduler, Task},
+    ActError, ActValue, NodeKind, Result, ShareLock, TaskState, Vars, WorkflowAction,
 };
 use std::sync::{Arc, RwLock};
 use tracing::debug;
@@ -20,8 +18,8 @@ pub struct Context {
 impl std::fmt::Debug for Context {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Context")
-            .field("pid", &self.proc.pid())
-            .field("tid", &self.task.tid)
+            .field("pid", &self.proc.id())
+            .field("tid", &self.task.id)
             .field("action", &self.action())
             .finish()
     }
@@ -29,13 +27,9 @@ impl std::fmt::Debug for Context {
 
 impl Context {
     fn init_vars(&self, task: &Task) {
-        let vars = match &task.node.data {
-            NodeData::Workflow(workflow) => workflow.env.clone(),
-            NodeData::Job(job) => job.env.clone(),
-            NodeData::Branch(branch) => branch.env.clone(),
-            NodeData::Step(step) => step.env.clone(),
-        };
-        self.env().append(&vars);
+        // let vars = task.node.inputs();
+        let inputs = task.inputs();
+        self.task.room().append(&inputs);
     }
 
     pub fn new(scher: &Arc<Scheduler>, proc: &Arc<Proc>, task: &Arc<Task>) -> Self {
@@ -51,35 +45,35 @@ impl Context {
 
     pub fn prepare(&self) {
         // bind current context to env
-        self.env().bind_context(self);
+        self.task.room().bind_context(self);
         self.init_vars(&self.task);
     }
 
-    pub fn set_action_vars(&self, action: &Action) -> ActResult<()> {
-        *self.action.write().unwrap() = Some(action.event.as_str().into());
-        self.env().append(&action.options);
+    pub fn set_action(&self, action: &Action) -> Result<()> {
+        *self.action.write().unwrap() = Some(EventAction::parse(action.event.as_str())?);
+        self.task.room().append(&action.options);
 
         Ok(())
     }
 
-    pub fn run(&self, script: &str) -> ActResult<bool> {
-        self.task.env.run(script)
+    pub fn run(&self, script: &str) -> Result<bool> {
+        self.task.room().run(script)
     }
 
-    pub fn eval(&self, expr: &str) -> ActResult<bool> {
-        self.task.env.eval(expr)
+    pub fn eval(&self, expr: &str) -> Result<bool> {
+        self.task.room().eval(expr)
     }
 
-    pub fn eval_with<T: rhai::Variant + Clone>(&self, expr: &str) -> ActResult<T> {
-        self.task.env.eval(expr)
+    pub fn eval_with<T: rhai::Variant + Clone>(&self, expr: &str) -> Result<T> {
+        self.task.room().eval(expr)
     }
 
     pub fn var(&self, name: &str) -> Option<ActValue> {
-        self.env().get(name)
+        self.task.room().get(name)
     }
 
-    pub(in crate::sch) fn env(&self) -> &VirtualMachine {
-        &self.task.env
+    pub fn set_var(&self, name: &str, value: ActValue) {
+        self.task.room().set(name, value)
     }
 
     #[allow(unused)]
@@ -89,204 +83,220 @@ impl Context {
 
     pub fn sched_task(&self, node: &Arc<Node>) {
         let task = self.proc.create_task(&node, Some(self.task.clone()));
-        self.scher.sched_task(&task);
+        self.scher.push(&task);
+    }
+
+    pub fn sched_act(&self, id: &str, tag: &str, inputs: &Vars, outputs: &Vars) {
+        let act = model::Act {
+            id: id.to_string(),
+            tag: tag.to_string(),
+            inputs: inputs.clone(),
+            outputs: outputs.clone(),
+            ..Default::default()
+        };
+
+        let node = self
+            .proc
+            .tree()
+            .make(NodeData::Act(act), self.task.node.level + 1);
+        node.set_parent(&self.task.node);
+
+        if self.task.state().is_pending() {
+            let task = self.proc.create_task(&node, Some(self.task.clone()));
+            self.scher.push(&task);
+        }
     }
 
     /// redo the task and dispatch directly
-    pub fn redo_task(&self, task: &Arc<Task>) -> ActResult<()> {
-        let vars = &task.env.vars();
-        let task = self.proc.create_task(&task.node, Some(self.task.clone()));
-        for key in consts::ACT_VARS {
-            if let Some(v) = vars.get(key) {
-                task.env.set(key, v.clone());
+    pub fn redo_task(&self, task: &Arc<Task>) -> Result<()> {
+        if let Some(prev) = task.prev() {
+            if let Some(prev_task) = self.task.proc().task(&prev) {
+                let task = self.proc.create_task(&task.node, Some(prev_task));
+
+                let vars = task.room().vars();
+                task.room().append(&vars);
+                self.scher.push(&task);
             }
         }
-        task.set_state(TaskState::Running);
-        self.dispatch_task(&task, EventAction::Create);
-
-        let ctx = task.create_context(&self.scher);
-        let dispatcher = Dispatcher::new(&ctx);
-        dispatcher.redo()
-    }
-
-    pub fn back_task(&self, task: &Arc<Task>, aid: &str) -> ActResult<()> {
-        for act in task.acts().iter().filter(|act| act.kind == ActKind::User) {
-            if act.state().is_completed() {
-                continue;
-            }
-            if act.id == aid {
-                act.set_state(TaskState::Backed);
-                self.dispatch_act(act, EventAction::Back);
-            } else {
-                act.set_state(TaskState::Skip);
-                self.dispatch_act(act, EventAction::Skip);
-            }
-        }
-        task.set_state(TaskState::Backed);
-        self.dispatch_task(task, EventAction::Back);
 
         Ok(())
     }
 
-    pub fn abort_task(&self, task: &Arc<Task>, aid: &str) -> ActResult<()> {
-        // abort all task's act
-        for act in task.acts().iter().filter(|act| act.kind == ActKind::User) {
-            if act.id == aid {
-                act.set_state(TaskState::Abort);
-                self.dispatch_act(act, EventAction::Abort);
-            } else {
-                act.set_state(TaskState::Skip);
-                self.dispatch_act(act, EventAction::Skip);
-            }
+    pub fn back_task(&self, task: &Arc<Task>) -> Result<()> {
+        let parent = task.parent().ok_or(ActError::Action(format!(
+            "cannot find task parent by tid '{}'",
+            task.id
+        )))?;
+
+        let tasks = parent.children();
+        for task in tasks
+            .iter()
+            .filter(|t| t.id != task.id && !t.state().is_completed())
+        {
+            task.set_action_state(ActionState::Skipped);
+            self.emit_task(task);
         }
+
+        task.set_action_state(ActionState::Backed);
+        self.emit_task(task);
+
+        parent.set_action_state(ActionState::Backed);
+        self.emit_task(&parent);
+
+        Ok(())
+    }
+
+    pub fn abort_task(&self, task: &Arc<Task>) -> Result<()> {
+        let parent = task.parent().ok_or(ActError::Action(format!(
+            "cannot find task parent by tid '{}'",
+            task.id
+        )))?;
+
+        let tasks = parent.children();
+
+        // abort all task's act
+        for task in tasks
+            .iter()
+            .filter(|t| t.id != task.id && !t.state().is_completed())
+        {
+            task.set_action_state(ActionState::Skipped);
+            self.emit_task(task);
+        }
+
+        task.set_action_state(ActionState::Aborted);
+        self.emit_task(task);
 
         // abort all running task
         let ctx = self;
-        let mut parent = task.parent(ctx);
+        let mut parent = task.parent();
         while let Some(task) = parent {
             let proc = ctx.proc.clone();
             let ctx = proc.create_context(&ctx.scher, &task);
-            ctx.task.set_state(TaskState::Abort);
-            ctx.dispatch_task(&ctx.task, EventAction::Abort);
+            ctx.task.set_action_state(ActionState::Aborted);
+            ctx.emit_task(&ctx.task);
 
-            for tid in task.children() {
-                if let Some(task) = ctx.proc.task(&tid) {
-                    if task.state().is_waiting() || task.state().is_running() {
-                        task.set_state(TaskState::Abort);
-                        ctx.dispatch_task(&task, EventAction::Abort);
-                    }
+            for t in task.children() {
+                if t.state().is_pending() || t.state().is_running() {
+                    t.set_action_state(ActionState::Aborted);
+                    ctx.emit_task(&t);
                 }
             }
 
-            parent = task.parent(&ctx);
+            parent = task.parent();
         }
-        Ok(())
-    }
-
-    pub fn redo_act(&self, act: &Arc<Act>) -> ActResult<()> {
-        act.set_state(TaskState::Cancelled);
-        self.dispatch_act(&act, EventAction::Cancel);
-
-        // create a new act
-        let act = self.task.push_act(act.kind.clone(), &act.vars);
-        self.dispatch_act(&act, EventAction::Create);
-
         Ok(())
     }
 
     /// undo task
-    pub fn undo_task(&self, task: &Arc<Task>) -> ActResult<()> {
+    pub fn undo_task(&self, task: &Arc<Task>) -> Result<()> {
         if task.state().is_completed() {
             return Err(ActError::Action(format!(
                 "task('{}') is not allowed to cancel",
-                task.tid
+                task.id
             )));
         }
 
-        // cancel all of the task's acts
-        for act in task.acts() {
-            act.set_state(TaskState::Cancelled);
-            self.dispatch_act(&act, EventAction::Cancel);
+        // skip all of the task's sub tasks
+        for sub in task
+            .children()
+            .iter()
+            .filter(|t| t.id != task.id && !t.state().is_completed())
+        {
+            sub.set_action_state(ActionState::Cancelled);
+            self.emit_task(&sub);
         }
-        task.set_state(TaskState::Cancelled);
-        self.dispatch_task(&task, EventAction::Cancel);
+        task.set_action_state(ActionState::Cancelled);
+        self.emit_task(&task);
 
         Ok(())
     }
 
-    pub fn dispatch_task(&self, task: &Task, action: EventAction) {
-        debug!("ctx::dispatch, task={:?} action={:?}", task, action);
-
-        let data = EventData {
-            pid: self.proc.pid(),
-            event: action.clone(),
-        };
-
-        // on workflow start
-        if let NodeData::Workflow(_) = &task.node.data {
-            if action == EventAction::Create {
-                self.proc.set_state(TaskState::Running);
-                self.scher.emitter().dispatch_proc_event(&self.proc, &data);
-            }
+    pub fn skip_task(&self, task: &Arc<Task>) -> Result<()> {
+        if task.state().is_completed() {
+            return Err(ActError::Action(format!(
+                "task '{}' is already completed",
+                task.id
+            )));
         }
-        match &task.node.data {
-            NodeData::Job(job) => {
-                // let mut outputs = Vars::new();
-                if action == EventAction::Complete {
-                    let outputs = utils::fill_vars(&self.task.env, &job.outputs);
-                    self.env().output(&outputs);
+        let parent = task.parent().ok_or(ActError::Action(format!(
+            "cannot find task parent by tid '{}'",
+            task.id
+        )))?;
 
-                    // re-assign the vars
-                    // data.vars = self.env().vars();
-                }
-            }
-            _ => {
-                // do nothing
-            }
+        // skip all of the task's sub tasks
+        for sub in parent
+            .children()
+            .iter()
+            .filter(|t| t.id != task.id && !t.state().is_completed())
+        {
+            sub.set_action_state(ActionState::Skipped);
+            self.emit_task(&sub);
         }
+        task.set_action_state(ActionState::Skipped);
+        self.emit_task(&task);
 
-        // exec on events from model config
-        self.task.on_event(&action.to_string(), self);
-        self.scher.emitter().dispatch_task_event(task, &data);
-
-        // on workflow complete
-        if let NodeData::Workflow(_) = &task.node.data {
-            if action != EventAction::Create {
-                self.proc.set_state(task.state());
-                self.scher.emitter().dispatch_proc_event(&self.proc, &data);
-            }
-        }
-
+        Ok(())
+    }
+    pub fn emit_error(&self) {
         let state = self.task.state();
         if state.is_error() {
-            let mut parent = self.task.parent(self);
+            let mut parent = self.task.parent();
             while let Some(task) = &parent {
                 task.set_state(state.clone());
-                self.scher.emitter().dispatch_task_event(task, &data);
+                //self.scher.emitter().dispatch_task_event(task, &data);
 
-                parent = task.parent(self);
+                parent = task.parent();
             }
 
             // dispatch workflow event
             self.proc.set_state(state.clone());
-            self.scher.emitter().dispatch_proc_event(&self.proc, &data);
+            self.scher.emitter().emit_proc_event(&self.proc);
         }
     }
 
-    pub fn dispatch_act(&self, act: &Arc<Act>, action: EventAction) {
-        if !act.active() {
-            act.set_active(true);
-        }
-        if act.state().is_none() {
-            act.set_state(TaskState::WaitingEvent);
-        }
-
-        if self.task.state().is_running() {
-            self.task.set_state(TaskState::WaitingEvent);
+    pub fn emit_task(&self, task: &Task) {
+        debug!("ctx::emit_task, task={:?}", task);
+        // on workflow start
+        if let NodeData::Workflow(_) = &task.node.data {
+            if task.action_state() == ActionState::Created {
+                self.proc.set_state(TaskState::Running);
+                self.scher.emitter().emit_proc_event(&self.proc);
+            }
         }
 
-        let mut vars = self.task.vars();
-        for (key, value) in act.vars() {
-            vars.entry(key.to_string())
-                .and_modify(|item| *item = value.clone())
-                .or_insert(value.clone());
+        if task.action_state() == ActionState::Completed {
+            let outputs = task.outputs();
+            match task.node.kind() {
+                NodeKind::Act => {
+                    // only add outputs to its parent task for act node
+                    if let Some(parent) = task.parent() {
+                        parent.room().append(&outputs);
+                    }
+                }
+                _ => {
+                    // add outputs to proc global for other node
+                    task.proc().env().append(&outputs);
+                }
+            }
         }
 
-        let edata = EventData {
-            pid: self.proc.pid(),
-            event: action.clone(),
-        };
-        act.on_event(&edata.event.to_string(), self);
-        if !self.task.state().is_error() {
-            self.scher.emitter().dispatch_act_event(act, &edata);
+        self.scher.emitter().emit_task_event(task);
+
+        // on workflow complete
+        if let NodeData::Workflow(_) = &task.node.data {
+            if task.action_state() != ActionState::Created {
+                self.proc.set_state(task.state());
+                self.scher.emitter().emit_proc_event(&self.proc);
+            }
         }
     }
 
-    pub fn dispatch_message(&self, key: &str) {
-        let mut message = self.task.create_message(&EventAction::Create);
-        message.key = Some(key.to_string());
-        message.kind = MessageKind::Notice;
-
-        self.scher.emitter().dispatch_message(&message);
+    pub fn send_message(&self, key: &str) {
+        let message = self.task.create_action_message(&WorkflowAction {
+            name: "message".to_string(),
+            id: key.to_string(),
+            ..Default::default()
+        });
+        self.scher.emitter().emit_message(&message);
     }
 }

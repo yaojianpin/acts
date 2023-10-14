@@ -1,6 +1,10 @@
+use std::collections::HashMap;
+
 use crate::{
-    env::{Enviroment, VirtualMachine},
-    ActValue, Vars,
+    env::{Enviroment, Room},
+    event::ActionState,
+    sch::TaskState,
+    ActError, ActValue, Result, Vars,
 };
 use regex::Regex;
 use rhai::{Dynamic, Map};
@@ -62,37 +66,38 @@ pub fn map_to_dynamic<'a>(map: &JsonMap<String, ActValue>) -> Map {
     ret
 }
 
-// pub fn ymap_to_act<'a>(
-//     vm: &VirtualMachine,
-//     values: &'a HashMap<String, Value>,
-// ) -> HashMap<String, ActValue> {
-//     let mut ret = HashMap::new();
-
-//     for (k, v) in values {
-//         let value: ActValue = v.into();
-//         if let ActValue::Expr(expr) = value {
-//             let result = vm.eval::<Dynamic>(&expr);
-//             let new_value = match result {
-//                 Ok(v) => v.into(),
-//                 Err(_err) => ActValue::Null,
-//             };
-
-//             ret.insert(k.to_string(), new_value);
-//         } else {
-//             ret.insert(k.to_string(), value);
-//         }
-//     }
-
-//     ret
-// }
-
 /// fill the vars
+/// 1. if the inputs is an expression, just calculate it
+/// or insert the input itself
+pub fn fill_inputs<'a>(env: &Room, inputs: &'a Vars) -> Vars {
+    let mut ret = Vars::new();
+    for (k, v) in inputs {
+        if let ActValue::String(string) = v {
+            if let Some(expr) = get_expr(string) {
+                let result = env.eval::<Dynamic>(&expr);
+                let new_value = match result {
+                    Ok(v) => dynamic_to_value(&v),
+                    Err(_err) => ActValue::Null,
+                };
+
+                // satisfies the rule 1
+                ret.insert(k.to_string(), new_value);
+                continue;
+            }
+        }
+        ret.insert(k.to_string(), v.clone());
+    }
+
+    ret
+}
+
+/// fill the outputs
 /// 1. if the outputs is an expression, just calculate it
-/// 2. if the env and the outpus both has the same key, using the env to replace the it in outputs
-pub fn fill_vars<'a>(env: &VirtualMachine, values: &'a Vars) -> Vars {
+/// 2. if the env and the outpus both has the same key, using the local outputs
+pub fn fill_outputs(env: &Room, outputs: &Vars) -> Vars {
     let mut ret = Vars::new();
 
-    for (k, v) in values {
+    for (k, v) in outputs {
         if let ActValue::String(string) = v {
             if let Some(expr) = get_expr(string) {
                 let result = env.eval::<Dynamic>(&expr);
@@ -157,25 +162,87 @@ pub fn get_expr(text: &str) -> Option<String> {
     None
 }
 
-// pub fn fmt_timestamp(
-//     start_time_mills: i64,
-//     end_time_mills: i64,
-//     fmt: &str,
-// ) -> (String, String, i64) {
-//     let start_time = parse_timestamp(start_time_mills);
-//     let end_time = parse_timestamp(end_time_mills);
+pub fn action_state_to_str(state: ActionState) -> String {
+    match state {
+        ActionState::None => "none".to_string(),
+        ActionState::Aborted => "aborted".to_string(),
+        ActionState::Backed => "backed".to_string(),
+        ActionState::Cancelled => "cancelled".to_string(),
+        ActionState::Completed => "completed".to_string(),
+        ActionState::Created => "created".to_string(),
+        ActionState::Skipped => "skipped".to_string(),
+        ActionState::Submitted => "submitted".to_string(),
+    }
+}
 
-//     let elapsed = end_time_mills - start_time_mills;
+pub fn str_to_action_state(s: &str) -> ActionState {
+    match s {
+        "aborted" => ActionState::Aborted,
+        "backed" => ActionState::Backed,
+        "cancelled" => ActionState::Cancelled,
+        "completed" => ActionState::Completed,
+        "created" => ActionState::Created,
+        "skipped" => ActionState::Skipped,
+        "submitted" => ActionState::Submitted,
+        "none" | _ => ActionState::None,
+    }
+}
 
-//     (
-//         start_time.format(fmt).to_string(),
-//         end_time.format(fmt).to_string(),
-//         elapsed,
-//     )
-// }
+pub fn state_to_str(state: TaskState) -> String {
+    match state {
+        TaskState::Pending => "pending".to_string(),
+        TaskState::Running => "running".to_string(),
+        TaskState::Success => "success".to_string(),
+        TaskState::Fail(s) => format!("fail({})", s),
+        TaskState::Skip => "skip".to_string(),
+        TaskState::Abort => "abort".to_string(),
+        TaskState::None => "none".to_string(),
+    }
+}
 
-// fn parse_timestamp(mills: i64) -> DateTime<Local> {
-//     let time: DateTime<Local> = Local.timestamp_millis(mills);
+pub fn str_to_state(str: &str) -> TaskState {
+    let re = regex::Regex::new(r"^(.*)\((.*)\)$").unwrap();
+    match str {
+        "none" => TaskState::None,
+        "pending" => TaskState::Pending,
+        "running" => TaskState::Running,
+        "success" => TaskState::Success,
+        "skip" => TaskState::Skip,
+        "abort" => TaskState::Abort,
+        _ => {
+            let caps = re.captures(str);
+            if let Some(caps) = caps {
+                let name = caps.get(1).map_or("", |m| m.as_str());
+                let err = caps.get(2).map_or("", |m| m.as_str());
 
-//     time
-// }
+                if name == "fail" {
+                    return TaskState::Fail(err.to_string());
+                }
+            }
+
+            TaskState::None
+        }
+    }
+}
+
+pub fn value_to_hash_map(value: &ActValue) -> Result<HashMap<String, Vec<String>>> {
+    let arr = value.as_object().ok_or(ActError::Convert(format!(
+        "cannot convert json '{}' to hash_map, it is not object",
+        value
+    )))?;
+
+    let mut ret = HashMap::new();
+    for (k, v) in arr {
+        let items = v
+            .as_array()
+            .ok_or(ActError::Convert(format!(
+                "cannot convert json to vec, it is not array type in key '{}'",
+                k
+            )))?
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        ret.insert(k.to_string(), items);
+    }
+    Ok(ret)
+}

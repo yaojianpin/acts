@@ -1,43 +1,35 @@
-use crate::{
-    sch::{self, Act},
-    store::{self, Model, Proc, Task},
-    ActError, ActResult, Workflow,
-};
+use crate::{sch, store::data, utils, ActError, Result, Workflow};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ProcInfo {
-    pub pid: String,
+    pub id: String,
     pub name: String,
     pub mid: String,
     pub state: String,
     pub start_time: i64,
     pub end_time: i64,
-    // pub vars: Vars,
+    pub vars: String,
+    pub timestamp: i64,
+    pub tasks: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct TaskInfo {
-    pub pid: String,
-    pub tid: String,
-    pub nid: String,
+    pub id: String,
+    pub prev: Option<String>,
+    pub name: String,
+    pub proc_id: String,
+    pub node_id: String,
     pub kind: String,
     pub state: String,
+    pub action_state: String,
     pub start_time: i64,
     pub end_time: i64,
-}
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct ActInfo {
-    pub pid: String,
-    pub tid: String,
-    pub aid: String,
-    pub kind: String,
-    pub state: String,
-    pub start_time: i64,
-    pub end_time: i64,
+    pub vars: String,
+    pub timestamp: i64,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -48,11 +40,10 @@ pub struct ModelInfo {
     pub size: u32,
     pub time: i64,
     pub model: String,
-    pub topic: String,
 }
 
 impl ModelInfo {
-    pub fn workflow(&self) -> ActResult<Workflow> {
+    pub fn workflow(&self) -> Result<Workflow> {
         let m = serde_yaml::from_str::<Workflow>(&self.model);
         match m {
             Ok(mut m) => {
@@ -64,73 +55,68 @@ impl ModelInfo {
     }
 }
 
-impl From<Model> for ModelInfo {
-    fn from(m: Model) -> Self {
+impl From<data::Model> for ModelInfo {
+    fn from(m: data::Model) -> Self {
         Self {
             id: m.id,
             name: m.name,
             ver: m.ver,
             size: m.size,
             time: m.time,
-
-            model: m.model,
-            topic: m.topic,
+            model: m.data,
         }
     }
 }
 
-impl From<&Proc> for ProcInfo {
-    fn from(p: &Proc) -> Self {
-        let model = Workflow::from_str(&p.model).unwrap();
+impl From<&data::Proc> for ProcInfo {
+    fn from(p: &data::Proc) -> Self {
         Self {
-            pid: p.pid.clone(),
-            name: model.name,
-            mid: model.id,
-            state: p.state.clone().into(),
+            id: p.id.clone(),
+            name: p.name.clone(),
+            mid: p.mid.clone(),
+            state: p.state.clone(),
             start_time: p.start_time,
             end_time: p.end_time,
+            vars: p.vars.clone(),
+            timestamp: p.timestamp,
+            tasks: "".to_string(),
         }
     }
 }
 
-impl From<Task> for TaskInfo {
-    fn from(t: Task) -> Self {
+impl From<data::Task> for TaskInfo {
+    fn from(t: data::Task) -> Self {
         Self {
-            pid: t.pid,
-            tid: t.tid,
-            nid: t.nid,
+            id: t.task_id,
+            prev: t.prev,
+            name: t.name,
+            proc_id: t.proc_id,
+            node_id: t.node_id,
             kind: t.kind,
-            state: t.state.into(),
+            state: t.state,
+            action_state: t.action_state,
             start_time: t.start_time,
             end_time: t.end_time,
+            vars: t.vars,
+            timestamp: t.timestamp,
         }
-    }
-}
-
-impl Into<serde_json::Value> for ActInfo {
-    fn into(self) -> serde_json::Value {
-        json!({
-            "pid": self.pid,
-            "tid": self.tid,
-            "aid": self.aid,
-            "kind": self.kind,
-            "state": self.state,
-            "start_time": self.start_time,
-            "end_time": self.end_time,
-        })
     }
 }
 
 impl Into<serde_json::Value> for TaskInfo {
     fn into(self) -> serde_json::Value {
         json!({
-            "pid": self.pid,
-            "tid": self.tid,
-            "nid": self.nid,
+            "id": self.id,
+            "name": self.name,
+            "proc_id": self.proc_id,
+            "node_id": self.node_id,
             "kind": self.kind,
             "state": self.state,
+            "action_state": self.action_state,
             "start_time": self.start_time,
             "end_time": self.end_time,
+            "vars": self.vars,
+            "timestamp": self.timestamp,
         })
     }
 }
@@ -138,12 +124,15 @@ impl Into<serde_json::Value> for TaskInfo {
 impl Into<serde_json::Value> for ProcInfo {
     fn into(self) -> serde_json::Value {
         json!({
-            "pid": self.pid,
+            "id": self.id,
             "mid": self.mid,
             "name": self.name,
             "state": self.state,
             "start_time": self.start_time,
             "end_time": self.end_time,
+            "vars": self.vars,
+            "timestamp": self.timestamp,
+            "tasks": self.tasks,
         })
     }
 }
@@ -157,49 +146,25 @@ impl Into<serde_json::Value> for ModelInfo {
             "size": self.size,
             "time": self.time,
             "model": self.model,
-            "topic": self.topic,
         })
-    }
-}
-
-impl From<&Arc<Act>> for ActInfo {
-    fn from(act: &Arc<Act>) -> Self {
-        Self {
-            pid: act.pid.clone(),
-            tid: act.tid.clone(),
-            aid: act.id.clone(),
-            kind: act.kind.to_string(),
-            state: act.state().into(),
-            start_time: act.start_time(),
-            end_time: act.end_time(),
-        }
-    }
-}
-
-impl From<store::Act> for ActInfo {
-    fn from(act: store::Act) -> Self {
-        Self {
-            pid: act.pid.clone(),
-            tid: act.tid.clone(),
-            aid: act.id.clone(),
-            kind: act.kind,
-            state: act.state,
-            start_time: act.start_time,
-            end_time: act.end_time,
-        }
     }
 }
 
 impl From<&Arc<sch::Task>> for TaskInfo {
     fn from(t: &Arc<sch::Task>) -> Self {
         Self {
-            pid: t.pid.clone(),
-            tid: t.tid.clone(),
-            nid: t.nid(),
+            id: t.id.clone(),
+            prev: t.prev(),
+            name: t.node.data().name(),
+            proc_id: t.proc_id.clone(),
+            node_id: t.node_id(),
             kind: t.node.kind().into(),
             state: t.state().into(),
+            action_state: t.action_state().into(),
             start_time: t.start_time(),
             end_time: t.end_time(),
+            vars: utils::vars::to_string(&t.vars()).unwrap_or("(err)".to_string()),
+            timestamp: t.timestamp,
         }
     }
 }

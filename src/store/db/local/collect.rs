@@ -1,11 +1,10 @@
 use super::database::Database;
 use crate::{
     store::{data::*, DbSet, Query},
-    ActResult, ShareLock,
+    Result, ShareLock,
 };
 use acts_tag::Value;
 use rocksdb::{Direction, IteratorMode};
-use std::collections::{HashMap, HashSet};
 use tracing::debug;
 
 #[derive(Debug)]
@@ -36,7 +35,7 @@ fn get_by_keys<T: DbModel>(db: &Database, model_name: &str, keys: &[Box<[u8]>]) 
     let mut ret = Vec::new();
     let cf = db.cf_handle(model_name).unwrap();
     keys.into_iter().for_each(|it| {
-        if let Ok(data) = db.get_cf(&cf, it) {
+        if let Ok(data) = db.get_cf(model_name, &cf, it) {
             if let Ok(model) = T::from_slice(&data) {
                 ret.push(model);
             }
@@ -64,25 +63,25 @@ impl<T> Collect<T>
 where
     T: DbModel,
 {
-    fn exists(&self, id: &str) -> ActResult<bool> {
+    fn exists(&self, id: &str) -> Result<bool> {
         debug!("local::{}.exists({})", self.name, id);
         let db = self.db.read().unwrap();
         let cf = db.cf_handle(&self.name).unwrap();
-        let ret = db.get_cf(&cf, id.as_bytes());
+        let ret = db.get_cf(&self.name, &cf, id.as_bytes());
 
         Ok(ret.is_ok())
     }
 
-    fn find(&self, id: &str) -> ActResult<T> {
+    fn find(&self, id: &str) -> Result<T> {
         debug!("local::{}.find({})", self.name, id);
         let db = self.db.read().unwrap();
         let cf = db.cf_handle(&self.name)?;
-        let data = db.get_cf(&cf, id.as_bytes())?;
+        let data = db.get_cf(&self.name, &cf, id.as_bytes())?;
         let model = T::from_slice(&data)?;
         Ok(model)
     }
 
-    fn query(&self, q: &Query) -> ActResult<Vec<T>> {
+    fn query(&self, q: &Query) -> Result<Vec<T>> {
         debug!("local::{}.query({:?})", self.name, q);
         let db = self.db.read().unwrap();
         let mut limit = q.limit();
@@ -92,43 +91,31 @@ where
         }
 
         let ret = if q.is_cond() {
-            let mut key_count: HashMap<Box<[u8]>, usize> = HashMap::new();
-            let mut query_results: HashSet<Box<[u8]>> = HashSet::new();
-            let cond_len = q.queries().len();
-            for (k, v) in &q.queries() {
-                let cf = db.cf_idx_handle(&self.name, &k)?;
+            let mut q = q.clone();
+            for cond in q.queries_mut() {
+                for expr in cond.conds.iter_mut() {
+                    let cf = db.cf_idx_handle(&self.name, &expr.key)?;
 
-                let value = Value::from(v).unwrap();
-                let mut iter =
-                    db.iterator_cf(&cf, IteratorMode::From(value.data(), Direction::Forward));
-                // let mut iter = db.prefix_iterator_cf(&cf, value.data());
-                while let Some(r) = iter.next() {
-                    let db_key = db.make_db_key(&r.key);
-                    if db_key.idx_key.as_ref() != value.data() {
-                        break;
-                    }
-                    if db.is_expired(&db_key.p_key, &r.value) {
-                        db.delete_update(&db_key.p_key)?;
-                        continue;
-                    }
-
-                    // query_results.push(value)
-                    query_results.insert(db_key.p_key.clone());
-
-                    // count the model id
-                    if let Some(value) = key_count.get_mut(&db_key.p_key) {
-                        *value += 1;
-                    } else {
-                        key_count.insert(db_key.p_key, 1);
+                    let value = Value::from(&expr.value).unwrap();
+                    let mut iter =
+                        db.iterator_cf(&cf, IteratorMode::From(value.data(), Direction::Forward));
+                    // let mut iter = db.prefix_iterator_cf(&cf, value.data());
+                    while let Some(r) = iter.next() {
+                        let db_key = db.make_db_key(&r.key);
+                        if db_key.idx_key.as_ref() != value.data() {
+                            break;
+                        }
+                        if db.is_expired(&db_key.p_key, &r.value) {
+                            db.delete_update(&db_key.p_key)?;
+                            continue;
+                        }
+                        expr.result.insert(db_key.p_key.clone());
                     }
                 }
+                cond.calc();
             }
 
-            let keys: Vec<Box<[u8]>> = query_results
-                .into_iter()
-                .filter(|id| key_count[id] == cond_len)
-                .take(limit)
-                .collect();
+            let keys = q.calc().into_iter().take(limit).collect::<Vec<_>>();
             get_by_keys(&db, &self.name, &keys)
         } else {
             get_all(&db, &self.name, limit)
@@ -137,7 +124,7 @@ where
         Ok(ret)
     }
 
-    fn create(&self, model: &T) -> ActResult<bool> {
+    fn create(&self, model: &T) -> Result<bool> {
         debug!("local::{}.create({})", self.name, model.id());
         let db = self.db.read().unwrap();
         let data = model.to_vec()?;
@@ -158,7 +145,7 @@ where
 
         Ok(true)
     }
-    fn update(&self, model: &T) -> ActResult<bool> {
+    fn update(&self, model: &T) -> Result<bool> {
         debug!("local::{}.update({})", self.name, model.id());
         let db = self.db.read().unwrap();
         let data = model.to_vec()?;
@@ -180,7 +167,7 @@ where
 
         Ok(true)
     }
-    fn delete(&self, id: &str) -> ActResult<bool> {
+    fn delete(&self, id: &str) -> Result<bool> {
         debug!("local::{}.delete({})", self.name, id);
         let db = self.db.read().unwrap();
         let cf = db.cf_handle(&self.name)?;
@@ -210,27 +197,27 @@ where
     T: DbModel + Send + Sync,
 {
     type Item = T;
-    fn exists(&self, id: &str) -> ActResult<bool> {
+    fn exists(&self, id: &str) -> Result<bool> {
         self.exists(id)
     }
 
-    fn find(&self, id: &str) -> ActResult<T> {
+    fn find(&self, id: &str) -> Result<T> {
         self.find(id)
     }
 
-    fn query(&self, query: &Query) -> ActResult<Vec<T>> {
+    fn query(&self, query: &Query) -> Result<Vec<T>> {
         self.query(query)
     }
 
-    fn create(&self, model: &T) -> ActResult<bool> {
+    fn create(&self, model: &T) -> Result<bool> {
         self.create(model)
     }
 
-    fn update(&self, model: &T) -> ActResult<bool> {
+    fn update(&self, model: &T) -> Result<bool> {
         self.update(model)
     }
 
-    fn delete(&self, id: &str) -> ActResult<bool> {
+    fn delete(&self, id: &str) -> Result<bool> {
         self.delete(id)
     }
 }

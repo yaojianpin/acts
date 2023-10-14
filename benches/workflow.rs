@@ -36,12 +36,12 @@ fn start_workflow(c: &mut Criterion) {
         let e = engine.clone();
         rt.block_on(async move {
             engine.start();
-            let workflow = Workflow::from_str(text).unwrap();
+            let workflow = Workflow::from_yml(text).unwrap();
             engine.manager().deploy(&workflow).unwrap();
         });
 
         b.iter(move || {
-            let workflow = Workflow::from_str(text).unwrap();
+            let workflow = Workflow::from_yml(text).unwrap();
             let exec = e.executor();
             rt.block_on(async move {
                 exec.start(&workflow.id, &Vars::new()).unwrap();

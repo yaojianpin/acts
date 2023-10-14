@@ -1,0 +1,33 @@
+name: approve
+id: approve
+actions:
+  - id: final
+    on: 
+      - state: completed
+        nkind: workflow
+jobs:
+  - name: job1
+    id: job1
+    steps:
+      - name: prepare
+        id: prepare
+        acts:
+          - id: init
+      - name: pm approval
+        id: pm_approval
+        acts:
+          - for:
+              by: all
+              alias:
+                init: pm
+              in: |
+                act.role("pm")
+      - name: gm approval
+        id: gm_approval
+        acts:
+          - for:
+              by: any
+              alias:
+                init: gm
+              in: |
+                act.role("gm")

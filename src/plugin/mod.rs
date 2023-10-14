@@ -9,7 +9,7 @@ mod tests;
 /// ## Example
 ///
 /// ```rust
-/// use acts::{ActPlugin, WorkflowState, Message, Engine, Workflow};
+/// use acts::{ActPlugin, Engine, Workflow};
 /// #[derive(Clone)]
 /// struct TestPlugin;
 ///
@@ -23,9 +23,9 @@ mod tests;
 ///     fn on_init(&self, engine: &Engine) {
 ///         println!("TestPlugin");
 ///         // engine.register_module("name", module);
-///         engine.emitter().on_start(|state: &WorkflowState| {});
-///         engine.emitter().on_complete(|state: &WorkflowState| {});
-///         engine.emitter().on_message(|msg: &Message| {});
+///         engine.emitter().on_start(|e| {});
+///         engine.emitter().on_complete(|e| {});
+///         engine.emitter().on_message(|e| {});
 ///     }
 /// }
 /// ```

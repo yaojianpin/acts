@@ -1,7 +1,5 @@
-use acts::{
-    event::EventAction, ActResult, ActValue, Candidate, Executor, Message, OrgAdapter, RoleAdapter,
-    Vars,
-};
+use acts::{Executor, Message, Result, RoleAdapter, Vars};
+use serde_json::json;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone)]
@@ -28,15 +26,21 @@ impl<'a> Client<'a> {
                 id: "1",
                 name: "John",
             },
-            "admin",
+            "pm",
         );
-
         self.add_user(
             User {
                 id: "2",
+                name: "Rose",
+            },
+            "pm",
+        );
+        self.add_user(
+            User {
+                id: "3",
                 name: "Tom",
             },
-            "admin",
+            "gm",
         );
     }
     pub fn add_user(&mut self, user: User<'a>, role: &str) {
@@ -46,72 +50,62 @@ impl<'a> Client<'a> {
             .or_insert(vec![user.clone()]);
     }
 
-    pub fn process(&self, executor: &Executor, message: &Message) -> ActResult<()> {
-        println!(
-            "message kind={} event={} key={:?}, vars={:?}",
-            message.kind, message.event, message.key, message.vars
-        );
-        if let Some(_msg) = message.as_task_message() {
-            // do something for task message
-        } else if let Some(_msg) = message.as_notice_message() {
-            // do something for notice message
-        } else if let Some(msg) = message.as_user_message() {
-            if msg.event == &EventAction::Create {
-                let mut vars = Vars::new();
-                vars.insert("uid".to_string(), msg.uid.into());
-                let state = executor.complete(&msg.pid, &msg.aid, &vars)?;
-                println!("action state: aid={} cost={}ms", msg.aid, state.cost());
-            }
-        } else if let Some(msg) = message.as_action_message() {
-            if msg.event == &EventAction::Create {
-                let mut vars = Vars::new();
-                vars.insert("uid".into(), "admin".into());
-                vars.insert("custom".into(), 100.into());
+    pub fn process(&self, executor: &Executor, message: &Message) -> Result<()> {
+        if message.is_key("init") && message.is_state("created") {
+            // init the workflow
+            println!("do init work");
+            let mut options = Vars::new();
+            options.insert("uid".to_string(), json!("u1"));
 
-                let state = executor.complete(msg.pid, &msg.aid, &vars)?;
-                println!("action state: aid={} cost={}ms", msg.aid, state.cost());
-            }
-        } else if let Some(msg) = message.as_canidate_message() {
-            if msg.event == &EventAction::Create {
-                let mut vars = Vars::new();
-                let new_cand = self.parse_cand(&msg.cands);
-                vars.insert("uid".into(), "admin".into());
-                vars.insert("sub_cands".into(), new_cand);
-                let state = executor.complete(&msg.pid, &msg.aid, &vars)?;
-                println!("action state: aid={} cost={}ms", msg.aid, state.cost());
-            }
-        } else if let Some(msg) = message.as_some_message() {
-            if msg.event == &EventAction::Create {
-                println!("run client act rule={}, vars={:#?}", msg.some, msg.vars);
+            let state = executor.complete(&message.proc_id, &message.id, &options)?;
+            println!("action state: id={} cost={}ms", &message.id, state.cost());
+        } else if message.is_key("each") && message.is_state("created") {
+            let mut options = Vars::new();
+            options.insert("uid".to_string(), json!("u1"));
 
-                let mut vars = Vars::new();
-                vars.insert("uid".into(), "admin".into());
-                vars.insert("some".into(), true.into());
+            let state = executor.complete(&message.proc_id, &message.id, &options)?;
+            println!(
+                "action state: id={} key={} cost={}ms",
+                &message.id,
+                &message.key,
+                state.cost()
+            );
+        } else if message.is_key("pm") && message.is_state("created") {
+            let mut options = Vars::new();
+            options.insert("uid".into(), "admin".into());
+            options.insert("users".into(), json!({ "role(pm)": self.role("pm") }));
 
-                let state = executor.complete(&msg.pid, &msg.aid, &vars)?;
-                println!("action state: aid={} cost={}ms", msg.aid, state.cost());
-            }
+            let state = executor.complete(&message.proc_id, &message.id, &options)?;
+            println!(
+                "action state: id={} key={} cost={}ms",
+                &message.id,
+                &message.key,
+                state.cost()
+            );
+        } else if message.is_key("gm") && message.is_state("created") {
+            let mut options = Vars::new();
+
+            options.insert("uid".into(), "admin".into());
+            options.insert("users".into(), json!({ "role(gm)": self.role("gm") }));
+
+            let state = executor.complete(&message.proc_id, &message.id, &options)?;
+            println!(
+                "action state: id={} key={} cost={}ms",
+                &message.id,
+                &message.key,
+                state.cost()
+            );
+        } else if message.is_key("final") {
+            println!("do final work");
         }
 
         Ok(())
     }
-
-    fn parse_cand(&self, data: &ActValue) -> ActValue {
-        let cand: Candidate = data.into();
-        let ret = cand.calc(self);
-        if ret.is_err() {
-            eprintln!("{}", ret.err().unwrap());
-            std::process::exit(1);
-        }
-
-        ret.unwrap().into()
-    }
 }
 
-impl<'a> RoleAdapter for Client<'a> {
+impl RoleAdapter for Client<'_> {
     fn role(&self, name: &str) -> Vec<String> {
         let mut ret = vec![];
-
         if let Some(users) = self.users.get(name) {
             let iter = users.iter().map(|u| u.id.to_string());
             ret.extend(iter);
@@ -120,16 +114,17 @@ impl<'a> RoleAdapter for Client<'a> {
     }
 }
 
-impl OrgAdapter for Client<'_> {
-    fn dept(&self, _name: &str) -> Vec<String> {
-        todo!()
-    }
+// you can also implement the OrgAdapter to get the org users
+// impl OrgAdapter for Client<'_> {
+//     fn dept(&self, _value: &str) -> Vec<String> {
+//         todo!()
+//     }
 
-    fn unit(&self, _name: &str) -> Vec<String> {
-        todo!()
-    }
+//     fn unit(&self, _value: &str) -> Vec<String> {
+//         todo!()
+//     }
 
-    fn relate(&self, _id_type: &str, _id: &str, _relation: &str) -> Vec<String> {
-        todo!()
-    }
-}
+//     fn relate(&self, _value: &str) -> Vec<String> {
+//         todo!()
+//     }
+// }

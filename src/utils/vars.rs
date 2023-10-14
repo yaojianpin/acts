@@ -1,8 +1,8 @@
-use crate::Vars;
+use crate::{ActError, Result, Vars};
 use serde_json::Value;
 
-pub fn to_string(vars: &Vars) -> String {
-    serde_json::to_string(vars).unwrap()
+pub fn to_string(vars: &Vars) -> Result<String> {
+    serde_json::to_string(vars).map_err(|err| ActError::Store(err.to_string()))
 }
 
 pub fn from_string(str: &str) -> Vars {

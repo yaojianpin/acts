@@ -1,5 +1,5 @@
 use super::step::Step;
-use crate::{ActValue, ModelBase, Vars};
+use crate::{ModelBase, Vars};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -11,22 +11,19 @@ pub struct Job {
     pub name: String,
 
     #[serde(default)]
+    pub tag: String,
+
+    #[serde(default)]
     pub steps: Vec<Step>,
 
     #[serde(default)]
     pub needs: Vec<String>,
 
     #[serde(default)]
-    pub env: Vars,
-
-    #[serde(default)]
-    pub accept: Option<ActValue>,
+    pub inputs: Vars,
 
     #[serde(default)]
     pub outputs: Vars,
-
-    #[serde(default)]
-    pub on: Vars,
 }
 
 impl Job {

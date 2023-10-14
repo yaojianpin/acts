@@ -9,23 +9,20 @@ pub struct LocalStore {
     models: Arc<Collect<Model>>,
     procs: Arc<Collect<Proc>>,
     tasks: Arc<Collect<Task>>,
-    acts: Arc<Collect<Act>>,
 }
 
 static DB: OnceCell<Arc<RwLock<Database>>> = OnceCell::new();
 impl LocalStore {
     pub fn new(data_dir: &str) -> Self {
         let db = DB.get_or_init(|| Arc::new(RwLock::new(Database::new(data_dir))));
-        let models = Collect::new(&db, "model");
-        let procs = Collect::new(&db, "proc");
-        let tasks = Collect::new(&db, "task");
-        let acts = Collect::new(&db, "act");
+        let models = Collect::new(&db, "models");
+        let procs = Collect::new(&db, "procs");
+        let tasks = Collect::new(&db, "tasks");
         let store = Self {
             db: db.clone(),
             models: Arc::new(models),
             procs: Arc::new(procs),
             tasks: Arc::new(tasks),
-            acts: Arc::new(acts),
         };
 
         store.init();
@@ -50,9 +47,5 @@ impl StoreAdapter for LocalStore {
 
     fn tasks(&self) -> Arc<dyn DbSet<Item = Task>> {
         self.tasks.clone()
-    }
-
-    fn acts(&self) -> Arc<dyn DbSet<Item = Act>> {
-        self.acts.clone()
     }
 }

@@ -1,4 +1,4 @@
-use acts::{Engine, Message, Vars, Workflow, WorkflowState};
+use acts::{Engine, Vars, Workflow};
 
 mod client;
 
@@ -9,34 +9,32 @@ async fn main() {
 
     let engine = Engine::new();
     engine.start();
-    let text = include_str!("./approve.yml");
-    let workflow = Workflow::from_str(text).unwrap();
+    let text = include_str!("./model.yml");
+    let workflow = Workflow::from_yml(text).unwrap();
+    workflow.print();
 
-    let executor = engine.executor();
+    let executor = engine.executor().clone();
     engine.manager().deploy(&workflow).expect("deploy model");
     executor
         .start(&workflow.id, &Vars::new())
         .expect("start workflow");
 
-    engine.emitter().on_message(move |message: &Message| {
-        let ret = store.process(&executor, message);
+    engine.emitter().on_message(move |e| {
+        let ret = store.process(&executor, e);
         if ret.is_err() {
             eprintln!("{}", ret.err().unwrap());
             std::process::exit(1);
         }
     });
 
-    let e2 = engine.clone();
-    engine.emitter().on_complete(move |w: &WorkflowState| {
+    engine.emitter().on_complete(move |e| {
         println!(
             "on_workflow_complete: pid={} cost={}ms outputs={:?}",
-            w.pid,
-            w.cost(),
-            w.outputs()
+            e.pid,
+            e.cost(),
+            e.outputs()
         );
-
-        e2.close();
+        e.close();
     });
-
     engine.eloop().await;
 }

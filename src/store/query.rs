@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashSet, slice::IterMut};
 
 #[derive(Debug)]
 pub struct DbKey {
@@ -6,69 +6,132 @@ pub struct DbKey {
     pub value: Box<[u8]>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Query {
     limit: usize,
-    conds: HashMap<String, String>,
+    conds: Vec<Cond>,
+}
+
+#[derive(Debug, Clone)]
+pub enum CondType {
+    And,
+    Or,
+}
+
+#[derive(Debug, Clone)]
+pub struct Cond {
+    pub r#type: CondType,
+    pub conds: Vec<Expr>,
+    pub result: HashSet<Box<[u8]>>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Expr {
+    pub key: String,
+    pub value: String,
+    pub result: HashSet<Box<[u8]>>,
+}
+
+impl Cond {
+    pub fn or() -> Self {
+        Self {
+            r#type: CondType::Or,
+            conds: Vec::new(),
+            result: HashSet::new(),
+        }
+    }
+
+    pub fn and() -> Self {
+        Self {
+            r#type: CondType::And,
+            conds: Vec::new(),
+            result: HashSet::new(),
+        }
+    }
+
+    pub fn push(mut self, expr: Expr) -> Self {
+        self.conds.push(expr);
+
+        self
+    }
+
+    pub fn calc(&mut self) {
+        match self.r#type {
+            CondType::And => {
+                for c in self.conds.iter_mut() {
+                    if self.result.len() == 0 {
+                        self.result = c.result.clone();
+                    } else {
+                        self.result = self
+                            .result
+                            .intersection(&c.result)
+                            .cloned()
+                            .collect::<HashSet<_>>()
+                    }
+                }
+            }
+            CondType::Or => {
+                for c in self.conds.iter_mut() {
+                    if self.result.len() == 0 {
+                        self.result = c.result.clone();
+                    } else {
+                        self.result = self
+                            .result
+                            .union(&c.result)
+                            .cloned()
+                            .collect::<HashSet<_>>()
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Expr {
+    pub fn eq(key: &str, value: &str) -> Self {
+        Self {
+            key: key.to_string(),
+            value: value.to_string(),
+            result: HashSet::new(),
+        }
+    }
 }
 
 impl Query {
     pub fn new() -> Self {
         Query {
             limit: 100000, // default to a big number
-            conds: HashMap::new(),
+            conds: Vec::new(),
         }
     }
 
-    pub fn queries(&self) -> HashMap<String, String> {
-        self.conds.clone()
+    pub fn queries_mut(&mut self) -> IterMut<'_, Cond> {
+        self.conds.iter_mut()
     }
 
-    pub fn push(mut self, key: &str, value: &str) -> Self {
-        self.conds.insert(key.to_string(), value.to_string());
+    pub fn queries(&mut self) -> &Vec<Cond> {
+        &self.conds
+    }
+
+    pub fn calc(&self) -> HashSet<Box<[u8]>> {
+        let mut result = HashSet::new();
+        for cond in self.conds.iter() {
+            if result.len() == 0 {
+                result = cond.result.clone();
+            } else {
+                result = result
+                    .intersection(&cond.result)
+                    .cloned()
+                    .collect::<HashSet<_>>()
+            }
+        }
+        result
+    }
+
+    pub fn push(mut self, cond: Cond) -> Self {
+        self.conds.push(cond);
 
         self
-    }
-
-    pub fn sql(&self) -> String {
-        let mut ret = String::new();
-
-        let cond_len = self.conds.len();
-        if cond_len > 0 {
-            ret.push_str(" where ");
-            for (index, (key, value)) in self.conds.iter().enumerate() {
-                ret.push_str(key);
-                ret.push_str("=");
-                ret.push_str(&format!("'{}'", value));
-
-                if index != cond_len - 1 {
-                    ret.push_str(" and ");
-                }
-            }
-        }
-
-        if self.limit > 0 {
-            ret.push_str(&format!(" limit {}", self.limit));
-        }
-
-        ret
-    }
-
-    pub fn predicate<F: Fn(&str, &str) -> Vec<String>>(&self, f: F) -> Vec<String> {
-        let mut ret = Vec::new();
-        for (key, value) in &self.conds {
-            let list = f(key, value);
-            if ret.len() == 0 {
-                ret = list;
-            } else {
-                ret = ret.into_iter().filter(|it| list.contains(it)).collect();
-            }
-        }
-
-        if self.limit > 0 {
-            ret = ret.into_iter().take(self.limit).collect();
-        }
-        ret
     }
 
     pub fn set_limit(mut self, limit: usize) -> Self {

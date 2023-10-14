@@ -1,26 +1,21 @@
 use crate::Vars;
+use serde::{Deserialize, Serialize};
 
-use super::EventAction;
-
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Action {
-    pub pid: String,
-    pub aid: String,
+    pub proc_id: String,
+    pub task_id: String,
     pub event: String,
     pub options: Vars,
 }
 
 impl Action {
-    pub fn new(pid: &str, aid: &str, event: &str, options: &Vars) -> Self {
+    pub fn new(pid: &str, tid: &str, event: &str, options: &Vars) -> Self {
         Self {
-            pid: pid.to_string(),
-            aid: aid.to_string(),
+            proc_id: pid.to_string(),
+            task_id: tid.to_string(),
             event: event.to_string(),
             options: options.clone(),
         }
-    }
-
-    pub fn event(&self) -> EventAction {
-        self.event.as_str().into()
     }
 }

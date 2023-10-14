@@ -1,4 +1,4 @@
-use acts::{Engine, Vars, Workflow, WorkflowState};
+use acts::{Engine, Vars, Workflow};
 
 #[tokio::main]
 async fn main() {
@@ -7,23 +7,21 @@ async fn main() {
 
     let executor = engine.executor();
     let text = include_str!("./model.yml");
-    let workflow = Workflow::from_str(text).unwrap();
+    let workflow = Workflow::from_yml(text).unwrap();
+    workflow.print();
     engine.manager().deploy(&workflow).expect("deploy model");
 
     let mut vars = Vars::new();
     vars.insert("input".into(), 10.into());
     executor.start(&workflow.id, &vars).expect("start workflow");
 
-    let e = engine.clone();
-    engine.emitter().on_complete(move |s: &WorkflowState| {
+    engine.emitter().on_complete(move |e| {
         println!(
             "on_workflow_complete: state={} cost={}ms output={:?}",
-            s.state,
-            s.cost(),
-            s.outputs()
+            e.state,
+            e.cost(),
+            e.outputs()
         );
-
-        //s.tree().unwrap();
         e.close();
     });
     engine.eloop().await;

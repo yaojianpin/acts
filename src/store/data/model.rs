@@ -10,8 +10,7 @@ pub struct Model {
     pub ver: u32,
     pub size: u32,
     pub time: i64,
-    pub model: String,
-    pub topic: String,
+    pub data: String,
 }
 
 impl DbModel for Model {

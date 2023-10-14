@@ -1,80 +1,108 @@
+use super::{ActionState, EventAction};
 use crate::{
-    event::{Emitter, Event, Message},
-    sch::{ActKind, Proc, Scheduler},
-    utils, Vars, Workflow, WorkflowState,
+    event::{Emitter, Message},
+    sch::{Proc, Scheduler},
+    utils, NodeKind, Vars, Workflow,
 };
 use std::sync::Arc;
+#[tokio::test]
+async fn event_action_parse() {
+    let action = EventAction::parse("complete").unwrap();
+    assert_eq!(action, EventAction::Complete);
 
-use super::{EventAction, MessageKind};
+    let action = EventAction::parse("submit").unwrap();
+    assert_eq!(action, EventAction::Submit);
+
+    let action = EventAction::parse("cancel").unwrap();
+    assert_eq!(action, EventAction::Cancel);
+
+    let action = EventAction::parse("back").unwrap();
+    assert_eq!(action, EventAction::Back);
+
+    let action = EventAction::parse("abort").unwrap();
+    assert_eq!(action, EventAction::Abort);
+
+    let action = EventAction::parse("skip").unwrap();
+    assert_eq!(action, EventAction::Skip);
+
+    let action = EventAction::parse("aaaaa");
+    assert_eq!(action.is_err(), true);
+}
 
 #[tokio::test]
 async fn event_start() {
-    let text = include_str!("../../examples/simple.yml");
-    let mut workflow = Workflow::from_str(text).unwrap();
+    let mut workflow = Workflow::new()
+        .with_id("m1")
+        .with_job(|job| job.with_id("job1").with_step(|step| step.with_id("step1")));
 
     let (proc, _) = create_proc(&mut workflow, &utils::longid());
     let evt = Emitter::new();
     let workflow2 = workflow.clone();
-    evt.add_event(&Event::OnStart(Arc::new(move |state: &WorkflowState| {
-        assert!(state.mid == workflow2.id);
-    })));
+    evt.on_start(move |e| {
+        assert!(e.inner().mid == workflow2.id);
+    });
 
-    let state = proc.workflow_state(&EventAction::Create);
-    evt.dispatch_start_event(&state);
+    let state = proc.workflow_state();
+    evt.emit_start_event(&state);
 }
 
 #[tokio::test]
 async fn event_finished() {
-    let text = include_str!("../../examples/simple.yml");
-    let mut workflow = Workflow::from_str(text).unwrap();
+    let mut workflow = Workflow::new()
+        .with_id("m1")
+        .with_job(|job| job.with_id("job1").with_step(|step| step.with_id("step1")));
     let (proc, _) = create_proc(&mut workflow, &utils::longid());
     let evt = Emitter::new();
     let workflow2 = workflow.clone();
-    evt.add_event(&Event::OnComplete(Arc::new(move |w: &WorkflowState| {
-        assert!(w.mid == workflow2.id);
-    })));
+    evt.on_complete(move |e| {
+        assert!(e.inner().mid == workflow2.id);
+    });
 
-    let state = proc.workflow_state(&EventAction::Complete);
-    evt.dispatch_complete_event(&state);
+    let state = proc.workflow_state();
+    evt.emit_complete_event(&state);
 }
 
 #[tokio::test]
 async fn event_error() {
-    let text = include_str!("../../examples/simple.yml");
-    let mut workflow = Workflow::from_str(text).unwrap();
+    let mut workflow = Workflow::new()
+        .with_id("m1")
+        .with_job(|job| job.with_id("job1").with_step(|step| step.with_id("step1")));
     let workflow_id = workflow.id.clone();
-
     let (proc, _) = create_proc(&mut workflow, &utils::longid());
 
     let evt = Emitter::new();
-    evt.add_event(&Event::OnError(Arc::new(move |w: &WorkflowState| {
-        assert!(w.mid == workflow_id);
-    })));
+    evt.on_error(move |e| {
+        assert!(e.inner().mid == workflow_id);
+    });
 
-    let state = proc.workflow_state(&EventAction::Error);
-    evt.dispatch_error(&state);
+    let state = proc.workflow_state();
+    evt.emit_error(&state);
 }
 
 #[tokio::test]
 async fn event_message() {
     let evt = Emitter::new();
-    evt.add_event(&Event::OnMessage(Arc::new(move |message: &Message| {
-        assert!(message.pid == "w1");
-    })));
+    evt.on_message(move |e| {
+        assert!(e.inner().proc_id == "w1");
+    });
     let m = Message {
-        kind: MessageKind::Act(ActKind::User),
-        event: EventAction::Create,
-        mid: "mid".to_string(),
-        topic: "m1".to_string(),
-        nkind: "workflow".to_string(),
-        nid: "a".to_string(),
-        pid: "w1".to_string(),
-        tid: "t1".to_string(),
-        key: None,
-        vars: Vars::new(),
+        id: "a1".to_string(),
+        r#type: NodeKind::Act.to_string(),
+        state: ActionState::Created.to_string(),
+        model_id: "mid".to_string(),
+        model_name: "mname".to_string(),
+        model_tag: "mtag".to_string(),
+        proc_id: "w1".to_string(),
+        name: "a1".to_string(),
+        inputs: Vars::new(),
+        outputs: Vars::new(),
+        tag: "".to_string(),
+        start_time: 0,
+        end_time: 0,
+        key: "n1".to_string(),
     };
 
-    evt.dispatch_message(&m);
+    evt.emit_message(&m);
 }
 
 fn create_proc(workflow: &mut Workflow, id: &str) -> (Arc<Proc>, Arc<Scheduler>) {

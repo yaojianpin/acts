@@ -1,9 +1,10 @@
 use super::{
+    build,
     node::{Node, NodeData},
-    utils,
 };
 use crate::{ActError, ShareLock, Workflow};
 use std::{
+    cell::RefCell,
     collections::HashMap,
     sync::{Arc, RwLock, Weak},
 };
@@ -13,6 +14,7 @@ pub struct NodeTree {
     pub(crate) root: Option<Arc<Node>>,
     pub(crate) node_map: ShareLock<HashMap<String, Arc<Node>>>,
     pub(crate) error: Option<ActError>,
+    pub(crate) model: Box<Workflow>,
 }
 
 impl NodeTree {
@@ -21,24 +23,35 @@ impl NodeTree {
             root: None,
             node_map: Arc::new(RwLock::new(HashMap::new())),
             error: None,
+            model: Box::new(Workflow::default()),
         }
     }
 
-    pub fn build(workflow: &mut Workflow) -> Arc<NodeTree> {
-        let mut tree = NodeTree::new();
-        utils::process_workflow(workflow, &mut tree);
-
-        Arc::new(tree)
+    pub fn root(&self) -> Option<Arc<Node>> {
+        self.root.clone()
     }
 
-    pub fn make(&self, root: &str, data: NodeData, level: usize) -> Arc<Node> {
+    pub fn build(workflow: &mut Workflow) -> NodeTree {
+        let mut tree = NodeTree::new();
+        build::build_workflow(workflow, &mut tree);
+
+        tree
+    }
+
+    pub fn load(&mut self, model: &Workflow) {
+        let mut model = model.clone();
+        build::build_workflow(&mut model, self);
+    }
+
+    pub fn make(&self, data: NodeData, level: usize) -> Arc<Node> {
         let node = Arc::new(Node {
-            root: root.to_string(),
-            data: data,
+            data,
             level,
             parent: Arc::new(RwLock::new(Weak::new())),
             children: Arc::new(RwLock::new(Vec::new())),
+            prev: Arc::new(RwLock::new(Weak::new())),
             next: Arc::new(RwLock::new(Weak::new())),
+            visit_count: Arc::new(RwLock::new(0)),
         });
 
         self.node_map
@@ -63,44 +76,76 @@ impl NodeTree {
 
     #[allow(unused)]
     pub fn print(&self) {
-        println!("print:");
-        if let Some(root) = self.root.clone() {
-            self.visit_(&root, |node| {
+        if let Some(node) = self.root.clone() {
+            self.visit(&node, |node| {
                 let mut level = node.level;
                 while level > 0 {
-                    println!("  ");
+                    print!("  ");
                     level -= 1;
                 }
-                println!("{:?}\n", node.data());
+
+                let next = match node.next().upgrade() {
+                    Some(n) => n.id(),
+                    None => "nil".to_string(),
+                };
+                println!(
+                    "{} id:{} name={}  next={}",
+                    node.kind(),
+                    node.id(),
+                    node.name(),
+                    next
+                );
             });
         }
     }
 
     #[allow(unused)]
-    pub fn walk<F: Fn(&Node) + Clone>(&self, f: F) {
+    pub fn tree_output(&self) -> String {
+        let s = &RefCell::new(String::new());
         if let Some(node) = self.root.clone() {
-            self.visit_(&node, f);
+            self.visit(&node, move |n| {
+                let mut level = n.level;
+                while level > 0 {
+                    s.borrow_mut().push_str(&format!("{}", "  "));
+                    level -= 1;
+                }
+
+                let next = match n.next().upgrade() {
+                    Some(n) => n.id(),
+                    None => "nil".to_string(),
+                };
+
+                s.borrow_mut().push_str(&format!(
+                    "{} id:{} name={}  next={}\n",
+                    n.kind(),
+                    n.id(),
+                    n.name(),
+                    next
+                ));
+            });
         }
+        s.clone().into_inner()
     }
 
     pub fn set_error(&mut self, err: ActError) {
         self.error = Some(err);
     }
 
-    fn visit_<F: Fn(&Node) + Clone>(&self, node: &Arc<Node>, f: F) {
+    #[allow(unused)]
+    pub fn visit<F: Fn(&Node) + Clone>(&self, node: &Arc<Node>, f: F) {
         f(node);
+        node.visit();
 
-        let children = node.children.read().unwrap();
+        let children = node.children();
         if children.len() > 0 {
-            let next = &children[0];
-            self.visit_(next, f.clone());
+            for child in children {
+                self.visit(&child, f.clone());
+            }
         }
 
-        let next = node.next.read().unwrap();
-        if let Some(next) = next.upgrade() {
-            // just visit the same level, or it will be recursive
-            if next.level == node.level {
-                self.visit_(&next, f.clone());
+        if let Some(next) = node.next().upgrade() {
+            if next.visit_count() == 0 {
+                self.visit(&next, f.clone());
             }
         }
     }

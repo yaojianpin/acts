@@ -1,6 +1,5 @@
-use std::io::ErrorKind;
-
 use serde::{Deserialize, Serialize};
+use std::io::ErrorKind;
 use thiserror::Error;
 
 #[derive(Deserialize, Serialize, Error, Debug, Clone, PartialEq)]

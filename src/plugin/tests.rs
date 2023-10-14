@@ -1,4 +1,4 @@
-use crate::{event::Message, plugin, ActPlugin, Engine, WorkflowState};
+use crate::{plugin, ActPlugin, Engine};
 use std::sync::{Arc, Mutex};
 
 #[test]
@@ -40,9 +40,9 @@ impl ActPlugin for TestPlugin {
 
         // engine.register_module("name", module);
         let emitter = engine.emitter();
-        emitter.on_start(|_w: &WorkflowState| {});
-        emitter.on_complete(|_w: &WorkflowState| {});
+        emitter.on_start(|_w| {});
+        emitter.on_complete(|_w| {});
 
-        emitter.on_message(|_msg: &Message| {});
+        emitter.on_message(|_msg| {});
     }
 }

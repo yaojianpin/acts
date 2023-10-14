@@ -3,16 +3,17 @@
 #![doc = include_str!("../README.md")]
 
 mod adapter;
+mod cache;
 mod engine;
 mod env;
 mod error;
-pub mod event;
+mod event;
 mod export;
 mod model;
 mod options;
 mod plugin;
 mod sch;
-pub mod store;
+mod store;
 mod utils;
 
 #[cfg(test)]
@@ -22,19 +23,19 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 pub use engine::Engine;
-pub use options::Options;
 pub use error::ActError;
-pub use event::{Action, Message};
+pub use event::{Action, Event, Message};
 pub use export::{Emitter, Executor, Extender, Manager};
 pub use model::*;
+pub use options::Options;
 pub use plugin::ActPlugin;
 pub use rhai::Map;
 pub use rhai::Module as ActModule;
-pub use sch::Context;
+pub use sch::{Context, NodeKind};
 pub use serde_json::Value as ActValue;
-pub use store::{DbSet, Query, StoreAdapter};
+pub use store::{data, DbSet, Query, StoreAdapter};
 pub type Vars = serde_json::Map<String, ActValue>;
-pub type ActResult<T> = std::result::Result<T, ActError>;
+pub type Result<T> = std::result::Result<T, ActError>;
 
 pub(crate) type ShareLock<T> = Arc<RwLock<T>>;
 pub(crate) use sch::{ActTask, TaskState};

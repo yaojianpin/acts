@@ -1,29 +1,25 @@
 # Acts workflow engine
-`acts` is a fast, tiny, extensiable workflow engine, which provides the abilities to execute workflow based on simple yml model.
+`acts` is a fast, tiny, extensiable workflow engine, which provides the abilities to execute workflow based on yml model.
 
 The yml workflow model is not as same as the tranditional flow. such as bpmn.  It is inspired by Github actions. As a contrast, it added branch defination for more complex flow, for the purpose of business approval flow, it defines the `subject` property in step to support the top absolute rules for user, org and role. 
 
 **node** new version has changed from `yao` to `acts` since 0.1.1
 
 ## Fast
-Uses rust to create the lib, there is no virtual machine, no db dependencies. The default store uses rocksdb for local storage.
+Uses rust to create the lib, there is no virtual machine, no db dependencies. The feature local_store uses the rocksdb to make sure the store performance. 
 
 ## Tiny
-The lib size is only 3mb (no local db)
+The lib size is only 3mb (no local_store), you can use Adapter to create external store.
 
 ## Extensiable
-Supports the plugin to extend the functions
-
-
-## Examples
-
-Here are some examples:
+Supports for extending the plugin
+Supports for creating external store
 
 ### How to start
 First, you should load a ymal workflow model, and call `engine.start` to start and call `engine.close` to stop it.
 
 ```no_run
-use acts::{Engine, Vars, WorkflowState, Workflow};
+use acts::{Engine, Vars, Workflow};
 
 #[tokio::main]
 async fn main() {
@@ -31,7 +27,7 @@ async fn main() {
     engine.start();
 
     let text = include_str!("../examples/simple/model.yml");
-    let mut workflow = Workflow::from_str(text).unwrap();
+    let mut workflow = Workflow::from_yml(text).unwrap();
 
     let executor = engine.executor();
     engine.manager().deploy(&workflow).expect("fail to deploy workflow");
@@ -42,8 +38,8 @@ async fn main() {
     executor.start(&workflow.id, &vars);
 
     let e = engine.clone();
-    engine.emitter().on_complete(move |w: &WorkflowState| {
-        println!("outputs: {:?}", w.outputs());
+    engine.emitter().on_complete(move |e| {
+        println!("outputs: {:?}", e.outputs());
     });
     
 }
@@ -97,45 +93,103 @@ jobs:
           env.set("output_key", "output value");
 ```
 
-The `subject` is used to create the user [`Act`], which can wait util calling the `post_message` to complete by user.
+Use act to interact with client
+```yml
+name: model name
+outputs:
+  output_key:
+jobs:
+  - id: job1
+    steps:
+      - name: step1
+        acts:
+          - id: init
+            name: my act init
+            inputs:
+              a: 6
+            outputs:
+              c:
+
+```
+
+Add workflow `actions` to create custom event with client
+```yml
+name: model name
+actions:
+  - name: fn1
+    id: fn1
+    on: 
+      - state: created
+        nkind: workflow
+      - state: completed
+        nkind: workflow
+  - name: fn2
+    id: fn2
+    on: 
+      - state: completed
+        nid: step2
+
+  - name: fn3
+    id: fn3
+    on: 
+      - state: completed
+        nid: step3
+    inputs:
+      a: ${ env.get("value") }
+jobs:
+  - id: job1
+    steps:
+      - name: step1
+        acts:
+          - id: init
+            name: my act init
+            inputs:
+              a: 6
+            outputs:
+              c:
+
+```
+
+There is a example to use `for` to generate acts, which can wait util calling the action to complete.
 ```yml
 name: model name
 jobs:
   - id: job1
     steps:
       - name: step1
-        subject: 
-            matcher: any
-            cands: |
+        acts:
+          - for:
+              by: any
+              in: |
                 let a = ["u1"];
                 let b = ["u2"];
                 a.union(b)
 ```
-It will generate the user act and send message automationly according to the sub users.
-The `matcher` tells the workflow how to pass the step act when you `post_message` to workflow, there are several match rules.
+It will generate the user act and send message automationly according to the `in` collection.
+The `by` tells the workflow how to pass the act there are several `by` rules.
 
-* matcher
-1. **one** to generate or check only one user
+* by
+1. **all** to match all of the acts to complete
 
-2. **any** to match any of the users
+2. **any** to match any of the acts to complete
 
-3. **some(rule_name)** to match some users by giving rule name, which can be registed by `register_some_rule` function.
+3. **some(rule)** to match some acts by giving rule name. If there is some rule, it can also generate a some act to ask the client to pass or not.
 
-4. **ord** or **ord(rule_name)** to generate the act message one by one by giving rule name, which can be registed by `register_ord_rule` function
+4. **ord** or **ord(rule)** to generate the act one by one. If there is order rule, it can also generate a rule act to sort the collection.
 
-* users
-Used to generate the step participants.
+* in
+A collection to generate the acts.
 
-The code `role("test_role")` uses the role rule to get the users through the role `test_role`
+The code `act.role("test_role")` uses the role rule to get the users through the role `test_role`
 ```yml
-users: |
-    let users = role("test_role");
+in: |
+    let users = act.role("test_role");
     users
 ```
-The following code uses the `user("test_user")` the get the user and then throght the `relate` rule to find the user's owner of the department (`d.owner`).
+The following code uses the `relate` rule to find the user's owner of the department (`d.owner`).
 ```yml
 users: |
-    let users = user("test_user").relate("d.owner");
+    let users = act.relate("user(test_user).d.owner");
     users
 ```
 
@@ -145,11 +199,11 @@ use acts::{Workflow};
 
 let mut workflow = Workflow::new()
         .with_name("workflow builder")
+        .with_env("count", 10.into())
         .with_output("result", 0.into())
         .with_job(|job| {
             job.with_id("job1")
-                .with_env("index", 0.into())
-                .with_env("result", 0.into())
+                .with_input("index", 0.into())
                 .with_step(|step| {
                     step.with_id("cond")
                         .with_branch(|branch| {

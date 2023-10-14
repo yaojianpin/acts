@@ -1,4 +1,4 @@
-mod data;
+pub mod data;
 mod db;
 mod query;
 mod store;
@@ -6,21 +6,21 @@ mod store;
 #[cfg(test)]
 mod tests;
 
-pub use data::*;
-pub use query::{DbKey, Query};
+use data::*;
+pub use query::{Cond, DbKey, Expr, Query};
 pub use store::{Store, StoreKind};
 
-use crate::ActResult;
+use crate::Result;
 use std::sync::Arc;
 
 pub trait DbSet: Send + Sync {
     type Item;
-    fn exists(&self, id: &str) -> ActResult<bool>;
-    fn find(&self, id: &str) -> ActResult<Self::Item>;
-    fn query(&self, query: &Query) -> ActResult<Vec<Self::Item>>;
-    fn create(&self, data: &Self::Item) -> ActResult<bool>;
-    fn update(&self, data: &Self::Item) -> ActResult<bool>;
-    fn delete(&self, id: &str) -> ActResult<bool>;
+    fn exists(&self, id: &str) -> Result<bool>;
+    fn find(&self, id: &str) -> Result<Self::Item>;
+    fn query(&self, query: &Query) -> Result<Vec<Self::Item>>;
+    fn create(&self, data: &Self::Item) -> Result<bool>;
+    fn update(&self, data: &Self::Item) -> Result<bool>;
+    fn delete(&self, id: &str) -> Result<bool>;
 }
 
 /// Store adapter trait
@@ -28,7 +28,7 @@ pub trait DbSet: Send + Sync {
 ///
 /// # Example
 /// ```no_run
-/// use acts::{store::{Model, Act, Proc, Task, DbSet}, StoreAdapter};
+/// use acts::{data::{Model, Proc, Task}, DbSet, StoreAdapter};
 /// use std::sync::Arc;
 /// struct TestStore;
 /// impl StoreAdapter for TestStore {
@@ -42,9 +42,6 @@ pub trait DbSet: Send + Sync {
 ///     fn tasks(&self) -> Arc<dyn DbSet<Item =Task>> {
 ///         todo!()
 ///     }
-///     fn acts(&self) -> Arc<dyn DbSet<Item =Act>> {
-///         todo!()
-///     }
 ///     fn init(&self) {}
 ///     fn flush(&self) {}
 /// }
@@ -55,7 +52,6 @@ pub trait StoreAdapter: Send + Sync {
     fn models(&self) -> Arc<dyn DbSet<Item = Model>>;
     fn procs(&self) -> Arc<dyn DbSet<Item = Proc>>;
     fn tasks(&self) -> Arc<dyn DbSet<Item = Task>>;
-    fn acts(&self) -> Arc<dyn DbSet<Item = Act>>;
 
     fn flush(&self);
 }

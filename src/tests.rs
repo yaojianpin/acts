@@ -1,7 +1,6 @@
 use crate::{
-    event::Message,
     sch::TaskState,
-    store::{self, StoreAdapter},
+    store::{data, StoreAdapter},
     utils, ActPlugin, Engine, Vars, Workflow,
 };
 use rhai::plugin::*;
@@ -64,15 +63,14 @@ async fn engine_on_message() {
 
     let mid = utils::longid();
     let workflow = Workflow::new().with_id(&mid).with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_subject(|sub| sub.with_matcher("any").with_cands(r#"["a"]"#))
-        })
+        job.with_id("job1")
+            .with_step(|step| step.with_act(|act| act.with_id("test")))
     });
 
     let e = engine.clone();
-    engine.emitter().on_message(move |msg: &Message| {
-        if let Some(msg) = msg.as_user_message() {
-            assert_eq!(msg.uid, "a");
+    engine.emitter().on_message(move |msg| {
+        if msg.inner().is_type("act") {
+            assert_eq!(msg.inner().id, "test");
         }
 
         e.close();
@@ -97,7 +95,7 @@ async fn engine_builder() {
     let workflow = Workflow::new().with_name("w1").with_job(|job| {
         job.with_id("job1")
             .with_name("job 1")
-            .with_env("v", 0.into())
+            .with_input("v", 0.into())
             .with_step(|step| {
                 step.with_id("step1")
                     .with_name("step1")
@@ -134,11 +132,9 @@ async fn engine_executor_start_no_biz_id() {
     engine.start();
 
     let mid = utils::longid();
-    let workflow = Workflow::new().with_id(&mid).with_job(|job| {
-        job.with_step(|step| {
-            step.with_subject(|sub| sub.with_matcher("any").with_cands(r#"["a"]"#))
-        })
-    });
+    let workflow = Workflow::new()
+        .with_id(&mid)
+        .with_job(|job| job.with_step(|step| step.with_act(|act| act.with_id("test"))));
     engine.manager().deploy(&workflow).unwrap();
     let options = Vars::new();
     let result = executor.start(&workflow.id, &options);
@@ -152,11 +148,9 @@ async fn engine_executor_start_empty_biz_id() {
     engine.start();
 
     let mid = utils::longid();
-    let workflow = Workflow::new().with_id(&mid).with_job(|job| {
-        job.with_step(|step| {
-            step.with_subject(|sub| sub.with_matcher("any").with_cands(r#"["a"]"#))
-        })
-    });
+    let workflow = Workflow::new()
+        .with_id(&mid)
+        .with_job(|job| job.with_step(|step| step.with_act(|act| act.with_id("test"))));
 
     engine.manager().deploy(&workflow).unwrap();
     let mut options = Vars::new();
@@ -173,21 +167,21 @@ async fn engine_executor_start_dup_biz_id_error() {
 
     let biz_id = utils::longid();
     let mid = utils::longid();
-    let model = Workflow::new().with_id(&mid).with_job(|job| {
-        job.with_step(|step| {
-            step.with_subject(|sub| sub.with_matcher("any").with_cands(r#"["a"]"#))
-        })
-    });
+    let model = Workflow::new()
+        .with_id(&mid)
+        .with_job(|job| job.with_step(|step| step.with_act(|act| act.with_id("test"))));
 
-    let store = engine.store();
-    let proc = store::Proc {
+    let store = engine.scher().cache().store();
+    let proc = data::Proc {
         id: biz_id.clone(),
-        pid: biz_id.clone(),
-        model: model.to_string().unwrap(),
+        name: model.name.clone(),
+        mid: model.id.clone(),
         state: TaskState::None.to_string(),
         start_time: 0,
         end_time: 0,
         vars: "".to_string(),
+        timestamp: 0,
+        model: model.to_json().unwrap(),
     };
     store.procs().create(&proc).expect("create proc");
     engine
@@ -206,11 +200,9 @@ async fn engine_manager_models() {
     engine.start();
     let manager = engine.manager();
     let mid = utils::longid();
-    let workflow = Workflow::new().with_id(&mid).with_job(|job| {
-        job.with_step(|step| {
-            step.with_subject(|sub| sub.with_matcher("any").with_cands(r#"["a"]"#))
-        })
-    });
+    let workflow = Workflow::new()
+        .with_id(&mid)
+        .with_job(|job| job.with_step(|step| step.with_act(|act| act.with_id("test"))));
 
     engine.manager().deploy(&workflow).expect("deploy model");
     let models = manager.models(100).expect("get models");
@@ -223,15 +215,13 @@ async fn engine_manager_model() {
     engine.start();
     let manager = engine.manager();
     let mid: String = utils::longid();
-    let mut workflow = Workflow::new().with_id(&mid).with_job(|job| {
-        job.with_step(|step| {
-            step.with_subject(|sub| sub.with_matcher("any").with_cands(r#"["a"]"#))
-        })
-    });
+    let mut workflow = Workflow::new()
+        .with_id(&mid)
+        .with_job(|job| job.with_step(|step| step.with_act(|act| act.with_id("test"))));
     workflow.id = utils::longid();
     manager.deploy(&workflow).expect("deploy model");
 
-    let model = manager.model(&workflow.id);
+    let model = manager.model(&workflow.id, "text");
     assert_eq!(model.is_ok(), true);
 }
 
@@ -242,22 +232,22 @@ async fn engine_manager_procs() {
     let manager = engine.manager();
 
     let mid: String = utils::longid();
-    let workflow = Workflow::new().with_id(&mid).with_job(|job| {
-        job.with_step(|step| {
-            step.with_subject(|sub| sub.with_matcher("any").with_cands(r#"["a"]"#))
-        })
-    });
+    let model = Workflow::new()
+        .with_id(&mid)
+        .with_job(|job| job.with_step(|step| step.with_act(|act| act.with_id("test"))));
 
-    let store = engine.store();
-    let pid = utils::longid();
-    let proc = store::Proc {
-        id: pid.clone(),
-        pid: pid.clone(),
-        model: workflow.to_string().unwrap(),
+    let store = engine.scher().cache().store();
+    let proc_id = utils::longid();
+    let proc = data::Proc {
+        id: proc_id.clone(),
+        model: model.to_json().unwrap(),
+        name: model.name,
+        mid: model.id,
         state: TaskState::None.to_string(),
         start_time: 0,
         end_time: 0,
         vars: "".to_string(),
+        timestamp: 0,
     };
     store.procs().create(&proc).expect("create proc");
 
@@ -272,25 +262,25 @@ async fn engine_manager_proc() {
     let manager = engine.manager();
     let biz_id = utils::longid();
     let mid: String = utils::longid();
-    let workflow = Workflow::new().with_id(&mid).with_job(|job| {
-        job.with_step(|step| {
-            step.with_subject(|sub| sub.with_matcher("any").with_cands(r#"["a"]"#))
-        })
-    });
+    let model = Workflow::new()
+        .with_id(&mid)
+        .with_job(|job| job.with_step(|step| step.with_act(|act| act.with_id("test"))));
 
-    let store = engine.store();
-    let proc = store::Proc {
+    let store = engine.scher().cache().store();
+    let proc = data::Proc {
         id: biz_id.clone(),
-        pid: biz_id.clone(),
-        model: workflow.to_string().unwrap(),
+        model: model.to_json().unwrap(),
+        name: model.name,
+        mid: model.id,
         state: TaskState::None.to_string(),
         start_time: 0,
         end_time: 0,
         vars: "".to_string(),
+        timestamp: 0,
     };
     store.procs().create(&proc).expect("create proc");
 
-    let proc = manager.proc(&biz_id);
+    let proc = manager.proc(&biz_id, "json");
     assert_eq!(proc.is_ok(), true);
 }
 

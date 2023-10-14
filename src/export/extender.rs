@@ -14,7 +14,6 @@ impl Extender {
     pub(crate) fn new() -> Self {
         Self {
             plugins: Arc::new(Mutex::new(Vec::new())),
-            // action: Arc::new(Mutex::new(ActModule::new())),
             modules: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -57,9 +56,9 @@ impl Extender {
     ///     fn on_init(&self, engine: &Engine) {
     ///         println!("TestPlugin");
     ///         // engine.mgr().register_module("name", module);
-    ///         engine.emitter().on_start(|state: &WorkflowState| {});
-    ///         engine.emitter().on_complete(|state: &WorkflowState| {});
-    ///         engine.emitter().on_message(|_msg: &Message| {});
+    ///         engine.emitter().on_start(|e| {});
+    ///         engine.emitter().on_complete(|e| {});
+    ///         engine.emitter().on_message(|e| {});
     ///     }
     /// }
     /// let engine = Engine::new();

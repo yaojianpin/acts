@@ -1,5 +1,5 @@
-name: add
-id: m1
+name: simple
+id: simple
 env:
   input: 4
   index: 0
@@ -15,7 +15,6 @@ jobs:
         run: |
           env.set("value", 0);
           env.set("index", 0);
-
       - name: cond
         id: cond
         branches:
@@ -30,7 +29,6 @@ jobs:
                   let index = env.get("index");
                   let value = env.get("value");
                   env.set("value", value + index);
-
                   env.set("index", index + 1);
 
           - name: ">input"

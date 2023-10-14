@@ -1,81 +1,82 @@
+mod act;
+mod branch;
+mod job;
+mod step;
+mod workflow;
+
 use crate::{
-    env::VirtualMachine,
-    event::{EventAction, MessageKind},
+    env::Room,
+    event::{ActionState, EventAction},
     sch::{
-        proc::Act,
         tree::{Node, NodeData},
         Context, Proc, Scheduler, TaskState,
     },
-    utils, ActTask, Message, ShareLock, Vars,
+    utils::{self, consts},
+    ActError, ActTask, Message, NodeKind, Result, ShareLock, Vars, WorkflowAction,
 };
 use async_trait::async_trait;
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-};
-use tracing::{debug, instrument};
-
-use super::ActKind;
+use serde_json::json;
+use std::sync::{Arc, RwLock};
+use tracing::info;
 
 #[derive(Clone)]
 pub struct Task {
-    pub pid: String,
-    pub tid: String,
-    pub node: Arc<Node>,
-    pub env: Arc<VirtualMachine>,
+    /// proc id
+    pub proc_id: String,
 
+    /// task id
+    pub id: String,
+
+    /// task node
+    pub node: Arc<Node>,
+
+    pub timestamp: i64,
+
+    /// env room
+    room: Arc<Room>,
+
+    /// task state
     state: ShareLock<TaskState>,
+
+    /// action state by do_action function
+    action_state: ShareLock<ActionState>,
+
     start_time: ShareLock<i64>,
     end_time: ShareLock<i64>,
-
-    // children tasks tid
-    children: ShareLock<Vec<String>>,
 
     // previous tid
     prev: ShareLock<Option<String>>,
 
-    pub(crate) proc: Arc<Proc>,
-}
-
-impl std::fmt::Debug for Task {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Task")
-            .field("kind", &self.node.kind())
-            .field("pid", &self.pid)
-            .field("tid", &self.tid)
-            .field("nid", &self.node.id())
-            .field("state", &self.state())
-            .field("start_time", &self.start_time())
-            .field("end_time", &self.end_time())
-            .field("vars", &self.vars())
-            .finish()
-    }
+    proc: Arc<Proc>,
 }
 
 impl Task {
-    pub fn new(proc: &Arc<Proc>, tid: &str, node: Arc<Node>) -> Self {
+    pub fn new(proc: &Arc<Proc>, task_id: &str, node: Arc<Node>) -> Self {
         // create new env for each task
-        let vm = proc.env.vm();
-        if let NodeData::Job(job) = node.data() {
-            // set the job env as global vars
-            let vars = utils::fill_vars(&vm, &job.env);
-            vm.output(&vars);
-        }
+        let room = proc.env().new_room();
         let task = Self {
-            pid: proc.pid(),
-            tid: tid.to_string(),
+            proc_id: proc.id(),
+            id: task_id.to_string(),
             node: node.clone(),
             state: Arc::new(RwLock::new(TaskState::None)),
+            action_state: Arc::new(RwLock::new(ActionState::None)),
             start_time: Arc::new(RwLock::new(0)),
             end_time: Arc::new(RwLock::new(0)),
             prev: Arc::new(RwLock::new(None)),
-            children: Arc::new(RwLock::new(Vec::new())),
-            env: vm,
-
+            room,
+            timestamp: utils::time::timestamp(),
             proc: proc.clone(),
         };
 
         task
+    }
+
+    pub fn proc(&self) -> &Arc<Proc> {
+        &self.proc
+    }
+
+    pub fn room(&self) -> &Arc<Room> {
+        &self.room
     }
 
     pub fn start_time(&self) -> i64 {
@@ -90,10 +91,15 @@ impl Task {
         state.clone()
     }
 
-    pub fn tid(&self) -> String {
-        self.tid.clone()
+    pub fn action_state(&self) -> ActionState {
+        let state = &*self.action_state.read().unwrap();
+        state.clone()
     }
-    pub fn nid(&self) -> String {
+
+    pub fn task_id(&self) -> String {
+        self.id.clone()
+    }
+    pub fn node_id(&self) -> String {
         self.node.id()
     }
 
@@ -105,28 +111,83 @@ impl Task {
         0
     }
 
+    pub fn is_emit_disabled(&self) -> bool {
+        self.room
+            .get(consts::TASK_EMIT_DISABLED)
+            .map(|v| v.as_bool().unwrap_or(false))
+            .unwrap_or(false)
+    }
+
+    pub fn set_emit_disabled(&self, v: bool) {
+        self.room.set(consts::TASK_EMIT_DISABLED, json!(v));
+    }
+
     pub fn create_context(self: &Arc<Self>, scher: &Arc<Scheduler>) -> Arc<Context> {
         self.proc.create_context(scher, self)
     }
 
-    pub fn create_message(&self, event: &EventAction) -> Message {
-        let workflow = self.proc.workflow();
+    pub fn create_message(&self) -> Message {
+        let workflow = self.proc.model();
 
-        let outputs = self.outputs();
-        let mut vars = self.vars();
-        vars.extend(outputs);
-
+        // if it is act, insert the step_node_id and step_task_id to the inputs
+        // it is necessary to find the relation between the step and it's children acts
+        let mut inputs = self.inputs();
+        if self.node.kind() == NodeKind::Act {
+            let mut parent = self.parent();
+            while let Some(task) = parent {
+                if task.is_kind(NodeKind::Step) {
+                    inputs.insert(
+                        consts::FOR_ACT_KEY_STEP_NODE_ID.to_string(),
+                        json!(task.node_id()),
+                    );
+                    inputs.insert(consts::FOR_ACT_KEY_STEP_TASK_ID.to_string(), json!(task.id));
+                    break;
+                }
+                parent = task.parent();
+            }
+        }
         Message {
-            kind: MessageKind::Task,
-            event: event.clone(),
-            mid: workflow.id.clone(),
-            topic: workflow.topic.clone(),
-            nkind: self.node.kind().to_string(),
-            nid: self.nid(),
-            pid: self.pid.clone(),
-            tid: self.tid.clone(),
-            key: None,
-            vars: vars,
+            id: self.id.clone(),
+            name: self.node.data().name(),
+            r#type: self.node.kind().to_string(),
+            state: self.action_state().to_string(),
+            proc_id: self.proc_id.clone(),
+            key: self.node_id(),
+            tag: self.node.tag(),
+
+            model_id: workflow.id.clone(),
+            model_name: workflow.name.to_string(),
+            model_tag: workflow.tag.to_string(),
+
+            inputs,
+            outputs: self.node.outputs(),
+
+            start_time: self.start_time(),
+            end_time: self.end_time(),
+        }
+    }
+
+    pub fn create_action_message(&self, action: &WorkflowAction) -> Message {
+        let workflow = self.proc.model();
+        let inputs = utils::fill_inputs(&self.room, &action.inputs);
+        Message {
+            id: utils::shortid(),
+            r#type: "message".to_string(),
+            state: self.action_state().to_string(),
+            proc_id: self.proc_id.clone(),
+            key: action.id.clone(),
+            name: action.name.clone(),
+
+            model_id: workflow.id.clone(),
+            model_name: workflow.name.to_string(),
+            model_tag: workflow.tag.to_string(),
+
+            inputs,
+            outputs: action.outputs.clone(),
+
+            start_time: self.start_time(),
+            end_time: self.end_time(),
+            ..Default::default()
         }
     }
 
@@ -135,10 +196,10 @@ impl Task {
         ret.clone()
     }
 
-    pub fn parent(&self, ctx: &Context) -> Option<Arc<Task>> {
+    pub fn parent(&self) -> Option<Arc<Task>> {
         let mut prev = self.prev();
         while let Some(tid) = prev.clone() {
-            match ctx.proc.task(&tid) {
+            match self.proc.task(&tid) {
                 Some(task) => {
                     if task.node.level < self.node.level {
                         return Some(task.clone());
@@ -156,39 +217,30 @@ impl Task {
         None
     }
 
-    pub fn children(&self) -> Vec<String> {
-        let ret = self.children.read().unwrap();
-        ret.clone()
+    pub fn children(&self) -> Vec<Arc<Self>> {
+        self.proc.children(&self.id)
     }
 
-    pub fn acts(&self) -> Vec<Arc<Act>> {
-        self.proc
-            .acts()
-            .iter()
-            .filter(|act| act.tid == self.tid)
-            .cloned()
-            .collect()
+    pub fn siblings(&self) -> Vec<Arc<Self>> {
+        let mut ret = Vec::new();
+        if let Some(parent) = self.parent() {
+            let children = parent.children();
+            ret.extend(children.iter().filter(|iter| iter.id != self.id).cloned());
+        }
+
+        ret
     }
 
-    pub fn vars(&self) -> Vars {
-        let vars = match &self.node.data {
-            NodeData::Workflow(workflow) => workflow.env.clone(),
-            NodeData::Job(job) => job.env.clone(),
-            NodeData::Branch(branch) => branch.env.clone(),
-            NodeData::Step(step) => step.env.clone(),
-        };
-
-        utils::fill_vars(&self.env, &vars)
+    pub fn inputs(&self) -> Vars {
+        utils::fill_inputs(&self.room, &self.node.inputs())
     }
 
     pub fn outputs(&self) -> Vars {
-        let vars = match &self.node.data {
-            NodeData::Workflow(workflow) => workflow.outputs.clone(),
-            NodeData::Job(job) => job.outputs.clone(),
-            _ => Vars::new(),
-        };
+        utils::fill_outputs(&self.room, &self.node.outputs())
+    }
 
-        utils::fill_vars(&self.env, &vars)
+    pub fn vars(&self) -> Vars {
+        self.room.vars()
     }
 
     pub fn set_prev(&self, prev: Option<String>) {
@@ -204,8 +256,31 @@ impl Task {
         *self.state.write().unwrap() = state;
     }
 
+    pub fn set_action_state(&self, state: ActionState) {
+        match state {
+            ActionState::None => self.set_state(TaskState::None),
+            ActionState::Created => {
+                if self.state().is_none() {
+                    self.set_state(TaskState::Running);
+                }
+            }
+            ActionState::Cancelled
+            | ActionState::Backed
+            | ActionState::Submitted
+            | ActionState::Completed => self.set_state(TaskState::Success),
+            ActionState::Aborted => self.set_state(TaskState::Abort),
+            ActionState::Skipped => self.set_state(TaskState::Skip),
+        }
+
+        *self.action_state.write().unwrap() = state;
+    }
+
     pub fn set_pure_state(&self, state: TaskState) {
         *self.state.write().unwrap() = state;
+    }
+
+    pub fn set_pure_action_state(&self, state: ActionState) {
+        *self.action_state.write().unwrap() = state;
     }
 
     pub fn set_start_time(&self, time: i64) {
@@ -215,172 +290,276 @@ impl Task {
         *self.end_time.write().unwrap() = time;
     }
 
-    pub fn push_act(self: &Arc<Self>, kind: ActKind, vars: &Vars) -> Arc<Act> {
-        let act = Act::new(self, kind, vars);
-        self.proc.push_act(&act);
-
-        act
+    pub fn is_kind(&self, kind: NodeKind) -> bool {
+        self.node.kind() == kind
     }
 
-    pub fn push_back(&self, next: &str) {
-        let mut children = self.children.write().unwrap();
-        children.push(next.to_string());
+    pub fn exec(&self, ctx: &Context) -> Result<()> {
+        info!("exec task={:?}", ctx.task);
+        self.init(ctx)?;
+        self.run(ctx)?;
+        self.next(ctx)?;
+        Ok(())
     }
 
-    #[instrument]
-    pub fn exec(&self, ctx: &Context) {
-        if ctx.task.state().is_none() {
-            self.prepare(ctx);
-        }
+    pub fn update(&self, ctx: &Context) -> Result<()> {
+        info!("update task={:?}", ctx.task);
+        let action = ctx
+            .action()
+            .ok_or(ActError::Action(format!("cannot find action in context")))?;
+        // check uid
+        let _ = ctx
+            .var(consts::FOR_ACT_KEY_UID)
+            .map(|v| v.as_str().unwrap().to_string())
+            .ok_or(ActError::Action(format!(
+                "cannot find '{}' in options",
+                consts::FOR_ACT_KEY_UID
+            )))?;
 
-        if ctx.task.state().is_running() {
-            self.run(ctx);
-        }
-        if ctx.task.state().is_next() {
-            self.next(ctx);
-        }
-
-        if ctx.task.state().is_error() {
-            ctx.dispatch_task(self, EventAction::Error);
-        }
-    }
-
-    #[instrument]
-    pub fn next(&self, ctx: &Context) {
-        let node = self.node.clone();
-        let children = node.children();
-        if children.len() > 0 {
-            for child in children {
-                if self.is_cond(&child, ctx) {
-                    ctx.sched_task(&child);
-                }
+        match action {
+            EventAction::Submit => {
+                self.set_action_state(ActionState::Submitted);
+                self.next(ctx)?;
             }
-        } else {
-            let next = node.next().upgrade();
-            match next {
-                Some(next) => {
-                    self.post(ctx);
-                    ctx.sched_task(&next);
+            EventAction::Complete => {
+                if self.state().is_completed() {
+                    return Err(ActError::Action(format!(
+                        "task '{}' is already completed",
+                        self.id
+                    )));
                 }
-                None => {
-                    ctx.task.post(ctx);
+                self.set_action_state(ActionState::Completed);
+                self.next(ctx)?;
+            }
+            EventAction::Back => {
+                if self.state().is_completed() {
+                    return Err(ActError::Action(format!(
+                        "task '{}' is already completed",
+                        self.id
+                    )));
+                }
+                let to = ctx.var("to").ok_or(ActError::Action(format!(
+                    "cannot find to value in options",
+                )))?;
+                let nid = to.as_str().ok_or(ActError::Action(format!(
+                    "to '{to}' value is not a valid string type",
+                )))?;
 
-                    let mut parent = ctx.task.parent(ctx);
-                    while let Some(task) = &parent.clone() {
-                        let proc = ctx.proc.clone();
-                        let ctx = &proc.create_context(&ctx.scher, task);
-                        task.post(ctx);
-                        if !task.state().is_completed() {
-                            break;
-                        }
+                let tasks = ctx
+                    .proc
+                    .find_tasks(|t| t.node.kind() == NodeKind::Step && t.node_id() == nid);
 
-                        let n = task.node.next().upgrade();
-                        match n {
-                            Some(next) => {
-                                ctx.sched_task(&next);
-                                break;
-                            }
-                            None => {
-                                parent = task.parent(ctx);
-                            }
-                        }
+                let task = tasks.last().ok_or(ActError::Action(format!(
+                    "cannot find history task by nid '{}'",
+                    nid
+                )))?;
+
+                ctx.back_task(&ctx.task)?;
+                ctx.redo_task(task)?;
+            }
+            EventAction::Cancel => {
+                let parent = ctx.task.parent().ok_or(ActError::Action(format!(
+                    "cannot find parent task by tid '{}'",
+                    ctx.task.id,
+                )))?;
+                if !parent.state().is_success() {
+                    return Err(ActError::Action(format!(
+                        "task('{}') is not allowed to cancel",
+                        parent.id
+                    )));
+                }
+                // get the neartest next task
+                if let Some(next) = ctx
+                    .proc
+                    .find_tasks(|t| {
+                        t.node.kind() == NodeKind::Step && t.prev() == Some(parent.id.clone())
+                    })
+                    .last()
+                {
+                    ctx.undo_task(next)?;
+                }
+                ctx.redo_task(&parent)?;
+            }
+            EventAction::Abort => {
+                if self.state().is_completed() {
+                    return Err(ActError::Action(format!(
+                        "task '{}' is already completed",
+                        self.id
+                    )));
+                }
+                ctx.abort_task(&ctx.task)?;
+            }
+            EventAction::Skip => {
+                ctx.skip_task(&ctx.task)?;
+                self.next(ctx)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn next(&self, ctx: &Context) -> Result<()> {
+        let mut is_next = false;
+        if ctx.task.state().is_next() {
+            is_next = match &self.node.data {
+                NodeData::Workflow(data) => data.next(ctx)?,
+                NodeData::Job(data) => data.next(ctx)?,
+                NodeData::Step(data) => data.next(ctx)?,
+                NodeData::Branch(data) => data.next(ctx)?,
+                NodeData::Act(data) => data.next(ctx)?,
+            };
+        }
+
+        info!("is_next:{} task={:?}", is_next, ctx.task);
+        if self.state().is_completed() {
+            ctx.emit_task(self);
+        }
+
+        if !is_next {
+            let parent = ctx.task.parent();
+            if let Some(task) = &parent.clone() {
+                let ctx = task.create_context(&ctx.scher);
+                task.review(&ctx)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn review(&self, ctx: &Context) -> Result<()> {
+        let is_review = match &self.node.data {
+            NodeData::Workflow(data) => data.review(ctx)?,
+            NodeData::Job(data) => data.review(ctx)?,
+            NodeData::Step(data) => data.review(ctx)?,
+            NodeData::Branch(data) => data.review(ctx)?,
+            NodeData::Act(data) => data.review(ctx)?,
+        };
+
+        info!("is_review:{} task={:?}", is_review, ctx.task);
+        if self.state().is_completed() {
+            ctx.emit_task(self);
+        }
+
+        if is_review {
+            let parent = ctx.task.parent();
+            if let Some(task) = &parent.clone() {
+                let ctx = task.create_context(&ctx.scher);
+                task.review(&ctx)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn is_ready(&self) -> bool {
+        match self.node.data() {
+            NodeData::Job(n) => {
+                if n.needs.len() > 0 {
+                    let siblings = self.siblings();
+                    if siblings
+                        .iter()
+                        .filter(|iter| {
+                            iter.state().is_completed() && n.needs.contains(&iter.node_id())
+                        })
+                        .count()
+                        > 0
+                    {
+                        return true;
+                    }
+
+                    return false;
+                }
+
+                true
+            }
+            NodeData::Branch(n) => {
+                let siblings = self.siblings();
+                if n.needs.len() > 0 {
+                    if siblings
+                        .iter()
+                        .filter(|iter| {
+                            iter.state().is_completed() && n.needs.contains(&iter.node_id())
+                        })
+                        .count()
+                        > 0
+                    {
+                        return true;
+                    }
+                    return false;
+                }
+
+                if n.default {
+                    if siblings.iter().all(|iter| iter.state().is_skip()) {
+                        return true;
+                    }
+
+                    // fix the branch.default state
+                    if siblings.iter().any(|iter| {
+                        iter.state().is_error()
+                            || iter.state().is_success()
+                            || iter.state().is_abort()
+                    }) {
+                        self.set_action_state(ActionState::Skipped);
                     }
                 }
-            }
-        }
-    }
 
-    pub fn on_event(&self, event: &str, ctx: &Context) {
-        let mut on_events = HashMap::new();
-        if let NodeData::Step(step) = self.node.data() {
-            if let Some(on) = step.on {
-                on_events = on.task.clone();
+                false
             }
+            NodeData::Act(_) => false,
+            _ => true,
         }
-        if let Some(event) = on_events.get(event) {
-            if event.is_string() {
-                let ret = ctx.run(event.as_str().unwrap());
-                if !self.state().is_error() && ret.is_err() {
-                    self.set_state(TaskState::Fail(ret.err().unwrap().into()));
-                }
-            }
-        }
-    }
-    /// check if the condition expr is ok
-    fn is_cond(&self, node: &Node, ctx: &Context) -> bool {
-        let mut expr = None;
-        match &node.data {
-            NodeData::Branch(branch) => expr = branch.r#if.clone(),
-            NodeData::Step(step) => expr = step.r#if.clone(),
-            _ => {}
-        }
-
-        if let Some(expr) = expr {
-            match ctx.eval(&expr) {
-                Ok(ret) => {
-                    debug!("check_cond {} ret={}", expr, ret);
-                    return ret;
-                }
-                Err(_) => return false,
-            }
-        }
-
-        true
     }
 }
 
 #[async_trait]
 impl ActTask for Task {
-    #[instrument]
-    fn prepare(&self, ctx: &Context) {
-        ctx.prepare();
-        match &self.node.data {
-            NodeData::Workflow(workflow) => {
-                workflow.prepare(ctx);
+    fn init(&self, ctx: &Context) -> Result<()> {
+        if ctx.task.state().is_none() {
+            ctx.prepare();
+            self.set_action_state(ActionState::Created);
+            match &self.node.data {
+                NodeData::Workflow(workflow) => workflow.init(ctx)?,
+                NodeData::Job(job) => job.init(ctx)?,
+                NodeData::Branch(branch) => branch.init(ctx)?,
+                NodeData::Step(step) => step.init(ctx)?,
+                NodeData::Act(act) => act.init(ctx)?,
             }
-            NodeData::Job(job) => {
-                job.prepare(ctx);
-            }
-            NodeData::Branch(branch) => branch.prepare(ctx),
-            NodeData::Step(step) => {
-                step.prepare(ctx);
-            }
+
+            ctx.emit_task(&ctx.task);
         }
 
-        if self.state().is_none() {
-            self.set_state(TaskState::Running);
-        }
-
-        ctx.dispatch_task(&ctx.task, EventAction::Create);
+        Ok(())
     }
 
-    #[instrument]
-    fn run(&self, ctx: &Context) {
-        match &self.node.data {
-            NodeData::Workflow(workflow) => workflow.run(ctx),
-            NodeData::Job(job) => job.run(ctx),
-            NodeData::Branch(branch) => branch.run(ctx),
-            NodeData::Step(step) => step.run(ctx),
+    fn run(&self, ctx: &Context) -> Result<()> {
+        if ctx.task.state().is_running() {
+            match &self.node.data {
+                NodeData::Workflow(workflow) => workflow.run(ctx),
+                NodeData::Job(job) => job.run(ctx),
+                NodeData::Branch(branch) => branch.run(ctx),
+                NodeData::Step(step) => step.run(ctx),
+                NodeData::Act(act) => act.run(ctx),
+            }?;
         }
+
+        Ok(())
     }
+}
 
-    #[instrument]
-    fn post(&self, ctx: &Context) {
-        match &self.node.data {
-            NodeData::Workflow(workflow) => {
-                workflow.post(ctx);
-            }
-            NodeData::Job(job) => job.post(ctx),
-            NodeData::Branch(branch) => {
-                branch.post(ctx);
-            }
-            NodeData::Step(step) => {
-                step.post(ctx);
-            }
-        }
-
-        if self.state().is_completed() {
-            ctx.dispatch_task(self, EventAction::Complete);
-        }
+impl std::fmt::Debug for Task {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Task")
+            .field("id", &self.id)
+            .field("name", &self.node.name())
+            .field("kind", &self.node.kind())
+            .field("proc_id", &self.proc_id)
+            .field("node_id", &self.node.id())
+            .field("state", &self.state())
+            .field("action_state", &self.action_state())
+            .field("start_time", &self.start_time())
+            .field("end_time", &self.end_time())
+            .field("prev", &self.prev())
+            .field("vars", &self.vars())
+            .finish()
     }
 }

@@ -9,7 +9,7 @@ pub struct Options {
 impl Default for Options {
     fn default() -> Self {
         Self {
-            cache_cap: 100,
+            cache_cap: 256,
             log_dir: "log".to_string(),
             data_dir: "data".to_string(),
             log_level: "INFO".to_string(),

@@ -17,9 +17,9 @@ mod env_module {
 
 #[export_module]
 mod vm_module {
-    use crate::env::VirtualMachine;
+    use crate::env::Room;
 
-    pub fn get(env: &mut VirtualMachine, name: &str) -> Dynamic {
+    pub fn get(env: &mut Room, name: &str) -> Dynamic {
         if let Some(v) = env.get(name) {
             return utils::value_to_dymainc(&v);
         }
@@ -27,7 +27,7 @@ mod vm_module {
         Dynamic::UNIT
     }
 
-    pub fn set(env: &mut VirtualMachine, name: &str, value: Dynamic) {
+    pub fn set(env: &mut Room, name: &str, value: Dynamic) {
         env.set(name, utils::dynamic_to_value(&value));
     }
 }

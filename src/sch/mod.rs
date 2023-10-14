@@ -1,4 +1,3 @@
-mod cache;
 mod context;
 mod proc;
 mod queue;
@@ -12,15 +11,28 @@ mod tests;
 use async_trait::async_trait;
 use core::clone::Clone;
 
+pub use crate::Result;
 pub use context::Context;
-pub use proc::{Act, ActKind, Proc, Task};
+pub use proc::{Proc, Task};
 pub use scher::Scheduler;
 pub use state::TaskState;
 pub use tree::{Node, NodeData, NodeKind, NodeTree};
 
 #[async_trait]
 pub trait ActTask: Clone + Send {
-    fn prepare(&self, _ctx: &Context) {}
-    fn run(&self, ctx: &Context);
-    fn post(&self, _ctx: &Context) {}
+    fn init(&self, _ctx: &Context) -> Result<()> {
+        Ok(())
+    }
+
+    fn run(&self, _ctx: &Context) -> Result<()> {
+        Ok(())
+    }
+
+    fn next(&self, _ctx: &Context) -> Result<bool> {
+        Ok(false)
+    }
+
+    fn review(&self, _ctx: &Context) -> Result<bool> {
+        Ok(false)
+    }
 }

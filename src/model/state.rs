@@ -1,26 +1,22 @@
-use crate::{event::EventAction, sch::TaskState, utils, ActValue, Vars};
+use crate::{sch::TaskState, utils, ActValue, Vars};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone)]
 pub struct WorkflowState {
     pub pid: String,
     pub mid: String,
-    pub event: EventAction,
     pub state: TaskState,
     pub start_time: i64,
     pub end_time: i64,
-
     pub outputs: Vars,
-    // pub(crate) proc: Arc<Proc>,
 }
 
 #[derive(Deserialize, Serialize, Clone)]
-pub struct ActionState {
+pub struct ActionResult {
     pub start_time: i64,
     pub end_time: i64,
 
     outputs: Vars,
-    // pub(crate) proc: Arc<Proc>,
 }
 
 impl WorkflowState {
@@ -39,7 +35,7 @@ impl WorkflowState {
     }
 }
 
-impl ActionState {
+impl ActionResult {
     pub fn begin() -> Self {
         Self {
             start_time: utils::time::time(),
@@ -67,7 +63,7 @@ impl ActionState {
     }
 }
 
-impl ActionState {
+impl ActionResult {
     // Print the workflow tree
     // pub fn tree(&self) -> ActResult<()> {
     //     let model = self.proc.workflow();
@@ -90,7 +86,7 @@ impl ActionState {
     // }
 }
 
-impl std::fmt::Debug for ActionState {
+impl std::fmt::Debug for ActionResult {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("State")
             .field("start_time", &self.start_time)

@@ -17,59 +17,100 @@ mod collection {
     use rhai::plugin::*;
 
     #[export_fn]
-    pub fn intersect(a: Vec<Dynamic>, b: Vec<Dynamic>) -> Vec<Dynamic> {
+    pub fn intersect(a: Dynamic, b: Dynamic) -> Dynamic {
+        let mut result_a = Vec::new();
+        if a.is_array() {
+            result_a.extend(a.into_array().unwrap());
+        } else {
+            result_a.push(a);
+        }
+
+        let mut result_b = Vec::new();
+        if b.is_array() {
+            result_b.extend(b.into_array().unwrap());
+        } else {
+            result_b.push(b);
+        }
         let a = Candidate::Set(
-            a.iter()
+            result_a
+                .iter()
                 .map(|i| Candidate::parse(&i.to_string()).unwrap())
                 .collect(),
         );
 
         let b = Candidate::Set(
-            b.iter()
+            result_b
+                .iter()
                 .map(|i| Candidate::parse(&i.to_string()).unwrap())
                 .collect(),
         );
 
-        vec![Candidate::Group {
+        Candidate::Group {
             op: Operation::Intersect,
             items: vec![a, b],
         }
-        .into()]
+        .into()
     }
 
     #[export_fn]
-    pub fn union(a: Vec<Dynamic>, b: Vec<Dynamic>) -> Vec<Dynamic> {
-        let mut result = a.clone();
-        result.extend(b);
+    pub fn union(a: Dynamic, b: Dynamic) -> Dynamic {
+        let mut result = Vec::new();
+        if a.is_array() {
+            result.extend(a.into_array().unwrap());
+        } else {
+            result.push(a);
+        }
 
-        vec![Candidate::Group {
+        if b.is_array() {
+            result.extend(b.into_array().unwrap());
+        } else {
+            result.push(b);
+        }
+
+        Candidate::Group {
             op: Operation::Union,
             items: result
                 .iter()
                 .map(|i| Candidate::parse(&i.to_string()).unwrap())
                 .collect(),
         }
-        .into()]
+        .into()
     }
 
     #[export_fn]
-    pub fn diff(a: Vec<Dynamic>, b: Vec<Dynamic>) -> Vec<Dynamic> {
+    pub fn diff(a: Dynamic, b: Dynamic) -> Dynamic {
+        let mut result_a = Vec::new();
+        if a.is_array() {
+            result_a.extend(a.into_array().unwrap());
+        } else {
+            result_a.push(a);
+        }
+
+        let mut result_b = Vec::new();
+        if b.is_array() {
+            result_b.extend(b.into_array().unwrap());
+        } else {
+            result_b.push(b);
+        }
+
         let a = Candidate::Set(
-            a.iter()
+            result_a
+                .iter()
                 .map(|i| Candidate::parse(&i.to_string()).unwrap())
                 .collect(),
         );
 
         let b = Candidate::Set(
-            b.iter()
+            result_b
+                .iter()
                 .map(|i| Candidate::parse(&i.to_string()).unwrap())
                 .collect(),
         );
 
-        vec![Candidate::Group {
+        Candidate::Group {
             op: Operation::Difference,
             items: vec![a, b],
         }
-        .into()]
+        .into()
     }
 }

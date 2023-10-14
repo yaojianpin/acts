@@ -7,13 +7,15 @@ pub struct Proc {
     #[tag(id)]
     pub id: String,
     #[tag]
-    pub pid: String,
-    #[tag]
     pub state: String,
-    pub model: String,
+    #[tag]
+    pub mid: String,
+    pub name: String,
     pub start_time: i64,
     pub end_time: i64,
     pub vars: String,
+    pub timestamp: i64,
+    pub model: String,
 }
 
 impl DbModel for Proc {

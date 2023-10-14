@@ -4,14 +4,10 @@ use crate::{
     options::Options,
     plugin,
     sch::Scheduler,
-    store::Store,
 };
-use once_cell::sync::OnceCell;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc::Sender;
 use tracing::info;
-
-static STORE: OnceCell<Arc<Store>> = OnceCell::new();
 
 /// Workflow Engine
 ///
@@ -19,7 +15,7 @@ static STORE: OnceCell<Arc<Store>> = OnceCell::new();
 /// a example to caculate the result from 1 to given input value
 ///
 ///```rust
-/// use acts::{Engine, WorkflowState, Workflow, Vars};
+/// use acts::{Engine, Workflow, Vars};
 ///
 /// #[tokio::main]
 /// async fn main() {
@@ -27,10 +23,10 @@ static STORE: OnceCell<Arc<Store>> = OnceCell::new();
 ///     engine.start();
 ///
 ///     let model = include_str!("../examples/simple/model.yml");
-///     let mut workflow = Workflow::from_str(model).unwrap();
+///     let workflow = Workflow::from_yml(model).unwrap();
 ///     
-///     engine.emitter().on_complete(move |w: &WorkflowState| {
-///         println!("{:?}", w.outputs());
+///     engine.emitter().on_complete(|e| {
+///         println!("{:?}", e.outputs());
 ///     });
 ///
 ///     engine.manager().deploy(&workflow).expect("fail to deploy workflow");
@@ -45,13 +41,13 @@ static STORE: OnceCell<Arc<Store>> = OnceCell::new();
 /// ```
 #[derive(Clone)]
 pub struct Engine {
+    options: Arc<Options>,
     scher: Arc<Scheduler>,
     adapter: Arc<Adapter>,
     executor: Arc<Executor>,
     manager: Arc<Manager>,
     emitter: Arc<Emitter>,
     extender: Arc<Extender>,
-    store: Arc<Store>,
     signal: Arc<Mutex<Option<Sender<i32>>>>,
     is_closed: Arc<Mutex<bool>>,
 }
@@ -64,16 +60,14 @@ impl Engine {
     pub fn new_with_options(opt: &Options) -> Self {
         info!("options: {:?}", opt);
         let scher = Scheduler::new_with(opt);
-        let store = STORE.get_or_init(|| Arc::new(Store::new_with_path(&opt.data_dir)));
         let engine = Engine {
+            options: Arc::new(opt.clone()),
             scher: scher.clone(),
             adapter: Arc::new(Adapter::new()),
-            executor: Arc::new(Executor::new(&scher, &store)),
-            manager: Arc::new(Manager::new(&scher, &store)),
+            executor: Arc::new(Executor::new(&scher)),
+            manager: Arc::new(Manager::new(&scher)),
             emitter: Arc::new(Emitter::new(&scher)),
             extender: Arc::new(Extender::new()),
-            store: store.clone(),
-
             signal: Arc::new(Mutex::new(None)),
             is_closed: Arc::new(Mutex::new(false)),
         };
@@ -81,28 +75,32 @@ impl Engine {
         engine
     }
 
-    pub fn adapter(&self) -> Arc<Adapter> {
-        self.adapter.clone()
+    pub fn options(&self) -> &Arc<Options> {
+        &self.options
+    }
+
+    pub fn adapter(&self) -> &Arc<Adapter> {
+        &self.adapter
     }
 
     /// engine executor
-    pub fn executor(&self) -> Arc<Executor> {
-        self.executor.clone()
+    pub fn executor(&self) -> &Arc<Executor> {
+        &self.executor
     }
 
     /// event emitter
-    pub fn emitter(&self) -> Arc<Emitter> {
-        self.emitter.clone()
+    pub fn emitter(&self) -> &Arc<Emitter> {
+        &self.emitter
     }
 
     /// engine manager
-    pub fn manager(&self) -> Arc<Manager> {
-        self.manager.clone()
+    pub fn manager(&self) -> &Arc<Manager> {
+        &self.manager
     }
 
     /// engine extender
-    pub fn extender(&self) -> Arc<Extender> {
-        self.extender.clone()
+    pub fn extender(&self) -> &Arc<Extender> {
+        &self.extender
     }
 
     /// start engine
@@ -121,7 +119,11 @@ impl Engine {
         info!("start");
         self.init();
         let scher = self.scher();
-        tokio::spawn(async move { scher.event_loop().await });
+        let engine = self.clone();
+        tokio::spawn(async move {
+            scher.event_loop().await;
+            engine.close();
+        });
     }
 
     /// close engine
@@ -165,16 +167,10 @@ impl Engine {
         self.scher.clone()
     }
 
-    /// engine store
-    pub(crate) fn store(&self) -> Arc<Store> {
-        self.store.clone()
-    }
-
     fn init(&self) {
         info!("init");
         plugin::init(self);
         adapter::init(self);
-        self.store.init(self);
         self.scher.init(self);
     }
 }
@@ -182,7 +178,7 @@ impl Engine {
 impl std::fmt::Debug for Engine {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Engine")
-            .field("store", &self.store().kind())
+            .field("options", &self.options)
             .finish()
     }
 }

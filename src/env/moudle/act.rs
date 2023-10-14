@@ -14,7 +14,7 @@ mod act_module {
 
     #[export_fn]
     pub fn send(ctx: &mut Context, key: &str) {
-        ctx.dispatch_message(key);
+        ctx.send_message(key);
     }
 
     pub fn end(ctx: &mut Context) {
@@ -26,31 +26,27 @@ mod act_module {
     }
 
     #[export_fn]
-    pub fn role(_ctx: &mut Context, name: &str) -> Vec<Dynamic> {
-        vec![Candidate::Role(name.to_string()).into()]
+    pub fn role(_ctx: &mut Context, v: &str) -> Dynamic {
+        Candidate::Role(v.to_string()).into()
     }
 
     #[export_fn()]
-    pub fn user(_ctx: &mut Context, id: &str) -> Dynamic {
-        Candidate::User(id.to_string()).into()
+    pub fn user(_ctx: &mut Context, v: &str) -> Dynamic {
+        Candidate::User(v.to_string()).into()
     }
 
     #[export_fn()]
-    pub fn dept(_ctx: &mut Context, id: &str) -> Dynamic {
-        Candidate::Dept(id.to_string()).into()
+    pub fn dept(_ctx: &mut Context, v: &str) -> Dynamic {
+        Candidate::Dept(v.to_string()).into()
     }
 
     #[export_fn()]
-    pub fn unit(_ctx: &mut Context, id: &str) -> Dynamic {
-        Candidate::Unit(id.to_string()).into()
+    pub fn unit(_ctx: &mut Context, v: &str) -> Dynamic {
+        Candidate::Unit(v.to_string()).into()
     }
 
     #[export_fn]
-    pub fn relate(id: &mut Dynamic, rel: &str) -> Dynamic {
-        Candidate::Relation {
-            id: id.to_string(),
-            rel: rel.to_string(),
-        }
-        .into()
+    pub fn relate(_ctx: &mut Context, v: &str) -> Dynamic {
+        Candidate::Relation(v.to_string()).into()
     }
 }

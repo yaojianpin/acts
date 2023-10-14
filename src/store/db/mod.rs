@@ -1,8 +1,8 @@
-pub mod local;
-pub mod sqlite;
+mod local;
+mod mem;
 
 pub use local::LocalStore;
-pub use sqlite::SqliteStore;
+pub use mem::MemStore;
 
 use crate::ActError;
 use std::error::Error;

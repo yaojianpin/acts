@@ -1,5 +1,5 @@
 /target
 /data
+/test_data
 /.vscode
-/Cargo.lock
 /log

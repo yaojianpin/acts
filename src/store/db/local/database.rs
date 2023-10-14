@@ -1,6 +1,6 @@
 use crate::{
     store::db::{map_db_err, map_opt_err},
-    ActResult,
+    Result,
 };
 use rocksdb::{
     AsColumnFamilyRef, BoundColumnFamily, /*ColumnFamily as SingleColumnFamily,*/ DBIterator,
@@ -89,7 +89,7 @@ impl Database {
         bytes
     }
 
-    pub fn cf_idx_handle(&self, name: &str, key: &str) -> ActResult<ColumnFamily> {
+    pub fn cf_idx_handle(&self, name: &str, key: &str) -> Result<ColumnFamily> {
         let cf_name = format!("{name}:{key}");
         self.cf_handle(&cf_name)
     }
@@ -110,27 +110,29 @@ impl Database {
         }
     }
 
-    pub fn cf_handle(&self, name: &str) -> ActResult<ColumnFamily> {
+    pub fn cf_handle(&self, name: &str) -> Result<ColumnFamily> {
         self.cf_inner_handle(&name)
-            .ok_or(map_opt_err(format!("cannot get cf '{name}'")))
+            .ok_or(map_opt_err(format!("cannot find Collect({name})")))
     }
 
     pub fn get_cf<K: AsRef<[u8]>>(
         &self,
+        name: &str,
         cf: &impl AsColumnFamilyRef,
         key: K,
-    ) -> ActResult<Vec<u8>> {
+    ) -> Result<Vec<u8>> {
         let key_name = key.as_ref().to_vec();
         self.db
             .get_cf(cf, key)
             .map_err(map_db_err)?
             .ok_or(map_opt_err(format!(
-                "get_cf error '{}'",
+                "cannot find data {}({})",
+                name,
                 String::from_utf8(key_name).unwrap()
             )))
     }
 
-    pub fn put_cf<K, V>(&self, cf: &impl AsColumnFamilyRef, key: K, value: V) -> ActResult<bool>
+    pub fn put_cf<K, V>(&self, cf: &impl AsColumnFamilyRef, key: K, value: V) -> Result<bool>
     where
         K: AsRef<[u8]>,
         V: AsRef<[u8]>,
@@ -142,7 +144,7 @@ impl Database {
         Ok(true)
     }
 
-    pub fn delete_cf<K: AsRef<[u8]>>(&self, cf: &impl AsColumnFamilyRef, key: K) -> ActResult<bool>
+    pub fn delete_cf<K: AsRef<[u8]>>(&self, cf: &impl AsColumnFamilyRef, key: K) -> Result<bool>
     where
         K: AsRef<[u8]>,
     {
@@ -169,14 +171,14 @@ impl Database {
         QueryIter::new(&self, iter)
     }
 
-    pub fn update_change(&self, key: &[u8]) -> ActResult<bool> {
+    pub fn update_change(&self, key: &[u8]) -> Result<bool> {
         let cf = self.cf_handle(CF_UPDATE)?;
         let seq = self.db.latest_sequence_number().to_le_bytes();
         self.put_cf(&cf, key, seq)?;
         Ok(true)
     }
 
-    pub fn delete_update(&self, key: &[u8]) -> ActResult<bool> {
+    pub fn delete_update(&self, key: &[u8]) -> Result<bool> {
         let cf_update = self.cf_handle(CF_UPDATE)?;
         self.delete_cf(&cf_update, key.as_ref())?;
 

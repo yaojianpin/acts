@@ -1,6 +1,31 @@
 use super::Job;
-use crate::{utils, ActError, ActResult, ModelBase, Vars};
+use crate::{sch::NodeTree, ActError, ModelBase, Result, Vars};
 use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WorkflowActionOn {
+    #[serde(default)]
+    pub state: String,
+    #[serde(default)]
+    pub nkind: Option<String>,
+    #[serde(default)]
+    pub nid: Option<String>,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct WorkflowAction {
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub tag: String,
+    #[serde(default)]
+    pub inputs: Vars,
+    #[serde(default)]
+    pub outputs: Vars,
+    #[serde(default)]
+    pub on: Vec<WorkflowActionOn>,
+}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Workflow {
@@ -11,7 +36,7 @@ pub struct Workflow {
     pub name: String,
 
     #[serde(default)]
-    pub topic: String,
+    pub tag: String,
 
     #[serde(default)]
     pub jobs: Vec<Job>,
@@ -23,15 +48,23 @@ pub struct Workflow {
     pub outputs: Vars,
 
     #[serde(default)]
-    pub on: Vars,
+    pub actions: Vec<WorkflowAction>,
 
     #[serde(default)]
     ver: u32,
 }
 
 impl Workflow {
-    pub fn from_str(s: &str) -> ActResult<Self> {
+    pub fn from_yml(s: &str) -> Result<Self> {
         let workflow = serde_yaml::from_str::<Workflow>(s);
+        match workflow {
+            Ok(v) => Ok(v),
+            Err(e) => Err(ActError::Model(format!("{}", e))),
+        }
+    }
+
+    pub fn from_json(s: &str) -> Result<Self> {
+        let workflow = serde_json::from_str::<Workflow>(s);
         match workflow {
             Ok(v) => Ok(v),
             Err(e) => Err(ActError::Model(format!("{}", e))),
@@ -47,8 +80,16 @@ impl Workflow {
         }
     }
 
-    pub fn print_tree(&self) -> ActResult<()> {
-        utils::log::print_tree(&self)
+    pub fn print(&self) {
+        let mut root = NodeTree::new();
+        root.load(self);
+        root.print();
+    }
+
+    pub fn tree_output(&self) -> String {
+        let mut root = NodeTree::new();
+        root.load(self);
+        root.tree_output()
     }
 
     pub fn job(&self, id: &str) -> Option<&Job> {
@@ -69,11 +110,22 @@ impl Workflow {
         self.ver = ver;
     }
 
-    pub fn to_string<'a>(&self) -> ActResult<String> {
+    pub fn to_yml<'a>(&self) -> Result<String> {
         match serde_yaml::to_string(self) {
             Ok(s) => Ok(s),
             Err(e) => Err(ActError::Model(e.to_string())),
         }
+    }
+
+    pub fn to_json<'a>(&self) -> Result<String> {
+        match serde_json::to_string(self) {
+            Ok(s) => Ok(s),
+            Err(e) => Err(ActError::Model(e.to_string())),
+        }
+    }
+
+    pub fn action(&self, id: &str) -> Option<&WorkflowAction> {
+        self.actions.iter().find(|item| item.id == id)
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::{event, sch::Scheduler, Message, WorkflowState};
+use crate::{event, sch::Scheduler, Event, Message, WorkflowState};
 use std::sync::Arc;
 
 /// Just a export struct for the event::Emitter
@@ -10,7 +10,7 @@ pub struct Emitter {
 impl Emitter {
     pub fn new(scher: &Arc<Scheduler>) -> Self {
         Self {
-            evt: scher.emitter(),
+            evt: scher.emitter().clone(),
         }
     }
 
@@ -27,13 +27,13 @@ impl Emitter {
     ///
     ///     let workflow = Workflow::new().with_id("m1").with_job(|job| {
     ///         job.with_id("job1").with_step(|step| {
-    ///             step.with_subject(|sub| sub.with_matcher("any").with_cands(r#"["a"]"#))
+    ///             step.with_id("step1").with_act(|act| act.with_for(|f|f.with_by("any").with_in(r#"["a"]"#)))
     ///         })
     ///     });
     ///
-    ///     engine.emitter().on_message(move |msg: &Message| {
-    ///         if let Some(msg) = msg.as_user_message() {
-    ///             println!("act message: aid={} event={} uid={}", msg.aid, msg.event, msg.uid);
+    ///     engine.emitter().on_message(move |e| {
+    ///         if e.r#type == "act" {
+    ///             println!("act message: id={} state={} inputs={:?} outputs={:?}", e.id, e.state, e.inputs, e.outputs);
     ///         }
     ///     });
     ///
@@ -46,19 +46,19 @@ impl Emitter {
     ///    );
     /// }
     /// ```
-    pub fn on_message(&self, f: impl Fn(&Message) + Send + Sync + 'static) {
+    pub fn on_message(&self, f: impl Fn(&Event<Message>) + Send + Sync + 'static) {
         self.evt.on_message(f);
     }
 
-    pub fn on_start(&self, f: impl Fn(&WorkflowState) + Send + Sync + 'static) {
+    pub fn on_start(&self, f: impl Fn(&Event<WorkflowState>) + Send + Sync + 'static) {
         self.evt.on_start(f);
     }
 
-    pub fn on_complete(&self, f: impl Fn(&WorkflowState) + Send + Sync + 'static) {
+    pub fn on_complete(&self, f: impl Fn(&Event<WorkflowState>) + Send + Sync + 'static) {
         self.evt.on_complete(f);
     }
 
-    pub fn on_error(&self, f: impl Fn(&WorkflowState) + Send + Sync + 'static) {
+    pub fn on_error(&self, f: impl Fn(&Event<WorkflowState>) + Send + Sync + 'static) {
         self.evt.on_error(f);
     }
 }

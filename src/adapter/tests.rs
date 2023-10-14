@@ -1,26 +1,37 @@
 use crate::{
-    store::{Act, DbSet, Model, Proc, Query, StoreAdapter, StoreKind, Task},
-    ActResult, Engine,
+    store::{data, DbSet, Query, StoreAdapter, StoreKind},
+    Engine, Result,
 };
 use std::sync::Arc;
+use tokio::sync::OnceCell;
+
+static STORE: OnceCell<TestStore> = OnceCell::const_new();
+async fn init() -> TestStore {
+    let s = TestStore::new();
+    s
+}
+
+async fn store() -> &'static TestStore {
+    STORE.get_or_init(init).await
+}
 
 #[tokio::test]
 async fn adapter_set_extern_store_test() {
     let engine = Engine::new();
-    let store = TestStore::new();
-    engine.adapter().set_extern_store(&store);
+    let store = store().await;
+    engine.adapter().set_store(store);
     engine.start();
 
-    assert_eq!(engine.store().kind(), StoreKind::Extern);
-    engine.store().reset();
+    let store = engine.scher().cache().store();
+    assert_eq!(store.kind(), StoreKind::Extern);
+    store.reset();
 }
 
 #[derive(Debug, Clone)]
 pub struct TestStore {
-    models: Collect<Model>,
-    procs: Collect<Proc>,
-    tasks: Collect<Task>,
-    acts: Collect<Act>,
+    models: Collect<data::Model>,
+    procs: Collect<data::Proc>,
+    tasks: Collect<data::Task>,
 }
 
 impl TestStore {
@@ -29,7 +40,6 @@ impl TestStore {
             models: Collect::new(),
             procs: Collect::new(),
             tasks: Collect::new(),
-            acts: Collect::new(),
         }
     }
 }
@@ -38,20 +48,16 @@ impl StoreAdapter for TestStore {
     fn init(&self) {}
     fn flush(&self) {}
 
-    fn models(&self) -> Arc<dyn DbSet<Item = Model>> {
+    fn models(&self) -> Arc<dyn DbSet<Item = data::Model>> {
         Arc::new(self.models.clone())
     }
 
-    fn procs(&self) -> Arc<dyn DbSet<Item = Proc>> {
+    fn procs(&self) -> Arc<dyn DbSet<Item = data::Proc>> {
         Arc::new(self.procs.clone())
     }
 
-    fn tasks(&self) -> Arc<dyn DbSet<Item = Task>> {
+    fn tasks(&self) -> Arc<dyn DbSet<Item = data::Task>> {
         Arc::new(self.tasks.clone())
-    }
-
-    fn acts(&self) -> Arc<dyn DbSet<Item = Act>> {
-        Arc::new(self.acts.clone())
     }
 }
 
@@ -71,28 +77,28 @@ where
     T: Send + Sync,
 {
     type Item = T;
-    fn exists(&self, _id: &str) -> ActResult<bool> {
+    fn exists(&self, _id: &str) -> Result<bool> {
         Ok(false)
     }
 
-    fn find(&self, _id: &str) -> ActResult<Self::Item> {
+    fn find(&self, _id: &str) -> Result<Self::Item> {
         Err(crate::ActError::Store(format!(
             "not found model id={}",
             _id
         )))
     }
 
-    fn query(&self, _q: &Query) -> ActResult<Vec<Self::Item>> {
+    fn query(&self, _q: &Query) -> Result<Vec<Self::Item>> {
         Ok(vec![])
     }
 
-    fn create(&self, _data: &Self::Item) -> ActResult<bool> {
+    fn create(&self, _data: &Self::Item) -> Result<bool> {
         Ok(false)
     }
-    fn update(&self, _data: &Self::Item) -> ActResult<bool> {
+    fn update(&self, _data: &Self::Item) -> Result<bool> {
         Ok(false)
     }
-    fn delete(&self, _id: &str) -> ActResult<bool> {
+    fn delete(&self, _id: &str) -> Result<bool> {
         Ok(false)
     }
 }

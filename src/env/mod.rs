@@ -1,14 +1,14 @@
 mod moudle;
-mod vm;
+mod room;
 
 #[cfg(test)]
 mod tests;
 
-use crate::{ActError, ActModule, ActResult, ActValue, ShareLock, Vars};
+use crate::{ActError, ActModule, ActValue, Result, ShareLock, Vars};
 use rhai::Engine as ScriptEngine;
+pub use room::Room;
 use std::sync::{Arc, Mutex, RwLock};
 use tracing::debug;
-pub use vm::VirtualMachine;
 
 #[derive(Debug, Default, Clone)]
 pub struct Enviroment {
@@ -34,9 +34,9 @@ impl Enviroment {
         env
     }
 
-    pub fn vm(&self) -> Arc<VirtualMachine> {
+    pub fn new_room(&self) -> Arc<Room> {
         // let vars = self.vars();
-        let vm = VirtualMachine::new(&self);
+        let vm = Room::new(&self);
         // vm.append(&vars);
         Arc::new(vm)
     }
@@ -55,6 +55,7 @@ impl Enviroment {
         self.vars.read().unwrap().clone()
     }
 
+    #[allow(unused)]
     pub fn set_scope_var<T: Send + Sync + Clone + 'static>(&self, name: &str, v: &T) {
         self.scope.write().unwrap().set_or_push(name, v.clone());
     }
@@ -68,7 +69,7 @@ impl Enviroment {
         }
     }
 
-    pub fn run_vm(&self, script: &str, vm: &VirtualMachine) -> ActResult<bool> {
+    pub fn run_vm(&self, script: &str, vm: &Room) -> Result<bool> {
         let scr = self.scr.lock().unwrap();
         let mut scope = vm.scope.write().unwrap();
         match scr.run_with_scope(&mut scope, script) {
@@ -77,11 +78,7 @@ impl Enviroment {
         }
     }
 
-    pub fn eval_vm<T: rhai::Variant + Clone>(
-        &self,
-        expr: &str,
-        vm: &VirtualMachine,
-    ) -> ActResult<T> {
+    pub fn eval_vm<T: rhai::Variant + Clone>(&self, expr: &str, vm: &Room) -> Result<T> {
         let scr = self.scr.lock().unwrap();
         let mut scope = vm.scope.write().unwrap();
 
@@ -91,7 +88,8 @@ impl Enviroment {
         }
     }
 
-    pub fn run(&self, script: &str) -> ActResult<bool> {
+    #[allow(unused)]
+    pub fn run(&self, script: &str) -> Result<bool> {
         let scr = self.scr.lock().unwrap();
         let mut scope = self.scope.write().unwrap();
         match scr.run_with_scope(&mut scope, script) {
@@ -100,7 +98,7 @@ impl Enviroment {
         }
     }
 
-    pub fn eval<T: rhai::Variant + Clone>(&self, expr: &str) -> ActResult<T> {
+    pub fn eval<T: rhai::Variant + Clone>(&self, expr: &str) -> Result<T> {
         let scr = self.scr.lock().unwrap();
         let mut scope = self.scope.write().unwrap();
         match scr.eval_with_scope::<T>(&mut scope, expr) {

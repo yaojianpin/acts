@@ -19,8 +19,8 @@ impl Adapter {
         }
     }
 
-    pub fn set_extern_store<STORE: StoreAdapter + Clone + 'static>(&self, store: &STORE) {
-        info!("set_extern_store");
+    pub fn set_store<STORE: StoreAdapter + Clone + 'static>(&self, store: &STORE) {
+        info!("set_store");
         *self.store.write().unwrap() = Some(Arc::new(store.clone()));
     }
 

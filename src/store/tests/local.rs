@@ -1,16 +1,14 @@
 use crate::{
-    event::EventAction,
-    sch::{ActKind, NodeKind},
-    store::{data::*, db::LocalStore, Query},
+    event::ActionState,
+    sch::NodeKind,
+    store::{data::*, db::LocalStore, Cond, Expr, Query},
     utils, StoreAdapter, TaskState, Vars,
 };
-use std::collections::HashMap;
 use tokio::sync::OnceCell;
 
 static STORE: OnceCell<LocalStore> = OnceCell::const_new();
-
 async fn init() -> LocalStore {
-    let s = LocalStore::new();
+    let s = LocalStore::new("test_data");
     s
 }
 
@@ -18,66 +16,87 @@ async fn store() -> &'static LocalStore {
     STORE.get_or_init(init).await
 }
 
-// #[tokio::test(flavor = "multi_thread" )]
-// async fn local_init() {
-//     let store = store().await;
-//     assert_eq!(store.is_initialized(), true);
-// }
-
 #[tokio::test]
-async fn local_proc_create() {
+async fn store_local_proc_create() {
     let store = store().await;
     let proc = Proc {
         id: utils::longid(),
-        pid: "pid".to_string(),
-        model: "".to_string(),
+        name: "name".to_string(),
+        mid: "m1".to_string(),
         state: TaskState::None.into(),
         start_time: 0,
         end_time: 0,
         vars: "".to_string(),
+        timestamp: 0,
+        model: "".to_string(),
     };
     store.procs().create(&proc).unwrap();
     assert_eq!(store.procs().exists(&proc.id).unwrap(), true);
 }
 
 #[tokio::test]
-async fn local_proc_query() {
+async fn store_local_proc_find() {
+    let store = store().await;
+    let pid = utils::longid();
+    let proc = Proc {
+        id: pid.clone(),
+        name: "name".to_string(),
+        mid: "m1".to_string(),
+        state: TaskState::None.into(),
+        start_time: 0,
+        end_time: 0,
+        vars: "".to_string(),
+        timestamp: 0,
+        model: "".to_string(),
+    };
+    store.procs().create(&proc).unwrap();
+    assert_eq!(store.procs().find(&pid).unwrap().id, pid);
+}
+
+#[tokio::test]
+async fn store_local_proc_query() {
     let store = store().await;
     let procs = store.procs();
-    let pid = utils::shortid();
-    for _ in 0..5 {
+    let mid = utils::longid();
+    for i in 0..5 {
         let proc = Proc {
             id: utils::longid(),
-            pid: pid.to_string(),
-            model: "".to_string(),
+            name: i.to_string(),
+            mid: mid.to_string(),
             state: TaskState::None.into(),
             start_time: 0,
             end_time: 0,
-            vars: "".to_string(),
+            vars: "{}".to_string(),
+            timestamp: 0,
+            model: "".to_string(),
         };
         procs.create(&proc).unwrap();
     }
 
-    let q = Query::new().push("pid", &pid).set_limit(5);
+    let q = Query::new()
+        .push(Cond::and().push(Expr::eq("mid", &mid)))
+        .set_limit(5);
     let items = procs.query(&q).unwrap();
     assert_eq!(items.len(), 5);
 }
 
 #[tokio::test]
-async fn local_proc_update() {
+async fn store_local_proc_update() {
     let store = store().await;
 
-    let mut vars: Vars = HashMap::new();
+    let mut vars: Vars = Vars::new();
     vars.insert("k1".to_string(), "v1".into());
 
     let mut proc = Proc {
         id: utils::shortid(),
-        pid: "pid".to_string(),
-        model: "".to_string(),
+        name: "test".to_string(),
+        mid: "m1".to_string(),
         state: TaskState::None.into(),
         start_time: 0,
         end_time: 0,
         vars: "".to_string(),
+        timestamp: 0,
+        model: "".to_string(),
     };
     store.procs().create(&proc).unwrap();
 
@@ -91,16 +110,18 @@ async fn local_proc_update() {
 }
 
 #[tokio::test]
-async fn local_proc_delete() {
+async fn store_local_proc_delete() {
     let store = store().await;
     let proc = Proc {
         id: utils::shortid(),
-        pid: "pid".to_string(),
-        model: "".to_string(),
+        name: "test".to_string(),
+        mid: "m1".to_string(),
         state: TaskState::None.into(),
         start_time: 0,
         end_time: 0,
         vars: "".to_string(),
+        timestamp: 0,
+        model: "".to_string(),
     };
     store.procs().create(&proc).unwrap();
     store.procs().delete(&proc.id).unwrap();
@@ -109,25 +130,54 @@ async fn local_proc_delete() {
 }
 
 #[tokio::test]
-async fn local_task_create() {
+async fn store_local_task_create() {
     let store = store().await;
     let tasks = store.tasks();
     let task = Task {
-        kind: NodeKind::Workflow.into(),
         id: utils::shortid(),
-        pid: "pid".to_string(),
-        tid: "tid".to_string(),
-        nid: "nid".to_string(),
+        kind: NodeKind::Workflow.into(),
+        name: "test".to_string(),
+        proc_id: "pid".to_string(),
+        task_id: "tid".to_string(),
+        node_id: "nid".to_string(),
         state: TaskState::None.into(),
+        action_state: ActionState::None.into(),
+        prev: None,
         start_time: 0,
         end_time: 0,
+        vars: "{}".to_string(),
+        timestamp: 0,
     };
     tasks.create(&task).unwrap();
     assert_eq!(tasks.exists(&task.id).unwrap(), true);
 }
 
 #[tokio::test]
-async fn local_task_query() {
+async fn store_local_task_find() {
+    let store = store().await;
+    let tasks = store.tasks();
+    let tid = utils::shortid();
+    let task = Task {
+        id: tid.clone(),
+        kind: NodeKind::Workflow.into(),
+        name: "test".to_string(),
+        proc_id: "pid".to_string(),
+        task_id: "tid".to_string(),
+        node_id: "nid".to_string(),
+        state: TaskState::None.into(),
+        action_state: ActionState::None.into(),
+        prev: None,
+        start_time: 0,
+        end_time: 0,
+        vars: "{}".to_string(),
+        timestamp: 0,
+    };
+    tasks.create(&task).unwrap();
+    assert_eq!(tasks.find(&tid).unwrap().id, tid);
+}
+
+#[tokio::test]
+async fn store_local_task_query() {
     let store = store().await;
     let tasks = store.tasks();
     let pid = utils::shortid();
@@ -135,161 +185,81 @@ async fn local_task_query() {
         let task = Task {
             kind: NodeKind::Workflow.into(),
             id: utils::shortid(),
-            pid: pid.to_string(),
-            tid: "tid".to_string(),
-            nid: "nid".to_string(),
+            name: "test".to_string(),
+            proc_id: pid.to_string(),
+            task_id: "tid".to_string(),
+            node_id: "nid".to_string(),
             state: TaskState::None.into(),
+            action_state: ActionState::None.into(),
+            prev: None,
             start_time: 0,
             end_time: 0,
+            vars: "{}".to_string(),
+            timestamp: 0,
         };
         tasks.create(&task).unwrap();
     }
 
-    let q = Query::new().push("pid", &pid).set_limit(5);
+    let q = Query::new()
+        .push(Cond::and().push(Expr::eq("proc_id", &pid)))
+        .set_limit(5);
     let items = tasks.query(&q).unwrap();
     assert_eq!(items.len(), 5);
 }
 
 #[tokio::test]
-async fn local_task_update() {
+async fn store_local_task_update() {
     let store = store().await;
     let table = store.tasks();
     let mut task = Task {
         kind: NodeKind::Workflow.into(),
         id: utils::shortid(),
-        pid: "pid".to_string(),
-        tid: "tid".to_string(),
-        nid: "nid".to_string(),
+        name: "test".to_string(),
+        proc_id: "pid".to_string(),
+        task_id: "tid".to_string(),
+        node_id: "nid".to_string(),
         state: TaskState::None.into(),
+        action_state: ActionState::None.into(),
+        prev: None,
         start_time: 0,
         end_time: 0,
+        vars: "{}".to_string(),
+        timestamp: 0,
     };
     table.create(&task).unwrap();
 
-    task.state = TaskState::Running.into();
+    task.state = TaskState::Success.into();
+    task.action_state = ActionState::Completed.into();
+    task.prev = Some("tid1".to_string());
     table.update(&task).unwrap();
 
     let t = table.find(&task.id).unwrap();
     assert_eq!(t.state, task.state);
+    assert_eq!(t.action_state, task.action_state);
+    assert_eq!(t.prev, task.prev);
 }
 
 #[tokio::test]
-async fn local_task_delete() {
+async fn store_local_task_delete() {
     let store = store().await;
     let table = store.tasks();
     let task = Task {
         kind: NodeKind::Workflow.into(),
         id: utils::shortid(),
-        pid: "pid".to_string(),
-        tid: "tid".to_string(),
-        nid: "nid".to_string(),
+        name: "test".to_string(),
+        proc_id: "pid".to_string(),
+        task_id: "tid".to_string(),
+        node_id: "nid".to_string(),
         state: TaskState::None.into(),
+        action_state: ActionState::None.into(),
+        prev: None,
         start_time: 0,
         end_time: 0,
+        vars: "{}".to_string(),
+        timestamp: 0,
     };
     table.create(&task).unwrap();
     table.delete(&task.id).unwrap();
 
     assert_eq!(table.exists(&task.id).unwrap(), false);
-}
-
-#[tokio::test]
-async fn local_act_create() {
-    let store = store().await;
-    let table = store.acts();
-    let vars = utils::vars::to_string(&Vars::new());
-    let act = Act {
-        id: utils::shortid(),
-        kind: ActKind::User.to_string(),
-        event: EventAction::Create.to_string(),
-        pid: "pid".to_string(),
-        tid: "tid".to_string(),
-        vars: "{}".to_string(),
-        create_time: 0,
-        update_time: 0,
-        state: "none".to_string(),
-        ack: false,
-        active: false,
-    };
-    table.create(&act).unwrap();
-    assert_eq!(table.exists(&act.id).unwrap(), true);
-}
-
-#[tokio::test]
-async fn local_act_query() {
-    let store = store().await;
-    let acts = store.acts();
-    let pid = utils::shortid();
-    let vars = utils::vars::to_string(&Vars::new());
-    for _ in 0..5 {
-        let act = Act {
-            id: utils::shortid(),
-            kind: ActKind::User.to_string(),
-            event: EventAction::Create.to_string(),
-            pid: "pid".to_string(),
-            tid: "tid".to_string(),
-            vars: "{}".to_string(),
-            create_time: 0,
-            update_time: 0,
-            state: "none".to_string(),
-            ack: false,
-            active: false,
-        };
-        acts.create(&act).unwrap();
-    }
-
-    let q = Query::new().push("pid", &pid).set_limit(5);
-    let items = acts.query(&q).unwrap();
-    assert_eq!(items.len(), 5);
-}
-
-#[tokio::test]
-async fn local_act_update() {
-    let store = store().await;
-    let table = store.acts();
-    let vars = utils::vars::to_string(&Vars::new());
-    let mut act = Act {
-        id: utils::shortid(),
-        kind: ActKind::User.to_string(),
-        event: EventAction::Create.to_string(),
-        pid: "pid".to_string(),
-        tid: "tid".to_string(),
-        vars: "{}".to_string(),
-        create_time: 0,
-        update_time: 0,
-        state: "none".to_string(),
-        ack: false,
-        active: false,
-    };
-    table.create(&act).unwrap();
-
-    act.vars = "u2".to_string();
-    table.update(&act).unwrap();
-
-    let t = table.find(&act.id).unwrap();
-    assert_eq!(t.vars, act.vars);
-}
-
-#[tokio::test]
-async fn local_act_delete() {
-    let store = store().await;
-    let table = store.acts();
-    let vars = utils::vars::to_string(&Vars::new());
-    let act = Act {
-        id: utils::shortid(),
-        kind: ActKind::User.to_string(),
-        event: EventAction::Create.to_string(),
-        pid: "pid".to_string(),
-        tid: "tid".to_string(),
-        vars: "{}".to_string(),
-        create_time: 0,
-        update_time: 0,
-        state: "none".to_string(),
-        ack: false,
-        active: false,
-    };
-    table.create(&act).unwrap();
-    table.delete(&act.id).unwrap();
-
-    assert_eq!(table.exists(&act.id).unwrap(), false);
 }

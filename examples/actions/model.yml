@@ -1,0 +1,48 @@
+name: actions
+id: actions
+env:
+  v: 0
+outputs:
+  result:
+jobs:
+  - name: job1
+    id: job1
+    steps:
+      - name: prepare
+        id: prepare
+        acts:
+          - id: init
+      - name: condition
+        id: condition
+        branches:
+          - name: cond 1
+            id: cond1
+            if: env.get("v") > 0
+            steps:
+              - name: step1
+                id: step1
+                acts:
+                  - id: action1
+                    inputs:
+                      result: ${ env.get("result") }
+              - name: step2
+                id: step2
+                acts:
+                  - id: action2
+                    inputs:
+                      result: ${ env.get("result") }        
+          - name: cond 2
+            id: cond2
+            default: true
+            steps:
+              - name: step3
+                id: step3
+                acts:
+                  - id: action3
+      - name: final
+        id: final
+        acts:
+          - id: action4
+            inputs:
+              result: ${ env.get("result") }
+

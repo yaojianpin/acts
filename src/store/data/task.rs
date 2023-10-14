@@ -8,15 +8,23 @@ pub struct Task {
     #[tag(id)]
     pub id: String,
     #[tag]
-    pub pid: String,
+    pub proc_id: String,
     #[tag]
-    pub tid: String,
+    pub task_id: String,
     #[tag]
-    pub nid: String,
+    pub node_id: String,
+    #[tag]
     pub kind: String,
+    #[tag]
+    pub prev: Option<String>,
+
+    pub name: String,
     pub state: String,
+    pub action_state: String,
     pub start_time: i64,
     pub end_time: i64,
+    pub vars: String,
+    pub timestamp: i64,
 }
 
 impl Task {
