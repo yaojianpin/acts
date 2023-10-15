@@ -39,7 +39,7 @@ impl Emitter {
     ///
     ///     engine.manager().deploy(&workflow).expect("fail to deploy workflow");
     ///     let mut vars = Vars::new();
-    ///     vars.insert("biz_id".into(), "w1".into());
+    ///     vars.insert("pid".into(), "w1".into());
     ///     engine.executor().start(
     ///        &workflow.id,
     ///        &vars,

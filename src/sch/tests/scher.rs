@@ -17,7 +17,7 @@ async fn sch_scher_next() {
     store.deploy(&workflow).unwrap();
     tokio::spawn(async move {
         let mut options = Vars::new();
-        options.insert("biz_id".to_string(), json!(utils::longid()));
+        options.insert("pid".to_string(), json!(utils::longid()));
         s.start(&workflow, &options).unwrap();
     });
 

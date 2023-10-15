@@ -33,7 +33,7 @@ use tracing::info;
 ///
 ///     let mut vars = Vars::new();
 ///     vars.insert("input".into(), 3.into());
-///     vars.insert("biz_id".into(), "w1".into());
+///     vars.insert("pid".into(), "w1".into());
 ///     engine.executor().start(
 ///        &workflow.id,
 ///        &vars);

@@ -36,7 +36,7 @@ async fn main() {
     engine.manager().deploy(&workflow).expect("deploy model");
 
     let mut vars = Vars::new();
-    vars.insert("biz_id".to_string(), nanoid!().into());
+    vars.insert("pid".to_string(), nanoid!().into());
     vars.insert("count".into(), 100.into());
     executor.start(&workflow.id, &vars).expect("start workflow");
 

@@ -19,7 +19,10 @@ pub struct Cache {
 
 impl std::fmt::Debug for Cache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Cache").finish()
+        f.debug_struct("Cache")
+            .field("cap", &self.cap())
+            .field("count", &self.count())
+            .finish()
     }
 }
 

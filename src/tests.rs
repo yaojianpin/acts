@@ -83,7 +83,7 @@ async fn engine_on_message() {
         .expect("fail to deploy workflow");
 
     let mut options = Vars::new();
-    options.insert("biz_id".to_string(), json!(utils::longid()));
+    options.insert("pid".to_string(), json!(utils::longid()));
     executor
         .start(&workflow.id, &options)
         .expect("fail to start workflow");
@@ -126,7 +126,7 @@ async fn engine_builder() {
 }
 
 #[tokio::test]
-async fn engine_executor_start_no_biz_id() {
+async fn engine_executor_start_no_pid() {
     let engine = Engine::new();
     let executor = engine.executor();
     engine.start();
@@ -142,7 +142,7 @@ async fn engine_executor_start_no_biz_id() {
 }
 
 #[tokio::test]
-async fn engine_executor_start_empty_biz_id() {
+async fn engine_executor_start_empty_pid() {
     let engine = Engine::new();
     let executor = engine.executor();
     engine.start();
@@ -154,18 +154,18 @@ async fn engine_executor_start_empty_biz_id() {
 
     engine.manager().deploy(&workflow).unwrap();
     let mut options = Vars::new();
-    options.insert("biz_id".to_string(), "".into());
+    options.insert("pid".to_string(), "".into());
     let result = executor.start(&workflow.id, &options);
     assert_eq!(result.is_ok(), true);
 }
 
 #[tokio::test]
-async fn engine_executor_start_dup_biz_id_error() {
+async fn engine_executor_start_dup_pid_error() {
     let engine = Engine::new();
     let executor = engine.executor();
     engine.start();
 
-    let biz_id = utils::longid();
+    let pid = utils::longid();
     let mid = utils::longid();
     let model = Workflow::new()
         .with_id(&mid)
@@ -173,7 +173,7 @@ async fn engine_executor_start_dup_biz_id_error() {
 
     let store = engine.scher().cache().store();
     let proc = data::Proc {
-        id: biz_id.clone(),
+        id: pid.clone(),
         name: model.name.clone(),
         mid: model.id.clone(),
         state: TaskState::None.to_string(),
@@ -189,7 +189,7 @@ async fn engine_executor_start_dup_biz_id_error() {
         .deploy(&model)
         .expect("fail to deploy workflow");
     let mut options = Vars::new();
-    options.insert("biz_id".to_string(), json!(biz_id.to_string()));
+    options.insert("pid".to_string(), json!(pid.to_string()));
     let result = executor.start(&model.id, &options);
     assert_eq!(result.is_err(), true);
 }
@@ -260,7 +260,7 @@ async fn engine_manager_proc() {
     let engine = Engine::new();
     engine.start();
     let manager = engine.manager();
-    let biz_id = utils::longid();
+    let pid = utils::longid();
     let mid: String = utils::longid();
     let model = Workflow::new()
         .with_id(&mid)
@@ -268,7 +268,7 @@ async fn engine_manager_proc() {
 
     let store = engine.scher().cache().store();
     let proc = data::Proc {
-        id: biz_id.clone(),
+        id: pid.clone(),
         model: model.to_json().unwrap(),
         name: model.name,
         mid: model.id,
@@ -280,7 +280,7 @@ async fn engine_manager_proc() {
     };
     store.procs().create(&proc).expect("create proc");
 
-    let proc = manager.proc(&biz_id, "json");
+    let proc = manager.proc(&pid, "json");
     assert_eq!(proc.is_ok(), true);
 }
 

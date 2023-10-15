@@ -34,7 +34,7 @@ async fn main() {
 
     let mut vars = Vars::new();
     vars.insert("input".into(), 3.into());
-    vars.insert("biz_id".to_string(), "w1".into());
+    vars.insert("pid".to_string(), "w1".into());
     executor.start(&workflow.id, &vars);
 
     let e = engine.clone();

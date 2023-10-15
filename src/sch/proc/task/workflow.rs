@@ -31,6 +31,7 @@ impl ActTask for Workflow {
             if task.state().is_pending() && task.is_ready() {
                 let ctx = task.create_context(&ctx.scher);
                 task.set_state(TaskState::Running);
+                ctx.scher.emitter().emit_task_event_with_extra(task, false);
                 task.exec(&ctx)?;
                 return Ok(false);
             }

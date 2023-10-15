@@ -1,7 +1,7 @@
 use super::{ActionState, EventAction};
 use crate::{
     event::{Emitter, Message},
-    sch::{Proc, Scheduler},
+    sch::{Proc, Scheduler, TaskState},
     utils, NodeKind, Vars, Workflow,
 };
 use std::sync::Arc;
@@ -27,6 +27,40 @@ async fn event_action_parse() {
 
     let action = EventAction::parse("aaaaa");
     assert_eq!(action.is_err(), true);
+}
+
+#[tokio::test]
+async fn event_on_proc() {
+    let mut workflow = Workflow::new()
+        .with_id("m1")
+        .with_job(|job| job.with_id("job1").with_step(|step| step.with_id("step1")));
+
+    let (proc, scher) = create_proc(&mut workflow, &utils::longid());
+    let evt = Emitter::new();
+    let workflow2 = workflow.clone();
+    evt.on_proc(move |e| {
+        assert_eq!(e.inner().state(), TaskState::Running);
+        assert_eq!(e.inner().model().id, workflow2.id);
+    });
+    proc.set_state(TaskState::Running);
+    scher.emitter().emit_proc_event(&proc);
+}
+
+#[tokio::test]
+async fn event_on_task() {
+    let mut workflow = Workflow::new()
+        .with_id("m1")
+        .with_job(|job| job.with_id("job1").with_step(|step| step.with_id("step1")));
+
+    let (proc, scher) = create_proc(&mut workflow, &utils::longid());
+    let evt = Emitter::new();
+    evt.on_task(move |e| {
+        assert_eq!(e.inner().state(), TaskState::Running);
+    });
+    proc.set_state(TaskState::Running);
+    let task = proc.create_task(&proc.tree().root.as_ref().unwrap(), None);
+    task.set_state(TaskState::Running);
+    scher.emitter().emit_task_event(&task);
 }
 
 #[tokio::test]

@@ -57,16 +57,16 @@ impl Scheduler {
     pub fn start(&self, model: &Workflow, options: &Vars) -> Result<ActionResult> {
         debug!("sch::start({})", model.id);
 
-        let mut pid = utils::longid();
-        if let Some(biz_id) = &options.get("biz_id") {
-            // the biz_id will use as the pid
-            pid = biz_id.as_str().unwrap().to_string();
+        let mut proc_id = utils::longid();
+        if let Some(pid) = &options.get("pid") {
+            // the pid will use as the proc_id
+            proc_id = pid.as_str().unwrap().to_string();
         }
 
-        let proc = self.cache.proc(&pid);
+        let proc = self.cache.proc(&proc_id);
         if proc.is_some() {
             return Err(ActError::Action(format!(
-                "pid({pid}) is duplicated in running proc list"
+                "proc_id({proc_id}) is duplicated in running proc list"
             )));
         }
 
@@ -76,12 +76,12 @@ impl Scheduler {
         let mut w = model.clone();
         w.set_env(&options);
 
-        let proc = Arc::new(Proc::new(&pid));
+        let proc = Arc::new(Proc::new(&proc_id));
         proc.load(&w);
         self.launch(&proc);
 
         // add pid to state
-        state.insert("pid", pid.into());
+        state.insert("pid", proc_id.into());
 
         state.end();
         Ok(state)
