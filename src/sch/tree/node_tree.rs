@@ -1,6 +1,7 @@
 use super::{
     build,
     node::{Node, NodeData},
+    visit::VisitRoot,
 };
 use crate::{ActError, ShareLock, Workflow};
 use std::{
@@ -51,7 +52,6 @@ impl NodeTree {
             children: Arc::new(RwLock::new(Vec::new())),
             prev: Arc::new(RwLock::new(Weak::new())),
             next: Arc::new(RwLock::new(Weak::new())),
-            visit_count: Arc::new(RwLock::new(0)),
         });
 
         self.node_map
@@ -76,14 +76,28 @@ impl NodeTree {
 
     #[allow(unused)]
     pub fn print(&self) {
-        if let Some(node) = self.root.clone() {
-            self.visit(&node, |node| {
-                let mut level = node.level;
-                while level > 0 {
-                    print!("  ");
-                    level -= 1;
+        if let Some(ref root) = self.root.clone() {
+            VisitRoot::walk(root, &move |node| {
+                if node.level > 1 {
+                    let mut level = 0;
+                    while level < node.level {
+                        if node.is_sibling(&level) {
+                            print!("│ ");
+                        } else {
+                            print!("  ");
+                        }
+
+                        level += 1;
+                    }
                 }
 
+                if node.next_sibling() {
+                    print!("├─");
+                } else {
+                    if node.level != 0 {
+                        print!("└─");
+                    }
+                }
                 let next = match node.next().upgrade() {
                     Some(n) => n.id(),
                     None => "nil".to_string(),
@@ -102,12 +116,27 @@ impl NodeTree {
     #[allow(unused)]
     pub fn tree_output(&self) -> String {
         let s = &RefCell::new(String::new());
-        if let Some(node) = self.root.clone() {
-            self.visit(&node, move |n| {
-                let mut level = n.level;
-                while level > 0 {
-                    s.borrow_mut().push_str(&format!("{}", "  "));
-                    level -= 1;
+        if let Some(ref root) = self.root.clone() {
+            VisitRoot::walk(root, &move |n| {
+                if n.level > 1 {
+                    let mut level = 0;
+                    while level < n.level {
+                        if n.is_sibling(&level) {
+                            s.borrow_mut().push_str(&format!("{}", "│ "));
+                        } else {
+                            s.borrow_mut().push_str(&format!("{}", "  "));
+                        }
+
+                        level += 1;
+                    }
+                }
+
+                if n.next_sibling() {
+                    s.borrow_mut().push_str(&format!("{}", "├─"));
+                } else {
+                    if n.level != 0 {
+                        s.borrow_mut().push_str(&format!("{}", "└─"));
+                    }
                 }
 
                 let next = match n.next().upgrade() {
@@ -129,24 +158,5 @@ impl NodeTree {
 
     pub fn set_error(&mut self, err: ActError) {
         self.error = Some(err);
-    }
-
-    #[allow(unused)]
-    pub fn visit<F: Fn(&Node) + Clone>(&self, node: &Arc<Node>, f: F) {
-        f(node);
-        node.visit();
-
-        let children = node.children();
-        if children.len() > 0 {
-            for child in children {
-                self.visit(&child, f.clone());
-            }
-        }
-
-        if let Some(next) = node.next().upgrade() {
-            if next.visit_count() == 0 {
-                self.visit(&next, f.clone());
-            }
-        }
     }
 }

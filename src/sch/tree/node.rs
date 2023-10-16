@@ -30,9 +30,6 @@ pub struct Node {
     pub children: Arc<RwLock<Vec<Arc<Node>>>>,
     pub prev: Arc<RwLock<Weak<Node>>>,
     pub next: Arc<RwLock<Weak<Node>>>,
-
-    /// used for recording visit count
-    pub(in crate::sch) visit_count: Arc<RwLock<usize>>,
 }
 
 impl NodeData {
@@ -160,16 +157,6 @@ impl Node {
             NodeData::Step(data) => data.tag,
             NodeData::Act(data) => data.tag,
         }
-    }
-
-    pub(in crate::sch) fn visit_count(&self) -> usize {
-        let visit_count = self.visit_count.read().unwrap();
-        *visit_count
-    }
-
-    pub(in crate::sch) fn visit(&self) {
-        let mut visit_count = self.visit_count.write().unwrap();
-        *visit_count += 1;
     }
 }
 
