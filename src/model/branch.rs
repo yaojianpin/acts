@@ -30,7 +30,7 @@ pub struct Branch {
     pub next: Option<String>,
 
     #[serde(default)]
-    pub default: bool,
+    pub r#else: bool,
 
     #[serde(default)]
     pub needs: Vec<String>,

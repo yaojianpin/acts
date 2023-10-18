@@ -4,6 +4,7 @@ pub const EVT_BACK: &str = "back";
 pub const EVT_CANCEL: &str = "cancel";
 pub const EVT_SUBMIT: &str = "submit";
 pub const EVT_SKIP: &str = "skip";
+pub const EVT_ERR: &str = "error";
 
 pub const INITIATOR: &str = "initiator";
 
@@ -14,6 +15,8 @@ pub const FOR_ACT_KEY_UID: &str = "uid";
 pub const FOR_ACT_KEY_USERS: &str = "users";
 pub const FOR_ACT_KEY_STEP_NODE_ID: &str = "step_node_id";
 pub const FOR_ACT_KEY_STEP_TASK_ID: &str = "step_task_id";
+pub const FOR_ACT_KEY_STEP_ERR_CODE: &str = "err_code";
+pub const FOR_ACT_KEY_STEP_ERR_MESSAGE: &str = "err_message";
 
 pub const FOR_ACT_TAG: &str = "for";
 pub const FOR_ACT_CTOR: &str = "ctor";

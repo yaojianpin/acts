@@ -1,13 +1,40 @@
+mod catch;
 mod r#for;
 
 use crate::{
     event::{Action, ActionState, Emitter},
-    sch::{Proc, Scheduler},
+    sch::{Proc, Scheduler, TaskState},
     utils, Engine, Executor, Manager, Vars, Workflow,
 };
 use serde_json::json;
 use std::sync::Arc;
 use std::sync::Mutex;
+
+#[tokio::test]
+async fn sch_act_create() {
+    let mut workflow = Workflow::new().with_job(|mut job| {
+        job.name = "job1".to_string();
+        job.with_step(|step| {
+            step.with_name("step1")
+                .with_act(|act| act.with_id("act1").with_name("act 1"))
+        })
+    });
+
+    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
+    emitter.on_message(move |e| {
+        if e.is_type("act") {
+            e.close();
+        }
+    });
+
+    scher.launch(&proc);
+    scher.event_loop().await;
+    proc.print();
+    assert_eq!(
+        proc.task_by_nid("act1").get(0).unwrap().state(),
+        TaskState::Pending
+    );
+}
 
 #[tokio::test]
 async fn sch_act_complete() {
@@ -185,8 +212,6 @@ async fn sch_act_back() {
 
 #[tokio::test]
 async fn sch_act_abort() {
-    let ret = Arc::new(Mutex::new(false));
-    let count = Arc::new(Mutex::new(0));
     let mut workflow = Workflow::new().with_id(&utils::longid()).with_job(|job| {
         job.with_name("job1")
             .with_step(|step| {
@@ -207,39 +232,29 @@ async fn sch_act_abort() {
     let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
 
     let s = scher.clone();
-    let r = ret.clone();
     emitter.on_message(move |e| {
-        if e.inner().is_type("act") {
-            let mut count = count.lock().unwrap();
-            let uid = e.inner().inputs.get("uid").unwrap().as_str().unwrap();
-            let tid = &e.inner().id;
-            if uid == "a" && *count == 0 {
-                let mut options = Vars::new();
-                options.insert("uid".to_string(), json!(uid.to_string()));
+        if e.is_key("fn1") && e.is_state("created") {
+            let mut options = Vars::new();
+            options.insert("uid".to_string(), json!("u1"));
 
-                let message = Action::new(&e.inner().proc_id, tid, "abort", &options);
-                s.do_action(&message).unwrap();
-            }
-            *count += 1;
+            let message = Action::new(&e.proc_id, &e.id, "abort", &options);
+            s.do_action(&message).unwrap();
         }
     });
 
     emitter.on_complete(move |e| {
-        *r.lock().unwrap() = e.inner().state.is_abort();
         e.close();
     });
     scher.launch(&proc);
     scher.event_loop().await;
-    let result = *ret.lock().unwrap();
-    assert!(result);
+    assert!(proc.state().is_abort());
 }
 
 #[tokio::test]
 async fn sch_act_submit() {
-    let ret = Arc::new(Mutex::new(false));
     let mut workflow = Workflow::new().with_id(&utils::longid()).with_job(|job| {
         job.with_name("job1").with_step(|step| {
-            step.with_name("step1").with_act(|act| {
+            step.with_id("step1").with_act(|act| {
                 act.with_id("fn1")
                     .with_name("fn 1")
                     .with_input("uid", json!("a"))
@@ -251,7 +266,6 @@ async fn sch_act_submit() {
     let (proc, scher, emitter, _, _) = create_proc2(&mut workflow, &pid);
 
     let s = scher.clone();
-    let r = ret.clone();
     emitter.on_message(move |e| {
         if e.inner().is_type("act") && e.inner().is_state("created") {
             let uid = e.inner().inputs.get("uid").unwrap().as_str().unwrap();
@@ -263,10 +277,6 @@ async fn sch_act_submit() {
                 s.do_action(&action).unwrap();
             }
         }
-
-        if e.inner().is_type("act") && e.inner().is_state("submitted") {
-            *r.lock().unwrap() = true;
-        }
     });
 
     emitter.on_complete(move |e| {
@@ -275,15 +285,21 @@ async fn sch_act_submit() {
 
     scher.launch(&proc);
     scher.event_loop().await;
-    assert!(*ret.lock().unwrap());
+    assert_eq!(
+        proc.task_by_nid("fn1").get(0).unwrap().action_state(),
+        ActionState::Submitted
+    );
+    assert_eq!(
+        proc.task_by_nid("step1").get(0).unwrap().state(),
+        TaskState::Success
+    );
 }
 
 #[tokio::test]
 async fn sch_act_skip() {
-    let ret = Arc::new(Mutex::new(false));
     let mut workflow = Workflow::new().with_id(&utils::longid()).with_job(|job| {
         job.with_name("job1").with_step(|step| {
-            step.with_name("step1").with_act(|act| {
+            step.with_id("step1").with_act(|act| {
                 act.with_id("fn1")
                     .with_name("fn 1")
                     .with_input("uid", json!("a"))
@@ -294,25 +310,15 @@ async fn sch_act_skip() {
     let pid = utils::longid();
     let (proc, scher, emitter, _, _) = create_proc2(&mut workflow, &pid);
     let s = scher.clone();
-    let r = ret.clone();
-    let task_id = Arc::new(Mutex::new("".to_string()));
     emitter.on_message(move |e| {
         if e.inner().is_type("act") {
             let uid = e.inner().inputs.get("uid").unwrap().as_str().unwrap();
             if uid == "a" && e.inner().state() == ActionState::Created {
-                *task_id.lock().unwrap() = e.inner().id.clone();
-
                 let mut options = Vars::new();
                 options.insert("uid".to_string(), json!(uid.to_string()));
 
                 let action = Action::new(&e.inner().proc_id, &e.inner().id, "skip", &options);
                 s.do_action(&action).unwrap();
-            }
-
-            // check the skipped state
-            if e.inner().id == *task_id.lock().unwrap() && e.inner().state() == ActionState::Skipped
-            {
-                *r.lock().unwrap() = true;
             }
         }
     });
@@ -323,7 +329,133 @@ async fn sch_act_skip() {
 
     scher.launch(&proc);
     scher.event_loop().await;
-    assert!(*ret.lock().unwrap());
+    assert_eq!(
+        proc.task_by_nid("fn1").get(0).unwrap().state(),
+        TaskState::Skip
+    );
+    assert_eq!(
+        proc.task_by_nid("step1").get(0).unwrap().state(),
+        TaskState::Success
+    );
+}
+
+#[tokio::test]
+async fn sch_act_skip_next() {
+    let mut workflow = Workflow::new().with_id(&utils::longid()).with_job(|job| {
+        job.with_name("job1")
+            .with_step(|step| {
+                step.with_id("step1")
+                    .with_act(|act| act.with_id("act1").with_input("uid", json!("a")))
+            })
+            .with_step(|step| step.with_id("step2"))
+    });
+
+    let pid = utils::longid();
+    let (proc, scher, emitter, _, _) = create_proc2(&mut workflow, &pid);
+    let s = scher.clone();
+    emitter.on_message(move |e| {
+        if e.is_key("act1") && e.is_state("created") {
+            let uid = e.inner().inputs.get("uid").unwrap().as_str().unwrap();
+            if uid == "a" && e.inner().state() == ActionState::Created {
+                let mut options = Vars::new();
+                options.insert("uid".to_string(), json!(uid.to_string()));
+
+                let action = Action::new(&e.inner().proc_id, &e.inner().id, "skip", &options);
+                s.do_action(&action).unwrap();
+            }
+        }
+    });
+
+    emitter.on_complete(move |e| {
+        e.close();
+    });
+
+    scher.launch(&proc);
+    scher.event_loop().await;
+    assert_eq!(
+        proc.task_by_nid("act1").get(0).unwrap().state(),
+        TaskState::Skip
+    );
+    assert_eq!(
+        proc.task_by_nid("step1").get(0).unwrap().state(),
+        TaskState::Success
+    );
+    assert_eq!(
+        proc.task_by_nid("step2").get(0).unwrap().state(),
+        TaskState::Success
+    );
+}
+
+#[tokio::test]
+async fn sch_act_error_action() {
+    let mut workflow = Workflow::new().with_id(&utils::longid()).with_job(|job| {
+        job.with_name("job1").with_step(|step| {
+            step.with_id("step1")
+                .with_act(|act| act.with_id("fn1").with_input("uid", json!("a")))
+        })
+    });
+
+    let pid = utils::longid();
+    let (proc, scher, emitter, _, _) = create_proc2(&mut workflow, &pid);
+    let s = scher.clone();
+    emitter.on_message(move |e| {
+        if e.is_key("fn1") && e.is_state("created") {
+            let uid = e.inner().inputs.get("uid").unwrap().as_str().unwrap();
+            if uid == "a" && e.inner().state() == ActionState::Created {
+                let mut options = Vars::new();
+                options.insert("uid".to_string(), json!(uid.to_string()));
+                options.insert("err_code".to_string(), json!("1"));
+                options.insert("err_message".to_string(), json!("biz error"));
+
+                let action = Action::new(&e.inner().proc_id, &e.inner().id, "error", &options);
+                s.do_action(&action).unwrap();
+            }
+        }
+    });
+
+    emitter.on_error(move |e| {
+        e.close();
+    });
+
+    scher.launch(&proc);
+    scher.event_loop().await;
+    assert!(proc.task_by_nid("fn1").get(0).unwrap().state().is_error());
+    assert!(proc.task_by_nid("step1").get(0).unwrap().state().is_error());
+    assert!(proc.state().is_error());
+}
+
+#[tokio::test]
+async fn sch_act_error_action_without_err_code() {
+    let ret = Arc::new(Mutex::new(false));
+    let mut workflow = Workflow::new().with_id(&utils::longid()).with_job(|job| {
+        job.with_name("job1").with_step(|step| {
+            step.with_id("step1")
+                .with_act(|act| act.with_id("fn1").with_input("uid", json!("a")))
+        })
+    });
+
+    let pid = utils::longid();
+    let (proc, scher, emitter, _, _) = create_proc2(&mut workflow, &pid);
+    let s = scher.clone();
+    let r = ret.clone();
+    emitter.on_message(move |e| {
+        if e.is_key("fn1") && e.is_state("created") {
+            let uid = e.inner().inputs.get("uid").unwrap().as_str().unwrap();
+            if uid == "a" && e.inner().state() == ActionState::Created {
+                let mut options = Vars::new();
+                options.insert("uid".to_string(), json!(uid.to_string()));
+
+                let action = Action::new(&e.inner().proc_id, &e.inner().id, "error", &options);
+                let result = s.do_action(&action);
+                *r.lock().unwrap() = result.is_err();
+                e.close();
+            }
+        }
+    });
+
+    scher.launch(&proc);
+    scher.event_loop().await;
+    assert_eq!(*ret.lock().unwrap(), true);
 }
 
 #[tokio::test]

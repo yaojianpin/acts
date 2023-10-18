@@ -1,3 +1,4 @@
+mod catch;
 mod r#for;
 mod rule;
 
@@ -5,6 +6,7 @@ mod rule;
 mod tests;
 
 use crate::{
+    event::ActionState,
     model::Act,
     sch::{Context, TaskState},
     ActTask, Result,
@@ -44,6 +46,42 @@ impl ActTask for Act {
             return Ok(is_review);
         }
 
+        let state = ctx.task.state();
+        if state.is_pending() {
+            let tasks = ctx.task.children();
+
+            let mut ok_count = 0;
+            for task in tasks.iter() {
+                if task.state().is_error() {
+                    ctx.set_err(&task.state().as_err().unwrap_or_default());
+                    ctx.emit_error();
+                    return Ok(false);
+                }
+                if task.state().is_skip() {
+                    ctx.task.set_action_state(ActionState::Skipped);
+                    return Ok(true);
+                }
+
+                if task.state().is_success() {
+                    ok_count += 1;
+                }
+            }
+
+            if ok_count == tasks.len() {
+                if !ctx.task.state().is_completed() {
+                    ctx.task.set_action_state(ActionState::Completed);
+                }
+            }
+        }
+
         return Ok(true);
+    }
+
+    fn error(&self, ctx: &Context) -> Result<()> {
+        self.catches.error(ctx)?;
+        if ctx.task.state().is_error() {
+            ctx.emit_error();
+        }
+        return Ok(());
     }
 }

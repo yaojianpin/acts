@@ -36,6 +36,7 @@ pub enum EventAction {
     Cancel,
     Abort,
     Skip,
+    Error,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
@@ -49,6 +50,7 @@ pub enum ActionState {
     Cancelled,
     Aborted,
     Skipped,
+    Error,
 }
 
 impl EventAction {
@@ -60,6 +62,7 @@ impl EventAction {
             consts::EVT_SUBMIT => Ok(EventAction::Submit),
             consts::EVT_SKIP => Ok(EventAction::Skip),
             consts::EVT_COMPLETE => Ok(EventAction::Complete),
+            consts::EVT_ERR => Ok(EventAction::Error),
             _ => Err(ActError::Action(format!(
                 "cannot find the action define '{v}'"
             ))),
@@ -73,6 +76,7 @@ impl EventAction {
             EventAction::Cancel => ActionState::Cancelled,
             EventAction::Abort => ActionState::Aborted,
             EventAction::Skip => ActionState::Skipped,
+            EventAction::Error => ActionState::Error,
         }
     }
 }
@@ -142,6 +146,7 @@ impl std::fmt::Display for EventAction {
             EventAction::Submit => f.write_str(consts::EVT_SUBMIT),
             EventAction::Abort => f.write_str(consts::EVT_ABORT),
             EventAction::Skip => f.write_str(consts::EVT_SKIP),
+            EventAction::Error => f.write_str(consts::EVT_ERR),
         }
     }
 }

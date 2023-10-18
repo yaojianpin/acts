@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 
 pub use engine::Engine;
-pub use error::ActError;
+pub use error::{ActError, Error};
 pub use event::{Action, Event, Message};
 pub use export::{Emitter, Executor, Extender, Manager};
 pub use model::*;

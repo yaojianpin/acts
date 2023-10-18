@@ -1,4 +1,4 @@
-use super::workflow::WorkflowActionOn;
+use super::{act::ActCatch, workflow::WorkflowActionOn};
 use crate::{Act, ActAlias, ActFor, ActValue, Branch, Job, Step, Workflow, WorkflowAction};
 
 impl Workflow {
@@ -184,8 +184,8 @@ impl Branch {
         self
     }
 
-    pub fn with_default(mut self, default: bool) -> Self {
-        self.default = default;
+    pub fn with_else(mut self, default: bool) -> Self {
+        self.r#else = default;
         self
     }
 
@@ -243,6 +243,12 @@ impl Act {
     pub fn with_for(mut self, build: fn(ActFor) -> ActFor) -> Self {
         let f = ActFor::default();
         self.r#for = Some(build(f));
+        self
+    }
+
+    pub fn with_catch(mut self, build: fn(ActCatch) -> ActCatch) -> Self {
+        let catch = ActCatch::default();
+        self.catches.push(build(catch));
         self
     }
 }
@@ -331,6 +337,38 @@ impl WorkflowActionOn {
 
     pub fn with_nid(mut self, nid: &str) -> Self {
         self.nid = Some(nid.to_string());
+        self
+    }
+}
+
+impl ActCatch {
+    pub fn with_id(mut self, id: &str) -> Self {
+        self.id = id.to_string();
+        self
+    }
+
+    pub fn with_name(mut self, name: &str) -> Self {
+        self.name = name.to_string();
+        self
+    }
+
+    pub fn with_tag(mut self, tag: &str) -> Self {
+        self.tag = tag.to_string();
+        self
+    }
+
+    pub fn with_input(mut self, name: &str, value: ActValue) -> Self {
+        self.inputs.insert(name.to_string(), value);
+        self
+    }
+
+    pub fn with_output(mut self, name: &str, value: ActValue) -> Self {
+        self.outputs.insert(name.to_string(), value);
+        self
+    }
+
+    pub fn with_err(mut self, err: &str) -> Self {
+        self.err = Some(err.to_string());
         self
     }
 }

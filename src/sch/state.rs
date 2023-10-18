@@ -1,7 +1,7 @@
 use core::{clone::Clone, convert::From, fmt};
 use serde::{Deserialize, Serialize};
 
-use crate::utils;
+use crate::{utils, Error};
 
 #[derive(Debug, Deserialize, Serialize, Default, Clone, PartialEq)]
 pub enum TaskState {
@@ -60,6 +60,14 @@ impl TaskState {
 
     pub fn is_next(&self) -> bool {
         self.is_skip() || self.is_running()
+    }
+
+    pub fn as_err(&self) -> Option<Error> {
+        if let TaskState::Fail(err) = self {
+            return Some(Error::parse(err));
+        }
+
+        None
     }
 }
 

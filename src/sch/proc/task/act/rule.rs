@@ -1,7 +1,7 @@
 use crate::{
     sch::Context,
     utils::{self, consts},
-    ActError, ActFor, Result, TaskState, Vars,
+    ActError, ActFor, Result, Vars,
 };
 use regex::Regex;
 use serde::{Deserialize, Serialize};
@@ -71,11 +71,15 @@ impl Rule {
             .collect::<Vec<_>>();
         match self {
             Rule::Any => {
-                let ret = acts.iter().any(|t| t.state().is_success());
+                let ret = acts
+                    .iter()
+                    .any(|act| act.state().is_success() || act.state().is_skip());
                 Ok(ret)
             }
             Rule::All => {
-                let ret = acts.iter().all(|act| act.state().is_success());
+                let ret = acts
+                    .iter()
+                    .all(|act| act.state().is_success() || act.state().is_skip());
                 Ok(ret)
             }
             Rule::Ord(_) => {
@@ -90,7 +94,10 @@ impl Rule {
                     .iter()
                     .map(|iter| iter.as_str().unwrap().to_string())
                     .collect::<Vec<_>>();
-                Ok(cands.len() == acts.len() && acts.iter().all(|act| act.state().is_success()))
+                Ok(cands.len() == acts.len()
+                    && acts
+                        .iter()
+                        .all(|act| act.state().is_success() || act.state().is_skip()))
             }
             Rule::Some(rule) => {
                 // use the rule name as the key to confirm the result
@@ -101,7 +108,9 @@ impl Rule {
                     .unwrap_or(false.into())
                     .as_bool()
                     .unwrap_or(false)
-                    || acts.iter().all(|act| act.state() == TaskState::Success);
+                    || acts
+                        .iter()
+                        .all(|act| act.state().is_success() || act.state().is_skip());
 
                 if !is_pass {
                     // generate new some rule act

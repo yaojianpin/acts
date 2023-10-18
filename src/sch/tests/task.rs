@@ -4,7 +4,7 @@ use crate::{
     utils, Action, Engine, TaskState, Vars, Workflow,
 };
 use serde_json::json;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 #[tokio::test]
 async fn sch_task_state() {
@@ -318,7 +318,7 @@ async fn sch_task_branch_empty_if() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sch_task_branch_if_false_default() {
+async fn sch_task_branch_if_false_else_success() {
     let mut workflow = Workflow::new().with_env("v", 1.into()).with_job(|mut job| {
         job.name = "job1".to_string();
         job.with_step(|step| {
@@ -326,7 +326,7 @@ async fn sch_task_branch_if_false_default() {
                 .with_branch(|branch| {
                     branch
                         .with_id("b1")
-                        .with_default(true)
+                        .with_else(true)
                         .with_name("branch 1")
                         .with_step(|step| step.with_name("step11"))
                         .with_step(|step| step.with_name("step12"))
@@ -344,11 +344,9 @@ async fn sch_task_branch_if_false_default() {
 
     let id = utils::longid();
     let (proc, scher, _) = create_proc(&mut workflow, &id);
-    // proc.tree().print();
-
     scher.launch(&proc);
     scher.event_loop().await;
-
+    proc.print();
     assert_eq!(
         proc.task_by_nid("b1").get(0).unwrap().state(),
         TaskState::Success
@@ -356,7 +354,7 @@ async fn sch_task_branch_if_false_default() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sch_task_branch_if_false_default_running() {
+async fn sch_task_branch_if_false_else_running() {
     let mut workflow = Workflow::new().with_env("v", 1.into()).with_job(|mut job| {
         job.name = "job1".to_string();
         job.with_step(|step| {
@@ -364,7 +362,7 @@ async fn sch_task_branch_if_false_default_running() {
                 .with_branch(|branch| {
                     branch
                         .with_id("b1")
-                        .with_default(true)
+                        .with_else(true)
                         .with_name("branch 1")
                         .with_step(|step| {
                             step.with_name("step11").with_act(|act| act.with_id("act1"))
@@ -414,7 +412,7 @@ async fn sch_task_branch_if_false_default_running() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sch_task_branch_if_true_default() {
+async fn sch_task_branch_if_true_else() {
     let mut workflow = Workflow::new().with_env("v", 1.into()).with_job(|mut job| {
         job.name = "job1".to_string();
         job.with_step(|step| {
@@ -429,7 +427,7 @@ async fn sch_task_branch_if_true_default() {
                 .with_branch(|branch| {
                     branch
                         .with_id("b2")
-                        .with_default(true)
+                        .with_else(true)
                         .with_name("branch 2")
                         .with_step(|step| step.with_id("step21"))
                 })
@@ -454,7 +452,7 @@ async fn sch_task_branch_if_true_default() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn sch_task_branch_if_two_no_default() {
+async fn sch_task_branch_if_two_no_else() {
     let mut workflow = Workflow::new().with_env("v", 1.into()).with_job(|mut job| {
         job.name = "job1".to_string();
         job.with_step(|step| {
@@ -589,34 +587,6 @@ async fn sch_task_branch_needs_state() {
     );
 }
 
-#[tokio::test]
-async fn sch_task_act() {
-    let state = Arc::new(Mutex::new(TaskState::None));
-    let mut workflow = Workflow::new().with_job(|mut job| {
-        job.name = "job1".to_string();
-        job.with_step(|step| {
-            step.with_name("step1")
-                .with_act(|act| act.with_name("act 1"))
-        })
-    });
-
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
-    let p = proc.clone();
-    let s = state.clone();
-    emitter.on_message(move |e| {
-        if e.inner().is_type("act") {
-            if let Some(task) = p.task(&e.inner().id) {
-                *s.lock().unwrap() = task.state();
-            }
-            e.close();
-        }
-    });
-
-    scher.launch(&proc);
-    scher.event_loop().await;
-    proc.print();
-    assert_eq!(*state.lock().unwrap(), TaskState::Pending);
-}
 
 fn create_proc(workflow: &mut Workflow, pid: &str) -> (Arc<Proc>, Arc<Scheduler>, Arc<Emitter>) {
     let engine = Engine::new();

@@ -50,3 +50,17 @@ fn model_act_for() {
     assert_eq!(f.alias.each.unwrap(), "my_each");
     assert_eq!(f.r#in.is_empty(), false);
 }
+
+#[test]
+fn model_act_catch() {
+    let mut act = Act::new();
+    assert_eq!(act.catches.len(), 0);
+
+    act = act
+        .with_catch(|c| c.with_id("err1").with_err("code1"))
+        .with_catch(|c| c.with_id("err2"));
+    assert_eq!(act.catches.len(), 2);
+
+    assert_eq!(act.catches.get(0).unwrap().err.as_ref().unwrap(), "code1");
+    assert_eq!(act.catches.get(1).unwrap().err, None);
+}

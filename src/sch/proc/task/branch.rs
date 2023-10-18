@@ -30,7 +30,7 @@ impl ActTask for Branch {
                     branch_count = parent.children().len();
                 }
 
-                if !self.default {
+                if !self.r#else {
                     ctx.task.set_action_state(ActionState::Skipped);
                     return Ok(());
                 }

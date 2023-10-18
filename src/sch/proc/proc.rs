@@ -218,7 +218,6 @@ impl Proc {
         action: &Action,
         scher: &Arc<Scheduler>,
     ) -> Result<ActionResult> {
-        // println!("do_action: {:?}", action);
         let mut count = self.sync.lock().unwrap();
         let mut state = ActionResult::begin();
         let task = self.task(&action.task_id).ok_or(ActError::Action(format!(
@@ -301,15 +300,16 @@ impl Proc {
                     level -= 1;
                 }
                 println!(
-                    "Task({}) prev={} kind={} nid={} name={} state={} action_state={}",
+                    "Task({}) {}  nid={} name={} tag={} prev={} state={} action_state={}",
                     task.id,
+                    task.node.kind(),
+                    task.node.id(),
+                    task.node.name(),
+                    task.node.tag(),
                     match task.prev() {
                         Some(v) => v,
                         None => "nil".to_string(),
                     },
-                    task.node.kind(),
-                    task.node.id(),
-                    task.node.data.name(),
                     task.state(),
                     task.action_state(),
                 );

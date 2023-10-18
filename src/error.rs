@@ -1,3 +1,4 @@
+use core::fmt;
 use serde::{Deserialize, Serialize};
 use std::io::ErrorKind;
 use thiserror::Error;
@@ -27,6 +28,45 @@ pub enum ActError {
 
     #[error("{0}")]
     IoError(String),
+}
+
+#[derive(Debug, Clone)]
+pub struct Error {
+    pub key: String,
+    pub message: String,
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_fmt(format_args!("{}:{}", &self.key, &self.message))
+    }
+}
+
+impl Default for Error {
+    fn default() -> Self {
+        Self {
+            key: "unknown".to_string(),
+            message: Default::default(),
+        }
+    }
+}
+
+impl Error {
+    pub fn parse(s: &str) -> Error {
+        let parts = s.split(':').collect::<Vec<_>>();
+
+        if parts.len() == 2 {
+            return Error {
+                key: parts[0].to_string(),
+                message: parts[1].to_string(),
+            };
+        }
+
+        Error {
+            key: "unknown".to_string(),
+            message: s.to_string(),
+        }
+    }
 }
 
 impl Into<String> for ActError {

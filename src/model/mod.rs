@@ -12,7 +12,7 @@ mod tests;
 
 pub mod builder;
 
-pub use act::{Act, ActAlias, ActFor};
+pub use act::{Act, ActAlias, ActCatch, ActFor};
 pub use branch::Branch;
 pub use cand::{Candidate, Operation, OrgAdapter, RoleAdapter};
 pub use info::{ModelInfo, ProcInfo, TaskInfo};

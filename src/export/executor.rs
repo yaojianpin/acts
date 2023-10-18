@@ -52,6 +52,10 @@ impl Executor {
         self.do_action(pid, consts::EVT_SKIP, tid, options)
     }
 
+    pub fn error(&self, pid: &str, tid: &str, options: &Vars) -> Result<ActionResult> {
+        self.do_action(pid, consts::EVT_ERR, tid, options)
+    }
+
     fn do_action(
         &self,
         pid: &str,

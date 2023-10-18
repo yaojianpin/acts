@@ -25,6 +25,9 @@ async fn event_action_parse() {
     let action = EventAction::parse("skip").unwrap();
     assert_eq!(action, EventAction::Skip);
 
+    let action = EventAction::parse("error").unwrap();
+    assert_eq!(action, EventAction::Error);
+
     let action = EventAction::parse("aaaaa");
     assert_eq!(action.is_err(), true);
 }

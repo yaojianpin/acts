@@ -2,7 +2,7 @@ use crate::{
     event::{Action, ActionState, EventAction},
     model,
     sch::{tree::NodeData, Node, Proc, Scheduler, Task},
-    ActError, ActValue, NodeKind, Result, ShareLock, TaskState, Vars, WorkflowAction,
+    ActError, ActValue, Error, NodeKind, Result, ShareLock, TaskState, Vars, WorkflowAction,
 };
 use std::sync::{Arc, RwLock};
 use tracing::debug;
@@ -13,6 +13,7 @@ pub struct Context {
     pub proc: Arc<Proc>,
     pub task: Arc<Task>,
     pub action: ShareLock<Option<EventAction>>,
+    pub err: ShareLock<Option<Error>>,
 }
 
 impl std::fmt::Debug for Context {
@@ -38,6 +39,7 @@ impl Context {
             proc: proc.clone(),
             action: Arc::new(RwLock::new(None)),
             task: task.clone(),
+            err: Arc::new(RwLock::new(None)),
         };
 
         ctx
@@ -54,6 +56,13 @@ impl Context {
         self.task.room().append(&action.options);
 
         Ok(())
+    }
+
+    pub fn err(&self) -> Option<Error> {
+        self.err.read().unwrap().clone()
+    }
+    pub fn set_err(&self, err: &Error) {
+        *self.err.write().unwrap() = Some(err.clone());
     }
 
     pub fn run(&self, script: &str) -> Result<bool> {
@@ -122,17 +131,11 @@ impl Context {
         Ok(())
     }
 
-    pub fn back_task(&self, task: &Arc<Task>) -> Result<()> {
-        let parent = task.parent().ok_or(ActError::Action(format!(
-            "cannot find task parent by tid '{}'",
-            task.id
-        )))?;
-
-        let tasks = parent.children();
-        for task in tasks
-            .iter()
-            .filter(|t| t.id != task.id && !t.state().is_completed())
-        {
+    pub fn back_task(&self, task: &Arc<Task>, paths: &Vec<Arc<Task>>) -> Result<()> {
+        for task in task.siblings().iter() {
+            if task.state().is_completed() {
+                continue;
+            }
             task.set_action_state(ActionState::Skipped);
             self.emit_task(task);
         }
@@ -140,25 +143,30 @@ impl Context {
         task.set_action_state(ActionState::Backed);
         self.emit_task(task);
 
-        parent.set_action_state(ActionState::Backed);
-        self.emit_task(&parent);
+        for p in paths {
+            if p.is_kind(NodeKind::Act) {
+                p.set_action_state(ActionState::Backed);
+                self.emit_task(&p);
+            }
+
+            if p.state().is_running() {
+                p.set_action_state(ActionState::Completed);
+                self.emit_task(&p);
+            } else if p.state().is_pending() {
+                p.set_action_state(ActionState::Skipped);
+                self.emit_task(&p);
+            }
+        }
 
         Ok(())
     }
 
     pub fn abort_task(&self, task: &Arc<Task>) -> Result<()> {
-        let parent = task.parent().ok_or(ActError::Action(format!(
-            "cannot find task parent by tid '{}'",
-            task.id
-        )))?;
-
-        let tasks = parent.children();
-
         // abort all task's act
-        for task in tasks
-            .iter()
-            .filter(|t| t.id != task.id && !t.state().is_completed())
-        {
+        for task in task.siblings().iter() {
+            if task.state().is_completed() {
+                continue;
+            }
             task.set_action_state(ActionState::Skipped);
             self.emit_task(task);
         }
@@ -170,13 +178,15 @@ impl Context {
         let ctx = self;
         let mut parent = task.parent();
         while let Some(task) = parent {
-            let proc = ctx.proc.clone();
-            let ctx = proc.create_context(&ctx.scher, &task);
+            let ctx = ctx.proc.create_context(&ctx.scher, &task);
             ctx.task.set_action_state(ActionState::Aborted);
             ctx.emit_task(&ctx.task);
 
             for t in task.children() {
-                if t.state().is_pending() || t.state().is_running() {
+                if t.state().is_pending() {
+                    t.set_action_state(ActionState::Skipped);
+                    ctx.emit_task(&t);
+                } else if t.state().is_running() {
                     t.set_action_state(ActionState::Aborted);
                     ctx.emit_task(&t);
                 }
@@ -188,6 +198,7 @@ impl Context {
     }
 
     /// undo task
+    /// the undo task is a step task, set the task as completed and set the children acts as cancelled
     pub fn undo_task(&self, task: &Arc<Task>) -> Result<()> {
         if task.state().is_completed() {
             return Err(ActError::Action(format!(
@@ -196,55 +207,33 @@ impl Context {
             )));
         }
 
-        // skip all of the task's sub tasks
-        for sub in task
-            .children()
-            .iter()
-            .filter(|t| t.id != task.id && !t.state().is_completed())
-        {
-            sub.set_action_state(ActionState::Cancelled);
-            self.emit_task(&sub);
+        // cancel all of the task's children
+        let mut children = task.children();
+        while children.len() > 0 {
+            let mut nexts = Vec::new();
+            for t in &children {
+                if t.state().is_completed() {
+                    continue;
+                }
+                t.set_action_state(ActionState::Cancelled);
+                self.emit_task(&t);
+                nexts.extend_from_slice(&t.children());
+            }
+
+            children = nexts;
         }
-        task.set_action_state(ActionState::Cancelled);
+        task.set_action_state(ActionState::Completed);
         self.emit_task(&task);
 
         Ok(())
     }
 
-    pub fn skip_task(&self, task: &Arc<Task>) -> Result<()> {
-        if task.state().is_completed() {
-            return Err(ActError::Action(format!(
-                "task '{}' is already completed",
-                task.id
-            )));
-        }
-        let parent = task.parent().ok_or(ActError::Action(format!(
-            "cannot find task parent by tid '{}'",
-            task.id
-        )))?;
-
-        // skip all of the task's sub tasks
-        for sub in parent
-            .children()
-            .iter()
-            .filter(|t| t.id != task.id && !t.state().is_completed())
-        {
-            sub.set_action_state(ActionState::Skipped);
-            self.emit_task(&sub);
-        }
-        task.set_action_state(ActionState::Skipped);
-        self.emit_task(&task);
-
-        Ok(())
-    }
     pub fn emit_error(&self) {
         let state = self.task.state();
         if state.is_error() {
             let mut parent = self.task.parent();
             while let Some(task) = &parent {
                 task.set_state(state.clone());
-                //self.scher.emitter().dispatch_task_event(task, &data);
-
                 parent = task.parent();
             }
 

@@ -4,6 +4,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 
+
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct Step {
     #[serde(default)]
@@ -35,6 +36,8 @@ pub struct Step {
 
     #[serde(default)]
     pub acts: Vec<Act>,
+
+
 }
 
 impl ModelBase for Step {
@@ -50,12 +53,10 @@ impl std::fmt::Debug for Step {
             .field("id", &self.id)
             .field("env", &self.inputs)
             .field("run", &self.run)
-            // .field("on", &self.on)
             .field("r#if", &self.r#if)
             .field("branches", &self.branches)
             .field("next", &self.next)
             .field("acts", &self.acts)
-            // .field("subject", &self.subject)
             .finish()
     }
 }

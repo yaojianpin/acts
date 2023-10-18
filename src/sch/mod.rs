@@ -35,4 +35,13 @@ pub trait ActTask: Clone + Send {
     fn review(&self, _ctx: &Context) -> Result<bool> {
         Ok(false)
     }
+
+    fn error(&self, ctx: &Context) -> Result<()> {
+        if !ctx.task.state().is_error() {
+            let err = ctx.err().unwrap_or_default();
+            ctx.task.set_state(TaskState::Fail(err.to_string()));
+        }
+        ctx.emit_error();
+        Ok(())
+    }
 }

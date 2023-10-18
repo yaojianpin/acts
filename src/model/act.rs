@@ -1,6 +1,8 @@
+mod catch;
 mod r#for;
 
 use crate::{ModelBase, Vars};
+pub use catch::ActCatch;
 pub use r#for::ActFor;
 use serde::{Deserialize, Serialize};
 
@@ -8,6 +10,7 @@ use serde::{Deserialize, Serialize};
 pub struct ActAlias {
     #[serde(default)]
     pub init: Option<String>,
+    #[serde(default)]
     pub each: Option<String>,
 }
 
@@ -30,6 +33,9 @@ pub struct Act {
 
     #[serde(default)]
     pub r#for: Option<ActFor>,
+
+    #[serde(default)]
+    pub catches: Vec<ActCatch>,
 }
 
 impl ModelBase for Act {

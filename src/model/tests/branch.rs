@@ -40,12 +40,12 @@ fn model_branch_run() {
 }
 
 #[test]
-fn model_branch_default() {
+fn model_branch_else() {
     let mut b = Branch::new();
-    assert_eq!(b.default, false);
+    assert_eq!(b.r#else, false);
 
-    b = b.with_default(true);
-    assert_eq!(b.default, true);
+    b = b.with_else(true);
+    assert_eq!(b.r#else, true);
 }
 
 #[test]

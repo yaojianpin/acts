@@ -172,6 +172,7 @@ pub fn action_state_to_str(state: ActionState) -> String {
         ActionState::Created => "created".to_string(),
         ActionState::Skipped => "skipped".to_string(),
         ActionState::Submitted => "submitted".to_string(),
+        ActionState::Error => "error".to_string(),
     }
 }
 
@@ -184,6 +185,7 @@ pub fn str_to_action_state(s: &str) -> ActionState {
         "created" => ActionState::Created,
         "skipped" => ActionState::Skipped,
         "submitted" => ActionState::Submitted,
+        "err" => ActionState::Error,
         "none" | _ => ActionState::None,
     }
 }

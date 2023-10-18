@@ -12,7 +12,7 @@ use crate::{
         Context, Proc, Scheduler, TaskState,
     },
     utils::{self, consts},
-    ActError, ActTask, Message, NodeKind, Result, ShareLock, Vars, WorkflowAction,
+    ActError, ActTask, Error, Message, NodeKind, Result, ShareLock, Vars, WorkflowAction,
 };
 use async_trait::async_trait;
 use serde_json::json;
@@ -270,6 +270,7 @@ impl Task {
             | ActionState::Completed => self.set_state(TaskState::Success),
             ActionState::Aborted => self.set_state(TaskState::Abort),
             ActionState::Skipped => self.set_state(TaskState::Skip),
+            ActionState::Error => self.set_state(TaskState::Fail(format!("action error"))),
         }
 
         *self.action_state.write().unwrap() = state;
@@ -345,40 +346,65 @@ impl Task {
                     "to '{to}' value is not a valid string type",
                 )))?;
 
-                let tasks = ctx
-                    .proc
-                    .find_tasks(|t| t.node.kind() == NodeKind::Step && t.node_id() == nid);
+                let mut path_tasks = Vec::new();
+                let task = self.backs(
+                    &|t| t.node.kind() == NodeKind::Step && t.node_id() == nid,
+                    &mut path_tasks,
+                );
 
-                let task = tasks.last().ok_or(ActError::Action(format!(
+                let task = task.ok_or(ActError::Action(format!(
                     "cannot find history task by nid '{}'",
                     nid
                 )))?;
 
-                ctx.back_task(&ctx.task)?;
-                ctx.redo_task(task)?;
+                ctx.back_task(&ctx.task, &path_tasks)?;
+                ctx.redo_task(&task)?;
             }
             EventAction::Cancel => {
-                let parent = ctx.task.parent().ok_or(ActError::Action(format!(
-                    "cannot find parent task by tid '{}'",
+                // find the parent step task
+                let mut step = ctx.task.parent();
+                while let Some(task) = &step {
+                    if task.is_kind(NodeKind::Step) {
+                        break;
+                    }
+                    step = task.parent();
+                }
+
+                let task = step.ok_or(ActError::Action(format!(
+                    "cannot find parent step task by tid '{}'",
                     ctx.task.id,
                 )))?;
-                if !parent.state().is_success() {
+                if !task.state().is_success() {
                     return Err(ActError::Action(format!(
                         "task('{}') is not allowed to cancel",
-                        parent.id
+                        task.id
                     )));
                 }
-                // get the neartest next task
-                if let Some(next) = ctx
-                    .proc
-                    .find_tasks(|t| {
-                        t.node.kind() == NodeKind::Step && t.prev() == Some(parent.id.clone())
-                    })
-                    .last()
-                {
+                // get the neartest next step tasks
+                let mut path_tasks = Vec::new();
+                let nexts = task.follows(
+                    &|t| t.is_kind(NodeKind::Step) && !t.is_branches(),
+                    &mut path_tasks,
+                );
+                if nexts.len() == 0 {
+                    return Err(ActError::Action(format!("cannot find cancelled tasks")));
+                }
+
+                // mark the path tasks as completed
+                for p in path_tasks {
+                    if p.state().is_running() {
+                        p.set_action_state(ActionState::Completed);
+                        ctx.emit_task(&p);
+                    } else if p.state().is_pending() {
+                        p.set_action_state(ActionState::Skipped);
+                        ctx.emit_task(&p);
+                    }
+                }
+
+                for next in &nexts {
                     ctx.undo_task(next)?;
                 }
-                ctx.redo_task(&parent)?;
+                ctx.redo_task(&task)?;
             }
             EventAction::Abort => {
                 if self.state().is_completed() {
@@ -390,61 +416,69 @@ impl Task {
                 ctx.abort_task(&ctx.task)?;
             }
             EventAction::Skip => {
-                ctx.skip_task(&ctx.task)?;
+                if self.state().is_completed() {
+                    return Err(ActError::Action(format!(
+                        "task '{}' is already completed",
+                        self.id
+                    )));
+                }
+
+                for task in self.siblings() {
+                    if task.state().is_completed() {
+                        continue;
+                    }
+                    task.set_action_state(ActionState::Skipped);
+                    ctx.emit_task(&task);
+                }
+
+                // set both current act and parent step to skip
+                self.set_action_state(ActionState::Skipped);
                 self.next(ctx)?;
             }
-        }
+            EventAction::Error => {
+                let err_code =
+                    ctx.var(consts::FOR_ACT_KEY_STEP_ERR_CODE)
+                        .ok_or(ActError::Action(format!(
+                            "cannot find '{}' in options",
+                            consts::FOR_ACT_KEY_STEP_ERR_CODE
+                        )))?;
+                let err_code = err_code.as_str().unwrap_or_default();
+                if err_code.is_empty() {
+                    return Err(ActError::Action(format!(
+                        "the var '{}' cannot be empty",
+                        consts::FOR_ACT_KEY_STEP_ERR_CODE
+                    )));
+                }
 
-        Ok(())
-    }
+                let task = &ctx.task;
+                if task.state().is_completed() {
+                    return Err(ActError::Action(format!(
+                        "task '{}' is already completed",
+                        task.id
+                    )));
+                }
+                let parent = task.parent().ok_or(ActError::Action(format!(
+                    "cannot find task parent by tid '{}'",
+                    task.id
+                )))?;
 
-    pub fn next(&self, ctx: &Context) -> Result<()> {
-        let mut is_next = false;
-        if ctx.task.state().is_next() {
-            is_next = match &self.node.data {
-                NodeData::Workflow(data) => data.next(ctx)?,
-                NodeData::Job(data) => data.next(ctx)?,
-                NodeData::Step(data) => data.next(ctx)?,
-                NodeData::Branch(data) => data.next(ctx)?,
-                NodeData::Act(data) => data.next(ctx)?,
-            };
-        }
+                for sub in parent.siblings().iter() {
+                    if sub.state().is_completed() {
+                        continue;
+                    }
+                    sub.set_action_state(ActionState::Skipped);
+                    ctx.emit_task(&sub);
+                }
 
-        info!("is_next:{} task={:?}", is_next, ctx.task);
-        if self.state().is_completed() {
-            ctx.emit_task(self);
-        }
-
-        if !is_next {
-            let parent = ctx.task.parent();
-            if let Some(task) = &parent.clone() {
-                let ctx = task.create_context(&ctx.scher);
-                task.review(&ctx)?;
-            }
-        }
-
-        Ok(())
-    }
-
-    pub fn review(&self, ctx: &Context) -> Result<()> {
-        let is_review = match &self.node.data {
-            NodeData::Workflow(data) => data.review(ctx)?,
-            NodeData::Job(data) => data.review(ctx)?,
-            NodeData::Step(data) => data.review(ctx)?,
-            NodeData::Branch(data) => data.review(ctx)?,
-            NodeData::Act(data) => data.review(ctx)?,
-        };
-
-        info!("is_review:{} task={:?}", is_review, ctx.task);
-        if self.state().is_completed() {
-            ctx.emit_task(self);
-        }
-
-        if is_review {
-            let parent = ctx.task.parent();
-            if let Some(task) = &parent.clone() {
-                let ctx = task.create_context(&ctx.scher);
-                task.review(&ctx)?;
+                let err_message = ctx
+                    .var(consts::FOR_ACT_KEY_STEP_ERR_MESSAGE)
+                    .map(|e| e.as_str().unwrap().to_string())
+                    .unwrap_or_default();
+                ctx.set_err(&Error {
+                    key: err_code.to_string(),
+                    message: err_message,
+                });
+                task.error(ctx)?;
             }
         }
 
@@ -488,7 +522,7 @@ impl Task {
                     return false;
                 }
 
-                if n.default {
+                if n.r#else {
                     if siblings.iter().all(|iter| iter.state().is_skip()) {
                         return true;
                     }
@@ -508,6 +542,69 @@ impl Task {
             NodeData::Act(_) => false,
             _ => true,
         }
+    }
+
+    /// check if the task includes branches
+    fn is_branches(&self) -> bool {
+        self.node
+            .children()
+            .iter()
+            .any(|iter| iter.kind() == NodeKind::Branch)
+    }
+
+    fn backs<F: Fn(&Arc<Self>) -> bool + Clone>(
+        &self,
+        predicate: &F,
+        path: &mut Vec<Arc<Self>>,
+    ) -> Option<Arc<Self>> {
+        let mut ret = None;
+
+        let mut prev = self.prev();
+        while let Some(tid) = &prev {
+            if let Some(task) = self.proc.task(tid) {
+                if predicate(&task) {
+                    ret = Some(task.clone());
+                    break;
+                }
+
+                // push the path tasks
+                if task.state().is_running() || task.state().is_pending() {
+                    path.push(task.clone());
+                }
+
+                prev = task.prev();
+            } else {
+                prev = None
+            }
+        }
+
+        ret
+    }
+
+    fn follows<F: Fn(&Arc<Self>) -> bool + Clone>(
+        &self,
+        predicate: &F,
+        path: &mut Vec<Arc<Self>>,
+    ) -> Vec<Arc<Self>> {
+        let mut ret = Vec::new();
+        let children = self.children();
+        if children.len() > 0 {
+            for task in &children {
+                if predicate(task) {
+                    ret.push(task.clone());
+                } else {
+                    // push the path tasks
+                    if task.state().is_running() || task.state().is_pending() {
+                        path.push(task.clone());
+                    }
+
+                    // find the next follows
+                    ret.extend(task.follows(predicate, path).into_iter());
+                }
+            }
+        }
+
+        ret
     }
 }
 
@@ -543,6 +640,69 @@ impl ActTask for Task {
         }
 
         Ok(())
+    }
+
+    fn next(&self, ctx: &Context) -> Result<bool> {
+        let mut is_next = false;
+        if ctx.task.state().is_next() {
+            is_next = match &self.node.data {
+                NodeData::Workflow(data) => data.next(ctx)?,
+                NodeData::Job(data) => data.next(ctx)?,
+                NodeData::Step(data) => data.next(ctx)?,
+                NodeData::Branch(data) => data.next(ctx)?,
+                NodeData::Act(data) => data.next(ctx)?,
+            };
+        }
+
+        info!("is_next:{} task={:?}", is_next, ctx.task);
+        if self.state().is_completed() {
+            ctx.emit_task(self);
+        }
+
+        if !is_next {
+            let parent = ctx.task.parent();
+            if let Some(task) = &parent.clone() {
+                let ctx = task.create_context(&ctx.scher);
+                task.review(&ctx)?;
+            }
+        }
+
+        Ok(false)
+    }
+
+    fn review(&self, ctx: &Context) -> Result<bool> {
+        let is_review = match &self.node.data {
+            NodeData::Workflow(data) => data.review(ctx)?,
+            NodeData::Job(data) => data.review(ctx)?,
+            NodeData::Step(data) => data.review(ctx)?,
+            NodeData::Branch(data) => data.review(ctx)?,
+            NodeData::Act(data) => data.review(ctx)?,
+        };
+
+        info!("is_review:{} task={:?}", is_review, ctx.task);
+        if self.state().is_completed() {
+            ctx.emit_task(self);
+        }
+
+        if is_review {
+            let parent = ctx.task.parent();
+            if let Some(task) = &parent.clone() {
+                let ctx = task.create_context(&ctx.scher);
+                return task.review(&ctx);
+            }
+        }
+
+        Ok(false)
+    }
+
+    fn error(&self, ctx: &Context) -> Result<()> {
+        match &self.node.data {
+            NodeData::Workflow(data) => data.error(ctx),
+            NodeData::Job(data) => data.error(ctx),
+            NodeData::Step(data) => data.error(ctx),
+            NodeData::Branch(data) => data.error(ctx),
+            NodeData::Act(data) => data.error(ctx),
+        }
     }
 }
 
