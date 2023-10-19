@@ -125,7 +125,7 @@ impl Rule {
                     let mut outputs = Vars::new();
                     outputs.insert(rule.to_string(), json!(null));
 
-                    ctx.sched_act(rule, &f.tag(ctx), &inputs, &outputs);
+                    ctx.sched_act(rule, &f.tag(ctx), &inputs, &outputs)?;
                 }
 
                 Ok(is_pass)
@@ -168,19 +168,19 @@ impl Rule {
                     for uid in cands.iter() {
                         let mut inputs = Vars::new();
                         inputs.insert(consts::FOR_ACT_KEY_UID.to_string(), json!(uid));
-                        ctx.sched_act(&f.each_key(), &f.tag(ctx), &inputs, &Vars::new());
+                        ctx.sched_act(&f.each_key(), &f.tag(ctx), &inputs, &Vars::new())?;
                     }
                 }
                 Rule::Any => {
                     let mut inputs = Vars::new();
                     inputs.insert(consts::FOR_ACT_KEY_CANDS.to_string(), json!(cands));
-                    ctx.sched_act(&f.each_key(), &f.tag(ctx), &inputs, &Vars::new());
+                    ctx.sched_act(&f.each_key(), &f.tag(ctx), &inputs, &Vars::new())?;
                 }
                 Rule::Some(_rule) => {
                     for uid in cands.iter() {
                         let mut inputs = Vars::new();
                         inputs.insert(consts::FOR_ACT_KEY_UID.to_string(), json!(uid));
-                        ctx.sched_act(&f.each_key(), &f.tag(ctx), &inputs, &Vars::new());
+                        ctx.sched_act(&f.each_key(), &f.tag(ctx), &inputs, &Vars::new())?;
                     }
                 }
                 Rule::Ord(rule) => {
@@ -194,7 +194,7 @@ impl Rule {
                             outputs.insert(consts::FOR_ACT_KEY_CANDS.to_string(), json!(null));
                             outputs.insert(key.to_string(), json!(null));
 
-                            ctx.sched_act(&key, &f.tag(ctx), &inputs, &outputs);
+                            ctx.sched_act(&key, &f.tag(ctx), &inputs, &outputs)?;
                             return Ok(true);
                         }
                     }
@@ -211,7 +211,7 @@ impl Rule {
                         let mut inputs = Vars::new();
                         inputs.insert(consts::FOR_ACT_KEY_UID.to_string(), json!(uid));
                         inputs.insert(consts::FOR_ACT_KEY_ORD_INDEX.to_string(), ord.into());
-                        ctx.sched_act(&f.each_key(), &f.tag(ctx), &inputs, &Vars::new());
+                        ctx.sched_act(&f.each_key(), &f.tag(ctx), &inputs, &Vars::new())?;
 
                         // order_index += 1
                         ctx.task

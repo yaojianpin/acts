@@ -1,6 +1,6 @@
 use crate::{
     sch::{Proc, Scheduler},
-    utils, Engine, TaskState, Vars, Workflow,
+    utils, Action, Engine, TaskState, Vars, Workflow,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -33,11 +33,66 @@ async fn sch_scher_task() {
     let s = scher.clone();
     tokio::spawn(async move {
         let proc = Proc::new(&pid);
-        proc.load(&workflow);
+        proc.load(&workflow).unwrap();
         proc.set_state(TaskState::Pending);
         s.launch(&Arc::new(proc))
     });
 
     let ret = scher.next().await;
     assert_eq!(ret, true);
+}
+
+#[tokio::test]
+async fn sch_scher_start_default() {
+    let scher = Scheduler::new();
+    let workflow = Workflow::new();
+    let s = scher.clone();
+    let result = s.start(&workflow, &Vars::new());
+    assert_eq!(result.is_ok(), true);
+}
+
+#[tokio::test]
+async fn sch_scher_start_with_vars() {
+    let scher = Scheduler::new();
+    let workflow = Workflow::new();
+    let s = scher.clone();
+    let mut vars = Vars::new();
+    vars.insert("a".to_string(), json!(100));
+    vars.insert("b".to_string(), json!("string"));
+
+    let result = s.start(&workflow, &vars).unwrap();
+
+    let pid = result.outputs().get("pid").unwrap().as_str().unwrap();
+    scher.next().await;
+    let proc = scher.proc(pid).unwrap();
+
+    assert_eq!(proc.env().get("a").unwrap(), json!(100));
+    assert_eq!(proc.env().get("b").unwrap(), json!("string"));
+}
+
+#[tokio::test]
+async fn sch_scher_do_action() {
+    let scher = Scheduler::new();
+    let workflow = Workflow::new().with_job(|job| {
+        job.with_name("job1").with_step(|step| {
+            step.with_name("step1")
+                .with_act(|act| act.with_id("act1").with_input("uid", json!("u1")))
+        })
+    });
+    let s = scher.clone();
+    scher.emitter().on_complete(|e| e.close());
+    scher.emitter().on_message(move |e| {
+        if e.is_key("act1") && e.is_state("created") {
+            let mut options = Vars::new();
+            options.insert("uid".to_string(), json!("u1"));
+            let action = Action::new(&e.proc_id, &e.id, "complete", &options);
+            s.do_action(&action).unwrap();
+        }
+    });
+    let proc = Arc::new(Proc::new(&utils::longid()));
+    proc.load(&workflow).unwrap();
+    scher.launch(&proc);
+    scher.event_loop().await;
+
+    assert_eq!(proc.state().is_success(), true);
 }

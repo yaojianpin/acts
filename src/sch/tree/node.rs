@@ -75,6 +75,17 @@ impl NodeData {
 }
 
 impl Node {
+    pub fn new(data: NodeData, level: usize) -> Self {
+        Self {
+            data,
+            level,
+            parent: Arc::new(RwLock::new(Weak::new())),
+            children: Arc::new(RwLock::new(Vec::new())),
+            prev: Arc::new(RwLock::new(Weak::new())),
+            next: Arc::new(RwLock::new(Weak::new())),
+        }
+    }
+
     pub fn parent(&self) -> Option<Arc<Node>> {
         let node = self.parent.read().unwrap();
         if let Some(parent) = node.upgrade() {

@@ -63,8 +63,9 @@ impl Executor {
         tid: &str,
         options: &Vars,
     ) -> Result<ActionResult> {
-        let act = Action::new(pid, tid, action, options);
-        let ret = self.scher.do_action(&act);
+        let ret = self
+            .scher
+            .do_action(&Action::new(pid, tid, action, options));
         if let Err(err) = ret.as_ref() {
             error!("{}", err);
         }

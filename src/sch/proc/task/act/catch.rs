@@ -13,7 +13,7 @@ impl ActTask for Vec<ActCatch> {
             for c in self.iter().filter(|iter| iter.err.is_some()) {
                 if let Some(code) = &c.err {
                     if code == &err.key {
-                        ctx.sched_act(&c.id, &c.tag, &c.inputs, &c.outputs);
+                        ctx.sched_act(&c.id, &c.tag, &c.inputs, &c.outputs)?;
                         is_catched = true;
                         break;
                     }
@@ -23,7 +23,7 @@ impl ActTask for Vec<ActCatch> {
             // process the any err catch
             if !is_catched {
                 if let Some(c) = self.iter().find(|iter| iter.err.is_none()) {
-                    ctx.sched_act(&c.id, &c.tag, &c.inputs, &c.outputs);
+                    ctx.sched_act(&c.id, &c.tag, &c.inputs, &c.outputs)?;
                     is_catched = true;
                 }
             }

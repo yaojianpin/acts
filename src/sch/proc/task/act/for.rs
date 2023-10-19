@@ -24,7 +24,7 @@ impl ActTask for ActFor {
 
             let mut outputs = Vars::new();
             outputs.insert(consts::FOR_ACT_KEY_USERS.to_string(), json!(null));
-            ctx.sched_act(&self.init_key(), &self.tag(ctx), &inputs, &outputs);
+            ctx.sched_act(&self.init_key(), &self.tag(ctx), &inputs, &outputs)?;
         } else {
             let users = cand
                 .users(&HashMap::new())?

@@ -82,13 +82,13 @@ impl Workflow {
 
     pub fn print(&self) {
         let mut root = NodeTree::new();
-        root.load(self);
+        root.load(self).unwrap();
         root.print();
     }
 
     pub fn tree_output(&self) -> String {
         let mut root = NodeTree::new();
-        root.load(self);
+        root.load(self).unwrap();
         root.tree_output()
     }
 
@@ -126,6 +126,12 @@ impl Workflow {
 
     pub fn action(&self, id: &str) -> Option<&WorkflowAction> {
         self.actions.iter().find(|item| item.id == id)
+    }
+
+    pub fn valid(&self) -> Result<()> {
+        let mut root = NodeTree::new();
+        root.load(self)?;
+        Ok(())
     }
 }
 

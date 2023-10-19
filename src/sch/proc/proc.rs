@@ -64,14 +64,14 @@ impl Proc {
         &self.env
     }
 
-    pub fn load(&self, model: &Workflow) {
+    pub fn load(&self, model: &Workflow) -> Result<()> {
         let env = &self.env;
         let vars = utils::fill_proc_vars(&env, &model.env);
         env.append(&model.outputs);
         env.append(&vars);
 
         let tree = &mut self.tree.write().unwrap();
-        tree.load(model);
+        tree.load(model)
     }
 
     pub fn tree(&self) -> std::sync::RwLockReadGuard<'_, NodeTree> {

@@ -95,7 +95,7 @@ impl Context {
         self.scher.push(&task);
     }
 
-    pub fn sched_act(&self, id: &str, tag: &str, inputs: &Vars, outputs: &Vars) {
+    pub fn sched_act(&self, id: &str, tag: &str, inputs: &Vars, outputs: &Vars) -> Result<()> {
         let act = model::Act {
             id: id.to_string(),
             tag: tag.to_string(),
@@ -104,16 +104,16 @@ impl Context {
             ..Default::default()
         };
 
-        let node = self
-            .proc
-            .tree()
-            .make(NodeData::Act(act), self.task.node.level + 1);
+        // does not add the node to tree
+        let node = Arc::new(Node::new(NodeData::Act(act), self.task.node.level + 1));
         node.set_parent(&self.task.node);
 
         if self.task.state().is_pending() {
             let task = self.proc.create_task(&node, Some(self.task.clone()));
             self.scher.push(&task);
         }
+
+        Ok(())
     }
 
     /// redo the task and dispatch directly

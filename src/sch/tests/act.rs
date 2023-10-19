@@ -755,7 +755,7 @@ fn create_proc(workflow: &mut Workflow, pid: &str) -> (Arc<Proc>, Arc<Scheduler>
     let engine = Engine::new();
     let scher = engine.scher();
     let proc = Arc::new(Proc::new(&pid));
-    proc.load(workflow);
+    proc.load(workflow).unwrap();
 
     let emitter = scher.emitter().clone();
     let s = scher.clone();
@@ -781,7 +781,7 @@ fn create_proc2(
     let scher = engine.scher();
 
     let proc = Arc::new(Proc::new(&pid));
-    proc.load(workflow);
+    proc.load(workflow).unwrap();
 
     let emitter = scher.emitter().clone();
     let executor = engine.executor().clone();

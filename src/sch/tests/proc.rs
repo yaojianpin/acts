@@ -61,7 +61,7 @@ async fn sch_proc_task() {
     });
 
     let pid = utils::longid();
-    let tr = NodeTree::build(&mut workflow);
+    let tr = NodeTree::build(&mut workflow).unwrap();
     let (proc, _) = create_proc(&mut workflow, &pid);
 
     let node = tr.root.as_ref().unwrap();

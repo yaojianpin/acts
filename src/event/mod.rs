@@ -125,6 +125,20 @@ where
             s.close();
         }
     }
+
+    #[cfg(test)]
+    pub fn do_action(
+        &self,
+        pid: &str,
+        tid: &str,
+        action: &str,
+        options: &crate::Vars,
+    ) -> Result<crate::ActionResult> {
+        if let Some(scher) = &self.scher {
+            return scher.do_action(&Action::new(pid, tid, action, options));
+        }
+        Err(ActError::Action(format!("scher is not define in Event")))
+    }
 }
 
 impl<T, E> std::fmt::Debug for Event<T, E>

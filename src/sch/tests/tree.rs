@@ -25,14 +25,14 @@ jobs:
 #[tokio::test]
 async fn sch_tree_from() {
     let mut workflow = Workflow::from_yml(SIMPLE_WORKFLOW).unwrap();
-    let tr = NodeTree::build(&mut workflow);
+    let tr = NodeTree::build(&mut workflow).unwrap();
     assert!(tr.root.is_some());
 }
 
 #[tokio::test]
 async fn sch_tree_get() {
     let mut workflow = Workflow::from_yml(SIMPLE_WORKFLOW).unwrap();
-    let tr = NodeTree::build(&mut workflow);
+    let tr = NodeTree::build(&mut workflow).unwrap();
 
     let job = tr.node("job1");
     assert!(job.is_some());
@@ -45,7 +45,7 @@ async fn sch_tree_new() {
     let mut workflow = Workflow::default();
     workflow.set_id("1");
     let data = NodeData::Workflow(workflow);
-    let node = tr.make(data, 0);
+    let node = tr.make(data, 0).unwrap();
     tr.set_root(&node);
     assert!(tr.root.is_some());
     assert_eq!(tr.root.unwrap().id(), "1");
@@ -57,12 +57,12 @@ async fn sch_tree_set_parent() {
     let mut workflow = Workflow::default();
     workflow.set_id("1");
     let data = NodeData::Workflow(workflow);
-    let parent = tr.make(data, 0);
+    let parent = tr.make(data, 0).unwrap();
 
     let mut workflow = Workflow::default();
     workflow.set_id("2");
     let data = NodeData::Workflow(workflow);
-    let node = tr.make(data, 1);
+    let node = tr.make(data, 1).unwrap();
     node.set_parent(&parent);
 
     assert!(parent.children().len() > 0);
@@ -76,12 +76,12 @@ async fn sch_tree_set_next() {
     let mut workflow = Workflow::default();
     workflow.set_id("1");
     let data = NodeData::Workflow(workflow);
-    let prev = tr.make(data, 0);
+    let prev = tr.make(data, 0).unwrap();
 
     let mut workflow = Workflow::default();
     workflow.set_id("2");
     let data = NodeData::Workflow(workflow);
-    let node = tr.make(data, 1);
+    let node = tr.make(data, 1).unwrap();
     prev.set_next(&node, true);
 
     assert_eq!(prev.next().upgrade().unwrap().id(), "2");
@@ -93,7 +93,7 @@ async fn sch_tree_jobs() {
         .with_id("w1")
         .with_job(|job| job.with_id("job1"))
         .with_job(|job| job.with_id("job2"));
-    let tree = NodeTree::build(&mut workflow);
+    let tree = NodeTree::build(&mut workflow).unwrap();
     let root = tree.root().unwrap();
 
     let node1 = tree.node("job1").unwrap();
@@ -110,7 +110,7 @@ async fn sch_tree_job_steps() {
             .with_step(|step| step.with_id("step1"))
             .with_step(|step| step.with_id("step2"))
     });
-    let tree = NodeTree::build(&mut workflow);
+    let tree = NodeTree::build(&mut workflow).unwrap();
     let job = tree.node("job1").unwrap();
     let step1 = tree.node("step1").unwrap();
     let step2 = tree.node("step2").unwrap();
@@ -128,7 +128,7 @@ async fn sch_tree_step_auto_next() {
             .with_step(|step| step.with_id("step2"))
             .with_step(|step| step.with_id("step3"))
     });
-    let tree = NodeTree::build(&mut workflow);
+    let tree = NodeTree::build(&mut workflow).unwrap();
     let step1 = tree.node("step1").unwrap();
     let step2 = tree.node("step2").unwrap();
     let step3 = tree.node("step3").unwrap();
@@ -145,7 +145,7 @@ async fn sch_tree_step_next_value() {
             .with_step(|step| step.with_id("step2"))
             .with_step(|step| step.with_id("step3").with_next("step1"))
     });
-    let tree = NodeTree::build(&mut workflow);
+    let tree = NodeTree::build(&mut workflow).unwrap();
     let step3 = tree.node("step3").unwrap();
     assert_eq!(step3.next().upgrade().unwrap().id(), "step1");
 }
@@ -158,7 +158,7 @@ async fn sch_tree_step_prev() {
             .with_step(|step| step.with_id("step2"))
             .with_step(|step| step.with_id("step3"))
     });
-    let tree = NodeTree::build(&mut workflow);
+    let tree = NodeTree::build(&mut workflow).unwrap();
     let step1 = tree.node("step1").unwrap();
     let step2 = tree.node("step2").unwrap();
     let step3 = tree.node("step3").unwrap();
@@ -176,7 +176,7 @@ async fn sch_tree_branches() {
                 .with_branch(|b| b.with_id("b2"))
         })
     });
-    let tree = NodeTree::build(&mut workflow);
+    let tree = NodeTree::build(&mut workflow).unwrap();
     let step = tree.node("step1").unwrap();
     let b1 = tree.node("b1").unwrap();
     let b2 = tree.node("b2").unwrap();
@@ -202,7 +202,7 @@ async fn sch_tree_branch_steps() {
                 })
         })
     });
-    let tree = NodeTree::build(&mut workflow);
+    let tree = NodeTree::build(&mut workflow).unwrap();
     tree.print();
     let b1 = tree.node("b1").unwrap();
     let b2 = tree.node("b2").unwrap();
@@ -224,7 +224,7 @@ async fn sch_tree_acts() {
                 .with_act(|act| act.with_id("act2"))
         })
     });
-    let tree = NodeTree::build(&mut workflow);
+    let tree = NodeTree::build(&mut workflow).unwrap();
     let step = tree.node("step1").unwrap();
     let act1 = tree.node("act1").unwrap();
     let act2 = tree.node("act2").unwrap();

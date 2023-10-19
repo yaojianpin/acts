@@ -385,7 +385,7 @@ fn create_task_context() -> Arc<Context> {
             .with_step(|step| step.with_name("step1"))
     });
     let id = utils::longid();
-    let tr = NodeTree::build(&mut workflow);
+    let tr = NodeTree::build(&mut workflow).unwrap();
     let scher = Scheduler::new();
     let proc = scher.create_proc(&id, &workflow);
 

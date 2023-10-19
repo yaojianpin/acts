@@ -309,8 +309,7 @@ impl Task {
             .action()
             .ok_or(ActError::Action(format!("cannot find action in context")))?;
         // check uid
-        let _ = ctx
-            .var(consts::FOR_ACT_KEY_UID)
+        ctx.var(consts::FOR_ACT_KEY_UID)
             .map(|v| v.as_str().unwrap().to_string())
             .ok_or(ActError::Action(format!(
                 "cannot find '{}' in options",
@@ -383,7 +382,7 @@ impl Task {
                 // get the neartest next step tasks
                 let mut path_tasks = Vec::new();
                 let nexts = task.follows(
-                    &|t| t.is_kind(NodeKind::Step) && !t.is_branches(),
+                    &|t| t.is_kind(NodeKind::Step) && t.is_acts(),
                     &mut path_tasks,
                 );
                 if nexts.len() == 0 {
@@ -545,11 +544,10 @@ impl Task {
     }
 
     /// check if the task includes branches
-    fn is_branches(&self) -> bool {
-        self.node
-            .children()
+    fn is_acts(&self) -> bool {
+        self.children()
             .iter()
-            .any(|iter| iter.kind() == NodeKind::Branch)
+            .any(|iter| iter.is_kind(NodeKind::Act))
     }
 
     fn backs<F: Fn(&Arc<Self>) -> bool + Clone>(

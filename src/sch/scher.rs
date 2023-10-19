@@ -77,7 +77,7 @@ impl Scheduler {
         w.set_env(&options);
 
         let proc = Arc::new(Proc::new(&proc_id));
-        proc.load(&w);
+        proc.load(&w)?;
         self.launch(&proc);
 
         // add pid to state

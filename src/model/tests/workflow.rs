@@ -2,7 +2,7 @@ use crate::{Vars, Workflow};
 use serde_json::json;
 
 #[test]
-fn model_workflow_from_str() {
+fn model_workflow_from_yml_str() {
     let text = r#"
     name: workflow
     id: m1
@@ -10,6 +10,35 @@ fn model_workflow_from_str() {
     let m = Workflow::from_yml(text).unwrap();
     assert_eq!(m.id, "m1");
     assert_eq!(m.name, "workflow");
+}
+
+#[test]
+fn model_workflow_from_json_str() {
+    let text = r#"
+    {
+        "name": "workflow",
+        "id": "m1"
+    }
+    "#;
+    let m = Workflow::from_json(text).unwrap();
+    assert_eq!(m.id, "m1");
+    assert_eq!(m.name, "workflow");
+}
+
+#[test]
+fn model_workflow_to_yml_str() {
+    let model =
+        Workflow::new().with_job(|job| job.with_id("job1").with_step(|step| step.with_id("step1")));
+    let m = model.to_yml();
+    assert_eq!(m.is_ok(), true);
+}
+
+#[test]
+fn model_workflow_to_json_str() {
+    let model =
+        Workflow::new().with_job(|job| job.with_id("job1").with_step(|step| step.with_id("step1")));
+    let m = model.to_json();
+    assert_eq!(m.is_ok(), true);
 }
 
 #[test]
@@ -55,4 +84,47 @@ fn model_workflow_actions() {
         .with_action(|action| action.with_id("a2"));
     assert_eq!(m.actions.len(), 2);
     assert!(m.action("a1").is_some());
+}
+
+#[test]
+fn model_workflow_actions_with_on() {
+    let m = Workflow::new().with_action(|action| {
+        action.with_id("a1").with_on(|on| {
+            on.with_state("created")
+                .with_nid("step1")
+                .with_nkind("step")
+        })
+    });
+    assert!(m.action("a1").is_some());
+    assert_eq!(m.action("a1").unwrap().on.get(0).unwrap().state, "created");
+    assert_eq!(
+        m.action("a1")
+            .unwrap()
+            .on
+            .get(0)
+            .unwrap()
+            .nkind
+            .as_ref()
+            .unwrap(),
+        "step"
+    );
+    assert_eq!(
+        m.action("a1")
+            .unwrap()
+            .on
+            .get(0)
+            .unwrap()
+            .nid
+            .as_ref()
+            .unwrap(),
+        "step1"
+    );
+}
+
+#[test]
+fn model_workflow_valid() {
+    let m = Workflow::new()
+        .with_job(|job| job.with_id("job1").with_step(|step| step.with_id("step1")))
+        .with_job(|job| job.with_id("job1").with_step(|step| step.with_id("step1")));
+    assert_eq!(m.valid().is_err(), true);
 }

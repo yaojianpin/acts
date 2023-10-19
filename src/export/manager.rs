@@ -21,6 +21,7 @@ impl Manager {
     #[instrument(skip(self))]
     pub fn deploy(&self, model: &Workflow) -> Result<ActionResult> {
         let mut state = ActionResult::begin();
+        model.valid()?;
         self.scher.cache().store().deploy(model)?;
         state.end();
 

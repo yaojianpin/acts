@@ -88,7 +88,7 @@ fn cache_upsert() {
     });
 
     let pid = utils::longid();
-    let tree = NodeTree::build(&mut workflow);
+    let tree = NodeTree::build(&mut workflow).unwrap();
 
     let cache = Cache::new(10);
     let proc = Arc::new(Proc::new(&pid));

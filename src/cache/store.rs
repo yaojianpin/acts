@@ -27,7 +27,7 @@ impl Store {
                 let vars = &utils::vars::from_string(&p.vars);
                 let state = p.state.clone();
                 let mut proc = sch::Proc::new(&p.id);
-                proc.load(&model);
+                proc.load(&model)?;
                 proc.set_pure_state(state.into());
                 proc.set_start_time(p.start_time);
                 proc.set_end_time(p.end_time);
@@ -49,7 +49,7 @@ impl Store {
             Ok(p) => {
                 let model = Workflow::from_json(&p.model)?;
                 let mut proc = Arc::new(sch::Proc::new(pid));
-                proc.load(&model);
+                proc.load(&model)?;
                 proc.set_state(p.state.into());
                 self.load_tasks(&mut proc)?;
 

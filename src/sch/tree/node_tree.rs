@@ -3,11 +3,11 @@ use super::{
     node::{Node, NodeData},
     visit::VisitRoot,
 };
-use crate::{ActError, ShareLock, Workflow};
+use crate::{ActError, Result, ShareLock, Workflow};
 use std::{
     cell::RefCell,
     collections::HashMap,
-    sync::{Arc, RwLock, Weak},
+    sync::{Arc, RwLock},
 };
 
 #[derive(Clone)]
@@ -32,34 +32,28 @@ impl NodeTree {
         self.root.clone()
     }
 
-    pub fn build(workflow: &mut Workflow) -> NodeTree {
+    pub fn build(workflow: &mut Workflow) -> Result<NodeTree> {
         let mut tree = NodeTree::new();
-        build::build_workflow(workflow, &mut tree);
+        build::build_workflow(workflow, &mut tree)?;
 
-        tree
+        Ok(tree)
     }
 
-    pub fn load(&mut self, model: &Workflow) {
+    pub fn load(&mut self, model: &Workflow) -> Result<()> {
         let mut model = model.clone();
-        build::build_workflow(&mut model, self);
+        build::build_workflow(&mut model, self)
     }
 
-    pub fn make(&self, data: NodeData, level: usize) -> Arc<Node> {
-        let node = Arc::new(Node {
-            data,
-            level,
-            parent: Arc::new(RwLock::new(Weak::new())),
-            children: Arc::new(RwLock::new(Vec::new())),
-            prev: Arc::new(RwLock::new(Weak::new())),
-            next: Arc::new(RwLock::new(Weak::new())),
-        });
+    pub fn make(&self, data: NodeData, level: usize) -> Result<Arc<Node>> {
+        let node = Arc::new(Node::new(data, level));
 
-        self.node_map
-            .write()
-            .unwrap()
-            .insert(node.id(), node.clone());
+        let mut node_map = self.node_map.write().unwrap();
+        if node_map.contains_key(&node.id()) {
+            return Err(ActError::Model(format!("dup node id with '{}'", node.id())));
+        }
+        node_map.insert(node.id(), node.clone());
 
-        node
+        Ok(node)
     }
 
     pub fn set_root(&mut self, node: &Arc<Node>) {
