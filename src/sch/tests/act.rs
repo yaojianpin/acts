@@ -32,7 +32,77 @@ async fn sch_act_create() {
     proc.print();
     assert_eq!(
         proc.task_by_nid("act1").get(0).unwrap().state(),
+        TaskState::Interrupt
+    );
+}
+
+#[tokio::test]
+async fn sch_act_needs_pending() {
+    let mut workflow = Workflow::new().with_job(|mut job| {
+        job.name = "job1".to_string();
+        job.with_step(|step| {
+            step.with_name("step1")
+                .with_act(|act| act.with_id("act1").with_need("act2"))
+                .with_act(|act| act.with_id("act2"))
+        })
+    });
+
+    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
+    emitter.on_message(move |e| {
+        if e.is_type("act") {
+            e.close();
+        }
+    });
+
+    scher.launch(&proc);
+    scher.event_loop().await;
+    proc.print();
+    assert_eq!(
+        proc.task_by_nid("act2").get(0).unwrap().state(),
+        TaskState::Interrupt
+    );
+    assert_eq!(
+        proc.task_by_nid("act1").get(0).unwrap().state(),
         TaskState::Pending
+    );
+}
+
+#[tokio::test]
+async fn sch_act_needs_resume() {
+    let mut workflow = Workflow::new().with_job(|mut job| {
+        job.name = "job1".to_string();
+        job.with_step(|step| {
+            step.with_name("step1")
+                .with_act(|act| act.with_id("act1").with_need("act2"))
+                .with_act(|act| act.with_id("act2"))
+        })
+    });
+
+    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
+    emitter.on_message(move |e| {
+        if e.is_key("act2") && e.is_state("created") {
+            let mut options = Vars::new();
+            options.insert("uid".to_string(), json!("u1"));
+
+            e.do_action(&e.proc_id, &e.id, "complete", &options)
+                .unwrap();
+        }
+
+        if e.is_key("act1") {
+            e.close();
+        }
+    });
+
+    scher.launch(&proc);
+    scher.event_loop().await;
+    proc.print();
+    assert_eq!(
+        proc.task_by_nid("act2").get(0).unwrap().state(),
+        TaskState::Success
+    );
+    assert_eq!(
+        proc.task_by_nid("act1").get(0).unwrap().state(),
+        TaskState::Interrupt
     );
 }
 
@@ -741,6 +811,39 @@ async fn sch_act_do_action_msg_id_error() {
             // create options that not contains uid key
             let options = Vars::new();
             let action = Action::new(&e.inner().proc_id, "no_exist_msg_id", "complete", &options);
+            *r.lock().unwrap() = s.do_action(&action).is_err();
+            s.close();
+        }
+    });
+
+    scher.launch(&proc);
+    scher.event_loop().await;
+    assert!(*ret.lock().unwrap());
+}
+
+#[tokio::test]
+async fn sch_act_do_action_not_act_task() {
+    let ret = Arc::new(Mutex::new(false));
+    let mut workflow = Workflow::new().with_job(|job| {
+        job.with_name("job1").with_step(|step| {
+            step.with_id("step1").with_act(|act| {
+                act.with_id("fn1")
+                    .with_name("fn 1")
+                    .with_input("uid", json!("a"))
+            })
+        })
+    });
+
+    let pid = utils::longid();
+    let (proc, scher, emitter) = create_proc(&mut workflow, &pid);
+
+    let s = scher.clone();
+    let r = ret.clone();
+    emitter.on_message(move |e| {
+        if e.inner().state() == ActionState::Created && e.inner().r#type == "step" {
+            // create options that not contains uid key
+            let options = Vars::new();
+            let action = Action::new(&e.proc_id, &e.id, "complete", &options);
             *r.lock().unwrap() = s.do_action(&action).is_err();
             s.close();
         }

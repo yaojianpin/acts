@@ -1,5 +1,5 @@
 use crate::{
-    event::Emitter,
+    event::{ActionState, Emitter},
     sch::{Proc, Scheduler},
     utils, Action, Engine, TaskState, Vars, Workflow,
 };
@@ -38,15 +38,16 @@ async fn sch_task_jobs() {
 }
 
 #[tokio::test]
-async fn sch_task_job_needs() {
-    let mut workflow = Workflow::new()
-        .with_job(|job| job.with_id("job1").with_need("job2"))
-        .with_job(|job| job.with_id("job2"));
-    let id = utils::longid();
-    let (proc, scher, _) = create_proc(&mut workflow, &id);
+async fn sch_task_job_completed() {
+    let mut workflow = Workflow::new().with_job(|job| job.with_id("job1"));
+    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
+    emitter.on_message(|msg| {
+        if msg.inner().r#type == "job" && msg.inner().state() == ActionState::Completed {
+            assert!(true);
+        }
+    });
     scher.launch(&proc);
     scher.event_loop().await;
-    assert_eq!(proc.state(), TaskState::Success);
 }
 
 #[tokio::test]
@@ -162,6 +163,86 @@ async fn sch_task_job_state_pending_to_running() {
     assert_eq!(
         proc.task_by_nid("job2").get(0).unwrap().state(),
         TaskState::Success
+    );
+}
+
+#[tokio::test]
+async fn sch_task_job_needs_basic() {
+    let mut workflow = Workflow::new()
+        .with_job(|job| job.with_id("job1").with_need("job2"))
+        .with_job(|job| job.with_id("job2"));
+    let id = utils::longid();
+    let (proc, scher, _) = create_proc(&mut workflow, &id);
+    scher.launch(&proc);
+    scher.event_loop().await;
+    assert_eq!(proc.state(), TaskState::Success);
+}
+
+#[tokio::test]
+async fn sch_task_job_needs_pending() {
+    let mut workflow = Workflow::new()
+        .with_job(|job| {
+            job.with_id("job1")
+                .with_step(|step| step.with_id("step1").with_act(|act| act.with_id("act1")))
+        })
+        .with_job(|job| {
+            job.with_id("job2")
+                .with_need("job1")
+                .with_step(|step| step.with_id("step2").with_act(|act| act.with_id("act2")))
+        });
+    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
+    emitter.on_message(|e| {
+        if e.is_key("job1") && e.is_state("created") {
+            e.close();
+        }
+    });
+    scher.launch(&proc);
+    scher.event_loop().await;
+    assert_eq!(
+        proc.task_by_nid("job1").get(0).unwrap().state(),
+        TaskState::Running
+    );
+    assert_eq!(
+        proc.task_by_nid("job2").get(0).unwrap().state(),
+        TaskState::Pending
+    );
+}
+
+#[tokio::test]
+async fn sch_task_job_needs_resume() {
+    let mut workflow = Workflow::new()
+        .with_job(|job| {
+            job.with_id("job1")
+                .with_step(|step| step.with_id("step1").with_act(|act| act.with_id("act1")))
+        })
+        .with_job(|job| {
+            job.with_id("job2")
+                .with_need("job1")
+                .with_step(|step| step.with_id("step2").with_act(|act| act.with_id("act2")))
+        });
+    let id = utils::longid();
+    let (proc, scher, emitter) = create_proc(&mut workflow, &id);
+
+    emitter.on_message(|e| {
+        if e.is_key("act1") && e.is_state("created") {
+            let mut options = Vars::new();
+            options.insert("uid".to_string(), json!("u1"));
+            e.do_action(&e.proc_id, &e.id, "complete", &options)
+                .unwrap();
+        }
+        if e.is_key("job2") && e.is_state("created") {
+            e.close();
+        }
+    });
+    scher.launch(&proc);
+    scher.event_loop().await;
+    assert_eq!(
+        proc.task_by_nid("job1").get(0).unwrap().state(),
+        TaskState::Success
+    );
+    assert_eq!(
+        proc.task_by_nid("job2").get(0).unwrap().state(),
+        TaskState::Running
     );
 }
 

@@ -32,6 +32,9 @@ pub struct Act {
     pub outputs: Vars,
 
     #[serde(default)]
+    pub needs: Vec<String>,
+
+    #[serde(default)]
     pub r#for: Option<ActFor>,
 
     #[serde(default)]

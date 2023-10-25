@@ -17,16 +17,27 @@ use rule::Rule;
 #[async_trait]
 impl ActTask for Act {
     fn init(&self, ctx: &Context) -> Result<()> {
-        ctx.task.set_state(TaskState::Pending);
-        if let Some(ref f) = self.r#for {
-            f.init(ctx)?;
+        if self.needs.len() > 0 {
+            ctx.task.set_state(TaskState::Pending);
+        } else {
+            if let Some(ref f) = self.r#for {
+                return f.init(ctx);
+            }
+
+            ctx.task.set_state(TaskState::Interrupt);
         }
+
         Ok(())
     }
 
     fn run(&self, ctx: &Context) -> Result<()> {
         if let Some(ref f) = self.r#for {
-            f.run(ctx)?;
+            return f.run(ctx);
+        }
+        // when resuming the pending task, the current state is running
+        // for general act task, reset the state to interrupt
+        if ctx.task.state().is_running() {
+            ctx.task.set_state(TaskState::Interrupt);
         }
         Ok(())
     }
@@ -47,7 +58,7 @@ impl ActTask for Act {
         }
 
         let state = ctx.task.state();
-        if state.is_pending() {
+        if state.is_running() {
             let tasks = ctx.task.children();
 
             let mut ok_count = 0;

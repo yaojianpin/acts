@@ -5,15 +5,29 @@ use crate::{utils, Error};
 
 #[derive(Debug, Deserialize, Serialize, Default, Clone, PartialEq)]
 pub enum TaskState {
+    /// initialized state
     #[default]
     None,
 
+    /// task is pending and waiting for the other task to wake up
     Pending,
+
+    /// task is in running
     Running,
 
+    /// task is interrupted and waiting for the external action to resume
+    Interrupt,
+
+    /// task is completed with sucess
     Success,
+
+    /// task is failed with some reasons
     Fail(String),
+
+    /// task is aborted by external action
     Abort,
+
+    /// task is skippted by exteral action or internal conditions
     Skip,
 }
 
@@ -60,6 +74,10 @@ impl TaskState {
 
     pub fn is_next(&self) -> bool {
         self.is_skip() || self.is_running()
+    }
+
+    pub fn is_interrupted(&self) -> bool {
+        *self == TaskState::Interrupt
     }
 
     pub fn as_err(&self) -> Option<Error> {

@@ -9,6 +9,11 @@ impl ActTask for Vec<ActCatch> {
         let err = ctx.err().unwrap_or_default();
         let mut is_catched = false;
         if self.len() > 0 {
+            ctx.task.set_state(TaskState::Running);
+            ctx.scher
+                .emitter()
+                .emit_task_event_with_extra(&ctx.task, false);
+
             // process the specific err catch
             for c in self.iter().filter(|iter| iter.err.is_some()) {
                 if let Some(code) = &c.err {

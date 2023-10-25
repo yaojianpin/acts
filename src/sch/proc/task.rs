@@ -250,7 +250,7 @@ impl Task {
     pub fn set_state(&self, state: TaskState) {
         if state.is_completed() {
             self.set_end_time(utils::time::time());
-        } else if state.is_running() {
+        } else if state.is_running() || state.is_interrupted() {
             self.set_start_time(utils::time::time());
         }
         *self.state.write().unwrap() = state;
@@ -538,7 +538,25 @@ impl Task {
 
                 false
             }
-            NodeData::Act(_) => false,
+            NodeData::Act(n) => {
+                if n.needs.len() > 0 {
+                    let siblings = self.siblings();
+                    if siblings
+                        .iter()
+                        .filter(|iter| {
+                            iter.state().is_completed() && n.needs.contains(&iter.node_id())
+                        })
+                        .count()
+                        > 0
+                    {
+                        return true;
+                    }
+
+                    return false;
+                }
+
+                true
+            }
             _ => true,
         }
     }

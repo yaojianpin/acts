@@ -34,6 +34,12 @@ fn model_act_tag() {
 }
 
 #[test]
+fn model_act_needs() {
+    let act = Act::new().with_need("act1");
+    assert_eq!(act.needs.len(), 1);
+}
+
+#[test]
 fn model_act_for() {
     let mut act = Act::new();
     assert!(act.r#for.is_none());

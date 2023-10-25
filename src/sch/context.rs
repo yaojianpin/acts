@@ -108,7 +108,7 @@ impl Context {
         let node = Arc::new(Node::new(NodeData::Act(act), self.task.node.level + 1));
         node.set_parent(&self.task.node);
 
-        if self.task.state().is_pending() {
+        if self.task.state().is_running() {
             let task = self.proc.create_task(&node, Some(self.task.clone()));
             self.scher.push(&task);
         }

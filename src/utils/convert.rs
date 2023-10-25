@@ -194,6 +194,7 @@ pub fn state_to_str(state: TaskState) -> String {
     match state {
         TaskState::Pending => "pending".to_string(),
         TaskState::Running => "running".to_string(),
+        TaskState::Interrupt => "interrupt".to_string(),
         TaskState::Success => "success".to_string(),
         TaskState::Fail(s) => format!("fail({})", s),
         TaskState::Skip => "skip".to_string(),
@@ -211,6 +212,7 @@ pub fn str_to_state(str: &str) -> TaskState {
         "success" => TaskState::Success,
         "skip" => TaskState::Skip,
         "abort" => TaskState::Abort,
+        "interrupt" => TaskState::Interrupt,
         _ => {
             let caps = re.captures(str);
             if let Some(caps) = caps {

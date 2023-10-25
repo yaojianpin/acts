@@ -240,6 +240,11 @@ impl Act {
         self
     }
 
+    pub fn with_need(mut self, need: &str) -> Self {
+        self.needs.push(need.to_string());
+        self
+    }
+
     pub fn with_for(mut self, build: fn(ActFor) -> ActFor) -> Self {
         let f = ActFor::default();
         self.r#for = Some(build(f));

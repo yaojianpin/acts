@@ -6,7 +6,8 @@ use crate::{
         tree::{Node, NodeTree},
         Context, Scheduler, Task, TaskState,
     },
-    utils, ActError, ActionResult, ProcInfo, Result, ShareLock, Vars, Workflow, WorkflowState,
+    utils, ActError, ActionResult, NodeKind, ProcInfo, Result, ShareLock, Vars, Workflow,
+    WorkflowState,
 };
 use std::{
     cell::RefCell,
@@ -224,6 +225,13 @@ impl Proc {
             "cannot find task by '{}'",
             action.task_id
         )))?;
+
+        if !task.is_kind(NodeKind::Act) {
+            return Err(ActError::Action(format!(
+                "The task '{}' is not an Act task",
+                action.task_id
+            )));
+        }
 
         // check act outputs
         let outputs = task.node.outputs();

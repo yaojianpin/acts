@@ -7,7 +7,11 @@ use serde_json::json;
 use std::collections::{BTreeSet, HashMap};
 
 impl ActTask for ActFor {
-    fn init(&self, ctx: &Context) -> Result<()> {
+    fn init(&self, _ctx: &Context) -> Result<()> {
+        Ok(())
+    }
+
+    fn run(&self, ctx: &Context) -> Result<()> {
         // disable emit message because it will generate the sub acts
         ctx.task.set_emit_disabled(true);
         let (_, cand) = self.parse(ctx, &self.r#in)?;
@@ -37,10 +41,6 @@ impl ActTask for ActFor {
             let rule = Rule::parse(&self.by)?;
             rule.next(ctx, self)?;
         }
-        Ok(())
-    }
-
-    fn run(&self, _ctx: &Context) -> Result<()> {
         Ok(())
     }
 

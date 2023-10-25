@@ -220,18 +220,18 @@ impl Scheduler {
                     .unwrap_or_else(|err| error!("scher.initialize upsert={}", err));
 
                 // check task is allowed to emit message to client
-                if e.extra().emit_message {
+                if e.extra().emit_message && !e.state().is_pending() {
                     let emitter = scher.emitter();
                     if !e.is_emit_disabled() {
                         let msg = e.create_message();
                         emitter.emit_message(&msg);
-                    }
 
-                    let workflow = e.proc().model();
-                    if let Some(actions) = workflow.actions(e) {
-                        for action in actions {
-                            let msg = e.create_action_message(action);
-                            emitter.emit_message(&msg);
+                        let workflow = e.proc().model();
+                        if let Some(actions) = workflow.actions(e) {
+                            for action in actions {
+                                let msg = e.create_action_message(action);
+                                emitter.emit_message(&msg);
+                            }
                         }
                     }
                 }

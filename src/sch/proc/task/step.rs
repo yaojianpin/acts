@@ -65,10 +65,10 @@ impl ActTask for Step {
             for task in tasks.iter() {
                 if task.state().is_pending() && task.is_ready() {
                     let ctx = task.create_context(&ctx.scher);
+
+                    // resume task
                     task.set_state(TaskState::Running);
-                    // state is changed, emit the task
-                    // because the state is the inner task state, not emit the message to client
-                    ctx.scher.emitter().emit_task_event_with_extra(task, false);
+                    ctx.scher.emitter().emit_task_event(task);
                     task.exec(&ctx)?;
                     return Ok(false);
                 } else if task.state().is_error() {

@@ -118,6 +118,72 @@ async fn sch_message_job_completed() {
 }
 
 #[tokio::test]
+async fn sch_message_job_needs_no_pending() {
+    let message_keys = Arc::new(Mutex::new(Vec::new()));
+    let mut workflow = Workflow::new()
+        .with_job(|job| {
+            job.with_id("job1")
+                .with_step(|step| step.with_id("step1").with_act(|act| act.with_id("act1")))
+        })
+        .with_job(|job| {
+            job.with_id("job2")
+                .with_need("job1")
+                .with_step(|step| step.with_id("step2").with_act(|act| act.with_id("act2")))
+        });
+    let id = utils::longid();
+    let (proc, scher, emitter) = create_proc(&mut workflow, &id);
+
+    let keys = message_keys.clone();
+    emitter.on_message(move |e| {
+        let mut keys = keys.lock().unwrap();
+        keys.push(e.key.clone());
+        if e.is_key("job1") && e.is_state("created") {
+            e.close();
+        }
+    });
+    scher.launch(&proc);
+    scher.event_loop().await;
+    assert_eq!(
+        message_keys.lock().unwrap().contains(&"job2".to_string()),
+        false
+    );
+}
+
+#[tokio::test]
+async fn sch_message_job_needs_resume() {
+    let ret = Arc::new(Mutex::new(false));
+    let mut workflow = Workflow::new()
+        .with_job(|job| {
+            job.with_id("job1")
+                .with_step(|step| step.with_id("step1").with_act(|act| act.with_id("act1")))
+        })
+        .with_job(|job| {
+            job.with_id("job2")
+                .with_need("job1")
+                .with_step(|step| step.with_id("step2").with_act(|act| act.with_id("act2")))
+        });
+    let id = utils::longid();
+    let (proc, scher, emitter) = create_proc(&mut workflow, &id);
+
+    let r = ret.clone();
+    emitter.on_message(move |e| {
+        if e.is_key("act1") && e.is_state("created") {
+            let mut options = Vars::new();
+            options.insert("uid".to_string(), json!("u1"));
+            e.do_action(&e.proc_id, &e.id, "complete", &options)
+                .unwrap();
+        }
+        if e.is_key("job2") && e.is_state("created") {
+            *r.lock().unwrap() = true;
+            e.close();
+        }
+    });
+    scher.launch(&proc);
+    scher.event_loop().await;
+    assert_eq!(*ret.lock().unwrap(), true);
+}
+
+#[tokio::test]
 async fn sch_message_step_created() {
     let mut workflow =
         Workflow::new().with_job(|job| job.with_id("job1").with_step(|step| step.with_id("step1")));

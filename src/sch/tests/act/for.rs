@@ -1006,7 +1006,7 @@ async fn sch_act_for_back_with_branches() {
     );
     assert_eq!(
         proc.task_by_nid("act1").get(1).unwrap().state(),
-        TaskState::Pending
+        TaskState::Running
     );
 }
 
@@ -1079,7 +1079,7 @@ async fn sch_act_for_cancel_any() {
     );
     assert_eq!(
         proc.task_by_nid("act1").get(1).unwrap().state(),
-        TaskState::Pending
+        TaskState::Running
     );
 }
 
@@ -1164,7 +1164,7 @@ async fn sch_act_for_cancel_with_branches() {
     );
     assert_eq!(
         proc.task_by_nid("act1").get(1).unwrap().state(),
-        TaskState::Pending
+        TaskState::Running
     );
 }
 

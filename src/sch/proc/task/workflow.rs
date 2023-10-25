@@ -30,8 +30,10 @@ impl ActTask for Workflow {
         for task in tasks.iter() {
             if task.state().is_pending() && task.is_ready() {
                 let ctx = task.create_context(&ctx.scher);
+
+                // resume task
                 task.set_state(TaskState::Running);
-                ctx.scher.emitter().emit_task_event_with_extra(task, false);
+                ctx.scher.emitter().emit_task_event(task);
                 task.exec(&ctx)?;
                 return Ok(false);
             }
