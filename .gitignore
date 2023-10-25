@@ -3,3 +3,4 @@
 /test_data
 /.vscode
 /log
+/Cargo.lock
