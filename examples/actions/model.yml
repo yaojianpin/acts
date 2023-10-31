@@ -33,7 +33,7 @@ jobs:
                       result: ${ env.get("result") }        
           - name: cond 2
             id: cond2
-            default: true
+            else: true
             steps:
               - name: step3
                 id: step3
