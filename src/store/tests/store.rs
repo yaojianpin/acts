@@ -319,10 +319,9 @@ async fn store_task_remove() {
 }
 
 fn create_workflow() -> Workflow {
-    Workflow::new().with_id("m1").with_job(|job| {
-        job.with_id("job1")
-            .with_step(|step| step.with_name("step1"))
-    })
+    Workflow::new()
+        .with_id("m1")
+        .with_step(|step| step.with_id("step1"))
 }
 
 fn create_proc(id: &str, state: TaskState, model: &Workflow) -> Proc {

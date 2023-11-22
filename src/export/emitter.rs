@@ -25,10 +25,8 @@ impl Emitter {
     ///     let engine = Engine::new();
     ///     engine.start();
     ///
-    ///     let workflow = Workflow::new().with_id("m1").with_job(|job| {
-    ///         job.with_id("job1").with_step(|step| {
+    ///     let workflow = Workflow::new().with_id("m1").with_step(|step| {
     ///             step.with_id("step1").with_act(|act| act.with_for(|f|f.with_by("any").with_in(r#"["a"]"#)))
-    ///         })
     ///     });
     ///
     ///     engine.emitter().on_message(move |e| {

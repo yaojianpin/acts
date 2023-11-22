@@ -41,7 +41,10 @@ where
             .unwrap()
             .get(id)
             .map(|iter| iter.clone())
-            .ok_or(ActError::Store(format!("cannot find item by '{id}'")))
+            .ok_or(ActError::Store(format!(
+                "cannot find {} by '{}'",
+                self.name, id
+            )))
     }
 
     fn query(&self, q: &Query) -> crate::Result<Vec<Self::Item>> {

@@ -6,7 +6,7 @@ keywords = ["workflow"]
 license = "MIT"
 name = "acts"
 repository = "https://github.com/yaojianpin/acts.git"
-version = "0.6.0"
+version = "0.7.0"
 
 [dependencies]
 acts-tag = { version = "0.2.0" }

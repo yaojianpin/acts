@@ -41,10 +41,7 @@ async fn sch_proc_cost() {
 
 #[tokio::test]
 async fn sch_proc_time() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_name("job1")
-            .with_step(|step| step.with_name("step1"))
-    });
+    let mut workflow = Workflow::new().with_step(|step| step.with_name("step1"));
     let (proc, scher) = create_proc(&mut workflow, &utils::longid());
     scher.launch(&proc);
     scher.event_loop().await;
@@ -55,10 +52,7 @@ async fn sch_proc_time() {
 
 #[tokio::test]
 async fn sch_proc_task() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_name("job1")
-            .with_step(|step| step.with_name("step1"))
-    });
+    let mut workflow = Workflow::new().with_step(|step| step.with_name("step1"));
 
     let pid = utils::longid();
     let tr = NodeTree::build(&mut workflow).unwrap();

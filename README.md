@@ -78,7 +78,7 @@ Please see [`examples`](<https://github.com/yaojianpin/acts/tree/main/examples>)
 
 ## Model Usage
 
-The model uses the yaml file to create, there are different type of node, which is constructed by [`Workflow`], [`Job`], [`Branch`], [`Step`] and [`Act`]. Every workflow can have more jobs, every job can have more steps, a step can have more branches and a branch can have `if` property to judge the condition.
+The model uses the yaml file to create, there are different type of node, which is constructed by [`Workflow`], [`Branch`], [`Step`] and [`Act`]. Every workflow can have more more steps, a step can have more branches and a branch can have `if` property to judge the condition.
 
 The `env` property can be set the initialzed vars in `workflow`, in the step's `run` scripts, you can use `env` moudle to get(`env.get`) or set(`env.set`) the value
 
@@ -86,29 +86,26 @@ The `run` property is the script based on [rhai script](https://github.com/rhais
 
 ```yml
 name: model name
-jobs:
-  - id: job1
-    env:
-      value: 0
-    steps:
-      - name: step 1
+env:
+  value: 0
+steps:
+  - name: step 1
+    run: |
+      print("step 1")
+
+  - name: step 2
+    branches:
+      - name: branch 1
+        if: ${ env.get("value") > 100 }
         run: |
-          print("step 1")
+            print("branch 1");
 
-      - name: step 2
-        branches:
-          - name: branch 1
-            if: ${ env.get("value") > 100 }
-            run: |
-                print("branch 1");
-
-          - name: branch 2
-            if: ${ env.get("value") <= 100 }
-            steps:
-                - name: step 3
-                  run: |
-                    print("branch 2")
-            
+      - name: branch 2
+        if: ${ env.get("value") <= 100 }
+        steps:
+            - name: step 3
+              run: |
+                print("branch 2")      
 ```
 ### Outputs
 
@@ -117,12 +114,10 @@ In the [`Workflow`], you can set the `outputs` to output the env to use.
 name: model name
 outputs:
   output_key:
-jobs:
-  - id: job1
-    steps:
-      - name: step1
-        run: |
-          env.set("output_key", "output value");
+steps:
+  - name: step1
+    run: |
+      env.set("output_key", "output value");
 ```
 
 ### Actions
@@ -150,59 +145,44 @@ actions:
         nid: step3
     inputs:
       a: ${ env.get("value") }
-jobs:
-  - id: job1
-    steps:
-      - name: step1
-      - name: step2
-      - name: step3
+steps:
+  - name: step1
+  - name: step2
+  - name: step3
 ```
 
-### Jobs
-
-Use `jobs` to add multiple job to a workflow, the job and run concurrently. Or set it one by one running orderly by use the property `needs`
-```yml
-name: model name
-jobs:
-  - id: job1
-  - id: job2
-    needs: [ "job1" ]
-```
 ### Steps
-Use `steps` to add step to the job
+Use `steps` to add step to the workflow
 ```yml
 name: model name
-jobs:
-  - id: job1
-    steps:
-      - id: step1
-        name: step 1
-      - id: step2
-        name: step 2
+steps:
+  - id: step1
+    name: step 1
+  - id: step2
+    name: step 2
 ```
 
 ### Branches
 Use `branches` to add branch to the step
 ```yml
 name: model name
-jobs:
-  - id: job1
-    steps:
-      - id: step1
-        name: step 1
-        branches:
-          - id: b1
-            if: env.get("v") > 0
-            steps: 
-              - name: step a
-              - name: step b
-          - id: b2
-            else: true
-            steps:
-              - name: step c
-              - name: step d
-      - id: step2
-        name: step 2
+steps:
+  - id: step1
+    name: step 1
+    branches:
+      - id: b1
+        if: env.get("v") > 0
+        steps: 
+          - name: step a
+          - name: step b
+      - id: b2
+        else: true
+        steps:
+          - name: step c
+          - name: step d
+  - id: step2
+    name: step 2
+
 ```
 
 ### Acts
@@ -211,38 +191,33 @@ Use `acts` to create act to interact with client
 name: model name
 outputs:
   output_key:
-jobs:
-  - id: job1
-    steps:
-      - name: step1
-        acts:
-          - id: init
-            name: my act init
-            inputs:
-              a: 6
-            outputs:
-              c:
-
+steps:
+  - name: step1
+    acts:
+      - id: init
+        name: my act init
+        inputs:
+          a: 6
+        outputs:
+          c:
 ```
 
 #### 1. for
 There is a example to use `for` to generate acts, which can wait util calling the action to complete.
 ```yml
 name: model name
-jobs:
-  - id: job1
-    steps:
-      - name: step1
-        acts:
-          - for:
-              by: any
-              in: |
-                let a = ["u1"];
-                let b = ["u2"];
-                a.union(b)
+steps:
+  - name: step1
+    acts:
+      - for:
+          by: any
+          in: |
+            let a = ["u1"];
+            let b = ["u2"];
+            a.union(b)
 ```
 It will generate the user act and send message automationly according to the `in` collection.
-The `by` tells the workflow how to pass the act there are several `by` rules.
+The `by` tells the workflow how to pass the act. There are several `by` rules.
 
 * by
 1. **all** to match all of the acts to complete
@@ -274,26 +249,23 @@ Use the `catches` to capture the `act` error and start a new act to run.
 ```yml
 name: a example to catch act error
 id: catches
-jobs:
-  - name: job1
-    id: job1
-    steps:
-      - name: prepare
-        id: prepare
-        acts:
-          - id: init
-      - name: step1
-        id: step1
-        acts:
-          - id: act1
-            catches:
-              - id: catch1
-                err: err1
-              - id: catch2
-                err: err2
-              - id: catch_others
-      - name: final
-        id: final
+steps:
+  - name: prepare
+    id: prepare
+    acts:
+      - id: init
+  - name: step1
+    id: step1
+    acts:
+      - id: act1
+        catches:
+          - id: catch1
+            err: err1
+          - id: catch2
+            err: err2
+          - id: catch_others
+  - name: final
+    id: final
 ```
 
 

@@ -8,11 +8,9 @@ use std::sync::{Arc, Mutex};
 
 #[tokio::test]
 async fn sch_act_for_rule_empty() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1")
-                .with_act(|act| act.with_for(|f| f.with_in(r#"["u1"]"#)))
-        })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(|act| act.with_for(|f| f.with_in(r#"["u1"]"#)))
     });
     workflow.print();
     let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
@@ -31,11 +29,9 @@ async fn sch_act_for_rule_empty() {
 
 #[tokio::test]
 async fn sch_act_for_rule_error() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1")
-                .with_act(|act| act.with_for(|f| f.with_by("no_exist").with_in(r#"["u1"]"#)))
-        })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(|act| act.with_for(|f| f.with_by("no_exist").with_in(r#"["u1"]"#)))
     });
     let id = utils::longid();
     let (proc, scher, emitter) = create_proc(&mut workflow, &id);
@@ -54,11 +50,9 @@ async fn sch_act_for_rule_error() {
 
 #[tokio::test]
 async fn sch_act_for_rule_some_no_key_error() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1")
-                .with_act(|act| act.with_for(|f| f.with_by("some").with_in(r#"["u1"]"#)))
-        })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(|act| act.with_for(|f| f.with_by("some").with_in(r#"["u1"]"#)))
     });
     let id = utils::longid();
     let (proc, scher, emitter) = create_proc(&mut workflow, &id);
@@ -77,11 +71,9 @@ async fn sch_act_for_rule_some_no_key_error() {
 
 #[tokio::test]
 async fn sch_act_for_no_in_error() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1")
-                .with_act(|act| act.with_for(|f| f.with_by("all")))
-        })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(|act| act.with_for(|f| f.with_by("all")))
     });
     let id = utils::longid();
     let (proc, scher, emitter) = create_proc(&mut workflow, &id);
@@ -100,11 +92,9 @@ async fn sch_act_for_no_in_error() {
 
 #[tokio::test]
 async fn sch_act_for_in_empty_error() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1")
-                .with_act(|act| act.with_for(|f| f.with_by("all").with_in("")))
-        })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(|act| act.with_for(|f| f.with_by("all").with_in("")))
     });
     let id = utils::longid();
     let (proc, scher, emitter) = create_proc(&mut workflow, &id);
@@ -124,11 +114,9 @@ async fn sch_act_for_in_empty_error() {
 #[tokio::test]
 async fn sch_act_for_tag_default() {
     let ret = Arc::new(Mutex::new(false));
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1")
-                .with_act(|act| act.with_for(|f| f.with_by("all").with_in(r#"["u1", "u2"]"#)))
-        })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(|act| act.with_for(|f| f.with_by("all").with_in(r#"["u1", "u2"]"#)))
     });
     let id = utils::longid();
     let (proc, scher, emitter) = create_proc(&mut workflow, &id);
@@ -151,12 +139,10 @@ async fn sch_act_for_tag_default() {
 #[tokio::test]
 async fn sch_act_for_tag_key() {
     let ret = Arc::new(Mutex::new(false));
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1").with_act(|act| {
-                act.with_tag("tag1")
-                    .with_for(|f| f.with_by("all").with_in(r#"["u1", "u2"]"#))
-            })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1").with_act(|act| {
+            act.with_tag("tag1")
+                .with_for(|f| f.with_by("all").with_in(r#"["u1", "u2"]"#))
         })
     });
     let id = utils::longid();
@@ -179,11 +165,9 @@ async fn sch_act_for_tag_key() {
 
 #[tokio::test]
 async fn sch_act_for_each_default() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1")
-                .with_act(|act| act.with_for(|f| f.with_by("all").with_in(r#"["u1", "u2"]"#)))
-        })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(|act| act.with_for(|f| f.with_by("all").with_in(r#"["u1", "u2"]"#)))
     });
     let id = utils::longid();
     let (proc, scher, emitter) = create_proc(&mut workflow, &id);
@@ -209,14 +193,12 @@ async fn sch_act_for_each_default() {
 
 #[tokio::test]
 async fn sch_act_for_each_key() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1").with_act(|act| {
-                act.with_for(|f| {
-                    f.with_by("all")
-                        .with_alias(|a| a.with_each("my_each"))
-                        .with_in(r#"["u1", "u2"]"#)
-                })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1").with_act(|act| {
+            act.with_for(|f| {
+                f.with_by("all")
+                    .with_alias(|a| a.with_each("my_each"))
+                    .with_in(r#"["u1", "u2"]"#)
             })
         })
     });
@@ -244,13 +226,11 @@ async fn sch_act_for_each_key() {
 
 #[tokio::test]
 async fn sch_act_for_init_default() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1").with_act(|act| {
-                act.with_for(|f| {
-                    f.with_by("all")
-                        .with_in(r#"act.role("role1").union(act.unit("unit1"))"#)
-                })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1").with_act(|act| {
+            act.with_for(|f| {
+                f.with_by("all")
+                    .with_in(r#"act.role("role1").union(act.unit("unit1"))"#)
             })
         })
     });
@@ -273,14 +253,12 @@ async fn sch_act_for_init_default() {
 
 #[tokio::test]
 async fn sch_act_for_init_key() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1").with_act(|act| {
-                act.with_for(|f| {
-                    f.with_by("all")
-                        .with_alias(|a| a.with_init("my_init"))
-                        .with_in(r#"act.role("role1")"#)
-                })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1").with_act(|act| {
+            act.with_for(|f| {
+                f.with_by("all")
+                    .with_alias(|a| a.with_init("my_init"))
+                    .with_in(r#"act.role("role1")"#)
             })
         })
     });
@@ -304,11 +282,9 @@ async fn sch_act_for_init_key() {
 
 #[tokio::test]
 async fn sch_act_for_init_action() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1")
-                .with_act(|act| act.with_for(|f| f.with_by("any").with_in(r#"act.role("role1")"#)))
-        })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(|act| act.with_for(|f| f.with_by("any").with_in(r#"act.role("role1")"#)))
     });
     let id = utils::longid();
     let (proc, scher, emitter) = create_proc(&mut workflow, &id);
@@ -355,11 +331,9 @@ async fn sch_act_for_init_action() {
 
 #[tokio::test]
 async fn sch_act_for_ord_default() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1")
-                .with_act(|act| act.with_for(|f| f.with_by("ord").with_in(r#"["u1", "u2"]"#)))
-        })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(|act| act.with_for(|f| f.with_by("ord").with_in(r#"["u1", "u2"]"#)))
     });
     let id = utils::longid();
     let (proc, scher, emitter) = create_proc(&mut workflow, &id);
@@ -380,11 +354,9 @@ async fn sch_act_for_ord_default() {
 
 #[tokio::test]
 async fn sch_act_for_ord_key_act_create() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1")
-                .with_act(|act| act.with_for(|f| f.with_by("ord(k1)").with_in(r#"["u1", "u2"]"#)))
-        })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(|act| act.with_for(|f| f.with_by("ord(k1)").with_in(r#"["u1", "u2"]"#)))
     });
     let id = utils::longid();
     let (proc, scher, emitter) = create_proc(&mut workflow, &id);
@@ -407,11 +379,9 @@ async fn sch_act_for_ord_key_act_create() {
 #[tokio::test]
 async fn sch_act_for_ord_key_act_complete() {
     let ret = Arc::new(Mutex::new(false));
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1")
-                .with_act(|act| act.with_for(|f| f.with_by("ord(k1)").with_in(r#"["u1", "u2"]"#)))
-        })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(|act| act.with_for(|f| f.with_by("ord(k1)").with_in(r#"["u1", "u2"]"#)))
     });
     let id = utils::longid();
     let (proc, scher, emitter) = create_proc(&mut workflow, &id);
@@ -463,11 +433,9 @@ async fn sch_act_for_ord_key_act_complete() {
 
 #[tokio::test]
 async fn sch_act_for_ord_key_act_next() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1")
-                .with_act(|act| act.with_for(|f| f.with_by("ord").with_in(r#"["u1", "u2"]"#)))
-        })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(|act| act.with_for(|f| f.with_by("ord").with_in(r#"["u1", "u2"]"#)))
     });
     let id = utils::longid();
     let (proc, scher, emitter) = create_proc(&mut workflow, &id);
@@ -522,11 +490,9 @@ async fn sch_act_for_ord_key_act_next() {
 
 #[tokio::test]
 async fn sch_act_for_any() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1")
-                .with_act(|act| act.with_for(|f| f.with_by("any").with_in(r#"["u1", "u2"]"#)))
-        })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(|act| act.with_for(|f| f.with_by("any").with_in(r#"["u1", "u2"]"#)))
     });
     let id = utils::longid();
     let (proc, scher, emitter) = create_proc(&mut workflow, &id);
@@ -547,11 +513,9 @@ async fn sch_act_for_any() {
 
 #[tokio::test]
 async fn sch_act_for_all() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1")
-                .with_act(|act| act.with_for(|f| f.with_by("all").with_in(r#"["u1", "u2"]"#)))
-        })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(|act| act.with_for(|f| f.with_by("all").with_in(r#"["u1", "u2"]"#)))
     });
     let id = utils::longid();
     let (proc, scher, emitter) = create_proc(&mut workflow, &id);
@@ -581,11 +545,9 @@ async fn sch_act_for_all() {
 
 #[tokio::test]
 async fn sch_act_for_some_key() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1").with_act(|act| {
-                act.with_for(|f| f.with_by("some(some1)").with_in(r#"["u1", "u2", "u3"]"#))
-            })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1").with_act(|act| {
+            act.with_for(|f| f.with_by("some(some1)").with_in(r#"["u1", "u2", "u3"]"#))
         })
     });
     let id = utils::longid();
@@ -654,21 +616,19 @@ async fn sch_act_for_some_key() {
 #[tokio::test]
 async fn sch_act_for_many_steps() {
     let ret = Arc::new(Mutex::new(false));
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1")
-            .with_step(|step| {
-                step.with_id("step1").with_act(|act| {
-                    act.with_tag("tag1")
-                        .with_for(|f| f.with_by("any").with_in(r#"["u1", "u2", "u3"]"#))
-                })
+    let mut workflow = Workflow::new()
+        .with_step(|step| {
+            step.with_id("step1").with_act(|act| {
+                act.with_tag("tag1")
+                    .with_for(|f| f.with_by("any").with_in(r#"["u1", "u2", "u3"]"#))
             })
-            .with_step(|step| {
-                step.with_id("step2").with_act(|act| {
-                    act.with_tag("tag2")
-                        .with_for(|f| f.with_by("any").with_in(r#"["u1", "u2", "u3"]"#))
-                })
+        })
+        .with_step(|step| {
+            step.with_id("step2").with_act(|act| {
+                act.with_tag("tag2")
+                    .with_for(|f| f.with_by("any").with_in(r#"["u1", "u2", "u3"]"#))
             })
-    });
+        });
     let id = utils::longid();
     let (proc, scher, emitter) = create_proc(&mut workflow, &id);
 
@@ -711,12 +671,10 @@ async fn sch_act_for_many_steps() {
 
 #[tokio::test]
 async fn sch_act_for_submit_action() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1").with_act(|act| {
-                act.with_id("act1")
-                    .with_for(|f| f.with_by("any").with_in(r#"["u1", "u2", "u3"]"#))
-            })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1").with_act(|act| {
+            act.with_id("act1")
+                .with_for(|f| f.with_by("any").with_in(r#"["u1", "u2", "u3"]"#))
         })
     });
     let id = utils::longid();
@@ -750,12 +708,10 @@ async fn sch_act_for_submit_action() {
 
 #[tokio::test]
 async fn sch_act_for_skip_action() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1").with_act(|act| {
-                act.with_id("act1")
-                    .with_for(|f| f.with_by("any").with_in(r#"["u1", "u2", "u3"]"#))
-            })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1").with_act(|act| {
+            act.with_id("act1")
+                .with_for(|f| f.with_by("any").with_in(r#"["u1", "u2", "u3"]"#))
         })
     });
     let id = utils::longid();
@@ -789,27 +745,25 @@ async fn sch_act_for_skip_action() {
 
 #[tokio::test]
 async fn sch_act_for_back_any() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1")
-            .with_step(|step| {
-                step.with_id("step1").with_act(|act| {
-                    act.with_id("act1").with_for(|f| {
-                        f.with_by("any")
-                            .with_alias(|a| a.with_each("act1_each"))
-                            .with_in(r#"["u1", "u2", "u3"]"#)
-                    })
+    let mut workflow = Workflow::new()
+        .with_step(|step| {
+            step.with_id("step1").with_act(|act| {
+                act.with_id("act1").with_for(|f| {
+                    f.with_by("any")
+                        .with_alias(|a| a.with_each("act1_each"))
+                        .with_in(r#"["u1", "u2", "u3"]"#)
                 })
             })
-            .with_step(|step| {
-                step.with_id("step2").with_act(|act| {
-                    act.with_id("act2").with_for(|f| {
-                        f.with_by("any")
-                            .with_alias(|a| a.with_each("act2_each"))
-                            .with_in(r#"["u1", "u2", "u3"]"#)
-                    })
+        })
+        .with_step(|step| {
+            step.with_id("step2").with_act(|act| {
+                act.with_id("act2").with_for(|f| {
+                    f.with_by("any")
+                        .with_alias(|a| a.with_each("act2_each"))
+                        .with_in(r#"["u1", "u2", "u3"]"#)
                 })
             })
-    });
+        });
     let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
     emitter.on_complete(move |e| {
         e.close();
@@ -859,27 +813,25 @@ async fn sch_act_for_back_any() {
 
 #[tokio::test]
 async fn sch_act_for_back_all() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1")
-            .with_step(|step| {
-                step.with_id("step1").with_act(|act| {
-                    act.with_id("act1").with_for(|f| {
-                        f.with_by("any")
-                            .with_alias(|a| a.with_each("act1_each"))
-                            .with_in(r#"["u1", "u2", "u3"]"#)
-                    })
+    let mut workflow = Workflow::new()
+        .with_step(|step| {
+            step.with_id("step1").with_act(|act| {
+                act.with_id("act1").with_for(|f| {
+                    f.with_by("any")
+                        .with_alias(|a| a.with_each("act1_each"))
+                        .with_in(r#"["u1", "u2", "u3"]"#)
                 })
             })
-            .with_step(|step| {
-                step.with_id("step2").with_act(|act| {
-                    act.with_id("act2").with_for(|f| {
-                        f.with_by("all")
-                            .with_alias(|a| a.with_each("act2_each"))
-                            .with_in(r#"["u1", "u2", "u3"]"#)
-                    })
+        })
+        .with_step(|step| {
+            step.with_id("step2").with_act(|act| {
+                act.with_id("act2").with_for(|f| {
+                    f.with_by("all")
+                        .with_alias(|a| a.with_each("act2_each"))
+                        .with_in(r#"["u1", "u2", "u3"]"#)
                 })
             })
-    });
+        });
     let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
     emitter.on_complete(move |e| {
         e.close();
@@ -929,39 +881,38 @@ async fn sch_act_for_back_all() {
 
 #[tokio::test]
 async fn sch_act_for_back_with_branches() {
-    let mut workflow = Workflow::new().with_env("v", json!(100)).with_job(|job| {
-        job.with_id("job1")
-            .with_step(|step| {
-                step.with_id("step1").with_act(|act| {
-                    act.with_id("act1").with_for(|f| {
-                        f.with_by("any")
-                            .with_alias(|a| a.with_each("act1_each"))
-                            .with_in(r#"["u1", "u2", "u3"]"#)
-                    })
+    let mut workflow = Workflow::new()
+        .with_env("v", json!(100))
+        .with_step(|step| {
+            step.with_id("step1").with_act(|act| {
+                act.with_id("act1").with_for(|f| {
+                    f.with_by("any")
+                        .with_alias(|a| a.with_each("act1_each"))
+                        .with_in(r#"["u1", "u2", "u3"]"#)
                 })
             })
-            .with_step(|step| {
-                step.with_id("step2")
-                    .with_branch(|b| {
-                        b.with_id("b1")
-                            .with_if(r#"env.get("v") > 0"#)
-                            .with_step(|step| {
-                                step.with_id("step11").with_act(|act| {
-                                    act.with_id("act2").with_for(|f| {
-                                        f.with_by("any")
-                                            .with_alias(|a| a.with_each("act2_each"))
-                                            .with_in(r#"["u1", "u2", "u3"]"#)
-                                    })
+        })
+        .with_step(|step| {
+            step.with_id("step2")
+                .with_branch(|b| {
+                    b.with_id("b1")
+                        .with_if(r#"env.get("v") > 0"#)
+                        .with_step(|step| {
+                            step.with_id("step11").with_act(|act| {
+                                act.with_id("act2").with_for(|f| {
+                                    f.with_by("any")
+                                        .with_alias(|a| a.with_each("act2_each"))
+                                        .with_in(r#"["u1", "u2", "u3"]"#)
                                 })
                             })
-                    })
-                    .with_branch(|b| {
-                        b.with_id("b2")
-                            .with_else(true)
-                            .with_step(|step| step.with_id("step21"))
-                    })
-            })
-    });
+                        })
+                })
+                .with_branch(|b| {
+                    b.with_id("b2")
+                        .with_else(true)
+                        .with_step(|step| step.with_id("step21"))
+                })
+        });
     let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
 
     let s = scher.clone();
@@ -1012,27 +963,25 @@ async fn sch_act_for_back_with_branches() {
 
 #[tokio::test]
 async fn sch_act_for_cancel_any() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1")
-            .with_step(|step| {
-                step.with_id("step1").with_act(|act| {
-                    act.with_id("act1").with_for(|f| {
-                        f.with_by("any")
-                            .with_alias(|a| a.with_each("act1_each"))
-                            .with_in(r#"["u1", "u2", "u3"]"#)
-                    })
+    let mut workflow = Workflow::new()
+        .with_step(|step| {
+            step.with_id("step1").with_act(|act| {
+                act.with_id("act1").with_for(|f| {
+                    f.with_by("any")
+                        .with_alias(|a| a.with_each("act1_each"))
+                        .with_in(r#"["u1", "u2", "u3"]"#)
                 })
             })
-            .with_step(|step| {
-                step.with_id("step2").with_act(|act| {
-                    act.with_id("act2").with_for(|f| {
-                        f.with_by("any")
-                            .with_alias(|a| a.with_each("act2_each"))
-                            .with_in(r#"["u1", "u2", "u3"]"#)
-                    })
+        })
+        .with_step(|step| {
+            step.with_id("step2").with_act(|act| {
+                act.with_id("act2").with_for(|f| {
+                    f.with_by("any")
+                        .with_alias(|a| a.with_each("act2_each"))
+                        .with_in(r#"["u1", "u2", "u3"]"#)
                 })
             })
-    });
+        });
     let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
 
     let s = scher.clone();
@@ -1085,39 +1034,38 @@ async fn sch_act_for_cancel_any() {
 
 #[tokio::test]
 async fn sch_act_for_cancel_with_branches() {
-    let mut workflow = Workflow::new().with_env("v", json!(100)).with_job(|job| {
-        job.with_id("job1")
-            .with_step(|step| {
-                step.with_id("step1").with_act(|act| {
-                    act.with_id("act1").with_for(|f| {
-                        f.with_by("any")
-                            .with_alias(|a| a.with_each("act1_each"))
-                            .with_in(r#"["u1", "u2", "u3"]"#)
-                    })
+    let mut workflow = Workflow::new()
+        .with_env("v", json!(100))
+        .with_step(|step| {
+            step.with_id("step1").with_act(|act| {
+                act.with_id("act1").with_for(|f| {
+                    f.with_by("any")
+                        .with_alias(|a| a.with_each("act1_each"))
+                        .with_in(r#"["u1", "u2", "u3"]"#)
                 })
             })
-            .with_step(|step| {
-                step.with_id("step2")
-                    .with_branch(|b| {
-                        b.with_id("b1")
-                            .with_if(r#"env.get("v") > 0"#)
-                            .with_step(|step| {
-                                step.with_id("step11").with_act(|act| {
-                                    act.with_id("act2").with_for(|f| {
-                                        f.with_by("any")
-                                            .with_alias(|a| a.with_each("act2_each"))
-                                            .with_in(r#"["u1", "u2", "u3"]"#)
-                                    })
+        })
+        .with_step(|step| {
+            step.with_id("step2")
+                .with_branch(|b| {
+                    b.with_id("b1")
+                        .with_if(r#"env.get("v") > 0"#)
+                        .with_step(|step| {
+                            step.with_id("step11").with_act(|act| {
+                                act.with_id("act2").with_for(|f| {
+                                    f.with_by("any")
+                                        .with_alias(|a| a.with_each("act2_each"))
+                                        .with_in(r#"["u1", "u2", "u3"]"#)
                                 })
                             })
-                    })
-                    .with_branch(|b| {
-                        b.with_id("b2")
-                            .with_else(true)
-                            .with_step(|step| step.with_id("step21"))
-                    })
-            })
-    });
+                        })
+                })
+                .with_branch(|b| {
+                    b.with_id("b2")
+                        .with_else(true)
+                        .with_step(|step| step.with_id("step21"))
+                })
+        });
     let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
 
     let s = scher.clone();
@@ -1170,14 +1118,12 @@ async fn sch_act_for_cancel_with_branches() {
 
 #[tokio::test]
 async fn sch_act_for_abort_action() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1").with_act(|act| {
-                act.with_id("act1").with_for(|f| {
-                    f.with_by("any")
-                        .with_alias(|a| a.with_each("act1_each"))
-                        .with_in(r#"["u1", "u2", "u3"]"#)
-                })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1").with_act(|act| {
+            act.with_id("act1").with_for(|f| {
+                f.with_by("any")
+                    .with_alias(|a| a.with_each("act1_each"))
+                    .with_in(r#"["u1", "u2", "u3"]"#)
             })
         })
     });
@@ -1201,12 +1147,10 @@ async fn sch_act_for_abort_action() {
 
 #[tokio::test]
 async fn sch_act_for_error_action() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1").with_act(|act| {
-                act.with_id("act1")
-                    .with_for(|f| f.with_by("any").with_in(r#"["u1", "u2", "u3"]"#))
-            })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1").with_act(|act| {
+            act.with_id("act1")
+                .with_for(|f| f.with_by("any").with_in(r#"["u1", "u2", "u3"]"#))
         })
     });
     let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());

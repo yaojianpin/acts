@@ -39,7 +39,7 @@ impl Context {
             proc: proc.clone(),
             action: Arc::new(RwLock::new(None)),
             task: task.clone(),
-            err: Arc::new(RwLock::new(None)),
+            err: Arc::new(RwLock::new(task.state().as_err())),
         };
 
         ctx
@@ -92,6 +92,12 @@ impl Context {
 
     pub fn sched_task(&self, node: &Arc<Node>) {
         let task = self.proc.create_task(&node, Some(self.task.clone()));
+        self.scher.push(&task);
+    }
+
+    pub fn sched_task_with_inputs(&self, node: &Arc<Node>, inputs: &Vars) {
+        let task = self.proc.create_task(&node, Some(self.task.clone()));
+        task.room().append(&inputs);
         self.scher.push(&task);
     }
 
@@ -162,7 +168,7 @@ impl Context {
     }
 
     pub fn abort_task(&self, task: &Arc<Task>) -> Result<()> {
-        // abort all task's act
+        // abort all task's acts
         for task in task.siblings().iter() {
             if task.state().is_completed() {
                 continue;
@@ -228,19 +234,20 @@ impl Context {
         Ok(())
     }
 
-    pub fn emit_error(&self) {
+    pub fn emit_error(&self) -> Result<()> {
         let state = self.task.state();
         if state.is_error() {
             let mut parent = self.task.parent();
             while let Some(task) = &parent {
                 task.set_state(state.clone());
+                task.set_pure_action_state(ActionState::Error);
+                self.emit_task(&task);
+
                 parent = task.parent();
             }
-
-            // dispatch workflow event
-            self.proc.set_state(state.clone());
-            self.scher.emitter().emit_proc_event(&self.proc);
         }
+
+        Ok(())
     }
 
     pub fn emit_task(&self, task: &Task) {

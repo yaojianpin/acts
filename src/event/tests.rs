@@ -36,7 +36,7 @@ async fn event_action_parse() {
 async fn event_on_proc() {
     let mut workflow = Workflow::new()
         .with_id("m1")
-        .with_job(|job| job.with_id("job1").with_step(|step| step.with_id("step1")));
+        .with_step(|step| step.with_id("step1"));
 
     let (proc, scher) = create_proc(&mut workflow, &utils::longid());
     let evt = Emitter::new();
@@ -53,7 +53,7 @@ async fn event_on_proc() {
 async fn event_on_task() {
     let mut workflow = Workflow::new()
         .with_id("m1")
-        .with_job(|job| job.with_id("job1").with_step(|step| step.with_id("step1")));
+        .with_step(|step| step.with_id("step1"));
 
     let (proc, scher) = create_proc(&mut workflow, &utils::longid());
     let evt = Emitter::new();
@@ -70,7 +70,7 @@ async fn event_on_task() {
 async fn event_start() {
     let mut workflow = Workflow::new()
         .with_id("m1")
-        .with_job(|job| job.with_id("job1").with_step(|step| step.with_id("step1")));
+        .with_step(|step| step.with_id("step1"));
 
     let (proc, _) = create_proc(&mut workflow, &utils::longid());
     let evt = Emitter::new();
@@ -87,7 +87,7 @@ async fn event_start() {
 async fn event_finished() {
     let mut workflow = Workflow::new()
         .with_id("m1")
-        .with_job(|job| job.with_id("job1").with_step(|step| step.with_id("step1")));
+        .with_step(|step| step.with_id("step1"));
     let (proc, _) = create_proc(&mut workflow, &utils::longid());
     let evt = Emitter::new();
     let workflow2 = workflow.clone();
@@ -103,7 +103,7 @@ async fn event_finished() {
 async fn event_error() {
     let mut workflow = Workflow::new()
         .with_id("m1")
-        .with_job(|job| job.with_id("job1").with_step(|step| step.with_id("step1")));
+        .with_step(|step| step.with_id("step1"));
     let workflow_id = workflow.id.clone();
     let (proc, _) = create_proc(&mut workflow, &utils::longid());
 

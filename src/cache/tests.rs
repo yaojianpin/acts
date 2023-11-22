@@ -82,10 +82,7 @@ fn cache_remove() {
 
 #[test]
 fn cache_upsert() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_name("job1")
-            .with_step(|step| step.with_name("step1"))
-    });
+    let mut workflow = Workflow::new().with_step(|step| step.with_name("step1"));
 
     let pid = utils::longid();
     let tree = NodeTree::build(&mut workflow).unwrap();
@@ -107,10 +104,9 @@ fn cache_upsert() {
 
 #[test]
 fn cache_restore_count() {
-    let model = Workflow::new().with_id("m1").with_job(|job| {
-        job.with_name("job1")
-            .with_step(|step| step.with_name("step1"))
-    });
+    let model = Workflow::new()
+        .with_id("m1")
+        .with_step(|step| step.with_name("step1"));
     let cache = Cache::new(5);
     cache.store().deploy(&model).unwrap();
 
@@ -140,10 +136,9 @@ fn cache_restore_count() {
 
 #[test]
 fn cache_restore_working_state() {
-    let model = Workflow::new().with_id("m1").with_job(|job| {
-        job.with_name("job1")
-            .with_step(|step| step.with_name("step1"))
-    });
+    let model = Workflow::new()
+        .with_id("m1")
+        .with_step(|step| step.with_name("step1"));
     let cache = Cache::new(5);
     cache.store().deploy(&model).unwrap();
 
@@ -186,10 +181,9 @@ fn cache_restore_working_state() {
 
 #[test]
 fn cache_restore_completed_state() {
-    let model = Workflow::new().with_id("m1").with_job(|job| {
-        job.with_name("job1")
-            .with_step(|step| step.with_name("step1"))
-    });
+    let model = Workflow::new()
+        .with_id("m1")
+        .with_step(|step| step.with_name("step1"));
     let cache = Cache::new(5);
     cache.store().deploy(&model).unwrap();
 
@@ -232,10 +226,9 @@ fn cache_restore_completed_state() {
 
 #[test]
 fn cache_restore_less_cap() {
-    let model = Workflow::new().with_id("m1").with_job(|job| {
-        job.with_name("job1")
-            .with_step(|step| step.with_name("step1"))
-    });
+    let model = Workflow::new()
+        .with_id("m1")
+        .with_step(|step| step.with_name("step1"));
     let cache = Cache::new(5);
     cache.store().deploy(&model).unwrap();
 

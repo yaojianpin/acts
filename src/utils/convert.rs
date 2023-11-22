@@ -203,6 +203,7 @@ pub fn state_to_str(state: TaskState) -> String {
     }
 }
 
+
 pub fn str_to_state(str: &str) -> TaskState {
     let re = regex::Regex::new(r"^(.*)\((.*)\)$").unwrap();
     match str {

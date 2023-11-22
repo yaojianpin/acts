@@ -16,12 +16,10 @@ impl ActTask for Vec<ActCatch> {
 
             // process the specific err catch
             for c in self.iter().filter(|iter| iter.err.is_some()) {
-                if let Some(code) = &c.err {
-                    if code == &err.key {
-                        ctx.sched_act(&c.id, &c.tag, &c.inputs, &c.outputs)?;
-                        is_catched = true;
-                        break;
-                    }
+                if err.key.is_some() && c.err == err.key {
+                    ctx.sched_act(&c.id, &c.tag, &c.inputs, &c.outputs)?;
+                    is_catched = true;
+                    break;
                 }
             }
 

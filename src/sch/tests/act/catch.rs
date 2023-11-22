@@ -9,11 +9,9 @@ use std::sync::{Arc, Mutex};
 #[tokio::test]
 async fn sch_act_catch_by_any_error() {
     let ret = Arc::new(Mutex::new(false));
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1")
-                .with_act(|act| act.with_id("act1").with_catch(|c| c.with_id("catch1")))
-        })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(|act| act.with_id("act1").with_catch(|c| c.with_id("catch1")))
     });
     workflow.print();
     let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
@@ -44,12 +42,10 @@ async fn sch_act_catch_by_any_error() {
 #[tokio::test]
 async fn sch_act_catch_by_err_code() {
     let ret = Arc::new(Mutex::new(false));
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1").with_act(|act| {
-                act.with_id("act1")
-                    .with_catch(|c| c.with_id("catch1").with_err("123"))
-            })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1").with_act(|act| {
+            act.with_id("act1")
+                .with_catch(|c| c.with_id("catch1").with_err("123"))
         })
     });
     workflow.print();
@@ -82,12 +78,10 @@ async fn sch_act_catch_by_err_code() {
 
 #[tokio::test]
 async fn sch_act_catch_by_wrong_code() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1").with_act(|act| {
-                act.with_id("act1")
-                    .with_catch(|c| c.with_id("catch1").with_err("wrong_code"))
-            })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1").with_act(|act| {
+            act.with_id("act1")
+                .with_catch(|c| c.with_id("catch1").with_err("wrong_code"))
         })
     });
     workflow.print();
@@ -115,11 +109,9 @@ async fn sch_act_catch_by_wrong_code() {
 #[tokio::test]
 async fn sch_act_catch_by_no_err_code() {
     let ret = Arc::new(Mutex::new(false));
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1")
-                .with_act(|act| act.with_id("act1").with_catch(|c| c.with_id("catch1")))
-        })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(|act| act.with_id("act1").with_catch(|c| c.with_id("catch1")))
     });
     workflow.print();
     let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
@@ -146,11 +138,9 @@ async fn sch_act_catch_by_no_err_code() {
 #[tokio::test]
 async fn sch_act_catch_as_complete() {
     let ret = Arc::new(Mutex::new(false));
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1")
-                .with_act(|act| act.with_id("act1").with_catch(|c| c.with_id("catch1")))
-        })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(|act| act.with_id("act1").with_catch(|c| c.with_id("catch1")))
     });
     workflow.print();
     let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
@@ -190,11 +180,9 @@ async fn sch_act_catch_as_complete() {
 #[tokio::test]
 async fn sch_act_catch_as_error() {
     let ret = Arc::new(Mutex::new(false));
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1")
-                .with_act(|act| act.with_id("act1").with_catch(|c| c.with_id("catch1")))
-        })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(|act| act.with_id("act1").with_catch(|c| c.with_id("catch1")))
     });
     workflow.print();
     let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
@@ -235,14 +223,12 @@ async fn sch_act_catch_as_error() {
 
 #[tokio::test]
 async fn sch_act_catch_as_skip() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1")
-            .with_step(|step| {
-                step.with_id("step1")
-                    .with_act(|act| act.with_id("act1").with_catch(|c| c.with_id("catch1")))
-            })
-            .with_step(|step| step.with_id("step2"))
-    });
+    let mut workflow = Workflow::new()
+        .with_step(|step| {
+            step.with_id("step1")
+                .with_act(|act| act.with_id("act1").with_catch(|c| c.with_id("catch1")))
+        })
+        .with_step(|step| step.with_id("step2"));
     workflow.print();
     let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
 
@@ -292,11 +278,9 @@ async fn sch_act_catch_as_skip() {
 
 #[tokio::test]
 async fn sch_act_catch_as_abort() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1")
-                .with_act(|act| act.with_id("act1").with_catch(|c| c.with_id("catch1")))
-        })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(|act| act.with_id("act1").with_catch(|c| c.with_id("catch1")))
     });
     workflow.print();
     let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
@@ -332,11 +316,9 @@ async fn sch_act_catch_as_abort() {
 
 #[tokio::test]
 async fn sch_act_catch_as_submit() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1")
-                .with_act(|act| act.with_id("act1").with_catch(|c| c.with_id("catch1")))
-        })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(|act| act.with_id("act1").with_catch(|c| c.with_id("catch1")))
     });
     workflow.print();
     let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
@@ -384,14 +366,12 @@ async fn sch_act_catch_as_submit() {
 #[tokio::test]
 async fn sch_act_catch_as_back() {
     let count = Arc::new(Mutex::new(0));
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1")
-            .with_step(|step| step.with_id("step1").with_act(|act| act.with_id("act1")))
-            .with_step(|step| {
-                step.with_id("step2")
-                    .with_act(|act| act.with_id("act2").with_catch(|c| c.with_id("catch2")))
-            })
-    });
+    let mut workflow = Workflow::new()
+        .with_step(|step| step.with_id("step1").with_act(|act| act.with_id("act1")))
+        .with_step(|step| {
+            step.with_id("step2")
+                .with_act(|act| act.with_id("act2").with_catch(|c| c.with_id("catch2")))
+        });
     workflow.print();
     let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
 

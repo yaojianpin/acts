@@ -6,8 +6,8 @@ use crate::{
         tree::{Node, NodeTree},
         Context, Scheduler, Task, TaskState,
     },
-    utils, ActError, ActionResult, NodeKind, ProcInfo, Result, ShareLock, Vars, Workflow,
-    WorkflowState,
+    utils::{self, consts},
+    ActError, ActionResult, NodeKind, ProcInfo, Result, ShareLock, Vars, Workflow, WorkflowState,
 };
 use std::{
     cell::RefCell,
@@ -107,6 +107,12 @@ impl Proc {
         vars
     }
 
+    pub fn inputs(&self) -> Vars {
+        let inputs = &self.model().env;
+        let vars = utils::fill_proc_vars(&self.env, inputs);
+        vars
+    }
+
     pub fn cost(&self) -> i64 {
         if self.state().is_completed() {
             return self.end_time() - self.start_time();
@@ -122,6 +128,7 @@ impl Proc {
             state: self.state(),
             start_time: self.start_time(),
             end_time: self.end_time(),
+            inputs: self.inputs(),
             outputs: self.outputs(),
         }
     }
@@ -262,7 +269,7 @@ impl Proc {
                 let ctx = self.create_context(scher, task);
                 task.exec(&ctx).unwrap_or_else(|err| {
                     task.set_state(TaskState::Fail(err.to_string()));
-                    ctx.emit_error();
+                    let _ = ctx.emit_error();
                 });
             }
         }
@@ -294,6 +301,21 @@ impl Proc {
     pub fn push_task(&self, task: Arc<Task>) {
         let mut tasks = self.tasks.write().unwrap();
         tasks.push(task);
+    }
+
+    pub fn parent(&self) -> Option<(String, String)> {
+        if let (Some(ppid), Some(ptid)) = (
+            self.env
+                .get(consts::PARENT_PROC_ID)
+                .map(|v| v.as_str().unwrap_or_default().to_string()),
+            self.env
+                .get(consts::PARENT_TASK_ID)
+                .map(|v| v.as_str().unwrap_or_default().to_string()),
+        ) {
+            return Some((ppid, ptid));
+        }
+
+        None
     }
 
     #[allow(unused)]

@@ -27,16 +27,14 @@ fn model_workflow_from_json_str() {
 
 #[test]
 fn model_workflow_to_yml_str() {
-    let model =
-        Workflow::new().with_job(|job| job.with_id("job1").with_step(|step| step.with_id("step1")));
+    let model = Workflow::new().with_step(|step| step.with_id("step1"));
     let m = model.to_yml();
     assert_eq!(m.is_ok(), true);
 }
 
 #[test]
 fn model_workflow_to_json_str() {
-    let model =
-        Workflow::new().with_job(|job| job.with_id("job1").with_step(|step| step.with_id("step1")));
+    let model = Workflow::new().with_step(|step| step.with_id("step1"));
     let m = model.to_json();
     assert_eq!(m.is_ok(), true);
 }
@@ -64,11 +62,11 @@ fn model_workflow_name() {
 }
 
 #[test]
-fn model_workflow_jobs() {
+fn model_workflow_steps() {
     let m = Workflow::new()
-        .with_job(|job| job.with_id("job1"))
-        .with_job(|job| job.with_id("job2"));
-    assert_eq!(m.jobs.len(), 2);
+        .with_step(|step| step.with_id("step1"))
+        .with_step(|step| step.with_id("step2"));
+    assert_eq!(m.steps.len(), 2);
 }
 
 #[test]
@@ -124,7 +122,7 @@ fn model_workflow_actions_with_on() {
 #[test]
 fn model_workflow_valid() {
     let m = Workflow::new()
-        .with_job(|job| job.with_id("job1").with_step(|step| step.with_id("step1")))
-        .with_job(|job| job.with_id("job1").with_step(|step| step.with_id("step1")));
+        .with_step(|step| step.with_id("step1"))
+        .with_step(|step| step.with_id("step1"));
     assert_eq!(m.valid().is_err(), true);
 }

@@ -1,0 +1,23 @@
+name: main
+id: main
+env:
+  v: 0
+outputs:
+  result: ${ env.get("v") }
+steps:
+  - name: prepare
+    id: prepare
+    acts:
+      - id: init
+  - name: enter sub workflow
+    acts:
+      - use: sub
+        inputs:
+            v: ${ env.get("v") }
+  - name: final
+    id: final
+    acts:
+      - id: action2
+        inputs:
+          v: ${ env.get("v") }
+    

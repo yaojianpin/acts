@@ -4,7 +4,7 @@ use super::{
 };
 use crate::{
     utils::{longid, shortid},
-    Act, ActError, Branch, Job, Result, Step, Workflow,
+    Act, ActError, Branch, Result, Step, Workflow,
 };
 use std::sync::Arc;
 
@@ -14,19 +14,21 @@ pub fn build_workflow(workflow: &mut Workflow, tree: &mut NodeTree) -> Result<()
         workflow.id = longid();
     }
 
-    let mut jobs = Vec::new();
-    for job in workflow.jobs.iter_mut() {
-        let node = build_job(job, tree, level + 1)?;
-        jobs.push(node);
+    let data = NodeData::Workflow(workflow.clone());
+    let root = tree.make(data, level)?;
+
+    let mut prev = root.clone();
+    for step in workflow.steps.iter_mut() {
+        build_step(step, tree, &root, &mut prev, level + 1)?;
     }
 
     // in the end to set the job node parent
     // to make sure the workflow's jobs is the newest
-    let data = NodeData::Workflow(workflow.clone());
-    let root = tree.make(data, level)?;
-    for job in jobs {
-        job.set_parent(&root);
-    }
+    // let data = NodeData::Workflow(workflow.clone());
+    // let root = tree.make(data, level)?;
+    // for job in jobs {
+    //     job.set_parent(&root);
+    // }
 
     tree.model = Box::new(workflow.clone());
     tree.set_root(&root);
@@ -34,20 +36,20 @@ pub fn build_workflow(workflow: &mut Workflow, tree: &mut NodeTree) -> Result<()
     Ok(())
 }
 
-pub fn build_job(job: &mut Job, tree: &mut NodeTree, level: usize) -> Result<Arc<Node>> {
-    if job.id.is_empty() {
-        job.id = shortid();
-    }
-    let data = NodeData::Job(job.clone());
-    let node = tree.make(data, level)?;
+// pub fn build_job(job: &mut Job, tree: &mut NodeTree, level: usize) -> Result<Arc<Node>> {
+//     if job.id.is_empty() {
+//         job.id = shortid();
+//     }
+//     let data = NodeData::Job(job.clone());
+//     let node = tree.make(data, level)?;
 
-    let mut prev = node.clone();
-    for step in job.steps.iter_mut() {
-        build_step(step, tree, &node, &mut prev, level + 1)?;
-    }
+//     let mut prev = node.clone();
+//     for step in job.steps.iter_mut() {
+//         build_step(step, tree, &node, &mut prev, level + 1)?;
+//     }
 
-    Ok(node.clone())
-}
+//     Ok(node.clone())
+// }
 
 pub fn build_step(
     step: &mut Step,

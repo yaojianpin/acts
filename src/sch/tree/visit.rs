@@ -26,7 +26,7 @@ impl VisitRoot {
 #[derive(Clone)]
 pub struct Visitor {
     root: Box<VisitRoot>,
-    next_sibling: bool,
+    is_next_sibling: bool,
     node: Arc<Node>,
     path: HashMap<usize, bool>,
 }
@@ -52,7 +52,7 @@ impl Visitor {
         Box::new(Self {
             root: root.clone(),
             node: node.clone(),
-            next_sibling,
+            is_next_sibling: next_sibling,
             path,
         })
     }
@@ -94,8 +94,9 @@ impl Visitor {
         None
     }
 
-    pub fn next_sibling(&self) -> bool {
-        self.next_sibling
+    /// if there is next sibling node
+    pub fn is_next_sibling(&self) -> bool {
+        self.is_next_sibling
     }
 
     pub fn is_sibling(&self, level: &usize) -> bool {
@@ -103,7 +104,7 @@ impl Visitor {
     }
 
     pub fn visit(&mut self) {
-        self.path.insert(self.node.level, self.next_sibling);
+        self.path.insert(self.node.level, self.is_next_sibling);
         self.root
             .visits
             .entry(self.node.id())

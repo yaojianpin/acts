@@ -1,5 +1,4 @@
-use super::Job;
-use crate::{sch::NodeTree, ActError, ModelBase, Result, Vars};
+use crate::{sch::NodeTree, ActError, ModelBase, Result, Step, Vars};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -39,7 +38,7 @@ pub struct Workflow {
     pub tag: String,
 
     #[serde(default)]
-    pub jobs: Vec<Job>,
+    pub steps: Vec<Step>,
 
     #[serde(default)]
     pub env: Vars,
@@ -92,16 +91,21 @@ impl Workflow {
         root.tree_output()
     }
 
-    pub fn job(&self, id: &str) -> Option<&Job> {
-        match self.jobs.iter().find(|job| job.id == id) {
-            Some(job) => {
-                // job.set_workflow(Box::new(self.clone()));
-                Some(job)
-            }
+    // pub fn job(&self, id: &str) -> Option<&Job> {
+    //     match self.jobs.iter().find(|job| job.id == id) {
+    //         Some(job) => {
+    //             // job.set_workflow(Box::new(self.clone()));
+    //             Some(job)
+    //         }
+    //         None => None,
+    //     }
+    // }
+    pub fn step(&self, id: &str) -> Option<&Step> {
+        match self.steps.iter().find(|s| s.id == id) {
+            Some(s) => Some(s),
             None => None,
         }
     }
-
     pub fn set_id(&mut self, id: &str) {
         self.id = id.to_string();
     }

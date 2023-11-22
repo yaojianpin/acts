@@ -14,12 +14,10 @@ impl std::fmt::Display for Data {
 
 const SIMPLE_WORKFLOW: &str = r#"
 id: m1
-jobs:
-  - id: job1
-    name: job1
-    steps:
-      - name: step1
-        run: print("step1")
+steps:
+- name: step1
+  id: step1
+  run: print("step1")
     "#;
 
 #[tokio::test]
@@ -34,8 +32,8 @@ async fn sch_tree_get() {
     let mut workflow = Workflow::from_yml(SIMPLE_WORKFLOW).unwrap();
     let tr = NodeTree::build(&mut workflow).unwrap();
 
-    let job = tr.node("job1");
-    assert!(job.is_some());
+    let step1 = tr.node("step1");
+    assert!(step1.is_some());
 }
 
 #[tokio::test]
@@ -88,46 +86,29 @@ async fn sch_tree_set_next() {
 }
 
 #[tokio::test]
-async fn sch_tree_jobs() {
+async fn sch_tree_steps() {
     let mut workflow = Workflow::new()
         .with_id("w1")
-        .with_job(|job| job.with_id("job1"))
-        .with_job(|job| job.with_id("job2"));
+        .with_step(|s| s.with_id("step1"))
+        .with_step(|s| s.with_id("step2"));
     let tree = NodeTree::build(&mut workflow).unwrap();
     let root = tree.root().unwrap();
 
-    let node1 = tree.node("job1").unwrap();
-    let node2 = tree.node("job2").unwrap();
+    let node1 = tree.node("step1").unwrap();
+    let node2 = tree.node("step2").unwrap();
     assert_eq!(node1.parent().unwrap().id(), "w1");
     assert_eq!(node2.parent().unwrap().id(), "w1");
-    assert_eq!(root.children().len(), 2);
-}
-
-#[tokio::test]
-async fn sch_tree_job_steps() {
-    let mut workflow = Workflow::new().with_id("w1").with_job(|job| {
-        job.with_id("job1")
-            .with_step(|step| step.with_id("step1"))
-            .with_step(|step| step.with_id("step2"))
-    });
-    let tree = NodeTree::build(&mut workflow).unwrap();
-    let job = tree.node("job1").unwrap();
-    let step1 = tree.node("step1").unwrap();
-    let step2 = tree.node("step2").unwrap();
-    assert_eq!(step1.parent().unwrap().id(), "job1");
-    assert_eq!(step2.parent().unwrap().id(), "job1");
-    assert!(job.next().upgrade().is_none());
-    assert_eq!(job.children().len(), 1);
+    assert_eq!(node1.next().upgrade().unwrap().id(), "step2");
+    assert_eq!(root.children().len(), 1);
 }
 
 #[tokio::test]
 async fn sch_tree_step_auto_next() {
-    let mut workflow = Workflow::new().with_id("w1").with_job(|job| {
-        job.with_id("job1")
-            .with_step(|step| step.with_id("step1"))
-            .with_step(|step| step.with_id("step2"))
-            .with_step(|step| step.with_id("step3"))
-    });
+    let mut workflow = Workflow::new()
+        .with_id("w1")
+        .with_step(|step| step.with_id("step1"))
+        .with_step(|step| step.with_id("step2"))
+        .with_step(|step| step.with_id("step3"));
     let tree = NodeTree::build(&mut workflow).unwrap();
     let step1 = tree.node("step1").unwrap();
     let step2 = tree.node("step2").unwrap();
@@ -139,12 +120,11 @@ async fn sch_tree_step_auto_next() {
 
 #[tokio::test]
 async fn sch_tree_step_next_value() {
-    let mut workflow = Workflow::new().with_id("w1").with_job(|job| {
-        job.with_id("job1")
-            .with_step(|step| step.with_id("step1"))
-            .with_step(|step| step.with_id("step2"))
-            .with_step(|step| step.with_id("step3").with_next("step1"))
-    });
+    let mut workflow = Workflow::new()
+        .with_id("w1")
+        .with_step(|step| step.with_id("step1"))
+        .with_step(|step| step.with_id("step2"))
+        .with_step(|step| step.with_id("step3").with_next("step1"));
     let tree = NodeTree::build(&mut workflow).unwrap();
     let step3 = tree.node("step3").unwrap();
     assert_eq!(step3.next().upgrade().unwrap().id(), "step1");
@@ -152,12 +132,11 @@ async fn sch_tree_step_next_value() {
 
 #[tokio::test]
 async fn sch_tree_step_prev() {
-    let mut workflow = Workflow::new().with_id("w1").with_job(|job| {
-        job.with_id("job1")
-            .with_step(|step| step.with_id("step1"))
-            .with_step(|step| step.with_id("step2"))
-            .with_step(|step| step.with_id("step3"))
-    });
+    let mut workflow = Workflow::new()
+        .with_id("w1")
+        .with_step(|step| step.with_id("step1"))
+        .with_step(|step| step.with_id("step2"))
+        .with_step(|step| step.with_id("step3"));
     let tree = NodeTree::build(&mut workflow).unwrap();
     let step1 = tree.node("step1").unwrap();
     let step2 = tree.node("step2").unwrap();
@@ -169,12 +148,10 @@ async fn sch_tree_step_prev() {
 
 #[tokio::test]
 async fn sch_tree_branches() {
-    let mut workflow = Workflow::new().with_id("w1").with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1")
-                .with_branch(|b| b.with_id("b1"))
-                .with_branch(|b| b.with_id("b2"))
-        })
+    let mut workflow = Workflow::new().with_id("w1").with_step(|step| {
+        step.with_id("step1")
+            .with_branch(|b| b.with_id("b1"))
+            .with_branch(|b| b.with_id("b2"))
     });
     let tree = NodeTree::build(&mut workflow).unwrap();
     let step = tree.node("step1").unwrap();
@@ -187,20 +164,18 @@ async fn sch_tree_branches() {
 
 #[tokio::test]
 async fn sch_tree_branch_steps() {
-    let mut workflow = Workflow::new().with_id("w1").with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1")
-                .with_branch(|b| {
-                    b.with_id("b1")
-                        .with_step(|step| step.with_id("step11"))
-                        .with_step(|step| step.with_id("step12"))
-                })
-                .with_branch(|b| {
-                    b.with_id("b2")
-                        .with_step(|step| step.with_id("step21"))
-                        .with_step(|step| step.with_id("step22"))
-                })
-        })
+    let mut workflow = Workflow::new().with_id("w1").with_step(|step| {
+        step.with_id("step1")
+            .with_branch(|b| {
+                b.with_id("b1")
+                    .with_step(|step| step.with_id("step11"))
+                    .with_step(|step| step.with_id("step12"))
+            })
+            .with_branch(|b| {
+                b.with_id("b2")
+                    .with_step(|step| step.with_id("step21"))
+                    .with_step(|step| step.with_id("step22"))
+            })
     });
     let tree = NodeTree::build(&mut workflow).unwrap();
     tree.print();
@@ -217,12 +192,10 @@ async fn sch_tree_branch_steps() {
 
 #[tokio::test]
 async fn sch_tree_acts() {
-    let mut workflow = Workflow::new().with_id("w1").with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1")
-                .with_act(|act| act.with_id("act1"))
-                .with_act(|act| act.with_id("act2"))
-        })
+    let mut workflow = Workflow::new().with_id("w1").with_step(|step| {
+        step.with_id("step1")
+            .with_act(|act| act.with_id("act1"))
+            .with_act(|act| act.with_id("act2"))
     });
     let tree = NodeTree::build(&mut workflow).unwrap();
     let step = tree.node("step1").unwrap();

@@ -1,6 +1,6 @@
 mod act;
 mod branch;
-mod job;
+// mod job;
 mod step;
 mod workflow;
 
@@ -120,6 +120,12 @@ impl Task {
 
     pub fn set_emit_disabled(&self, v: bool) {
         self.room.set(consts::TASK_EMIT_DISABLED, json!(v));
+    }
+
+    pub fn parent_task_id(&self) -> Option<String> {
+        self.room
+            .get(consts::PARENT_TASK_ID)
+            .map(|v| v.as_str().map(|v| v.to_string()).unwrap())
     }
 
     pub fn create_context(self: &Arc<Self>, scher: &Arc<Scheduler>) -> Arc<Context> {
@@ -309,12 +315,12 @@ impl Task {
             .action()
             .ok_or(ActError::Action(format!("cannot find action in context")))?;
         // check uid
-        ctx.var(consts::FOR_ACT_KEY_UID)
-            .map(|v| v.as_str().unwrap().to_string())
-            .ok_or(ActError::Action(format!(
-                "cannot find '{}' in options",
-                consts::FOR_ACT_KEY_UID
-            )))?;
+        // ctx.var(consts::FOR_ACT_KEY_UID)
+        //     .map(|v| v.as_str().unwrap().to_string())
+        //     .ok_or(ActError::Action(format!(
+        //         "cannot find '{}' in options",
+        //         consts::FOR_ACT_KEY_UID
+        //     )))?;
 
         match action {
             EventAction::Submit => {
@@ -474,7 +480,7 @@ impl Task {
                     .map(|e| e.as_str().unwrap().to_string())
                     .unwrap_or_default();
                 ctx.set_err(&Error {
-                    key: err_code.to_string(),
+                    key: Some(err_code.to_string()),
                     message: err_message,
                 });
                 task.error(ctx)?;
@@ -486,25 +492,6 @@ impl Task {
 
     pub fn is_ready(&self) -> bool {
         match self.node.data() {
-            NodeData::Job(n) => {
-                if n.needs.len() > 0 {
-                    let siblings = self.siblings();
-                    if siblings
-                        .iter()
-                        .filter(|iter| {
-                            iter.state().is_completed() && n.needs.contains(&iter.node_id())
-                        })
-                        .count()
-                        > 0
-                    {
-                        return true;
-                    }
-
-                    return false;
-                }
-
-                true
-            }
             NodeData::Branch(n) => {
                 let siblings = self.siblings();
                 if n.needs.len() > 0 {
@@ -561,6 +548,15 @@ impl Task {
         }
     }
 
+    pub fn resume(&self, ctx: &Context) -> Result<()> {
+        if self.is_ready() {
+            self.set_state(TaskState::Running);
+            ctx.scher.emitter().emit_task_event(self);
+            self.exec(&ctx)?;
+        }
+
+        Ok(())
+    }
     /// check if the task includes branches
     fn is_acts(&self) -> bool {
         self.children()
@@ -632,7 +628,6 @@ impl ActTask for Task {
             self.set_action_state(ActionState::Created);
             match &self.node.data {
                 NodeData::Workflow(workflow) => workflow.init(ctx)?,
-                NodeData::Job(job) => job.init(ctx)?,
                 NodeData::Branch(branch) => branch.init(ctx)?,
                 NodeData::Step(step) => step.init(ctx)?,
                 NodeData::Act(act) => act.init(ctx)?,
@@ -648,7 +643,6 @@ impl ActTask for Task {
         if ctx.task.state().is_running() {
             match &self.node.data {
                 NodeData::Workflow(workflow) => workflow.run(ctx),
-                NodeData::Job(job) => job.run(ctx),
                 NodeData::Branch(branch) => branch.run(ctx),
                 NodeData::Step(step) => step.run(ctx),
                 NodeData::Act(act) => act.run(ctx),
@@ -663,7 +657,6 @@ impl ActTask for Task {
         if ctx.task.state().is_next() {
             is_next = match &self.node.data {
                 NodeData::Workflow(data) => data.next(ctx)?,
-                NodeData::Job(data) => data.next(ctx)?,
                 NodeData::Step(data) => data.next(ctx)?,
                 NodeData::Branch(data) => data.next(ctx)?,
                 NodeData::Act(data) => data.next(ctx)?,
@@ -689,7 +682,6 @@ impl ActTask for Task {
     fn review(&self, ctx: &Context) -> Result<bool> {
         let is_review = match &self.node.data {
             NodeData::Workflow(data) => data.review(ctx)?,
-            NodeData::Job(data) => data.review(ctx)?,
             NodeData::Step(data) => data.review(ctx)?,
             NodeData::Branch(data) => data.review(ctx)?,
             NodeData::Act(data) => data.review(ctx)?,
@@ -714,7 +706,6 @@ impl ActTask for Task {
     fn error(&self, ctx: &Context) -> Result<()> {
         match &self.node.data {
             NodeData::Workflow(data) => data.error(ctx),
-            NodeData::Job(data) => data.error(ctx),
             NodeData::Step(data) => data.error(ctx),
             NodeData::Branch(data) => data.error(ctx),
             NodeData::Act(data) => data.error(ctx),

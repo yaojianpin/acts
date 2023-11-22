@@ -32,20 +32,24 @@ pub enum ActError {
 
 #[derive(Debug, Clone)]
 pub struct Error {
-    pub key: String,
+    pub key: Option<String>,
     pub message: String,
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_fmt(format_args!("{}:{}", &self.key, &self.message))
+        if let Some(key) = &self.key {
+            f.write_fmt(format_args!("{}:{}", key, &self.message))
+        } else {
+            f.write_fmt(format_args!("{}", &self.message))
+        }
     }
 }
 
 impl Default for Error {
     fn default() -> Self {
         Self {
-            key: "unknown".to_string(),
+            key: None,
             message: Default::default(),
         }
     }
@@ -57,13 +61,13 @@ impl Error {
 
         if parts.len() == 2 {
             return Error {
-                key: parts[0].to_string(),
+                key: Some(parts[0].to_string()),
                 message: parts[1].to_string(),
             };
         }
 
         Error {
-            key: "unknown".to_string(),
+            key: None,
             message: s.to_string(),
         }
     }

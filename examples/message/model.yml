@@ -23,15 +23,14 @@ actions:
         nid: step3
     inputs:
       a: ${ env.get("value") }
-jobs:
-  - name: job1
-    steps:
-      - name: step 1
-        id: step1
-      - name: step 2
-        id: step2
-        run: |
-          env.set("value", 100);          
-      - name: step 3
-        id: step3
-      - name: step 4
+steps:
+  - name: step 1
+    id: step1
+  - name: step 2
+    id: step2
+    run: |
+      env.set("value", 100);          
+  - name: step 3
+    id: step3
+  - name: step 4
+    

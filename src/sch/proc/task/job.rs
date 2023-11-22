@@ -2,11 +2,14 @@ use crate::{
     event::ActionState,
     model::Job,
     sch::{Context, TaskState},
-    ActTask, Result,
+    utils::consts,
+    ActTask, Action, Result, Vars,
 };
 use async_trait::async_trait;
 use core::clone::Clone;
+use serde_json::json;
 use std::{ops::Deref, sync::Arc};
+use tokio::runtime::Handle;
 
 #[async_trait]
 impl ActTask for Job {
@@ -30,13 +33,28 @@ impl ActTask for Job {
     }
 
     fn review(&self, ctx: &Context) -> Result<bool> {
-        let state = ctx.task.state();
-        if state.is_running() {
+        if ctx.task.state().is_running() {
             ctx.task.set_action_state(ActionState::Completed);
-            return Ok(true);
         }
 
-        Ok(false)
+        // if let Some(tid) = &ctx.task.parent_task_id() {
+        //     let mut vars = Vars::new();
+        //     vars.insert("uid".to_string(), json!("sys"));
+        //     let action = Action::new(&ctx.proc.id(), tid, consts::EVT_COMPLETE, &vars);
+
+        //     let proc = ctx.proc.clone();
+        //     let scher = ctx.scher.clone();
+        //     Handle::current().spawn(async move {
+        //         proc.do_action(&action, &scher)
+        //             .expect("return to act from job");
+        //     });
+
+        //     // break for review
+        //     // the job will return to the parent act task
+        //     return Ok(false);
+        // }
+
+        Ok(ctx.task.state().is_completed())
     }
 }
 

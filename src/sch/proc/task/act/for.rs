@@ -7,13 +7,13 @@ use serde_json::json;
 use std::collections::{BTreeSet, HashMap};
 
 impl ActTask for ActFor {
-    fn init(&self, _ctx: &Context) -> Result<()> {
+    fn init(&self, ctx: &Context) -> Result<()> {
+        // disable emit message because it will generate the sub acts
+        ctx.task.set_emit_disabled(true);
         Ok(())
     }
 
     fn run(&self, ctx: &Context) -> Result<()> {
-        // disable emit message because it will generate the sub acts
-        ctx.task.set_emit_disabled(true);
         let (_, cand) = self.parse(ctx, &self.r#in)?;
         let mut cands = Vec::new();
         if !cand.calculable(&mut cands) {
@@ -70,7 +70,7 @@ impl ActTask for ActFor {
 impl ActFor {
     pub fn parse(&self, ctx: &Context, scr: &str) -> Result<(Rule, Candidate)> {
         if scr.is_empty() {
-            return Err(ActError::Runtime("act.for's in is empty".to_string()));
+            return Err(ActError::Runtime("act.for's 'in' is empty".to_string()));
         }
         let rule = Rule::parse(&self.by)?;
         let result = ctx.eval_with::<rhai::Dynamic>(scr)?;

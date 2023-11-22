@@ -69,8 +69,7 @@ async fn sch_message_workflow_id() {
 
 #[tokio::test]
 async fn sch_message_time() {
-    let mut workflow =
-        Workflow::new().with_job(|job| job.with_id("job1").with_step(|step| step.with_id("step1")));
+    let mut workflow = Workflow::new().with_step(|step| step.with_id("step1"));
     let id = utils::longid();
     let (proc, scher, emitter) = create_proc(&mut workflow, &id);
 
@@ -88,105 +87,8 @@ async fn sch_message_time() {
 }
 
 #[tokio::test]
-async fn sch_message_job_created() {
-    let mut workflow = Workflow::new().with_job(|job| job.with_id("job1"));
-    let id = utils::longid();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &id);
-
-    emitter.on_message(|msg| {
-        if msg.inner().r#type == "job" && msg.inner().state() == ActionState::Created {
-            assert!(true);
-        }
-    });
-    scher.launch(&proc);
-    scher.event_loop().await;
-}
-
-#[tokio::test]
-async fn sch_message_job_completed() {
-    let mut workflow = Workflow::new().with_job(|job| job.with_id("job1"));
-    let id = utils::longid();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &id);
-
-    emitter.on_message(|msg| {
-        if msg.inner().r#type == "job" && msg.inner().state() == ActionState::Completed {
-            assert!(true);
-        }
-    });
-    scher.launch(&proc);
-    scher.event_loop().await;
-}
-
-#[tokio::test]
-async fn sch_message_job_needs_no_pending() {
-    let message_keys = Arc::new(Mutex::new(Vec::new()));
-    let mut workflow = Workflow::new()
-        .with_job(|job| {
-            job.with_id("job1")
-                .with_step(|step| step.with_id("step1").with_act(|act| act.with_id("act1")))
-        })
-        .with_job(|job| {
-            job.with_id("job2")
-                .with_need("job1")
-                .with_step(|step| step.with_id("step2").with_act(|act| act.with_id("act2")))
-        });
-    let id = utils::longid();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &id);
-
-    let keys = message_keys.clone();
-    emitter.on_message(move |e| {
-        let mut keys = keys.lock().unwrap();
-        keys.push(e.key.clone());
-        if e.is_key("job1") && e.is_state("created") {
-            e.close();
-        }
-    });
-    scher.launch(&proc);
-    scher.event_loop().await;
-    assert_eq!(
-        message_keys.lock().unwrap().contains(&"job2".to_string()),
-        false
-    );
-}
-
-#[tokio::test]
-async fn sch_message_job_needs_resume() {
-    let ret = Arc::new(Mutex::new(false));
-    let mut workflow = Workflow::new()
-        .with_job(|job| {
-            job.with_id("job1")
-                .with_step(|step| step.with_id("step1").with_act(|act| act.with_id("act1")))
-        })
-        .with_job(|job| {
-            job.with_id("job2")
-                .with_need("job1")
-                .with_step(|step| step.with_id("step2").with_act(|act| act.with_id("act2")))
-        });
-    let id = utils::longid();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &id);
-
-    let r = ret.clone();
-    emitter.on_message(move |e| {
-        if e.is_key("act1") && e.is_state("created") {
-            let mut options = Vars::new();
-            options.insert("uid".to_string(), json!("u1"));
-            e.do_action(&e.proc_id, &e.id, "complete", &options)
-                .unwrap();
-        }
-        if e.is_key("job2") && e.is_state("created") {
-            *r.lock().unwrap() = true;
-            e.close();
-        }
-    });
-    scher.launch(&proc);
-    scher.event_loop().await;
-    assert_eq!(*ret.lock().unwrap(), true);
-}
-
-#[tokio::test]
 async fn sch_message_step_created() {
-    let mut workflow =
-        Workflow::new().with_job(|job| job.with_id("job1").with_step(|step| step.with_id("step1")));
+    let mut workflow = Workflow::new().with_step(|step| step.with_id("step1"));
     let id = utils::longid();
     let (proc, scher, emitter) = create_proc(&mut workflow, &id);
 
@@ -201,8 +103,7 @@ async fn sch_message_step_created() {
 
 #[tokio::test]
 async fn sch_message_step_completed() {
-    let mut workflow =
-        Workflow::new().with_job(|job| job.with_id("job1").with_step(|step| step.with_id("step1")));
+    let mut workflow = Workflow::new().with_step(|step| step.with_id("step1"));
     let id = utils::longid();
     let (proc, scher, emitter) = create_proc(&mut workflow, &id);
 
@@ -217,10 +118,8 @@ async fn sch_message_step_completed() {
 
 #[tokio::test]
 async fn sch_message_branch_created() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1")
-            .with_step(|step| step.with_id("step1").with_branch(|b| b.with_id("b1")))
-    });
+    let mut workflow =
+        Workflow::new().with_step(|step| step.with_id("step1").with_branch(|b| b.with_id("b1")));
     let id = utils::longid();
     let (proc, scher, emitter) = create_proc(&mut workflow, &id);
 
@@ -235,10 +134,8 @@ async fn sch_message_branch_created() {
 
 #[tokio::test]
 async fn sch_message_branch_completed() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1")
-            .with_step(|step| step.with_id("step1").with_branch(|b| b.with_id("b1")))
-    });
+    let mut workflow =
+        Workflow::new().with_step(|step| step.with_id("step1").with_branch(|b| b.with_id("b1")));
     let id = utils::longid();
     let (proc, scher, emitter) = create_proc(&mut workflow, &id);
 
@@ -253,11 +150,9 @@ async fn sch_message_branch_completed() {
 
 #[tokio::test]
 async fn sch_message_branch_skipped() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1")
-                .with_branch(|b| b.with_id("b1").with_if("false"))
-        })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_branch(|b| b.with_id("b1").with_if("false"))
     });
     let id = utils::longid();
     let (proc, scher, emitter) = create_proc(&mut workflow, &id);
@@ -273,10 +168,8 @@ async fn sch_message_branch_skipped() {
 
 #[tokio::test]
 async fn sch_message_act_created() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1")
-            .with_step(|step| step.with_id("step1").with_act(|act| act.with_id("act1")))
-    });
+    let mut workflow =
+        Workflow::new().with_step(|step| step.with_id("step1").with_act(|act| act.with_id("act1")));
     let id = utils::longid();
     let (proc, scher, emitter) = create_proc(&mut workflow, &id);
 
@@ -293,10 +186,8 @@ async fn sch_message_act_created() {
 
 #[tokio::test]
 async fn sch_message_act_completed() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1")
-            .with_step(|step| step.with_id("step1").with_act(|act| act.with_id("act1")))
-    });
+    let mut workflow =
+        Workflow::new().with_step(|step| step.with_id("step1").with_act(|act| act.with_id("act1")));
     let id = utils::longid();
     let (proc, scher, emitter) = create_proc(&mut workflow, &id);
     let s = scher.clone();
@@ -318,10 +209,8 @@ async fn sch_message_act_completed() {
 
 #[tokio::test]
 async fn sch_message_send() {
-    let mut workflow = Workflow::new().with_job(|mut job| {
-        job.name = "job1".to_string();
-        job.with_step(|step| step.with_name("step1").with_run(r#"act.send("123")"#))
-    });
+    let mut workflow =
+        Workflow::new().with_step(|step| step.with_name("step1").with_run(r#"act.send("123")"#));
     workflow.id = utils::longid();
     let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
@@ -338,10 +227,8 @@ async fn sch_message_send() {
 
 #[tokio::test]
 async fn sch_message_act_inputs_with_step_id() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1")
-            .with_step(|step| step.with_id("step1").with_act(|act| act.with_id("test")))
-    });
+    let mut workflow =
+        Workflow::new().with_step(|step| step.with_id("step1").with_act(|act| act.with_id("test")));
     workflow.id = utils::longid();
     let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
 

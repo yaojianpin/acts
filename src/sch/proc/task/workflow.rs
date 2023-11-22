@@ -1,6 +1,6 @@
 use crate::{
     event::ActionState,
-    sch::{Context, Task, TaskState},
+    sch::{Context, Task},
     ActTask, Result, Workflow, WorkflowAction,
 };
 use async_trait::async_trait;
@@ -14,8 +14,8 @@ impl ActTask for Workflow {
     fn next(&self, ctx: &Context) -> Result<bool> {
         let children = ctx.task.node.children();
         if children.len() > 0 {
-            for child in &children {
-                ctx.sched_task(child);
+            for step in &children {
+                ctx.sched_task(step);
             }
         } else {
             ctx.task.set_action_state(ActionState::Completed);
@@ -25,24 +25,8 @@ impl ActTask for Workflow {
     }
 
     fn review(&self, ctx: &Context) -> Result<bool> {
-        let tasks = ctx.task.children();
-        let mut complete_count = 0;
-        for task in tasks.iter() {
-            if task.state().is_pending() && task.is_ready() {
-                let ctx = task.create_context(&ctx.scher);
-
-                // resume task
-                task.set_state(TaskState::Running);
-                ctx.scher.emitter().emit_task_event(task);
-                task.exec(&ctx)?;
-                return Ok(false);
-            }
-
-            if task.state().is_completed() {
-                complete_count += 1;
-            }
-        }
-        if complete_count == tasks.len() {
+        let state = ctx.task.state();
+        if state.is_running() {
             ctx.task.set_action_state(ActionState::Completed);
             return Ok(true);
         }

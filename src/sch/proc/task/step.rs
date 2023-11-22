@@ -33,6 +33,7 @@ impl ActTask for Step {
         if state.is_running() {
             let children = ctx.task.node.children();
             let mut is_next = false;
+
             if children.len() > 0 {
                 for child in &ctx.task.node.children() {
                     ctx.sched_task(child);
@@ -45,6 +46,7 @@ impl ActTask for Step {
             } else {
                 ctx.task.set_action_state(ActionState::Completed);
             }
+
             return Ok(is_next);
         } else if state.is_skip() {
             // if the step is skipped, still find the next to run
@@ -73,7 +75,7 @@ impl ActTask for Step {
                     return Ok(false);
                 } else if task.state().is_error() {
                     ctx.set_err(&task.state().as_err().unwrap_or_default());
-                    ctx.emit_error();
+                    ctx.emit_error()?;
                     return Ok(false);
                 }
 

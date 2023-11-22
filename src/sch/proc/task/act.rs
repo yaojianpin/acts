@@ -1,6 +1,7 @@
 mod catch;
 mod r#for;
 mod rule;
+mod r#use;
 
 #[cfg(test)]
 mod tests;
@@ -9,7 +10,7 @@ use crate::{
     event::ActionState,
     model::Act,
     sch::{Context, TaskState},
-    ActTask, Result,
+    ActTask, ActUse, Result,
 };
 use async_trait::async_trait;
 use rule::Rule;
@@ -24,6 +25,10 @@ impl ActTask for Act {
                 return f.init(ctx);
             }
 
+            if let Some(ref s) = self.r#use {
+                return ActUse::new(s).init(ctx);
+            }
+
             ctx.task.set_state(TaskState::Interrupt);
         }
 
@@ -34,6 +39,11 @@ impl ActTask for Act {
         if let Some(ref f) = self.r#for {
             return f.run(ctx);
         }
+
+        if let Some(ref s) = self.r#use {
+            return ActUse::new(s).run(ctx);
+        }
+
         // when resuming the pending task, the current state is running
         // for general act task, reset the state to interrupt
         if ctx.task.state().is_running() {
@@ -65,7 +75,7 @@ impl ActTask for Act {
             for task in tasks.iter() {
                 if task.state().is_error() {
                     ctx.set_err(&task.state().as_err().unwrap_or_default());
-                    ctx.emit_error();
+                    ctx.emit_error()?;
                     return Ok(false);
                 }
                 if task.state().is_skip() {
@@ -91,7 +101,7 @@ impl ActTask for Act {
     fn error(&self, ctx: &Context) -> Result<()> {
         self.catches.error(ctx)?;
         if ctx.task.state().is_error() {
-            ctx.emit_error();
+            return ctx.emit_error();
         }
         return Ok(());
     }

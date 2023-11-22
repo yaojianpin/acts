@@ -5,34 +5,32 @@ env:
   index: 0
   value: 0
 outputs:
-  result:
-jobs:
-  - outputs:
-      result: ${ env.get("value") }
-    steps:
-      - name: init
-        id: init
-        run: |
-          env.set("value", 0);
-          env.set("index", 0);
-      - name: cond
-        id: cond
-        branches:
-          - name: "<=input"
-            id: "<=input"
-            if: env.get("index") <= env.get("input")
-            steps:
-              - name: add
-                id: add
-                next: cond
-                run: |
-                  let index = env.get("index");
-                  let value = env.get("value");
-                  env.set("value", value + index);
-                  env.set("index", index + 1);
+  result: ${ env.get("value") }
+steps:
+  - name: init
+    id: init
+    run: |
+      env.set("value", 0);
+      env.set("index", 0);
+  - name: cond
+    id: cond
+    branches:
+      - name: "<=input"
+        id: "<=input"
+        if: env.get("index") <= env.get("input")
+        steps:
+          - name: add
+            id: add
+            next: cond
+            run: |
+              let index = env.get("index");
+              let value = env.get("value");
+              env.set("value", value + index);
+              env.set("index", index + 1);
 
-          - name: ">input"
-            id: ">input"
-            if: env.get("index") > env.get("input")
-      - name: end
-        id: end
+      - name: ">input"
+        id: ">input"
+        if: env.get("index") > env.get("input")
+  - name: end
+    id: end
+    

@@ -73,11 +73,9 @@ async fn sch_scher_start_with_vars() {
 #[tokio::test]
 async fn sch_scher_do_action() {
     let scher = Scheduler::new();
-    let workflow = Workflow::new().with_job(|job| {
-        job.with_name("job1").with_step(|step| {
-            step.with_name("step1")
-                .with_act(|act| act.with_id("act1").with_input("uid", json!("u1")))
-        })
+    let workflow = Workflow::new().with_step(|step| {
+        step.with_name("step1")
+            .with_act(|act| act.with_id("act1").with_input("uid", json!("u1")))
     });
     let s = scher.clone();
     scher.emitter().on_complete(|e| e.close());

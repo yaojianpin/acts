@@ -8,6 +8,7 @@ pub struct WorkflowState {
     pub state: TaskState,
     pub start_time: i64,
     pub end_time: i64,
+    pub inputs: Vars,
     pub outputs: Vars,
 }
 
@@ -16,6 +17,7 @@ pub struct ActionResult {
     pub start_time: i64,
     pub end_time: i64,
 
+    inputs: Vars,
     outputs: Vars,
 }
 
@@ -24,8 +26,10 @@ impl WorkflowState {
     pub fn outputs(&self) -> &Vars {
         &self.outputs
     }
-
-    /// How many time(million seconds) did a workflow cost
+    pub fn inputs(&self) -> &Vars {
+        &self.inputs
+    }
+    /// workflow cost in million seconds
     pub fn cost(&self) -> i64 {
         if self.state.is_completed() {
             return self.end_time - self.start_time;
@@ -40,6 +44,7 @@ impl ActionResult {
         Self {
             start_time: utils::time::time(),
             end_time: 0,
+            inputs: Vars::new(),
             outputs: Vars::new(),
         }
     }

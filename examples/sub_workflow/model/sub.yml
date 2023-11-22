@@ -1,0 +1,17 @@
+name: sub
+id: sub
+env:
+  v: 0
+outputs:
+  v:
+steps:
+  - name: t1
+    acts:
+      - id: action1
+        outputs:
+          v:
+  - name: t2
+    run: |
+      print(env.get("v"));
+
+

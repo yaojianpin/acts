@@ -41,7 +41,6 @@ pub trait ActTask: Clone + Send {
             let err = ctx.err().unwrap_or_default();
             ctx.task.set_state(TaskState::Fail(err.to_string()));
         }
-        ctx.emit_error();
-        Ok(())
+        ctx.emit_error()
     }
 }

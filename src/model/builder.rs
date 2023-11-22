@@ -1,5 +1,5 @@
 use super::{act::ActCatch, workflow::WorkflowActionOn};
-use crate::{Act, ActAlias, ActFor, ActValue, Branch, Job, Step, Workflow, WorkflowAction};
+use crate::{Act, ActAlias, ActFor, ActValue, Branch, Step, Workflow, WorkflowAction};
 
 impl Workflow {
     pub fn new() -> Self {
@@ -36,53 +36,9 @@ impl Workflow {
         self.actions.push(build(action));
         self
     }
-
-    pub fn with_job(mut self, build: fn(Job) -> Job) -> Self {
-        let job = Job::default();
-        self.jobs.push(build(job));
-        self
-    }
-}
-
-impl Job {
-    pub fn new() -> Self {
-        Default::default()
-    }
-
-    pub fn with_id(mut self, id: &str) -> Self {
-        self.id = id.to_string();
-        self
-    }
-
-    pub fn with_name(mut self, name: &str) -> Self {
-        self.name = name.to_string();
-        self
-    }
-
-    pub fn with_tag(mut self, tag: &str) -> Self {
-        self.tag = tag.to_string();
-        self
-    }
-
-    pub fn with_input(mut self, name: &str, value: ActValue) -> Self {
-        self.inputs.insert(name.to_string(), value);
-        self
-    }
-
-    pub fn with_output(mut self, name: &str, value: ActValue) -> Self {
-        self.outputs.insert(name.to_string(), value);
-        self
-    }
-
-    pub fn with_need(mut self, need: &str) -> Self {
-        self.needs.push(need.to_string());
-        self
-    }
-
     pub fn with_step(mut self, build: fn(Step) -> Step) -> Self {
         let step = Step::default();
-        let step = build(step);
-        self.steps.push(step);
+        self.steps.push(build(step));
         self
     }
 }
@@ -254,6 +210,11 @@ impl Act {
     pub fn with_catch(mut self, build: fn(ActCatch) -> ActCatch) -> Self {
         let catch = ActCatch::default();
         self.catches.push(build(catch));
+        self
+    }
+
+    pub fn with_use(mut self, mid: &str) -> Self {
+        self.r#use = Some(mid.to_string());
         self
     }
 }

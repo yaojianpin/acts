@@ -10,26 +10,23 @@ async fn main() {
         .with_env("index", 0.into())
         .with_env("result", 0.into())
         .with_output("result", 0.into())
-        .with_job(|job| {
-            job.with_id("job1")
-                .with_step(|step| {
-                    step.with_id("cond")
-                        .with_branch(|b| {
-                            b.with_if(r#"env.get("index") <= env.get("count")"#)
-                                .with_step(|step| {
-                                    step.with_next("cond").with_run(
-                                        r#"let index = env.get("index");
-                                            let value = env.get("result");
-                                            env.set("index", index + 1);
-                                            env.set("result", value + index);
-                                        "#,
-                                    )
-                                })
+        .with_step(|step| {
+            step.with_id("cond")
+                .with_branch(|b| {
+                    b.with_if(r#"env.get("index") <= env.get("count")"#)
+                        .with_step(|step| {
+                            step.with_next("cond").with_run(
+                                r#"let index = env.get("index");
+                                    let value = env.get("result");
+                                    env.set("index", index + 1);
+                                    env.set("result", value + index);
+                                "#,
+                            )
                         })
-                        .with_branch(|b| b.with_if(r#"env.get("index") > env.get("count")"#))
                 })
-                .with_step(|step| step.with_name("step2"))
-        });
+                .with_branch(|b| b.with_if(r#"env.get("index") > env.get("count")"#))
+        })
+        .with_step(|step| step.with_name("step2"));
 
     workflow.print();
     let executor = engine.executor();

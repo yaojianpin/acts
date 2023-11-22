@@ -73,7 +73,9 @@ impl NodeTree {
         if let Some(ref root) = self.root.clone() {
             VisitRoot::walk(root, &move |node| {
                 if node.level > 1 {
-                    let mut level = 0;
+                    // level start from 1
+                    // level 0 is the workflow itself
+                    let mut level = 1;
                     while level < node.level {
                         if node.is_sibling(&level) {
                             print!("│ ");
@@ -85,7 +87,7 @@ impl NodeTree {
                     }
                 }
 
-                if node.next_sibling() {
+                if node.is_next_sibling() {
                     print!("├─");
                 } else {
                     if node.level != 0 {
@@ -101,7 +103,7 @@ impl NodeTree {
                     node.kind(),
                     node.id(),
                     node.name(),
-                    next
+                    next,
                 );
             });
         }
@@ -125,7 +127,7 @@ impl NodeTree {
                     }
                 }
 
-                if n.next_sibling() {
+                if n.is_next_sibling() {
                     s.borrow_mut().push_str(&format!("{}", "├─"));
                 } else {
                     if n.level != 0 {

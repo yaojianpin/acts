@@ -7,11 +7,15 @@ use crate::{
         queue::{Queue, Signal},
         Proc, Task,
     },
-    utils, ActError, ActionResult, Engine, Result, RwLock, ShareLock, Vars,
+    utils::{self, consts},
+    ActError, ActionResult, Engine, Error, Result, RwLock, ShareLock, Vars,
 };
+use serde_json::json;
 use std::sync::Arc;
 use tokio::runtime::Handle;
 use tracing::{debug, error, info};
+
+use super::TaskState;
 
 #[derive(Clone)]
 pub struct Scheduler {
@@ -185,13 +189,23 @@ impl Scheduler {
                 if state.is_running() || state.is_pending() {
                     scher.emitter().emit_start_event(&workflow_state);
                 } else {
+                    if state.is_error() {
+                        scher.emitter().emit_error(&workflow_state);
+                    } else if state.is_completed() {
+                        scher.emitter().emit_complete_event(&workflow_state);
+                    }
+
+                    // if the proc is a sub proc
+                    // call the parent act
+                    if let Some((ppid, ptid)) = proc.parent() {
+                        scher.return_to_act(&ppid, &ptid, proc);
+                    }
+
                     // proc.print();
-                    let pid = proc.id();
-                    cache.remove(&pid).unwrap_or_else(|err| {
+                    cache.remove(&proc.id()).unwrap_or_else(|err| {
                         error!("scher.initialize remove={}", err);
                         false
                     });
-
                     cache
                         .restore(|proc| {
                             if proc.state().is_none() {
@@ -199,12 +213,6 @@ impl Scheduler {
                             }
                         })
                         .unwrap_or_else(|err| error!("scher.initialize restore={}", err));
-
-                    if state.is_error() {
-                        scher.emitter().emit_error(&workflow_state);
-                    } else if state.is_completed() {
-                        scher.emitter().emit_complete_event(&workflow_state);
-                    }
                 }
             });
         }
@@ -237,5 +245,38 @@ impl Scheduler {
                 }
             });
         }
+    }
+
+    fn return_to_act(self: &Arc<Self>, pid: &str, tid: &str, proc: &Proc) {
+        let state = proc.state();
+        let mut vars = proc.outputs();
+        let mut event = consts::EVT_COMPLETE;
+        if state.is_abort() {
+            event = consts::EVT_ABORT;
+        } else if state.is_skip() {
+            event = consts::EVT_SKIP;
+        } else if let TaskState::Fail(ref s) = state {
+            event = consts::EVT_ERR;
+            let err = Error::parse(s);
+            match err.key {
+                Some(key) => {
+                    vars.insert(consts::FOR_ACT_KEY_STEP_ERR_CODE.to_string(), json!(key));
+                }
+                None => {
+                    vars.insert(
+                        consts::FOR_ACT_KEY_STEP_ERR_CODE.to_string(),
+                        json!(consts::FOR_ACT_KEY_STEP_ERR_INNER),
+                    );
+                }
+            }
+            vars.insert(
+                consts::FOR_ACT_KEY_STEP_ERR_MESSAGE.to_string(),
+                json!(err.message),
+            );
+        }
+        let action = Action::new(pid, tid, event, &vars);
+        let _ = self
+            .do_action(&action)
+            .map_err(|err| error!("scher::return_to_act {}", err.to_string()));
     }
 }

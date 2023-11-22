@@ -1,5 +1,6 @@
 mod catch;
 mod r#for;
+mod r#use;
 
 use crate::{
     event::{Action, ActionState, Emitter},
@@ -12,12 +13,9 @@ use std::sync::Mutex;
 
 #[tokio::test]
 async fn sch_act_create() {
-    let mut workflow = Workflow::new().with_job(|mut job| {
-        job.name = "job1".to_string();
-        job.with_step(|step| {
-            step.with_name("step1")
-                .with_act(|act| act.with_id("act1").with_name("act 1"))
-        })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_name("step1")
+            .with_act(|act| act.with_id("act1").with_name("act 1"))
     });
 
     let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
@@ -38,13 +36,10 @@ async fn sch_act_create() {
 
 #[tokio::test]
 async fn sch_act_needs_pending() {
-    let mut workflow = Workflow::new().with_job(|mut job| {
-        job.name = "job1".to_string();
-        job.with_step(|step| {
-            step.with_name("step1")
-                .with_act(|act| act.with_id("act1").with_need("act2"))
-                .with_act(|act| act.with_id("act2"))
-        })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_name("step1")
+            .with_act(|act| act.with_id("act1").with_need("act2"))
+            .with_act(|act| act.with_id("act2"))
     });
 
     let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
@@ -69,13 +64,10 @@ async fn sch_act_needs_pending() {
 
 #[tokio::test]
 async fn sch_act_needs_resume() {
-    let mut workflow = Workflow::new().with_job(|mut job| {
-        job.name = "job1".to_string();
-        job.with_step(|step| {
-            step.with_name("step1")
-                .with_act(|act| act.with_id("act1").with_need("act2"))
-                .with_act(|act| act.with_id("act2"))
-        })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_name("step1")
+            .with_act(|act| act.with_id("act1").with_need("act2"))
+            .with_act(|act| act.with_id("act2"))
     });
 
     let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
@@ -109,13 +101,11 @@ async fn sch_act_needs_resume() {
 #[tokio::test]
 async fn sch_act_complete() {
     let ret = Arc::new(Mutex::new(false));
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_name("job1").with_step(|step| {
-            step.with_name("step1").with_act(|act| {
-                act.with_id("fn1")
-                    .with_name("fn 1")
-                    .with_input("uid", json!("u1"))
-            })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_name("step1").with_act(|act| {
+            act.with_id("fn1")
+                .with_name("fn 1")
+                .with_input("uid", json!("u1"))
         })
     });
     workflow.id = utils::longid();
@@ -156,23 +146,22 @@ async fn sch_act_complete() {
 async fn sch_act_cancel_normal() {
     let ret = Arc::new(Mutex::new(false));
     let count = Arc::new(Mutex::new(0));
-    let mut workflow = Workflow::new().with_id(&utils::longid()).with_job(|job| {
-        job.with_name("job1")
-            .with_step(|step| {
-                step.with_name("step1").with_act(|act| {
-                    act.with_id("fn1")
-                        .with_name("fn 1")
-                        .with_input("uid", json!("a"))
-                })
+    let mut workflow = Workflow::new()
+        .with_id(&utils::longid())
+        .with_step(|step| {
+            step.with_name("step1").with_act(|act| {
+                act.with_id("fn1")
+                    .with_name("fn 1")
+                    .with_input("uid", json!("a"))
             })
-            .with_step(|step| {
-                step.with_name("step2").with_act(|act| {
-                    act.with_id("fn2")
-                        .with_name("fn 2")
-                        .with_input("uid", json!("b"))
-                })
+        })
+        .with_step(|step| {
+            step.with_name("step2").with_act(|act| {
+                act.with_id("fn2")
+                    .with_name("fn 2")
+                    .with_input("uid", json!("b"))
             })
-    });
+        });
 
     workflow.print();
     let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
@@ -224,23 +213,22 @@ async fn sch_act_cancel_normal() {
 async fn sch_act_back() {
     let ret = Arc::new(Mutex::new(false));
     let count = Arc::new(Mutex::new(0));
-    let mut workflow = Workflow::new().with_id(&utils::longid()).with_job(|job| {
-        job.with_name("job1")
-            .with_step(|step| {
-                step.with_id("step1").with_name("step1").with_act(|act| {
-                    act.with_id("fn1")
-                        .with_name("fn 1")
-                        .with_input("uid", json!("a"))
-                })
+    let mut workflow = Workflow::new()
+        .with_id(&utils::longid())
+        .with_step(|step| {
+            step.with_id("step1").with_name("step1").with_act(|act| {
+                act.with_id("fn1")
+                    .with_name("fn 1")
+                    .with_input("uid", json!("a"))
             })
-            .with_step(|step| {
-                step.with_name("step2").with_act(|act| {
-                    act.with_id("fn2")
-                        .with_name("fn 2")
-                        .with_input("uid", json!("b"))
-                })
+        })
+        .with_step(|step| {
+            step.with_name("step2").with_act(|act| {
+                act.with_id("fn2")
+                    .with_name("fn 2")
+                    .with_input("uid", json!("b"))
             })
-    });
+        });
     let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
 
     let s = scher.clone();
@@ -282,23 +270,22 @@ async fn sch_act_back() {
 
 #[tokio::test]
 async fn sch_act_abort() {
-    let mut workflow = Workflow::new().with_id(&utils::longid()).with_job(|job| {
-        job.with_name("job1")
-            .with_step(|step| {
-                step.with_id("step1").with_name("step1").with_act(|act| {
-                    act.with_id("fn1")
-                        .with_name("fn 1")
-                        .with_input("uid", json!("a"))
-                })
+    let mut workflow = Workflow::new()
+        .with_id(&utils::longid())
+        .with_step(|step| {
+            step.with_id("step1").with_name("step1").with_act(|act| {
+                act.with_id("fn1")
+                    .with_name("fn 1")
+                    .with_input("uid", json!("a"))
             })
-            .with_step(|step| {
-                step.with_name("step2").with_act(|act| {
-                    act.with_id("fn2")
-                        .with_name("fn 2")
-                        .with_input("uid", json!("b"))
-                })
+        })
+        .with_step(|step| {
+            step.with_name("step2").with_act(|act| {
+                act.with_id("fn2")
+                    .with_name("fn 2")
+                    .with_input("uid", json!("b"))
             })
-    });
+        });
     let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
 
     let s = scher.clone();
@@ -322,13 +309,11 @@ async fn sch_act_abort() {
 
 #[tokio::test]
 async fn sch_act_submit() {
-    let mut workflow = Workflow::new().with_id(&utils::longid()).with_job(|job| {
-        job.with_name("job1").with_step(|step| {
-            step.with_id("step1").with_act(|act| {
-                act.with_id("fn1")
-                    .with_name("fn 1")
-                    .with_input("uid", json!("a"))
-            })
+    let mut workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
+        step.with_id("step1").with_act(|act| {
+            act.with_id("fn1")
+                .with_name("fn 1")
+                .with_input("uid", json!("a"))
         })
     });
 
@@ -367,13 +352,11 @@ async fn sch_act_submit() {
 
 #[tokio::test]
 async fn sch_act_skip() {
-    let mut workflow = Workflow::new().with_id(&utils::longid()).with_job(|job| {
-        job.with_name("job1").with_step(|step| {
-            step.with_id("step1").with_act(|act| {
-                act.with_id("fn1")
-                    .with_name("fn 1")
-                    .with_input("uid", json!("a"))
-            })
+    let mut workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
+        step.with_id("step1").with_act(|act| {
+            act.with_id("fn1")
+                .with_name("fn 1")
+                .with_input("uid", json!("a"))
         })
     });
 
@@ -411,14 +394,13 @@ async fn sch_act_skip() {
 
 #[tokio::test]
 async fn sch_act_skip_next() {
-    let mut workflow = Workflow::new().with_id(&utils::longid()).with_job(|job| {
-        job.with_name("job1")
-            .with_step(|step| {
-                step.with_id("step1")
-                    .with_act(|act| act.with_id("act1").with_input("uid", json!("a")))
-            })
-            .with_step(|step| step.with_id("step2"))
-    });
+    let mut workflow = Workflow::new()
+        .with_id(&utils::longid())
+        .with_step(|step| {
+            step.with_id("step1")
+                .with_act(|act| act.with_id("act1").with_input("uid", json!("a")))
+        })
+        .with_step(|step| step.with_id("step2"));
 
     let pid = utils::longid();
     let (proc, scher, emitter, _, _) = create_proc2(&mut workflow, &pid);
@@ -458,11 +440,9 @@ async fn sch_act_skip_next() {
 
 #[tokio::test]
 async fn sch_act_error_action() {
-    let mut workflow = Workflow::new().with_id(&utils::longid()).with_job(|job| {
-        job.with_name("job1").with_step(|step| {
-            step.with_id("step1")
-                .with_act(|act| act.with_id("fn1").with_input("uid", json!("a")))
-        })
+    let mut workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
+        step.with_id("step1")
+            .with_act(|act| act.with_id("fn1").with_input("uid", json!("a")))
     });
 
     let pid = utils::longid();
@@ -497,11 +477,9 @@ async fn sch_act_error_action() {
 #[tokio::test]
 async fn sch_act_error_action_without_err_code() {
     let ret = Arc::new(Mutex::new(false));
-    let mut workflow = Workflow::new().with_id(&utils::longid()).with_job(|job| {
-        job.with_name("job1").with_step(|step| {
-            step.with_id("step1")
-                .with_act(|act| act.with_id("fn1").with_input("uid", json!("a")))
-        })
+    let mut workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
+        step.with_id("step1")
+            .with_act(|act| act.with_id("fn1").with_input("uid", json!("a")))
     });
 
     let pid = utils::longid();
@@ -532,13 +510,11 @@ async fn sch_act_error_action_without_err_code() {
 async fn sch_act_not_support_action() {
     let ret = Arc::new(Mutex::new(false));
     let count = Arc::new(Mutex::new(0));
-    let mut workflow = Workflow::new().with_id(&utils::longid()).with_job(|job| {
-        job.with_name("job1").with_step(|step| {
-            step.with_id("step1").with_name("step1").with_act(|act| {
-                act.with_id("fn1")
-                    .with_name("fn 1")
-                    .with_input("uid", json!("a"))
-            })
+    let mut workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
+        step.with_id("step1").with_name("step1").with_act(|act| {
+            act.with_id("fn1")
+                .with_name("fn 1")
+                .with_input("uid", json!("a"))
         })
     });
     let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
@@ -570,23 +546,22 @@ async fn sch_act_not_support_action() {
 #[tokio::test]
 async fn sch_act_next_by_complete_state() {
     let ret = Arc::new(Mutex::new(false));
-    let mut workflow = Workflow::new().with_id(&utils::longid()).with_job(|job| {
-        job.with_name("job1")
-            .with_step(|step| {
-                step.with_id("step1").with_name("step1").with_act(|act| {
-                    act.with_id("fn1")
-                        .with_name("fn 1")
-                        .with_input("uid", json!("a"))
-                })
+    let mut workflow = Workflow::new()
+        .with_id(&utils::longid())
+        .with_step(|step| {
+            step.with_id("step1").with_name("step1").with_act(|act| {
+                act.with_id("fn1")
+                    .with_name("fn 1")
+                    .with_input("uid", json!("a"))
             })
-            .with_step(|step| {
-                step.with_name("step2").with_act(|act| {
-                    act.with_id("fn2")
-                        .with_name("fn 2")
-                        .with_input("uid", json!("b"))
-                })
+        })
+        .with_step(|step| {
+            step.with_name("step2").with_act(|act| {
+                act.with_id("fn2")
+                    .with_name("fn 2")
+                    .with_input("uid", json!("b"))
             })
-    });
+        });
     let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
 
     let s = scher.clone();
@@ -615,13 +590,11 @@ async fn sch_act_next_by_complete_state() {
 #[tokio::test]
 async fn sch_act_cancel_by_running_state() {
     let ret = Arc::new(Mutex::new(false));
-    let mut workflow = Workflow::new().with_id(&utils::longid()).with_job(|job| {
-        job.with_name("job1").with_step(|step| {
-            step.with_id("step1").with_name("step1").with_act(|act| {
-                act.with_id("fn1")
-                    .with_name("fn 1")
-                    .with_input("uid", json!("a"))
-            })
+    let mut workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
+        step.with_id("step1").with_name("step1").with_act(|act| {
+            act.with_id("fn1")
+                .with_name("fn 1")
+                .with_input("uid", json!("a"))
         })
     });
     let (proc, scher, emitter) = create_proc(&mut workflow, "w1");
@@ -649,13 +622,11 @@ async fn sch_act_cancel_by_running_state() {
 #[tokio::test]
 async fn sch_act_do_action_complete() {
     let ret = Arc::new(Mutex::new(false));
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_name("job1").with_step(|step| {
-            step.with_id("step1").with_name("step1").with_act(|act| {
-                act.with_id("fn1")
-                    .with_name("fn 1")
-                    .with_input("uid", json!("a"))
-            })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1").with_name("step1").with_act(|act| {
+            act.with_id("fn1")
+                .with_name("fn 1")
+                .with_input("uid", json!("a"))
         })
     });
 
@@ -686,14 +657,12 @@ async fn sch_act_do_action_complete() {
 #[tokio::test]
 async fn sch_act_do_action_no_outputs_key_error() {
     let ret = Arc::new(Mutex::new(false));
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_name("job1").with_step(|step| {
-            step.with_id("step1").with_name("step1").with_act(|act| {
-                act.with_id("fn1")
-                    .with_name("fn 1")
-                    .with_output("abc", json!(null))
-                    .with_input("uid", json!("a"))
-            })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1").with_name("step1").with_act(|act| {
+            act.with_id("fn1")
+                .with_name("fn 1")
+                .with_output("abc", json!(null))
+                .with_input("uid", json!("a"))
         })
     });
 
@@ -724,14 +693,12 @@ async fn sch_act_do_action_no_outputs_key_error() {
 #[tokio::test]
 async fn sch_act_do_action_no_uid_key_error() {
     let ret = Arc::new(Mutex::new(false));
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_name("job1").with_step(|step| {
-            step.with_id("step1").with_name("step1").with_act(|act| {
-                act.with_id("fn1")
-                    .with_name("fn 1")
-                    .with_output("abc", json!(null))
-                    .with_input("uid", json!("a"))
-            })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1").with_name("step1").with_act(|act| {
+            act.with_id("fn1")
+                .with_name("fn 1")
+                .with_output("abc", json!(null))
+                .with_input("uid", json!("a"))
         })
     });
 
@@ -758,13 +725,11 @@ async fn sch_act_do_action_no_uid_key_error() {
 #[tokio::test]
 async fn sch_act_do_action_proc_id_error() {
     let ret = Arc::new(Mutex::new(false));
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_name("job1").with_step(|step| {
-            step.with_id("step1").with_name("step1").with_act(|act| {
-                act.with_id("fn1")
-                    .with_name("fn 1")
-                    .with_input("uid", json!("a"))
-            })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1").with_name("step1").with_act(|act| {
+            act.with_id("fn1")
+                .with_name("fn 1")
+                .with_input("uid", json!("a"))
         })
     });
 
@@ -791,13 +756,11 @@ async fn sch_act_do_action_proc_id_error() {
 #[tokio::test]
 async fn sch_act_do_action_msg_id_error() {
     let ret = Arc::new(Mutex::new(false));
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_name("job1").with_step(|step| {
-            step.with_id("step1").with_name("step1").with_act(|act| {
-                act.with_id("fn1")
-                    .with_name("fn 1")
-                    .with_input("uid", json!("a"))
-            })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1").with_name("step1").with_act(|act| {
+            act.with_id("fn1")
+                .with_name("fn 1")
+                .with_input("uid", json!("a"))
         })
     });
 
@@ -824,13 +787,11 @@ async fn sch_act_do_action_msg_id_error() {
 #[tokio::test]
 async fn sch_act_do_action_not_act_task() {
     let ret = Arc::new(Mutex::new(false));
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_name("job1").with_step(|step| {
-            step.with_id("step1").with_act(|act| {
-                act.with_id("fn1")
-                    .with_name("fn 1")
-                    .with_input("uid", json!("a"))
-            })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1").with_act(|act| {
+            act.with_id("fn1")
+                .with_name("fn 1")
+                .with_input("uid", json!("a"))
         })
     });
 

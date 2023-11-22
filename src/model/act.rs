@@ -1,9 +1,11 @@
 mod catch;
 mod r#for;
+mod r#use;
 
 use crate::{ModelBase, Vars};
 pub use catch::ActCatch;
 pub use r#for::ActFor;
+pub use r#use::ActUse;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -39,6 +41,9 @@ pub struct Act {
 
     #[serde(default)]
     pub catches: Vec<ActCatch>,
+
+    #[serde(default)]
+    pub r#use: Option<String>,
 }
 
 impl ModelBase for Act {

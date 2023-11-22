@@ -1,22 +1,19 @@
 name: a example to catch act error
 id: catches
-jobs:
-  - name: job1
-    id: job1
-    steps:
-      - name: prepare
-        id: prepare
-        acts:
-          - id: init
-      - name: step1
-        id: step1
-        acts:
-          - id: act1
-            catches:
-              - id: catch1
-                err: err1
-              - id: catch2
-                err: err2
-              - id: catch_others
-      - name: final
-        id: final
+steps:
+  - name: prepare
+    id: prepare
+    acts:
+      - id: init
+  - name: step1
+    id: step1
+    acts:
+      - id: act1
+        catches:
+          - id: catch1
+            err: err1
+          - id: catch2
+            err: err2
+          - id: catch_others
+  - name: final
+    id: final

@@ -26,8 +26,8 @@ async fn sch_vars_workflow_outputs() {
 
 #[tokio::test]
 async fn sch_vars_get_with_script() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1")
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
             .with_input("var1", 10.into())
             .with_input("var2", r#"${ env.get("var1") }"#.into())
     });
@@ -35,7 +35,7 @@ async fn sch_vars_get_with_script() {
     scher.launch(&proc);
     scher.event_loop().await;
     assert_eq!(
-        proc.task_by_nid("job1")
+        proc.task_by_nid("step1")
             .get(0)
             .unwrap()
             .inputs()
@@ -47,8 +47,8 @@ async fn sch_vars_get_with_script() {
 
 #[tokio::test]
 async fn sch_vars_output_only_key_name() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1")
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
             .with_input("var1", 10.into())
             .with_output("var1", json!(null))
     });
@@ -56,7 +56,7 @@ async fn sch_vars_output_only_key_name() {
     scher.launch(&proc);
     scher.event_loop().await;
     assert_eq!(
-        proc.task_by_nid("job1")
+        proc.task_by_nid("step1")
             .get(0)
             .unwrap()
             .outputs()
@@ -67,39 +67,9 @@ async fn sch_vars_output_only_key_name() {
 }
 
 #[tokio::test]
-async fn sch_vars_job_inputs() {
-    let mut workflow =
-        Workflow::new().with_job(|job| job.with_id("job1").with_input("var1", 10.into()));
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
-    scher.launch(&proc);
-    scher.event_loop().await;
-    assert_eq!(
-        proc.task_by_nid("job1")
-            .get(0)
-            .unwrap()
-            .room()
-            .get("var1")
-            .unwrap(),
-        json!(10)
-    );
-}
-
-#[tokio::test]
-async fn sch_vars_job_outputs() {
-    let mut workflow =
-        Workflow::new().with_job(|job| job.with_id("job1").with_output("var1", 10.into()));
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
-    scher.launch(&proc);
-    scher.event_loop().await;
-    assert_eq!(proc.env().get("var1").unwrap(), json!(10));
-}
-
-#[tokio::test]
 async fn sch_vars_step_inputs() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1")
-            .with_step(|step| step.with_id("step1").with_input("var1", 10.into()))
-    });
+    let mut workflow =
+        Workflow::new().with_step(|step| step.with_id("step1").with_input("var1", 10.into()));
     let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
     scher.launch(&proc);
     scher.event_loop().await;
@@ -116,10 +86,9 @@ async fn sch_vars_step_inputs() {
 
 #[tokio::test]
 async fn sch_vars_step_outputs() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1")
-            .with_step(|step| step.with_id("step1").with_output("var1", 10.into()))
-    });
+    let mut workflow =
+        Workflow::new().with_step(|step| step.with_id("step1").with_output("var1", 10.into()));
+
     let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
     scher.launch(&proc);
     scher.event_loop().await;
@@ -128,12 +97,11 @@ async fn sch_vars_step_outputs() {
 
 #[tokio::test]
 async fn sch_vars_branch_inputs() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1")
-                .with_branch(|b| b.with_id("b1").with_input("var1", 10.into()))
-        })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_branch(|b| b.with_id("b1").with_input("var1", 10.into()))
     });
+
     let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
     scher.launch(&proc);
     scher.event_loop().await;
@@ -150,13 +118,11 @@ async fn sch_vars_branch_inputs() {
 
 #[tokio::test]
 async fn sch_vars_branch_outputs() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1").with_branch(|b| {
-                b.with_id("b1")
-                    .with_if("true")
-                    .with_output("var1", 10.into())
-            })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1").with_branch(|b| {
+            b.with_id("b1")
+                .with_if("true")
+                .with_output("var1", 10.into())
         })
     });
     let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
@@ -168,11 +134,9 @@ async fn sch_vars_branch_outputs() {
 #[tokio::test]
 async fn sch_vars_act_inputs() {
     let ret = Arc::new(Mutex::new(false));
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1")
-                .with_act(|act| act.with_id("act1").with_input("var1", 10.into()))
-        })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(|act| act.with_id("act1").with_input("var1", 10.into()))
     });
     let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
 
@@ -190,11 +154,9 @@ async fn sch_vars_act_inputs() {
 
 #[tokio::test]
 async fn sch_vars_act_outputs() {
-    let mut workflow = Workflow::new().with_job(|job| {
-        job.with_id("job1").with_step(|step| {
-            step.with_id("step1")
-                .with_act(|act| act.with_id("act1").with_output("var1", json!(null)))
-        })
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(|act| act.with_id("act1").with_output("var1", json!(null)))
     });
     let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
 
