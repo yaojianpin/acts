@@ -1,9 +1,4 @@
-use crate::{
-    event::{ActionState, Emitter},
-    sch::{Proc, Scheduler},
-    utils, Engine, TaskState, Workflow,
-};
-use std::sync::Arc;
+use crate::{event::ActionState, sch::tests::create_proc, utils, Act, TaskState, Workflow};
 
 #[tokio::test]
 async fn sch_task_state() {
@@ -129,8 +124,6 @@ async fn sch_task_branch_basic() {
     });
 
     let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
-    // proc.tree().print();
-
     scher.launch(&proc);
     scher.event_loop().await;
     assert_eq!(proc.state(), TaskState::Success);
@@ -152,8 +145,6 @@ async fn sch_task_branch_skip() {
 
     let id = utils::longid();
     let (proc, scher, _) = create_proc(&mut workflow, &id);
-    // proc.tree().print();
-
     scher.launch(&proc);
     scher.event_loop().await;
 
@@ -179,8 +170,6 @@ async fn sch_task_branch_empty_if() {
 
     let id = utils::longid();
     let (proc, scher, _) = create_proc(&mut workflow, &id);
-    // proc.tree().print();
-
     scher.launch(&proc);
     scher.event_loop().await;
 
@@ -192,7 +181,7 @@ async fn sch_task_branch_empty_if() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_task_branch_if_false_else_success() {
-    let mut workflow = Workflow::new().with_env("v", 1.into()).with_step(|step| {
+    let mut workflow = Workflow::new().with_input("v", 1.into()).with_step(|step| {
         step.with_name("step1")
             .with_branch(|branch| {
                 branch
@@ -225,14 +214,17 @@ async fn sch_task_branch_if_false_else_success() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_task_branch_if_false_else_running() {
-    let mut workflow = Workflow::new().with_env("v", 1.into()).with_step(|step| {
+    let mut workflow = Workflow::new().with_input("v", 1.into()).with_step(|step| {
         step.with_name("step1")
             .with_branch(|branch| {
                 branch
                     .with_id("b1")
                     .with_else(true)
                     .with_name("branch 1")
-                    .with_step(|step| step.with_name("step11").with_act(|act| act.with_id("act1")))
+                    .with_step(|step| {
+                        step.with_name("step11")
+                            .with_act(Act::req(|act| act.with_id("act1")))
+                    })
             })
             .with_branch(|branch| {
                 branch
@@ -278,7 +270,7 @@ async fn sch_task_branch_if_false_else_running() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_task_branch_if_true_else() {
-    let mut workflow = Workflow::new().with_env("v", 1.into()).with_step(|step| {
+    let mut workflow = Workflow::new().with_input("v", 1.into()).with_step(|step| {
         step.with_id("step1")
             .with_branch(|branch| {
                 branch
@@ -315,7 +307,7 @@ async fn sch_task_branch_if_true_else() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_task_branch_if_two_no_else() {
-    let mut workflow = Workflow::new().with_env("v", 1.into()).with_step(|step| {
+    let mut workflow = Workflow::new().with_input("v", 1.into()).with_step(|step| {
         step.with_name("step1")
             .with_branch(|branch| {
                 branch
@@ -352,7 +344,7 @@ async fn sch_task_branch_if_two_no_else() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_task_branch_if_mutli_true() {
-    let mut workflow = Workflow::new().with_env("v", 5.into()).with_step(|step| {
+    let mut workflow = Workflow::new().with_input("v", 5.into()).with_step(|step| {
         step.with_name("step1")
             .with_branch(|branch| {
                 branch
@@ -400,14 +392,17 @@ async fn sch_task_branch_if_mutli_true() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_task_branch_needs_state() {
-    let mut workflow = Workflow::new().with_env("v", 5.into()).with_step(|step| {
+    let mut workflow = Workflow::new().with_input("v", 5.into()).with_step(|step| {
         step.with_name("step1")
             .with_branch(|branch| {
                 branch
                     .with_id("b1")
                     .with_if(r#"env.get("v") > 0"#)
                     .with_name("branch 1")
-                    .with_step(|step| step.with_id("step11").with_act(|act| act.with_id("act1")))
+                    .with_step(|step| {
+                        step.with_id("step11")
+                            .with_act(Act::req(|act| act.with_id("act1")))
+                    })
             })
             .with_branch(|branch| {
                 branch
@@ -419,15 +414,18 @@ async fn sch_task_branch_needs_state() {
             })
     });
 
+    workflow.print();
     let id = utils::longid();
     let (proc, scher, emitter) = create_proc(&mut workflow, &id);
     emitter.on_message(move |e| {
-        if e.inner().is_type("act") {
+        println!("message: {:?}", e.inner());
+        if e.inner().is_source("act") {
             e.close();
         }
     });
     scher.launch(&proc);
     scher.event_loop().await;
+    proc.print();
     assert_eq!(
         proc.task_by_nid("b1").get(0).unwrap().state(),
         TaskState::Running
@@ -436,27 +434,4 @@ async fn sch_task_branch_needs_state() {
         proc.task_by_nid("b2").get(0).unwrap().state(),
         TaskState::Pending
     );
-}
-
-fn create_proc(workflow: &mut Workflow, pid: &str) -> (Arc<Proc>, Arc<Scheduler>, Arc<Emitter>) {
-    let engine = Engine::new();
-    let scher = engine.scher();
-
-    let proc = Arc::new(Proc::new(&pid));
-    proc.load(workflow).unwrap();
-
-    let emitter = scher.emitter().clone();
-    let s = scher.clone();
-    emitter.on_complete(move |p| {
-        if p.inner().state.is_completed() {
-            s.close();
-        }
-    });
-
-    let s2 = scher.clone();
-    emitter.on_error(move |p| {
-        println!("error in '{}', error={}", p.inner().pid, p.inner().state);
-        s2.close();
-    });
-    (proc, scher, emitter)
 }

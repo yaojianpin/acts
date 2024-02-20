@@ -1,6 +1,6 @@
 use crate::{
-    sch::tree::{NodeData, NodeTree},
-    Workflow,
+    sch::tree::{NodeContent, NodeTree},
+    Act, Workflow,
 };
 
 #[derive(Clone)]
@@ -42,8 +42,8 @@ async fn sch_tree_new() {
 
     let mut workflow = Workflow::default();
     workflow.set_id("1");
-    let data = NodeData::Workflow(workflow);
-    let node = tr.make(data, 0).unwrap();
+    let data = NodeContent::Workflow(workflow);
+    let node = tr.make(&data.id(), data, 0).unwrap();
     tr.set_root(&node);
     assert!(tr.root.is_some());
     assert_eq!(tr.root.unwrap().id(), "1");
@@ -54,13 +54,13 @@ async fn sch_tree_set_parent() {
     let tr = NodeTree::new();
     let mut workflow = Workflow::default();
     workflow.set_id("1");
-    let data = NodeData::Workflow(workflow);
-    let parent = tr.make(data, 0).unwrap();
+    let data = NodeContent::Workflow(workflow);
+    let parent = tr.make(&data.id(), data, 0).unwrap();
 
     let mut workflow = Workflow::default();
     workflow.set_id("2");
-    let data = NodeData::Workflow(workflow);
-    let node = tr.make(data, 1).unwrap();
+    let data = NodeContent::Workflow(workflow);
+    let node = tr.make(&data.id(), data, 1).unwrap();
     node.set_parent(&parent);
 
     assert!(parent.children().len() > 0);
@@ -73,13 +73,13 @@ async fn sch_tree_set_next() {
 
     let mut workflow = Workflow::default();
     workflow.set_id("1");
-    let data = NodeData::Workflow(workflow);
-    let prev = tr.make(data, 0).unwrap();
+    let data = NodeContent::Workflow(workflow);
+    let prev = tr.make(&data.id(), data, 0).unwrap();
 
     let mut workflow = Workflow::default();
     workflow.set_id("2");
-    let data = NodeData::Workflow(workflow);
-    let node = tr.make(data, 1).unwrap();
+    let data = NodeContent::Workflow(workflow);
+    let node = tr.make(&data.id(), data, 1).unwrap();
     prev.set_next(&node, true);
 
     assert_eq!(prev.next().upgrade().unwrap().id(), "2");
@@ -194,8 +194,8 @@ async fn sch_tree_branch_steps() {
 async fn sch_tree_acts() {
     let mut workflow = Workflow::new().with_id("w1").with_step(|step| {
         step.with_id("step1")
-            .with_act(|act| act.with_id("act1"))
-            .with_act(|act| act.with_id("act2"))
+            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::req(|act| act.with_id("act2")))
     });
     let tree = NodeTree::build(&mut workflow).unwrap();
     let step = tree.node("step1").unwrap();

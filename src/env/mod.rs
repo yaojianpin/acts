@@ -1,44 +1,42 @@
 mod moudle;
-mod room;
+mod refenv;
 
 #[cfg(test)]
 mod tests;
 
-use crate::{ActError, ActModule, ActValue, Result, ShareLock, Vars};
+use crate::{ActError, ActModule, ActValue, Result, Vars};
+pub use refenv::RefEnv;
 use rhai::Engine as ScriptEngine;
-pub use room::Room;
-use std::sync::{Arc, Mutex, RwLock};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::cell::RefCell;
+use std::sync::{Arc, Mutex};
 use tracing::debug;
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default)]
 pub struct Enviroment {
-    pub(crate) scr: Arc<Mutex<ScriptEngine>>,
-    pub(crate) scope: ShareLock<rhai::Scope<'static>>,
-    pub(crate) vars: ShareLock<Vars>,
+    scr: Mutex<ScriptEngine>,
+    scope: RefCell<rhai::Scope<'static>>,
+    vars: RefCell<Vars>,
 }
 
 unsafe impl Send for Enviroment {}
 unsafe impl Sync for Enviroment {}
 
 impl Enviroment {
-    pub fn new() -> Self {
-        let scr = ScriptEngine::new();
+    pub fn new() -> Arc<Self> {
         let scope = rhai::Scope::new();
         let env = Enviroment {
-            scr: Arc::new(Mutex::new(scr)),
-            scope: Arc::new(RwLock::new(scope)),
-            vars: Arc::new(RwLock::new(Vars::new())),
+            scr: Mutex::new(ScriptEngine::new()),
+            scope: RefCell::new(scope),
+            vars: RefCell::new(Vars::new()),
         };
-
         env.init();
-        env
+        Arc::new(env)
     }
 
-    pub fn new_room(&self) -> Arc<Room> {
-        // let vars = self.vars();
-        let vm = Room::new(&self);
-        // vm.append(&vars);
-        Arc::new(vm)
+    pub fn create_ref(self: &Arc<Self>, id: &str) -> Arc<RefEnv> {
+        Arc::new(RefEnv::new(self, id))
     }
 
     pub fn init(&self) {
@@ -46,22 +44,54 @@ impl Enviroment {
         self.registry_collection_module();
         self.registry_console_module();
         self.registry_env_module();
-        self.registry_act_module();
-
-        self.scope.write().unwrap().set_or_push("env", self.clone());
     }
 
     pub fn vars(&self) -> Vars {
-        self.vars.read().unwrap().clone()
+        self.vars.borrow().clone()
     }
 
-    #[allow(unused)]
-    pub fn set_scope_var<T: Send + Sync + Clone + 'static>(&self, name: &str, v: &T) {
-        self.scope.write().unwrap().set_or_push(name, v.clone());
+    pub fn data(&self, id: &str) -> Option<Vars> {
+        self.vars.borrow().get(id)
+    }
+
+    pub fn set_data(&self, id: &str, values: &Vars) {
+        if !self.vars.borrow().contains_key(id) {
+            self.vars.borrow_mut().set(id, Vars::new());
+        }
+        if let Some(vars) = self.vars.borrow_mut().get_mut(id) {
+            if let Some(data) = vars.as_object_mut() {
+                for (name, value) in values {
+                    data.entry(name)
+                        .and_modify(|v| *v = value.clone())
+                        .or_insert(value.clone());
+                }
+            }
+        }
+    }
+
+    pub fn update_data(&self, id: &str, name: &str, value: &ActValue) -> bool {
+        if let Some(vars) = self.vars.borrow_mut().get_mut(id) {
+            if let Some(data) = vars.as_object_mut() {
+                if data.contains_key(name) {
+                    data.entry(name).and_modify(|v| *v = value.clone());
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    pub fn root(&self) -> Vars {
+        if let Some(vars) = self.data("$") {
+            return vars;
+        }
+
+        Vars::new()
     }
 
     pub fn append(&self, vars: &Vars) {
-        let env = &mut self.vars.write().unwrap();
+        let mut env = self.vars.borrow_mut();
         for (name, v) in vars {
             env.entry(name.to_string())
                 .and_modify(|i| *i = v.clone())
@@ -69,29 +99,10 @@ impl Enviroment {
         }
     }
 
-    pub fn run_vm(&self, script: &str, vm: &Room) -> Result<bool> {
-        let scr = self.scr.lock().unwrap();
-        let mut scope = vm.scope.write().unwrap();
-        match scr.run_with_scope(&mut scope, script) {
-            Ok(..) => Ok(true),
-            Err(err) => Err(ActError::Script(format!("{}", err))),
-        }
-    }
-
-    pub fn eval_vm<T: rhai::Variant + Clone>(&self, expr: &str, vm: &Room) -> Result<T> {
-        let scr = self.scr.lock().unwrap();
-        let mut scope = vm.scope.write().unwrap();
-
-        match scr.eval_with_scope::<T>(&mut scope, expr) {
-            Ok(ret) => Ok(ret),
-            Err(err) => Err(ActError::Script(format!("{}", err))),
-        }
-    }
-
     #[allow(unused)]
     pub fn run(&self, script: &str) -> Result<bool> {
         let scr = self.scr.lock().unwrap();
-        let mut scope = self.scope.write().unwrap();
+        let mut scope = self.scope.borrow_mut();
         match scr.run_with_scope(&mut scope, script) {
             Ok(..) => Ok(true),
             Err(err) => Err(ActError::Script(format!("{}", err))),
@@ -100,30 +111,53 @@ impl Enviroment {
 
     pub fn eval<T: rhai::Variant + Clone>(&self, expr: &str) -> Result<T> {
         let scr = self.scr.lock().unwrap();
-        let mut scope = self.scope.write().unwrap();
+        let mut scope = self.scope.borrow_mut();
         match scr.eval_with_scope::<T>(&mut scope, expr) {
             Ok(ret) => Ok(ret),
             Err(err) => Err(ActError::Script(format!("{}", err))),
         }
     }
 
-    pub fn get(&self, name: &str) -> Option<ActValue> {
-        let vars = self.vars.read().unwrap();
-        match vars.get(name) {
+    fn get<T>(&self, name: &str) -> Option<T>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        if let Some(value) = self.get_value(name) {
+            if let Ok(v) = serde_json::from_value::<T>(value) {
+                return Some(v);
+            }
+        }
+
+        None
+    }
+
+    pub fn get_value(&self, name: &str) -> Option<ActValue> {
+        let vars = self.vars.borrow();
+        match vars.get_value(name) {
             Some(v) => Some(v.clone()),
             None => None,
         }
     }
 
-    pub fn set(&self, name: &str, value: ActValue) {
-        let mut vars = self.vars.write().unwrap();
+    #[allow(unused)]
+    fn set<T>(&self, name: &str, value: T)
+    where
+        T: Serialize,
+    {
+        self.set_value(name, json!(value));
+    }
+
+    #[allow(unused)]
+    fn set_value(&self, name: &str, value: ActValue) {
+        let mut vars = self.vars.borrow_mut();
         vars.entry(name.to_string())
             .and_modify(|i| *i = value.clone())
             .or_insert(value);
     }
 
-    pub fn remove(&self, name: &str) {
-        let mut vars = self.vars.write().unwrap();
+    #[allow(unused)]
+    fn remove(&self, name: &str) {
+        let mut vars = self.vars.borrow_mut();
         vars.remove(name);
     }
 

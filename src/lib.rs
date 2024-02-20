@@ -34,7 +34,6 @@ pub use rhai::Module as ActModule;
 pub use sch::{Context, NodeKind};
 pub use serde_json::Value as ActValue;
 pub use store::{data, DbSet, Query, StoreAdapter};
-pub type Vars = serde_json::Map<String, ActValue>;
 pub type Result<T> = std::result::Result<T, ActError>;
 
 pub(crate) type ShareLock<T> = Arc<RwLock<T>>;

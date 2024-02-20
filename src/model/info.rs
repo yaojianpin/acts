@@ -1,4 +1,4 @@
-use crate::{sch, store::data, utils, ActError, Result, Workflow};
+use crate::{sch, store::data, ActError, Result, Workflow};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::sync::Arc;
@@ -23,12 +23,11 @@ pub struct TaskInfo {
     pub name: String,
     pub proc_id: String,
     pub node_id: String,
-    pub kind: String,
+    pub r#type: String,
     pub state: String,
     pub action_state: String,
     pub start_time: i64,
     pub end_time: i64,
-    pub vars: String,
     pub timestamp: i64,
 }
 
@@ -92,12 +91,11 @@ impl From<data::Task> for TaskInfo {
             name: t.name,
             proc_id: t.proc_id,
             node_id: t.node_id,
-            kind: t.kind,
+            r#type: t.kind,
             state: t.state,
             action_state: t.action_state,
             start_time: t.start_time,
             end_time: t.end_time,
-            vars: t.vars,
             timestamp: t.timestamp,
         }
     }
@@ -110,12 +108,11 @@ impl Into<serde_json::Value> for TaskInfo {
             "name": self.name,
             "proc_id": self.proc_id,
             "node_id": self.node_id,
-            "kind": self.kind,
+            "type": self.r#type,
             "state": self.state,
             "action_state": self.action_state,
             "start_time": self.start_time,
             "end_time": self.end_time,
-            "vars": self.vars,
             "timestamp": self.timestamp,
         })
     }
@@ -155,15 +152,14 @@ impl From<&Arc<sch::Task>> for TaskInfo {
         Self {
             id: t.id.clone(),
             prev: t.prev(),
-            name: t.node.data().name(),
+            name: t.node.content.name(),
             proc_id: t.proc_id.clone(),
-            node_id: t.node_id(),
-            kind: t.node.kind().into(),
+            node_id: t.node.id().to_string(),
+            r#type: t.node.kind().into(),
             state: t.state().into(),
             action_state: t.action_state().into(),
             start_time: t.start_time(),
             end_time: t.end_time(),
-            vars: utils::vars::to_string(&t.vars()).unwrap_or("(err)".to_string()),
             timestamp: t.timestamp,
         }
     }

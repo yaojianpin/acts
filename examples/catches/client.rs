@@ -23,7 +23,7 @@ impl Client {
     }
 
     pub fn process(&self, executor: &Executor, e: &Event<Message>) -> Result<()> {
-        if e.is_type("act") && e.is_state("created") {
+        if e.is_source("act") && e.is_state("created") {
             match self.actions.get(&e.key) {
                 Some(action) => {
                     let state = action(executor, e)?;

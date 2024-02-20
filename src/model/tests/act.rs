@@ -1,72 +1,59 @@
+mod chain;
+mod cmd;
+mod each;
+mod expose;
+mod hooks;
+mod r#if;
+mod msg;
+mod pack;
+mod req;
+mod set;
+mod r#use;
+
 use crate::Act;
-use serde_json::json;
 
 #[test]
-fn model_act_id() {
-    let act = Act::new().with_id("act1");
-    assert_eq!(act.id, "act1");
+fn model_act_parse_nest() {
+    let text = r#"
+    !each
+    in: "[\"a\", \"b\"]"
+    run:
+        - !msg
+          id: msg1
+        - !set
+          a: 10
+        - !each
+          in: "[\"a\", \"b\"]"
+          run:
+            - !msg
+              id: msg2
+            - !if
+              on: env.get("a") > 0
+              then:
+                - !msg
+                  id: msg3
+    "#;
+    assert!(serde_yaml::from_str::<Act>(text).is_ok());
 }
 
 #[test]
-fn model_act_name() {
-    let act = Act::new().with_name("my name");
-    assert_eq!(act.name, "my name");
-}
+fn model_act_to_json() {
+    let text = r#"
+    - !each
+        in: "[\"a\", \"b\"]"
+        run:
+            - !msg
+              id: msg1
+            - !each
+              in: "[\"a\", \"b\"]"
+              run:
+                - !msg
+                  id: msg2
+    - !msg
+      id: msg2
+    "#;
 
-#[test]
-fn model_act_inputs() {
-    let act = Act::new().with_input("p1", json!(5));
-    assert_eq!(act.inputs.len(), 1);
-    assert_eq!(act.inputs.get("p1"), Some(&json!(5)));
-}
-
-#[test]
-fn model_act_outputs() {
-    let act = Act::new().with_output("p1", json!(5));
-    assert_eq!(act.outputs.len(), 1);
-    assert!(act.outputs.get("p1").is_some());
-}
-
-#[test]
-fn model_act_tag() {
-    let act = Act::new().with_tag("tag1");
-    assert_eq!(act.tag, "tag1");
-}
-
-#[test]
-fn model_act_needs() {
-    let act = Act::new().with_need("act1");
-    assert_eq!(act.needs.len(), 1);
-}
-
-#[test]
-fn model_act_for() {
-    let mut act = Act::new();
-    assert!(act.r#for.is_none());
-
-    act = act.with_for(|f| {
-        f.with_by("all")
-            .with_alias(|a| a.with_init("my_init").with_each("my_each"))
-            .with_in(r#"print("in")"#)
-    });
-
-    let f = act.r#for.unwrap();
-    assert_eq!(f.by, "all");
-    assert_eq!(f.alias.init.unwrap(), "my_init");
-    assert_eq!(f.alias.each.unwrap(), "my_each");
-    assert_eq!(f.r#in.is_empty(), false);
-}
-
-#[test]
-fn model_act_catch() {
-    let mut act = Act::new();
-    assert_eq!(act.catches.len(), 0);
-
-    act = act
-        .with_catch(|c| c.with_id("err1").with_err("code1"))
-        .with_catch(|c| c.with_id("err2"));
-    assert_eq!(act.catches.len(), 2);
-
-    assert_eq!(act.catches.get(0).unwrap().err.as_ref().unwrap(), "code1");
-    assert_eq!(act.catches.get(1).unwrap().err, None);
+    let stms: Vec<Act> = serde_yaml::from_str(text).unwrap();
+    let ret = serde_json::to_string(&stms);
+    assert_eq!(ret.is_ok(), true);
 }

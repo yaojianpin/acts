@@ -169,6 +169,7 @@ async fn store_procs() {
     let id = utils::longid();
     let workflow = create_workflow();
     let proc = create_proc(&id, TaskState::None, &workflow);
+
     store.procs().create(&proc).expect("create proc");
 
     let q = Query::new().set_limit(1);
@@ -243,7 +244,7 @@ async fn store_task_create() {
         action_state: ActionState::None.to_string(),
         start_time: 0,
         end_time: 0,
-        vars: "{}".to_string(),
+        hooks: "{}".to_string(),
         timestamp: 0,
     };
 
@@ -273,7 +274,7 @@ async fn store_task_update() {
         action_state: ActionState::None.to_string(),
         start_time: 0,
         end_time: 0,
-        vars: "{}".to_string(),
+        hooks: "{}".to_string(),
         timestamp: 0,
     };
 
@@ -307,7 +308,7 @@ async fn store_task_remove() {
         action_state: ActionState::None.to_string(),
         start_time: 0,
         end_time: 0,
-        vars: "{}".to_string(),
+        hooks: "{}".to_string(),
         timestamp: 0,
     };
 
@@ -335,6 +336,7 @@ fn create_proc(id: &str, state: TaskState, model: &Workflow) -> Proc {
         vars: "".to_string(),
         timestamp: utils::time::timestamp(),
         model: model.to_json().unwrap(),
+        root_tid: "".to_string(),
     }
 }
 

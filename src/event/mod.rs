@@ -16,7 +16,7 @@ use crate::{
 pub use action::Action;
 pub use emitter::Emitter;
 pub use extra::TaskExtra;
-pub use message::Message;
+pub use message::{Message, Model};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -37,6 +37,8 @@ pub enum EventAction {
     Abort,
     Skip,
     Error,
+    Push,
+    Remove,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
@@ -51,6 +53,7 @@ pub enum ActionState {
     Aborted,
     Skipped,
     Error,
+    Removed,
 }
 
 impl EventAction {
@@ -63,6 +66,8 @@ impl EventAction {
             consts::EVT_SKIP => Ok(EventAction::Skip),
             consts::EVT_COMPLETE => Ok(EventAction::Complete),
             consts::EVT_ERR => Ok(EventAction::Error),
+            consts::EVT_PUSH => Ok(EventAction::Push),
+            consts::EVT_REMOVE => Ok(EventAction::Remove),
             _ => Err(ActError::Action(format!(
                 "cannot find the action define '{v}'"
             ))),
@@ -77,6 +82,8 @@ impl EventAction {
             EventAction::Abort => ActionState::Aborted,
             EventAction::Skip => ActionState::Skipped,
             EventAction::Error => ActionState::Error,
+            EventAction::Remove => ActionState::Removed,
+            _ => ActionState::None,
         }
     }
 }
@@ -161,6 +168,8 @@ impl std::fmt::Display for EventAction {
             EventAction::Abort => f.write_str(consts::EVT_ABORT),
             EventAction::Skip => f.write_str(consts::EVT_SKIP),
             EventAction::Error => f.write_str(consts::EVT_ERR),
+            EventAction::Push => f.write_str(consts::EVT_PUSH),
+            EventAction::Remove => f.write_str(consts::EVT_REMOVE),
         }
     }
 }

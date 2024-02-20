@@ -18,7 +18,7 @@ pub enum TaskState {
     /// task is interrupted and waiting for the external action to resume
     Interrupt,
 
-    /// task is completed with sucess
+    /// task is completed with success
     Success,
 
     /// task is failed with some reasons
@@ -29,6 +29,9 @@ pub enum TaskState {
 
     /// task is skippted by exteral action or internal conditions
     Skip,
+
+    /// task is removed
+    Removed,
 }
 
 impl TaskState {
@@ -37,7 +40,11 @@ impl TaskState {
     }
     pub fn is_completed(&self) -> bool {
         match self {
-            TaskState::Success | TaskState::Fail(..) | TaskState::Skip | TaskState::Abort => true,
+            TaskState::Success
+            | TaskState::Fail(..)
+            | TaskState::Skip
+            | TaskState::Abort
+            | TaskState::Removed => true,
             _ => false,
         }
     }
@@ -54,6 +61,10 @@ impl TaskState {
             TaskState::Fail(..) => true,
             _ => false,
         }
+    }
+
+    pub fn is_removed(&self) -> bool {
+        *self == TaskState::Removed
     }
 
     pub fn is_running(&self) -> bool {
@@ -73,7 +84,7 @@ impl TaskState {
     }
 
     pub fn is_next(&self) -> bool {
-        self.is_skip() || self.is_running()
+        self.is_skip() || self.is_running() || self.is_removed()
     }
 
     pub fn is_interrupted(&self) -> bool {

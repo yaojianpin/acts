@@ -17,14 +17,14 @@ fn model_branch_name() {
 fn model_branch_inputs() {
     let b = Branch::new().with_input("p1", json!(5));
     assert_eq!(b.inputs.len(), 1);
-    assert_eq!(b.inputs.get("p1"), Some(&json!(5)));
+    assert_eq!(b.inputs.get_value("p1"), Some(&json!(5)));
 }
 
 #[test]
 fn model_branch_outputs() {
     let b = Branch::new().with_output("p1", json!(5));
     assert_eq!(b.outputs.len(), 1);
-    assert!(b.outputs.get("p1").is_some());
+    assert!(b.outputs.get_value("p1").is_some());
 }
 
 #[test]

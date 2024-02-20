@@ -7,8 +7,8 @@ async fn main() {
 
     let workflow = Workflow::new()
         .with_id("m1")
-        .with_env("index", 0.into())
-        .with_env("result", 0.into())
+        .with_input("index", 0.into())
+        .with_input("result", 0.into())
         .with_output("result", 0.into())
         .with_step(|step| {
             step.with_id("cond")

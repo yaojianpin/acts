@@ -18,7 +18,7 @@ impl Emitter {
     ///
     /// Example
     /// ```rust
-    /// use acts::{Engine, Workflow, Vars, Message};
+    /// use acts::{Engine, Act, Workflow, Vars, Message};
     ///
     /// #[tokio::main]
     /// async fn main() {
@@ -26,11 +26,11 @@ impl Emitter {
     ///     engine.start();
     ///
     ///     let workflow = Workflow::new().with_id("m1").with_step(|step| {
-    ///             step.with_id("step1").with_act(|act| act.with_for(|f|f.with_by("any").with_in(r#"["a"]"#)))
+    ///             step.with_id("step1").with_act(Act::req(|act| act.with_id("act1")))
     ///     });
     ///
     ///     engine.emitter().on_message(move |e| {
-    ///         if e.r#type == "act" {
+    ///         if e.r#type == "req" {
     ///             println!("act message: id={} state={} inputs={:?} outputs={:?}", e.id, e.state, e.inputs, e.outputs);
     ///         }
     ///     });

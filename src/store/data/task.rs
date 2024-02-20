@@ -23,7 +23,7 @@ pub struct Task {
     pub action_state: String,
     pub start_time: i64,
     pub end_time: i64,
-    pub vars: String,
+    pub hooks: String,
     pub timestamp: i64,
 }
 

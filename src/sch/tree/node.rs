@@ -4,7 +4,7 @@ use crate::{Act, Branch, ModelBase, Step, Vars, Workflow};
 use std::sync::{Arc, RwLock, Weak};
 
 #[derive(Debug, Clone)]
-pub enum NodeData {
+pub enum NodeContent {
     Workflow(Workflow),
     Branch(Branch),
     Step(Step),
@@ -22,7 +22,8 @@ pub enum NodeKind {
 
 #[derive(Clone)]
 pub struct Node {
-    pub data: NodeData,
+    pub id: String,
+    pub content: NodeContent,
     pub level: usize,
     pub parent: Arc<RwLock<Weak<Node>>>,
     pub children: Arc<RwLock<Vec<Arc<Node>>>>,
@@ -30,48 +31,56 @@ pub struct Node {
     pub next: Arc<RwLock<Weak<Node>>>,
 }
 
-impl NodeData {
+impl NodeContent {
     pub fn id(&self) -> String {
         match self {
-            NodeData::Workflow(data) => data.id.clone(),
-            NodeData::Branch(data) => data.id.clone(),
-            NodeData::Step(data) => data.id.clone(),
-            NodeData::Act(data) => data.id().to_string(),
+            NodeContent::Workflow(data) => data.id.clone(),
+            NodeContent::Branch(data) => data.id.clone(),
+            NodeContent::Step(data) => data.id.clone(),
+            NodeContent::Act(data) => data.id().to_string(),
         }
     }
 
     pub fn name(&self) -> String {
         match self {
-            NodeData::Workflow(data) => data.name.clone(),
-            NodeData::Branch(data) => data.name.clone(),
-            NodeData::Step(data) => data.name.clone(),
-            NodeData::Act(data) => data.name.clone(),
+            NodeContent::Workflow(data) => data.name.clone(),
+            NodeContent::Branch(data) => data.name.clone(),
+            NodeContent::Step(data) => data.name.clone(),
+            NodeContent::Act(data) => data.name().to_string(),
         }
     }
 
     pub fn inputs(&self) -> Vars {
         match self {
-            NodeData::Workflow(data) => data.env.clone(),
-            NodeData::Branch(data) => data.inputs.clone(),
-            NodeData::Step(data) => data.inputs.clone(),
-            NodeData::Act(data) => data.inputs.clone(),
+            NodeContent::Workflow(c) => c.inputs.clone(),
+            NodeContent::Branch(c) => c.inputs.clone(),
+            NodeContent::Step(c) => c.inputs.clone(),
+            NodeContent::Act(c) => c.inputs(),
         }
     }
 
     pub fn outputs(&self) -> Vars {
         match self {
-            NodeData::Workflow(data) => data.outputs.clone(),
-            NodeData::Branch(data) => data.outputs.clone(),
-            NodeData::Step(data) => data.outputs.clone(),
-            NodeData::Act(data) => data.outputs.clone(),
+            NodeContent::Workflow(node) => node.outputs.clone(),
+            NodeContent::Branch(node) => node.outputs.clone(),
+            NodeContent::Step(node) => node.outputs.clone(),
+            NodeContent::Act(node) => node.outputs(),
+        }
+    }
+
+    pub fn rets(&self) -> Vars {
+        match self {
+            NodeContent::Act(node) => node.rets(),
+            _ => Vars::new(),
         }
     }
 }
 
 impl Node {
-    pub fn new(data: NodeData, level: usize) -> Self {
+    pub fn new(id: &str, data: NodeContent, level: usize) -> Self {
         Self {
-            data,
+            id: id.to_string(),
+            content: data,
             level,
             parent: Arc::new(RwLock::new(Weak::new())),
             children: Arc::new(RwLock::new(Vec::new())),
@@ -124,41 +133,41 @@ impl Node {
         prev.clone()
     }
 
-    pub fn data(&self) -> NodeData {
-        self.data.clone()
-    }
-
-    pub fn id(&self) -> String {
-        self.data.id()
+    pub fn id(&self) -> &str {
+        &self.id
     }
 
     pub fn name(&self) -> String {
-        self.data.name()
-    }
-
-    pub fn inputs(&self) -> Vars {
-        self.data.inputs()
+        self.content.name()
     }
 
     pub fn outputs(&self) -> Vars {
-        self.data.outputs()
+        self.content.outputs()
     }
 
     pub fn kind(&self) -> NodeKind {
-        match self.data() {
-            NodeData::Workflow(_) => NodeKind::Workflow,
-            NodeData::Branch(_) => NodeKind::Branch,
-            NodeData::Step(_) => NodeKind::Step,
-            NodeData::Act(_) => NodeKind::Act,
+        match &self.content {
+            NodeContent::Workflow(_) => NodeKind::Workflow,
+            NodeContent::Branch(_) => NodeKind::Branch,
+            NodeContent::Step(_) => NodeKind::Step,
+            NodeContent::Act(_) => NodeKind::Act,
         }
     }
 
-    pub fn tag(&self) -> String {
-        match self.data() {
-            NodeData::Workflow(data) => data.tag,
-            NodeData::Branch(data) => data.tag,
-            NodeData::Step(data) => data.tag,
-            NodeData::Act(data) => data.tag,
+    pub fn r#type(&self) -> String {
+        if let NodeContent::Act(act) = &self.content {
+            return act.kind().to_string();
+        }
+
+        self.kind().to_string()
+    }
+
+    pub fn tag(&self) -> &str {
+        match &self.content {
+            NodeContent::Workflow(data) => &data.tag,
+            NodeContent::Branch(data) => &data.tag,
+            NodeContent::Step(data) => &data.tag,
+            NodeContent::Act(data) => data.tag(),
         }
     }
 }
@@ -166,7 +175,7 @@ impl Node {
 impl std::fmt::Debug for Node {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Node")
-            .field("data", &self.data)
+            .field("data", &self.content)
             .field("level", &self.level)
             .field("parent", &self.parent)
             .field("children", &self.children)

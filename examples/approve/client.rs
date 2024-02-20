@@ -58,35 +58,60 @@ impl<'a> Client<'a> {
             options.insert("uid".to_string(), json!("u1"));
 
             let state = executor.complete(&message.proc_id, &message.id, &options)?;
-            println!("action state: id={} cost={}ms", &message.id, state.cost());
-        } else if message.is_key("each") && message.is_state("created") {
+            println!(
+                "action state: id={} key={} inputs={} cost={}ms",
+                &message.id,
+                &message.key,
+                &message.inputs,
+                state.cost()
+            );
+        } else if message.is_key("pm_act") && message.is_state("created") {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
 
             let state = executor.complete(&message.proc_id, &message.id, &options)?;
             println!(
-                "action state: id={} key={} cost={}ms",
+                "action state: id={} key={} inputs={} cost={}ms",
                 &message.id,
                 &message.key,
+                &message.inputs,
+                state.cost()
+            );
+        } else if message.is_key("gm_act") && message.is_state("created") {
+            let mut options = Vars::new();
+            options.insert("uid".to_string(), json!("u2"));
+
+            let state = executor.complete(&message.proc_id, &message.id, &options)?;
+            println!(
+                "action state: id={} key={} inputs={} cost={}ms",
+                &message.id,
+                &message.key,
+                &message.inputs,
                 state.cost()
             );
         } else if message.is_key("pm") && message.is_state("created") {
             let mut options = Vars::new();
             options.insert("uid".into(), "admin".into());
-            options.insert("users".into(), json!({ "role(pm)": self.role("pm") }));
-
+            options.insert(
+                "pm".into(),
+                json!(self.role(&message.inputs.get::<String>("role_id").unwrap())),
+            );
             let state = executor.complete(&message.proc_id, &message.id, &options)?;
             println!(
-                "action state: id={} key={} cost={}ms",
+                "action state: id={} key={} inputs={} cost={}ms",
                 &message.id,
                 &message.key,
+                &message.inputs,
                 state.cost()
             );
         } else if message.is_key("gm") && message.is_state("created") {
             let mut options = Vars::new();
 
             options.insert("uid".into(), "admin".into());
-            options.insert("users".into(), json!({ "role(gm)": self.role("gm") }));
+            options.insert(
+                "gm".into(),
+                json!(self.role(&message.inputs.get::<String>("role_id").unwrap())),
+            );
 
             let state = executor.complete(&message.proc_id, &message.id, &options)?;
             println!(
@@ -95,8 +120,11 @@ impl<'a> Client<'a> {
                 &message.key,
                 state.cost()
             );
-        } else if message.is_key("final") {
-            println!("do final work");
+        } else if message.is_type("msg") {
+            println!(
+                "msg: id={} key={} inputs={}",
+                message.id, message.key, message.inputs
+            );
         }
 
         Ok(())

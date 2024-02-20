@@ -10,6 +10,7 @@ use tracing::debug;
 #[async_trait]
 impl ActTask for Branch {
     fn init(&self, ctx: &Context) -> Result<()> {
+        ctx.task.set_emit_disabled(true);
         if self.needs.len() > 0 {
             ctx.task.set_state(TaskState::Pending);
             return Ok(());

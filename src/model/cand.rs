@@ -1,9 +1,8 @@
-use std::collections::{BTreeSet, HashMap};
-
 use crate::{ActError, Result};
 use rhai::Dynamic;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::collections::BTreeSet;
 use tracing::debug;
 
 /// Org adapter trait
@@ -60,11 +59,7 @@ pub trait RoleAdapter: Send + Sync {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub enum Candidate {
     Empty,
-    User(String),
-    Role(String),
-    Unit(String),
-    Dept(String),
-    Relation(String),
+    Value(String),
     Group {
         op: Operation,
         items: Vec<Candidate>,
@@ -76,18 +71,20 @@ pub enum Candidate {
 pub enum Operation {
     Union,
     Intersect,
-    Difference,
+    Except,
 }
 
 impl Candidate {
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Candidate::Empty => true,
+            _ => false,
+        }
+    }
     pub fn r#type(&self) -> String {
         match self {
             Candidate::Empty => "empty".to_string(),
-            Candidate::User { .. } => "user".to_string(),
-            Candidate::Role { .. } => "role".to_string(),
-            Candidate::Unit { .. } => "unit".to_string(),
-            Candidate::Dept { .. } => "dept".to_string(),
-            Candidate::Relation { .. } => "rel".to_string(),
+            Candidate::Value { .. } => "value".to_string(),
             Candidate::Group { .. } => "group".to_string(),
             Candidate::Set(..) => "set".to_string(),
         }
@@ -95,11 +92,7 @@ impl Candidate {
 
     pub fn id(&self) -> Result<String> {
         match self {
-            Candidate::User(v) => Ok(format!("user({v})")),
-            Candidate::Role(v) => Ok(format!("role({v})")),
-            Candidate::Unit(v) => Ok(format!("unit({v})")),
-            Candidate::Dept(v) => Ok(format!("dept({v})")),
-            Candidate::Relation(v) => Ok(format!("rel({v})")),
+            Candidate::Value(v) => Ok(format!("value({v})")),
             _ => Err(ActError::Convert(format!(
                 "only basic candidate can get id"
             ))),
@@ -108,11 +101,7 @@ impl Candidate {
 
     pub fn value(&self) -> Result<String> {
         match self {
-            Candidate::User(v) => Ok(v.to_string()),
-            Candidate::Role(v) => Ok(v.to_string()),
-            Candidate::Unit(v) => Ok(v.to_string()),
-            Candidate::Dept(v) => Ok(v.to_string()),
-            Candidate::Relation(v) => Ok(v.to_string()),
+            Candidate::Value(v) => Ok(v.to_string()),
             _ => Err(ActError::Convert(format!(
                 "only basic candidate can get value"
             ))),
@@ -132,49 +121,22 @@ impl Candidate {
                 serde_json::de::from_str(expr).map_err(|err| ActError::Convert(err.to_string()))?;
             Ok(value.into())
         } else {
-            Ok(Candidate::User(expr.to_string()))
+            Ok(Candidate::Value(expr.to_string()))
         }
     }
 
-    pub fn calculable(&self, cands: &mut Vec<Candidate>) -> bool {
-        match self {
-            Candidate::User { .. } => true,
-            Candidate::Set(items) => {
-                let mut result = true;
-                for item in items {
-                    result &= item.calculable(cands);
-                }
-
-                result
-            }
-            Candidate::Group { op: _, items } => {
-                let mut result = true;
-                for item in items {
-                    result &= item.calculable(cands);
-                }
-
-                result
-            }
-            Candidate::Empty => false,
-            cand => {
-                cands.push(cand.clone());
-
-                false
-            }
-        }
-    }
-
-    pub fn users(&self, values: &HashMap<String, Vec<String>>) -> Result<BTreeSet<String>> {
+    pub fn values(&self) -> Result<BTreeSet<String>> {
         let mut ret = BTreeSet::new();
 
         match self {
-            Candidate::User(name) => {
-                ret.insert(name.to_string());
+            Candidate::Empty => {}
+            Candidate::Value(value) => {
+                ret.insert(value.to_string());
             }
             Candidate::Set(items) => {
                 let mut result = BTreeSet::new();
                 for item in items {
-                    let users = item.users(values)?;
+                    let users = item.values()?;
                     result = result.union(&users).cloned().collect();
                 }
                 ret.extend(result);
@@ -183,7 +145,7 @@ impl Candidate {
                 Operation::Union => {
                     let mut result = BTreeSet::new();
                     for item in items {
-                        let users = item.users(values)?;
+                        let users = item.values()?;
                         result = result.union(&users).cloned().collect();
                     }
                     ret.extend(result);
@@ -191,7 +153,7 @@ impl Candidate {
                 Operation::Intersect => {
                     let mut result = BTreeSet::new();
                     for item in items {
-                        let users = item.users(values)?;
+                        let users = item.values()?;
                         if result.len() == 0 {
                             result.extend(users);
                         } else {
@@ -201,10 +163,10 @@ impl Candidate {
 
                     ret.extend(result);
                 }
-                Operation::Difference => {
+                Operation::Except => {
                     let mut result = BTreeSet::new();
                     for item in items {
-                        let users = item.users(values)?;
+                        let users = item.values()?;
                         if result.len() == 0 {
                             result.extend(users);
                         } else {
@@ -215,20 +177,19 @@ impl Candidate {
                     ret.extend(result);
                 }
             },
-
-            v => {
-                let id = v.id()?;
-                if let Some(users) = values.get(&id) {
-                    for v in users.iter() {
-                        ret.insert(v.to_string());
-                    }
-                } else {
-                    return Err(ActError::Runtime(format!(
-                        "cannot calculate users by {}",
-                        id
-                    )));
-                }
-            }
+            // v => {
+            //     let id = v.id()?;
+            //     if let Some(values) = values.get(&id) {
+            //         for v in values.iter() {
+            //             ret.insert(v.to_string());
+            //         }
+            //     } else {
+            //         return Err(ActError::Runtime(format!(
+            //             "cannot calculate value by {}",
+            //             id
+            //         )));
+            //     }
+            // }
         }
 
         Ok(ret)
@@ -240,7 +201,7 @@ impl std::fmt::Display for Operation {
         let value = match self {
             Operation::Union => "union",
             Operation::Intersect => "intersect",
-            Operation::Difference => "difference",
+            Operation::Except => "except",
         };
 
         f.write_str(value)
@@ -251,7 +212,7 @@ impl From<&str> for Operation {
     fn from(value: &str) -> Self {
         match value {
             "intersect" => Operation::Intersect,
-            "difference" => Operation::Difference,
+            "except" => Operation::Except,
             "union" | _ => Operation::Union,
         }
     }
@@ -274,8 +235,7 @@ impl From<&Value> for Candidate {
 impl From<Value> for Candidate {
     fn from(value: Value) -> Self {
         match &value {
-            // set single string to Candidate::User
-            Value::String(v) => Candidate::User(v.to_string()),
+            Value::String(v) => Candidate::Value(v.to_string()),
             Value::Array(arr) => {
                 let mut set = Vec::new();
                 for item in arr {
@@ -292,25 +252,9 @@ impl From<Value> for Candidate {
                 }
 
                 match t.as_str().unwrap() {
-                    "user" => {
+                    "value" => {
                         let v = obj.get("value").unwrap().as_str().unwrap();
-                        Candidate::User(v.to_string())
-                    }
-                    "role" => {
-                        let v = obj.get("value").unwrap().as_str().unwrap();
-                        Candidate::Role(v.to_string())
-                    }
-                    "unit" => {
-                        let v = obj.get("value").unwrap().as_str().unwrap();
-                        Candidate::Unit(v.to_string())
-                    }
-                    "dept" => {
-                        let v = obj.get("value").unwrap().as_str().unwrap();
-                        Candidate::Dept(v.to_string())
-                    }
-                    "rel" => {
-                        let v = obj.get("value").unwrap().as_str().unwrap();
-                        Candidate::Relation(v.to_string())
+                        Candidate::Value(v.to_string())
                     }
                     "group" => {
                         let op: Operation = obj.get("op").unwrap().as_str().unwrap().into();
@@ -356,20 +300,8 @@ impl Into<Value> for &Candidate {
                 }
                 json!({ "type": "set", "items": cands })
             }
-            Candidate::User(value) => {
-                json!({ "type": "user", "value": value })
-            }
-            Candidate::Unit(value) => {
-                json!({ "type": "unit",  "value": value })
-            }
-            Candidate::Dept(value) => {
-                json!({ "type": "dept",  "value": value })
-            }
-            Candidate::Role(value) => {
-                json!({ "type": "role", "value": value })
-            }
-            Candidate::Relation(value) => {
-                json!({ "type": "rel", "value": value })
+            Candidate::Value(value) => {
+                json!({ "type": "value", "value": value })
             }
             Candidate::Empty => Value::Null,
         }

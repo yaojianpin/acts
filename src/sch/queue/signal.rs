@@ -16,7 +16,7 @@ impl std::fmt::Debug for Signal {
             Self::Task(t) => f
                 .debug_tuple("Task")
                 .field(&t.node.kind())
-                .field(&t.node.data().name())
+                .field(&t.node.content.name())
                 .field(&t.id)
                 .finish(),
         }

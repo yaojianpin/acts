@@ -1,4 +1,4 @@
-use crate::{data, sch::TaskState, utils, ActPlugin, Engine, StoreAdapter, Vars, Workflow};
+use crate::{data, sch::TaskState, utils, Act, ActPlugin, Engine, StoreAdapter, Vars, Workflow};
 use rhai::plugin::*;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -9,7 +9,7 @@ async fn export_manager_deploy_ok() {
     let manager = engine.manager();
     let model = Workflow::new()
         .with_id(&utils::longid())
-        .with_step(|step| step.with_act(|act| act.with_id("test")));
+        .with_step(|step| step.with_act(Act::req(|act| act.with_id("test"))));
 
     let result = manager.deploy(&model);
 
@@ -65,7 +65,7 @@ async fn engine_executor_start_no_pid() {
     let mid = utils::longid();
     let workflow = Workflow::new()
         .with_id(&mid)
-        .with_step(|step| step.with_act(|act| act.with_id("test")));
+        .with_step(|step| step.with_act(Act::req(|act| act.with_id("test"))));
     engine.manager().deploy(&workflow).unwrap();
     let options = Vars::new();
     let result = executor.start(&workflow.id, &options);
@@ -81,13 +81,16 @@ async fn engine_executor_start_with_pid() {
     let mid = utils::longid();
     let workflow = Workflow::new()
         .with_id(&mid)
-        .with_step(|step| step.with_act(|act| act.with_id("test")));
+        .with_step(|step| step.with_act(Act::req(|act| act.with_id("test"))));
     engine.manager().deploy(&workflow).unwrap();
     let mut options = Vars::new();
     options.insert("pid".to_string(), "123".into());
     let result = executor.start(&workflow.id, &options);
     assert_eq!(result.is_ok(), true);
-    assert_eq!(result.unwrap().outputs().get("pid").unwrap(), &json!("123"));
+    assert_eq!(
+        result.unwrap().outputs().get::<String>("pid").unwrap(),
+        "123"
+    );
 }
 
 #[tokio::test]
@@ -99,7 +102,7 @@ async fn export_executor_start_empty_pid() {
     let mid = utils::longid();
     let workflow = Workflow::new()
         .with_id(&mid)
-        .with_step(|step| step.with_act(|act| act.with_id("test")));
+        .with_step(|step| step.with_act(Act::req(|act| act.with_id("test"))));
 
     engine.manager().deploy(&workflow).unwrap();
     let mut options = Vars::new();
@@ -118,7 +121,7 @@ async fn export_executor_start_dup_pid_error() {
     let mid = utils::longid();
     let model = Workflow::new()
         .with_id(&mid)
-        .with_step(|step| step.with_act(|act| act.with_id("test")));
+        .with_step(|step| step.with_act(Act::req(|act| act.with_id("test"))));
 
     let store = engine.scher().cache().store();
     let proc = data::Proc {
@@ -131,6 +134,7 @@ async fn export_executor_start_dup_pid_error() {
         vars: "".to_string(),
         timestamp: 0,
         model: model.to_json().unwrap(),
+        root_tid: "".to_string(),
     };
     store.procs().create(&proc).expect("create proc");
     engine
@@ -281,8 +285,10 @@ async fn export_manager_proc_get_tree() {
 async fn export_manager_tasks() {
     let engine = Engine::new();
     let manager = engine.manager();
-    let model =
-        Workflow::new().with_step(|step| step.with_id("step1").with_act(|act| act.with_id("act1")));
+    let model = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::req(|act| act.with_id("act1")))
+    });
 
     let scher = engine.scher();
     scher.emitter().on_message(move |e| {
@@ -306,8 +312,10 @@ async fn export_manager_tasks() {
 async fn export_manager_task_get() {
     let engine = Engine::new();
     let manager = engine.manager();
-    let model =
-        Workflow::new().with_step(|step| step.with_id("step1").with_act(|act| act.with_id("act1")));
+    let model = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::req(|act| act.with_id("act1")))
+    });
 
     let scher = engine.scher();
     scher.emitter().on_message(move |e| {
@@ -371,8 +379,10 @@ async fn export_executeor_start_not_found_model() {
 async fn export_executeor_complete() {
     let ret = Arc::new(Mutex::new(false));
     let engine = Engine::new();
-    let model =
-        Workflow::new().with_step(|step| step.with_id("step1").with_act(|act| act.with_id("act1")));
+    let model = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::req(|act| act.with_id("act1")))
+    });
 
     let scher = engine.scher();
     scher.emitter().on_complete(|e| e.close());
@@ -397,8 +407,10 @@ async fn export_executeor_complete() {
 async fn export_executeor_complete_no_uid() {
     let ret = Arc::new(Mutex::new(false));
     let engine = Engine::new();
-    let model =
-        Workflow::new().with_step(|step| step.with_id("step1").with_act(|act| act.with_id("act1")));
+    let model = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::req(|act| act.with_id("act1")))
+    });
 
     let scher = engine.scher();
     scher.emitter().on_complete(|e| e.close());
@@ -423,8 +435,10 @@ async fn export_executeor_complete_no_uid() {
 async fn export_executeor_submit() {
     let ret = Arc::new(Mutex::new(false));
     let engine = Engine::new();
-    let model =
-        Workflow::new().with_step(|step| step.with_id("step1").with_act(|act| act.with_id("act1")));
+    let model = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::req(|act| act.with_id("act1")))
+    });
 
     let scher = engine.scher();
     scher.emitter().on_complete(|e| e.close());
@@ -449,8 +463,10 @@ async fn export_executeor_submit() {
 async fn export_executeor_skip() {
     let ret = Arc::new(Mutex::new(false));
     let engine = Engine::new();
-    let model =
-        Workflow::new().with_step(|step| step.with_id("step1").with_act(|act| act.with_id("act1")));
+    let model = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::req(|act| act.with_id("act1")))
+    });
 
     let scher = engine.scher();
     scher.emitter().on_complete(|e| e.close());
@@ -475,11 +491,15 @@ async fn export_executeor_skip() {
 async fn export_executeor_error() {
     let ret = Arc::new(Mutex::new(false));
     let engine = Engine::new();
-    let model =
-        Workflow::new().with_step(|step| step.with_id("step1").with_act(|act| act.with_id("act1")));
+    let model = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::req(|act| act.with_id("act1")))
+    });
 
     let scher = engine.scher();
-    scher.emitter().on_error(|e| e.close());
+    scher.emitter().on_error(|e| {
+        e.close();
+    });
 
     let r = ret.clone();
     scher.emitter().on_message(move |e| {
@@ -502,14 +522,17 @@ async fn export_executeor_error() {
 async fn export_executeor_abort() {
     let ret = Arc::new(Mutex::new(false));
     let engine = Engine::new();
-    let model =
-        Workflow::new().with_step(|step| step.with_id("step1").with_act(|act| act.with_id("act1")));
+    let model = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::req(|act| act.with_id("act1")))
+    });
 
     let scher = engine.scher();
     scher.emitter().on_complete(|e| e.close());
 
     let r = ret.clone();
     scher.emitter().on_message(move |e| {
+        println!("message: {:?}", e.inner());
         if e.is_key("act1") && e.is_state("created") {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
@@ -529,8 +552,14 @@ async fn export_executeor_back() {
     let ret = Arc::new(Mutex::new(false));
     let engine = Engine::new();
     let model = Workflow::new()
-        .with_step(|step| step.with_id("step1").with_act(|act| act.with_id("act1")))
-        .with_step(|step| step.with_id("step2").with_act(|act| act.with_id("act2")));
+        .with_step(|step| {
+            step.with_id("step1")
+                .with_act(Act::req(|act| act.with_id("act1")))
+        })
+        .with_step(|step| {
+            step.with_id("step2")
+                .with_act(Act::req(|act| act.with_id("act2")))
+        });
 
     let scher = engine.scher();
     scher.emitter().on_complete(|e| e.close());
@@ -573,8 +602,14 @@ async fn export_executeor_cancel() {
     let ret = Arc::new(Mutex::new(false));
     let engine = Engine::new();
     let model = Workflow::new()
-        .with_step(|step| step.with_id("step1").with_act(|act| act.with_id("act1")))
-        .with_step(|step| step.with_id("step2").with_act(|act| act.with_id("act2")));
+        .with_step(|step| {
+            step.with_id("step1")
+                .with_act(Act::req(|act| act.with_id("act1")))
+        })
+        .with_step(|step| {
+            step.with_id("step2")
+                .with_act(Act::req(|act| act.with_id("act2")))
+        });
 
     let scher = engine.scher();
     scher.emitter().on_complete(|e| e.close());
@@ -606,6 +641,124 @@ async fn export_executeor_cancel() {
                 .executor()
                 .cancel(&e.proc_id, &tid.lock().unwrap(), &vars);
             *r.lock().unwrap() = ret.is_ok();
+        }
+    });
+    let mut vars = Vars::new();
+    vars.insert("uid".to_string(), json!("u1"));
+    scher.start(&model, &vars).unwrap();
+    scher.event_loop().await;
+    assert_eq!(*ret.lock().unwrap(), true);
+}
+
+#[tokio::test]
+async fn export_executeor_push() {
+    let ret = Arc::new(Mutex::new(false));
+    let engine = Engine::new();
+    let model = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::req(|act| act.with_id("act1")))
+    });
+
+    let scher = engine.scher();
+    scher.emitter().on_complete(|e| e.close());
+
+    let r = ret.clone();
+    scher.emitter().on_message(move |e| {
+        println!("message: {e:?}");
+        if e.is_key("step1") && e.is_state("created") {
+            let mut vars = Vars::new();
+            vars.insert("id".to_string(), json!("act2"));
+            engine.executor().push(&e.proc_id, &e.id, &vars).unwrap();
+        }
+
+        if e.is_key("act2") && e.is_state("created") {
+            *r.lock().unwrap() = true;
+            e.close();
+        }
+    });
+    let mut vars = Vars::new();
+    vars.insert("uid".to_string(), json!("u1"));
+    scher.start(&model, &vars).unwrap();
+    scher.event_loop().await;
+    assert_eq!(*ret.lock().unwrap(), true);
+}
+
+#[tokio::test]
+async fn export_executeor_push_no_id_error() {
+    let ret = Arc::new(Mutex::new(false));
+    let engine = Engine::new();
+    let model = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::req(|act| act.with_id("act1")))
+    });
+
+    let scher = engine.scher();
+    scher.emitter().on_complete(|e| e.close());
+
+    let r = ret.clone();
+    scher.emitter().on_message(move |e| {
+        println!("message: {e:?}");
+        if e.is_key("step1") && e.is_state("created") {
+            let vars = Vars::new();
+            *r.lock().unwrap() = engine.executor().push(&e.proc_id, &e.id, &vars).is_err();
+            e.close();
+        }
+    });
+    let mut vars = Vars::new();
+    vars.insert("uid".to_string(), json!("u1"));
+    scher.start(&model, &vars).unwrap();
+    scher.event_loop().await;
+    assert_eq!(*ret.lock().unwrap(), true);
+}
+
+#[tokio::test]
+async fn export_executeor_push_not_step_id_error() {
+    let ret = Arc::new(Mutex::new(false));
+    let engine = Engine::new();
+    let model = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::req(|act| act.with_id("act1")))
+    });
+
+    let scher = engine.scher();
+    scher.emitter().on_complete(|e| e.close());
+
+    let r = ret.clone();
+    scher.emitter().on_message(move |e| {
+        println!("message: {e:?}");
+        if e.is_key("act1") && e.is_state("created") {
+            let vars = Vars::new();
+            *r.lock().unwrap() = engine.executor().push(&e.proc_id, &e.id, &vars).is_err();
+            e.close();
+        }
+    });
+    let mut vars = Vars::new();
+    vars.insert("uid".to_string(), json!("u1"));
+    scher.start(&model, &vars).unwrap();
+    scher.event_loop().await;
+    assert_eq!(*ret.lock().unwrap(), true);
+}
+
+#[tokio::test]
+async fn export_executeor_remove() {
+    let ret = Arc::new(Mutex::new(false));
+    let engine = Engine::new();
+    let model = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::req(|act| act.with_id("act1")))
+    });
+
+    let scher = engine.scher();
+    scher.emitter().on_complete(|e| e.close());
+
+    let r = ret.clone();
+    scher.emitter().on_message(move |e| {
+        println!("message: {e:?}");
+        if e.is_key("act1") && e.is_state("created") {
+            *r.lock().unwrap() = engine
+                .executor()
+                .remove(&e.proc_id, &e.id, &Vars::new())
+                .is_ok();
         }
     });
     let mut vars = Vars::new();

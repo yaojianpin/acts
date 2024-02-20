@@ -107,7 +107,7 @@ impl Visitor {
         self.path.insert(self.node.level, self.is_next_sibling);
         self.root
             .visits
-            .entry(self.node.id())
+            .entry(self.node.id().to_string())
             .and_modify(|v| *v += 1)
             .or_insert(1);
     }

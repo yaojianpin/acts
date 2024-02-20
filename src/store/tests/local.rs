@@ -29,6 +29,7 @@ async fn store_local_proc_create() {
         vars: "".to_string(),
         timestamp: 0,
         model: "".to_string(),
+        root_tid: "".to_string(),
     };
     store.procs().create(&proc).unwrap();
     assert_eq!(store.procs().exists(&proc.id).unwrap(), true);
@@ -48,6 +49,7 @@ async fn store_local_proc_find() {
         vars: "".to_string(),
         timestamp: 0,
         model: "".to_string(),
+        root_tid: "".to_string(),
     };
     store.procs().create(&proc).unwrap();
     assert_eq!(store.procs().find(&pid).unwrap().id, pid);
@@ -69,6 +71,7 @@ async fn store_local_proc_query() {
             vars: "{}".to_string(),
             timestamp: 0,
             model: "".to_string(),
+            root_tid: "".to_string(),
         };
         procs.create(&proc).unwrap();
     }
@@ -97,6 +100,7 @@ async fn store_local_proc_update() {
         vars: "".to_string(),
         timestamp: 0,
         model: "".to_string(),
+        root_tid: "".to_string(),
     };
     store.procs().create(&proc).unwrap();
 
@@ -122,6 +126,7 @@ async fn store_local_proc_delete() {
         vars: "".to_string(),
         timestamp: 0,
         model: "".to_string(),
+        root_tid: "".to_string(),
     };
     store.procs().create(&proc).unwrap();
     store.procs().delete(&proc.id).unwrap();
@@ -145,7 +150,7 @@ async fn store_local_task_create() {
         prev: None,
         start_time: 0,
         end_time: 0,
-        vars: "{}".to_string(),
+        hooks: "{}".to_string(),
         timestamp: 0,
     };
     tasks.create(&task).unwrap();
@@ -169,7 +174,7 @@ async fn store_local_task_find() {
         prev: None,
         start_time: 0,
         end_time: 0,
-        vars: "{}".to_string(),
+        hooks: "{}".to_string(),
         timestamp: 0,
     };
     tasks.create(&task).unwrap();
@@ -194,7 +199,7 @@ async fn store_local_task_query() {
             prev: None,
             start_time: 0,
             end_time: 0,
-            vars: "{}".to_string(),
+            hooks: "{}".to_string(),
             timestamp: 0,
         };
         tasks.create(&task).unwrap();
@@ -223,7 +228,7 @@ async fn store_local_task_update() {
         prev: None,
         start_time: 0,
         end_time: 0,
-        vars: "{}".to_string(),
+        hooks: "{}".to_string(),
         timestamp: 0,
     };
     table.create(&task).unwrap();
@@ -255,7 +260,7 @@ async fn store_local_task_delete() {
         prev: None,
         start_time: 0,
         end_time: 0,
-        vars: "{}".to_string(),
+        hooks: "{}".to_string(),
         timestamp: 0,
     };
     table.create(&task).unwrap();

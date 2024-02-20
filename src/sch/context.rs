@@ -1,11 +1,14 @@
 use crate::{
-    event::{Action, ActionState, EventAction},
-    model,
-    sch::{tree::NodeData, Node, Proc, Scheduler, Task},
-    ActError, ActValue, Error, NodeKind, Result, ShareLock, TaskState, Vars, WorkflowAction,
+    event::{Action, ActionState, EventAction, Model},
+    sch::{tree::NodeContent, Node, Proc, Scheduler, Task},
+    utils::{self, consts, shortid},
+    Act, ActError, Error, Message, ModelBase, Msg, NodeKind, Result, ShareLock, TaskState, Vars,
 };
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock};
 use tracing::debug;
+
+use super::ActTask;
 
 #[derive(Clone)]
 pub struct Context {
@@ -14,6 +17,7 @@ pub struct Context {
     pub task: Arc<Task>,
     pub action: ShareLock<Option<EventAction>>,
     pub err: ShareLock<Option<Error>>,
+    pub vars: ShareLock<Vars>,
 }
 
 impl std::fmt::Debug for Context {
@@ -28,9 +32,9 @@ impl std::fmt::Debug for Context {
 
 impl Context {
     fn init_vars(&self, task: &Task) {
-        // let vars = task.node.inputs();
         let inputs = task.inputs();
-        self.task.room().append(&inputs);
+        debug!("init_vars: {inputs}");
+        self.task.env().set_env(&inputs);
     }
 
     pub fn new(scher: &Arc<Scheduler>, proc: &Arc<Proc>, task: &Arc<Task>) -> Self {
@@ -40,6 +44,7 @@ impl Context {
             action: Arc::new(RwLock::new(None)),
             task: task.clone(),
             err: Arc::new(RwLock::new(task.state().as_err())),
+            vars: Arc::new(RwLock::new(Vars::new())),
         };
 
         ctx
@@ -47,13 +52,20 @@ impl Context {
 
     pub fn prepare(&self) {
         // bind current context to env
-        self.task.room().bind_context(self);
+        self.task.env().bind_context(self);
         self.init_vars(&self.task);
     }
 
     pub fn set_action(&self, action: &Action) -> Result<()> {
         *self.action.write().unwrap() = Some(EventAction::parse(action.event.as_str())?);
-        self.task.room().append(&action.options);
+
+        // set the action options to the context
+        let mut vars = self.vars.write().unwrap();
+        for (name, v) in &action.options {
+            vars.entry(name.to_string())
+                .and_modify(|i| *i = v.clone())
+                .or_insert(v.clone());
+        }
 
         Ok(())
     }
@@ -65,24 +77,34 @@ impl Context {
         *self.err.write().unwrap() = Some(err.clone());
     }
 
+    pub fn vars(&self) -> Vars {
+        self.vars.read().unwrap().clone()
+    }
+
+    pub fn set_var<T>(&self, name: &str, value: T)
+    where
+        T: Serialize + Clone,
+    {
+        self.vars.write().unwrap().set(name, value);
+    }
+
+    pub fn get_var<T>(&self, name: &str) -> Option<T>
+    where
+        T: for<'de> Deserialize<'de> + Clone,
+    {
+        self.vars.read().unwrap().get::<T>(name)
+    }
+
     pub fn run(&self, script: &str) -> Result<bool> {
-        self.task.room().run(script)
+        self.task.env().run(script)
     }
 
     pub fn eval(&self, expr: &str) -> Result<bool> {
-        self.task.room().eval(expr)
+        self.task.env().eval(expr)
     }
 
     pub fn eval_with<T: rhai::Variant + Clone>(&self, expr: &str) -> Result<T> {
-        self.task.room().eval(expr)
-    }
-
-    pub fn var(&self, name: &str) -> Option<ActValue> {
-        self.task.room().get(name)
-    }
-
-    pub fn set_var(&self, name: &str, value: ActValue) {
-        self.task.room().set(name, value)
+        self.task.env().eval(expr)
     }
 
     #[allow(unused)]
@@ -95,31 +117,43 @@ impl Context {
         self.scher.push(&task);
     }
 
-    pub fn sched_task_with_inputs(&self, node: &Arc<Node>, inputs: &Vars) {
-        let task = self.proc.create_task(&node, Some(self.task.clone()));
-        task.room().append(&inputs);
-        self.scher.push(&task);
-    }
+    pub fn append_act(&self, act: &Act) -> Result<Arc<Node>> {
+        debug!("append_act: {act:?}  {:?}", self.task);
+        let mut task = self.task.clone();
+        if self.task.is_kind(NodeKind::Act) {
+            let is_package_act = self.task.is_act(consts::ACT_TYPE_PACK);
 
-    pub fn sched_act(&self, id: &str, tag: &str, inputs: &Vars, outputs: &Vars) -> Result<()> {
-        let act = model::Act {
-            id: id.to_string(),
-            tag: tag.to_string(),
-            inputs: inputs.clone(),
-            outputs: outputs.clone(),
-            ..Default::default()
-        };
+            // not package act or completed package
+            if !is_package_act || (is_package_act && self.task.state().is_completed()) {
+                // find its parent to append task
+                while let Some(parent) = task.parent() {
+                    if parent.is_kind(NodeKind::Step) || parent.is_act(consts::ACT_TYPE_PACK) {
+                        task = parent;
+                        break;
+                    }
+                    task = parent;
+                }
+            }
+        }
 
-        // does not add the node to tree
-        let node = Arc::new(Node::new(NodeData::Act(act), self.task.node.level + 1));
-        node.set_parent(&self.task.node);
+        let mut id = act.id().to_string();
+        if id.is_empty() {
+            id = shortid();
+        }
 
-        if self.task.state().is_running() {
-            let task = self.proc.create_task(&node, Some(self.task.clone()));
+        let node = Arc::new(Node::new(
+            &id,
+            NodeContent::Act(act.clone()),
+            task.node.level + 1,
+        ));
+        node.set_parent(&task.node);
+
+        if task.state().is_running() {
+            let task = self.proc.create_task(&node, Some(task));
             self.scher.push(&task);
         }
 
-        Ok(())
+        Ok(node)
     }
 
     /// redo the task and dispatch directly
@@ -127,9 +161,6 @@ impl Context {
         if let Some(prev) = task.prev() {
             if let Some(prev_task) = self.task.proc().task(&prev) {
                 let task = self.proc.create_task(&task.node, Some(prev_task));
-
-                let vars = task.room().vars();
-                task.room().append(&vars);
                 self.scher.push(&task);
             }
         }
@@ -237,41 +268,38 @@ impl Context {
     pub fn emit_error(&self) -> Result<()> {
         let state = self.task.state();
         if state.is_error() {
-            let mut parent = self.task.parent();
-            while let Some(task) = &parent {
-                task.set_state(state.clone());
-                task.set_pure_action_state(ActionState::Error);
-                self.emit_task(&task);
+            self.emit_task(&self.task);
 
-                parent = task.parent();
+            // after emitting, re-check the task state
+            if self.task.state().is_error() {
+                if let Some(parent) = self.task.parent() {
+                    let ctx = parent.create_context(&self.scher);
+                    ctx.set_err(&state.as_err().unwrap_or_default());
+                    return parent.error(&ctx);
+                }
             }
         }
 
         Ok(())
     }
 
-    pub fn emit_task(&self, task: &Task) {
+    pub fn emit_task(&self, task: &Arc<Task>) {
         debug!("ctx::emit_task, task={:?}", task);
         // on workflow start
-        if let NodeData::Workflow(_) = &task.node.data {
+        if let NodeContent::Workflow(_) = &task.node.content {
             if task.action_state() == ActionState::Created {
                 self.proc.set_state(TaskState::Running);
                 self.scher.emitter().emit_proc_event(&self.proc);
             }
         }
 
-        if task.action_state() == ActionState::Completed {
+        if task.action_state() == ActionState::Completed
+            || task.action_state() == ActionState::Submitted
+        {
             let outputs = task.outputs();
-            match task.node.kind() {
-                NodeKind::Act => {
-                    // only add outputs to its parent task for act node
-                    if let Some(parent) = task.parent() {
-                        parent.room().append(&outputs);
-                    }
-                }
-                _ => {
-                    // add outputs to proc global for other node
-                    task.proc().env().append(&outputs);
+            if outputs.len() > 0 {
+                if let Some(parent) = task.parent() {
+                    parent.env().set_env(&outputs);
                 }
             }
         }
@@ -279,7 +307,7 @@ impl Context {
         self.scher.emitter().emit_task_event(task);
 
         // on workflow complete
-        if let NodeData::Workflow(_) = &task.node.data {
+        if let NodeContent::Workflow(_) = &task.node.content {
             if task.action_state() != ActionState::Created {
                 self.proc.set_state(task.state());
                 self.scher.emitter().emit_proc_event(&self.proc);
@@ -287,12 +315,30 @@ impl Context {
         }
     }
 
-    pub fn send_message(&self, key: &str) {
-        let message = self.task.create_action_message(&WorkflowAction {
-            name: "message".to_string(),
-            id: key.to_string(),
+    pub fn emit_message(&self, msg: &Msg) {
+        debug!("emit_message: {:?}", msg);
+        let workflow = self.proc.model();
+
+        let inputs = utils::fill_inputs(&self.task.env(), &msg.inputs);
+        let msg = Message {
+            id: utils::shortid(),
+            r#type: consts::ACT_TYPE_MSG.to_string(),
+            source: self.task.node.kind().to_string(),
+            state: self.task.action_state().to_string(),
+            proc_id: self.task.proc_id.clone(),
+            key: msg.id.to_string(),
+            name: msg.name.clone(),
+
+            model: Model {
+                id: workflow.id.clone(),
+                name: workflow.name.to_string(),
+                tag: workflow.tag.to_string(),
+            },
+
+            tag: msg.tag.to_string(),
+            inputs,
             ..Default::default()
-        });
-        self.scher.emitter().emit_message(&message);
+        };
+        self.scher.emitter().emit_message(&msg);
     }
 }

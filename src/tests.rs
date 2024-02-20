@@ -1,4 +1,4 @@
-use crate::{utils, Engine, Vars, Workflow};
+use crate::{utils, Act, Engine, Vars, Workflow};
 use serde_json::json;
 
 #[tokio::test]
@@ -37,10 +37,10 @@ async fn engine_event_on_message() {
     let mid = utils::longid();
     let workflow = Workflow::new()
         .with_id(&mid)
-        .with_step(|step| step.with_act(|act| act.with_id("test")));
+        .with_step(|step| step.with_act(Act::req(|act| act.with_id("test"))));
 
     engine.emitter().on_message(move |e| {
-        if e.is_type("act") {
+        if e.is_source("act") {
             assert_eq!(e.id, "test");
         }
 
@@ -64,7 +64,7 @@ async fn engine_event_on_start() {
     let mid = utils::longid();
     let workflow = Workflow::new()
         .with_id(&mid)
-        .with_step(|step| step.with_act(|act| act.with_id("test")));
+        .with_step(|step| step.with_act(Act::req(|act| act.with_id("test"))));
 
     engine.emitter().on_start(move |e| {
         assert_eq!(e.mid, mid);
@@ -110,9 +110,10 @@ async fn engine_event_on_error() {
     engine.start();
 
     let mid = utils::longid();
-    let workflow = Workflow::new()
-        .with_id(&mid)
-        .with_step(|step| step.with_id("step1").with_act(|a| a.with_id("act1")));
+    let workflow = Workflow::new().with_id(&mid).with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::req(|a| a.with_id("act1")))
+    });
 
     engine.emitter().on_error(move |e| {
         assert_eq!(e.mid, mid);
@@ -142,7 +143,7 @@ async fn engine_event_on_error() {
 async fn engine_builder() {
     let workflow = Workflow::new()
         .with_name("w1")
-        .with_env("v", 0.into())
+        .with_input("v", 0.into())
         .with_step(|step| {
             step.with_id("step1")
                 .with_name("step1")

@@ -2,35 +2,34 @@ name: event_test
 id: m1
 outputs:
   value: 0
-actions:
-  - name: fn1
-    id: fn1
-    on: 
-      - state: created
-        nkind: workflow
-      - state: completed
-        nkind: workflow
-  - name: fn2
-    id: fn2
-    on: 
-      - state: completed
-        nid: step2
-
-  - name: fn3
-    id: fn3
-    on: 
-      - state: completed
-        nid: step3
-    inputs:
-      a: ${ env.get("value") }
+setup:
+  - !on_created
+      - !msg
+        id: fn1
+  - !on_step
+      - !msg
+        id: fn_on_step
+  - !on_completed
+      - !msg
+        id: fn1
 steps:
   - name: step 1
     id: step1
   - name: step 2
     id: step2
-    run: |
-      env.set("value", 100);          
+    setup:
+      - !set
+        value: 100
+      - !on_completed
+          - !msg
+            id: fn2
   - name: step 3
     id: step3
+    setup:
+      - !on_completed
+          - !msg
+            id: fn3
+            inputs:
+              a: ${ env.get("value") }
   - name: step 4
     

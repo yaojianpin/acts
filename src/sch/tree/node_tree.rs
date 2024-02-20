@@ -1,6 +1,6 @@
 use super::{
     build,
-    node::{Node, NodeData},
+    node::{Node, NodeContent},
     visit::VisitRoot,
 };
 use crate::{ActError, Result, ShareLock, Workflow};
@@ -44,14 +44,14 @@ impl NodeTree {
         build::build_workflow(&mut model, self)
     }
 
-    pub fn make(&self, data: NodeData, level: usize) -> Result<Arc<Node>> {
-        let node = Arc::new(Node::new(data, level));
+    pub fn make(&self, id: &str, data: NodeContent, level: usize) -> Result<Arc<Node>> {
+        let node = Arc::new(Node::new(id, data, level));
 
         let mut node_map = self.node_map.write().unwrap();
-        if node_map.contains_key(&node.id()) {
+        if node_map.contains_key(node.id()) {
             return Err(ActError::Model(format!("dup node id with '{}'", node.id())));
         }
-        node_map.insert(node.id(), node.clone());
+        node_map.insert(node.id().to_string(), node.clone());
 
         Ok(node)
     }
@@ -95,12 +95,13 @@ impl NodeTree {
                     }
                 }
                 let next = match node.next().upgrade() {
-                    Some(n) => n.id(),
+                    Some(n) => n.id().to_string(),
                     None => "nil".to_string(),
                 };
+
                 println!(
                     "{} id:{} name={}  next={}",
-                    node.kind(),
+                    node.r#type(),
                     node.id(),
                     node.name(),
                     next,
@@ -136,7 +137,7 @@ impl NodeTree {
                 }
 
                 let next = match n.next().upgrade() {
-                    Some(n) => n.id(),
+                    Some(n) => n.id().to_string(),
                     None => "nil".to_string(),
                 };
 

@@ -4,6 +4,7 @@ pub struct Options {
     pub log_dir: String,
     pub log_level: String,
     pub data_dir: String,
+    pub tick_interval_secs: u64,
 }
 
 impl Default for Options {
@@ -13,6 +14,9 @@ impl Default for Options {
             log_dir: "log".to_string(),
             data_dir: "data".to_string(),
             log_level: "INFO".to_string(),
+
+            // default to 15s
+            tick_interval_secs: 15,
         }
     }
 }

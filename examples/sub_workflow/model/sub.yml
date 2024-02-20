@@ -1,13 +1,14 @@
 name: sub
 id: sub
-env:
+inputs:
   v: 0
 outputs:
   v:
 steps:
   - name: t1
     acts:
-      - id: action1
+      - !req
+        id: action1
         outputs:
           v:
   - name: t2

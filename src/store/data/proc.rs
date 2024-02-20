@@ -16,6 +16,7 @@ pub struct Proc {
     pub vars: String,
     pub timestamp: i64,
     pub model: String,
+    pub root_tid: String,
 }
 
 impl DbModel for Proc {

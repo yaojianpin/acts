@@ -1,6 +1,6 @@
 name: main
 id: main
-env:
+inputs:
   v: 0
 outputs:
   result: ${ env.get("v") }
@@ -8,16 +8,19 @@ steps:
   - name: prepare
     id: prepare
     acts:
-      - id: init
+      - !req
+        id: init
   - name: enter sub workflow
     acts:
-      - use: sub
+      - !use
+        mid: sub
         inputs:
             v: ${ env.get("v") }
   - name: final
     id: final
     acts:
-      - id: action2
+      - !req
+        id: action2
         inputs:
           v: ${ env.get("v") }
     

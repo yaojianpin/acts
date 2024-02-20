@@ -4,7 +4,7 @@ use crate::{
     sch::{
         tree::TaskTree,
         tree::{Node, NodeTree},
-        Context, Scheduler, Task, TaskState,
+        Context, Scheduler, Task, TaskLifeCycle, TaskState,
     },
     utils::{self, consts},
     ActError, ActionResult, NodeKind, ProcInfo, Result, ShareLock, Vars, Workflow, WorkflowState,
@@ -14,7 +14,7 @@ use std::{
     fmt,
     sync::{Arc, Mutex, RwLock},
 };
-use tracing::instrument;
+use tracing::{error, instrument};
 
 #[derive(Clone)]
 pub struct Proc {
@@ -27,6 +27,7 @@ pub struct Proc {
     start_time: ShareLock<i64>,
     end_time: ShareLock<i64>,
     timestamp: i64,
+    root_tid: ShareLock<Option<String>>,
 
     sync: Arc<Mutex<i32>>,
 }
@@ -46,11 +47,10 @@ impl std::fmt::Debug for Proc {
 
 impl Proc {
     pub fn new(pid: &str) -> Self {
-        let env = Arc::new(Enviroment::new());
         let tree = NodeTree::new();
         Proc {
             id: pid.to_string(),
-            env,
+            env: Enviroment::new(),
             tree: Arc::new(RwLock::new(tree)),
             state: Arc::new(RwLock::new(TaskState::None)),
             start_time: Arc::new(RwLock::new(0)),
@@ -58,6 +58,7 @@ impl Proc {
             tasks: Arc::new(RwLock::new(TaskTree::new())),
             sync: Arc::new(Mutex::new(0)),
             timestamp: utils::time::timestamp(),
+            root_tid: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -66,10 +67,10 @@ impl Proc {
     }
 
     pub fn load(&self, model: &Workflow) -> Result<()> {
-        let env = &self.env;
-        let vars = utils::fill_proc_vars(&env, &model.env);
-        env.append(&model.outputs);
-        env.append(&vars);
+        // let env = &self.env;
+        // let vars = utils::fill_proc_vars(&env, &model.inputs);
+        // env.append(&model.outputs);
+        // env.append(&vars);
 
         let tree = &mut self.tree.write().unwrap();
         tree.load(model)
@@ -81,10 +82,6 @@ impl Proc {
 
     pub fn model(&self) -> Box<Workflow> {
         self.tree().model.clone()
-    }
-
-    pub fn append_vars(&self, vars: &Vars) {
-        self.env.append(vars);
     }
 
     pub fn state(&self) -> TaskState {
@@ -101,14 +98,21 @@ impl Proc {
         self.timestamp
     }
 
+    pub fn root_tid(&self) -> Option<String> {
+        let root_tid = self.root_tid.read().unwrap();
+        root_tid.clone()
+    }
+
     pub fn outputs(&self) -> Vars {
-        let outputs = &self.model().outputs;
-        let vars = utils::fill_proc_vars(&self.env, outputs);
-        vars
+        if let Some(root) = self.root() {
+            return root.outputs();
+        }
+
+        Vars::new()
     }
 
     pub fn inputs(&self) -> Vars {
-        let inputs = &self.model().env;
+        let inputs = &self.model().inputs;
         let vars = utils::fill_proc_vars(&self.env, inputs);
         vars
     }
@@ -151,6 +155,14 @@ impl Proc {
             tasks: "".to_string(),
         }
     }
+
+    pub fn root(&self) -> Option<Arc<Task>> {
+        if let Some(root_tid) = &*self.root_tid.read().unwrap() {
+            return self.task(root_tid);
+        }
+        None
+    }
+
     pub fn task(&self, tid: &str) -> Option<Arc<Task>> {
         self.tasks.read().unwrap().task_by_tid(tid)
     }
@@ -184,7 +196,7 @@ impl Proc {
     }
 
     pub fn task_by_nid(&self, nid: &str) -> Vec<Arc<Task>> {
-        self.find_tasks(|t| t.node_id() == nid)
+        self.find_tasks(|t| t.node.id() == nid)
     }
 
     pub fn create_context(
@@ -220,6 +232,28 @@ impl Proc {
         self.timestamp = time;
     }
 
+    pub(crate) fn set_root_tid(&self, tid: &str) {
+        *self.root_tid.write().unwrap() = if tid.is_empty() {
+            None
+        } else {
+            Some(tid.to_string())
+        };
+    }
+
+    pub(crate) fn do_tick(&self, scher: &Arc<Scheduler>) {
+        self.find_tasks(|t| {
+            t.hooks().contains_key(&TaskLifeCycle::Timeout) && t.state().is_running()
+        })
+        .iter()
+        .for_each(|t| {
+            let ctx = t.create_context(scher);
+            t.run_hooks_timeout(&ctx).unwrap_or_else(|err| {
+                eprintln!("{}", err);
+                error!("{}", err);
+            });
+        })
+    }
+
     #[instrument(skip(scher))]
     pub fn do_action(
         self: &Arc<Self>,
@@ -228,34 +262,51 @@ impl Proc {
     ) -> Result<ActionResult> {
         let mut count = self.sync.lock().unwrap();
         let mut state = ActionResult::begin();
+        let mut action = action.clone();
         let task = self.task(&action.task_id).ok_or(ActError::Action(format!(
             "cannot find task by '{}'",
             action.task_id
         )))?;
 
-        if !task.is_kind(NodeKind::Act) {
-            return Err(ActError::Action(format!(
-                "The task '{}' is not an Act task",
-                action.task_id
-            )));
-        }
-
-        // check act outputs
-        let outputs = task.node.outputs();
-
-        for (key, _) in &outputs {
-            if !action.options.contains_key(key) {
+        if action.event == consts::EVT_PUSH {
+            if !task.is_kind(NodeKind::Step) {
                 return Err(ActError::Action(format!(
-                    "the act's outputs key '{}' is not satisfied in task({})",
-                    key, action.task_id
+                    "The task '{}' is not an Step task",
+                    action.task_id
+                )));
+            }
+        } else {
+            if !task.is_kind(NodeKind::Act) {
+                return Err(ActError::Action(format!(
+                    "The task '{}' is not an Act task",
+                    action.task_id
                 )));
             }
         }
 
-        let ctx = task.create_context(scher);
-        ctx.set_action(action)?;
-        task.update(&ctx)?;
+        // check act return
+        let rets = task.node.content.rets();
+        if rets.len() > 0 {
+            let mut options = Vars::new();
+            for (key, _) in &rets {
+                if !action.options.contains_key(key) {
+                    return Err(ActError::Action(format!(
+                        "the options is not satisfied with act's rets '{}' in task({})",
+                        key, action.task_id
+                    )));
+                }
+                let value = action.options.get_value(key).unwrap();
+                options.set(key, value.clone());
+            }
 
+            // retset the options by rets defination
+            action.options = options;
+        }
+
+        let ctx = task.create_context(scher);
+        ctx.set_action(&action)?;
+
+        task.update(&ctx)?;
         state.end();
         *count += 1;
         Ok(state)
@@ -279,17 +330,25 @@ impl Proc {
     #[instrument(skip(scher))]
     pub fn start(self: &Arc<Self>, scher: &Arc<Scheduler>) {
         let mut count = self.sync.lock().unwrap();
+
         let tr = self.tree();
         self.set_state(TaskState::Running);
         if let Some(root) = &tr.root {
             let task = self.create_task(root, None);
+            self.set_root_tid(&task.id);
             scher.push(&task);
         }
         *count += 1;
     }
 
     pub fn create_task(self: &Arc<Proc>, node: &Arc<Node>, prev: Option<Arc<Task>>) -> Arc<Task> {
-        let task = Arc::new(Task::new(&self, &utils::shortid(), node.clone()));
+        let mut nid = utils::shortid();
+        if node.kind() == NodeKind::Workflow {
+            // set $ for the root task id
+            // a proc only has one root task
+            nid = "$".to_string();
+        }
+        let task = Arc::new(Task::new(&self, &nid, node.clone()));
         if let Some(prev) = prev {
             task.set_prev(Some(prev.id.clone()));
         }
@@ -306,11 +365,11 @@ impl Proc {
     pub fn parent(&self) -> Option<(String, String)> {
         if let (Some(ppid), Some(ptid)) = (
             self.env
-                .get(consts::PARENT_PROC_ID)
-                .map(|v| v.as_str().unwrap_or_default().to_string()),
+                .root()
+                .get::<String>(consts::ACT_USE_PARENT_PROC_ID),
             self.env
-                .get(consts::PARENT_TASK_ID)
-                .map(|v| v.as_str().unwrap_or_default().to_string()),
+                .root()
+                .get::<String>(consts::ACT_USE_PARENT_TASK_ID),
         ) {
             return Some((ppid, ptid));
         }
@@ -321,7 +380,9 @@ impl Proc {
     #[allow(unused)]
     pub fn print(&self) {
         let ttree = self.tasks.read().unwrap();
+
         println!("Proc({})  state={}", self.id, self.state());
+        println!("env={}", self.env().vars());
         if let Some(root) = ttree.root() {
             self.visit(&root, |task| {
                 let mut level = task.node.level;
@@ -329,10 +390,11 @@ impl Proc {
                     print!("  ");
                     level -= 1;
                 }
+
                 println!(
                     "Task({}) {}  nid={} name={} tag={} prev={} state={} action_state={}",
                     task.id,
-                    task.node.kind(),
+                    task.node.r#type(),
                     task.node.id(),
                     task.node.name(),
                     task.node.tag(),
@@ -369,7 +431,7 @@ impl Proc {
                     },
                     task.node.kind(),
                     task.node.id(),
-                    task.node.data.name(),
+                    task.node.content.name(),
                     task.state(),
                     task.action_state(),
                 ));

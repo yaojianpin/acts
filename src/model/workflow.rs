@@ -1,30 +1,5 @@
-use crate::{sch::NodeTree, ActError, ModelBase, Result, Step, Vars};
+use crate::{sch::NodeTree, Act, ActError, ActValue, ModelBase, Result, Step, Vars};
 use serde::{Deserialize, Serialize};
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct WorkflowActionOn {
-    #[serde(default)]
-    pub state: String,
-    #[serde(default)]
-    pub nkind: Option<String>,
-    #[serde(default)]
-    pub nid: Option<String>,
-}
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct WorkflowAction {
-    #[serde(default)]
-    pub id: String,
-    #[serde(default)]
-    pub name: String,
-    #[serde(default)]
-    pub tag: String,
-    #[serde(default)]
-    pub inputs: Vars,
-    #[serde(default)]
-    pub outputs: Vars,
-    #[serde(default)]
-    pub on: Vec<WorkflowActionOn>,
-}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Workflow {
@@ -41,13 +16,13 @@ pub struct Workflow {
     pub steps: Vec<Step>,
 
     #[serde(default)]
-    pub env: Vars,
+    pub inputs: Vars,
 
     #[serde(default)]
     pub outputs: Vars,
 
     #[serde(default)]
-    pub actions: Vec<WorkflowAction>,
+    pub setup: Vec<Act>,
 
     #[serde(default)]
     ver: u32,
@@ -72,7 +47,7 @@ impl Workflow {
 
     pub fn set_env(&mut self, vars: &Vars) {
         for (name, value) in vars {
-            self.env
+            self.inputs
                 .entry(name.clone())
                 .and_modify(|v| *v = value.clone())
                 .or_insert(value.clone());
@@ -91,15 +66,6 @@ impl Workflow {
         root.tree_output()
     }
 
-    // pub fn job(&self, id: &str) -> Option<&Job> {
-    //     match self.jobs.iter().find(|job| job.id == id) {
-    //         Some(job) => {
-    //             // job.set_workflow(Box::new(self.clone()));
-    //             Some(job)
-    //         }
-    //         None => None,
-    //     }
-    // }
     pub fn step(&self, id: &str) -> Option<&Step> {
         match self.steps.iter().find(|s| s.id == id) {
             Some(s) => Some(s),
@@ -128,10 +94,6 @@ impl Workflow {
         }
     }
 
-    pub fn action(&self, id: &str) -> Option<&WorkflowAction> {
-        self.actions.iter().find(|item| item.id == id)
-    }
-
     pub fn valid(&self) -> Result<()> {
         let mut root = NodeTree::new();
         root.load(self)?;
@@ -142,5 +104,49 @@ impl Workflow {
 impl ModelBase for Workflow {
     fn id(&self) -> &str {
         &self.id
+    }
+}
+
+/// for builder
+impl Workflow {
+    pub fn new() -> Self {
+        Default::default()
+    }
+
+    pub fn with_id(mut self, id: &str) -> Self {
+        self.id = id.to_string();
+        self
+    }
+
+    pub fn with_name(mut self, name: &str) -> Self {
+        self.name = name.to_string();
+        self
+    }
+
+    pub fn with_tag(mut self, tag: &str) -> Self {
+        self.tag = tag.to_string();
+        self
+    }
+
+    pub fn with_input(mut self, name: &str, value: ActValue) -> Self {
+        self.inputs.insert(name.to_string(), value);
+        self
+    }
+
+    pub fn with_output(mut self, name: &str, value: ActValue) -> Self {
+        self.outputs.insert(name.to_string(), value);
+        self
+    }
+
+    pub fn with_step(mut self, build: fn(Step) -> Step) -> Self {
+        let step = Step::default();
+        self.steps.push(build(step));
+        self
+    }
+
+    pub fn with_setup(mut self, build: fn(Vec<Act>) -> Vec<Act>) -> Self {
+        let stmts = Vec::new();
+        self.setup = build(stmts);
+        self
     }
 }

@@ -1,5 +1,61 @@
-use crate::Step;
+mod acts;
+mod catch;
+mod setup;
+mod timeout;
+
+use crate::{Act, Step, Workflow};
 use serde_json::json;
+
+#[test]
+fn model_step_yml_simple() {
+    let text = r#"
+    name: workflow
+    id: m1
+    steps:
+        - id: act1
+    "#;
+    let m = Workflow::from_yml(text).unwrap();
+    assert_eq!(m.steps.len(), 1);
+    assert_eq!(m.steps.get(0).unwrap().id, "act1");
+}
+
+#[test]
+fn model_step_yml_inputs() {
+    let text = r#"
+    name: workflow
+    id: m1
+    steps:
+        - id: act1
+          inputs:
+            p1: 5
+    "#;
+    let m = Workflow::from_yml(text).unwrap();
+    assert_eq!(m.steps.len(), 1);
+    assert_eq!(m.steps.get(0).unwrap().id, "act1");
+
+    let step = m.steps.get(0).unwrap();
+    assert_eq!(step.inputs.len(), 1);
+    assert_eq!(step.inputs.get_value("p1"), Some(&json!(5)));
+}
+
+#[test]
+fn model_step_yml_outputs() {
+    let text = r#"
+    name: workflow
+    id: m1
+    steps:
+        - id: act1
+          outputs:
+            p1:
+    "#;
+    let m = Workflow::from_yml(text).unwrap();
+    assert_eq!(m.steps.len(), 1);
+    assert_eq!(m.steps.get(0).unwrap().id, "act1");
+
+    let step = m.steps.get(0).unwrap();
+    assert_eq!(step.outputs.len(), 1);
+    assert_eq!(step.outputs.get_value("p1"), Some(&json!(null)));
+}
 
 #[test]
 fn model_step_id() {
@@ -17,14 +73,14 @@ fn model_step_name() {
 fn model_step_inputs() {
     let step = Step::new().with_input("p1", json!(5));
     assert_eq!(step.inputs.len(), 1);
-    assert_eq!(step.inputs.get("p1"), Some(&json!(5)));
+    assert_eq!(step.inputs.get_value("p1"), Some(&json!(5)));
 }
 
 #[test]
 fn model_step_outputs() {
     let step = Step::new().with_output("p1", json!(5));
     assert_eq!(step.outputs.len(), 1);
-    assert!(step.outputs.get("p1").is_some());
+    assert!(step.outputs.get_value("p1").is_some());
 }
 
 #[test]
@@ -65,8 +121,7 @@ fn model_step_acts() {
     assert_eq!(step.acts.len(), 0);
 
     step = step
-        .with_act(|a| a.with_id("act1"))
-        .with_act(|a| a.with_id("act2"));
+        .with_act(Act::req(|act| act.with_id("act1")))
+        .with_act(Act::req(|act| act.with_id("act2")));
     assert_eq!(step.acts.len(), 2);
 }
-

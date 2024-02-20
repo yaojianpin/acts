@@ -1,6 +1,6 @@
 name: simple
 id: simple
-env:
+inputs:
   input: 4
   index: 0
   value: 0

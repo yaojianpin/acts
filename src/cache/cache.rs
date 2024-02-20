@@ -1,8 +1,8 @@
 use crate::{
     sch::{Proc, Task},
     store::{self, Store},
-    utils::{self, Id},
-    Engine, Result, ShareLock, StoreAdapter,
+    utils::Id,
+    ActError, Engine, Result, ShareLock, StoreAdapter,
 };
 use lru::LruCache;
 use std::{
@@ -60,6 +60,14 @@ impl Cache {
         self.store.read().unwrap().flush();
     }
 
+    pub fn procs(&self) -> Vec<Arc<Proc>> {
+        let mut procs = Vec::new();
+        for (_, proc) in self.procs.read().unwrap().iter() {
+            procs.push(proc.clone());
+        }
+        procs
+    }
+
     #[instrument]
     pub fn push(&self, proc: &Arc<Proc>) {
         let mut procs = self.procs.write().unwrap();
@@ -76,9 +84,9 @@ impl Cache {
             state: proc.state().into(),
             start_time: proc.start_time(),
             end_time: proc.end_time(),
-            vars: utils::vars::to_string(&proc.env().vars())
-                .expect("fail to convert vars to string"),
+            vars: proc.env().vars().to_string(),
             timestamp: proc.timestamp(),
+            root_tid: proc.root_tid().unwrap_or_default(),
         };
         store.procs().create(&data).expect("failed to create proc");
     }
@@ -119,8 +127,10 @@ impl Cache {
         if procs.len() < procs.cap().get() / 2 {
             let cap = procs.cap().get() - procs.len();
             for ref proc in store.load(cap)? {
-                procs.push(proc.id(), proc.clone());
-                on_load(proc);
+                if !procs.contains(&proc.id()) {
+                    procs.put(proc.id(), proc.clone());
+                    on_load(proc);
+                }
             }
         }
         Ok(())
@@ -131,7 +141,7 @@ impl Cache {
         let store = self.store.read().unwrap();
         // update proc when updating the task
         let mut proc = store.procs().find(&task.proc_id)?;
-        proc.vars = utils::vars::to_string(&task.proc().env().vars())?;
+        proc.vars = task.proc().env().vars().to_string();
         proc.start_time = task.proc().start_time();
         proc.end_time = task.proc().end_time();
         proc.state = task.proc().state().into();
@@ -144,25 +154,26 @@ impl Cache {
                 store_task.state = state.into();
                 store_task.action_state = task.action_state().into();
                 store_task.end_time = task.end_time();
-                store_task.vars = utils::vars::to_string(&task.vars())?;
+                store_task.hooks = serde_json::to_string(&task.hooks())
+                    .map_err(|err| ActError::Store(err.to_string()))?;
                 store.tasks().update(&store_task)?;
             }
             Err(_) => {
                 let tid = &task.id;
-                let nid = task.node_id();
                 let task = store::data::Task {
                     id: id.id(),
                     prev: task.prev(),
-                    name: task.node.data().name(),
-                    kind: task.node.kind().to_string(),
+                    name: task.node.content.name(),
+                    kind: task.node.r#type(),
                     proc_id: task.proc_id.clone(),
                     task_id: tid.clone(),
-                    node_id: nid,
+                    node_id: task.node.id().to_string(),
                     state: task.state().into(),
                     action_state: task.action_state().into(),
                     start_time: task.start_time(),
                     end_time: task.end_time(),
-                    vars: utils::vars::to_string(&task.vars())?,
+                    hooks: serde_json::to_string(&task.hooks())
+                        .map_err(|err| ActError::Store(err.to_string()))?,
                     timestamp: task.timestamp,
                 };
                 store.tasks().create(&task)?;
@@ -170,5 +181,10 @@ impl Cache {
         }
 
         Ok(())
+    }
+
+    #[cfg(test)]
+    pub fn uncache(&self, pid: &str) {
+        self.procs.write().unwrap().pop(pid);
     }
 }

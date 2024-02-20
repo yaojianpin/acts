@@ -1,31 +1,29 @@
 use crate::{
     sch::{ActTask, TaskState},
     utils::consts,
-    ActUse, Context, Executor, Result,
+    Context, Executor, Result, Use,
 };
-use serde_json::json;
 
-impl ActTask for ActUse {
+impl ActTask for Use {
     fn init(&self, ctx: &Context) -> Result<()> {
+        if self.mid.is_empty() {
+            ctx.task.set_state(TaskState::Fail(format!(
+                "not find 'mid' in act '{}'",
+                ctx.task.id
+            )));
+            return self.error(ctx);
+        }
         ctx.task.set_emit_disabled(true);
         Ok(())
     }
 
     fn run(&self, ctx: &Context) -> Result<()> {
-        if self.id.is_empty() {
-            ctx.task.set_state(TaskState::Fail(format!(
-                "not define id for act '{}'",
-                ctx.task.id
-            )));
-            return self.error(ctx);
-        }
-
-        // start the workflow by id
         let executor = Executor::new(&ctx.scher);
+
         let mut inputs = ctx.task.inputs();
-        inputs.insert(consts::PARENT_PROC_ID.to_string(), json!(ctx.proc.id()));
-        inputs.insert(consts::PARENT_TASK_ID.to_string(), json!(ctx.task.id));
-        executor.start(&self.id, &inputs)?;
+        inputs.set(consts::ACT_USE_PARENT_PROC_ID, &ctx.proc.id());
+        inputs.set(consts::ACT_USE_PARENT_TASK_ID, &ctx.task.id);
+        executor.start(&self.mid, &inputs)?;
 
         Ok(())
     }

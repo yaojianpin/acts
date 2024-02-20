@@ -1,6 +1,6 @@
 use super::{ActionState, EventAction};
 use crate::{
-    event::{Emitter, Message},
+    event::{Emitter, Message, Model},
     sch::{Proc, Scheduler, TaskState},
     utils, NodeKind, Vars, Workflow,
 };
@@ -124,11 +124,14 @@ async fn event_message() {
     });
     let m = Message {
         id: "a1".to_string(),
-        r#type: NodeKind::Act.to_string(),
+        r#type: "msg".to_string(),
+        source: NodeKind::Act.to_string(),
         state: ActionState::Created.to_string(),
-        model_id: "mid".to_string(),
-        model_name: "mname".to_string(),
-        model_tag: "mtag".to_string(),
+        model: Model {
+            id: "mid".to_string(),
+            name: "mname".to_string(),
+            tag: "mtag".to_string(),
+        },
         proc_id: "w1".to_string(),
         name: "a1".to_string(),
         inputs: Vars::new(),

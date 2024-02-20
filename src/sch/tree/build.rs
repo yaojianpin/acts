@@ -1,10 +1,10 @@
 use super::{
-    node::{Node, NodeData},
+    node::{Node, NodeContent},
     node_tree::NodeTree,
 };
 use crate::{
     utils::{longid, shortid},
-    Act, ActError, Branch, Result, Step, Workflow,
+    Act, ActError, Branch, ModelBase, Result, Step, Workflow,
 };
 use std::sync::Arc;
 
@@ -14,8 +14,8 @@ pub fn build_workflow(workflow: &mut Workflow, tree: &mut NodeTree) -> Result<()
         workflow.id = longid();
     }
 
-    let data = NodeData::Workflow(workflow.clone());
-    let root = tree.make(data, level)?;
+    let data = NodeContent::Workflow(workflow.clone());
+    let root = tree.make(&data.id(), data, level)?;
 
     let mut prev = root.clone();
     for step in workflow.steps.iter_mut() {
@@ -61,8 +61,8 @@ pub fn build_step(
     if step.id.is_empty() {
         step.id = shortid();
     }
-    let data = NodeData::Step(step.clone());
-    let node = tree.make(data, level)?;
+    let data = NodeContent::Step(step.clone());
+    let node = tree.make(&data.id(), data, level)?;
 
     if node.level == prev.level {
         prev.set_next(&node, true);
@@ -111,8 +111,8 @@ pub fn build_branch(
     if branch.id.is_empty() {
         branch.id = shortid();
     }
-    let data = NodeData::Branch(branch.clone());
-    let node = tree.make(data, level)?;
+    let data = NodeContent::Branch(branch.clone());
+    let node = tree.make(&data.id(), data, level)?;
     node.set_parent(&parent);
 
     let parent = node.clone();
@@ -133,12 +133,17 @@ pub fn build_act(
     prev: &mut Arc<Node>,
     level: usize,
 ) -> Result<()> {
-    if act.id.is_empty() {
-        act.id = shortid();
+    if act.id().is_empty() {
+        act.set_id(&shortid());
     }
 
-    let data = NodeData::Act(act.clone());
-    let node = tree.make(data, level)?;
+    let mut id = act.id().to_string();
+    if id.is_empty() {
+        id = shortid();
+    }
+
+    let data = NodeContent::Act(act.clone());
+    let node = tree.make(&id, data, level)?;
     node.set_parent(&parent);
 
     *prev = node.clone();

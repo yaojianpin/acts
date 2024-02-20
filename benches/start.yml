@@ -1,0 +1,24 @@
+  id: test1
+  env: 
+    a: 100
+  jobs:
+    - id: job1
+      steps:
+        - name: step 1
+        - name: step 2
+          run: |
+            let v = 50;
+        - name: step 3
+          env:
+            e: abc
+          branches:
+            - name: branch 1
+              if: env.get("a") >= 100
+              steps:
+                - name: branch 1.1
+                - name: branch 1.2
+            - name: branch 2
+              if: env.get("a") < 100
+              steps:
+                - name:  branch 2.1
+        - name: step 4

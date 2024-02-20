@@ -1,6 +1,6 @@
 use crate::{
     sch::{Proc, Scheduler},
-    utils, Action, Engine, TaskState, Vars, Workflow,
+    utils, Act, Action, Engine, TaskState, Vars, Workflow,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -62,20 +62,21 @@ async fn sch_scher_start_with_vars() {
 
     let result = s.start(&workflow, &vars).unwrap();
 
-    let pid = result.outputs().get("pid").unwrap().as_str().unwrap();
+    let pid = result.outputs().get_value("pid").unwrap().as_str().unwrap();
     scher.next().await;
     let proc = scher.proc(pid).unwrap();
 
-    assert_eq!(proc.env().get("a").unwrap(), json!(100));
-    assert_eq!(proc.env().get("b").unwrap(), json!("string"));
+    assert_eq!(proc.inputs().get::<i64>("a").unwrap(), 100);
+    assert_eq!(proc.inputs().get::<String>("b").unwrap(), "string");
 }
 
 #[tokio::test]
 async fn sch_scher_do_action() {
     let scher = Scheduler::new();
     let workflow = Workflow::new().with_step(|step| {
-        step.with_name("step1")
-            .with_act(|act| act.with_id("act1").with_input("uid", json!("u1")))
+        step.with_name("step1").with_act(Act::req(|act| {
+            act.with_id("act1").with_input("uid", json!("u1"))
+        }))
     });
     let s = scher.clone();
     scher.emitter().on_complete(|e| e.close());

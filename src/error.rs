@@ -39,7 +39,7 @@ pub struct Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(key) = &self.key {
-            f.write_fmt(format_args!("{}:{}", key, &self.message))
+            f.write_fmt(format_args!("{}:{}", &self.message, key))
         } else {
             f.write_fmt(format_args!("{}", &self.message))
         }
@@ -61,8 +61,8 @@ impl Error {
 
         if parts.len() == 2 {
             return Error {
-                key: Some(parts[0].to_string()),
-                message: parts[1].to_string(),
+                message: parts[0].to_string(),
+                key: Some(parts[1].to_string()),
             };
         }
 

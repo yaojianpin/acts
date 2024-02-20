@@ -1,11 +1,6 @@
-use crate::{
-    env::Enviroment,
-    sch::{NodeTree, Scheduler},
-    utils, Candidate, Context, Engine, Vars, Workflow,
-};
+use crate::{env::Enviroment, utils::consts, Candidate, Vars};
 use rhai::Dynamic;
-use serde_json::json;
-use std::{collections::HashMap, sync::Arc};
+use serde_json::{json, Value};
 
 #[test]
 fn env_run() {
@@ -69,64 +64,161 @@ async fn env_console_module() {
     assert_eq!(result.unwrap(), true);
 }
 
-#[tokio::test]
-async fn env_act_module() {
-    let engine = Engine::new();
-    engine.start();
+#[test]
+fn env_get_set() {
     let env = Enviroment::new();
-    env.registry_act_module();
-    let room = env.new_room();
 
-    let ctx = create_task_context();
-    room.bind_context(&ctx);
+    env.set("a", 5);
+    assert_eq!(env.get::<i64>("a").unwrap(), 5);
+    assert_eq!(env.get::<i32>("a").unwrap(), 5);
 
-    let script = r#"
-    let a = 5;
-    let b = 4;
-    act.send("test1");
+    env.set("a", false);
+    assert_eq!(env.get::<bool>("a").unwrap(), false);
 
-    true
-    "#;
-    let result = room.eval::<bool>(script);
-    assert_eq!(result.unwrap(), true);
+    env.set("a", "abc");
+    assert_eq!(env.get::<String>("a").unwrap(), "abc");
+
+    env.set("a", 10.56);
+    assert_eq!(env.get::<f64>("a").unwrap(), 10.56);
+    assert_eq!(env.get::<f32>("a").unwrap(), 10.56);
+
+    env.set("a", json!(100));
+    assert_eq!(env.get::<Value>("a").unwrap(), json!(100));
+    assert_eq!(env.get::<i32>("a").unwrap(), 100);
 }
 
 #[test]
-fn env_get() {
+fn env_get_not_exists() {
     let env = Enviroment::new();
-    env.registry_env_module();
-
-    let vars = Vars::from_iter([("a".to_string(), 10.into()), ("b".to_string(), "b".into())]);
-    env.append(&vars);
-
-    let script = r#"
-    let a = env.get("a");
-    a
-    "#;
-    let result = env.eval::<i64>(script);
-    assert_eq!(result.unwrap(), 10);
+    assert_eq!(env.get_value("a"), None);
 }
 
 #[test]
-fn env_set() {
+fn env_get_set_data() {
     let env = Enviroment::new();
-    env.registry_env_module();
+    env.set_data("test1", &Vars::new().with("a", 5));
+    assert_eq!(env.data("test1").unwrap().get::<i32>("a").unwrap(), 5);
 
-    let vars = Vars::from_iter([("a".to_string(), 10.into()), ("b".to_string(), "b".into())]);
-    env.append(&vars);
-
-    let script = r#"
-    let a = env.get("a");
-    a
-    "#;
-    let result = env.eval::<i64>(script);
-    assert_eq!(result.unwrap(), 10);
+    env.set_data("test1", &Vars::new().with("a", 10));
+    assert_eq!(env.data("test1").unwrap().get::<i32>("a").unwrap(), 10);
 }
 
 #[test]
-fn env_room_run() {
+fn env_update_data() {
     let env = Enviroment::new();
-    let room = env.new_room();
+    let refenv = env.create_ref("test1");
+    refenv.set("a", 0);
+
+    let vars = Vars::new().with("a", 5).with("b", "abc");
+    let mut not_updated = Vec::new();
+    for (k, v) in &vars {
+        let ret = env.update_data("test1", k, v);
+        if !ret {
+            not_updated.push(k);
+        }
+    }
+
+    assert_eq!(env.data("test1").unwrap().get::<i32>("a").unwrap(), 5);
+    assert_eq!(env.data("test1").unwrap().get::<i32>("b"), None);
+    assert_eq!(not_updated, ["b"]);
+}
+
+#[test]
+fn env_remove() {
+    let env = Enviroment::new();
+    env.set("a", 10);
+    assert_eq!(env.get::<i32>("a").unwrap(), 10);
+
+    env.remove("a");
+    assert!(env.get::<i32>("a").is_none());
+}
+
+#[test]
+fn env_ref_get_set() {
+    let env = Enviroment::new();
+    let refenv = env.create_ref("test1");
+
+    refenv.set("a", 5);
+    assert_eq!(refenv.get::<i64>("a").unwrap(), 5);
+    assert_eq!(refenv.get::<i32>("a").unwrap(), 5);
+
+    refenv.set("a", false);
+    assert_eq!(refenv.get::<bool>("a").unwrap(), false);
+
+    refenv.set("a", "abc");
+    assert_eq!(refenv.get::<String>("a").unwrap(), "abc");
+
+    refenv.set("a", 10.56);
+    assert_eq!(refenv.get::<f64>("a").unwrap(), 10.56);
+    assert_eq!(refenv.get::<f32>("a").unwrap(), 10.56);
+
+    refenv.set("a", json!(100));
+    assert_eq!(refenv.get::<Value>("a").unwrap(), json!(100));
+    assert_eq!(refenv.get::<i32>("a").unwrap(), 100);
+}
+
+#[test]
+fn env_ref_data() {
+    let env = Enviroment::new();
+    let refenv = env.create_ref("test1");
+
+    refenv.set("a", 5);
+    assert_eq!(refenv.data().get::<i32>("a").unwrap(), 5);
+}
+
+#[test]
+fn env_ref_update_tree_top() {
+    let env = Enviroment::new();
+    let refenv = env.create_ref("test1");
+    refenv.set("a", 1);
+
+    let refenv2 = env.create_ref("test2");
+    refenv2.set(consts::ENV_PARENT_TASK_ID, "test1");
+    refenv2.set("b", 1);
+
+    let refenv3 = env.create_ref("test3");
+    refenv3.set(consts::ENV_PARENT_TASK_ID, "test2");
+    refenv3.set("c", 1);
+
+    refenv.set_env(&Vars::new().with("a", 5).with("b", 5).with("c", 5));
+    assert_eq!(env.data("test1").unwrap().get::<i32>("a").unwrap(), 5);
+    assert_eq!(env.data("test1").unwrap().get::<i32>("b").unwrap(), 5);
+    assert_eq!(env.data("test1").unwrap().get::<i32>("c").unwrap(), 5);
+    assert_eq!(env.data("test2").unwrap().get::<i32>("b").unwrap(), 1);
+    assert_eq!(env.data("test3").unwrap().get::<i32>("c").unwrap(), 1);
+}
+
+#[test]
+fn env_ref_update_tree_sub() {
+    let env = Enviroment::new();
+    let refenv = env.create_ref("test1");
+    refenv.set("a", 1);
+
+    let refenv2 = env.create_ref("test2");
+    refenv2.set(consts::ENV_PARENT_TASK_ID, "test1");
+    refenv2.set("b", 1);
+
+    let refenv3 = env.create_ref("test3");
+    refenv3.set(consts::ENV_PARENT_TASK_ID, "test2");
+    refenv3.set("c", 1);
+
+    refenv3.set_env(
+        &Vars::new()
+            .with("a", 20)
+            .with("b", 20)
+            .with("c", 20)
+            .with("d", 20),
+    );
+    assert_eq!(env.data("test1").unwrap().get::<i32>("a").unwrap(), 20);
+    assert_eq!(env.data("test2").unwrap().get::<i32>("b").unwrap(), 20);
+    assert_eq!(env.data("test3").unwrap().get::<i32>("c").unwrap(), 20);
+    assert_eq!(env.data("test3").unwrap().get::<i32>("d").unwrap(), 20);
+}
+
+#[test]
+fn env_ref_run() {
+    let env = Enviroment::new();
+    let room = env.create_ref("test1");
     let script = r#"
     let v = 5;
     print(`v=${v}`);
@@ -137,9 +229,9 @@ fn env_room_run() {
 }
 
 #[test]
-fn env_room_eval() {
+fn env_ref_eval() {
     let env = Enviroment::new();
-    let room = env.new_room();
+    let room = env.create_ref("test1");
     let script = r#"
     let v = 5;
     v
@@ -150,11 +242,11 @@ fn env_room_eval() {
 }
 
 #[test]
-fn env_room_eval_error() {
+fn env_ref_eval_error() {
     let env = Enviroment::new();
-    let room = env.new_room();
+    let room = env.create_ref("test1");
     let script = r#"
-    let v = 5
+    let v = 5  // needs end with ;
     v
     "#;
 
@@ -167,9 +259,9 @@ fn env_room_eval_error() {
 }
 
 #[tokio::test]
-async fn env_room_console_module() {
+async fn env_ref_console_module() {
     let env = Enviroment::new();
-    let room = env.new_room();
+    let room = env.create_ref("test1");
     env.registry_console_module();
     let script = r#"
     let v = 5;
@@ -183,95 +275,38 @@ async fn env_room_console_module() {
 }
 
 #[test]
-fn env_room_get() {
+fn env_ref_create() {
     let env = Enviroment::new();
-    let room = env.new_room();
-    env.registry_env_module();
+    env.create_ref("test1");
 
-    let vars = Vars::from_iter([("a".to_string(), 10.into()), ("b".to_string(), "b".into())]);
-    room.append(&vars);
-
-    let script = r#"
-    let a = env.get("a");
-    a
-    "#;
-    let result = room.eval::<i64>(script);
-    assert_eq!(result.unwrap(), 10);
+    assert!(env.data("test1").is_some());
 }
 
 #[test]
-fn env_room_set() {
+fn env_ref_remove() {
     let env = Enviroment::new();
-    let room = env.new_room();
-    env.registry_env_module();
+    let refenv = env.create_ref("test1");
 
-    let vars = Vars::from_iter([("a".to_string(), 10.into()), ("b".to_string(), "b".into())]);
-    room.append(&vars);
+    refenv.set("a", 10);
+    refenv.set("b", "abc");
+    assert_eq!(refenv.get::<i32>("a").unwrap(), 10);
+    assert_eq!(refenv.get::<String>("b").unwrap(), "abc");
 
-    let script = r#"
-    let a = env.get("a");
+    let data = env.data("test1").unwrap();
+    assert_eq!(data.get::<i32>("a").unwrap(), 10);
+    assert_eq!(data.get::<String>("b").unwrap(), "abc");
 
-    env.set("a", a + 5);
-    a
-    "#;
-    let result = room.eval::<i64>(script);
-    assert_eq!(result.unwrap(), vars.get("a").unwrap().as_i64().unwrap());
+    refenv.remove("a");
+    assert!(data.get::<String>("a").is_none());
 }
 
 #[test]
-fn env_room_share_global_vars() {
+fn env_ref_throw_error() {
     let env = Enviroment::new();
-
-    env.set("abc", json!(1.5));
-    let room = env.new_room();
-    let script = r#"
-    let v = 5;
-    let v2 = env.get("abc");
-    v2
-    "#;
-
-    let result = room.eval::<f64>(script);
-    assert_eq!(result.unwrap(), 1.5);
-}
-
-#[test]
-fn env_room_override_global_vars() {
-    let env = Enviroment::new();
-    env.set("abc", json!(1.5));
-
-    let room = env.new_room();
-    room.set("abc", json!("Tom"));
-    assert_eq!(room.get("abc").unwrap(), "Tom");
+    let room = env.create_ref("test1");
 
     let script = r#"
-    let v = 5;
-    let v2 = env.get("abc");
-    v2
-    "#;
-
-    let result = env.eval::<String>(script);
-    assert_eq!(result.unwrap(), "Tom");
-}
-
-#[test]
-fn env_room_output() {
-    let env = Enviroment::new();
-    let room = env.new_room();
-
-    let mut vars = Vars::new();
-    vars.insert("output".to_string(), 100.into());
-    room.output(&vars);
-    assert_eq!(env.get("output").unwrap(), 100);
-}
-
-#[test]
-fn env_room_get_error() {
-    let env = Enviroment::new();
-    let room = env.new_room();
-
-    let script = r#"
-        let v = env.get("abc");
-        return v;
+        throw "error"
     "#;
 
     let result = room.eval::<String>(script);
@@ -279,36 +314,18 @@ fn env_room_get_error() {
 }
 
 #[test]
-fn env_room_over_env() {
-    let env = Enviroment::new();
-    let room = env.new_room();
-    env.set("a", 100.into());
-    room.set("a", 10.into());
-    let script = r#"
-        let v = env.get("a");
-        return v;
-    "#;
-
-    let result = room.eval::<i64>(script).unwrap();
-    assert_eq!(result, 10);
-}
-
-#[test]
 fn env_collection_array() {
     let env = Enviroment::new();
-    let room = env.new_room();
+    let refenv = env.create_ref("test1");
     let script = r#"
         return ["a", "b"];
     "#;
 
-    let result = room.eval::<Dynamic>(script).unwrap();
+    let result = refenv.eval::<Dynamic>(script).unwrap();
     let cand = Candidate::parse(&result.to_string()).unwrap();
     assert_eq!(cand.r#type(), "set");
     assert_eq!(
-        cand.users(&HashMap::new())
-            .unwrap()
-            .into_iter()
-            .collect::<Vec<_>>(),
+        cand.values().unwrap().into_iter().collect::<Vec<_>>(),
         ["a", "b"]
     );
 }
@@ -316,21 +333,18 @@ fn env_collection_array() {
 #[test]
 fn env_collection_union() {
     let env = Enviroment::new();
-    let room = env.new_room();
+    let refenv = env.create_ref("test1");
     let script = r#"
         let a = ["a"];
         let b = ["b"];
         return a.union(b);
     "#;
 
-    let result = room.eval::<Dynamic>(script).unwrap();
+    let result = refenv.eval::<Dynamic>(script).unwrap();
     let cand = Candidate::parse(&result.to_string()).unwrap();
     assert_eq!(cand.r#type(), "group");
     assert_eq!(
-        cand.users(&HashMap::new())
-            .unwrap()
-            .into_iter()
-            .collect::<Vec<_>>(),
+        cand.values().unwrap().into_iter().collect::<Vec<_>>(),
         ["a", "b"]
     );
 }
@@ -338,56 +352,56 @@ fn env_collection_union() {
 #[test]
 fn env_collection_intersect() {
     let env = Enviroment::new();
-    let room = env.new_room();
+    let refenv = env.create_ref("test1");
     let script = r#"
         let a = ["a", "b"];
         let b = ["b", "c"];
         return a.intersect(b);
     "#;
 
-    let result = room.eval::<Dynamic>(script).unwrap();
+    let result = refenv.eval::<Dynamic>(script).unwrap();
     let cand = Candidate::parse(&result.to_string()).unwrap();
     assert_eq!(cand.r#type(), "group");
     assert_eq!(
-        cand.users(&HashMap::new())
-            .unwrap()
-            .into_iter()
-            .collect::<Vec<_>>(),
+        cand.values().unwrap().into_iter().collect::<Vec<_>>(),
         ["b"]
     );
 }
 
 #[test]
-fn env_collection_diff() {
+fn env_collection_except() {
     let env = Enviroment::new();
-    let room = env.new_room();
+    let refenv = env.create_ref("test1");
     let script = r#"
         let a = ["a", "b"];
         let b = ["b"];
-        return a.diff(b);
+        return a.except(b);
     "#;
 
-    let result = room.eval::<Dynamic>(script).unwrap();
+    let result = refenv.eval::<Dynamic>(script).unwrap();
     let cand = Candidate::parse(&result.to_string()).unwrap();
     assert_eq!(cand.r#type(), "group");
     assert_eq!(
-        cand.users(&HashMap::new())
-            .unwrap()
-            .into_iter()
-            .collect::<Vec<_>>(),
+        cand.values().unwrap().into_iter().collect::<Vec<_>>(),
         ["a"]
     );
 }
 
-fn create_task_context() -> Arc<Context> {
-    let mut workflow = Workflow::new().with_step(|step| step.with_name("step1"));
-    let id = utils::longid();
-    let tr = NodeTree::build(&mut workflow).unwrap();
-    let scher = Scheduler::new();
-    let proc = scher.create_proc(&id, &workflow);
+#[test]
+fn env_get_get_value_by_type() {
+    let env = Enviroment::new();
 
-    let node = tr.root.as_ref().unwrap();
-    let task = proc.create_task(node, None);
+    env.set("a", 5);
+    assert_eq!(env.get::<u32>("a").unwrap(), 5);
+    assert_eq!(env.get::<String>("a"), None);
+}
 
-    task.create_context(&scher)
+#[test]
+fn env_ref_get_get_value_diff_type() {
+    let env = Enviroment::new();
+    let refenv = env.create_ref("test1");
+
+    refenv.set("a", 5);
+    assert_eq!(refenv.get::<u32>("a").unwrap(), 5);
+    assert_eq!(refenv.get::<String>("a"), None);
 }

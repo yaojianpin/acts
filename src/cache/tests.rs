@@ -122,6 +122,7 @@ fn cache_restore_count() {
             vars: "".to_string(),
             timestamp: 0,
             model: model.to_json().unwrap(),
+            root_tid: "".to_string(),
         };
         cache.store().base().procs().create(&proc).unwrap();
     }
@@ -167,6 +168,7 @@ fn cache_restore_working_state() {
             vars: "".to_string(),
             timestamp: 0,
             model: model.to_json().unwrap(),
+            root_tid: "".to_string(),
         };
         cache.store().base().procs().create(&proc).unwrap();
     }
@@ -212,6 +214,7 @@ fn cache_restore_completed_state() {
             vars: "".to_string(),
             timestamp: 0,
             model: model.to_json().unwrap(),
+            root_tid: "".to_string(),
         };
         cache.store().base().procs().create(&proc).unwrap();
     }
@@ -246,6 +249,7 @@ fn cache_restore_less_cap() {
             vars: "".to_string(),
             timestamp: 0,
             model: model.to_json().unwrap(),
+            root_tid: "".to_string(),
         };
         cache.store().base().procs().create(&proc).unwrap();
     }

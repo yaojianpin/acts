@@ -1,23 +1,27 @@
 mod act;
 mod branch;
-// mod job;
+mod hook;
 mod step;
 mod workflow;
 
 use crate::{
-    env::Room,
-    event::{ActionState, EventAction},
+    env::RefEnv,
+    event::{ActionState, EventAction, Model},
     sch::{
-        tree::{Node, NodeData},
+        tree::{Node, NodeContent},
         Context, Proc, Scheduler, TaskState,
     },
     utils::{self, consts},
-    ActError, ActTask, Error, Message, NodeKind, Result, ShareLock, Vars, WorkflowAction,
+    Act, ActError, ActTask, Catch, Error, Message, NodeKind, Req, Result, ShareLock, Timeout, Vars,
 };
 use async_trait::async_trait;
+pub use hook::{StatementBatch, TaskLifeCycle};
 use serde_json::json;
-use std::sync::{Arc, RwLock};
-use tracing::info;
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+};
+use tracing::{debug, info};
 
 #[derive(Clone)]
 pub struct Task {
@@ -32,8 +36,8 @@ pub struct Task {
 
     pub timestamp: i64,
 
-    /// env room
-    room: Arc<Room>,
+    // ref of the Enviroment
+    env: Arc<RefEnv>,
 
     /// task state
     state: ShareLock<TaskState>,
@@ -48,24 +52,27 @@ pub struct Task {
     prev: ShareLock<Option<String>>,
 
     proc: Arc<Proc>,
+
+    // lifecycle hooks
+    hooks: ShareLock<HashMap<TaskLifeCycle, Vec<StatementBatch>>>,
 }
 
 impl Task {
     pub fn new(proc: &Arc<Proc>, task_id: &str, node: Arc<Node>) -> Self {
-        // create new env for each task
-        let room = proc.env().new_room();
+        let env = proc.env().create_ref(task_id);
         let task = Self {
             proc_id: proc.id(),
             id: task_id.to_string(),
             node: node.clone(),
+            env,
             state: Arc::new(RwLock::new(TaskState::None)),
             action_state: Arc::new(RwLock::new(ActionState::None)),
             start_time: Arc::new(RwLock::new(0)),
             end_time: Arc::new(RwLock::new(0)),
             prev: Arc::new(RwLock::new(None)),
-            room,
             timestamp: utils::time::timestamp(),
             proc: proc.clone(),
+            hooks: Arc::new(RwLock::new(HashMap::new())),
         };
 
         task
@@ -75,8 +82,8 @@ impl Task {
         &self.proc
     }
 
-    pub fn room(&self) -> &Arc<Room> {
-        &self.room
+    pub fn env(&self) -> &Arc<RefEnv> {
+        &self.env
     }
 
     pub fn start_time(&self) -> i64 {
@@ -99,9 +106,6 @@ impl Task {
     pub fn task_id(&self) -> String {
         self.id.clone()
     }
-    pub fn node_id(&self) -> String {
-        self.node.id()
-    }
 
     pub fn cost(&self) -> i64 {
         if self.state().is_completed() {
@@ -112,20 +116,13 @@ impl Task {
     }
 
     pub fn is_emit_disabled(&self) -> bool {
-        self.room
-            .get(consts::TASK_EMIT_DISABLED)
-            .map(|v| v.as_bool().unwrap_or(false))
+        self.env()
+            .get::<bool>(consts::TASK_EMIT_DISABLED)
             .unwrap_or(false)
     }
 
     pub fn set_emit_disabled(&self, v: bool) {
-        self.room.set(consts::TASK_EMIT_DISABLED, json!(v));
-    }
-
-    pub fn parent_task_id(&self) -> Option<String> {
-        self.room
-            .get(consts::PARENT_TASK_ID)
-            .map(|v| v.as_str().map(|v| v.to_string()).unwrap())
+        self.env().set(consts::TASK_EMIT_DISABLED, json!(v));
     }
 
     pub fn create_context(self: &Arc<Self>, scher: &Arc<Scheduler>) -> Arc<Context> {
@@ -138,62 +135,46 @@ impl Task {
         // if it is act, insert the step_node_id and step_task_id to the inputs
         // it is necessary to find the relation between the step and it's children acts
         let mut inputs = self.inputs();
+
         if self.node.kind() == NodeKind::Act {
             let mut parent = self.parent();
             while let Some(task) = parent {
                 if task.is_kind(NodeKind::Step) {
                     inputs.insert(
-                        consts::FOR_ACT_KEY_STEP_NODE_ID.to_string(),
-                        json!(task.node_id()),
+                        consts::STEP_KEY.to_string(),
+                        json!({
+                            consts::STEP_NODE_ID: task.node.id(),
+                            consts::STEP_NODE_NAME: task.node.name(),
+                            consts::STEP_TASK_ID: task.id,
+                        }),
                     );
-                    inputs.insert(consts::FOR_ACT_KEY_STEP_TASK_ID.to_string(), json!(task.id));
                     break;
                 }
                 parent = task.parent();
             }
         }
+
         Message {
             id: self.id.clone(),
-            name: self.node.data().name(),
-            r#type: self.node.kind().to_string(),
+            name: self.node.content.name(),
+            r#type: self.node.r#type(),
+            source: self.node.kind().to_string(),
             state: self.action_state().to_string(),
             proc_id: self.proc_id.clone(),
-            key: self.node_id(),
-            tag: self.node.tag(),
+            key: self.node.id().to_string(),
+            tag: self.node.tag().to_string(),
 
-            model_id: workflow.id.clone(),
-            model_name: workflow.name.to_string(),
-            model_tag: workflow.tag.to_string(),
+            model: Model {
+                id: workflow.id.clone(),
+                name: workflow.name.clone(),
+                tag: workflow.tag.clone(),
+            },
 
             inputs,
-            outputs: self.node.outputs(),
+            outputs: self.outputs(),
 
             start_time: self.start_time(),
             end_time: self.end_time(),
-        }
-    }
-
-    pub fn create_action_message(&self, action: &WorkflowAction) -> Message {
-        let workflow = self.proc.model();
-        let inputs = utils::fill_inputs(&self.room, &action.inputs);
-        Message {
-            id: utils::shortid(),
-            r#type: "message".to_string(),
-            state: self.action_state().to_string(),
-            proc_id: self.proc_id.clone(),
-            key: action.id.clone(),
-            name: action.name.clone(),
-
-            model_id: workflow.id.clone(),
-            model_name: workflow.name.to_string(),
-            model_tag: workflow.tag.to_string(),
-
-            inputs,
-            outputs: action.outputs.clone(),
-
-            start_time: self.start_time(),
-            end_time: self.end_time(),
-            ..Default::default()
         }
     }
 
@@ -238,19 +219,37 @@ impl Task {
     }
 
     pub fn inputs(&self) -> Vars {
-        utils::fill_inputs(&self.room, &self.node.inputs())
+        utils::fill_inputs(self.env(), &self.node.content.inputs())
     }
 
     pub fn outputs(&self) -> Vars {
-        utils::fill_outputs(&self.room, &self.node.outputs())
+        let mut outputs = utils::fill_outputs(self.env(), &self.node.content.outputs());
+
+        // The task(Workflow) can also set the outputs by expose act
+        // These data is stored in consts::ACT_OUTPUTS
+        // merge the expose data with the outputs
+        if let Some(vars) = self.env().get::<Vars>(consts::ACT_OUTPUTS) {
+            for (key, value) in &vars {
+                outputs.set(key, value.clone());
+            }
+        }
+
+        outputs
     }
 
-    pub fn vars(&self) -> Vars {
-        self.room.vars()
+    pub fn data(&self) -> Vars {
+        self.env().data()
     }
 
     pub fn set_prev(&self, prev: Option<String>) {
-        *self.prev.write().unwrap() = prev;
+        {
+            *self.prev.write().unwrap() = prev;
+        }
+
+        // set refenv parent task id
+        if let Some(parent) = self.parent() {
+            self.env().set_parent(&parent.id);
+        }
     }
 
     pub fn set_state(&self, state: TaskState) {
@@ -277,6 +276,7 @@ impl Task {
             ActionState::Aborted => self.set_state(TaskState::Abort),
             ActionState::Skipped => self.set_state(TaskState::Skip),
             ActionState::Error => self.set_state(TaskState::Fail(format!("action error"))),
+            ActionState::Removed => self.set_state(TaskState::Removed),
         }
 
         *self.action_state.write().unwrap() = state;
@@ -301,7 +301,14 @@ impl Task {
         self.node.kind() == kind
     }
 
-    pub fn exec(&self, ctx: &Context) -> Result<()> {
+    pub fn is_act(&self, v: &str) -> bool {
+        if self.node.kind() == NodeKind::Act {
+            return self.node.r#type() == v;
+        }
+        false
+    }
+
+    pub fn exec(self: &Arc<Self>, ctx: &Context) -> Result<()> {
         info!("exec task={:?}", ctx.task);
         self.init(ctx)?;
         self.run(ctx)?;
@@ -309,20 +316,30 @@ impl Task {
         Ok(())
     }
 
-    pub fn update(&self, ctx: &Context) -> Result<()> {
+    pub fn update(self: &Arc<Self>, ctx: &Context) -> Result<()> {
         info!("update task={:?}", ctx.task);
         let action = ctx
             .action()
             .ok_or(ActError::Action(format!("cannot find action in context")))?;
-        // check uid
-        // ctx.var(consts::FOR_ACT_KEY_UID)
-        //     .map(|v| v.as_str().unwrap().to_string())
-        //     .ok_or(ActError::Action(format!(
-        //         "cannot find '{}' in options",
-        //         consts::FOR_ACT_KEY_UID
-        //     )))?;
-
         match action {
+            EventAction::Push => {
+                let act = Act::Req(Req {
+                    id: ctx
+                        .get_var::<String>("id")
+                        .ok_or(ActError::Runtime(format!("cannot find 'id' in options")))?,
+                    name: ctx.get_var::<String>("name").unwrap_or_default(),
+                    tag: ctx.get_var::<String>("tag").unwrap_or_default(),
+                    inputs: ctx.get_var("inputs").unwrap_or_default(),
+                    outputs: ctx.get_var("outputs").unwrap_or_default(),
+                    rets: ctx.get_var("rets").unwrap_or_default(),
+                    ..Default::default()
+                });
+                ctx.append_act(&act)?;
+            }
+            EventAction::Remove => {
+                self.set_action_state(ActionState::Removed);
+                self.next(ctx)?;
+            }
             EventAction::Submit => {
                 self.set_action_state(ActionState::Submitted);
                 self.next(ctx)?;
@@ -344,16 +361,13 @@ impl Task {
                         self.id
                     )));
                 }
-                let to = ctx.var("to").ok_or(ActError::Action(format!(
-                    "cannot find to value in options",
-                )))?;
-                let nid = to.as_str().ok_or(ActError::Action(format!(
-                    "to '{to}' value is not a valid string type",
+                let nid = ctx.get_var::<String>("to").ok_or(ActError::Action(format!(
+                    "cannot find 'to' value in options",
                 )))?;
 
                 let mut path_tasks = Vec::new();
                 let task = self.backs(
-                    &|t| t.node.kind() == NodeKind::Step && t.node_id() == nid,
+                    &|t| t.node.kind() == NodeKind::Step && t.node.id() == nid,
                     &mut path_tasks,
                 );
 
@@ -442,16 +456,15 @@ impl Task {
             }
             EventAction::Error => {
                 let err_code =
-                    ctx.var(consts::FOR_ACT_KEY_STEP_ERR_CODE)
+                    ctx.get_var::<String>(consts::ACT_ERR_CODE)
                         .ok_or(ActError::Action(format!(
                             "cannot find '{}' in options",
-                            consts::FOR_ACT_KEY_STEP_ERR_CODE
+                            consts::ACT_ERR_CODE
                         )))?;
-                let err_code = err_code.as_str().unwrap_or_default();
                 if err_code.is_empty() {
                     return Err(ActError::Action(format!(
                         "the var '{}' cannot be empty",
-                        consts::FOR_ACT_KEY_STEP_ERR_CODE
+                        consts::ACT_ERR_CODE
                     )));
                 }
 
@@ -476,8 +489,7 @@ impl Task {
                 }
 
                 let err_message = ctx
-                    .var(consts::FOR_ACT_KEY_STEP_ERR_MESSAGE)
-                    .map(|e| e.as_str().unwrap().to_string())
+                    .get_var::<String>(consts::ACT_ERR_MESSAGE)
                     .unwrap_or_default();
                 ctx.set_err(&Error {
                     key: Some(err_code.to_string()),
@@ -491,14 +503,15 @@ impl Task {
     }
 
     pub fn is_ready(&self) -> bool {
-        match self.node.data() {
-            NodeData::Branch(n) => {
+        match &self.node.content {
+            NodeContent::Branch(n) => {
                 let siblings = self.siblings();
                 if n.needs.len() > 0 {
                     if siblings
                         .iter()
                         .filter(|iter| {
-                            iter.state().is_completed() && n.needs.contains(&iter.node_id())
+                            iter.state().is_completed()
+                                && n.needs.contains(&iter.node.id().to_string())
                         })
                         .count()
                         > 0
@@ -525,30 +538,30 @@ impl Task {
 
                 false
             }
-            NodeData::Act(n) => {
-                if n.needs.len() > 0 {
-                    let siblings = self.siblings();
-                    if siblings
-                        .iter()
-                        .filter(|iter| {
-                            iter.state().is_completed() && n.needs.contains(&iter.node_id())
-                        })
-                        .count()
-                        > 0
-                    {
-                        return true;
-                    }
+            // NodeData::Act(n) => {
+            //     if n.needs.len() > 0 {
+            //         let siblings = self.siblings();
+            //         if siblings
+            //             .iter()
+            //             .filter(|iter| {
+            //                 iter.state().is_completed() && n.needs.contains(&iter.node_id())
+            //             })
+            //             .count()
+            //             > 0
+            //         {
+            //             return true;
+            //         }
 
-                    return false;
-                }
+            //         return false;
+            //     }
 
-                true
-            }
+            //     true
+            // }
             _ => true,
         }
     }
 
-    pub fn resume(&self, ctx: &Context) -> Result<()> {
+    pub fn resume(self: &Arc<Self>, ctx: &Context) -> Result<()> {
         if self.is_ready() {
             self.set_state(TaskState::Running);
             ctx.scher.emitter().emit_task_event(self);
@@ -557,7 +570,111 @@ impl Task {
 
         Ok(())
     }
-    /// check if the task includes branches
+
+    /// add statement to task lifecycle hooks
+    pub fn add_hook_stmts(&self, key: TaskLifeCycle, value: &Act) {
+        let mut hooks = self.hooks.write().unwrap();
+
+        let batch = StatementBatch::Statement(value.clone());
+        hooks
+            .entry(key)
+            .and_modify(|list| list.push(batch.clone()))
+            .or_insert(vec![batch]);
+    }
+
+    pub fn add_hook_catch(&self, key: TaskLifeCycle, value: &Catch) {
+        let mut hooks = self.hooks.write().unwrap();
+
+        let batch = StatementBatch::Catch(value.clone());
+        hooks
+            .entry(key)
+            .and_modify(|list| list.push(batch.clone()))
+            .or_insert(vec![batch]);
+    }
+
+    pub fn add_hook_timeout(&self, key: TaskLifeCycle, value: &Timeout) {
+        let mut hooks = self.hooks.write().unwrap();
+
+        let batch = StatementBatch::Timeout(value.clone());
+        hooks
+            .entry(key)
+            .and_modify(|list| list.push(batch.clone()))
+            .or_insert(vec![batch]);
+    }
+
+    pub fn run_hooks(&self, ctx: &Context) -> Result<()> {
+        let state = self.action_state();
+        match state {
+            ActionState::None => {}
+            ActionState::Created => {
+                self.run_hooks_by(TaskLifeCycle::Created, ctx)?;
+                if self.is_kind(NodeKind::Act) {
+                    if let Some(task) = self.parent() {
+                        task.run_hooks_by(TaskLifeCycle::BeforeUpdate, ctx)?;
+                    }
+                    if let Some(root) = ctx.task.proc.root() {
+                        root.run_hooks_by(TaskLifeCycle::BeforeUpdate, ctx)?
+                    }
+                } else if self.is_kind(NodeKind::Step) {
+                    ctx.task.run_hooks_by(TaskLifeCycle::Step, ctx)?;
+                    if let Some(root) = ctx.task.proc.root() {
+                        root.run_hooks_by(TaskLifeCycle::Step, ctx)?
+                    }
+                }
+            }
+            ActionState::Completed
+            | ActionState::Submitted
+            | ActionState::Backed
+            | ActionState::Cancelled
+            | ActionState::Aborted
+            | ActionState::Skipped
+            | ActionState::Removed => {
+                self.run_hooks_by(TaskLifeCycle::Completed, ctx)?;
+                if self.is_kind(NodeKind::Act) {
+                    // triggers step updated hook when the act is completed
+                    if let Some(task) = self.parent() {
+                        task.run_hooks_by(TaskLifeCycle::Updated, ctx)?;
+                    }
+                    if let Some(root) = ctx.task.proc.root() {
+                        root.run_hooks_by(TaskLifeCycle::Updated, ctx)?
+                    }
+                } else if self.is_kind(NodeKind::Step) {
+                    ctx.task.run_hooks_by(TaskLifeCycle::Step, ctx)?;
+                    if let Some(root) = ctx.task.proc.root() {
+                        root.run_hooks_by(TaskLifeCycle::Step, ctx)?
+                    }
+                }
+            }
+            ActionState::Error => self.run_hooks_by(TaskLifeCycle::ErrorCatch, ctx)?,
+        }
+
+        Ok(())
+    }
+
+    pub fn run_hooks_timeout(&self, ctx: &Context) -> Result<()> {
+        self.run_hooks_by(TaskLifeCycle::Timeout, ctx)
+    }
+
+    fn run_hooks_by(&self, key: TaskLifeCycle, ctx: &Context) -> Result<()> {
+        debug!("run_hooks_by:{:?} {:?}", key, self);
+        let hooks = self.hooks.read().unwrap();
+        let default = Vec::new();
+        let stmts = hooks.get(&key).unwrap_or(&default);
+        for s in stmts {
+            s.run(ctx)?;
+        }
+        Ok(())
+    }
+
+    pub(crate) fn set_hooks(&self, hooks: &HashMap<TaskLifeCycle, Vec<StatementBatch>>) {
+        *self.hooks.write().unwrap() = hooks.clone();
+    }
+
+    pub(crate) fn hooks(&self) -> HashMap<TaskLifeCycle, Vec<StatementBatch>> {
+        self.hooks.read().unwrap().clone()
+    }
+
+    /// check if the task includes act
     fn is_acts(&self) -> bool {
         self.children()
             .iter()
@@ -621,18 +738,17 @@ impl Task {
 }
 
 #[async_trait]
-impl ActTask for Task {
+impl ActTask for Arc<Task> {
     fn init(&self, ctx: &Context) -> Result<()> {
         if ctx.task.state().is_none() {
             ctx.prepare();
-            self.set_action_state(ActionState::Created);
-            match &self.node.data {
-                NodeData::Workflow(workflow) => workflow.init(ctx)?,
-                NodeData::Branch(branch) => branch.init(ctx)?,
-                NodeData::Step(step) => step.init(ctx)?,
-                NodeData::Act(act) => act.init(ctx)?,
+            match &self.node.content {
+                NodeContent::Workflow(workflow) => workflow.init(ctx)?,
+                NodeContent::Branch(branch) => branch.init(ctx)?,
+                NodeContent::Step(step) => step.init(ctx)?,
+                NodeContent::Act(act) => act.init(ctx)?,
             }
-
+            self.set_action_state(ActionState::Created);
             ctx.emit_task(&ctx.task);
         }
 
@@ -641,11 +757,11 @@ impl ActTask for Task {
 
     fn run(&self, ctx: &Context) -> Result<()> {
         if ctx.task.state().is_running() {
-            match &self.node.data {
-                NodeData::Workflow(workflow) => workflow.run(ctx),
-                NodeData::Branch(branch) => branch.run(ctx),
-                NodeData::Step(step) => step.run(ctx),
-                NodeData::Act(act) => act.run(ctx),
+            match &self.node.content {
+                NodeContent::Workflow(workflow) => workflow.run(ctx),
+                NodeContent::Branch(branch) => branch.run(ctx),
+                NodeContent::Step(step) => step.run(ctx),
+                NodeContent::Act(act) => act.run(ctx),
             }?;
         }
 
@@ -655,15 +771,16 @@ impl ActTask for Task {
     fn next(&self, ctx: &Context) -> Result<bool> {
         let mut is_next = false;
         if ctx.task.state().is_next() {
-            is_next = match &self.node.data {
-                NodeData::Workflow(data) => data.next(ctx)?,
-                NodeData::Step(data) => data.next(ctx)?,
-                NodeData::Branch(data) => data.next(ctx)?,
-                NodeData::Act(data) => data.next(ctx)?,
+            is_next = match &self.node.content {
+                NodeContent::Workflow(data) => data.next(ctx)?,
+                NodeContent::Step(data) => data.next(ctx)?,
+                NodeContent::Branch(data) => data.next(ctx)?,
+                NodeContent::Act(data) => data.next(ctx)?,
             };
         }
 
-        info!("is_next:{} task={:?}", is_next, ctx.task);
+        debug!("is_next:{} task={:?}", is_next, ctx.task);
+        self.env().set_env(&ctx.vars());
         if self.state().is_completed() {
             ctx.emit_task(self);
         }
@@ -680,11 +797,11 @@ impl ActTask for Task {
     }
 
     fn review(&self, ctx: &Context) -> Result<bool> {
-        let is_review = match &self.node.data {
-            NodeData::Workflow(data) => data.review(ctx)?,
-            NodeData::Step(data) => data.review(ctx)?,
-            NodeData::Branch(data) => data.review(ctx)?,
-            NodeData::Act(data) => data.review(ctx)?,
+        let is_review = match &self.node.content {
+            NodeContent::Workflow(data) => data.review(ctx)?,
+            NodeContent::Step(data) => data.review(ctx)?,
+            NodeContent::Branch(data) => data.review(ctx)?,
+            NodeContent::Act(data) => data.review(ctx)?,
         };
 
         info!("is_review:{} task={:?}", is_review, ctx.task);
@@ -704,11 +821,11 @@ impl ActTask for Task {
     }
 
     fn error(&self, ctx: &Context) -> Result<()> {
-        match &self.node.data {
-            NodeData::Workflow(data) => data.error(ctx),
-            NodeData::Step(data) => data.error(ctx),
-            NodeData::Branch(data) => data.error(ctx),
-            NodeData::Act(data) => data.error(ctx),
+        match &self.node.content {
+            NodeContent::Workflow(data) => data.error(ctx),
+            NodeContent::Step(data) => data.error(ctx),
+            NodeContent::Branch(data) => data.error(ctx),
+            NodeContent::Act(data) => data.error(ctx),
         }
     }
 }
@@ -718,7 +835,7 @@ impl std::fmt::Debug for Task {
         f.debug_struct("Task")
             .field("id", &self.id)
             .field("name", &self.node.name())
-            .field("kind", &self.node.kind())
+            .field("type", &self.node.kind())
             .field("proc_id", &self.proc_id)
             .field("node_id", &self.node.id())
             .field("state", &self.state())
@@ -726,7 +843,7 @@ impl std::fmt::Debug for Task {
             .field("start_time", &self.start_time())
             .field("end_time", &self.end_time())
             .field("prev", &self.prev())
-            .field("vars", &self.vars())
+            .field("vars", &self.data())
             .finish()
     }
 }

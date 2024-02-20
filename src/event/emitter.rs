@@ -1,7 +1,7 @@
 use crate::{
     event::Message,
     sch::{Proc, Scheduler, Task},
-    Event, ShareLock, WorkflowState,
+    utils, Event, ShareLock, WorkflowState,
 };
 use std::sync::{Arc, RwLock};
 use tokio::runtime::Handle;
@@ -23,7 +23,8 @@ macro_rules! dispatch_event {
 pub type ActWorkflowHandle = Arc<dyn Fn(&Event<WorkflowState>) + Send + Sync>;
 pub type ActWorkflowMessageHandle = Arc<dyn Fn(&Event<Message>) + Send + Sync>;
 pub type ProcHandle = Arc<dyn Fn(&Event<Arc<Proc>>) + Send + Sync>;
-pub type TaskHandle = Arc<dyn Fn(&Event<Task, TaskExtra>) + Send + Sync>;
+pub type TaskHandle = Arc<dyn Fn(&Event<Arc<Task>, TaskExtra>) + Send + Sync>;
+pub type TickHandle = Arc<dyn Fn(&i64) + Send + Sync>;
 
 pub struct Emitter {
     starts: ShareLock<Vec<ActWorkflowHandle>>,
@@ -34,6 +35,8 @@ pub struct Emitter {
 
     procs: ShareLock<Vec<ProcHandle>>,
     tasks: ShareLock<Vec<TaskHandle>>,
+
+    ticks: ShareLock<Vec<TickHandle>>,
 
     scher: ShareLock<Option<Arc<Scheduler>>>,
 }
@@ -53,6 +56,7 @@ impl Emitter {
             errors: Arc::new(RwLock::new(Vec::new())),
             procs: Arc::new(RwLock::new(Vec::new())),
             tasks: Arc::new(RwLock::new(Vec::new())),
+            ticks: Arc::new(RwLock::new(Vec::new())),
 
             scher: Arc::new(RwLock::new(None)),
         }
@@ -82,8 +86,12 @@ impl Emitter {
         self.procs.write().unwrap().push(Arc::new(f));
     }
 
-    pub fn on_task(&self, f: impl Fn(&Event<Task, TaskExtra>) + Send + Sync + 'static) {
+    pub fn on_task(&self, f: impl Fn(&Event<Arc<Task>, TaskExtra>) + Send + Sync + 'static) {
         self.tasks.write().unwrap().push(Arc::new(f));
+    }
+
+    pub fn on_tick(&self, f: impl Fn(&i64) + Send + Sync + 'static) {
+        self.ticks.write().unwrap().push(Arc::new(f));
     }
 
     pub fn emit_proc_event(&self, proc: &Arc<Proc>) {
@@ -95,7 +103,7 @@ impl Emitter {
         }
     }
 
-    pub fn emit_task_event(&self, task: &Task) {
+    pub fn emit_task_event(&self, task: &Arc<Task>) {
         debug!("emit_task_event: task={:?}", task);
         let handlers = self.tasks.read().unwrap();
         let e = &Event::new_with_extra(
@@ -108,7 +116,7 @@ impl Emitter {
         }
     }
 
-    pub fn emit_task_event_with_extra(&self, task: &Task, emit_message: bool) {
+    pub fn emit_task_event_with_extra(&self, task: &Arc<Task>, emit_message: bool) {
         debug!("emit_task_event: task={:?}", task);
         let handlers = self.tasks.read().unwrap();
         let e = &Event::new_with_extra(
@@ -146,5 +154,11 @@ impl Emitter {
         debug!("emit_error: {:?}", state);
         let e = Event::new(&*self.scher.read().unwrap(), state);
         dispatch_event!(self, errors, &e);
+    }
+
+    pub fn emit_tick(&self) {
+        let time_millis = utils::time::time();
+        debug!("emit_tick {time_millis}");
+        dispatch_event!(self, ticks, &time_millis);
     }
 }

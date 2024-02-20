@@ -1,30 +1,48 @@
 name: approve
 id: approve
-actions:
-  - id: final
-    on: 
-      - state: completed
-        nkind: workflow
+setup:
+  - !on_completed
+      - !msg
+        id: final
 steps:
   - name: prepare
     id: prepare
     acts:
-      - id: init
+      - !req
+        id: init
   - name: pm approval
     id: pm_approval
     acts:
-      - for:
-          by: all
-          alias:
-            init: pm
-          in: |
-            act.role("pm")
+      - !req
+        id: pm
+        inputs:
+          role_id: pm
+        outputs:
+          pm:
+        on_completed:
+          - !each
+            in: env.get("pm")
+            run:
+              - !req
+                id: pm_act
+              - !msg
+                id: pm_act_msg
   - name: gm approval
     id: gm_approval
     acts:
-      - for:
-          by: any
-          alias:
-            init: gm
-          in: |
-            act.role("gm")
+      - !req
+        id: gm
+        inputs:
+          role_id: gm
+        outputs:
+          gm:
+        on_completed:
+          - !req
+            id: gm_act
+            inputs:
+              v: ${ env.get("gm") }
+          - !each
+            in: env.get("gm")
+            run:
+              - !msg
+                id: gm_act_msg

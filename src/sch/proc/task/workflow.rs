@@ -1,12 +1,19 @@
-use crate::{
-    event::ActionState,
-    sch::{Context, Task},
-    ActTask, Result, Workflow, WorkflowAction,
-};
+use crate::{event::ActionState, sch::Context, ActTask, Result, Workflow};
 use async_trait::async_trait;
 
 #[async_trait]
 impl ActTask for Workflow {
+    fn init(&self, ctx: &Context) -> Result<()> {
+        // run setup
+        if self.setup.len() > 0 {
+            for s in &self.setup {
+                s.exec(ctx)?;
+            }
+        }
+
+        Ok(())
+    }
+
     fn run(&self, _ctx: &Context) -> Result<()> {
         Ok(())
     }
@@ -32,40 +39,5 @@ impl ActTask for Workflow {
         }
 
         Ok(false)
-    }
-}
-
-impl Workflow {
-    pub(in crate::sch) fn actions(&self, task: &Task) -> Option<Vec<&WorkflowAction>> {
-        let actions = self
-            .actions
-            .iter()
-            .filter(|iter| {
-                if iter.on.len() == 0 {
-                    return false;
-                }
-
-                iter.on.iter().any(|on| {
-                    let mut ret = true;
-                    ret &= on.state == task.action_state().to_string();
-
-                    if let Some(nkind) = &on.nkind {
-                        ret &= nkind == &task.node.kind().to_string();
-                    }
-
-                    if let Some(nid) = &on.nid {
-                        ret &= nid == &task.node.id();
-                    }
-
-                    ret
-                })
-            })
-            .collect::<Vec<_>>();
-
-        if actions.len() > 0 {
-            return Some(actions);
-        }
-
-        None
     }
 }

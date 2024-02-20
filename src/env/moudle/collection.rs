@@ -78,7 +78,7 @@ mod collection {
     }
 
     #[export_fn]
-    pub fn diff(a: Dynamic, b: Dynamic) -> Dynamic {
+    pub fn except(a: Dynamic, b: Dynamic) -> Dynamic {
         let mut result_a = Vec::new();
         if a.is_array() {
             result_a.extend(a.into_array().unwrap());
@@ -108,7 +108,7 @@ mod collection {
         );
 
         Candidate::Group {
-            op: Operation::Difference,
+            op: Operation::Except,
             items: vec![a, b],
         }
         .into()

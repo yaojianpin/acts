@@ -1,8 +1,8 @@
 use crate::{plugin, ActPlugin, Engine};
 use std::sync::{Arc, Mutex};
 
-#[test]
-fn plugin_register() {
+#[tokio::test]
+async fn plugin_register() {
     let engine = Engine::new();
     let extender = engine.extender();
     let plugin_count = extender.plugins.lock().unwrap().len();

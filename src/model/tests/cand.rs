@@ -2,59 +2,21 @@ use crate::{ActValue, Candidate, Operation};
 use serde_json::json;
 
 #[test]
-fn model_candidate_user() {
-    let cand = Candidate::User("u1".to_string());
+fn model_candidate_value() {
+    let cand = Candidate::Value("u1".to_string());
 
     assert_eq!(
         Into::<ActValue>::into(cand),
-        json!({ "type": "user", "value": "u1" })
+        json!({ "type": "value", "value": "u1" })
     )
-}
-
-#[test]
-fn model_candidate_role() {
-    let cand = Candidate::Role("r1".to_string());
-    assert_eq!(
-        Into::<ActValue>::into(cand),
-        json!({ "type": "role", "value": "r1" })
-    )
-}
-
-#[test]
-fn model_candidate_org() {
-    let cand = Candidate::Unit("u1".to_string());
-    assert_eq!(
-        Into::<ActValue>::into(cand),
-        json!({ "type": "unit", "value": "u1" })
-    );
-
-    let cand = Candidate::Dept("d1".to_string());
-    assert_eq!(
-        Into::<ActValue>::into(cand),
-        json!({ "type": "dept", "value": "d1" })
-    );
-
-    let cand = Candidate::Relation("d.owner".to_string());
-    assert_eq!(
-        Into::<ActValue>::into(cand),
-        json!({ "type": "rel", "value": "d.owner" })
-    );
 }
 
 #[test]
 fn model_candidate_group() {
-    let cand_unit = Candidate::Unit("u1".to_string());
-    let cand_dept = Candidate::Dept("d1".to_string());
-    let cand_rel = Candidate::Relation("d.owner".to_string());
-    let cand_role = Candidate::Role("r1".to_string());
-    let cand_user = Candidate::User("u1".to_string());
+    let cand_user = Candidate::Value("u1".to_string());
     let cand = Candidate::Group {
         op: Operation::Intersect,
         items: vec![
-            cand_unit.clone(),
-            cand_dept.clone(),
-            cand_rel.clone(),
-            cand_role.clone(),
             cand_user.clone(),
         ],
     };
@@ -65,10 +27,6 @@ fn model_candidate_group() {
             "type": "group",
             "op": Operation::Intersect.to_string(), 
             "items": json!([
-                Into::<ActValue>::into(cand_unit),
-                Into::<ActValue>::into(cand_dept),
-                Into::<ActValue>::into(cand_rel),
-                Into::<ActValue>::into(cand_role),
                 Into::<ActValue>::into(cand_user),
         ]) })
     );
@@ -79,16 +37,16 @@ fn model_candidate_nest() {
     let cand1 = Candidate::Group {
         op: Operation::Union,
         items: vec![
-            Candidate::User("u1".to_string()),
-            Candidate::User("u2".to_string()),
+            Candidate::Value("u1".to_string()),
+            Candidate::Value("u2".to_string()),
         ],
     };
 
     let cand2 = Candidate::Group {
-        op: Operation::Difference,
+        op: Operation::Except,
         items: vec![
-            Candidate::Role("r1".to_string()),
-            Candidate::User("u3".to_string()),
+            Candidate::Value("r1".to_string()),
+            Candidate::Value("u3".to_string()),
         ],
     };
 
@@ -111,11 +69,11 @@ fn model_candidate_nest() {
 
 #[test]
 fn model_candidate_parse() {
-    let text = json!({ "type": "user", "value": "u1" }).to_string();
+    let text = json!({ "type": "value", "value": "u1" }).to_string();
     let cand = Candidate::parse(&text);
     assert!(cand.is_ok());
 
-    if let Candidate::User(value) = cand.unwrap() {
+    if let Candidate::Value(value) = cand.unwrap() {
         assert_eq!(value, "u1");
     } else {
         assert!(false);
@@ -123,12 +81,12 @@ fn model_candidate_parse() {
 }
 
 #[test]
-fn model_candidate_parse_str_as_user() {
+fn model_candidate_parse_str_as_value() {
     let text = "u1";
     let cand = Candidate::parse(text);
     assert!(cand.is_ok());
 
-    if let Candidate::User(value) = cand.unwrap() {
+    if let Candidate::Value(value) = cand.unwrap() {
         assert_eq!(value, "u1");
     } else {
         assert!(false);

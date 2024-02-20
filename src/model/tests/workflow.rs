@@ -1,4 +1,4 @@
-use crate::{Vars, Workflow};
+use crate::{Act, StmtBuild, Vars, Workflow};
 use serde_json::json;
 
 #[test]
@@ -47,12 +47,12 @@ fn model_workflow_set_id() {
 }
 
 #[test]
-fn model_workflow_set_env() {
+fn model_workflow_set_input() {
     let mut m = Workflow::new();
     let mut vars = Vars::new();
     vars.insert("v1".to_string(), 5.into());
     m.set_env(&vars);
-    assert_eq!(m.env.get("v1"), Some(&json!(5)));
+    assert_eq!(m.inputs.get_value("v1"), Some(&json!(5)));
 }
 
 #[test]
@@ -76,53 +76,46 @@ fn model_workflow_tag() {
 }
 
 #[test]
-fn model_workflow_actions() {
-    let m = Workflow::new()
-        .with_action(|action| action.with_id("a1"))
-        .with_action(|action| action.with_id("a2"));
-    assert_eq!(m.actions.len(), 2);
-    assert!(m.action("a1").is_some());
-}
-
-#[test]
-fn model_workflow_actions_with_on() {
-    let m = Workflow::new().with_action(|action| {
-        action.with_id("a1").with_on(|on| {
-            on.with_state("created")
-                .with_nid("step1")
-                .with_nkind("step")
-        })
+fn model_workflow_setup_build() {
+    let m = Workflow::new().with_setup(|stmts| {
+        stmts
+            .add(Act::msg(|msg| msg.with_id("msg1")))
+            .add(Act::set(Vars::new().with("a", 5)))
     });
-    assert!(m.action("a1").is_some());
-    assert_eq!(m.action("a1").unwrap().on.get(0).unwrap().state, "created");
-    assert_eq!(
-        m.action("a1")
-            .unwrap()
-            .on
-            .get(0)
-            .unwrap()
-            .nkind
-            .as_ref()
-            .unwrap(),
-        "step"
-    );
-    assert_eq!(
-        m.action("a1")
-            .unwrap()
-            .on
-            .get(0)
-            .unwrap()
-            .nid
-            .as_ref()
-            .unwrap(),
-        "step1"
-    );
+    assert_eq!(m.setup.len(), 2);
 }
 
 #[test]
-fn model_workflow_valid() {
-    let m = Workflow::new()
-        .with_step(|step| step.with_id("step1"))
-        .with_step(|step| step.with_id("step1"));
-    assert_eq!(m.valid().is_err(), true);
+fn model_workflow_setup_parse() {
+    let text = r#"
+    name: workflow
+    id: m1
+    setup:
+       - !msg
+         id: msg1
+       - !set
+         a: 6
+       - !on_created
+         - !msg
+           id: msg2
+       - !on_completed
+           - !msg
+             id: msg3
+       - !on_step
+           - !msg
+             id: msg3
+       - !on_before_update
+           - !msg
+             id: msg3
+       - !on_updated
+           - !msg
+             id: msg3
+       - !on_step
+           - !msg
+             id: msg3
+       - !expose
+         out:
+    "#;
+    let m = Workflow::from_yml(text).unwrap();
+    assert_eq!(m.setup.len(), 9);
 }

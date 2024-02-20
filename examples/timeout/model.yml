@@ -1,0 +1,34 @@
+name: a timeout example
+id: timeout
+steps:
+  - name: prepare
+    id: prepare
+    acts:
+      - !req
+        id: init
+  - name: step1
+    id: step1
+    acts:
+      - !req
+        id: act1
+    timeout:
+      - on: 2s
+        then:
+          - !msg
+            id: step1_timeout_2s
+            inputs:
+              a: 1
+      - on: 5s
+        then:
+          - !req
+            id: step1_timeout_5s
+            inputs:
+              a: 2
+      - on: 8s
+        then:
+          - !cmd
+            name: error
+            inputs:
+              err_code: err_timeout_8s
+  - name: final
+    id: final

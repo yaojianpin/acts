@@ -2,11 +2,11 @@ use tracing::debug;
 
 use crate::{
     event::ActionState,
-    sch::{self, TaskState},
+    sch::{self, StatementBatch, TaskLifeCycle, TaskState},
     store::{Cond, Expr, Query, Store},
     utils, ActError, Result, StoreAdapter, Workflow,
 };
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 impl Store {
     pub fn load(&self, cap: usize) -> Result<Vec<Arc<sch::Proc>>> {
@@ -32,7 +32,7 @@ impl Store {
                 proc.set_start_time(p.start_time);
                 proc.set_end_time(p.end_time);
                 proc.set_timestamp(p.timestamp);
-                proc.append_vars(vars);
+                proc.env().append(vars);
 
                 let proc = Arc::new(proc);
                 self.load_tasks(&proc)?;
@@ -51,6 +51,7 @@ impl Store {
                 let mut proc = Arc::new(sch::Proc::new(pid));
                 proc.load(&model)?;
                 proc.set_state(p.state.into());
+                proc.set_root_tid(&p.root_tid);
                 self.load_tasks(&mut proc)?;
 
                 return Ok(Some(proc));
@@ -86,9 +87,11 @@ impl Store {
                 task.timestamp = t.timestamp;
                 task.set_prev(t.prev);
 
-                let vars = serde_json::from_str(&t.vars)
-                    .map_err(|err| ActError::Store(err.to_string()))?;
-                task.room().append(&vars);
+                let hooks: HashMap<TaskLifeCycle, Vec<StatementBatch>> =
+                    serde_json::from_str(&t.hooks)
+                        .map_err(|err| ActError::Store(err.to_string()))?;
+                task.set_hooks(&hooks);
+
                 proc.push_task(Arc::new(task));
             }
         }

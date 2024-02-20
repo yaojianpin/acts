@@ -1,14 +1,15 @@
 name: actions
 id: actions
-env:
+inputs:
   v: 0
 outputs:
-  result:
+  result: ${ env.get("v")}
 steps:
   - name: prepare
     id: prepare
     acts:
-      - id: init
+      - !req
+        id: init
   - name: condition
     id: condition
     branches:
@@ -19,28 +20,33 @@ steps:
           - name: step1
             id: step1
             acts:
-              - id: action1
+              - !req
+                id: action1
                 inputs:
-                  result: ${ env.get("result") }
+                  v: ${ env.get("v") }
           - name: step2
             id: step2
             acts:
-              - id: action2
+              - !req
+                id: action2
                 inputs:
-                  result: ${ env.get("result") }        
+                  v: ${ env.get("v") }        
       - name: cond 2
         id: cond2
         else: true
         steps:
-          - name: step3
+          - !req
+            name: step3
             id: step3
             acts:
-              - id: action3
+              - !req
+                id: action3
   - name: final
     id: final
     acts:
-      - id: action4
+      - !req
+        id: action4
         inputs:
-          result: ${ env.get("result") }
+          v: ${ env.get("v") }
   
 

@@ -1,14 +1,13 @@
 use crate::{
-    sch::{NodeTree, Proc, Scheduler, TaskState},
+    sch::{tests::create_proc, NodeTree, TaskState},
     utils, Workflow,
 };
-use std::sync::Arc;
 
 #[tokio::test]
 async fn sch_proc_send() {
     let mut workflow = Workflow::default();
     let id = utils::longid();
-    let (proc, scher) = create_proc(&mut workflow, &id);
+    let (proc, scher, ..) = create_proc(&mut workflow, &id);
     scher.launch(&proc);
     scher.next().await;
 
@@ -20,7 +19,7 @@ async fn sch_proc_state() {
     let mut workflow = Workflow::default();
 
     let id = utils::longid();
-    let (proc, _) = create_proc(&mut workflow, &id);
+    let (proc, ..) = create_proc(&mut workflow, &id);
 
     proc.set_state(TaskState::Skip);
     assert_eq!(proc.state(), TaskState::Skip)
@@ -30,7 +29,7 @@ async fn sch_proc_state() {
 async fn sch_proc_cost() {
     let mut workflow = Workflow::default();
     let id = utils::longid();
-    let (proc, _) = create_proc(&mut workflow, &id);
+    let (proc, ..) = create_proc(&mut workflow, &id);
 
     proc.set_state(TaskState::Success);
     proc.set_start_time(100);
@@ -42,7 +41,7 @@ async fn sch_proc_cost() {
 #[tokio::test]
 async fn sch_proc_time() {
     let mut workflow = Workflow::new().with_step(|step| step.with_name("step1"));
-    let (proc, scher) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, ..) = create_proc(&mut workflow, &utils::longid());
     scher.launch(&proc);
     scher.event_loop().await;
 
@@ -56,30 +55,9 @@ async fn sch_proc_task() {
 
     let pid = utils::longid();
     let tr = NodeTree::build(&mut workflow).unwrap();
-    let (proc, _) = create_proc(&mut workflow, &pid);
+    let (proc, ..) = create_proc(&mut workflow, &pid);
 
     let node = tr.root.as_ref().unwrap();
     let task = proc.create_task(node, None);
     assert!(proc.task(&task.id).is_some())
-}
-
-fn create_proc(workflow: &mut Workflow, id: &str) -> (Arc<Proc>, Arc<Scheduler>) {
-    let scher = Scheduler::new();
-    let proc = scher.create_proc(id, workflow);
-
-    let evt = scher.emitter();
-    let s = scher.clone();
-    evt.on_complete(move |p| {
-        if p.inner().state.is_completed() {
-            s.close();
-        }
-    });
-
-    let s2 = scher.clone();
-    evt.on_error(move |p| {
-        println!("error in '{}', error={}", p.inner().pid, p.inner().state);
-        s2.close();
-    });
-
-    (proc, scher)
 }

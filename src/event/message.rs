@@ -1,7 +1,18 @@
 use super::ActionState;
-use crate::Vars;
+use crate::{utils, Msg, Vars};
 use serde::{Deserialize, Serialize};
 
+#[derive(Default, Serialize, Deserialize, Clone, Debug)]
+pub struct Model {
+    /// workflow id
+    pub id: String,
+
+    /// workflow tag
+    pub tag: String,
+
+    /// workflow name
+    pub name: String,
+}
 #[derive(Default, Serialize, Deserialize, Clone, Debug)]
 pub struct Message {
     /// task id
@@ -13,17 +24,14 @@ pub struct Message {
     /// task action state
     pub state: String,
 
-    /// message type which is node kind or other message type
+    /// message type
+    /// msg | req
     pub r#type: String,
 
-    /// workflow id
-    pub model_id: String,
+    // node kind
+    pub source: String,
 
-    /// workflow tag
-    pub model_tag: String,
-
-    /// workflow name
-    pub model_name: String,
+    pub model: Model,
 
     /// proc id
     pub proc_id: String,
@@ -49,6 +57,17 @@ pub struct Message {
 }
 
 impl Message {
+    pub fn from(msg: &Msg) -> Self {
+        Self {
+            name: msg.name.to_string(),
+            id: msg.id.to_string(),
+            tag: msg.tag.to_string(),
+            inputs: msg.inputs.clone(),
+            start_time: utils::time::time(),
+            ..Default::default()
+        }
+    }
+
     pub fn state(&self) -> ActionState {
         let state = self.state.clone().into();
         state
@@ -64,6 +83,10 @@ impl Message {
 
     pub fn is_type(&self, t: &str) -> bool {
         self.r#type == t
+    }
+
+    pub fn is_source(&self, t: &str) -> bool {
+        self.source == t
     }
 
     pub fn is_tag(&self, tag: &str) -> bool {

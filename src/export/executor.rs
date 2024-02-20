@@ -21,7 +21,7 @@ impl Executor {
 
         let mut vars = options.clone();
         // set the workflow initiator
-        if let Some(uid) = options.get(consts::FOR_ACT_KEY_UID) {
+        if let Some(uid) = options.get_value(consts::FOR_ACT_KEY_UID) {
             vars.insert(consts::INITIATOR.to_string(), uid.clone());
         }
 
@@ -54,6 +54,14 @@ impl Executor {
 
     pub fn error(&self, pid: &str, tid: &str, options: &Vars) -> Result<ActionResult> {
         self.do_action(pid, consts::EVT_ERR, tid, options)
+    }
+
+    pub fn push(&self, pid: &str, tid: &str, options: &Vars) -> Result<ActionResult> {
+        self.do_action(pid, consts::EVT_PUSH, tid, options)
+    }
+
+    pub fn remove(&self, pid: &str, tid: &str, options: &Vars) -> Result<ActionResult> {
+        self.do_action(pid, consts::EVT_REMOVE, tid, options)
     }
 
     fn do_action(

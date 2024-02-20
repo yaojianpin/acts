@@ -22,7 +22,7 @@ impl Client {
 
     pub fn process(&self, executor: &Executor, message: &Message) -> Result<()> {
         // println!("process: {:?}", message);
-        if message.is_type("act") && message.is_state("created") {
+        if message.is_type("req") && message.is_state("created") {
             match self.actions.get(&message.key) {
                 Some(action) => {
                     let outputs = action(&message.inputs);
@@ -40,18 +40,21 @@ impl Client {
     }
 
     pub fn init(_inputs: &Vars) -> Vars {
+        println!("init");
         let mut vars = Vars::new();
         vars.insert("v".to_string(), json!(10));
         vars
     }
     pub fn action1(_inputs: &Vars) -> Vars {
+        println!("action1");
         let mut vars = Vars::new();
         vars.insert("v".to_string(), json!(100));
 
         vars
     }
     pub fn action2(inputs: &Vars) -> Vars {
-        let v = inputs.get("v").unwrap().as_i64().unwrap();
+        println!("action2: {inputs}");
+        let v = inputs.get_value("v").unwrap().as_i64().unwrap();
 
         let mut vars = Vars::new();
         vars.insert("v".to_string(), json!(v * 2));

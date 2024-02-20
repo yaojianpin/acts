@@ -2,7 +2,7 @@ use crate::{
     event::Emitter,
     sch::{Proc, Scheduler, TaskState},
     utils::{self, consts},
-    Engine, Manager, Vars, Workflow,
+    Act, Engine, Manager, Vars, Workflow,
 };
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -12,7 +12,7 @@ async fn sch_act_use_start() {
     let ret = Arc::new(Mutex::new(false));
     let mut main = Workflow::new().with_id("main").with_step(|step| {
         step.with_id("step1")
-            .with_act(|act| act.with_id("act1").with_use("w2"))
+            .with_act(Act::r#use(|act| act.with_mid("w2")))
     });
 
     let w2 = Workflow::new()
@@ -42,7 +42,7 @@ async fn sch_act_use_not_found_error() {
     let ret = Arc::new(Mutex::new(false));
     let mut main = Workflow::new().with_id("main").with_step(|step| {
         step.with_id("step1")
-            .with_act(|act| act.with_id("act1").with_use("not_exists"))
+            .with_act(Act::r#use(|act| act.with_mid("not_exists")))
     });
 
     main.print();
@@ -63,16 +63,20 @@ async fn sch_act_use_not_found_error() {
 async fn sch_act_use_act_running() {
     let mut main = Workflow::new().with_id("main").with_step(|step| {
         step.with_id("step1")
-            .with_act(|act| act.with_id("act1").with_use("w2"))
+            .with_act(Act::r#use(|act| act.with_id("act1").with_mid("w2")))
     });
 
-    let w2 = Workflow::new()
-        .with_id("w2")
-        .with_step(|step| step.with_id("step1").with_act(|act| act.with_id("act2")));
+    let w2 = Workflow::new().with_id("w2").with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::r#use(|act| act.with_id("act2")))
+    });
 
     main.print();
     let (proc, scher, emitter) = create_proc(&mut main, &utils::longid());
     Manager::new(&scher).deploy(&w2).unwrap();
+    emitter.on_message(move |e| {
+        println!("message: {:?}", e.inner());
+    });
     emitter.on_start(move |e| {
         if e.mid == "w2" {
             e.close();
@@ -91,16 +95,17 @@ async fn sch_act_use_act_running() {
 #[tokio::test]
 async fn sch_act_use_act_complete() {
     let mut main = Workflow::new().with_id("main").with_step(|step| {
-        step.with_id("step1").with_act(|act| {
+        step.with_id("step1").with_act(Act::r#use(|act| {
             act.with_id("act1")
-                .with_use("w2")
-                .with_input("pid", json!("sub1"))
-        })
+                .with_mid("w2")
+                .with_input("pid", json!("sub2"))
+        }))
     });
 
-    let w2 = Workflow::new()
-        .with_id("w2")
-        .with_step(|step| step.with_id("s1").with_act(|act| act.with_id("act2")));
+    let w2 = Workflow::new().with_id("w2").with_step(|step| {
+        step.with_id("s1")
+            .with_act(Act::req(|act| act.with_id("act2")))
+    });
 
     main.print();
     let main_pid = utils::longid();
@@ -127,16 +132,17 @@ async fn sch_act_use_act_complete() {
 #[tokio::test]
 async fn sch_act_use_act_skip() {
     let mut main = Workflow::new().with_id("main").with_step(|step| {
-        step.with_id("step1").with_act(|act| {
+        step.with_id("step1").with_act(Act::r#use(|act| {
             act.with_id("act1")
-                .with_use("w2")
+                .with_mid("w2")
                 .with_input("pid", json!("sub1"))
-        })
+        }))
     });
 
-    let w2 = Workflow::new()
-        .with_id("w2")
-        .with_step(|step| step.with_id("s1").with_act(|act| act.with_id("act2")));
+    let w2 = Workflow::new().with_id("w2").with_step(|step| {
+        step.with_id("s1")
+            .with_act(Act::req(|act| act.with_id("act2")))
+    });
 
     main.print();
     let main_pid = utils::longid();
@@ -165,16 +171,17 @@ async fn sch_act_use_act_skip() {
 #[tokio::test]
 async fn sch_act_use_act_abort() {
     let mut main = Workflow::new().with_id("main").with_step(|step| {
-        step.with_id("step1").with_act(|act| {
+        step.with_id("step1").with_act(Act::r#use(|act| {
             act.with_id("act1")
-                .with_use("w2")
+                .with_mid("w2")
                 .with_input("pid", json!("sub1"))
-        })
+        }))
     });
 
-    let w2 = Workflow::new()
-        .with_id("w2")
-        .with_step(|step| step.with_id("s1").with_act(|act| act.with_id("act2")));
+    let w2 = Workflow::new().with_id("w2").with_step(|step| {
+        step.with_id("s1")
+            .with_act(Act::req(|act| act.with_id("act2")))
+    });
 
     main.print();
     let main_pid = utils::longid();
@@ -182,6 +189,7 @@ async fn sch_act_use_act_abort() {
 
     Manager::new(&scher).deploy(&w2).unwrap();
     emitter.on_message(move |e| {
+        // println!("message: {:?}", e.inner());
         if e.is_key("act2") && e.is_state("created") {
             let options = Vars::new();
             e.do_action(&e.proc_id, &e.id, consts::EVT_ABORT, &options)
@@ -201,16 +209,17 @@ async fn sch_act_use_act_abort() {
 #[tokio::test]
 async fn sch_act_use_act_error() {
     let mut main = Workflow::new().with_id("main").with_step(|step| {
-        step.with_id("step1").with_act(|act| {
+        step.with_id("step1").with_act(Act::r#use(|act| {
             act.with_id("act1")
-                .with_use("w2")
+                .with_mid("w2")
                 .with_input("pid", json!("sub1"))
-        })
+        }))
     });
 
-    let w2 = Workflow::new()
-        .with_id("w2")
-        .with_step(|step| step.with_id("s1").with_act(|act| act.with_id("act2")));
+    let w2 = Workflow::new().with_id("w2").with_step(|step| {
+        step.with_id("s1")
+            .with_act(Act::req(|act| act.with_id("act2")))
+    });
 
     main.print();
     let main_pid = utils::longid();

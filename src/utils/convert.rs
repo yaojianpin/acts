@@ -1,14 +1,13 @@
-use std::collections::HashMap;
-
 use crate::{
-    env::{Enviroment, Room},
+    env::{Enviroment, RefEnv},
     event::ActionState,
     sch::TaskState,
-    ActError, ActValue, Result, Vars,
+    ActValue, Vars,
 };
 use regex::Regex;
 use rhai::{Dynamic, Map};
 use serde_json::Map as JsonMap;
+use tracing::debug;
 
 pub fn value_to_dymainc(v: &ActValue) -> Dynamic {
     match v {
@@ -69,7 +68,7 @@ pub fn map_to_dynamic<'a>(map: &JsonMap<String, ActValue>) -> Map {
 /// fill the vars
 /// 1. if the inputs is an expression, just calculate it
 /// or insert the input itself
-pub fn fill_inputs<'a>(env: &Room, inputs: &'a Vars) -> Vars {
+pub fn fill_inputs<'a>(env: &RefEnv, inputs: &'a Vars) -> Vars {
     let mut ret = Vars::new();
     for (k, v) in inputs {
         if let ActValue::String(string) = v {
@@ -77,7 +76,10 @@ pub fn fill_inputs<'a>(env: &Room, inputs: &'a Vars) -> Vars {
                 let result = env.eval::<Dynamic>(&expr);
                 let new_value = match result {
                     Ok(v) => dynamic_to_value(&v),
-                    Err(_err) => ActValue::Null,
+                    Err(err) => {
+                        eprintln!("fill_inputs: {err}");
+                        ActValue::Null
+                    }
                 };
 
                 // satisfies the rule 1
@@ -94,7 +96,8 @@ pub fn fill_inputs<'a>(env: &Room, inputs: &'a Vars) -> Vars {
 /// fill the outputs
 /// 1. if the outputs is an expression, just calculate it
 /// 2. if the env and the outpus both has the same key, using the local outputs
-pub fn fill_outputs(env: &Room, outputs: &Vars) -> Vars {
+pub fn fill_outputs(env: &RefEnv, outputs: &Vars) -> Vars {
+    debug!("fill_outputs: env.data={} outputs={outputs}", env.data());
     let mut ret = Vars::new();
 
     for (k, v) in outputs {
@@ -113,10 +116,16 @@ pub fn fill_outputs(env: &Room, outputs: &Vars) -> Vars {
         }
 
         // rule 2
-        match env.get(k) {
-            Some(v) => ret.insert(k.to_string(), v.clone()),
-            None => ret.insert(k.to_string(), v.clone()),
-        };
+        if v.is_null() {
+            // the the env value
+            match env.get_env::<ActValue>(k) {
+                Some(v) => ret.insert(k.to_string(), v),
+                None => ret.insert(k.to_string(), v.clone()),
+            };
+        } else {
+            // insert the orign value
+            ret.insert(k.to_string(), v.clone());
+        }
     }
 
     ret
@@ -141,7 +150,7 @@ pub fn fill_proc_vars<'a>(env: &Enviroment, values: &'a Vars) -> Vars {
         }
 
         // rule 2
-        match env.get(k) {
+        match env.get_value(k) {
             Some(v) => ret.insert(k.to_string(), v.clone()),
             None => ret.insert(k.to_string(), v.clone()),
         };
@@ -173,6 +182,7 @@ pub fn action_state_to_str(state: ActionState) -> String {
         ActionState::Skipped => "skipped".to_string(),
         ActionState::Submitted => "submitted".to_string(),
         ActionState::Error => "error".to_string(),
+        ActionState::Removed => "removed".to_string(),
     }
 }
 
@@ -185,7 +195,8 @@ pub fn str_to_action_state(s: &str) -> ActionState {
         "created" => ActionState::Created,
         "skipped" => ActionState::Skipped,
         "submitted" => ActionState::Submitted,
-        "err" => ActionState::Error,
+        "error" => ActionState::Error,
+        "removed" => ActionState::Removed,
         "none" | _ => ActionState::None,
     }
 }
@@ -199,10 +210,10 @@ pub fn state_to_str(state: TaskState) -> String {
         TaskState::Fail(s) => format!("fail({})", s),
         TaskState::Skip => "skip".to_string(),
         TaskState::Abort => "abort".to_string(),
+        TaskState::Removed => "removed".to_string(),
         TaskState::None => "none".to_string(),
     }
 }
-
 
 pub fn str_to_state(str: &str) -> TaskState {
     let re = regex::Regex::new(r"^(.*)\((.*)\)$").unwrap();
@@ -230,24 +241,24 @@ pub fn str_to_state(str: &str) -> TaskState {
     }
 }
 
-pub fn value_to_hash_map(value: &ActValue) -> Result<HashMap<String, Vec<String>>> {
-    let arr = value.as_object().ok_or(ActError::Convert(format!(
-        "cannot convert json '{}' to hash_map, it is not object",
-        value
-    )))?;
+// pub fn value_to_hash_map(value: &ActValue) -> Result<HashMap<String, Vec<String>>> {
+//     let arr = value.as_object().ok_or(ActError::Convert(format!(
+//         "cannot convert json '{}' to hash_map, it is not object",
+//         value
+//     )))?;
 
-    let mut ret = HashMap::new();
-    for (k, v) in arr {
-        let items = v
-            .as_array()
-            .ok_or(ActError::Convert(format!(
-                "cannot convert json to vec, it is not array type in key '{}'",
-                k
-            )))?
-            .iter()
-            .map(|v| v.as_str().unwrap().to_string())
-            .collect();
-        ret.insert(k.to_string(), items);
-    }
-    Ok(ret)
-}
+//     let mut ret = HashMap::new();
+//     for (k, v) in arr {
+//         let items = v
+//             .as_array()
+//             .ok_or(ActError::Convert(format!(
+//                 "cannot convert json to vec, it is not array type in key '{}'",
+//                 k
+//             )))?
+//             .iter()
+//             .map(|v| v.as_str().unwrap().to_string())
+//             .collect();
+//         ret.insert(k.to_string(), items);
+//     }
+//     Ok(ret)
+// }
