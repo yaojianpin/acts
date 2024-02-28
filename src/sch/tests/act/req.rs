@@ -1467,3 +1467,62 @@ async fn sch_act_req_chain() {
         TaskState::Success
     );
 }
+
+#[tokio::test]
+async fn sch_act_req_with_key() {
+    let ret = Arc::new(Mutex::new(vec![]));
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_setup(|setup| setup.add(Act::req(|act| act.with_id("act1").with_key("key1"))))
+    });
+
+    workflow.print();
+    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
+    let r = ret.clone();
+    emitter.on_message(move |e| {
+        println!("message: {:?}", e);
+        if e.is_type("req") && e.is_state("created") {
+            r.lock().unwrap().push(e.inner().clone());
+            e.close();
+        }
+    });
+    scher.launch(&proc);
+    scher.event_loop().await;
+    proc.print();
+    assert_eq!(
+        proc.task_by_nid("act1").get(0).unwrap().state(),
+        TaskState::Interrupt
+    );
+    let messages = ret.lock().unwrap();
+    assert_eq!(messages.len(), 1);
+    assert_eq!(messages.get(0).unwrap().key, "key1");
+}
+
+
+#[tokio::test]
+async fn sch_act_req_on_timeout() {
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_name("step1").with_act(Act::req(|act| {
+            act.with_id("act1").with_timeout(|c| {
+                c.with_on("2s")
+                    .with_then(|stmts| stmts.add(Act::req(|act| act.with_id("act2"))))
+            })
+        }))
+    });
+
+    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
+    emitter.on_message(move |e| {
+        println!("message: {e:?}");
+        if e.is_key("act2") {
+            e.close();
+        }
+    });
+
+    scher.launch(&proc);
+    scher.event_loop().await;
+    proc.print();
+    assert_eq!(
+        proc.task_by_nid("act2").get(0).unwrap().state(),
+        TaskState::Interrupt
+    );
+}

@@ -19,26 +19,32 @@ fn model_act_msg_parse() {
 }
 
 #[test]
-fn model_act_req_id() {
+fn model_act_msg_id() {
     let act = Msg::new().with_id("act1");
     assert_eq!(act.id, "act1");
 }
 
 #[test]
-fn model_act_req_name() {
+fn model_act_msg_name() {
     let act = Msg::new().with_name("my name");
     assert_eq!(act.name, "my name");
 }
 
 #[test]
-fn model_act_req_inputs() {
+fn model_act_msg_inputs() {
     let act = Msg::new().with_input("p1", 5);
     assert_eq!(act.inputs.len(), 1);
     assert_eq!(act.inputs.get("p1"), Some(5));
 }
 
 #[test]
-fn model_act_req_tag() {
+fn model_act_msg_tag() {
     let act = Msg::new().with_tag("tag1");
     assert_eq!(act.tag, "tag1");
+}
+
+#[test]
+fn model_act_msg_key() {
+    let act = Msg::new().with_key("key1");
+    assert_eq!(act.key, "key1");
 }

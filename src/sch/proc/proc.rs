@@ -241,17 +241,15 @@ impl Proc {
     }
 
     pub(crate) fn do_tick(&self, scher: &Arc<Scheduler>) {
-        self.find_tasks(|t| {
-            t.hooks().contains_key(&TaskLifeCycle::Timeout) && t.state().is_running()
-        })
-        .iter()
-        .for_each(|t| {
-            let ctx = t.create_context(scher);
-            t.run_hooks_timeout(&ctx).unwrap_or_else(|err| {
-                eprintln!("{}", err);
-                error!("{}", err);
-            });
-        })
+        self.find_tasks(|t| t.hooks().contains_key(&TaskLifeCycle::Timeout))
+            .iter()
+            .for_each(|t| {
+                let ctx = t.create_context(scher);
+                t.run_hooks_timeout(&ctx).unwrap_or_else(|err| {
+                    eprintln!("{}", err);
+                    error!("{}", err);
+                });
+            })
     }
 
     #[instrument(skip(scher))]

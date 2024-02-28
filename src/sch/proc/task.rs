@@ -154,6 +154,12 @@ impl Task {
             }
         }
 
+        // if there is no key, use id instead
+        let mut key = self.node.key();
+        if key.is_empty() {
+            key = self.node.id();
+        }
+
         Message {
             id: self.id.clone(),
             name: self.node.content.name(),
@@ -161,7 +167,7 @@ impl Task {
             source: self.node.kind().to_string(),
             state: self.action_state().to_string(),
             proc_id: self.proc_id.clone(),
-            key: self.node.id().to_string(),
+            key: key.to_string(),
             tag: self.node.tag().to_string(),
 
             model: Model {
@@ -329,6 +335,7 @@ impl Task {
                         .ok_or(ActError::Runtime(format!("cannot find 'id' in options")))?,
                     name: ctx.get_var::<String>("name").unwrap_or_default(),
                     tag: ctx.get_var::<String>("tag").unwrap_or_default(),
+                    key: ctx.get_var::<String>("key").unwrap_or_default(),
                     inputs: ctx.get_var("inputs").unwrap_or_default(),
                     outputs: ctx.get_var("outputs").unwrap_or_default(),
                     rets: ctx.get_var("rets").unwrap_or_default(),

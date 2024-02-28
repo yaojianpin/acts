@@ -320,13 +320,19 @@ impl Context {
         let workflow = self.proc.model();
 
         let inputs = utils::fill_inputs(&self.task.env(), &msg.inputs);
+        // if there is no key, use id instead
+        let mut key = &msg.key;
+        if key.is_empty() {
+            key = &msg.id;
+        }
+
         let msg = Message {
             id: utils::shortid(),
             r#type: consts::ACT_TYPE_MSG.to_string(),
             source: self.task.node.kind().to_string(),
             state: self.task.action_state().to_string(),
             proc_id: self.task.proc_id.clone(),
-            key: msg.id.to_string(),
+            key: key.to_string(),
             name: msg.name.clone(),
 
             model: Model {

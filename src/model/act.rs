@@ -139,6 +139,14 @@ impl Act {
         }
     }
 
+    pub fn key(&self) -> &str {
+        match self {
+            Act::Req(req) => &req.key,
+            Act::Msg(msg) => &msg.key,
+            _ => "",
+        }
+    }
+
     pub fn name(&self) -> &str {
         match self {
             Act::Req(req) => &req.name,

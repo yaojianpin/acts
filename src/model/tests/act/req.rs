@@ -1,4 +1,4 @@
-use crate::{Act, Req};
+use crate::{Act, Req, StmtBuild, Vars};
 use serde_json::json;
 
 #[test]
@@ -52,4 +52,34 @@ fn model_act_req_outputs() {
 fn model_act_req_tag() {
     let act = Req::new().with_tag("tag1");
     assert_eq!(act.tag, "tag1");
+}
+
+#[test]
+fn model_act_req_key() {
+    let act = Req::new().with_key("key1");
+    assert_eq!(act.key, "key1");
+}
+
+#[test]
+fn model_act_req_catch() {
+    let act = Req::new().with_catch(|c| c.with_err("err1"));
+    assert_eq!(act.catches.len(), 1);
+}
+
+#[test]
+fn model_act_req_timeout() {
+    let act = Req::new().with_timeout(|c| c.with_on(r#"1d"#));
+    assert_eq!(act.timeout.len(), 1);
+}
+
+#[test]
+fn model_act_req_on_created() {
+    let act = Req::new().with_on_created(|acts| acts.add(Act::set(Vars::new().with("a", 5))));
+    assert_eq!(act.on_created.len(), 1);
+}
+
+#[test]
+fn model_act_req_on_completed() {
+    let act = Req::new().with_on_completed(|acts| acts.add(Act::set(Vars::new().with("a", 5))));
+    assert_eq!(act.on_completed.len(), 1);
 }

@@ -1,4 +1,4 @@
-use crate::{Act, Catch, Vars};
+use crate::{Act, Catch, Timeout, Vars};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -29,7 +29,9 @@ pub struct Req {
     #[serde(default)]
     pub on_completed: Vec<Act>,
     #[serde(default)]
-    pub on_error_catch: Vec<Catch>,
+    pub catches: Vec<Catch>,
+    #[serde(default)]
+    pub timeout: Vec<Timeout>,
 }
 
 impl Req {
@@ -48,6 +50,11 @@ impl Req {
 
     pub fn with_tag(mut self, tag: &str) -> Self {
         self.tag = tag.to_string();
+        self
+    }
+
+    pub fn with_key(mut self, key: &str) -> Self {
+        self.key = key.to_string();
         self
     }
 
@@ -89,7 +96,13 @@ impl Req {
 
     pub fn with_catch(mut self, build: fn(Catch) -> Catch) -> Self {
         let c = Catch::default();
-        self.on_error_catch.push(build(c));
+        self.catches.push(build(c));
+        self
+    }
+
+    pub fn with_timeout(mut self, build: fn(Timeout) -> Timeout) -> Self {
+        let c = Timeout::default();
+        self.timeout.push(build(c));
         self
     }
 }

@@ -13,6 +13,9 @@ pub struct Msg {
     pub tag: String,
 
     #[serde(default)]
+    pub key: String,
+
+    #[serde(default)]
     pub inputs: Vars,
 }
 
@@ -38,6 +41,11 @@ impl Msg {
 
     pub fn with_tag(mut self, tag: &str) -> Self {
         self.tag = tag.to_string();
+        self
+    }
+    
+    pub fn with_key(mut self, key: &str) -> Self {
+        self.key = key.to_string();
         self
     }
 

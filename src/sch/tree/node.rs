@@ -137,6 +137,15 @@ impl Node {
         &self.id
     }
 
+    pub fn key(&self) -> &str {
+        match &self.content {
+            NodeContent::Workflow(n) => &n.id,
+            NodeContent::Branch(n) => &n.id,
+            NodeContent::Step(n) => &n.id,
+            NodeContent::Act(n) => n.key(),
+        }
+    }
+
     pub fn name(&self) -> String {
         self.content.name()
     }
