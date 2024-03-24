@@ -234,7 +234,7 @@ async fn sch_step_acts_pack() {
     let ret = Arc::new(Mutex::new(Vec::new()));
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_input("a", json!(10)).with_id("step1").with_act({
-            Act::pack(|act| {
+            Act::block(|act| {
                 act.with_acts(|stmts| stmts.add(Act::msg(|msg| msg.with_id("msg1"))))
                     .with_next(|act| {
                         act.with_acts(|stmts| stmts.add(Act::msg(|msg| msg.with_id("msg2"))))

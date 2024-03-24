@@ -11,6 +11,9 @@ mod event;
 mod export;
 mod model;
 mod options;
+
+#[cfg(feature = "wit")]
+mod packet;
 mod plugin;
 mod sch;
 mod store;

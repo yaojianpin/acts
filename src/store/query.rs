@@ -1,13 +1,8 @@
 use std::{collections::HashSet, slice::IterMut};
 
-#[derive(Debug)]
-pub struct DbKey {
-    pub name: Box<[u8]>,
-    pub value: Box<[u8]>,
-}
-
 #[derive(Debug, Clone)]
 pub struct Query {
+    offset: usize,
     limit: usize,
     conds: Vec<Cond>,
 }
@@ -55,36 +50,7 @@ impl Cond {
         self
     }
 
-    pub fn calc(&mut self) {
-        match self.r#type {
-            CondType::And => {
-                for c in self.conds.iter_mut() {
-                    if self.result.len() == 0 {
-                        self.result = c.result.clone();
-                    } else {
-                        self.result = self
-                            .result
-                            .intersection(&c.result)
-                            .cloned()
-                            .collect::<HashSet<_>>()
-                    }
-                }
-            }
-            CondType::Or => {
-                for c in self.conds.iter_mut() {
-                    if self.result.len() == 0 {
-                        self.result = c.result.clone();
-                    } else {
-                        self.result = self
-                            .result
-                            .union(&c.result)
-                            .cloned()
-                            .collect::<HashSet<_>>()
-                    }
-                }
-            }
-        }
-    }
+    
 }
 
 impl Expr {
@@ -100,6 +66,7 @@ impl Expr {
 impl Query {
     pub fn new() -> Self {
         Query {
+            offset: 0,
             limit: 100000, // default to a big number
             conds: Vec::new(),
         }
@@ -134,6 +101,12 @@ impl Query {
         self
     }
 
+    pub fn set_offset(mut self, offset: usize) -> Self {
+        self.offset = offset;
+
+        self
+    }
+
     pub fn set_limit(mut self, limit: usize) -> Self {
         self.limit = limit;
 
@@ -141,7 +114,15 @@ impl Query {
     }
 
     pub fn limit(&self) -> usize {
+        if self.limit == 0 {
+            return 10000;
+        }
+
         self.limit
+    }
+
+    pub fn offset(&self) -> usize {
+        self.offset
     }
 
     pub fn is_cond(&self) -> bool {

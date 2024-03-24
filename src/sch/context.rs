@@ -121,13 +121,13 @@ impl Context {
         debug!("append_act: {act:?}  {:?}", self.task);
         let mut task = self.task.clone();
         if self.task.is_kind(NodeKind::Act) {
-            let is_package_act = self.task.is_act(consts::ACT_TYPE_PACK);
+            let is_package_act = self.task.is_act(consts::ACT_TYPE_BLOCK);
 
             // not package act or completed package
             if !is_package_act || (is_package_act && self.task.state().is_completed()) {
                 // find its parent to append task
                 while let Some(parent) = task.parent() {
-                    if parent.is_kind(NodeKind::Step) || parent.is_act(consts::ACT_TYPE_PACK) {
+                    if parent.is_kind(NodeKind::Step) || parent.is_act(consts::ACT_TYPE_BLOCK) {
                         task = parent;
                         break;
                     }

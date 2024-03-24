@@ -1,14 +1,16 @@
+mod block;
+mod call;
 mod cmd;
+#[cfg(feature = "wit")]
 mod pack;
 mod req;
-mod r#use;
 
 use super::TaskLifeCycle;
 use crate::{
     event::ActionState,
     sch::Context,
     utils::{self, consts},
-    Act, ActTask, Package, Result, Vars,
+    Act, ActTask, Block, Result, Vars,
 };
 use async_trait::async_trait;
 use std::{cell::RefCell, rc::Rc};
@@ -18,8 +20,11 @@ impl ActTask for Act {
     fn init(&self, ctx: &Context) -> Result<()> {
         match self {
             Act::Req(req) => req.init(ctx),
-            Act::Use(u) => u.init(ctx),
-            Act::Package(pack) => pack.init(ctx),
+            Act::Call(u) => u.init(ctx),
+            Act::Block(b) => b.init(ctx),
+
+            #[cfg(feature = "wit")]
+            Act::Pack(p) => p.init(ctx),
             _ => Ok(()),
         }
     }
@@ -27,8 +32,10 @@ impl ActTask for Act {
     fn run(&self, ctx: &Context) -> Result<()> {
         match self {
             Act::Req(req) => req.run(ctx),
-            Act::Use(u) => u.run(ctx),
-            Act::Package(pack) => pack.run(ctx),
+            Act::Call(u) => u.run(ctx),
+            Act::Block(b) => b.run(ctx),
+            #[cfg(feature = "wit")]
+            Act::Pack(p) => p.run(ctx),
             _ => Ok(()),
         }
     }
@@ -36,8 +43,10 @@ impl ActTask for Act {
     fn next(&self, ctx: &Context) -> Result<bool> {
         match self {
             Act::Req(req) => req.next(ctx),
-            Act::Use(u) => u.next(ctx),
-            Act::Package(pack) => pack.next(ctx),
+            Act::Call(u) => u.next(ctx),
+            Act::Block(b) => b.next(ctx),
+            #[cfg(feature = "wit")]
+            Act::Pack(p) => p.next(ctx),
             _ => Ok(false),
         }
     }
@@ -45,8 +54,10 @@ impl ActTask for Act {
     fn review(&self, ctx: &Context) -> Result<bool> {
         match self {
             Act::Req(req) => req.review(ctx),
-            Act::Use(u) => u.review(ctx),
-            Act::Package(pack) => pack.review(ctx),
+            Act::Call(u) => u.review(ctx),
+            Act::Block(b) => b.review(ctx),
+            #[cfg(feature = "wit")]
+            Act::Pack(p) => p.review(ctx),
             _ => Ok(true),
         }
     }
@@ -104,8 +115,12 @@ impl Act {
                     };
                 }
             }
-            Act::Package(pack) => {
-                ctx.append_act(&Act::Package(pack.clone()))?;
+            Act::Block(b) => {
+                ctx.append_act(&Act::Block(b.clone()))?;
+            }
+            #[cfg(feature = "wit")]
+            Act::Pack(p) => {
+                ctx.append_act(&Act::Pack(p.clone()))?;
             }
             Act::If(cond) => {
                 let result = ctx.eval(&cond.on)?;
@@ -135,7 +150,7 @@ impl Act {
                 let cands = cans.values()?;
                 let mut items = cands.iter().enumerate();
                 if let Some((index, value)) = items.next() {
-                    let head = Rc::new(RefCell::new(Package::new()));
+                    let head = Rc::new(RefCell::new(Block::new()));
 
                     head.borrow_mut().id = utils::shortid();
                     head.borrow_mut().inputs = Vars::new()
@@ -145,7 +160,7 @@ impl Act {
 
                     let mut pre = head.clone();
                     while let Some((index, value)) = items.next() {
-                        let p = Rc::new(RefCell::new(Package::new()));
+                        let p = Rc::new(RefCell::new(Block::new()));
                         p.borrow_mut().id = utils::shortid();
                         p.borrow_mut().inputs = Vars::new()
                             .with(consts::ACT_INDEX, index)
@@ -156,12 +171,12 @@ impl Act {
                         pre = p;
                     }
 
-                    let act = Act::Package(head.take());
+                    let act = Act::Block(head.take());
                     act.exec(ctx)?;
                 }
             }
-            Act::Use(u) => {
-                ctx.append_act(&Act::Use(u.clone()))?;
+            Act::Call(u) => {
+                ctx.append_act(&Act::Call(u.clone()))?;
             }
             Act::OnCreated(stmts) => {
                 for s in stmts {

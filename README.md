@@ -8,9 +8,9 @@ This workflow engine focus on the workflow logics itself and message distributio
 ## Key Features
 
 ### Fast
-Uses rust to create the lib, there is no virtual machine, no db dependencies. It also provides the feature `local_store` to enable the local store. 
+Uses rust to create the lib, there is no virtual machine, no db dependencies. It also provides the feature `store` to enable the local store. 
 
-```txt
+```txt,no_run
 load                    time:   [67.642 µs 76.809 µs 87.116 µs]
                         change: [-11.599% +0.4158% +14.468%] (p = 0.94 > 0.05)
                         No change in performance detected.
@@ -39,11 +39,11 @@ Found 4 outliers among 100 measurements (4.00%)
 ```
 
 ### Tiny
-The lib size is only 3.5mb (no local_store), you can use Adapter to create external store.
+The lib size is only 4.2mb (no store), you can use Adapter to create external store.
 
 ### Extensiable
 Supports for extending the plugin
-Supports for creating external store
+Supports for creating external store, please refer to the code under `src/store/db/local`.
 
 ## Installation
 The easiest way to get the latest version of `acts` is to install it via `cargo`
@@ -58,7 +58,7 @@ cargo add acts
 4. Config events by `engine.emitter()`.
 5. Start the workflow by `engine.executor()`.
 
-```rust
+```rust,no_run
 use acts::{Engine, Vars, Workflow};
 
 #[tokio::main]
@@ -67,7 +67,7 @@ async fn main() {
     engine.start();
 
     let text = include_str!("../examples/simple/model.yml");
-    let mut workflow = Workflow::from_yml(text).unwrap();
+    let workflow = Workflow::from_yml(text).unwrap();
 
     let executor = engine.executor();
     engine.manager().deploy(&workflow).expect("fail to deploy workflow");
@@ -75,7 +75,7 @@ async fn main() {
     let mut vars = Vars::new();
     vars.insert("input".into(), 3.into());
     vars.insert("pid".to_string(), "w1".into());
-    executor.start(&workflow.id, &vars);
+    executor.start(&workflow.id, &vars).expect("fail to start workflow");;
     let emitter = engine.emitter();
 
     emitter.on_start(|e| {
@@ -147,7 +147,7 @@ steps:
 
 The inputs can also be set by starting the workflow.
 
-```rust
+```rust,no_run
 use acts::{Engine, Vars, Workflow};
 
 #[tokio::main]
@@ -159,7 +159,7 @@ async fn main() {
 
   let mut vars = Vars::new();
   vars.insert("input".into(), 3.into());
-  vars.insert("pid".to_string(), "w1".into());
+  vars.insert("pid".to_string(), "w2".into());
 
   executor.start("m1", &vars);
 }
@@ -463,12 +463,18 @@ steps:
 For more acts example, please see [`examples`](<https://github.com/yaojianpin/acts/tree/main/examples>)
 
 ## Store
-You can enable the store feature using `local_store`, which uses [`rocksdb`](<https://github.com/rust-rocksdb/rust-rocksdb>) to build.
+You can enable the store feature using `store`, which uses [`duckdb`](<https://github.com/duckdb/duckdb>) to build.
+
+To enable feature `store`
+```ignore
+[dependencies]
+acts = { version = "*", features = ["store"] }
+```
 
 For external store:
 
- ```rust
- use acts::{Engine, data::{Model, Proc, Task}, DbSet, StoreAdapter};
+ ```rust,no_run
+ use acts::{Engine, data::{Model, Proc, Task, Package}, DbSet, StoreAdapter};
  use std::sync::Arc;
 
  #[derive(Clone)]
@@ -484,8 +490,11 @@ For external store:
      fn tasks(&self) -> Arc<dyn DbSet<Item =Task>> {
          todo!()
      }
+     fn packages(&self) -> Arc<dyn DbSet<Item =Package>> {
+         todo!()
+     }
      fn init(&self) {}
-     fn flush(&self) {}
+     fn close(&self) {}
  }
 
 #[tokio::main]
@@ -497,6 +506,15 @@ async fn main() {
   engine.adapter().set_store(&store);
 }
  ```
+
+## Wit package
+`acts` engine intergrates the [`wasmtime`](<https://github.com/bytecodealliance/wasmtime>) runtime to execute the wit component, which can extend the engine abilities.
+for more information please see the example [`package`](<https://github.com/yaojianpin/acts/tree/main/examples/package>)
+
+```ignore
+[dependencies]
+acts = { version = "*", features = ["wit"] }
+```
 
 ## Acts-Server
 Create a acts-server to interact with clients based on grpc.

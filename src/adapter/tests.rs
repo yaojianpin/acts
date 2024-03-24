@@ -32,6 +32,7 @@ pub struct TestStore {
     models: Collect<data::Model>,
     procs: Collect<data::Proc>,
     tasks: Collect<data::Task>,
+    packages: Collect<data::Package>,
 }
 
 impl TestStore {
@@ -40,13 +41,14 @@ impl TestStore {
             models: Collect::new(),
             procs: Collect::new(),
             tasks: Collect::new(),
+            packages: Collect::new(),
         }
     }
 }
 
 impl StoreAdapter for TestStore {
     fn init(&self) {}
-    fn flush(&self) {}
+    fn close(&self) {}
 
     fn models(&self) -> Arc<dyn DbSet<Item = data::Model>> {
         Arc::new(self.models.clone())
@@ -58,6 +60,10 @@ impl StoreAdapter for TestStore {
 
     fn tasks(&self) -> Arc<dyn DbSet<Item = data::Task>> {
         Arc::new(self.tasks.clone())
+    }
+
+    fn packages(&self) -> Arc<dyn DbSet<Item = data::Package>> {
+        Arc::new(self.packages.clone())
     }
 }
 

@@ -69,7 +69,6 @@ impl Scheduler {
             // the pid will use as the proc_id
             proc_id = pid.to_string();
         }
-
         let proc = self.cache.proc(&proc_id);
         if proc.is_some() {
             return Err(ActError::Action(format!(

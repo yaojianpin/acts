@@ -31,6 +31,8 @@ pub const TASK_EMIT_DISABLED: &str = "emit_disabled";
 pub const IS_CATCH_PROCESSED: &str = "is_catch_processed";
 pub const IS_TIMEOUT_PROCESSED_PREFIX: &str = "timeout_";
 
-pub const ACT_TYPE_PACK: &str = "pack";
+pub const ACT_TYPE_BLOCK: &str = "block";
 pub const ACT_TYPE_MSG: &str = "msg";
-pub const ACT_OUTPUTS: &str = "act_outputs";
+pub const ACT_OUTPUTS: &str = "outputs";
+
+pub const ACT_TO: &str = "to";

@@ -1,5 +1,5 @@
 use crate::{
-    store::{db::LocalStore, Model, Proc, StoreAdapter, Task},
+    store::{db::LocalStore, Model, Package, Proc, StoreAdapter, Task},
     utils, ActError, Result, ShareLock, Workflow,
 };
 use std::sync::{Arc, Mutex, RwLock};
@@ -36,8 +36,12 @@ impl StoreAdapter for Store {
         self.base.read().unwrap().tasks()
     }
 
-    fn flush(&self) {
-        self.base.read().unwrap().flush()
+    fn packages(&self) -> Arc<dyn super::DbSet<Item = Package>> {
+        self.base.read().unwrap().packages()
+    }
+
+    fn close(&self) {
+        self.base.read().unwrap().close()
     }
 }
 
@@ -57,8 +61,8 @@ impl Store {
         }
     }
 
-    pub fn local(path: &str) -> Self {
-        let store = Arc::new(LocalStore::new(path));
+    pub fn local(path: &str, name: &str) -> Self {
+        let store = Arc::new(LocalStore::new(path, name));
         Self {
             kind: Arc::new(Mutex::new(StoreKind::Local)),
             base: Arc::new(RwLock::new(store)),
@@ -67,15 +71,51 @@ impl Store {
 
     #[cfg(test)]
     pub fn reset(&self) {
-        let store = Self::default();
-        #[cfg(feature = "local_store")]
-        let store = Self::local("data");
-        *self.kind.lock().unwrap() = store.kind();
-        *self.base.write().unwrap() = store.base();
+        #[cfg(not(feature = "store"))]
+        {
+            let store = Self::default();
+            *self.kind.lock().unwrap() = store.kind();
+            *self.base.write().unwrap() = store.base();
+        }
+        #[cfg(feature = "store")]
+        {
+            let store = Self::local("data", "acts.db");
+            *self.kind.lock().unwrap() = store.kind();
+            *self.base.write().unwrap() = store.base();
+        }
     }
 
+    pub fn publish(&self, pack: &Package) -> Result<bool> {
+        trace!("store::publish({})", pack.id);
+        if pack.id.is_empty() {
+            return Err(ActError::Action("missing id in package".into()));
+        }
+
+        if pack.file_data.len() == 0 {
+            return Err(ActError::Action("missing file in package".into()));
+        }
+
+        let packages = self.base().packages();
+        match packages.find(&pack.id) {
+            Ok(m) => {
+                let data = Package {
+                    create_time: m.create_time,
+                    update_time: utils::time::time(),
+                    ..pack.clone()
+                };
+                packages.update(&data)
+            }
+            Err(_) => {
+                let data = Package {
+                    create_time: utils::time::time(),
+                    ..pack.clone()
+                };
+                packages.create(&data)
+            }
+        }
+    }
     pub fn deploy(&self, model: &Workflow) -> Result<bool> {
-        trace!("store::create_model({})", model.id);
+        trace!("store::deploy({})", model.id);
         if model.id.is_empty() {
             return Err(ActError::Action("missing id in model".into()));
         }

@@ -4,6 +4,16 @@ use serde_json::json;
 use std::sync::Arc;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct PackageInfo {
+    pub id: String,
+    pub name: String,
+    pub size: u32,
+    pub create_time: i64,
+    pub update_time: i64,
+    pub timestamp: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct ProcInfo {
     pub id: String,
     pub name: String,
@@ -39,6 +49,19 @@ pub struct ModelInfo {
     pub size: u32,
     pub time: i64,
     pub model: String,
+}
+
+impl From<&data::Package> for PackageInfo {
+    fn from(m: &data::Package) -> Self {
+        Self {
+            id: m.id.clone(),
+            name: m.name.clone(),
+            size: m.size,
+            timestamp: m.timestamp,
+            create_time: m.create_time,
+            update_time: m.update_time,
+        }
+    }
 }
 
 impl ModelInfo {
@@ -98,6 +121,19 @@ impl From<data::Task> for TaskInfo {
             end_time: t.end_time,
             timestamp: t.timestamp,
         }
+    }
+}
+
+impl Into<serde_json::Value> for PackageInfo {
+    fn into(self) -> serde_json::Value {
+        json!({
+            "id": self.id,
+            "name": self.name,
+            "size": self.size,
+            "timestamp": self.timestamp,
+            "create_time": self.create_time,
+            "update_time": self.update_time,
+        })
     }
 }
 

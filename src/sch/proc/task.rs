@@ -368,9 +368,11 @@ impl Task {
                         self.id
                     )));
                 }
-                let nid = ctx.get_var::<String>("to").ok_or(ActError::Action(format!(
-                    "cannot find 'to' value in options",
-                )))?;
+                let nid = ctx
+                    .get_var::<String>(consts::ACT_TO)
+                    .ok_or(ActError::Action(format!(
+                        "cannot find 'to' value in options",
+                    )))?;
 
                 let mut path_tasks = Vec::new();
                 let task = self.backs(
@@ -505,7 +507,6 @@ impl Task {
                 task.error(ctx)?;
             }
         }
-
         Ok(())
     }
 

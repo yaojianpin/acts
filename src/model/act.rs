@@ -1,3 +1,5 @@
+mod block;
+mod call;
 mod chain;
 mod cmd;
 mod each;
@@ -5,16 +7,16 @@ mod r#if;
 mod msg;
 mod pack;
 mod req;
-mod r#use;
 
 use crate::{Catch, ModelBase, StmtBuild, Timeout, Vars};
+pub use block::Block;
+pub use call::Call;
 pub use chain::Chain;
 pub use cmd::Cmd;
 pub use each::Each;
 pub use msg::Msg;
-pub use pack::Package;
+pub use pack::Pack;
 pub use r#if::If;
-pub use r#use::Use;
 pub use req::Req;
 use serde::{Deserialize, Serialize};
 
@@ -41,14 +43,18 @@ pub enum Act {
     #[serde(rename = "chain")]
     Chain(Chain),
 
-    #[serde(rename = "pack")]
-    Package(Package),
+    #[serde(rename = "block")]
+    Block(Block),
 
     #[serde(rename = "if")]
     If(If),
 
-    #[serde(rename = "use")]
-    Use(Use),
+    #[serde(rename = "call")]
+    Call(Call),
+
+    #[cfg(feature = "wit")]
+    #[serde(rename = "pack")]
+    Pack(Pack),
 
     #[serde(rename = "on_created")]
     OnCreated(Vec<Act>),
@@ -77,8 +83,8 @@ impl ModelBase for Act {
         match self {
             Act::Req(req) => &req.id,
             Act::Msg(msg) => &msg.id,
-            Act::Use(r#use) => &r#use.id,
-            Act::Package(pack) => &pack.id,
+            Act::Call(r#use) => &r#use.id,
+            Act::Block(pack) => &pack.id,
             _ => "",
         }
     }
@@ -101,9 +107,11 @@ impl Act {
             Act::Cmd(_) => "cmd",
             Act::Each(_) => "each",
             Act::Chain(_) => "chain",
-            Act::Package(_) => "pack",
+            Act::Block(_) => "block",
             Act::If(_) => "if",
-            Act::Use(_) => "use",
+            Act::Call(_) => "use",
+            #[cfg(feature = "wit")]
+            Act::Pack(_) => "pack",
             Act::OnCreated(_) => "on_created",
             Act::OnTimeout(_) => "on_timeout",
             Act::OnBeforeUpdate(_) => "on_before_update",
@@ -116,7 +124,9 @@ impl Act {
 
     pub fn is_taskable(&self) -> bool {
         match self {
-            Act::Req(_) | Act::Package(_) | Act::Use(_) => true,
+            Act::Req(_) | Act::Block(_) | Act::Call(_) => true,
+            #[cfg(feature = "wit")]
+            Act::Pack(_) => true,
             _ => false,
         }
     }
@@ -125,8 +135,10 @@ impl Act {
         match self {
             Act::Req(req) => req.id = id.to_string(),
             Act::Msg(msg) => msg.id = id.to_string(),
-            Act::Use(r#use) => r#use.id = id.to_string(),
-            Act::Package(pack) => pack.id = id.to_string(),
+            Act::Call(r#use) => r#use.id = id.to_string(),
+            Act::Block(b) => b.id = id.to_string(),
+            #[cfg(feature = "wit")]
+            Act::Pack(p) => p.id = id.to_string(),
             _ => {}
         }
     }
@@ -152,6 +164,8 @@ impl Act {
             Act::Req(req) => &req.name,
             Act::Msg(msg) => &msg.name,
             Act::Cmd(cmd) => &cmd.name,
+            #[cfg(feature = "wit")]
+            Act::Pack(p) => &p.name,
             _ => "",
         }
     }
@@ -160,7 +174,9 @@ impl Act {
         match self {
             Act::Req(req) => req.inputs.clone(),
             Act::Msg(msg) => msg.inputs.clone(),
-            Act::Use(r#use) => r#use.inputs.clone(),
+            Act::Call(r#use) => r#use.inputs.clone(),
+            #[cfg(feature = "wit")]
+            Act::Pack(p) => p.inputs.clone(),
             _ => Vars::new(),
         }
     }
@@ -168,7 +184,9 @@ impl Act {
     pub fn outputs(&self) -> Vars {
         match self {
             Act::Req(req) => req.outputs.clone(),
-            Act::Use(u) => u.outputs.clone(),
+            Act::Call(u) => u.outputs.clone(),
+            #[cfg(feature = "wit")]
+            Act::Pack(p) => p.outputs.clone(),
             _ => Vars::new(),
         }
     }
@@ -208,9 +226,9 @@ impl Act {
         Act::Each(build(each))
     }
 
-    pub fn r#use(build: fn(Use) -> Use) -> Self {
-        let u = Use::default();
-        Act::Use(build(u))
+    pub fn call(build: fn(Call) -> Call) -> Self {
+        let u = Call::default();
+        Act::Call(build(u))
     }
 
     pub fn chain(build: fn(Chain) -> Chain) -> Self {
@@ -223,9 +241,15 @@ impl Act {
         Act::Cmd(build(cmd))
     }
 
-    pub fn pack(build: fn(Package) -> Package) -> Self {
-        let pack = Package::default();
-        Act::Package(build(pack))
+    pub fn block(build: fn(Block) -> Block) -> Self {
+        let block = Block::default();
+        Act::Block(build(block))
+    }
+
+    #[cfg(feature = "wit")]
+    pub fn pack(build: fn(Pack) -> Pack) -> Self {
+        let pack = Pack::default();
+        Act::Pack(build(pack))
     }
 
     pub fn on_created(build: fn(Vec<Act>) -> Vec<Act>) -> Self {

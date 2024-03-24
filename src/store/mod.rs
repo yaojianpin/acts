@@ -7,11 +7,16 @@ mod store;
 mod tests;
 
 use data::*;
-pub use query::{Cond, DbKey, Expr, Query};
+pub use query::{Cond, Expr, Query};
+#[allow(unused_imports)]
 pub use store::{Store, StoreKind};
 
-use crate::Result;
-use std::sync::Arc;
+use crate::{ActError, Result};
+use std::{error::Error, sync::Arc};
+
+fn map_db_err(err: impl Error) -> ActError {
+    ActError::Store(err.to_string())
+}
 
 pub trait DbSet: Send + Sync {
     type Item;
@@ -28,7 +33,7 @@ pub trait DbSet: Send + Sync {
 ///
 /// # Example
 /// ```no_run
-/// use acts::{data::{Model, Proc, Task}, DbSet, StoreAdapter};
+/// use acts::{data::{Model, Proc, Task, Package}, DbSet, StoreAdapter};
 /// use std::sync::Arc;
 /// struct TestStore;
 /// impl StoreAdapter for TestStore {
@@ -42,8 +47,11 @@ pub trait DbSet: Send + Sync {
 ///     fn tasks(&self) -> Arc<dyn DbSet<Item =Task>> {
 ///         todo!()
 ///     }
+///     fn packages(&self) -> Arc<dyn DbSet<Item =Package>> {
+///         todo!()
+///     }
 ///     fn init(&self) {}
-///     fn flush(&self) {}
+///     fn close(&self) {}
 /// }
 /// ```
 pub trait StoreAdapter: Send + Sync {
@@ -52,6 +60,7 @@ pub trait StoreAdapter: Send + Sync {
     fn models(&self) -> Arc<dyn DbSet<Item = Model>>;
     fn procs(&self) -> Arc<dyn DbSet<Item = Proc>>;
     fn tasks(&self) -> Arc<dyn DbSet<Item = Task>>;
+    fn packages(&self) -> Arc<dyn DbSet<Item = Package>>;
 
-    fn flush(&self);
+    fn close(&self);
 }

@@ -244,7 +244,7 @@ async fn sch_step_setup_pack() {
         step.with_input("a", json!(10))
             .with_id("step1")
             .with_setup(|stmts| {
-                stmts.add(Act::pack(|act| {
+                stmts.add(Act::block(|act| {
                     act.with_acts(|stmts| stmts.add(Act::msg(|msg| msg.with_id("msg1"))))
                         .with_next(|act| {
                             act.with_acts(|stmts| stmts.add(Act::msg(|msg| msg.with_id("msg2"))))

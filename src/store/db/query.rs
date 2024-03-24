@@ -1,5 +1,4 @@
 use super::utils::SEP;
-use rocksdb::{ColumnFamily, DBIterator};
 
 #[derive(Debug)]
 pub struct DbQueryValue {
@@ -48,51 +47,9 @@ impl Query {
         self
     }
 
-    
     pub fn queries(&self) -> Vec<DbQueryValue> {
         self.conds
     }
-
-    // pub fn sql(&self) -> String {
-    //     let mut ret = String::new();
-
-    //     let cond_len = self.conds.len();
-    //     if cond_len > 0 {
-    //         ret.push_str(" where ");
-    //         for (index, (key, value)) in self.conds.iter().enumerate() {
-    //             ret.push_str(key);
-    //             ret.push_str("=");
-    //             ret.push_str(&format!("'{}'", value));
-
-    //             if index != cond_len - 1 {
-    //                 ret.push_str(" and ");
-    //             }
-    //         }
-    //     }
-
-    //     if self.limit > 0 {
-    //         ret.push_str(&format!(" limit {}", self.limit));
-    //     }
-
-    //     ret
-    // }
-
-    // pub fn predicate<F: Fn(&str, &str) -> Vec<String>>(&self, f: F) -> Vec<String> {
-    //     let mut ret = Vec::new();
-    //     for (key, value) in &self.conds {
-    //         let list = f(key, value);
-    //         if ret.len() == 0 {
-    //             ret = list;
-    //         } else {
-    //             ret = ret.into_iter().filter(|it| list.contains(it)).collect();
-    //         }
-    //     }
-
-    //     if self.limit > 0 {
-    //         ret = ret.into_iter().take(self.limit).collect();
-    //     }
-    //     ret
-    // }
 
     pub fn set_limit(mut self, limit: usize) -> Self {
         self.limit = limit;
@@ -107,20 +64,4 @@ impl Query {
     pub fn is_cond(&self) -> bool {
         self.conds.len() > 0
     }
-
-    // fn convert(v: &ActValue) -> String {
-    //     let ret: String = serde_yaml::to_string(v).unwrap();
-    //     if v.is_string() {
-    //         return format!("'{}'", v.as_str().unwrap());
-    //     }
-
-    //     ret
-    // }
 }
-
-pub struct QueryIterator<'a> {
-    db_iter: DBIterator<'a>,
-    cf: &'a ColumnFamily,
-}
-
-impl<'a> QueryIterator<'a> {}

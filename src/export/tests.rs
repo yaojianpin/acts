@@ -4,6 +4,23 @@ use serde_json::json;
 use std::sync::{Arc, Mutex};
 
 #[tokio::test]
+async fn export_manager_publish_ok() {
+    let engine = Engine::new();
+    let manager = engine.manager();
+    let pack = data::Package {
+        id: "pack1".to_string(),
+        name: "package 1".to_string(),
+        file_data: vec![0x01, 0x02],
+        ..Default::default()
+    };
+
+    let result = manager.publish(&pack);
+
+    assert_eq!(result.is_ok(), true);
+    assert_eq!(manager.publish(&pack).is_ok(), true);
+}
+
+#[tokio::test]
 async fn export_manager_deploy_ok() {
     let engine = Engine::new();
     let manager = engine.manager();
@@ -87,6 +104,7 @@ async fn engine_executor_start_with_pid() {
     options.insert("pid".to_string(), "123".into());
     let result = executor.start(&workflow.id, &options);
     assert_eq!(result.is_ok(), true);
+
     assert_eq!(
         result.unwrap().outputs().get::<String>("pid").unwrap(),
         "123"

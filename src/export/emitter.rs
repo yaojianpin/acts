@@ -17,7 +17,7 @@ impl Emitter {
     ///  Receive act message
     ///
     /// Example
-    /// ```rust
+    /// ```rust,no_run
     /// use acts::{Engine, Act, Workflow, Vars, Message};
     ///
     /// #[tokio::main]

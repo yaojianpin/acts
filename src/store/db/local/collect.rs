@@ -1,223 +1,203 @@
-use super::database::Database;
+use super::{database::Database, DbRow, DbSchema};
 use crate::{
-    store::{data::*, DbSet, Query},
+    store::{map_db_err, query::CondType, DbSet, Query},
     Result, ShareLock,
 };
-use acts_tag::Value;
-use rocksdb::{Direction, IteratorMode};
+use duckdb::{params, params_from_iter};
+use std::{fmt::Debug, marker::PhantomData};
 use tracing::debug;
 
 #[derive(Debug)]
 pub struct Collect<T> {
     db: ShareLock<Database>,
     name: String,
-    _t: Vec<T>,
-}
-
-fn get_all<T: DbModel>(db: &Database, model_name: &str, limit: usize) -> Vec<T> {
-    let mut ret = Vec::new();
-    let cf = db.cf_handle(model_name).unwrap();
-    let mut count = 0;
-    db.iterator_cf(&cf, IteratorMode::End)
-        .take(limit)
-        .for_each(|it| {
-            let bytes = it.value;
-            if let Ok(model) = T::from_slice(&bytes) {
-                ret.push(model);
-            }
-            count += 1;
-        });
-
-    ret
-}
-
-fn get_by_keys<T: DbModel>(db: &Database, model_name: &str, keys: &[Box<[u8]>]) -> Vec<T> {
-    let mut ret = Vec::new();
-    let cf = db.cf_handle(model_name).unwrap();
-    keys.into_iter().for_each(|it| {
-        if let Ok(data) = db.get_cf(model_name, &cf, it) {
-            if let Ok(model) = T::from_slice(&data) {
-                ret.push(model);
-            }
-        }
-    });
-
-    ret
+    _t: PhantomData<T>,
 }
 
 impl<T> Collect<T>
 where
-    T: DbModel,
+    T: DbSchema,
 {
     pub fn new(db: &ShareLock<Database>, name: &str) -> Self {
-        db.write().unwrap().init_cfs(name, &T::keys());
+        db.write().unwrap().init(name, &T::schema().unwrap());
         Self {
             db: db.clone(),
             name: name.to_string(),
-            _t: Vec::new(),
+            _t: PhantomData::default(),
         }
     }
 }
 
-impl<T> Collect<T>
+impl<'a, T> DbSet for Collect<T>
 where
-    T: DbModel,
+    T: DbSchema + DbRow + Debug + Send + Sync + Clone,
 {
+    type Item = T;
     fn exists(&self, id: &str) -> Result<bool> {
         debug!("local::{}.exists({})", self.name, id);
         let db = self.db.read().unwrap();
-        let cf = db.cf_handle(&self.name).unwrap();
-        let ret = db.get_cf(&self.name, &cf, id.as_bytes());
+        let conn = db.pool().get().unwrap();
 
-        Ok(ret.is_ok())
+        let mut stmt = conn
+            .prepare(&format!("select count(id) from {} where id = ?", self.name))
+            .map_err(map_db_err)?;
+        let result = stmt
+            .query_row(params![id], |row| row.get::<usize, i64>(0))
+            .map_err(map_db_err)?;
+        return Ok(result > 0);
     }
 
     fn find(&self, id: &str) -> Result<T> {
         debug!("local::{}.find({})", self.name, id);
         let db = self.db.read().unwrap();
-        let cf = db.cf_handle(&self.name)?;
-        let data = db.get_cf(&self.name, &cf, id.as_bytes())?;
-        let model = T::from_slice(&data)?;
+        let conn = db.pool().get().unwrap();
+
+        let schema = T::schema()?;
+        let keys: Vec<&str> = schema.iter().map(|(k, _)| k.as_str()).collect();
+        let sql = format!("select {} from {} where id = ?", keys.join(","), self.name);
+        let row = conn
+            .prepare(&sql)
+            .map_err(map_db_err)?
+            .query_row(params![id], |row| Ok(T::from_row(row)))
+            .map_err(map_db_err)?;
+        let model = row.map_err(map_db_err)?;
         Ok(model)
     }
 
     fn query(&self, q: &Query) -> Result<Vec<T>> {
         debug!("local::{}.query({:?})", self.name, q);
         let db = self.db.read().unwrap();
-        let mut limit = q.limit();
-        if limit == 0 {
-            // should be a big number to take
-            limit = 10000;
-        }
-
-        let ret = if q.is_cond() {
+        let conn = db.pool().get().unwrap();
+        let mut filter = String::new();
+        if q.is_cond() {
             let mut q = q.clone();
-            for cond in q.queries_mut() {
-                for expr in cond.conds.iter_mut() {
-                    let cf = db.cf_idx_handle(&self.name, &expr.key)?;
 
-                    let value = Value::from(&expr.value).unwrap();
-                    let mut iter =
-                        db.iterator_cf(&cf, IteratorMode::From(value.data(), Direction::Forward));
-                    // let mut iter = db.prefix_iterator_cf(&cf, value.data());
-                    while let Some(r) = iter.next() {
-                        let db_key = db.make_db_key(&r.key);
-                        if db_key.idx_key.as_ref() != value.data() {
-                            break;
-                        }
-                        if db.is_expired(&db_key.p_key, &r.value) {
-                            db.delete_update(&db_key.p_key)?;
-                            continue;
-                        }
-                        expr.result.insert(db_key.p_key.clone());
+            let queries = q.queries();
+            for (index, cond) in queries.iter().enumerate() {
+                let typ = match cond.r#type {
+                    CondType::And => "and",
+                    CondType::Or => "or",
+                };
+                filter.push_str("(");
+                for (index, expr) in cond.conds.iter().enumerate() {
+                    filter.push_str(&format!("{} = '{}'", expr.key, expr.value));
+                    if index != cond.conds.len() - 1 {
+                        filter.push_str(&format!(" {typ} "));
                     }
                 }
-                cond.calc();
-            }
+                filter.push_str(")");
 
-            let keys = q.calc().into_iter().take(limit).collect::<Vec<_>>();
-            get_by_keys(&db, &self.name, &keys)
-        } else {
-            get_all(&db, &self.name, limit)
-        };
+                if index != queries.len() - 1 {
+                    filter.push_str(&format!(" and "));
+                }
+            }
+        }
+
+        debug!("filter: {filter}");
+        let schema = T::schema()?;
+        let keys: Vec<&str> = schema.iter().map(|(k, _)| k.as_str()).collect();
+        let mut sql = format!(
+            "select {} from {} limit {} offset {}",
+            keys.join(","),
+            self.name,
+            q.limit(),
+            q.offset(),
+        );
+        if !filter.is_empty() {
+            sql = format!(
+                "select {} from {} where {} limit {} offset {}",
+                keys.join(","),
+                self.name,
+                filter,
+                q.limit(),
+                q.offset(),
+            );
+        }
+
+        let ret = conn
+            .prepare(&sql)
+            .map_err(map_db_err)?
+            .query_map([], |row| T::from_row(row))
+            .map_err(map_db_err)?
+            .map(|v| v.unwrap())
+            .collect::<Vec<_>>();
 
         Ok(ret)
     }
 
     fn create(&self, model: &T) -> Result<bool> {
         debug!("local::{}.create({})", self.name, model.id());
-        let db = self.db.read().unwrap();
-        let data = model.to_vec()?;
-        let cf = db.cf_handle(&self.name)?;
-        db.put_cf(&cf, model.id().as_bytes(), data)?;
+        let db = self.db.write().unwrap();
+        let conn = db.pool().get().unwrap();
 
-        for key in &T::keys() {
-            if key == "id" {
-                continue;
-            }
-
-            let cf = db.cf_idx_handle(&self.name, key)?;
-            let value = model.get(key)?;
-            let key = db.idx_key(key, &value, model.id().as_bytes());
-            let seq = db.latest_sequence_number().to_le_bytes().to_vec();
-            db.put_cf(&cf, key, seq)?;
+        let mut keys = Vec::new();
+        let mut values = Vec::new();
+        for (k, v) in model.to_values()? {
+            keys.push(k);
+            values.push(v);
         }
 
-        Ok(true)
+        let ret = conn
+            .execute(
+                &format!(
+                    "insert into {} ( {} ) values ( {} )",
+                    self.name,
+                    keys.join(","),
+                    repeat_var(values.len())
+                ),
+                params_from_iter(values),
+            )
+            .map_err(map_db_err)?;
+        Ok(ret > 0)
     }
     fn update(&self, model: &T) -> Result<bool> {
         debug!("local::{}.update({})", self.name, model.id());
-        let db = self.db.read().unwrap();
-        let data = model.to_vec()?;
-        let cf = db.cf_handle(&self.name)?;
+        let db = self.db.write().unwrap();
+        let conn = db.pool().get().unwrap();
 
-        let id = model.id().as_bytes();
-        db.put_cf(&cf, id, data)?;
-        db.update_change(id)?;
-        for key in &T::keys() {
-            if key == "id" {
+        let mut keys = Vec::new();
+        let mut values = Vec::new();
+        for (k, v) in model.to_values()? {
+            if k == "id" {
                 continue;
             }
-            let cf = db.cf_handle(&self.name).unwrap();
-            let value = model.get(key)?;
-            let key = db.idx_key(key, &value, model.id().as_bytes());
-            let seq = db.latest_sequence_number().to_le_bytes().to_vec();
-            db.put_cf(&cf, key, seq)?;
+            keys.push(format!("{} = ?", k.as_str()));
+            values.push(v);
         }
 
-        Ok(true)
+        let ret = conn
+            .execute(
+                &format!(
+                    "update {} set {} where id = '{}'",
+                    self.name,
+                    keys.join(","),
+                    model.id()
+                ),
+                params_from_iter(values),
+            )
+            .map_err(map_db_err)?;
+
+        Ok(ret > 0)
     }
     fn delete(&self, id: &str) -> Result<bool> {
         debug!("local::{}.delete({})", self.name, id);
-        let db = self.db.read().unwrap();
-        let cf = db.cf_handle(&self.name)?;
-        let item = self.find(id)?;
+        let db = self.db.write().unwrap();
+        let conn = db.pool().get().unwrap();
 
-        let id = id.as_bytes();
-        db.delete_cf(&cf, id)?;
+        let ret = conn
+            .execute(
+                &format!("delete from {} where id = ?", self.name),
+                params![id],
+            )
+            .map_err(map_db_err)?;
 
-        // ignore error, because the data maybe not be changed.
-        let _ = db.delete_update(id);
-        for key in &T::keys() {
-            if key == "id" {
-                continue;
-            }
-            let cf = db.cf_idx_handle(&self.name, key)?;
-            let db_value = item.get(key)?;
-            let idx = db.idx_key(key, &db_value, item.id().as_bytes());
-            db.delete_cf(&cf, &idx)?;
-        }
-
-        Ok(true)
+        Ok(ret > 0)
     }
 }
 
-impl<T> DbSet for Collect<T>
-where
-    T: DbModel + Send + Sync,
-{
-    type Item = T;
-    fn exists(&self, id: &str) -> Result<bool> {
-        self.exists(id)
-    }
+fn repeat_var(len: usize) -> String {
+    let mut var = "?,".repeat(len);
+    var.pop();
 
-    fn find(&self, id: &str) -> Result<T> {
-        self.find(id)
-    }
-
-    fn query(&self, query: &Query) -> Result<Vec<T>> {
-        self.query(query)
-    }
-
-    fn create(&self, model: &T) -> Result<bool> {
-        self.create(model)
-    }
-
-    fn update(&self, model: &T) -> Result<bool> {
-        self.update(model)
-    }
-
-    fn delete(&self, id: &str) -> Result<bool> {
-        self.delete(id)
-    }
+    var
 }

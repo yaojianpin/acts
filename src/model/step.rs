@@ -1,6 +1,7 @@
 mod catch;
 mod timeout;
 
+#[allow(unused_imports)]
 pub use self::{
     catch::Catch,
     timeout::{Timeout, TimeoutLimit, TimeoutUnit},

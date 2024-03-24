@@ -1,0 +1,1 @@
+/mnt/d/private/github/workflow/acts/examples/packet/pack1/target/wasm32-wasi/debug/pack1.wasm: /mnt/d/private/github/workflow/acts/examples/packet/pack1/src/bindings.rs /mnt/d/private/github/workflow/acts/examples/packet/pack1/src/lib.rs

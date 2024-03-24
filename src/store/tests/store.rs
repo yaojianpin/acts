@@ -10,7 +10,7 @@ use tokio::sync::OnceCell;
 
 static STORE: OnceCell<Store> = OnceCell::const_new();
 async fn init() -> Store {
-    let s = Store::local("data");
+    let s = Store::local("test_data", "test.db");
     s
 }
 
@@ -87,7 +87,7 @@ async fn store_load_by_state() {
 }
 
 #[tokio::test]
-async fn store_model_deploy() {
+async fn store_model_deploy_ok() {
     let store = store().await;
     let workflow = create_workflow();
     let ok = store.deploy(&workflow).unwrap();
@@ -356,7 +356,10 @@ impl StoreAdapter for TestStore {
         todo!()
     }
 
-    fn init(&self) {}
+    fn packages(&self) -> Arc<dyn DbSet<Item = data::Package>> {
+        todo!()
+    }
 
-    fn flush(&self) {}
+    fn init(&self) {}
+    fn close(&self) {}
 }

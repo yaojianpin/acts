@@ -47,9 +47,11 @@ impl Cache {
     }
 
     pub fn init(&self, engine: &Engine) {
-        #[cfg(feature = "local_store")]
+        #[cfg(feature = "store")]
         {
-            *self.store.write().unwrap() = Arc::new(Store::local(&engine.options().data_dir));
+            let options = engine.options();
+            *self.store.write().unwrap() =
+                Arc::new(Store::local(&options.data_dir, &options.db_name));
         }
         if let Some(store) = engine.adapter().store() {
             *self.store.write().unwrap() = Arc::new(Store::create(store));
@@ -57,7 +59,7 @@ impl Cache {
     }
 
     pub fn close(&self) {
-        self.store.read().unwrap().flush();
+        self.store.read().unwrap().close();
     }
 
     pub fn procs(&self) -> Vec<Arc<Proc>> {

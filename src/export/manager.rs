@@ -1,10 +1,11 @@
 use tracing::instrument;
 
 use crate::{
+    data::Package,
     sch::Scheduler,
     store::{Cond, Expr, StoreAdapter},
     utils::Id,
-    ActionResult, ModelInfo, ProcInfo, Query, Result, TaskInfo, Workflow,
+    ActionResult, ModelInfo, PackageInfo, ProcInfo, Query, Result, TaskInfo, Workflow,
 };
 use std::sync::Arc;
 
@@ -16,6 +17,32 @@ pub struct Manager {
 impl Manager {
     pub(crate) fn new(sch: &Arc<Scheduler>) -> Self {
         Self { scher: sch.clone() }
+    }
+
+    #[instrument(skip(self))]
+    pub fn publish(&self, pack: &Package) -> Result<ActionResult> {
+        let mut state = ActionResult::begin();
+        self.scher.cache().store().publish(pack)?;
+        state.end();
+
+        Ok(state)
+    }
+
+    #[instrument(skip(self))]
+    pub fn packages(&self, limit: usize) -> Result<Vec<PackageInfo>> {
+        let query = Query::new().set_limit(limit);
+        match self.scher.cache().store().packages().query(&query) {
+            Ok(mut packages) => {
+                packages.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+                let mut ret = Vec::new();
+                for t in &packages {
+                    ret.push(t.into());
+                }
+
+                Ok(ret)
+            }
+            Err(err) => Err(err),
+        }
     }
 
     #[instrument(skip(self))]

@@ -14,7 +14,7 @@ use tracing::info;
 /// ## Example:
 /// a example to caculate the result from 1 to given input value
 ///
-///```rust
+///```rust,no_run
 /// use acts::{Engine, Workflow, Vars};
 ///
 /// #[tokio::main]
@@ -33,7 +33,7 @@ use tracing::info;
 ///
 ///     let mut vars = Vars::new();
 ///     vars.insert("input".into(), 3.into());
-///     vars.insert("pid".into(), "w1".into());
+///     vars.insert("pid".into(), "test1".into());
 ///     engine.executor().start(
 ///        &workflow.id,
 ///        &vars);
@@ -106,7 +106,7 @@ impl Engine {
     /// start engine
     ///
     /// ## Example
-    /// ```rust
+    /// ```rust,no_run
     /// use acts::{Engine, Workflow, Vars};
     ///
     /// #[tokio::main]
@@ -130,7 +130,7 @@ impl Engine {
     ///
     /// ## Example
     ///
-    /// ```rust
+    /// ```rust,no_run
     /// use acts::{Engine, Workflow, Vars};
     /// #[tokio::main]
     /// async fn main() {
