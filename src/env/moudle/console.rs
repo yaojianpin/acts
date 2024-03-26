@@ -1,5 +1,4 @@
 use crate::env::Enviroment;
-use colored::Colorize;
 use rhai::{export_module, plugin::*};
 
 impl Enviroment {
@@ -21,21 +20,21 @@ mod console {
 
     #[export_fn]
     pub fn dbg(_message: &str) {
-        println!("{}", format!("[debug]{}", _message).cyan());
+        println!("{}", format!("[debug]{}", _message));
     }
 
     #[export_fn]
     pub fn info(_message: &str) {
-        println!("{}", format!("[info]{}", _message).blue());
+        println!("{}", format!("[info]{}", _message));
     }
 
     #[export_fn]
     pub fn wran(_message: &str) {
-        println!("{}", format!("[wran]{}", _message).yellow());
+        println!("{}", format!("[wran]{}", _message));
     }
 
     #[export_fn]
     pub fn error(_message: &str) {
-        println!("{}", format!("[error]{}", _message).red());
+        println!("{}", format!("[error]{}", _message));
     }
 }

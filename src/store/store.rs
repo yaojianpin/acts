@@ -1,9 +1,12 @@
 use crate::{
-    store::{db::LocalStore, Model, Package, Proc, StoreAdapter, Task},
+    store::{Model, Package, Proc, StoreAdapter, Task},
     utils, ActError, Result, ShareLock, Workflow,
 };
 use std::sync::{Arc, Mutex, RwLock};
 use tracing::trace;
+
+#[cfg(feature = "store")]
+use crate::store::db::LocalStore;
 
 use super::db::MemStore;
 
@@ -61,6 +64,7 @@ impl Store {
         }
     }
 
+    #[cfg(feature = "store")]
     pub fn local(path: &str, name: &str) -> Self {
         let store = Arc::new(LocalStore::new(path, name));
         Self {
