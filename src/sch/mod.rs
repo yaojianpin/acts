@@ -9,7 +9,6 @@ mod tree;
 mod tests;
 
 use async_trait::async_trait;
-use core::clone::Clone;
 
 use crate::event::ActionState;
 pub use crate::Result;
