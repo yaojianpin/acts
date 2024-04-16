@@ -1,4 +1,4 @@
-use core::{clone::Clone, convert::From, fmt};
+use core::{clone::Clone, fmt};
 use serde::{Deserialize, Serialize};
 
 use crate::{utils, Error};
