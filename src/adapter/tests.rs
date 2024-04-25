@@ -1,6 +1,6 @@
 use crate::{
     store::{data, DbSet, Query, StoreAdapter, StoreKind},
-    Engine, Result,
+    Builder, Result,
 };
 use std::sync::Arc;
 use tokio::sync::OnceCell;
@@ -17,11 +17,8 @@ async fn store() -> &'static TestStore {
 
 #[tokio::test]
 async fn adapter_set_extern_store_test() {
-    let engine = Engine::new();
     let store = store().await;
-    engine.adapter().set_store(store);
-    engine.start();
-
+    let engine = Builder::new().store(store).build();
     let store = engine.scher().cache().store();
     assert_eq!(store.kind(), StoreKind::Extern);
     store.reset();

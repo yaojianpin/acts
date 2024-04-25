@@ -197,7 +197,7 @@ fn model_step_setup_yml_parse() {
             - !set
               users: ["a", "b"]
             - !each
-              in: env.get("users")
+              in: $("users")
               run:
                 - !req
                   id: act2
@@ -213,7 +213,7 @@ fn model_step_setup_yml_parse() {
         assert_eq!(vars.get::<Vec<String>>("users").unwrap(), ["a", "b"]);
     }
     if let Act::Each(each) = step.setup.get(1).unwrap() {
-        assert_eq!(each.r#in, r#"env.get("users")"#);
+        assert_eq!(each.r#in, r#"$("users")"#);
         assert_eq!(each.run.len(), 1);
     }
     if let Act::OnCreated(stmts) = step.setup.get(2).unwrap() {

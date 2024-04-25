@@ -16,14 +16,14 @@ impl DbSchema for Proc {
                 db_type: DbType::Text,
                 is_not_null: true,
                 is_primary_key: true,
-                ..Default::default()
+                ..
             },
         ));
         map.push((
             "name".to_string(),
             DbColumn {
                 db_type: DbType::Text,
-                ..Default::default()
+                ..
             },
         ));
         map.push((
@@ -33,7 +33,7 @@ impl DbSchema for Proc {
                 is_not_null: true,
                 is_primary_key: false,
                 is_index: true,
-                ..Default::default()
+                ..
             },
         ));
         map.push((
@@ -43,7 +43,7 @@ impl DbSchema for Proc {
                 is_not_null: true,
                 is_primary_key: false,
                 is_index: true,
-                ..Default::default()
+                ..
             },
         ));
         map.push((
@@ -52,7 +52,7 @@ impl DbSchema for Proc {
                 db_type: DbType::Int64,
                 is_not_null: true,
                 is_primary_key: false,
-                ..Default::default()
+                ..
             },
         ));
         map.push((
@@ -61,14 +61,7 @@ impl DbSchema for Proc {
                 db_type: DbType::Int64,
                 is_not_null: true,
                 is_primary_key: false,
-                ..Default::default()
-            },
-        ));
-        map.push((
-            "vars".to_string(),
-            DbColumn {
-                db_type: DbType::Text,
-                ..Default::default()
+                ..
             },
         ));
         map.push((
@@ -77,14 +70,14 @@ impl DbSchema for Proc {
                 db_type: DbType::Int64,
                 is_not_null: true,
                 is_primary_key: false,
-                ..Default::default()
+                ..
             },
         ));
         map.push((
             "model".to_string(),
             DbColumn {
                 db_type: DbType::Text,
-                ..Default::default()
+                ..
             },
         ));
         map.push((
@@ -92,7 +85,14 @@ impl DbSchema for Proc {
             DbColumn {
                 db_type: DbType::Text,
                 is_not_null: true,
-                ..Default::default()
+                ..
+            },
+        ));
+        map.push((
+            "env_local".to_string(),
+            DbColumn {
+                db_type: DbType::Text,
+                ..
             },
         ));
         Ok(map)
@@ -112,10 +112,9 @@ impl DbRow for Proc {
             mid: row.get::<usize, String>(3).unwrap(),
             start_time: row.get::<usize, i64>(4).unwrap(),
             end_time: row.get::<usize, i64>(5).unwrap(),
-            vars: row.get::<usize, String>(6).unwrap(),
-            timestamp: row.get::<usize, i64>(7).unwrap(),
-            model: row.get::<usize, String>(8).unwrap(),
-            root_tid: row.get::<usize, String>(9).unwrap(),
+            timestamp: row.get::<usize, i64>(6).unwrap(),
+            model: row.get::<usize, String>(7).unwrap(),
+            root_tid: row.get::<usize, String>(8).unwrap(),
         })
     }
 
@@ -128,7 +127,6 @@ impl DbRow for Proc {
         ret.push(("mid".to_string(), Value::Text(self.mid.clone())));
         ret.push(("start_time".to_string(), Value::BigInt(self.start_time)));
         ret.push(("end_time".to_string(), Value::BigInt(self.end_time)));
-        ret.push(("vars".to_string(), Value::Text(self.vars.clone())));
         ret.push(("timestamp".to_string(), Value::BigInt(self.timestamp)));
         ret.push(("model".to_string(), Value::Text(self.model.clone())));
         ret.push(("root_tid".to_string(), Value::Text(self.root_tid.clone())));

@@ -51,8 +51,17 @@ fn model_workflow_set_input() {
     let mut m = Workflow::new();
     let mut vars = Vars::new();
     vars.insert("v1".to_string(), 5.into());
-    m.set_env(&vars);
+    m.set_inputs(&vars);
     assert_eq!(m.inputs.get_value("v1"), Some(&json!(5)));
+}
+
+#[test]
+fn model_workflow_set_env() {
+    let mut m = Workflow::new();
+    let mut vars = Vars::new();
+    vars.insert("v1".to_string(), 5.into());
+    m.set_env(&vars);
+    assert_eq!(m.env.get_value("v1"), Some(&json!(5)));
 }
 
 #[test]

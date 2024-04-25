@@ -1,7 +1,6 @@
 mod block;
 mod call;
 mod cmd;
-#[cfg(feature = "wit")]
 mod pack;
 mod req;
 
@@ -22,8 +21,6 @@ impl ActTask for Act {
             Act::Req(req) => req.init(ctx),
             Act::Call(u) => u.init(ctx),
             Act::Block(b) => b.init(ctx),
-
-            #[cfg(feature = "wit")]
             Act::Pack(p) => p.init(ctx),
             _ => Ok(()),
         }
@@ -34,7 +31,6 @@ impl ActTask for Act {
             Act::Req(req) => req.run(ctx),
             Act::Call(u) => u.run(ctx),
             Act::Block(b) => b.run(ctx),
-            #[cfg(feature = "wit")]
             Act::Pack(p) => p.run(ctx),
             _ => Ok(()),
         }
@@ -45,7 +41,6 @@ impl ActTask for Act {
             Act::Req(req) => req.next(ctx),
             Act::Call(u) => u.next(ctx),
             Act::Block(b) => b.next(ctx),
-            #[cfg(feature = "wit")]
             Act::Pack(p) => p.next(ctx),
             _ => Ok(false),
         }
@@ -56,7 +51,6 @@ impl ActTask for Act {
             Act::Req(req) => req.review(ctx),
             Act::Call(u) => u.review(ctx),
             Act::Block(b) => b.review(ctx),
-            #[cfg(feature = "wit")]
             Act::Pack(p) => p.review(ctx),
             _ => Ok(true),
         }
@@ -65,17 +59,18 @@ impl ActTask for Act {
 
 impl Act {
     pub fn exec(&self, ctx: &Context) -> Result<()> {
+        let task = ctx.task();
         match self {
             Act::Set(vars) => {
-                let inputs = utils::fill_inputs(&ctx.task.env(), vars);
-                ctx.task.env().set_env(&inputs);
+                let inputs = utils::fill_inputs(vars, ctx);
+                task.update_data(&inputs);
             }
             Act::Expose(vars) => {
-                let outputs = utils::fill_outputs(&ctx.task.env(), vars);
-                if let Some(task) = ctx.task.parent() {
-                    task.env().set_env(&outputs);
+                let outputs = utils::fill_outputs(vars, ctx);
+                if let Some(task) = task.parent() {
+                    task.update_data(&outputs);
                 } else {
-                    ctx.task.env().set(consts::ACT_OUTPUTS, outputs);
+                    task.set_data_with(move |data| data.set(consts::ACT_OUTPUTS, &outputs));
                 }
             }
             Act::Req(req) => {
@@ -98,19 +93,18 @@ impl Act {
                 if let Some(v) = ctx.get_var::<String>(consts::ACT_VALUE) {
                     msg.inputs.set(consts::ACT_VALUE, v);
                 }
-                if ctx.task.state().is_none() {
-                    ctx.task
-                        .add_hook_stmts(TaskLifeCycle::Created, &Act::Msg(msg.clone()));
+                if task.state().is_none() {
+                    task.add_hook_stmts(TaskLifeCycle::Created, &Act::Msg(msg.clone()));
                 } else {
-                    ctx.emit_message(&msg);
+                    ctx.emit_message(&msg)?;
                 }
             }
             Act::Cmd(cmd) => {
-                if ctx.task.state().is_none() {
-                    ctx.task.add_hook_stmts(TaskLifeCycle::Created, self);
+                if task.state().is_none() {
+                    task.add_hook_stmts(TaskLifeCycle::Created, self);
                 } else {
                     if let Err(err) = cmd.run(ctx) {
-                        ctx.task.set_pure_action_state(ActionState::Error);
+                        task.set_pure_action_state(ActionState::Error);
                         return Err(err);
                     };
                 }
@@ -118,7 +112,6 @@ impl Act {
             Act::Block(b) => {
                 ctx.append_act(&Act::Block(b.clone()))?;
             }
-            #[cfg(feature = "wit")]
             Act::Pack(p) => {
                 ctx.append_act(&Act::Pack(p.clone()))?;
             }
@@ -135,8 +128,8 @@ impl Act {
                 }
             }
             Act::Each(each) => {
-                let can = each.parse(ctx, &each.r#in)?;
-                for (index, value) in can.values()?.iter().enumerate() {
+                let cans = each.parse(ctx, &each.r#in)?;
+                for (index, value) in cans.iter().enumerate() {
                     ctx.set_var(consts::ACT_INDEX, index);
                     ctx.set_var(consts::ACT_VALUE, value);
                     for s in &each.run {
@@ -147,8 +140,7 @@ impl Act {
             Act::Chain(chain) => {
                 let cans = chain.parse(ctx, &chain.r#in)?;
                 let stmts = &chain.run;
-                let cands = cans.values()?;
-                let mut items = cands.iter().enumerate();
+                let mut items = cans.iter().enumerate();
                 if let Some((index, value)) = items.next() {
                     let head = Rc::new(RefCell::new(Block::new()));
 
@@ -179,38 +171,45 @@ impl Act {
                 ctx.append_act(&Act::Call(u.clone()))?;
             }
             Act::OnCreated(stmts) => {
+                let task = ctx.task();
                 for s in stmts {
-                    ctx.task.add_hook_stmts(TaskLifeCycle::Created, s);
+                    task.add_hook_stmts(TaskLifeCycle::Created, s);
                 }
             }
             Act::OnCompleted(stmts) => {
+                let task = ctx.task();
                 for s in stmts {
-                    ctx.task.add_hook_stmts(TaskLifeCycle::Completed, s);
+                    task.add_hook_stmts(TaskLifeCycle::Completed, s);
                 }
             }
             Act::OnBeforeUpdate(stmts) => {
+                let task = ctx.task();
                 for s in stmts {
-                    ctx.task.add_hook_stmts(TaskLifeCycle::BeforeUpdate, s);
+                    task.add_hook_stmts(TaskLifeCycle::BeforeUpdate, s);
                 }
             }
             Act::OnUpdated(stmts) => {
+                let task = ctx.task();
                 for s in stmts {
-                    ctx.task.add_hook_stmts(TaskLifeCycle::Updated, s);
+                    task.add_hook_stmts(TaskLifeCycle::Updated, s);
                 }
             }
             Act::OnStep(stmts) => {
+                let task = ctx.task();
                 for s in stmts {
-                    ctx.task.add_hook_stmts(TaskLifeCycle::Step, s);
+                    task.add_hook_stmts(TaskLifeCycle::Step, s);
                 }
             }
             Act::OnErrorCatch(stmts) => {
+                let task = ctx.task();
                 for s in stmts {
-                    ctx.task.add_hook_catch(TaskLifeCycle::ErrorCatch, s);
+                    task.add_hook_catch(TaskLifeCycle::ErrorCatch, s);
                 }
             }
             Act::OnTimeout(stmts) => {
+                let task = ctx.task();
                 for s in stmts {
-                    ctx.task.add_hook_timeout(TaskLifeCycle::Timeout, s);
+                    task.add_hook_timeout(TaskLifeCycle::Timeout, s);
                 }
             }
         }

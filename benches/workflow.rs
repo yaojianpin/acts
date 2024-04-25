@@ -10,8 +10,6 @@ fn load(c: &mut Criterion) {
     c.bench_function("load", |b| {
         let rt = Runtime::new().unwrap();
         rt.block_on(async move {
-            let engine = Engine::new();
-            engine.start();
             let text = include_str!("./start.yml");
             b.iter(move || {
                 Workflow::from_yml(text).unwrap();
@@ -25,7 +23,6 @@ fn deploy(c: &mut Criterion) {
         let rt = Runtime::new().unwrap();
         rt.block_on(async move {
             let engine = Engine::new();
-            engine.start();
             let text = include_str!("./start.yml");
             let workflow = Workflow::from_yml(text).unwrap();
             b.iter(move || {
@@ -40,14 +37,11 @@ fn start(c: &mut Criterion) {
         let rt = Runtime::new().unwrap();
         rt.block_on(async move {
             let engine = Engine::new();
-            engine.start();
             let text = include_str!("./start.yml");
             let workflow = Workflow::from_yml(text).unwrap();
             engine.manager().deploy(&workflow).unwrap();
-            let e = engine.clone();
             b.iter(move || {
-                let exec = e.executor();
-                exec.start(&workflow.id, &Vars::new()).unwrap();
+                engine.executor().start(&workflow.id, &Vars::new()).unwrap();
             })
         });
     });
@@ -56,44 +50,41 @@ fn start(c: &mut Criterion) {
 fn act(c: &mut Criterion) {
     c.bench_function("act", |b| {
         let rt = Runtime::new().unwrap();
+        let engine = Engine::new();
         b.to_async(rt).iter_custom(|iters| async move {
-            // println!("iters: {iters}");
-            let engine = Engine::new();
-            engine.start();
+            let sig = engine.signal(());
+            let s = sig.clone();
+
             let text = include_str!("./act.yml");
             let workflow = Workflow::from_yml(text).unwrap();
             engine.manager().deploy(&workflow).unwrap();
 
-            let exec = engine.executor().clone();
             let time = Arc::new(Mutex::new(Duration::new(0, 0)));
             let count = Arc::new(Mutex::new(0));
             let t = time.clone();
             engine.emitter().on_message(move |e| {
                 if e.is_key("act1") && e.is_state("created") {
                     let start = Instant::now();
-                    exec.complete(&e.proc_id, &e.id, &Vars::new()).unwrap();
+                    engine
+                        .executor()
+                        .complete(&e.proc_id, &e.id, &Vars::new())
+                        .unwrap();
                     let elapsed = start.elapsed();
                     *t.lock().unwrap() += elapsed;
 
                     let mut count = count.lock().unwrap();
                     *count += 1;
-                    // println!("message: pid={} key={} count={}", e.proc_id, e.key, *count);
                     if *count >= iters {
-                        // println!("close");
-                        e.close();
+                        s.close();
                     }
                 }
             });
 
             for _ in 0..iters {
                 let _ = engine.executor().start(&workflow.id, &Vars::new()).unwrap();
-                // println!("start: {}", ret.outputs());
             }
-
-            engine.eloop().await;
-
+            sig.recv().await;
             let time = time.lock().unwrap();
-            // println!("closed: {}", time.as_millis());
             *time
         })
     });

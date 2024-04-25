@@ -35,13 +35,9 @@ pub trait ActPlugin: Send + Sync {
 
 pub fn init(engine: &Engine) {
     debug!("plugin::init");
-    let extender = engine.extender();
-    let mut plugins = &mut *extender.plugins.lock().unwrap();
-
-    register_plugins_default(&mut plugins);
-    for plugin in plugins.into_iter() {
+    let plugins = engine.plugins();
+    let plugins = plugins.lock().unwrap();
+    for plugin in plugins.iter() {
         plugin.on_init(engine);
     }
 }
-
-fn register_plugins_default(_plugins: &mut Vec<Box<dyn ActPlugin>>) {}

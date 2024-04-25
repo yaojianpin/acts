@@ -9,33 +9,35 @@ use async_trait::async_trait;
 #[async_trait]
 impl ActTask for Req {
     fn init(&self, ctx: &Context) -> Result<()> {
+        let task = ctx.task();
         for s in self.on_created.iter() {
-            ctx.task.add_hook_stmts(TaskLifeCycle::Created, s);
+            task.add_hook_stmts(TaskLifeCycle::Created, s);
         }
 
         for s in self.on_completed.iter() {
-            ctx.task.add_hook_stmts(TaskLifeCycle::Completed, s);
+            task.add_hook_stmts(TaskLifeCycle::Completed, s);
         }
 
         for s in self.catches.iter() {
-            ctx.task.add_hook_catch(TaskLifeCycle::ErrorCatch, s);
+            task.add_hook_catch(TaskLifeCycle::ErrorCatch, s);
         }
 
         if self.timeout.len() > 0 {
             for s in &self.timeout {
-                ctx.task.add_hook_timeout(TaskLifeCycle::Timeout, s);
+                task.add_hook_timeout(TaskLifeCycle::Timeout, s);
             }
         }
 
-        ctx.task.set_state(TaskState::Interrupt);
+        task.set_state(TaskState::Interrupt);
         Ok(())
     }
 
     fn run(&self, ctx: &Context) -> Result<()> {
+        let task = ctx.task();
         // when resuming the pending task, the current state is running
         // for general act task, reset the state to interrupt
-        if ctx.task.state().is_running() {
-            ctx.task.set_state(TaskState::Interrupt);
+        if task.state().is_running() {
+            task.set_state(TaskState::Interrupt);
         }
         Ok(())
     }
@@ -45,30 +47,31 @@ impl ActTask for Req {
     }
 
     fn review(&self, ctx: &Context) -> Result<bool> {
-        let state = ctx.task.state();
+        let task = ctx.task();
+        let state = task.state();
         if state.is_running() {
-            let tasks = ctx.task.children();
+            let tasks = task.children();
 
             let mut count = 0;
-            for task in tasks.iter() {
-                if task.state().is_error() {
-                    ctx.set_err(&task.state().as_err().unwrap_or_default());
+            for t in tasks.iter() {
+                if t.state().is_error() {
+                    ctx.set_err(&t.state().as_err().unwrap_or_default());
                     ctx.emit_error()?;
                     return Ok(false);
                 }
-                if task.state().is_skip() {
-                    ctx.task.set_action_state(ActionState::Skipped);
+                if t.state().is_skip() {
+                    task.set_action_state(ActionState::Skipped);
                     return Ok(true);
                 }
 
-                if task.state().is_success() {
+                if t.state().is_success() {
                     count += 1;
                 }
             }
 
             if count == tasks.len() {
-                if !ctx.task.state().is_completed() {
-                    ctx.task.set_action_state(ActionState::Completed);
+                if !task.state().is_completed() {
+                    task.set_action_state(ActionState::Completed);
                 }
             }
         }

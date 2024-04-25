@@ -1,23 +1,24 @@
-use crate::{env::Enviroment, utils::consts, Candidate, Vars};
-use rhai::Dynamic;
-use serde_json::{json, Value};
+use crate::{
+    env::Enviroment, Act, ActError, Context, Engine, Event, Message, Signal, Vars, Workflow,
+};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
 
 #[test]
-fn env_run() {
+fn env_eval_void() {
     let env = Enviroment::new();
 
     let script = r#"
     let v = 5;
-    print(`v=${v}`);
+    console.log(`v=${v}`);
     "#;
 
-    let result = env.run(script);
-
-    assert_eq!(result.unwrap(), true);
+    let result = env.eval::<()>(script);
+    assert_eq!(result.is_ok(), true);
 }
 
 #[test]
-fn env_eval() {
+fn env_eval_number() {
     let env = Enviroment::new();
     let script = r#"
     let v = 5;
@@ -25,7 +26,6 @@ fn env_eval() {
     "#;
 
     let result = env.eval::<i64>(script);
-
     assert_eq!(result.unwrap(), 5);
 }
 
@@ -34,374 +34,494 @@ fn env_eval_error() {
     let env = Enviroment::new();
 
     let script = r#"
-    let v = 5
-    v
+    throw new Error("err1");
     "#;
 
-    let script_result = env.eval::<i64>(script);
-    let reuslt = match script_result {
-        Ok(..) => false,
-        Err(_) => true,
-    };
+    let result = env.eval::<()>(script);
+    assert_eq!(
+        result.err().unwrap(),
+        ActError::Exception("err1".to_string())
+    );
+}
 
-    assert_eq!(reuslt, true);
+#[test]
+fn env_eval_expr() {
+    let env = Enviroment::new();
+
+    let script = r#"
+    let ret =  10;
+    ret > 0
+    "#;
+    let result = env.eval::<bool>(script);
+    assert_eq!(result.unwrap(), true);
+}
+
+#[test]
+fn env_eval_array() {
+    let env = Enviroment::new();
+
+    let script = r#"
+    ["u1", "u2"]
+    "#;
+
+    let result = env.eval::<Vec<String>>(script);
+    assert_eq!(result.unwrap(), ["u1", "u2"]);
+}
+
+#[test]
+fn env_eval_object() {
+    let env = Enviroment::new();
+
+    let script = r#"
+    let ret =  { "a": 1, "b": "abc" };
+    ret
+    "#;
+
+    #[derive(Debug, Deserialize, Serialize, PartialEq, Clone)]
+    struct Obj {
+        a: i32,
+        b: String,
+    }
+    let result = env.eval::<Obj>(script);
+    assert_eq!(
+        result.unwrap(),
+        Obj {
+            a: 1,
+            b: "abc".to_string()
+        }
+    );
 }
 
 #[tokio::test]
 async fn env_console_module() {
     let env = Enviroment::new();
-
-    env.registry_console_module();
     let script = r#"
     let v = 5;
-    console::log(`v=${v}`);
-    console::dbg(`v=${v}`);
-    console::wran(`v=${v}`);
-    console::error(`v=${v}`);
+    console.log(`v=${v}`);
+    console.info(`v=${v}`);
+    console.wran(`v=${v}`);
+    console.error(`v=${v}`);
     "#;
-    let result = env.run(script);
-
-    assert_eq!(result.unwrap(), true);
-}
-
-#[test]
-fn env_get_set() {
-    let env = Enviroment::new();
-
-    env.set("a", 5);
-    assert_eq!(env.get::<i64>("a").unwrap(), 5);
-    assert_eq!(env.get::<i32>("a").unwrap(), 5);
-
-    env.set("a", false);
-    assert_eq!(env.get::<bool>("a").unwrap(), false);
-
-    env.set("a", "abc");
-    assert_eq!(env.get::<String>("a").unwrap(), "abc");
-
-    env.set("a", 10.56);
-    assert_eq!(env.get::<f64>("a").unwrap(), 10.56);
-    assert_eq!(env.get::<f32>("a").unwrap(), 10.56);
-
-    env.set("a", json!(100));
-    assert_eq!(env.get::<Value>("a").unwrap(), json!(100));
-    assert_eq!(env.get::<i32>("a").unwrap(), 100);
-}
-
-#[test]
-fn env_get_not_exists() {
-    let env = Enviroment::new();
-    assert_eq!(env.get_value("a"), None);
-}
-
-#[test]
-fn env_get_set_data() {
-    let env = Enviroment::new();
-    env.set_data("test1", &Vars::new().with("a", 5));
-    assert_eq!(env.data("test1").unwrap().get::<i32>("a").unwrap(), 5);
-
-    env.set_data("test1", &Vars::new().with("a", 10));
-    assert_eq!(env.data("test1").unwrap().get::<i32>("a").unwrap(), 10);
-}
-
-#[test]
-fn env_update_data() {
-    let env = Enviroment::new();
-    let refenv = env.create_ref("test1");
-    refenv.set("a", 0);
-
-    let vars = Vars::new().with("a", 5).with("b", "abc");
-    let mut not_updated = Vec::new();
-    for (k, v) in &vars {
-        let ret = env.update_data("test1", k, v);
-        if !ret {
-            not_updated.push(k);
-        }
-    }
-
-    assert_eq!(env.data("test1").unwrap().get::<i32>("a").unwrap(), 5);
-    assert_eq!(env.data("test1").unwrap().get::<i32>("b"), None);
-    assert_eq!(not_updated, ["b"]);
-}
-
-#[test]
-fn env_remove() {
-    let env = Enviroment::new();
-    env.set("a", 10);
-    assert_eq!(env.get::<i32>("a").unwrap(), 10);
-
-    env.remove("a");
-    assert!(env.get::<i32>("a").is_none());
-}
-
-#[test]
-fn env_ref_get_set() {
-    let env = Enviroment::new();
-    let refenv = env.create_ref("test1");
-
-    refenv.set("a", 5);
-    assert_eq!(refenv.get::<i64>("a").unwrap(), 5);
-    assert_eq!(refenv.get::<i32>("a").unwrap(), 5);
-
-    refenv.set("a", false);
-    assert_eq!(refenv.get::<bool>("a").unwrap(), false);
-
-    refenv.set("a", "abc");
-    assert_eq!(refenv.get::<String>("a").unwrap(), "abc");
-
-    refenv.set("a", 10.56);
-    assert_eq!(refenv.get::<f64>("a").unwrap(), 10.56);
-    assert_eq!(refenv.get::<f32>("a").unwrap(), 10.56);
-
-    refenv.set("a", json!(100));
-    assert_eq!(refenv.get::<Value>("a").unwrap(), json!(100));
-    assert_eq!(refenv.get::<i32>("a").unwrap(), 100);
-}
-
-#[test]
-fn env_ref_data() {
-    let env = Enviroment::new();
-    let refenv = env.create_ref("test1");
-
-    refenv.set("a", 5);
-    assert_eq!(refenv.data().get::<i32>("a").unwrap(), 5);
-}
-
-#[test]
-fn env_ref_update_tree_top() {
-    let env = Enviroment::new();
-    let refenv = env.create_ref("test1");
-    refenv.set("a", 1);
-
-    let refenv2 = env.create_ref("test2");
-    refenv2.set(consts::ENV_PARENT_TASK_ID, "test1");
-    refenv2.set("b", 1);
-
-    let refenv3 = env.create_ref("test3");
-    refenv3.set(consts::ENV_PARENT_TASK_ID, "test2");
-    refenv3.set("c", 1);
-
-    refenv.set_env(&Vars::new().with("a", 5).with("b", 5).with("c", 5));
-    assert_eq!(env.data("test1").unwrap().get::<i32>("a").unwrap(), 5);
-    assert_eq!(env.data("test1").unwrap().get::<i32>("b").unwrap(), 5);
-    assert_eq!(env.data("test1").unwrap().get::<i32>("c").unwrap(), 5);
-    assert_eq!(env.data("test2").unwrap().get::<i32>("b").unwrap(), 1);
-    assert_eq!(env.data("test3").unwrap().get::<i32>("c").unwrap(), 1);
-}
-
-#[test]
-fn env_ref_update_tree_sub() {
-    let env = Enviroment::new();
-    let refenv = env.create_ref("test1");
-    refenv.set("a", 1);
-
-    let refenv2 = env.create_ref("test2");
-    refenv2.set(consts::ENV_PARENT_TASK_ID, "test1");
-    refenv2.set("b", 1);
-
-    let refenv3 = env.create_ref("test3");
-    refenv3.set(consts::ENV_PARENT_TASK_ID, "test2");
-    refenv3.set("c", 1);
-
-    refenv3.set_env(
-        &Vars::new()
-            .with("a", 20)
-            .with("b", 20)
-            .with("c", 20)
-            .with("d", 20),
-    );
-    assert_eq!(env.data("test1").unwrap().get::<i32>("a").unwrap(), 20);
-    assert_eq!(env.data("test2").unwrap().get::<i32>("b").unwrap(), 20);
-    assert_eq!(env.data("test3").unwrap().get::<i32>("c").unwrap(), 20);
-    assert_eq!(env.data("test3").unwrap().get::<i32>("d").unwrap(), 20);
-}
-
-#[test]
-fn env_ref_run() {
-    let env = Enviroment::new();
-    let room = env.create_ref("test1");
-    let script = r#"
-    let v = 5;
-    print(`v=${v}`);
-    "#;
-
-    let result = room.run(script);
-    assert_eq!(result.unwrap(), true);
-}
-
-#[test]
-fn env_ref_eval() {
-    let env = Enviroment::new();
-    let room = env.create_ref("test1");
-    let script = r#"
-    let v = 5;
-    v
-    "#;
-
-    let result = room.eval::<i64>(script);
-    assert_eq!(result.unwrap(), 5);
-}
-
-#[test]
-fn env_ref_eval_error() {
-    let env = Enviroment::new();
-    let room = env.create_ref("test1");
-    let script = r#"
-    let v = 5  // needs end with ;
-    v
-    "#;
-
-    let script_result = room.eval::<i64>(script);
-    let reuslt = match script_result {
-        Ok(..) => false,
-        Err(_) => true,
-    };
-    assert_eq!(reuslt, true);
-}
-
-#[tokio::test]
-async fn env_ref_console_module() {
-    let env = Enviroment::new();
-    let room = env.create_ref("test1");
-    env.registry_console_module();
-    let script = r#"
-    let v = 5;
-    console::log(`v=${v}`);
-    console::dbg(`v=${v}`);
-    console::wran(`v=${v}`);
-    console::error(`v=${v}`);
-    "#;
-    let result = room.run(script);
-    assert_eq!(result.unwrap(), true);
-}
-
-#[test]
-fn env_ref_create() {
-    let env = Enviroment::new();
-    env.create_ref("test1");
-
-    assert!(env.data("test1").is_some());
-}
-
-#[test]
-fn env_ref_remove() {
-    let env = Enviroment::new();
-    let refenv = env.create_ref("test1");
-
-    refenv.set("a", 10);
-    refenv.set("b", "abc");
-    assert_eq!(refenv.get::<i32>("a").unwrap(), 10);
-    assert_eq!(refenv.get::<String>("b").unwrap(), "abc");
-
-    let data = env.data("test1").unwrap();
-    assert_eq!(data.get::<i32>("a").unwrap(), 10);
-    assert_eq!(data.get::<String>("b").unwrap(), "abc");
-
-    refenv.remove("a");
-    assert!(data.get::<String>("a").is_none());
-}
-
-#[test]
-fn env_ref_throw_error() {
-    let env = Enviroment::new();
-    let room = env.create_ref("test1");
-
-    let script = r#"
-        throw "error"
-    "#;
-
-    let result = room.eval::<String>(script);
-    assert_eq!(result.is_err(), true);
-}
-
-#[test]
-fn env_collection_array() {
-    let env = Enviroment::new();
-    let refenv = env.create_ref("test1");
-    let script = r#"
-        return ["a", "b"];
-    "#;
-
-    let result = refenv.eval::<Dynamic>(script).unwrap();
-    let cand = Candidate::parse(&result.to_string()).unwrap();
-    assert_eq!(cand.r#type(), "set");
-    assert_eq!(
-        cand.values().unwrap().into_iter().collect::<Vec<_>>(),
-        ["a", "b"]
-    );
+    let result = env.eval::<()>(script);
+    assert!(result.is_ok());
 }
 
 #[test]
 fn env_collection_union() {
     let env = Enviroment::new();
-    let refenv = env.create_ref("test1");
     let script = r#"
         let a = ["a"];
         let b = ["b"];
-        return a.union(b);
+        a.union(b)
     "#;
 
-    let result = refenv.eval::<Dynamic>(script).unwrap();
-    let cand = Candidate::parse(&result.to_string()).unwrap();
-    assert_eq!(cand.r#type(), "group");
-    assert_eq!(
-        cand.values().unwrap().into_iter().collect::<Vec<_>>(),
-        ["a", "b"]
-    );
+    let result = env.eval::<Vec<String>>(script).unwrap();
+    assert_eq!(result, ["a", "b"]);
 }
 
 #[test]
 fn env_collection_intersect() {
     let env = Enviroment::new();
-    let refenv = env.create_ref("test1");
     let script = r#"
         let a = ["a", "b"];
         let b = ["b", "c"];
-        return a.intersect(b);
+        a.intersection(b)
     "#;
 
-    let result = refenv.eval::<Dynamic>(script).unwrap();
-    let cand = Candidate::parse(&result.to_string()).unwrap();
-    assert_eq!(cand.r#type(), "group");
-    assert_eq!(
-        cand.values().unwrap().into_iter().collect::<Vec<_>>(),
-        ["b"]
-    );
+    let result = env.eval::<Vec<String>>(script).unwrap();
+    assert_eq!(result, ["b"]);
 }
 
 #[test]
-fn env_collection_except() {
+fn env_collection_difference() {
     let env = Enviroment::new();
-    let refenv = env.create_ref("test1");
     let script = r#"
         let a = ["a", "b"];
         let b = ["b"];
-        return a.except(b);
+        a.difference(b)
     "#;
 
-    let result = refenv.eval::<Dynamic>(script).unwrap();
-    let cand = Candidate::parse(&result.to_string()).unwrap();
-    assert_eq!(cand.r#type(), "group");
-    assert_eq!(
-        cand.values().unwrap().into_iter().collect::<Vec<_>>(),
-        ["a"]
-    );
+    let result = env.eval::<Vec<String>>(script).unwrap();
+    assert_eq!(result, ["a"]);
+}
+
+#[tokio::test]
+async fn env_task_get() {
+    let engine = Engine::new();
+    let sig = engine.signal(());
+    let s1 = sig.clone();
+
+    let env = engine.env();
+    let workflow = Workflow::new()
+        .with_input("a", 10.into())
+        .with_step(|step| step.with_id("step1"));
+    let proc = engine.scher().start(&workflow, &Vars::new()).unwrap();
+    engine.emitter().on_complete(move |_| s1.close());
+    sig.recv().await;
+    let task = proc.root().unwrap();
+    let script = r#"
+    $("a")
+    "#;
+
+    let context = task.create_context();
+    Context::scope(context, || {
+        let result = env.eval::<i64>(script);
+        assert_eq!(result.unwrap(), 10);
+    });
+}
+
+#[tokio::test]
+async fn env_task_set() {
+    let engine = Engine::new();
+    let sig = engine.signal(());
+    let s1 = sig.clone();
+
+    let env = engine.env();
+    let workflow = Workflow::new()
+        .with_input("a", 10.into())
+        .with_step(|step| step.with_id("step1"));
+    let proc = engine.scher().start(&workflow, &Vars::new()).unwrap();
+    engine.emitter().on_complete(move |_| s1.close());
+    sig.recv().await;
+    let task = proc.root().unwrap();
+    let script = r#"
+    $("a", 100);
+    "#;
+    let context = task.create_context();
+    Context::scope(context, || {
+        env.eval::<()>(script).unwrap();
+        assert_eq!(proc.data().get::<i64>("a"), Some(100));
+    });
+}
+
+#[tokio::test]
+async fn env_task_multi_line() {
+    let engine = Engine::new();
+    let sig = engine.signal(());
+    let s1 = sig.clone();
+
+    let env = engine.env();
+    let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
+    let proc = engine.scher().start(&workflow, &Vars::new()).unwrap();
+    engine.emitter().on_complete(move |_| s1.close());
+    sig.recv().await;
+    let task = proc.root().unwrap();
+
+    let context = task.create_context();
+    Context::scope(context, || {
+        env.eval::<()>(r#"$("a", 100)"#).unwrap();
+        env.eval::<()>(r#"$("b", 200)"#).unwrap();
+        let value = env.eval::<bool>(r#"$("a") < $("b")"#).unwrap();
+        assert_eq!(value, true);
+    });
+}
+
+#[tokio::test]
+async fn env_env_get_local() {
+    let engine = Engine::new();
+    let sig = engine.signal(());
+    let s1 = sig.clone();
+
+    let env = engine.env();
+    let workflow = Workflow::new()
+        .with_env("a", 10.into())
+        .with_step(|step| step.with_id("step1"));
+    let proc = engine.scher().start(&workflow, &Vars::new()).unwrap();
+    engine.emitter().on_complete(move |_| s1.close());
+    sig.recv().await;
+    let task = proc.root().unwrap();
+    let script = r#"
+    $env("a")
+    "#;
+
+    let context = task.create_context();
+    Context::scope(context, || {
+        let result = env.eval::<i64>(script);
+        assert_eq!(result.unwrap(), 10);
+    });
+}
+
+#[tokio::test]
+async fn env_env_get_global() {
+    let engine = Engine::new();
+    let sig = engine.signal(());
+    let s1 = sig.clone();
+
+    let env = engine.env();
+    env.set("a", 10);
+    let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
+    let proc = engine.scher().start(&workflow, &Vars::new()).unwrap();
+    engine.emitter().on_complete(move |_| s1.close());
+    sig.recv().await;
+    let task = proc.root().unwrap();
+    let script = r#"
+    $env("a")
+    "#;
+
+    let context = task.create_context();
+    Context::scope(context, || {
+        let result = env.eval::<i64>(script);
+        assert_eq!(result.unwrap(), 10);
+    });
+}
+
+#[tokio::test]
+async fn env_env_set_from_global() {
+    let engine = Engine::new();
+    let sig = engine.signal(());
+    let s1 = sig.clone();
+
+    let env = engine.env();
+    env.set("a", 10);
+    let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
+    let proc = engine.scher().start(&workflow, &Vars::new()).unwrap();
+    engine.emitter().on_complete(move |_| s1.close());
+    sig.recv().await;
+    let task = proc.root().unwrap();
+
+    // set the env value only change the proc local env in context
+    let script = r#"
+    $env("a", 100);
+    "#;
+    let context = task.create_context();
+    Context::scope(context, || {
+        env.eval::<()>(script).unwrap();
+        assert_eq!(proc.env_local().get::<i64>("a"), Some(100));
+
+        // the global env value is not changed
+        assert_eq!(env.get::<i64>("a"), Some(10));
+    });
+}
+
+#[tokio::test]
+async fn env_env_set_both_local_global() {
+    let engine = Engine::new();
+    let sig = engine.signal(());
+    let s1 = sig.clone();
+
+    let env = engine.env();
+    env.set("a", 10);
+    let workflow = Workflow::new()
+        .with_env("a", 100.into())
+        .with_step(|step| step.with_id("step1"));
+    let proc = engine.scher().start(&workflow, &Vars::new()).unwrap();
+    engine.emitter().on_complete(move |_| s1.close());
+    sig.recv().await;
+    let task = proc.root().unwrap();
+
+    // set the env value only change the proc local env in context
+    let script = r#"
+    $env("a", 200);
+    "#;
+    let context = task.create_context();
+    Context::scope(context, || {
+        env.eval::<()>(script).unwrap();
+        assert_eq!(proc.env_local().get::<i64>("a"), Some(200));
+
+        // the global env value is not changed
+        assert_eq!(env.get::<i64>("a"), Some(10));
+    });
+}
+
+#[tokio::test]
+async fn env_env_multi_line() {
+    let engine = Engine::new();
+    let sig = engine.signal(());
+    let s1 = sig.clone();
+
+    let env = engine.env();
+    let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
+    let proc = engine.scher().start(&workflow, &Vars::new()).unwrap();
+    engine.emitter().on_complete(move |_| s1.close());
+    sig.recv().await;
+    let task = proc.root().unwrap();
+
+    let context = task.create_context();
+    Context::scope(context, || {
+        env.eval::<()>(r#"$env("a", 100)"#).unwrap();
+        env.eval::<()>(r#"$env("b", 200)"#).unwrap();
+        let value = env.eval::<bool>(r#"$env("a") < $env("b")"#).unwrap();
+        assert_eq!(value, true);
+    });
 }
 
 #[test]
-fn env_get_get_value_by_type() {
+fn env_vars_set_num() {
     let env = Enviroment::new();
-
     env.set("a", 5);
     assert_eq!(env.get::<u32>("a").unwrap(), 5);
     assert_eq!(env.get::<String>("a"), None);
 }
 
 #[test]
-fn env_ref_get_get_value_diff_type() {
+fn env_vars_set_str() {
     let env = Enviroment::new();
-    let refenv = env.create_ref("test1");
+    env.set("a", "abc");
+    assert_eq!(env.get::<String>("a").unwrap(), "abc");
+}
 
-    refenv.set("a", 5);
-    assert_eq!(refenv.get::<u32>("a").unwrap(), 5);
-    assert_eq!(refenv.get::<String>("a"), None);
+#[test]
+fn env_vars_set_json() {
+    let env = Enviroment::new();
+    let json = json!({ "count": 1 });
+    env.set("a", json.clone());
+    assert_eq!(env.get::<serde_json::Value>("a").unwrap(), json);
+}
+
+#[test]
+fn env_vars_update() {
+    let env = Enviroment::new();
+    env.set("a", 1);
+    env.set("b", "abc");
+    env.update(|data| {
+        data.set("a", 2);
+        data.set("b", "def");
+    });
+    assert_eq!(env.get::<i32>("a").unwrap(), 2);
+    assert_eq!(env.get::<String>("b").unwrap(), "def");
+}
+
+#[tokio::test]
+async fn env_act_req() {
+    let script = r#"
+    let req = { id: "act2"}
+    act.req(req);
+    "#;
+    let ret = run_test(script, |e, s| {
+        if e.is_key("act2") {
+            s.send(true);
+        }
+    })
+    .await;
+    assert!(ret);
+}
+
+#[tokio::test]
+async fn env_act_msg() {
+    let script = r#"
+    act.msg({ id: "msg1"});
+    "#;
+    let ret = run_test(script, |e, s| {
+        if e.is_key("msg1") {
+            s.send(true);
+        }
+    })
+    .await;
+    assert!(ret);
+}
+
+#[tokio::test]
+async fn env_act_chain() {
+    let script = r#"
+    act.chain({ in: "[ \"u1\", \"u2\" ]", run: [{ msg: { id: "msg1" } }] });
+    "#;
+
+    let ret: i32 = run_test(script, |e, s| {
+        if e.is_key("msg1") {
+            s.update(|data| *data += 1);
+        }
+        if s.data() == 2 {
+            s.close();
+        }
+    })
+    .await;
+    assert_eq!(ret, 2);
+}
+
+#[tokio::test]
+async fn env_act_each() {
+    let script = r#"
+    act.each({ in: "[ \"u1\", \"u2\" ]", run: [{ msg: { id: "msg1" } }] });
+    "#;
+
+    let ret: i32 = run_test(script, |e, s| {
+        if e.is_key("msg1") {
+            s.update(|data| *data += 1);
+        }
+        if s.data() == 2 {
+            s.close();
+        }
+    })
+    .await;
+    assert_eq!(ret, 2);
+}
+
+#[tokio::test]
+async fn env_act_block() {
+    let script = r#"
+    act.block({ acts: [{ msg: { id: "msg1" } }] });
+    "#;
+
+    let ret = run_test(script, |e, s| {
+        if e.is_key("msg1") {
+            s.send(true);
+        }
+    })
+    .await;
+    assert!(ret);
+}
+
+#[tokio::test]
+async fn env_act_call() {
+    let script = r#"
+    act.call({ mid: "m1" });
+    "#;
+
+    let ret = run_test(script, |e, s| {
+        if e.is_key("m1") {
+            s.send(true);
+        }
+    })
+    .await;
+    assert!(ret);
+}
+
+#[tokio::test]
+async fn env_act_push() {
+    let script = r#"
+    act.push({ req: { id: "act1" } });
+    "#;
+
+    let ret = run_test(script, |e, s| {
+        if e.is_key("act1") {
+            s.send(true);
+        }
+    })
+    .await;
+    assert!(ret);
+}
+
+async fn run_test<T: Clone + Send + 'static + Default>(
+    script: &str,
+    exit_if: fn(&Event<Message>, sig: Signal<T>),
+) -> T {
+    let engine = Engine::new();
+    let sig1 = engine.signal(());
+    let sig2 = engine.signal(T::default());
+    let s1 = sig1.clone();
+    let s2 = sig2.clone();
+
+    let m1 = Workflow::new()
+        .with_id("m1")
+        .with_step(|step| step.with_id("step1"));
+    engine.manager().deploy(&m1).unwrap();
+
+    let workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::req(|act| act.with_id("act1")))
+    });
+    let proc = engine.scher().start(&workflow, &Vars::new()).unwrap();
+    engine.emitter().on_message(move |e| {
+        // println!("message: {e:?}");
+        if e.is_key("act1") {
+            s1.close();
+        }
+    });
+    engine.emitter().on_message(move |e| exit_if(e, s2.clone()));
+
+    sig1.recv().await;
+    let task = proc.root().unwrap();
+    let context = task.create_context();
+    context.eval::<()>(&script).unwrap();
+    sig2.recv().await
 }

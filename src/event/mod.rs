@@ -24,6 +24,7 @@ use std::sync::Arc;
 pub struct Event<T, E = ()> {
     inner: T,
     extra: E,
+    #[cfg(test)]
     scher: Option<Arc<Scheduler>>,
 }
 
@@ -107,17 +108,19 @@ where
     pub fn inner(&self) -> &T {
         &self.inner
     }
-    pub fn new(s: &Option<Arc<Scheduler>>, inner: &T) -> Self {
+    pub fn new(_s: &Option<Arc<Scheduler>>, inner: &T) -> Self {
         Self {
-            scher: s.clone(),
+            #[cfg(test)]
+            scher: _s.clone(),
             extra: E::default(),
             inner: inner.clone(),
         }
     }
 
-    pub fn new_with_extra(s: &Option<Arc<Scheduler>>, inner: &T, extra: &E) -> Self {
+    pub fn new_with_extra(_s: &Option<Arc<Scheduler>>, inner: &T, extra: &E) -> Self {
         Self {
-            scher: s.clone(),
+            #[cfg(test)]
+            scher: _s.clone(),
             extra: extra.clone(),
             inner: inner.clone(),
         }
@@ -125,12 +128,6 @@ where
 
     pub fn extra(&self) -> &E {
         &self.extra
-    }
-
-    pub fn close(&self) {
-        if let Some(s) = &self.scher {
-            s.close();
-        }
     }
 
     #[cfg(test)]

@@ -7,7 +7,9 @@ async fn main() {
     let client = client::Client::new();
 
     let engine = Engine::new();
-    engine.start();
+    let sig = engine.signal(());
+    let s = sig.clone();
+
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text).unwrap();
     workflow.print();
@@ -33,7 +35,7 @@ async fn main() {
             e.cost(),
             e.outputs()
         );
-        e.close();
+        s.close();
     });
-    engine.eloop().await;
+    sig.recv().await;
 }

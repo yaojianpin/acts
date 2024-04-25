@@ -1,6 +1,6 @@
 use core::fmt;
 use serde::{Deserialize, Serialize};
-use std::io::ErrorKind;
+use std::{io::ErrorKind, string::FromUtf8Error};
 use thiserror::Error;
 
 #[derive(Deserialize, Serialize, Error, Debug, Clone, PartialEq)]
@@ -10,6 +10,9 @@ pub enum ActError {
 
     #[error("{0}")]
     Script(String),
+
+    #[error("{0}")]
+    Exception(String),
 
     #[error("{0}")]
     Model(String),
@@ -88,5 +91,35 @@ impl From<std::io::Error> for ActError {
 impl Into<std::io::Error> for ActError {
     fn into(self) -> std::io::Error {
         std::io::Error::new(ErrorKind::Other, self.to_string())
+    }
+}
+
+impl From<rquickjs::Error> for ActError {
+    fn from(error: rquickjs::Error) -> Self {
+        ActError::Script(error.to_string())
+    }
+}
+
+impl Into<rquickjs::Error> for ActError {
+    fn into(self) -> rquickjs::Error {
+        std::io::Error::other(self.to_string()).into()
+    }
+}
+
+impl From<FromUtf8Error> for ActError {
+    fn from(_: FromUtf8Error) -> Self {
+        ActError::Runtime("Error with utf-8 string convert".to_string())
+    }
+}
+
+impl From<serde_json::Error> for ActError {
+    fn from(error: serde_json::Error) -> Self {
+        ActError::Convert(error.to_string())
+    }
+}
+
+impl<'a> From<rquickjs::CaughtError<'a>> for ActError {
+    fn from(error: rquickjs::CaughtError<'a>) -> Self {
+        ActError::Script(error.to_string())
     }
 }

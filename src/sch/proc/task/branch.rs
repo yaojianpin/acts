@@ -10,34 +10,35 @@ use tracing::debug;
 #[async_trait]
 impl ActTask for Branch {
     fn init(&self, ctx: &Context) -> Result<()> {
-        ctx.task.set_emit_disabled(true);
+        let task = ctx.task();
+        task.set_emit_disabled(true);
         if self.needs.len() > 0 {
-            ctx.task.set_state(TaskState::Pending);
+            task.set_state(TaskState::Pending);
             return Ok(());
         }
 
         match &self.r#if {
             Some(expr) => {
-                let is_true = ctx.eval(expr)?;
+                let is_true = ctx.eval::<bool>(expr)?;
                 debug!("{} = {}", expr, is_true);
                 if !is_true {
-                    ctx.task.set_action_state(ActionState::Skipped);
+                    task.set_action_state(ActionState::Skipped);
                     return Ok(());
                 }
             }
             None => {
                 let mut branch_count = 1;
-                if let Some(parent) = ctx.task.node.parent() {
+                if let Some(parent) = task.node.parent() {
                     branch_count = parent.children().len();
                 }
 
                 if !self.r#else {
-                    ctx.task.set_action_state(ActionState::Skipped);
+                    task.set_action_state(ActionState::Skipped);
                     return Ok(());
                 }
 
                 if branch_count > 1 {
-                    ctx.task.set_state(TaskState::Pending);
+                    task.set_state(TaskState::Pending);
                 }
 
                 return Ok(());
@@ -49,20 +50,21 @@ impl ActTask for Branch {
 
     fn run(&self, ctx: &Context) -> Result<()> {
         if let Some(script) = &self.run {
-            ctx.run(script)?;
+            ctx.eval(script)?;
         }
         Ok(())
     }
 
     fn next(&self, ctx: &Context) -> Result<bool> {
-        if ctx.task.state().is_running() {
-            let children = ctx.task.node.children();
+        let task = ctx.task();
+        if task.state().is_running() {
+            let children = task.node.children();
             if children.len() > 0 {
-                for child in &ctx.task.node.children() {
+                for child in &task.node.children() {
                     ctx.sched_task(child);
                 }
             } else {
-                ctx.task.set_action_state(ActionState::Completed);
+                task.set_action_state(ActionState::Completed);
             }
             return Ok(children.len() > 0);
         }
@@ -71,9 +73,10 @@ impl ActTask for Branch {
     }
 
     fn review(&self, ctx: &Context) -> Result<bool> {
-        let state = ctx.task.state();
+        let task = ctx.task();
+        let state = task.state();
         if state.is_running() {
-            ctx.task.set_action_state(ActionState::Completed);
+            task.set_action_state(ActionState::Completed);
             return Ok(true);
         } else if state.is_skip() {
             return Ok(true);

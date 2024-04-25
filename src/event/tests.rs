@@ -2,7 +2,7 @@ use super::{ActionState, EventAction};
 use crate::{
     event::{Emitter, Message, Model},
     sch::{Proc, Scheduler, TaskState},
-    utils, NodeKind, Vars, Workflow,
+    utils, Engine, NodeKind, Vars, Workflow,
 };
 use std::sync::Arc;
 #[tokio::test]
@@ -63,7 +63,7 @@ async fn event_on_task() {
     proc.set_state(TaskState::Running);
     let task = proc.create_task(&proc.tree().root.as_ref().unwrap(), None);
     task.set_state(TaskState::Running);
-    scher.emitter().emit_task_event(&task);
+    scher.emitter().emit_task_event(&task).unwrap();
 }
 
 #[tokio::test]
@@ -146,7 +146,8 @@ async fn event_message() {
 }
 
 fn create_proc(workflow: &mut Workflow, id: &str) -> (Arc<Proc>, Arc<Scheduler>) {
-    let scher = Scheduler::new();
+    let engine = Engine::new();
+    let scher = engine.scher();
     let proc = scher.create_proc(id, workflow);
     (proc, scher)
 }

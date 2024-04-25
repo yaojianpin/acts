@@ -4,6 +4,15 @@ use async_trait::async_trait;
 #[async_trait]
 impl ActTask for Workflow {
     fn init(&self, ctx: &Context) -> Result<()> {
+        // set the env to proc env local
+        if self.env.len() > 0 {
+            ctx.proc.with_env_local_mut(|data| {
+                for (k, v) in self.env.iter() {
+                    data.set(k, v.clone());
+                }
+            });
+        }
+
         // run setup
         if self.setup.len() > 0 {
             for s in &self.setup {
@@ -19,22 +28,24 @@ impl ActTask for Workflow {
     }
 
     fn next(&self, ctx: &Context) -> Result<bool> {
-        let children = ctx.task.node.children();
+        let task = ctx.task();
+        let children = task.node.children();
         if children.len() > 0 {
             for step in &children {
                 ctx.sched_task(step);
             }
         } else {
-            ctx.task.set_action_state(ActionState::Completed);
+            task.set_action_state(ActionState::Completed);
         }
 
         Ok(children.len() > 0)
     }
 
     fn review(&self, ctx: &Context) -> Result<bool> {
-        let state = ctx.task.state();
+        let task = ctx.task();
+        let state = task.state();
         if state.is_running() {
-            ctx.task.set_action_state(ActionState::Completed);
+            task.set_action_state(ActionState::Completed);
             return Ok(true);
         }
 

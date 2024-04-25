@@ -1,8 +1,9 @@
 use crate::{
+    engine::Runtime,
     sch::{Proc, Task},
     store::{self, Store},
     utils::Id,
-    ActError, Engine, Result, ShareLock, StoreAdapter,
+    ActError, Result, ShareLock, StoreAdapter,
 };
 use lru::LruCache;
 use std::{
@@ -46,16 +47,18 @@ impl Cache {
         self.procs.read().unwrap().len()
     }
 
-    pub fn init(&self, engine: &Engine) {
-        #[cfg(feature = "store")]
-        {
-            let options = engine.options();
-            *self.store.write().unwrap() =
-                Arc::new(Store::local(&options.data_dir, &options.db_name));
-        }
-        if let Some(store) = engine.adapter().store() {
-            *self.store.write().unwrap() = Arc::new(Store::create(store));
-        }
+    pub fn init(&self) {
+        Runtime::with(|runtime| {
+            #[cfg(feature = "store")]
+            {
+                let config = engine.config();
+                *self.store.write().unwrap() =
+                    Arc::new(Store::local(&config.data_dir, &config.db_name));
+            }
+            if let Some(store) = runtime.adapter().store() {
+                *self.store.write().unwrap() = Arc::new(Store::create(store));
+            }
+        });
     }
 
     pub fn close(&self) {
@@ -86,9 +89,9 @@ impl Cache {
             state: proc.state().into(),
             start_time: proc.start_time(),
             end_time: proc.end_time(),
-            vars: proc.env().vars().to_string(),
             timestamp: proc.timestamp(),
             root_tid: proc.root_tid().unwrap_or_default(),
+            env_local: proc.env_local().to_string(),
         };
         store.procs().create(&data).expect("failed to create proc");
     }
@@ -143,7 +146,6 @@ impl Cache {
         let store = self.store.read().unwrap();
         // update proc when updating the task
         let mut proc = store.procs().find(&task.proc_id)?;
-        proc.vars = task.proc().env().vars().to_string();
         proc.start_time = task.proc().start_time();
         proc.end_time = task.proc().end_time();
         proc.state = task.proc().state().into();
@@ -158,6 +160,7 @@ impl Cache {
                 store_task.end_time = task.end_time();
                 store_task.hooks = serde_json::to_string(&task.hooks())
                     .map_err(|err| ActError::Store(err.to_string()))?;
+                store_task.data = task.data().to_string();
                 store.tasks().update(&store_task)?;
             }
             Err(_) => {
@@ -171,6 +174,7 @@ impl Cache {
                     task_id: tid.clone(),
                     node_id: task.node.id().to_string(),
                     state: task.state().into(),
+                    data: task.data().to_string(),
                     action_state: task.action_state().into(),
                     start_time: task.start_time(),
                     end_time: task.end_time(),

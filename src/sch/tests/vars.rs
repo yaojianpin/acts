@@ -1,46 +1,42 @@
-use crate::{sch::tests::create_proc, utils, Act, Action, Vars, Workflow};
+use crate::{sch::tests::create_proc_signal, utils, Act, Action, Vars, Workflow};
 use serde_json::json;
-use std::sync::{Arc, Mutex};
 
 #[tokio::test]
 async fn sch_vars_workflow_inputs() {
     let mut workflow = Workflow::new().with_input("var1", 10.into());
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     scher.launch(&proc);
-    scher.event_loop().await;
-    assert_eq!(proc.env().root().get::<i64>("var1").unwrap(), 10);
+    tx.recv().await;
+    assert_eq!(proc.data().get::<i64>("var1").unwrap(), 10);
 }
 
 #[tokio::test]
 async fn sch_vars_workflow_outputs_value() {
-    let outputs = Arc::new(Mutex::new(Vars::new()));
     let mut workflow = Workflow::new().with_output("var1", 10.into());
-    let (proc, scher, emiter) = create_proc(&mut workflow, &utils::longid());
-
-    let o = outputs.clone();
+    let (proc, scher, emiter, tx, rx) = create_proc_signal::<Vars>(&mut workflow, &utils::longid());
+    emiter.reset();
     emiter.on_complete(move |e| {
-        *o.lock().unwrap() = e.outputs().clone();
+        rx.send(e.outputs().clone());
     });
     scher.launch(&proc);
-    scher.event_loop().await;
-    assert_eq!(outputs.lock().unwrap().get::<i64>("var1").unwrap(), 10);
+    let ret = tx.recv().await;
+    assert_eq!(ret.get::<i64>("var1").unwrap(), 10);
 }
 
 #[tokio::test]
 async fn sch_vars_workflow_outputs_script() {
-    let outputs = Arc::new(Mutex::new(Vars::new()));
     let mut workflow = Workflow::new()
         .with_input("a", json!(10))
-        .with_output("var1", json!(r#"${ env.get("a") }"#));
-    let (proc, scher, emiter) = create_proc(&mut workflow, &utils::longid());
-
-    let o = outputs.clone();
+        .with_output("var1", json!(r#"${ $("a") }"#));
+    let (proc, scher, emiter, tx, rx) = create_proc_signal::<Vars>(&mut workflow, &utils::longid());
+    emiter.reset();
     emiter.on_complete(move |e| {
-        *o.lock().unwrap() = e.outputs().clone();
+        rx.send(e.outputs().clone());
     });
     scher.launch(&proc);
-    scher.event_loop().await;
-    assert_eq!(outputs.lock().unwrap().get::<i64>("var1").unwrap(), 10);
+    let ret = tx.recv().await;
+    proc.print();
+    assert_eq!(ret.get::<i64>("var1").unwrap(), 10);
 }
 
 #[tokio::test]
@@ -48,11 +44,11 @@ async fn sch_vars_get_with_script() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_input("var1", 10.into())
-            .with_input("var2", r#"${ env.get("var1") }"#.into())
+            .with_input("var2", r#"${ $("var1") }"#.into())
     });
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     assert_eq!(
         proc.task_by_nid("step1")
             .get(0)
@@ -68,11 +64,11 @@ async fn sch_vars_get_with_script() {
 async fn sch_vars_get_with_not_exists() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_input("var2", r#"${ env.get("var1") }"#.into())
+            .with_input("var2", r#"${ $("var1") }"#.into())
     });
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     assert_eq!(
         proc.task_by_nid("step1")
             .get(0)
@@ -91,9 +87,9 @@ async fn sch_vars_output_only_key_name() {
             .with_input("var1", 10.into())
             .with_output("var1", json!(null))
     });
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     assert_eq!(
         proc.task_by_nid("step1")
             .get(0)
@@ -109,14 +105,14 @@ async fn sch_vars_output_only_key_name() {
 async fn sch_vars_step_inputs() {
     let mut workflow =
         Workflow::new().with_step(|step| step.with_id("step1").with_input("var1", 10.into()));
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     assert_eq!(
         proc.task_by_nid("step1")
             .get(0)
             .unwrap()
-            .env()
+            .data()
             .get::<i64>("var1")
             .unwrap(),
         10
@@ -128,10 +124,18 @@ async fn sch_vars_one_step_outputs() {
     let mut workflow =
         Workflow::new().with_step(|step| step.with_id("step1").with_output("var1", 10.into()));
 
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     scher.launch(&proc);
-    scher.event_loop().await;
-    assert_eq!(proc.env().root().get::<i64>("var1").unwrap(), 10);
+    tx.recv().await;
+    assert_eq!(
+        proc.task_by_nid("step1")
+            .get(0)
+            .unwrap()
+            .outputs()
+            .get::<i64>("var1")
+            .unwrap(),
+        10
+    );
 }
 
 #[tokio::test]
@@ -140,11 +144,28 @@ async fn sch_vars_two_steps_outputs() {
         .with_step(|step| step.with_id("step1").with_output("var1", 10.into()))
         .with_step(|step| step.with_id("step2").with_output("var1", 20.into()));
 
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
-    assert_eq!(proc.env().root().get::<i64>("var1").unwrap(), 20);
+    assert_eq!(
+        proc.task_by_nid("step1")
+            .get(0)
+            .unwrap()
+            .outputs()
+            .get::<i64>("var1")
+            .unwrap(),
+        10
+    );
+    assert_eq!(
+        proc.task_by_nid("step2")
+            .get(0)
+            .unwrap()
+            .outputs()
+            .get::<i64>("var1")
+            .unwrap(),
+        20
+    );
 }
 
 #[tokio::test]
@@ -154,14 +175,14 @@ async fn sch_vars_branch_inputs() {
             .with_branch(|b| b.with_id("b1").with_input("var1", 10.into()))
     });
 
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     assert_eq!(
         proc.task_by_nid("b1")
             .get(0)
             .unwrap()
-            .env()
+            .data()
             .get::<i64>("var1")
             .unwrap(),
         10
@@ -177,15 +198,15 @@ async fn sch_vars_branch_outputs() {
                 .with_output("var1", 10.into())
         })
     });
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("step1")
+        proc.task_by_nid("b1")
             .get(0)
             .unwrap()
-            .env()
+            .outputs()
             .get::<i64>("var1")
             .unwrap(),
         10
@@ -202,15 +223,15 @@ async fn sch_vars_branch_one_step_outputs() {
                 .with_step(|step| step.with_id("step1").with_output("var1", json!(100)))
         })
     });
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("b1")
+        proc.task_by_nid("step1")
             .get(0)
             .unwrap()
-            .env()
+            .outputs()
             .get::<i64>("var1")
             .unwrap(),
         100
@@ -228,15 +249,24 @@ async fn sch_vars_branch_two_steps_outputs() {
                 .with_step(|step| step.with_id("step2").with_output("var1", json!(200)))
         })
     });
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("b1")
+        proc.task_by_nid("step1")
             .get(0)
             .unwrap()
-            .env()
+            .outputs()
+            .get::<i64>("var1")
+            .unwrap(),
+        100
+    );
+    assert_eq!(
+        proc.task_by_nid("step2")
+            .get(0)
+            .unwrap()
+            .outputs()
             .get::<i64>("var1")
             .unwrap(),
         200
@@ -245,23 +275,20 @@ async fn sch_vars_branch_two_steps_outputs() {
 
 #[tokio::test]
 async fn sch_vars_act_inputs() {
-    let ret = Arc::new(Mutex::new(false));
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::req(|act| act.with_id("act1").with_input("var1", 10)))
     });
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
-
-    let r = ret.clone();
+    let (proc, scher, emitter, tx, rx) = create_proc_signal(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         if e.inner().is_source("act") && e.inner().is_state("created") {
-            *r.lock().unwrap() = e.inner().inputs.get_value("var1").unwrap() == &json!(10);
-            e.close();
+            rx.update(|data| *data = e.inner().inputs.get_value("var1").unwrap() == &json!(10));
+            rx.close();
         }
     });
     scher.launch(&proc);
-    scher.event_loop().await;
-    assert_eq!(*ret.lock().unwrap(), true);
+    let ret = tx.recv().await;
+    assert_eq!(ret, true);
 }
 
 #[tokio::test]
@@ -271,7 +298,7 @@ async fn sch_vars_act_outputs() {
             act.with_id("act1").with_output("var1", json!(null))
         }))
     });
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 
     let s = scher.clone();
     emitter.on_message(move |e| {
@@ -283,15 +310,13 @@ async fn sch_vars_act_outputs() {
             s.do_action(&action).unwrap();
         }
     });
-
-    emitter.on_complete(|e| e.close());
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     assert_eq!(
-        proc.task_by_nid("step1")
+        proc.task_by_nid("act1")
             .get(0)
             .unwrap()
-            .env()
+            .data()
             .get::<i64>("var1")
             .unwrap(),
         10
@@ -304,7 +329,7 @@ async fn sch_vars_act_options() {
         step.with_id("step1")
             .with_act(Act::req(|act| act.with_id("act1")))
     });
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 
     let s = scher.clone();
     emitter.on_message(move |e| {
@@ -317,14 +342,13 @@ async fn sch_vars_act_options() {
         }
     });
 
-    emitter.on_complete(|e| e.close());
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     assert_eq!(
         proc.task_by_nid("act1")
             .get(0)
             .unwrap()
-            .env()
+            .data()
             .get::<i64>("var1")
             .unwrap(),
         10
@@ -340,22 +364,81 @@ async fn sch_vars_get_global_vars() {
                 act.with_id("act1").with_output("var1", json!(null))
             }))
         });
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {e:?}");
         if e.inner().is_source("act") && e.inner().is_state("created") {
-            e.close();
+            rx.close();
         }
     });
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert_eq!(
         proc.task_by_nid("step1")
             .get(0)
             .unwrap()
-            .env()
-            .get_env::<String>("a")
+            .find::<String>("a")
+            .unwrap(),
+        "abc"
+    );
+}
+
+#[tokio::test]
+async fn sch_vars_act_outputs_from_step() {
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_input("a", json!("abc"))
+            .with_act(Act::req(|act| {
+                act.with_id("act1").with_output("a", json!(null))
+            }))
+    });
+    let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
+    emitter.on_message(move |e| {
+        println!("message: {e:?}");
+        if e.inner().is_source("act") && e.inner().is_state("created") {
+            rx.close();
+        }
+    });
+    scher.launch(&proc);
+    tx.recv().await;
+    proc.print();
+    assert_eq!(
+        proc.task_by_nid("act1")
+            .get(0)
+            .unwrap()
+            .outputs()
+            .get::<String>("a")
+            .unwrap(),
+        "abc"
+    );
+}
+
+#[tokio::test]
+async fn sch_vars_act_inputs_from_step() {
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_input("a", json!("abc"))
+            .with_act(Act::req(|act| {
+                act.with_id("act1").with_input("a", json!(r#"${ $("a") }"#))
+            }))
+    });
+    let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
+    emitter.on_message(move |e| {
+        println!("message: {e:?}");
+        if e.inner().is_source("act") && e.inner().is_state("created") {
+            rx.close();
+        }
+    });
+    scher.launch(&proc);
+    tx.recv().await;
+    proc.print();
+    assert_eq!(
+        proc.task_by_nid("act1")
+            .get(0)
+            .unwrap()
+            .inputs()
+            .get::<String>("a")
             .unwrap(),
         "abc"
     );
@@ -370,22 +453,21 @@ async fn sch_vars_override_global_vars() {
                 act.with_id("act1").with_output("var1", json!(null))
             }))
         });
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         if e.inner().is_source("act") && e.inner().is_state("created") {
-            e.close();
+            rx.close();
         }
     });
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
 
     proc.task_by_nid("step1")
         .get(0)
         .unwrap()
-        .env()
-        .set_env(&Vars::new().with("a", 10));
-    assert_eq!(proc.env().root().get::<i32>("a").unwrap(), json!(10));
+        .update_data(&Vars::new().with("a", 10));
+    assert_eq!(proc.data().get::<i32>("a").unwrap(), json!(10));
 }
 
 #[tokio::test]
@@ -397,27 +479,25 @@ async fn sch_vars_override_step_vars() {
                 act.with_id("act1").with_output("var1", json!(null))
             }))
     });
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         if e.inner().is_source("act") && e.inner().is_state("created") {
-            e.close();
+            rx.close();
         }
     });
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
 
     proc.task_by_nid("act1")
         .get(0)
         .unwrap()
-        .env()
-        .set_env(&Vars::new().with("a", 10));
+        .update_data(&Vars::new().with("a", 10));
     assert_eq!(
         proc.task_by_nid("step1")
             .get(0)
             .unwrap()
-            .env()
-            .get::<i32>("a")
+            .find::<i32>("a")
             .unwrap(),
         json!(10)
     );

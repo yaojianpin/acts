@@ -19,6 +19,7 @@ impl DbDocument for Task {
         map.insert("kind".to_string(), json!(self.kind.clone()));
         map.insert("prev".to_string(), json!(self.prev.clone()));
         map.insert("state".to_string(), json!(self.state.clone()));
+        map.insert("data".to_string(), json!(self.data.clone()));
         map.insert("action_state".to_string(), json!(self.action_state.clone()));
         map.insert("start_time".to_string(), json!(self.start_time));
         map.insert("end_time".to_string(), json!(self.end_time));

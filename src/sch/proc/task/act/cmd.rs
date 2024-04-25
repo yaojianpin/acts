@@ -6,32 +6,33 @@ use crate::{
 
 impl Cmd {
     pub fn run(&self, ctx: &Context) -> Result<()> {
+        let task = ctx.task();
         let set_inputs = || {
             if self.inputs.len() > 0 {
-                let inputs = utils::fill_inputs(&ctx.task.env(), &self.inputs);
-                ctx.task.env().set_env(&inputs);
+                let inputs = utils::fill_inputs(&self.inputs, ctx);
+                task.update_data(&inputs);
             }
         };
         let name: &str = &self.name;
         match name {
             consts::EVT_SUBMIT => {
                 set_inputs();
-                ctx.task.set_action_state(ActionState::Submitted);
-                ctx.task.next(ctx)?;
+                task.set_action_state(ActionState::Submitted);
+                task.next(ctx)?;
             }
             consts::EVT_COMPLETE => {
                 set_inputs();
-                ctx.task.set_action_state(ActionState::Completed);
-                ctx.task.next(ctx)?;
+                task.set_action_state(ActionState::Completed);
+                task.next(ctx)?;
             }
             consts::EVT_SKIP => {
                 set_inputs();
-                ctx.task.set_action_state(ActionState::Skipped);
-                ctx.task.next(ctx)?;
+                task.set_action_state(ActionState::Skipped);
+                task.next(ctx)?;
             }
             consts::EVT_ABORT => {
                 set_inputs();
-                ctx.abort_task(&ctx.task)?;
+                ctx.abort_task(&task)?;
             }
             consts::EVT_ERR => {
                 let err_code =
@@ -58,11 +59,11 @@ impl Cmd {
                 });
 
                 set_inputs();
-                ctx.task.error(ctx)?;
+                task.error(ctx)?;
             }
             _ => {
                 return Err(ActError::Runtime(format!(
-                    "cmd name not exists for '{name}'"
+                    "the cmd.name({name}) does not exists"
                 )));
             }
         }

@@ -13,12 +13,12 @@
             e: abc
           branches:
             - name: branch 1
-              if: env.get("a") >= 100
+              if: $("a") >= 100
               steps:
                 - name: branch 1.1
                 - name: branch 1.2
             - name: branch 2
-              if: env.get("a") < 100
+              if: $("a") < 100
               steps:
                 - name:  branch 2.1
         - name: step 4

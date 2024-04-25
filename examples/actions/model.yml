@@ -3,7 +3,7 @@ id: actions
 inputs:
   v: 0
 outputs:
-  result: ${ env.get("v")}
+  result: ${ $("v")}
 steps:
   - name: prepare
     id: prepare
@@ -15,7 +15,7 @@ steps:
     branches:
       - name: cond 1
         id: cond1
-        if: env.get("v") > 0
+        if: $("v") > 0
         steps:
           - name: step1
             id: step1
@@ -23,14 +23,14 @@ steps:
               - !req
                 id: action1
                 inputs:
-                  v: ${ env.get("v") }
+                  v: ${ $("v") }
           - name: step2
             id: step2
             acts:
               - !req
                 id: action2
                 inputs:
-                  v: ${ env.get("v") }        
+                  v: ${ $("v") }        
       - name: cond 2
         id: cond2
         else: true
@@ -47,6 +47,6 @@ steps:
       - !req
         id: action4
         inputs:
-          v: ${ env.get("v") }
+          v: ${ $("v") }
   
 

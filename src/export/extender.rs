@@ -1,20 +1,21 @@
-use crate::{ActModule, ActPlugin};
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
+
+use crate::{env::Enviroment, ActModule, ActPlugin};
 
 #[derive(Clone)]
 pub struct Extender {
-    modules: Arc<Mutex<HashMap<String, ActModule>>>,
-    pub(crate) plugins: Arc<Mutex<Vec<Box<dyn ActPlugin>>>>,
+    env: Arc<Enviroment>,
+    plugins: Arc<Mutex<Vec<Box<dyn ActPlugin>>>>,
 }
 
 impl Extender {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(
+        env: &Arc<Enviroment>,
+        plugins: &Arc<Mutex<Vec<Box<dyn ActPlugin>>>>,
+    ) -> Self {
         Self {
-            plugins: Arc::new(Mutex::new(Vec::new())),
-            modules: Arc::new(Mutex::new(HashMap::new())),
+            env: env.clone(),
+            plugins: plugins.clone(),
         }
     }
 
@@ -31,11 +32,8 @@ impl Extender {
     ///     assert!(engine.mgr().modules().contains_key("test"));
     /// }
     /// ```
-    pub fn register_module(&self, name: &str, module: &ActModule) {
-        self.modules
-            .lock()
-            .unwrap()
-            .insert(name.to_string(), module.clone());
+    pub fn register_module<T: ActModule + Clone + 'static>(&self, module: &T) {
+        self.env.register_module(module)
     }
 
     /// register plugin
@@ -55,7 +53,7 @@ impl Extender {
     /// impl ActPlugin for TestPlugin {
     ///     fn on_init(&self, engine: &Engine) {
     ///         println!("TestPlugin");
-    ///         // engine.mgr().register_module("name", module);
+    ///         // engine.extender().register_module("name", module);
     ///         engine.emitter().on_start(|e| {});
     ///         engine.emitter().on_complete(|e| {});
     ///         engine.emitter().on_message(|e| {});
@@ -65,11 +63,7 @@ impl Extender {
     /// engine.extender().register_plugin(&TestPlugin::new());
     /// ```
     pub fn register_plugin<T: ActPlugin + 'static + Clone>(&self, plugin: &T) {
-        self.plugins.lock().unwrap().push(Box::new(plugin.clone()));
-    }
-
-    #[allow(unused)]
-    pub(crate) fn modules(&self) -> HashMap<String, ActModule> {
-        self.modules.lock().unwrap().clone()
+        let mut plugins = self.plugins.lock().unwrap();
+        plugins.push(Box::new(plugin.clone()));
     }
 }

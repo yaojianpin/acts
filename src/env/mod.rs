@@ -1,173 +1,90 @@
 mod moudle;
-mod refenv;
-
 #[cfg(test)]
 mod tests;
+mod value;
 
-use crate::{ActError, ActModule, ActValue, Result, Vars};
-pub use refenv::RefEnv;
-use rhai::Engine as ScriptEngine;
-use serde::{Deserialize, Serialize};
-use serde_json::json;
+use crate::{ActError, Result, Vars};
+use core::fmt;
+use rquickjs::{Context as JsContext, Ctx as JsCtx, FromJs, Runtime as JsRuntime};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::cell::RefCell;
-use std::sync::{Arc, Mutex};
-use tracing::debug;
 
-#[derive(Debug, Default)]
+use self::value::ActValue;
+
+pub trait ActModule: Send + Sync {
+    fn init<'a>(&self, ctx: &JsCtx<'a>) -> Result<()>;
+}
+
 pub struct Enviroment {
-    scr: Mutex<ScriptEngine>,
-    scope: RefCell<rhai::Scope<'static>>,
     vars: RefCell<Vars>,
+    modules: RefCell<Vec<Box<dyn ActModule>>>,
+}
+
+impl fmt::Debug for Enviroment {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Enviroment").finish()
+    }
 }
 
 unsafe impl Send for Enviroment {}
 unsafe impl Sync for Enviroment {}
 
 impl Enviroment {
-    pub fn new() -> Arc<Self> {
-        let scope = rhai::Scope::new();
-        let env = Enviroment {
-            scr: Mutex::new(ScriptEngine::new()),
-            scope: RefCell::new(scope),
+    pub fn new() -> Self {
+        let mut env = Enviroment {
+            modules: RefCell::new(Vec::new()),
             vars: RefCell::new(Vars::new()),
         };
         env.init();
-        Arc::new(env)
+        env
     }
 
-    pub fn create_ref(self: &Arc<Self>, id: &str) -> Arc<RefEnv> {
-        Arc::new(RefEnv::new(self, id))
+    pub fn register_module<T: ActModule + Clone + 'static>(&self, module: &T) {
+        let mut modules = self.modules.borrow_mut();
+        modules.push(Box::new(module.clone()));
     }
 
-    pub fn init(&self) {
-        debug!("env::init");
-        self.registry_collection_module();
-        self.registry_console_module();
-        self.registry_env_module();
-    }
-
-    pub fn vars(&self) -> Vars {
-        self.vars.borrow().clone()
-    }
-
-    pub fn data(&self, id: &str) -> Option<Vars> {
-        self.vars.borrow().get(id)
-    }
-
-    pub fn set_data(&self, id: &str, values: &Vars) {
-        if !self.vars.borrow().contains_key(id) {
-            self.vars.borrow_mut().set(id, Vars::new());
-        }
-        if let Some(vars) = self.vars.borrow_mut().get_mut(id) {
-            if let Some(data) = vars.as_object_mut() {
-                for (name, value) in values {
-                    data.entry(name)
-                        .and_modify(|v| *v = value.clone())
-                        .or_insert(value.clone());
-                }
-            }
-        }
-    }
-
-    pub fn update_data(&self, id: &str, name: &str, value: &ActValue) -> bool {
-        if let Some(vars) = self.vars.borrow_mut().get_mut(id) {
-            if let Some(data) = vars.as_object_mut() {
-                if data.contains_key(name) {
-                    data.entry(name).and_modify(|v| *v = value.clone());
-                    return true;
-                }
-            }
-        }
-
-        false
-    }
-
-    pub fn root(&self) -> Vars {
-        if let Some(vars) = self.data("$") {
-            return vars;
-        }
-
-        Vars::new()
-    }
-
-    pub fn append(&self, vars: &Vars) {
-        let mut env = self.vars.borrow_mut();
-        for (name, v) in vars {
-            env.entry(name.to_string())
-                .and_modify(|i| *i = v.clone())
-                .or_insert(v.clone());
-        }
-    }
-
-    #[allow(unused)]
-    pub fn run(&self, script: &str) -> Result<bool> {
-        let scr = self.scr.lock().unwrap();
-        let mut scope = self.scope.borrow_mut();
-        match scr.run_with_scope(&mut scope, script) {
-            Ok(..) => Ok(true),
-            Err(err) => Err(ActError::Script(format!("{}", err))),
-        }
-    }
-
-    pub fn eval<T: rhai::Variant + Clone>(&self, expr: &str) -> Result<T> {
-        let scr = self.scr.lock().unwrap();
-        let mut scope = self.scope.borrow_mut();
-        match scr.eval_with_scope::<T>(&mut scope, expr) {
-            Ok(ret) => Ok(ret),
-            Err(err) => Err(ActError::Script(format!("{}", err))),
-        }
-    }
-
-    fn get<T>(&self, name: &str) -> Option<T>
+    pub fn get<T>(&self, name: &str) -> Option<T>
     where
-        T: for<'de> Deserialize<'de>,
+        T: for<'de> Deserialize<'de> + Clone,
     {
-        if let Some(value) = self.get_value(name) {
-            if let Ok(v) = serde_json::from_value::<T>(value) {
-                return Some(v);
-            }
-        }
-
-        None
+        self.vars.borrow().get::<T>(name)
     }
 
-    pub fn get_value(&self, name: &str) -> Option<ActValue> {
-        let vars = self.vars.borrow();
-        match vars.get_value(name) {
-            Some(v) => Some(v.clone()),
-            None => None,
-        }
-    }
-
-    #[allow(unused)]
-    fn set<T>(&self, name: &str, value: T)
+    pub fn set<T>(&self, name: &str, value: T)
     where
-        T: Serialize,
+        T: Serialize + Clone,
     {
-        self.set_value(name, json!(value));
+        self.vars.borrow_mut().set(name, value);
     }
 
-    #[allow(unused)]
-    fn set_value(&self, name: &str, value: ActValue) {
+    pub fn update<F: FnOnce(&mut Vars)>(&self, f: F) {
         let mut vars = self.vars.borrow_mut();
-        vars.entry(name.to_string())
-            .and_modify(|i| *i = value.clone())
-            .or_insert(value);
+        f(&mut vars);
     }
 
-    #[allow(unused)]
-    fn remove(&self, name: &str) {
-        let mut vars = self.vars.borrow_mut();
-        vars.remove(name);
-    }
+    pub fn eval<T>(&self, expr: &str) -> Result<T>
+    where
+        T: DeserializeOwned,
+    {
+        let runtime = JsRuntime::new().unwrap();
+        let ctx = JsContext::full(&runtime).unwrap();
+        ctx.with(|ctx| {
+            let modules = self.modules.borrow();
+            for m in modules.iter() {
+                m.init(&ctx)?;
+            }
 
-    fn register_module(&self, name: impl AsRef<str>, module: ActModule) {
-        let scr = &mut *self.scr.lock().unwrap();
-        scr.register_static_module(name, module.into());
-    }
+            let result = ctx.eval::<ActValue, &str>(expr);
+            if let Err(rquickjs::Error::Exception) = result {
+                let exception = rquickjs::Exception::from_js(&ctx, ctx.catch()).unwrap();
+                eprintln!("error: {exception:?}");
+                return Err(ActError::Exception(exception.message().unwrap_or_default()));
+            }
 
-    fn register_global_module(&self, module: ActModule) {
-        let scr = &mut *self.scr.lock().unwrap();
-        scr.register_global_module(module.into());
+            let value = result.map_err(ActError::from)?;
+            let ret = serde_json::from_value::<T>(value.into()).map_err(ActError::from)?;
+            Ok(ret)
+        })
     }
 }

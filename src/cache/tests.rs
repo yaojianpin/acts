@@ -119,10 +119,10 @@ fn cache_restore_count() {
             state: TaskState::None.into(),
             start_time: 0,
             end_time: 0,
-            vars: "".to_string(),
             timestamp: 0,
             model: model.to_json().unwrap(),
             root_tid: "".to_string(),
+            env_local: "{}".to_string(),
         };
         cache.store().base().procs().create(&proc).unwrap();
     }
@@ -165,10 +165,10 @@ fn cache_restore_working_state() {
             state: states[i].to_string(),
             start_time: 0,
             end_time: 0,
-            vars: "".to_string(),
             timestamp: 0,
             model: model.to_json().unwrap(),
             root_tid: "".to_string(),
+            env_local: "{}".to_string(),
         };
         cache.store().base().procs().create(&proc).unwrap();
     }
@@ -211,10 +211,10 @@ fn cache_restore_completed_state() {
             state: states[i].to_string(),
             start_time: 0,
             end_time: 0,
-            vars: "".to_string(),
             timestamp: 0,
             model: model.to_json().unwrap(),
             root_tid: "".to_string(),
+            env_local: "{}".to_string(),
         };
         cache.store().base().procs().create(&proc).unwrap();
     }
@@ -246,10 +246,10 @@ fn cache_restore_less_cap() {
             state: states[i].to_string(),
             start_time: 0,
             end_time: 0,
-            vars: "".to_string(),
             timestamp: 0,
             model: model.to_json().unwrap(),
             root_tid: "".to_string(),
+            env_local: "{}".to_string(),
         };
         cache.store().base().procs().create(&proc).unwrap();
     }

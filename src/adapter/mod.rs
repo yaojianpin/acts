@@ -19,9 +19,9 @@ impl Adapter {
         }
     }
 
-    pub fn set_store<STORE: StoreAdapter + Clone + 'static>(&self, store: &STORE) {
+    pub fn set_store(&self, store: Arc<dyn StoreAdapter>) {
         info!("set_store");
-        *self.store.write().unwrap() = Some(Arc::new(store.clone()));
+        *self.store.write().unwrap() = Some(store);
     }
 
     pub fn store(&self) -> Option<Arc<dyn StoreAdapter>> {

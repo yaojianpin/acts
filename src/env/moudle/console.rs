@@ -1,40 +1,37 @@
-use crate::env::Enviroment;
-use rhai::{export_module, plugin::*};
+use crate::{env::ActModule, Result};
+use rquickjs::class::Trace;
 
-impl Enviroment {
-    pub fn registry_console_module(&self) {
-        let mut module = Module::new();
-        combine_with_exported_module!(&mut module, "console", console);
-        self.register_module("console", module)
+#[derive(Trace, Clone)]
+#[rquickjs::class]
+pub struct Console {}
+
+#[rquickjs::methods]
+impl Console {
+    pub fn new() -> Self {
+        Console {}
+    }
+
+    fn log(&self, message: String) {
+        println!("[log] {message}");
+    }
+
+    fn info(&self, message: String) {
+        println!("{}", format!("[info]{}", message));
+    }
+
+    fn wran(&self, message: String) {
+        println!("{}", format!("[wran]{}", message));
+    }
+
+    fn error(&self, message: String) {
+        println!("{}", format!("[error]{}", message));
     }
 }
 
-#[export_module]
-mod console {
-    use rhai::plugin::*;
+impl ActModule for Console {
+    fn init<'a>(&self, ctx: &rquickjs::Ctx<'a>) -> Result<()> {
+        ctx.globals().set("console", self.clone())?;
 
-    #[export_fn]
-    pub fn log(message: &str) {
-        println!("{}", message);
-    }
-
-    #[export_fn]
-    pub fn dbg(_message: &str) {
-        println!("{}", format!("[debug]{}", _message));
-    }
-
-    #[export_fn]
-    pub fn info(_message: &str) {
-        println!("{}", format!("[info]{}", _message));
-    }
-
-    #[export_fn]
-    pub fn wran(_message: &str) {
-        println!("{}", format!("[wran]{}", _message));
-    }
-
-    #[export_fn]
-    pub fn error(_message: &str) {
-        println!("{}", format!("[error]{}", _message));
+        Ok(())
     }
 }

@@ -30,39 +30,41 @@ impl StatementBatch {
                 s.exec(ctx)?;
             }
             StatementBatch::Catch(c) => {
-                if let Some(err) = ctx.task.state().as_err() {
-                    let is_catch_processed = ctx
-                        .task
-                        .env()
-                        .get::<bool>(consts::IS_CATCH_PROCESSED)
+                let task = ctx.task();
+                if let Some(err) = task.state().as_err() {
+                    let is_catch_processed = task
+                        .with_data(|data| data.get::<bool>(consts::IS_CATCH_PROCESSED))
                         .unwrap_or_default();
                     if is_catch_processed {
                         return Ok(());
                     }
                     // if the catch is no err key, it will catch all error
                     if c.err.is_none() || err.key == c.err {
-                        ctx.task.env().set(consts::IS_CATCH_PROCESSED, true);
-                        ctx.task.set_state(TaskState::Running);
-                        ctx.task.set_pure_action_state(ActionState::Created);
+                        task.set_data_with(|data| data.set(consts::IS_CATCH_PROCESSED, true));
+                        task.set_state(TaskState::Running);
+                        task.set_pure_action_state(ActionState::Created);
                         for s in &c.then {
                             s.exec(ctx)?;
                         }
 
                         // review and run the next task
-                        ctx.task.review(ctx)?;
+                        task.review(ctx)?;
                     }
                 }
             }
             StatementBatch::Timeout(t) => {
+                let task = ctx.task();
                 let key = format!("{}{}", consts::IS_TIMEOUT_PROCESSED_PREFIX, t.on);
-                let is_timeout_processed = ctx.task.env().get::<bool>(&key).unwrap_or_default();
+                let is_timeout_processed = task
+                    .with_data(|data| data.get::<bool>(&key))
+                    .unwrap_or_default();
                 if is_timeout_processed {
                     return Ok(());
                 }
 
-                let millis = utils::time::time() - ctx.task.start_time();
+                let millis = utils::time::time() - task.start_time();
                 if millis >= t.on.as_secs() * 1000 {
-                    ctx.task.env().set(&key, true);
+                    task.set_data_with(|data| data.set(&key, true));
                     for s in &t.then {
                         s.exec(ctx)?;
                     }

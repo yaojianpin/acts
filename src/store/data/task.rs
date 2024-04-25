@@ -12,6 +12,7 @@ pub struct Task {
 
     pub name: String,
     pub state: String,
+    pub data: String,
     pub action_state: String,
     pub start_time: i64,
     pub end_time: i64,

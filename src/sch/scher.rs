@@ -1,31 +1,30 @@
+use super::TaskState;
 use crate::{
     cache::Cache,
+    config::Config,
     event::{Action, Emitter},
     model::Workflow,
-    options::Options,
     sch::{
         queue::{Queue, Signal},
         Proc, Task,
     },
     utils::{self, consts},
-    ActError, ActionResult, Engine, Error, Result, RwLock, ShareLock, Vars,
+    ActError, ActionResult, Error, Result, Vars,
 };
 use serde_json::json;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::{
     runtime::Handle,
     time::{self, Duration},
 };
 use tracing::{debug, error, info};
 
-use super::TaskState;
-
 #[derive(Clone)]
 pub struct Scheduler {
     queue: Arc<Queue>,
     cache: Arc<Cache>,
     emitter: Arc<Emitter>,
-    engine: ShareLock<Option<Engine>>,
+    closed: Arc<Mutex<bool>>,
 }
 
 impl std::fmt::Debug for Scheduler {
@@ -39,29 +38,27 @@ impl std::fmt::Debug for Scheduler {
 
 impl Scheduler {
     pub fn new() -> Arc<Self> {
-        Scheduler::new_with(&Options::default())
+        Scheduler::new_with(&Config::default())
     }
 
-    pub fn new_with(options: &Options) -> Arc<Self> {
+    pub fn new_with(options: &Config) -> Arc<Self> {
         let scher = Arc::new(Self {
             queue: Queue::new(),
             cache: Arc::new(Cache::new(options.cache_cap)),
             emitter: Arc::new(Emitter::new()),
-            engine: Arc::new(RwLock::new(None)),
+            closed: Arc::new(Mutex::new(false)),
         });
+
         scher.initialize(options);
         scher
     }
 
-    pub fn init(self: &Arc<Self>, engine: &Engine) {
+    pub fn init(self: &Arc<Self>) {
         debug!("sch::init");
-        *self.engine.write().unwrap() = Some(engine.clone());
-
-        self.queue.init(engine);
-        self.cache.init(engine);
+        self.cache.init();
     }
 
-    pub fn start(&self, model: &Workflow, options: &Vars) -> Result<ActionResult> {
+    pub fn start(self: &Arc<Self>, model: &Workflow, options: &Vars) -> Result<Arc<Proc>> {
         debug!("sch::start({})", model.id);
 
         let mut proc_id = utils::longid();
@@ -76,41 +73,28 @@ impl Scheduler {
             )));
         }
 
-        let mut state = ActionResult::begin();
-
         // merge vars with workflow.env
         let mut w = model.clone();
-        w.set_env(&options);
+        w.set_inputs(&options);
 
         let proc = Arc::new(Proc::new(&proc_id));
         proc.load(&w)?;
         self.launch(&proc);
 
-        // add pid to state
-        state.insert("pid", proc_id.into());
-
-        state.end();
-        Ok(state)
+        Ok(proc)
     }
 
     pub async fn next(self: &Arc<Self>) -> bool {
-        let mut handlers = Vec::new();
         if let Some(signal) = self.queue.next().await {
             debug!("next: {:?}", signal);
             match signal {
-                Signal::Proc(proc) => {
-                    self.cache.push(&proc);
-                    let scher = self.clone();
-                    handlers.push(Handle::current().spawn(async move {
-                        proc.start(&scher);
-                    }));
-                }
                 Signal::Task(task) => {
                     if let Some(proc) = self.cache.proc(&task.proc_id) {
-                        let scher = self.clone();
-                        handlers.push(Handle::current().spawn(async move {
-                            proc.do_task(&task.id, &scher);
-                        }));
+                        let task_id = task.id.clone();
+                        let ctx = task.create_context();
+                        Handle::current().spawn(async move {
+                            proc.do_task(&task_id, &ctx);
+                        });
                     }
                 }
                 Signal::Terminal => {
@@ -123,10 +107,11 @@ impl Scheduler {
         return true;
     }
 
-    pub async fn event_loop(self: &Arc<Scheduler>) {
+    pub async fn event_loop(self: &Arc<Self>) {
         loop {
             let ret = self.next().await;
             if !ret {
+                *self.closed.lock().unwrap() = true;
                 break;
             }
         }
@@ -136,19 +121,23 @@ impl Scheduler {
         self.cache.proc(pid)
     }
 
-    pub fn launch(&self, proc: &Arc<Proc>) {
+    pub fn launch(self: &Arc<Self>, proc: &Arc<Proc>) {
         debug!("sch::launch");
-        self.queue.send(&Signal::Proc(proc.clone()));
+        let scher = self.clone();
+        let proc = proc.clone();
+        tokio::spawn(async move {
+            proc.start(&scher);
+        });
     }
 
-    pub fn push(&self, task: &Task) {
+    pub fn push(&self, task: &Arc<Task>) {
         debug!("sch::push  task={:?}", task);
         self.queue.send(&Signal::Task(task.clone()));
     }
 
-    pub fn do_action(self: &Arc<Self>, action: &Action) -> Result<ActionResult> {
+    pub fn do_action(&self, action: &Action) -> Result<ActionResult> {
         match self.cache.proc(&action.proc_id) {
-            Some(proc) => proc.do_action(&action, self),
+            Some(proc) => proc.do_action(&action),
             None => Err(ActError::Runtime(format!(
                 "cannot find proc '{}'",
                 action.proc_id
@@ -161,12 +150,21 @@ impl Scheduler {
         self.queue.terminate();
     }
 
+    #[cfg(test)]
+    pub(crate) fn signal<T: Clone>(&self, v: T) -> crate::Signal<T> {
+        crate::Signal::new(v)
+    }
+
     pub fn emitter(&self) -> &Arc<Emitter> {
         &self.emitter
     }
 
     pub fn cache(&self) -> &Arc<Cache> {
         &self.cache
+    }
+
+    pub fn is_closed(&self) -> bool {
+        self.closed.lock().unwrap().clone()
     }
 
     #[allow(unused)]
@@ -176,16 +174,15 @@ impl Scheduler {
         proc
     }
 
-    fn initialize(self: &Arc<Scheduler>, options: &Options) {
+    fn initialize(self: &Arc<Scheduler>, options: &Config) {
         {
             let cache = self.cache.clone();
-            let evt = self.emitter();
-            evt.init(self);
+            let emitter = self.emitter();
+            emitter.init(self);
 
             let scher = self.clone();
-            evt.on_proc(move |proc| {
+            emitter.on_proc(move |proc| {
                 info!("on_proc: {:?}", proc);
-
                 let workflow_state = proc.workflow_state();
                 let state = proc.state();
                 if state.is_running() || state.is_pending() {
@@ -221,22 +218,20 @@ impl Scheduler {
         {
             let cache = self.cache.clone();
             let evt = self.emitter();
-            let scher = self.clone();
             evt.on_task(move |e| {
                 info!("on_task: task={:?}", e.inner());
-
                 cache
                     .upsert(e)
                     .unwrap_or_else(|err| error!("scher.initialize upsert={}", err));
 
+                let ctx = e.create_context();
                 // run the hook events
-                let ctx = e.create_context(&scher);
                 e.run_hooks(&ctx)
                     .unwrap_or_else(|err| error!("scher.initialize hooks={}", err));
 
                 // check task is allowed to emit message to client
                 if e.extra().emit_message && !e.state().is_pending() {
-                    let emitter = scher.emitter();
+                    let emitter = ctx.scher.emitter();
                     if !e.is_emit_disabled() {
                         let msg = e.create_message();
                         emitter.emit_message(&msg);
@@ -247,11 +242,10 @@ impl Scheduler {
         {
             let evt = self.emitter().clone();
             let cache = self.cache.clone();
-            let scher = self.clone();
             evt.on_tick(move |_| {
                 for proc in cache.procs().iter() {
                     if proc.state().is_running() {
-                        proc.do_tick(&scher);
+                        proc.do_tick();
                     }
                 }
             });
@@ -282,7 +276,7 @@ impl Scheduler {
     fn return_to_act(self: &Arc<Self>, pid: &str, tid: &str, proc: &Proc) {
         debug!("scher.return_to_act");
         let state = proc.state();
-        proc.print();
+        // proc.print();
         let mut vars = proc.outputs();
         println!("sub outputs: {vars}");
         let mut event = consts::EVT_COMPLETE;
@@ -307,8 +301,11 @@ impl Scheduler {
             vars.insert(consts::ACT_ERR_MESSAGE.to_string(), json!(err.message));
         }
         let action = Action::new(pid, tid, event, &vars);
-        let _ = self
-            .do_action(&action)
-            .map_err(|err| error!("scher::return_to_act {}", err.to_string()));
+        let scher = self.clone();
+        tokio::spawn(async move {
+            let _ = scher
+                .do_action(&action)
+                .map_err(|err| error!("scher::return_to_act {}", err.to_string()));
+        });
     }
 }

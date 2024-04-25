@@ -52,7 +52,7 @@ cargo add acts
 ```
 
 ## Quickstart
-1. Start the workflow engine by `engine.start`.
+1. Create and start the workflow engine by `engine.new()`.
 2. Load a yaml model to create a `workflow`. 
 3. Deploy the model in step 2 by `engine.manager()`.
 4. Config events by `engine.emitter()`.
@@ -64,7 +64,6 @@ use acts::{Engine, Vars, Workflow};
 #[tokio::main]
 async fn main() {
     let engine = Engine::new();
-    engine.start();
 
     let text = include_str!("../examples/simple/model.yml");
     let workflow = Workflow::from_yml(text).unwrap();
@@ -119,12 +118,12 @@ steps:
   - name: step 2
     branches:
       - name: branch 1
-        if: ${ env.get("value") > 100 }
+        if: ${ $("value") > 100 }
         run: |
             print("branch 1");
 
       - name: branch 2
-        if: ${ env.get("value") <= 100 }
+        if: ${ $("value") <= 100 }
         steps:
             - name: step 3
               run: |
@@ -153,8 +152,6 @@ use acts::{Engine, Vars, Workflow};
 #[tokio::main]
 async fn main() {
   let engine = Engine::new();
-  engine.start();
-
   let executor = engine.executor();
 
   let mut vars = Vars::new();
@@ -196,25 +193,25 @@ setup:
 
   # checks the condition and enters into the 'then' acts
   - !if
-    on: env.get("v") > 0
+    on: $("v") > 0
     then:
       - !msg
         id: msg2
   # on step created
-  - !on_created:
+  - !on_created
     - !msg
       id: msg3
 
   # on workflow completed
-  - !on_completed:
+  - !on_completed
     - !msg
       id: msg4
   # on act created
-  - !on_before_update:
+  - !on_before_update
     - !msg
       id: msg5
   # on act completed
-  - !on_updated:
+  - !on_updated
     - !msg
       id: msg5
 
@@ -223,7 +220,7 @@ setup:
       - !msg
         id: msg3
   # on error catch
-  - !on_error_catch:
+  - !on_error_catch
     - err: err1
       then:
         - !req
@@ -266,18 +263,18 @@ steps:
       - !msg
         id: msg1
         inputs:
-          data: ${ env.get("a") }
+          data: ${ $("a") }
 
       # chains and runs 'run' one by one by 'in' data
       - !chain
-        in: env.get("a")
+        in: $("a")
         run:
           - !req
             id: act1
 
       # each the var 'a'
       - !each
-        in: env.get("a")
+        in: $("a")
         run:
           # the each will generate two !req with `act_index`  and `act_value`
           # the `act_index` is the each index. It is 0 and 1 in this example
@@ -286,25 +283,25 @@ steps:
             id: act2
       # checks the condition and enters into the 'then' acts
       - !if
-        on: env.get("v") > 0
+        on: $("v") > 0
         then:
           - !msg
             id: msg2
       # on step created
-      - !on_created:
+      - !on_created
         - !msg
           id: msg3
 
       # on step completed
-      - !on_completed:
+      - !on_completed
         - !msg
           id: msg4
       # on act created
-      - !on_before_update:
+      - !on_before_update
         - !msg
           id: msg5
       # on act completed
-      - !on_updated:
+      - !on_updated
         - !msg
           id: msg5
 
@@ -313,13 +310,13 @@ steps:
           - !msg
             id: msg3
       # on error catch
-      - !on_error_catch:
+      - !on_error_catch
         - err: err1
           then:
             - !req
               id: act3
       # on timeout 
-      - !on_timeout:
+      - !on_timeout
         - on: 6h
           then:
             - !req
@@ -411,7 +408,7 @@ steps:
     name: step 1
     branches:
       - id: b1
-        if: env.get("v") > 0
+        if: $("v") > 0
         steps: 
           - name: step a
           - name: step b
@@ -474,7 +471,7 @@ acts = { version = "*", features = ["store"] }
 For external store:
 
  ```rust,no_run
- use acts::{Engine, data::{Model, Proc, Task, Package}, DbSet, StoreAdapter};
+ use acts::{Engine, Builder, data::{Model, Proc, Task, Package}, DbSet, StoreAdapter};
  use std::sync::Arc;
 
  #[derive(Clone)]
@@ -499,22 +496,15 @@ For external store:
 
 #[tokio::main]
 async fn main() {
-  let engine = Engine::new();
-
-  // set custom store
+    // set custom store
   let store = TestStore;
-  engine.adapter().set_store(&store);
+  let engine = Builder::new().store(&store).build();
 }
  ```
 
 ## Wit package
-`acts` engine intergrates the [`wasmtime`](<https://github.com/bytecodealliance/wasmtime>) runtime to execute the wit component, which can extend the engine abilities.
+`acts` engine intergrates the [`ruickjs`](<https://github.com/delskayn/rquickjs>) runtime to execute the package, which can extend the engine abilities.
 for more information please see the example [`package`](<https://github.com/yaojianpin/acts/tree/main/examples/package>)
-
-```ignore
-[dependencies]
-acts = { version = "*", features = ["wit"] }
-```
 
 ## Acts-Server
 Create a acts-server to interact with clients based on grpc.

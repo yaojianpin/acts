@@ -1,0 +1,20 @@
+id: pack_example
+outputs:
+  result: ${  $("input")  }
+steps:
+  - name: step 1
+    id: step1
+    acts:
+      - !pack
+        uses: pack1
+        inputs:
+          a: ${ $("input") }
+    setup:
+      - !on_completed
+        - !msg
+          id: msg1
+          inputs:
+            my_data: ${ $("my_data") }
+
+
+    

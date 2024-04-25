@@ -1,4 +1,4 @@
-use acts::{Executor, Message, Result, RoleAdapter, Vars};
+use acts::{Executor, Message, Result, Vars};
 use serde_json::json;
 use std::collections::HashMap;
 
@@ -131,7 +131,7 @@ impl<'a> Client<'a> {
     }
 }
 
-impl RoleAdapter for Client<'_> {
+impl Client<'_> {
     fn role(&self, name: &str) -> Vec<String> {
         let mut ret = vec![];
         if let Some(users) = self.users.get(name) {

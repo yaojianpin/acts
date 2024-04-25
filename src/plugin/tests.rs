@@ -5,9 +5,9 @@ use std::sync::{Arc, Mutex};
 async fn plugin_register() {
     let engine = Engine::new();
     let extender = engine.extender();
-    let plugin_count = extender.plugins.lock().unwrap().len();
+    let plugin_count = engine.plugins().lock().unwrap().len();
     extender.register_plugin(&TestPlugin::new());
-    assert_eq!(extender.plugins.lock().unwrap().len(), plugin_count + 1);
+    assert_eq!(engine.plugins().lock().unwrap().len(), plugin_count + 1);
 }
 
 #[tokio::test]

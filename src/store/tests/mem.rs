@@ -26,10 +26,10 @@ async fn store_mem_proc_create() {
         state: TaskState::None.into(),
         start_time: 0,
         end_time: 0,
-        vars: "".to_string(),
         timestamp: 0,
         model: "".to_string(),
         root_tid: "".to_string(),
+        env_local: "".to_string(),
     };
     store.procs().create(&proc).unwrap();
     assert_eq!(store.procs().exists(&proc.id).unwrap(), true);
@@ -46,10 +46,10 @@ async fn store_mem_proc_find() {
         state: TaskState::None.into(),
         start_time: 0,
         end_time: 0,
-        vars: "".to_string(),
         timestamp: 0,
         model: "".to_string(),
         root_tid: "".to_string(),
+        env_local: "".to_string(),
     };
     store.procs().create(&proc).unwrap();
     assert_eq!(store.procs().find(&pid).unwrap().id, pid);
@@ -68,10 +68,10 @@ async fn store_mem_proc_query() {
             state: TaskState::None.into(),
             start_time: 0,
             end_time: 0,
-            vars: "{}".to_string(),
             timestamp: 0,
             model: "".to_string(),
             root_tid: "".to_string(),
+            env_local: "".to_string(),
         };
         procs.create(&proc).unwrap();
     }
@@ -97,20 +97,18 @@ async fn store_mem_proc_update() {
         state: TaskState::None.into(),
         start_time: 0,
         end_time: 0,
-        vars: "".to_string(),
         timestamp: 0,
         model: "".to_string(),
         root_tid: "".to_string(),
+        env_local: "".to_string(),
     };
     store.procs().create(&proc).unwrap();
 
     proc.state = TaskState::Running.into();
-    proc.vars = serde_yaml::to_string(&vars).unwrap();
     store.procs().update(&proc).unwrap();
 
     let p = store.procs().find(&proc.id).unwrap();
     assert_eq!(p.state, proc.state);
-    assert_eq!(p.vars, proc.vars);
 }
 
 #[tokio::test]
@@ -123,10 +121,10 @@ async fn store_mem_proc_delete() {
         state: TaskState::None.into(),
         start_time: 0,
         end_time: 0,
-        vars: "".to_string(),
         timestamp: 0,
         model: "".to_string(),
         root_tid: "".to_string(),
+        env_local: "".to_string(),
     };
     store.procs().create(&proc).unwrap();
     store.procs().delete(&proc.id).unwrap();
@@ -146,6 +144,7 @@ async fn store_mem_task_create() {
         task_id: "tid".to_string(),
         node_id: "nid".to_string(),
         state: TaskState::None.into(),
+        data: "".to_string(),
         action_state: ActionState::None.into(),
         prev: None,
         start_time: 0,
@@ -170,6 +169,7 @@ async fn store_mem_task_find() {
         task_id: "tid".to_string(),
         node_id: "nid".to_string(),
         state: TaskState::None.into(),
+        data: "".to_string(),
         action_state: ActionState::None.into(),
         prev: None,
         start_time: 0,
@@ -195,6 +195,7 @@ async fn store_mem_task_query() {
             task_id: "tid".to_string(),
             node_id: "nid".to_string(),
             state: TaskState::None.into(),
+            data: "".to_string(),
             action_state: ActionState::None.into(),
             prev: None,
             start_time: 0,
@@ -224,6 +225,7 @@ async fn store_mem_task_update() {
         task_id: "tid".to_string(),
         node_id: "nid".to_string(),
         state: TaskState::None.into(),
+        data: "".to_string(),
         action_state: ActionState::None.into(),
         prev: None,
         start_time: 0,
@@ -256,6 +258,7 @@ async fn store_mem_task_delete() {
         task_id: "tid".to_string(),
         node_id: "nid".to_string(),
         state: TaskState::None.into(),
+        data: "".to_string(),
         action_state: ActionState::None.into(),
         prev: None,
         start_time: 0,

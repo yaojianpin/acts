@@ -37,10 +37,11 @@ pub trait ActTask: Clone + Send {
     }
 
     fn error(&self, ctx: &Context) -> Result<()> {
-        if !ctx.task.state().is_error() {
+        let task = ctx.task();
+        if !task.state().is_error() {
             let err = ctx.err().unwrap_or_default();
-            ctx.task.set_pure_action_state(ActionState::Error);
-            ctx.task.set_state(TaskState::Fail(err.to_string()));
+            task.set_pure_action_state(ActionState::Error);
+            task.set_state(TaskState::Fail(err.to_string()));
         }
         ctx.emit_error()
     }

@@ -1,5 +1,6 @@
-use crate::{sch::NodeTree, Act, ActError, ActValue, ModelBase, Result, Step, Vars};
+use crate::{sch::NodeTree, Act, ActError, ModelBase, Result, Step, Vars};
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Workflow {
@@ -14,6 +15,9 @@ pub struct Workflow {
 
     #[serde(default)]
     pub steps: Vec<Step>,
+
+    #[serde(default)]
+    pub env: Vars,
 
     #[serde(default)]
     pub inputs: Vars,
@@ -46,6 +50,15 @@ impl Workflow {
     }
 
     pub fn set_env(&mut self, vars: &Vars) {
+        for (name, value) in vars {
+            self.env
+                .entry(name.clone())
+                .and_modify(|v| *v = value.clone())
+                .or_insert(value.clone());
+        }
+    }
+
+    pub fn set_inputs(&mut self, vars: &Vars) {
         for (name, value) in vars {
             self.inputs
                 .entry(name.clone())
@@ -128,12 +141,17 @@ impl Workflow {
         self
     }
 
-    pub fn with_input(mut self, name: &str, value: ActValue) -> Self {
+    pub fn with_input(mut self, name: &str, value: JsonValue) -> Self {
         self.inputs.insert(name.to_string(), value);
         self
     }
 
-    pub fn with_output(mut self, name: &str, value: ActValue) -> Self {
+    pub fn with_env(mut self, name: &str, value: JsonValue) -> Self {
+        self.env.insert(name.to_string(), value);
+        self
+    }
+
+    pub fn with_output(mut self, name: &str, value: JsonValue) -> Self {
         self.outputs.insert(name.to_string(), value);
         self
     }

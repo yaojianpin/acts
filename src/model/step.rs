@@ -6,10 +6,11 @@ pub use self::{
     catch::Catch,
     timeout::{Timeout, TimeoutLimit, TimeoutUnit},
 };
-use crate::{model::Branch, Act, ActValue, ModelBase, Vars};
+use crate::{model::Branch, Act, ModelBase, Vars};
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 
-#[derive(Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Step {
     #[serde(default)]
     pub name: String,
@@ -28,6 +29,9 @@ pub struct Step {
 
     #[serde(default)]
     pub run: Option<String>,
+
+    #[serde(default)]
+    pub uses: Option<String>,
 
     #[serde(default)]
     pub r#if: Option<String>,
@@ -54,21 +58,6 @@ pub struct Step {
 impl ModelBase for Step {
     fn id(&self) -> &str {
         &self.id
-    }
-}
-
-impl std::fmt::Debug for Step {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Step")
-            .field("name", &self.name)
-            .field("id", &self.id)
-            .field("env", &self.inputs)
-            .field("run", &self.run)
-            .field("r#if", &self.r#if)
-            .field("branches", &self.branches)
-            .field("next", &self.next)
-            .field("acts", &self.acts)
-            .finish()
     }
 }
 
@@ -111,12 +100,17 @@ impl Step {
         self
     }
 
-    pub fn with_input(mut self, name: &str, value: ActValue) -> Self {
+    pub fn with_uses(mut self, uses: &str) -> Self {
+        self.uses = Some(uses.to_string());
+        self
+    }
+
+    pub fn with_input(mut self, name: &str, value: JsonValue) -> Self {
         self.inputs.insert(name.to_string(), value);
         self
     }
 
-    pub fn with_output(mut self, name: &str, value: ActValue) -> Self {
+    pub fn with_output(mut self, name: &str, value: JsonValue) -> Self {
         self.outputs.insert(name.to_string(), value);
         self
     }

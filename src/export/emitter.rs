@@ -1,16 +1,17 @@
-use crate::{event, sch::Scheduler, Event, Message, WorkflowState};
 use std::sync::Arc;
+
+use crate::{sch::Scheduler, Event, Message, WorkflowState};
 
 /// Just a export struct for the event::Emitter
 ///
 pub struct Emitter {
-    evt: Arc<event::Emitter>,
+    scher: Arc<Scheduler>,
 }
 
 impl Emitter {
     pub fn new(scher: &Arc<Scheduler>) -> Self {
         Self {
-            evt: scher.emitter().clone(),
+            scher: scher.clone(),
         }
     }
 
@@ -23,8 +24,6 @@ impl Emitter {
     /// #[tokio::main]
     /// async fn main() {
     ///     let engine = Engine::new();
-    ///     engine.start();
-    ///
     ///     let workflow = Workflow::new().with_id("m1").with_step(|step| {
     ///             step.with_id("step1").with_act(Act::req(|act| act.with_id("act1")))
     ///     });
@@ -45,18 +44,18 @@ impl Emitter {
     /// }
     /// ```
     pub fn on_message(&self, f: impl Fn(&Event<Message>) + Send + Sync + 'static) {
-        self.evt.on_message(f);
+        self.scher.emitter().on_message(f);
     }
 
     pub fn on_start(&self, f: impl Fn(&Event<WorkflowState>) + Send + Sync + 'static) {
-        self.evt.on_start(f);
+        self.scher.emitter().on_start(f);
     }
 
     pub fn on_complete(&self, f: impl Fn(&Event<WorkflowState>) + Send + Sync + 'static) {
-        self.evt.on_complete(f);
+        self.scher.emitter().on_complete(f);
     }
 
     pub fn on_error(&self, f: impl Fn(&Event<WorkflowState>) + Send + Sync + 'static) {
-        self.evt.on_error(f);
+        self.scher.emitter().on_error(f);
     }
 }

@@ -1,84 +1,26 @@
 use crate::{
-    env::{Enviroment, RefEnv},
     event::ActionState,
-    sch::TaskState,
-    ActValue, Vars,
+    sch::{Task, TaskState},
+    Context, Vars,
 };
 use regex::Regex;
-use rhai::{Dynamic, Map};
-use serde_json::Map as JsonMap;
-use tracing::debug;
-
-pub fn value_to_dymainc(v: &ActValue) -> Dynamic {
-    match v {
-        ActValue::Null => Dynamic::UNIT,
-        ActValue::Bool(b) => Dynamic::from(b.clone()),
-        ActValue::String(s) => Dynamic::from(s.clone()),
-        ActValue::Number(n) if n.is_i64() => Dynamic::from(n.as_i64().unwrap()),
-        ActValue::Number(n) if n.is_f64() => Dynamic::from(n.as_f64().unwrap()),
-        ActValue::Array(s) => Dynamic::from(array_to_dynamic(s)),
-        ActValue::Object(m) => Dynamic::from(map_to_dynamic(m)),
-        _ => Dynamic::default(),
-    }
-}
-
-pub fn dynamic_to_value(value: &Dynamic) -> ActValue {
-    if value.is::<rhai::INT>() {
-        let int = value.as_int().unwrap() as i64;
-        return int.into();
-    } else if value.is::<rhai::FLOAT>() {
-        let float = value.as_float().unwrap() as f64;
-        return float.into();
-    } else if value.is::<bool>() {
-        let b = value.as_bool().unwrap();
-        return b.into();
-    } else if value.is::<rhai::ImmutableString>() {
-        let s = value.clone().into_string().unwrap();
-        return s.into();
-    } else if value.is::<rhai::Array>() {
-        let arr = value.clone().into_array().unwrap();
-        let arr_values: Vec<_> = arr.iter().map(|v| dynamic_to_value(v)).collect();
-
-        return ActValue::Array(arr_values);
-    }
-
-    ActValue::Null
-}
-
-pub fn array_to_dynamic<'a>(values: &'a Vec<ActValue>) -> Vec<Dynamic> {
-    let mut ret = Vec::new();
-
-    for v in values {
-        ret.push(value_to_dymainc(v));
-    }
-
-    ret
-}
-
-pub fn map_to_dynamic<'a>(map: &JsonMap<String, ActValue>) -> Map {
-    let mut ret: Map = Map::new();
-    for (k, v) in map {
-        let key = k.to_string();
-        ret.insert(key.into(), value_to_dymainc(v));
-    }
-
-    ret
-}
+use serde_json::Value as JsonValue;
+use std::sync::Arc;
 
 /// fill the vars
 /// 1. if the inputs is an expression, just calculate it
 /// or insert the input itself
-pub fn fill_inputs<'a>(env: &RefEnv, inputs: &'a Vars) -> Vars {
+pub fn fill_inputs<'a>(inputs: &'a Vars, ctx: &Context) -> Vars {
     let mut ret = Vars::new();
     for (k, v) in inputs {
-        if let ActValue::String(string) = v {
+        if let JsonValue::String(string) = v {
             if let Some(expr) = get_expr(string) {
-                let result = env.eval::<Dynamic>(&expr);
+                let result = Context::scope(ctx.clone(), move || ctx.env.eval::<JsonValue>(&expr));
                 let new_value = match result {
-                    Ok(v) => dynamic_to_value(&v),
+                    Ok(v) => v,
                     Err(err) => {
                         eprintln!("fill_inputs: {err}");
-                        ActValue::Null
+                        JsonValue::Null
                     }
                 };
 
@@ -95,18 +37,17 @@ pub fn fill_inputs<'a>(env: &RefEnv, inputs: &'a Vars) -> Vars {
 
 /// fill the outputs
 /// 1. if the outputs is an expression, just calculate it
-/// 2. if the env and the outpus both has the same key, using the local outputs
-pub fn fill_outputs(env: &RefEnv, outputs: &Vars) -> Vars {
-    debug!("fill_outputs: env.data={} outputs={outputs}", env.data());
+/// 2. if the env and the outputs both has the same key, using the local outputs
+pub fn fill_outputs(outputs: &Vars, ctx: &Context) -> Vars {
+    // println!("fill_outputs: outputs={outputs}");
     let mut ret = Vars::new();
-
     for (k, v) in outputs {
-        if let ActValue::String(string) = v {
+        if let JsonValue::String(string) = v {
             if let Some(expr) = get_expr(string) {
-                let result = env.eval::<Dynamic>(&expr);
+                let result = Context::scope(ctx.clone(), move || ctx.env.eval::<JsonValue>(&expr));
                 let new_value = match result {
-                    Ok(v) => dynamic_to_value(&v),
-                    Err(_err) => ActValue::Null,
+                    Ok(v) => v,
+                    Err(_err) => JsonValue::Null,
                 };
 
                 // satisfies the rule 1
@@ -117,8 +58,8 @@ pub fn fill_outputs(env: &RefEnv, outputs: &Vars) -> Vars {
 
         // rule 2
         if v.is_null() {
-            // the the env value
-            match env.get_env::<ActValue>(k) {
+            // the env value
+            match ctx.task().find(k) {
                 Some(v) => ret.insert(k.to_string(), v),
                 None => ret.insert(k.to_string(), v.clone()),
             };
@@ -131,31 +72,30 @@ pub fn fill_outputs(env: &RefEnv, outputs: &Vars) -> Vars {
     ret
 }
 
-pub fn fill_proc_vars<'a>(env: &Enviroment, values: &'a Vars) -> Vars {
+pub fn fill_proc_vars<'a>(task: &Arc<Task>, values: &'a Vars, ctx: &Context) -> Vars {
     let mut ret = Vars::new();
-
     for (k, v) in values {
-        if let ActValue::String(string) = v {
+        if let JsonValue::String(string) = v {
             if let Some(expr) = get_expr(string) {
-                let result = env.eval::<Dynamic>(&expr);
+                let result = Context::scope(ctx.clone(), || ctx.env.eval::<JsonValue>(&expr));
                 let new_value = match result {
-                    Ok(v) => dynamic_to_value(&v),
-                    Err(_err) => ActValue::Null,
+                    Ok(v) => v,
+                    Err(_err) => JsonValue::Null,
                 };
 
                 // satisfies the rule 1
                 ret.insert(k.to_string(), new_value);
+
                 continue;
             }
         }
 
         // rule 2
-        match env.get_value(k) {
+        match task.find::<JsonValue>(k) {
             Some(v) => ret.insert(k.to_string(), v.clone()),
             None => ret.insert(k.to_string(), v.clone()),
         };
     }
-
     ret
 }
 
@@ -240,25 +180,3 @@ pub fn str_to_state(str: &str) -> TaskState {
         }
     }
 }
-
-// pub fn value_to_hash_map(value: &ActValue) -> Result<HashMap<String, Vec<String>>> {
-//     let arr = value.as_object().ok_or(ActError::Convert(format!(
-//         "cannot convert json '{}' to hash_map, it is not object",
-//         value
-//     )))?;
-
-//     let mut ret = HashMap::new();
-//     for (k, v) in arr {
-//         let items = v
-//             .as_array()
-//             .ok_or(ActError::Convert(format!(
-//                 "cannot convert json to vec, it is not array type in key '{}'",
-//                 k
-//             )))?
-//             .iter()
-//             .map(|v| v.as_str().unwrap().to_string())
-//             .collect();
-//         ret.insert(k.to_string(), items);
-//     }
-//     Ok(ret)
-// }

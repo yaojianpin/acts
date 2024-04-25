@@ -1,6 +1,6 @@
 use serde_json::json;
 
-use crate::{sch::tests::create_proc, utils, Act, StmtBuild, Vars, Workflow};
+use crate::{sch::tests::create_proc_signal, utils, Act, StmtBuild, Vars, Workflow};
 
 #[tokio::test]
 async fn sch_step_setup_expose_one() {
@@ -10,12 +10,12 @@ async fn sch_step_setup_expose_one() {
     });
 
     workflow.print();
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
-    assert_eq!(proc.env().root().get::<i64>("a").unwrap(), 5);
+    assert_eq!(proc.data().get::<i64>("a").unwrap(), 5);
 }
 
 #[tokio::test]
@@ -26,14 +26,14 @@ async fn sch_step_setup_expose_many() {
     });
 
     workflow.print();
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
-    assert_eq!(proc.env().root().get::<i64>("a").unwrap(), 5);
+    assert_eq!(proc.data().get::<i64>("a").unwrap(), 5);
 
-    assert_eq!(proc.env().root().get::<String>("b").unwrap(), "bb");
+    assert_eq!(proc.data().get::<String>("b").unwrap(), "bb");
 }
 
 #[tokio::test]
@@ -44,14 +44,13 @@ async fn sch_step_setup_expose_null() {
     });
 
     workflow.print();
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
-    assert_eq!(proc.env().root().get::<()>("a").unwrap(), ());
-
-    assert_eq!(proc.env().root().get::<()>("b").unwrap(), ());
+    assert_eq!(proc.data().get::<()>("a").unwrap(), ());
+    assert_eq!(proc.data().get::<()>("b").unwrap(), ());
 }
 
 #[tokio::test]
@@ -64,13 +63,13 @@ async fn sch_step_setup_expose_local() {
     });
 
     workflow.print();
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
-    assert_eq!(proc.env().root().get::<String>("a").unwrap(), "abc");
-    assert_eq!(proc.env().root().get::<i32>("b").unwrap(), 5);
+    assert_eq!(proc.data().get::<String>("a").unwrap(), "abc");
+    assert_eq!(proc.data().get::<i32>("b").unwrap(), 5);
 }
 
 #[tokio::test]
@@ -83,10 +82,10 @@ async fn sch_step_setup_expose_update() {
         });
 
     workflow.print();
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
-    assert_eq!(proc.env().root().get::<String>("a").unwrap(), "123");
+    assert_eq!(proc.data().get::<String>("a").unwrap(), "123");
 }

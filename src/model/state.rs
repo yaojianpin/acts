@@ -1,5 +1,6 @@
-use crate::{sch::TaskState, utils, ActValue, Vars};
+use crate::{sch::TaskState, utils, Vars};
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 
 #[derive(Clone)]
 pub struct WorkflowState {
@@ -58,7 +59,7 @@ impl ActionResult {
         &self.outputs
     }
 
-    pub fn insert(&mut self, key: &str, value: ActValue) {
+    pub fn insert(&mut self, key: &str, value: JsonValue) {
         self.outputs.insert(key.to_string(), value);
     }
 

@@ -1,25 +1,23 @@
 use crate::{
     env::Enviroment,
-    event::Action,
+    event::{Action, ActionState},
     sch::{
-        tree::TaskTree,
-        tree::{Node, NodeTree},
+        tree::{Node, NodeTree, TaskTree},
         Context, Scheduler, Task, TaskLifeCycle, TaskState,
     },
     utils::{self, consts},
     ActError, ActionResult, NodeKind, ProcInfo, Result, ShareLock, Vars, Workflow, WorkflowState,
 };
+use serde::Deserialize;
 use std::{
     cell::RefCell,
     fmt,
-    sync::{Arc, Mutex, RwLock},
+    sync::{Arc, RwLock},
 };
 use tracing::{error, instrument};
 
 #[derive(Clone)]
 pub struct Proc {
-    env: Arc<Enviroment>,
-
     id: String,
     tree: ShareLock<NodeTree>,
     tasks: ShareLock<TaskTree>,
@@ -28,8 +26,8 @@ pub struct Proc {
     end_time: ShareLock<i64>,
     timestamp: i64,
     root_tid: ShareLock<Option<String>>,
-
-    sync: Arc<Mutex<i32>>,
+    env_local: ShareLock<Vars>,
+    sync: Arc<spin::Mutex<usize>>,
 }
 
 impl std::fmt::Debug for Proc {
@@ -50,20 +48,35 @@ impl Proc {
         let tree = NodeTree::new();
         Proc {
             id: pid.to_string(),
-            env: Enviroment::new(),
             tree: Arc::new(RwLock::new(tree)),
             state: Arc::new(RwLock::new(TaskState::None)),
             start_time: Arc::new(RwLock::new(0)),
             end_time: Arc::new(RwLock::new(0)),
             tasks: Arc::new(RwLock::new(TaskTree::new())),
-            sync: Arc::new(Mutex::new(0)),
+            sync: Arc::new(spin::Mutex::new(0)),
             timestamp: utils::time::timestamp(),
             root_tid: Arc::new(RwLock::new(None)),
+            env_local: Arc::new(RwLock::new(Vars::new())),
         }
     }
 
-    pub fn env(&self) -> &Arc<Enviroment> {
-        &self.env
+    pub fn data(&self) -> Vars {
+        if let Some(root) = self.root() {
+            return root.data();
+        }
+        Vars::new()
+    }
+
+    pub fn set_data_with<F: Fn(&mut Vars)>(&self, f: F) {
+        if let Some(root) = self.root() {
+            root.set_data_with(f);
+        }
+    }
+
+    pub fn set_data(&self, vars: &Vars) {
+        if let Some(root) = self.root() {
+            root.set_data(vars);
+        }
     }
 
     pub fn load(&self, model: &Workflow) -> Result<()> {
@@ -103,6 +116,24 @@ impl Proc {
         root_tid.clone()
     }
 
+    pub fn env_local(&self) -> Vars {
+        let env_local = self.env_local.read().unwrap();
+        env_local.clone()
+    }
+
+    pub fn with_env_local<T, F: FnOnce(&Vars) -> T>(&self, f: F) -> T
+    where
+        T: for<'de> Deserialize<'de> + Clone,
+    {
+        let local = self.env_local.read().unwrap();
+        f(&local)
+    }
+
+    pub fn with_env_local_mut<F: FnOnce(&mut Vars)>(&self, f: F) {
+        let mut local = self.env_local.write().unwrap();
+        f(&mut local)
+    }
+
     pub fn outputs(&self) -> Vars {
         if let Some(root) = self.root() {
             return root.outputs();
@@ -113,8 +144,12 @@ impl Proc {
 
     pub fn inputs(&self) -> Vars {
         let inputs = &self.model().inputs;
-        let vars = utils::fill_proc_vars(&self.env, inputs);
-        vars
+        if let Some(task) = self.root() {
+            let ctx = task.create_context();
+            let vars = utils::fill_proc_vars(&task, inputs, &ctx);
+            return vars;
+        }
+        Vars::new()
     }
 
     pub fn cost(&self) -> i64 {
@@ -150,7 +185,6 @@ impl Proc {
             state: self.state().into(),
             start_time: self.start_time(),
             end_time: self.end_time(),
-            vars: serde_json::to_string(&self.env.vars()).unwrap_or("(err)".to_string()),
             timestamp: self.timestamp,
             tasks: "".to_string(),
         }
@@ -201,11 +235,11 @@ impl Proc {
 
     pub fn create_context(
         self: &Arc<Self>,
-        scher: &Arc<Scheduler>,
         task: &Arc<Task>,
-    ) -> Arc<Context> {
-        let ctx = Context::new(scher, &self, task);
-        Arc::new(ctx)
+        scher: &Arc<Scheduler>,
+        env: &Arc<Enviroment>,
+    ) -> Context {
+        Context::new(&self, task, scher, env)
     }
 
     pub fn set_state(&self, state: TaskState) {
@@ -240,25 +274,33 @@ impl Proc {
         };
     }
 
-    pub(crate) fn do_tick(&self, scher: &Arc<Scheduler>) {
+    pub(crate) fn set_env_local(&self, value: &Vars) {
+        *self.env_local.write().unwrap() = value.clone();
+    }
+
+    pub(crate) fn do_tick(&self) {
         self.find_tasks(|t| t.hooks().contains_key(&TaskLifeCycle::Timeout))
             .iter()
             .for_each(|t| {
-                let ctx = t.create_context(scher);
+                let ctx = t.create_context();
                 t.run_hooks_timeout(&ctx).unwrap_or_else(|err| {
                     eprintln!("{}", err);
                     error!("{}", err);
                 });
-            })
+
+                // block_on(Context::scope(ctx, async move {
+                //     Context::with(move |ctx| {
+                //         task.run_hooks_timeout(&ctx).unwrap_or_else(|err| {
+                //             eprintln!("{}", err);
+                //             error!("{}", err);
+                //         });
+                //     });
+                // }));
+            });
     }
 
-    #[instrument(skip(scher))]
-    pub fn do_action(
-        self: &Arc<Self>,
-        action: &Action,
-        scher: &Arc<Scheduler>,
-    ) -> Result<ActionResult> {
-        let mut count = self.sync.lock().unwrap();
+    #[instrument()]
+    pub fn do_action(self: &Arc<Self>, action: &Action) -> Result<ActionResult> {
         let mut state = ActionResult::begin();
         let mut action = action.clone();
         let task = self.task(&action.task_id).ok_or(ActError::Action(format!(
@@ -301,34 +343,29 @@ impl Proc {
             action.options = options;
         }
 
-        let ctx = task.create_context(scher);
+        let ctx = task.create_context();
         ctx.set_action(&action)?;
-
         task.update(&ctx)?;
         state.end();
-        *count += 1;
         Ok(state)
     }
 
-    #[instrument(skip(scher))]
-    pub fn do_task(self: &Arc<Self>, tid: &str, scher: &Arc<Scheduler>) {
-        let mut count = self.sync.lock().unwrap();
+    #[instrument()]
+    pub fn do_task(self: &Arc<Self>, tid: &str, ctx: &Context) {
         if let Some(task) = &self.task(tid) {
-            if !task.state().is_completed() {
-                let ctx = self.create_context(scher, task);
-                task.exec(&ctx).unwrap_or_else(|err| {
-                    task.set_state(TaskState::Fail(err.to_string()));
-                    let _ = ctx.emit_error();
-                });
-            }
+            task.exec(ctx).unwrap_or_else(|err| {
+                eprintln!("error: {err}");
+                task.set_pure_action_state(ActionState::Error);
+                task.set_state(TaskState::Fail(err.to_string()));
+                let _ = ctx.emit_error();
+            });
         }
-        *count += 1;
     }
 
     #[instrument(skip(scher))]
     pub fn start(self: &Arc<Self>, scher: &Arc<Scheduler>) {
-        let mut count = self.sync.lock().unwrap();
-
+        let _ = self.sync.lock();
+        scher.cache().push(self);
         let tr = self.tree();
         self.set_state(TaskState::Running);
         if let Some(root) = &tr.root {
@@ -336,17 +373,16 @@ impl Proc {
             self.set_root_tid(&task.id);
             scher.push(&task);
         }
-        *count += 1;
     }
 
     pub fn create_task(self: &Arc<Proc>, node: &Arc<Node>, prev: Option<Arc<Task>>) -> Arc<Task> {
-        let mut nid = utils::shortid();
+        let mut tid = utils::shortid();
         if node.kind() == NodeKind::Workflow {
             // set $ for the root task id
             // a proc only has one root task
-            nid = "$".to_string();
+            tid = "$".to_string();
         }
-        let task = Arc::new(Task::new(&self, &nid, node.clone()));
+        let task = Arc::new(Task::new(&self, &tid, node.clone()));
         if let Some(prev) = prev {
             task.set_prev(Some(prev.id.clone()));
         }
@@ -361,15 +397,17 @@ impl Proc {
     }
 
     pub fn parent(&self) -> Option<(String, String)> {
-        if let (Some(ppid), Some(ptid)) = (
-            self.env
-                .root()
-                .get::<String>(consts::ACT_USE_PARENT_PROC_ID),
-            self.env
-                .root()
-                .get::<String>(consts::ACT_USE_PARENT_TASK_ID),
-        ) {
-            return Some((ppid, ptid));
+        if let Some(root) = &self.root() {
+            let use_data = root.with_data(|data| {
+                (
+                    data.get::<String>(consts::ACT_USE_PARENT_PROC_ID),
+                    data.get::<String>(consts::ACT_USE_PARENT_TASK_ID),
+                )
+            });
+
+            if let (Some(ppid), Some(ptid)) = use_data {
+                return Some((ppid, ptid));
+            }
         }
 
         None
@@ -380,7 +418,7 @@ impl Proc {
         let ttree = self.tasks.read().unwrap();
 
         println!("Proc({})  state={}", self.id, self.state());
-        println!("env={}", self.env().vars());
+        println!("data={}", self.data());
         if let Some(root) = ttree.root() {
             self.visit(&root, |task| {
                 let mut level = task.node.level;
@@ -390,7 +428,7 @@ impl Proc {
                 }
 
                 println!(
-                    "Task({}) {}  nid={} name={} tag={} prev={} state={} action_state={}",
+                    "Task({}) {}  nid={} name={} tag={} prev={} state={} action_state={}  data={}",
                     task.id,
                     task.node.r#type(),
                     task.node.id(),
@@ -402,6 +440,7 @@ impl Proc {
                     },
                     task.state(),
                     task.action_state(),
+                    task.data(),
                 );
             })
         }

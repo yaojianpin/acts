@@ -3,7 +3,7 @@ id: main
 inputs:
   v: 0
 outputs:
-  result: ${ env.get("v") }
+  result: ${ $("v") }
 steps:
   - name: prepare
     id: prepare
@@ -15,12 +15,12 @@ steps:
       - !call
         mid: sub
         inputs:
-            v: ${ env.get("v") }
+            v: ${ $("v") }
   - name: final
     id: final
     acts:
       - !req
         id: action2
         inputs:
-          v: ${ env.get("v") }
+          v: ${ $("v") }
     

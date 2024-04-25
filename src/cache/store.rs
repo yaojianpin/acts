@@ -1,12 +1,11 @@
-use tracing::debug;
-
 use crate::{
     event::ActionState,
     sch::{self, StatementBatch, TaskLifeCycle, TaskState},
     store::{Cond, Expr, Query, Store},
-    utils, ActError, Result, StoreAdapter, Workflow,
+    ActError, Result, StoreAdapter, Workflow,
 };
 use std::{collections::HashMap, sync::Arc};
+use tracing::debug;
 
 impl Store {
     pub fn load(&self, cap: usize) -> Result<Vec<Arc<sch::Proc>>> {
@@ -24,7 +23,6 @@ impl Store {
             let procs = self.procs().query(&query)?;
             for p in procs {
                 let model = Workflow::from_json(&p.model)?;
-                let vars = &utils::vars::from_string(&p.vars);
                 let state = p.state.clone();
                 let mut proc = sch::Proc::new(&p.id);
                 proc.load(&model)?;
@@ -32,7 +30,6 @@ impl Store {
                 proc.set_start_time(p.start_time);
                 proc.set_end_time(p.end_time);
                 proc.set_timestamp(p.timestamp);
-                proc.env().append(vars);
 
                 let proc = Arc::new(proc);
                 self.load_tasks(&proc)?;
@@ -49,9 +46,13 @@ impl Store {
             Ok(p) => {
                 let model = Workflow::from_json(&p.model)?;
                 let mut proc = Arc::new(sch::Proc::new(pid));
+                let env_local = serde_json::from_str(&p.env_local)
+                    .map_err(|err| ActError::Store(err.to_string()))?;
+
                 proc.load(&model)?;
                 proc.set_state(p.state.into());
                 proc.set_root_tid(&p.root_tid);
+                proc.set_env_local(&env_local);
                 self.load_tasks(&mut proc)?;
 
                 return Ok(Some(proc));
@@ -86,6 +87,10 @@ impl Store {
                 task.set_end_time(t.end_time);
                 task.timestamp = t.timestamp;
                 task.set_prev(t.prev);
+
+                let data = serde_json::from_str(&t.data)
+                    .map_err(|err| ActError::Store(err.to_string()))?;
+                task.set_data(&data);
 
                 let hooks: HashMap<TaskLifeCycle, Vec<StatementBatch>> =
                     serde_json::from_str(&t.hooks)

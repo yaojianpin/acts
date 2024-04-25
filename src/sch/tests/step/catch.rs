@@ -1,25 +1,22 @@
 use crate::{
     event::ActionState,
-    sch::{tests::create_proc, TaskState},
+    sch::{tests::create_proc_signal, TaskState},
     utils, Act, Action, StmtBuild, Vars, Workflow,
 };
 use serde_json::json;
-use std::sync::{Arc, Mutex};
 
 #[tokio::test]
 async fn sch_act_catch_by_any_error() {
-    let ret = Arc::new(Mutex::new(false));
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_catch(|c| c.with_then(|stmts| stmts.add(Act::req(|act| act.with_id("catch1")))))
             .with_act(Act::req(|act| act.with_id("act1")))
     });
     workflow.print();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, emitter, tx, rx) =
+        create_proc_signal::<bool>(&mut workflow, &utils::longid());
 
     let s = scher.clone();
-    let r = ret.clone();
-
     emitter.on_message(move |e| {
         if e.is_key("act1") && e.is_state("created") {
             let mut options = Vars::new();
@@ -30,31 +27,27 @@ async fn sch_act_catch_by_any_error() {
         }
 
         if e.is_key("catch1") && e.is_state("created") {
-            *r.lock().unwrap() = true;
-            e.close();
+            rx.send(true);
         }
     });
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    let ret = tx.recv().await;
     proc.print();
-    assert!(*ret.lock().unwrap())
+    assert!(ret)
 }
 
 #[tokio::test]
 async fn sch_act_catch_by_msg() {
-    let ret = Arc::new(Mutex::new(false));
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_catch(|c| c.with_then(|stmts| stmts.add(Act::msg(|msg| msg.with_id("msg1")))))
             .with_act(Act::req(|act| act.with_id("act1")))
     });
     workflow.print();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, emitter, tx, rx) = create_proc_signal(&mut workflow, &utils::longid());
 
     let s = scher.clone();
-    let r = ret.clone();
-
     emitter.on_message(move |e| {
         if e.is_key("act1") && e.is_state("created") {
             let mut options = Vars::new();
@@ -65,15 +58,14 @@ async fn sch_act_catch_by_msg() {
         }
 
         if e.is_key("msg1") {
-            *r.lock().unwrap() = true;
-            e.close();
+            rx.send(true);
         }
     });
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    let ret = tx.recv().await;
     proc.print();
-    assert!(*ret.lock().unwrap());
+    assert!(ret);
     assert_eq!(proc.state(), TaskState::Success);
 }
 
@@ -85,7 +77,7 @@ async fn sch_act_catch_empty_then() {
             .with_act(Act::req(|act| act.with_id("act1")))
     });
     workflow.print();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 
     let s = scher.clone();
     emitter.on_message(move |e| {
@@ -98,14 +90,13 @@ async fn sch_act_catch_empty_then() {
     });
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert_eq!(proc.state(), TaskState::Success);
 }
 
 #[tokio::test]
 async fn sch_act_catch_by_err_code() {
-    let ret = Arc::new(Mutex::new(false));
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_catch(|c| {
@@ -115,10 +106,9 @@ async fn sch_act_catch_by_err_code() {
             .with_act(Act::req(|act| act.with_id("act1")))
     });
     workflow.print();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, emitter, tx, rx) = create_proc_signal(&mut workflow, &utils::longid());
 
     let s = scher.clone();
-    let r = ret.clone();
     emitter.on_message(move |e| {
         if e.is_key("act1") && e.is_state("created") {
             let mut options = Vars::new();
@@ -131,15 +121,14 @@ async fn sch_act_catch_by_err_code() {
         }
 
         if e.is_key("catch1") && e.is_state("created") {
-            *r.lock().unwrap() = true;
-            e.close();
+            rx.send(true);
         }
     });
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    let ret = tx.recv().await;
     proc.print();
-    assert!(*ret.lock().unwrap())
+    assert!(ret)
 }
 
 #[tokio::test]
@@ -153,7 +142,7 @@ async fn sch_act_catch_by_wrong_code() {
             .with_act(Act::req(|act| act.with_id("act1")))
     });
     workflow.print();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 
     let s = scher.clone();
     emitter.on_message(move |e| {
@@ -169,55 +158,54 @@ async fn sch_act_catch_by_wrong_code() {
     });
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert!(proc.state().is_error());
 }
 
 #[tokio::test]
 async fn sch_act_catch_by_no_err_code() {
-    let ret = Arc::new(Mutex::new(false));
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_catch(|c| c.with_then(|stmts| stmts.add(Act::req(|act| act.with_id("catch1")))))
             .with_act(Act::req(|act| act.with_id("act1")))
     });
     workflow.print();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, emitter, tx, rx) =
+        create_proc_signal::<bool>(&mut workflow, &utils::longid());
 
     let s = scher.clone();
-    let r = ret.clone();
     emitter.on_message(move |e| {
         if e.is_key("act1") && e.is_state("created") {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             let action = Action::new(&e.proc_id, &e.id, "error", &options);
             let state = s.do_action(&action);
-            *r.lock().unwrap() = state.is_err();
-            e.close();
+            rx.send(state.is_err());
         }
     });
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    let ret = tx.recv().await;
     proc.print();
-    assert!(*ret.lock().unwrap())
+    assert!(ret)
 }
 
 #[tokio::test]
 async fn sch_act_catch_as_complete() {
-    let ret = Arc::new(Mutex::new(false));
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_catch(|c| c.with_then(|stmts| stmts.add(Act::req(|act| act.with_id("catch1")))))
             .with_act(Act::req(|act| act.with_id("act1")))
     });
     workflow.print();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, emitter, tx, rx) =
+        create_proc_signal::<bool>(&mut workflow, &utils::longid());
 
     let s = scher.clone();
-    let r = ret.clone();
     let p = proc.clone();
+
+    emitter.reset();
     emitter.on_message(move |e| {
         println!("message: {:?}", e.inner());
         if e.is_key("act1") && e.is_state("created") {
@@ -241,29 +229,29 @@ async fn sch_act_catch_as_complete() {
     });
 
     emitter.on_complete(move |_p| {
-        *r.lock().unwrap() = true;
+        rx.send(true);
     });
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    let ret = tx.recv().await;
     proc.print();
-    assert!(*ret.lock().unwrap())
+    assert!(ret)
 }
 
 #[tokio::test]
 async fn sch_act_catch_as_error() {
-    let ret = Arc::new(Mutex::new(false));
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_catch(|c| c.with_then(|stmts| stmts.add(Act::req(|act| act.with_id("catch1")))))
             .with_act(Act::req(|act| act.with_id("act1")))
     });
     workflow.print();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, emitter, tx, rx) =
+        create_proc_signal::<bool>(&mut workflow, &utils::longid());
 
     let s = scher.clone();
-    let r = ret.clone();
     let p = proc.clone();
+    emitter.reset();
     emitter.on_message(move |e| {
         if e.is_key("act1") && e.is_state("created") {
             let mut options = Vars::new();
@@ -289,13 +277,13 @@ async fn sch_act_catch_as_error() {
     });
 
     emitter.on_error(move |_p| {
-        *r.lock().unwrap() = true;
+        rx.send(true);
     });
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    let ret = tx.recv().await;
     proc.print();
-    assert!(*ret.lock().unwrap())
+    assert!(ret)
 }
 
 #[tokio::test]
@@ -310,7 +298,7 @@ async fn sch_act_catch_as_skip() {
         })
         .with_step(|step| step.with_id("step2"));
     workflow.print();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 
     let s = scher.clone();
     emitter.on_message(move |e| {
@@ -333,10 +321,8 @@ async fn sch_act_catch_as_skip() {
         }
     });
 
-    emitter.on_complete(move |e| e.close());
-
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert_eq!(
         proc.task_by_nid("catch1").get(0).unwrap().state(),
@@ -361,7 +347,7 @@ async fn sch_act_catch_as_abort() {
             .with_act(Act::req(|act| act.with_id("act1")))
     });
     workflow.print();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 
     let s = scher.clone();
     emitter.on_message(move |e| {
@@ -384,10 +370,8 @@ async fn sch_act_catch_as_abort() {
         }
     });
 
-    emitter.on_complete(move |e| e.close());
-
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert_eq!(proc.state(), TaskState::Abort);
 }
@@ -400,7 +384,7 @@ async fn sch_act_catch_as_submit() {
             .with_act(Act::req(|act| act.with_id("act1")))
     });
     workflow.print();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 
     let s = scher.clone();
     emitter.on_message(move |e| {
@@ -423,10 +407,10 @@ async fn sch_act_catch_as_submit() {
         }
     });
 
-    emitter.on_complete(move |e| e.close());
+    // emitter.on_complete(move |e| rx.close());
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert_eq!(
         proc.task_by_nid("catch1").get(0).unwrap().action_state(),
@@ -441,7 +425,6 @@ async fn sch_act_catch_as_submit() {
 
 #[tokio::test]
 async fn sch_act_catch_as_back() {
-    let count = Arc::new(Mutex::new(0));
     let mut workflow = Workflow::new()
         .with_step(|step| {
             step.with_id("step1")
@@ -455,14 +438,14 @@ async fn sch_act_catch_as_back() {
                 .with_act(Act::req(|act| act.with_id("act2")))
         });
     workflow.print();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, emitter, tx, rx) = create_proc_signal::<i32>(&mut workflow, &utils::longid());
 
     let s = scher.clone();
     emitter.on_message(move |e| {
         if e.is_key("act1") && e.is_state("created") {
-            let mut count = count.lock().unwrap();
-            if *count == 1 {
-                e.close();
+            let count = rx.data();
+            if count == 1 {
+                rx.close();
                 return;
             }
 
@@ -471,8 +454,7 @@ async fn sch_act_catch_as_back() {
 
             let action = Action::new(&e.proc_id, &e.id, "complete", &options);
             s.do_action(&action).unwrap();
-
-            *count += 1;
+            rx.update(|data| *data += 1);
         }
 
         if e.is_key("act2") && e.is_state("created") {
@@ -495,10 +477,8 @@ async fn sch_act_catch_as_back() {
         }
     });
 
-    emitter.on_complete(move |e| e.close());
-
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert_eq!(
         proc.task_by_nid("catch2").get(0).unwrap().action_state(),
@@ -513,7 +493,6 @@ async fn sch_act_catch_as_back() {
 
 #[tokio::test]
 async fn sch_act_catch_and_continue() {
-    let ret = Arc::new(Mutex::new(false));
     let mut workflow = Workflow::new()
         .with_step(|step| {
             step.with_id("step1")
@@ -525,11 +504,9 @@ async fn sch_act_catch_and_continue() {
                 .with_act(Act::req(|act| act.with_id("act2")))
         });
     workflow.print();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, emitter, tx, rx) = create_proc_signal(&mut workflow, &utils::longid());
 
     let s = scher.clone();
-    let r = ret.clone();
-
     emitter.on_message(move |e| {
         if e.is_key("act1") && e.is_state("created") {
             let mut options = Vars::new();
@@ -540,13 +517,12 @@ async fn sch_act_catch_and_continue() {
         }
 
         if e.is_key("act2") && e.is_state("created") {
-            *r.lock().unwrap() = true;
-            e.close();
+            rx.send(true);
         }
     });
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    let ret = tx.recv().await;
     proc.print();
-    assert!(*ret.lock().unwrap());
+    assert!(ret);
 }

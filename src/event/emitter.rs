@@ -1,7 +1,7 @@
 use crate::{
     event::Message,
     sch::{Proc, Scheduler, Task},
-    utils, Event, ShareLock, WorkflowState,
+    utils, Event, Result, ShareLock, WorkflowState,
 };
 use std::sync::{Arc, RwLock};
 use tokio::runtime::Handle;
@@ -43,7 +43,7 @@ pub struct Emitter {
 
 impl std::fmt::Debug for Emitter {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("EventHub").finish()
+        f.debug_struct("Emitter").finish()
     }
 }
 
@@ -64,6 +64,14 @@ impl Emitter {
 
     pub fn init(&self, scher: &Arc<Scheduler>) {
         *self.scher.write().unwrap() = Some(scher.clone());
+    }
+
+    #[cfg(test)]
+    pub fn reset(&self) {
+        self.messages.write().unwrap().clear();
+        self.starts.write().unwrap().clear();
+        self.completes.write().unwrap().clear();
+        self.errors.write().unwrap().clear();
     }
 
     pub fn on_message(&self, f: impl Fn(&Event<Message>) + Send + Sync + 'static) {
@@ -103,7 +111,7 @@ impl Emitter {
         }
     }
 
-    pub fn emit_task_event(&self, task: &Arc<Task>) {
+    pub fn emit_task_event(&self, task: &Arc<Task>) -> Result<()> {
         debug!("emit_task_event: task={:?}", task);
         let handlers = self.tasks.read().unwrap();
         let e = &Event::new_with_extra(
@@ -114,6 +122,8 @@ impl Emitter {
         for handle in handlers.iter() {
             (handle)(e);
         }
+
+        Ok(())
     }
 
     pub fn emit_task_event_with_extra(&self, task: &Arc<Task>, emit_message: bool) {

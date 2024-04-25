@@ -1,4 +1,8 @@
-use crate::{event::ActionState, sch::tests::create_proc, utils, Act, TaskState, Workflow};
+use crate::{
+    event::ActionState,
+    sch::tests::{create_proc, create_proc_signal},
+    utils, Act, TaskState, Workflow,
+};
 
 #[tokio::test]
 async fn sch_task_state() {
@@ -10,12 +14,13 @@ async fn sch_task_state() {
 #[tokio::test]
 async fn sch_task_start() {
     let mut workflow = Workflow::new();
-    let (proc, scher, emitter) = create_proc(&mut workflow, "w1");
+    let (proc, scher, emitter, tx, rx) = create_proc_signal::<TaskState>(&mut workflow, "w1");
 
     proc.start(&scher);
-    emitter.on_proc(|proc| {
-        assert_eq!(proc.state(), TaskState::Running);
-    });
+    emitter.on_proc(move |e| rx.send(e.state()));
+
+    let ret = tx.recv().await;
+    assert_eq!(ret, TaskState::Running);
 }
 
 #[tokio::test]
@@ -30,23 +35,25 @@ async fn sch_task_steps() {
             step
         });
     let id = utils::longid();
-    let (proc, scher, _) = create_proc(&mut workflow, &id);
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &id);
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     assert_eq!(proc.state(), TaskState::Success);
 }
 
 #[tokio::test]
 async fn sch_task_step_completed() {
     let mut workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
-    emitter.on_message(|msg| {
+    let (proc, scher, emitter, tx, rx) =
+        create_proc_signal::<bool>(&mut workflow, &utils::longid());
+    emitter.on_message(move |msg| {
         if msg.inner().r#type == "step" && msg.inner().state() == ActionState::Completed {
-            assert!(true);
+            rx.send(true);
         }
     });
     scher.launch(&proc);
-    scher.event_loop().await;
+    let ret = tx.recv().await;
+    assert!(ret)
 }
 
 #[tokio::test]
@@ -54,9 +61,9 @@ async fn sch_task_step() {
     let mut workflow = Workflow::new().with_step(|step| step.with_name("step1"));
     let id = utils::longid();
     workflow.print();
-    let (proc, scher, _) = create_proc(&mut workflow, &id);
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &id);
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     assert_eq!(proc.state(), TaskState::Success);
 }
 
@@ -66,9 +73,9 @@ async fn sch_task_step_if_false() {
         .with_step(|step| step.with_id("step1").with_if("false"))
         .with_step(|step| step.with_id("step2"));
     workflow.print();
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
 
     proc.print();
 
@@ -89,9 +96,9 @@ async fn sch_task_step_if_true() {
         .with_step(|step| step.with_id("step1").with_if("true"))
         .with_step(|step| step.with_id("step2"));
     workflow.print();
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
 
     proc.print();
     assert_eq!(
@@ -123,9 +130,9 @@ async fn sch_task_branch_basic() {
             })
     });
 
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     assert_eq!(proc.state(), TaskState::Success);
 }
 
@@ -144,9 +151,9 @@ async fn sch_task_branch_skip() {
     });
 
     let id = utils::longid();
-    let (proc, scher, _) = create_proc(&mut workflow, &id);
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &id);
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
 
     assert_eq!(
         proc.task_by_nid("b1").get(0).unwrap().state(),
@@ -169,9 +176,9 @@ async fn sch_task_branch_empty_if() {
     });
 
     let id = utils::longid();
-    let (proc, scher, _) = create_proc(&mut workflow, &id);
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &id);
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
 
     assert_eq!(
         proc.task_by_nid("b1").get(0).unwrap().state(),
@@ -179,7 +186,7 @@ async fn sch_task_branch_empty_if() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn sch_task_branch_if_false_else_success() {
     let mut workflow = Workflow::new().with_input("v", 1.into()).with_step(|step| {
         step.with_name("step1")
@@ -195,16 +202,16 @@ async fn sch_task_branch_if_false_else_success() {
             .with_branch(|branch| {
                 branch
                     .with_id("b2")
-                    .with_if(r#"env.get("v") < 0"#)
+                    .with_if(r#"$("v") < 0"#)
                     .with_name("branch 2")
                     .with_step(|step| step.with_id("step21"))
             })
     });
 
     let id = utils::longid();
-    let (proc, scher, _) = create_proc(&mut workflow, &id);
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &id);
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert_eq!(
         proc.task_by_nid("b1").get(0).unwrap().state(),
@@ -212,7 +219,7 @@ async fn sch_task_branch_if_false_else_success() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn sch_task_branch_if_false_else_running() {
     let mut workflow = Workflow::new().with_input("v", 1.into()).with_step(|step| {
         step.with_name("step1")
@@ -229,23 +236,23 @@ async fn sch_task_branch_if_false_else_running() {
             .with_branch(|branch| {
                 branch
                     .with_id("b2")
-                    .with_if(r#"env.get("v") < 0"#)
+                    .with_if(r#"$("v") < 0"#)
                     .with_name("branch 2")
                     .with_step(|step| step.with_id("step21"))
             })
     });
 
     let id = utils::longid();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &id);
+    let (proc, scher, emitter, rx, tx) = create_proc_signal::<()>(&mut workflow, &id);
     // proc.tree().print();
-    emitter.on_message(|e| {
+    emitter.on_message(move |e| {
         if e.is_key("act1") {
-            e.close();
+            rx.close();
         }
     });
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
 
     assert_eq!(
         proc.task_by_nid("b1").get(0).unwrap().state(),
@@ -268,14 +275,14 @@ async fn sch_task_branch_if_false_else_running() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn sch_task_branch_if_true_else() {
     let mut workflow = Workflow::new().with_input("v", 1.into()).with_step(|step| {
         step.with_id("step1")
             .with_branch(|branch| {
                 branch
                     .with_id("b1")
-                    .with_if(r#"env.get("v") > 0"#)
+                    .with_if(r#"$("v") > 0"#)
                     .with_name("branch 1")
                     .with_step(|step| step.with_id("step11"))
             })
@@ -289,11 +296,11 @@ async fn sch_task_branch_if_true_else() {
     });
 
     let id = utils::longid();
-    let (proc, scher, _) = create_proc(&mut workflow, &id);
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &id);
     // proc.tree().print();
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
 
     assert_eq!(
         proc.task_by_nid("b1").get(0).unwrap().state(),
@@ -305,32 +312,32 @@ async fn sch_task_branch_if_true_else() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn sch_task_branch_if_two_no_else() {
     let mut workflow = Workflow::new().with_input("v", 1.into()).with_step(|step| {
         step.with_name("step1")
             .with_branch(|branch| {
                 branch
                     .with_id("b1")
-                    .with_if(r#"env.get("v") > 0"#)
+                    .with_if(r#"$("v") > 0"#)
                     .with_name("branch 1")
                     .with_step(|step| step.with_id("step11"))
             })
             .with_branch(|branch| {
                 branch
                     .with_id("b2")
-                    .with_if(r#"env.get("v") <= 0"#)
+                    .with_if(r#"$("v") <= 0"#)
                     .with_name("branch 2")
                     .with_step(|step| step.with_id("step21"))
             })
     });
 
     let id = utils::longid();
-    let (proc, scher, _) = create_proc(&mut workflow, &id);
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &id);
     // proc.tree().print();
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
 
     assert_eq!(
         proc.task_by_nid("b1").get(0).unwrap().state(),
@@ -342,39 +349,39 @@ async fn sch_task_branch_if_two_no_else() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn sch_task_branch_if_mutli_true() {
     let mut workflow = Workflow::new().with_input("v", 5.into()).with_step(|step| {
         step.with_name("step1")
             .with_branch(|branch| {
                 branch
                     .with_id("b1")
-                    .with_if(r#"env.get("v") > 0"#)
+                    .with_if(r#"$("v") > 0"#)
                     .with_name("branch 1")
                     .with_step(|step| step.with_id("step11"))
             })
             .with_branch(|branch| {
                 branch
                     .with_id("b2")
-                    .with_if(r#"env.get("v") <= 0"#)
+                    .with_if(r#"$("v") <= 0"#)
                     .with_name("branch 2")
                     .with_step(|step| step.with_id("step21"))
             })
             .with_branch(|branch| {
                 branch
                     .with_id("b3")
-                    .with_if(r#"env.get("v") > 2"#)
+                    .with_if(r#"$("v") > 2"#)
                     .with_name("branch 3")
                     .with_step(|step| step.with_id("step31"))
             })
     });
 
     let id = utils::longid();
-    let (proc, scher, _) = create_proc(&mut workflow, &id);
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &id);
     // proc.tree().print();
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
 
     assert_eq!(
         proc.task_by_nid("b1").get(0).unwrap().state(),
@@ -390,14 +397,14 @@ async fn sch_task_branch_if_mutli_true() {
     );
 }
 
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 async fn sch_task_branch_needs_state() {
     let mut workflow = Workflow::new().with_input("v", 5.into()).with_step(|step| {
         step.with_name("step1")
             .with_branch(|branch| {
                 branch
                     .with_id("b1")
-                    .with_if(r#"env.get("v") > 0"#)
+                    .with_if(r#"$("v") > 0"#)
                     .with_name("branch 1")
                     .with_step(|step| {
                         step.with_id("step11")
@@ -407,7 +414,7 @@ async fn sch_task_branch_needs_state() {
             .with_branch(|branch| {
                 branch
                     .with_id("b2")
-                    .with_if(r#"env.get("v") > 2"#)
+                    .with_if(r#"$("v") > 2"#)
                     .with_name("branch 2")
                     .with_need("b1")
                     .with_step(|step| step.with_id("step21"))
@@ -416,15 +423,15 @@ async fn sch_task_branch_needs_state() {
 
     workflow.print();
     let id = utils::longid();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &id);
+    let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &id);
     emitter.on_message(move |e| {
         println!("message: {:?}", e.inner());
         if e.inner().is_source("act") {
-            e.close();
+            rx.close();
         }
     });
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert_eq!(
         proc.task_by_nid("b1").get(0).unwrap().state(),

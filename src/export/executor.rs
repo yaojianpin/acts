@@ -1,9 +1,9 @@
+use std::sync::Arc;
+
 use crate::{
     event::Action, sch::Scheduler, store::StoreAdapter, utils::consts, ActionResult, ModelInfo,
     Result, Vars,
 };
-use std::sync::Arc;
-use tracing::error;
 
 #[derive(Clone)]
 pub struct Executor {
@@ -11,11 +11,14 @@ pub struct Executor {
 }
 
 impl Executor {
-    pub(crate) fn new(sch: &Arc<Scheduler>) -> Self {
-        Self { scher: sch.clone() }
+    pub(crate) fn new(scher: &Arc<Scheduler>) -> Self {
+        Self {
+            scher: scher.clone(),
+        }
     }
 
     pub fn start(&self, mid: &str, options: &Vars) -> Result<ActionResult> {
+        let mut state = ActionResult::begin();
         let model: ModelInfo = self.scher.cache().store().models().find(mid)?.into();
         let workflow = model.workflow()?;
 
@@ -24,8 +27,11 @@ impl Executor {
         if let Some(uid) = options.get_value(consts::FOR_ACT_KEY_UID) {
             vars.insert(consts::INITIATOR.to_string(), uid.clone());
         }
+        let proc = self.scher.start(&workflow, &vars)?;
+        state.insert("pid", proc.id().into());
+        state.end();
 
-        self.scher.start(&workflow, &vars)
+        Ok(state)
     }
 
     pub fn submit(&self, pid: &str, tid: &str, options: &Vars) -> Result<ActionResult> {
@@ -71,13 +77,7 @@ impl Executor {
         tid: &str,
         options: &Vars,
     ) -> Result<ActionResult> {
-        let ret = self
-            .scher
-            .do_action(&Action::new(pid, tid, action, options));
-        if let Err(err) = ret.as_ref() {
-            error!("{}", err);
-        }
-
-        ret
+        self.scher
+            .do_action(&Action::new(pid, tid, action, options))
     }
 }

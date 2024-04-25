@@ -1,8 +1,7 @@
 use crate::{
-    sch::{tests::create_proc, TaskState},
-    utils, Act, Catch, StmtBuild, Timeout, Vars, Workflow,
+    sch::{tests::create_proc_signal, TaskState},
+    utils, Act, Catch, Message, StmtBuild, Timeout, Vars, Workflow,
 };
-use std::sync::{Arc, Mutex};
 
 #[tokio::test]
 async fn sch_step_hooks_created() {
@@ -17,15 +16,15 @@ async fn sch_step_hooks_created() {
     });
 
     workflow.print();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
         if e.is_source("act") {
-            e.close();
+            rx.close();
         }
     });
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert_eq!(
         proc.task_by_nid("act1").get(0).unwrap().state(),
@@ -39,7 +38,6 @@ async fn sch_step_hooks_created() {
 
 #[tokio::test]
 async fn sch_step_hooks_completed() {
-    let messages = Arc::new(Mutex::new(vec![]));
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_setup(|stmts| {
             stmts
@@ -51,9 +49,8 @@ async fn sch_step_hooks_completed() {
     });
 
     workflow.print();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
-
-    let m = messages.clone();
+    let (proc, scher, emitter, tx, rx) =
+        create_proc_signal::<Vec<Message>>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
         if e.is_key("act1") {
@@ -62,22 +59,19 @@ async fn sch_step_hooks_completed() {
         }
 
         if e.is_type("msg") {
-            m.lock().unwrap().push(e.inner().clone());
-            e.close();
+            rx.update(|data| data.push(e.inner().clone()));
+            rx.close();
         }
     });
     scher.launch(&proc);
-    scher.event_loop().await;
+    let ret = tx.recv().await;
     proc.print();
-
-    let messages = messages.lock().unwrap();
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages.get(0).unwrap().key, "msg1");
+    assert_eq!(ret.len(), 1);
+    assert_eq!(ret.get(0).unwrap().key, "msg1");
 }
 
 #[tokio::test]
 async fn sch_step_hooks_before_update() {
-    let messages = Arc::new(Mutex::new(vec![]));
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_setup(|stmts| {
             stmts
@@ -90,29 +84,28 @@ async fn sch_step_hooks_before_update() {
     });
 
     workflow.print();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
-
-    let m = messages.clone();
+    let (proc, scher, emitter, tx, rx) =
+        create_proc_signal::<Vec<Message>>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
         if e.is_type("msg") {
-            m.lock().unwrap().push(e.inner().clone());
-            e.close();
+            rx.update(|data| data.push(e.inner().clone()));
+            if rx.data().len() == 2 {
+                rx.close();
+            }
         }
     });
     scher.launch(&proc);
-    scher.event_loop().await;
+    let ret = tx.recv().await;
     proc.print();
 
-    let messages = messages.lock().unwrap();
-    assert_eq!(messages.len(), 2);
-    assert_eq!(messages.get(0).unwrap().key, "msg1");
-    assert_eq!(messages.get(1).unwrap().key, "msg1");
+    assert_eq!(ret.len(), 2);
+    assert_eq!(ret.get(0).unwrap().key, "msg1");
+    assert_eq!(ret.get(1).unwrap().key, "msg1");
 }
 
 #[tokio::test]
 async fn sch_step_hooks_updated() {
-    let messages = Arc::new(Mutex::new(vec![]));
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_setup(|stmts| {
             stmts
@@ -125,9 +118,9 @@ async fn sch_step_hooks_updated() {
     });
 
     workflow.print();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, emitter, tx, rx) =
+        create_proc_signal::<Vec<Message>>(&mut workflow, &utils::longid());
 
-    let m = messages.clone();
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
         if e.is_source("act") && e.is_state("created") {
@@ -136,23 +129,22 @@ async fn sch_step_hooks_updated() {
         }
 
         if e.is_type("msg") {
-            m.lock().unwrap().push(e.inner().clone());
-            e.close();
+            rx.update(|data| data.push(e.inner().clone()));
+            if rx.data().len() == 2 {
+                rx.close();
+            }
         }
     });
     scher.launch(&proc);
-    scher.event_loop().await;
+    let ret = tx.recv().await;
     proc.print();
-
-    let messages = messages.lock().unwrap();
-    assert_eq!(messages.len(), 2);
-    assert_eq!(messages.get(0).unwrap().key, "msg1");
-    assert_eq!(messages.get(1).unwrap().key, "msg1");
+    assert_eq!(ret.len(), 2);
+    assert_eq!(ret.get(0).unwrap().key, "msg1");
+    assert_eq!(ret.get(1).unwrap().key, "msg1");
 }
 
 #[tokio::test]
 async fn sch_step_hooks_on_step() {
-    let messages = Arc::new(Mutex::new(vec![]));
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_setup(|stmts| {
             stmts
@@ -165,28 +157,24 @@ async fn sch_step_hooks_on_step() {
     });
 
     workflow.print();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
-
-    let m = messages.clone();
+    let (proc, scher, emitter, tx, rx) =
+        create_proc_signal::<Vec<Message>>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
         if e.is_type("msg") {
-            m.lock().unwrap().push(e.inner().clone());
-            e.close();
+            rx.update(|data| data.push(e.inner().clone()));
+            rx.close();
         }
     });
     scher.launch(&proc);
-    scher.event_loop().await;
+    let ret = tx.recv().await;
     proc.print();
-
-    let messages = messages.lock().unwrap();
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages.get(0).unwrap().key, "msg1");
+    assert_eq!(ret.len(), 1);
+    assert_eq!(ret.get(0).unwrap().key, "msg1");
 }
 
 #[tokio::test]
 async fn sch_step_hooks_error() {
-    let messages = Arc::new(Mutex::new(vec![]));
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_setup(|stmts| {
             stmts
@@ -201,9 +189,8 @@ async fn sch_step_hooks_error() {
     });
 
     workflow.print();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
-
-    let m = messages.clone();
+    let (proc, scher, emitter, tx, rx) =
+        create_proc_signal::<Vec<Message>>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
         if e.is_type("req") {
@@ -213,22 +200,20 @@ async fn sch_step_hooks_error() {
         }
 
         if e.is_type("msg") {
-            m.lock().unwrap().push(e.inner().clone());
-            e.close();
+            rx.update(|data| data.push(e.inner().clone()));
+            rx.close();
         }
     });
     scher.launch(&proc);
-    scher.event_loop().await;
+    let ret = tx.recv().await;
     proc.print();
 
-    let messages = messages.lock().unwrap();
-    assert_eq!(messages.len(), 1);
-    assert_eq!(messages.get(0).unwrap().key, "msg1");
+    assert_eq!(ret.len(), 1);
+    assert_eq!(ret.get(0).unwrap().key, "msg1");
 }
 
 #[tokio::test]
 async fn sch_step_hooks_store() {
-    let ret = Arc::new(Mutex::new(0));
     let mut workflow = Workflow::new().with_id("m1").with_step(|step| {
         step.with_id("step1").with_setup(|stmts| {
             stmts
@@ -257,10 +242,10 @@ async fn sch_step_hooks_store() {
     });
 
     workflow.print();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, emitter, tx, rx) =
+        create_proc_signal::<usize>(&mut workflow, &utils::longid());
     let cache = scher.cache().clone();
     let pid = proc.id().clone();
-    let r = ret.clone();
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
         if e.is_type("req") && e.is_state("created") {
@@ -268,15 +253,15 @@ async fn sch_step_hooks_store() {
             cache
                 .restore(|proc| {
                     if let Some(task) = proc.task_by_nid("step1").get(0) {
-                        *r.lock().unwrap() = task.hooks().len();
+                        rx.update(|data| *data = task.hooks().len());
                     }
                 })
                 .unwrap();
-            e.close();
+            rx.close();
         }
     });
     scher.launch(&proc);
-    scher.event_loop().await;
+    let ret = tx.recv().await;
     proc.print();
-    assert_eq!(*ret.lock().unwrap(), 7);
+    assert_eq!(ret, 7);
 }

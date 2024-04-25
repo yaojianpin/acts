@@ -4,13 +4,13 @@ use crate::{Act, If, StmtBuild, Vars};
 fn model_act_if_parse() {
     let text = r#"
     !if
-    on: env.get("a") > 0
+    on: $("a") > 0
     then:
       - !msg
         id: msg1
     "#;
     if let Act::If(stmt) = serde_yaml::from_str(text).unwrap() {
-        assert_eq!(stmt.on, r#"env.get("a") > 0"#);
+        assert_eq!(stmt.on, r#"$("a") > 0"#);
         assert_eq!(stmt.then.len(), 1);
     } else {
         assert!(false);
@@ -19,8 +19,8 @@ fn model_act_if_parse() {
 
 #[test]
 fn model_act_if_on() {
-    let act = If::new().with_on(r#"env.get("a") > 0"#);
-    assert_eq!(act.on, r#"env.get("a") > 0"#);
+    let act = If::new().with_on(r#"$("a") > 0"#);
+    assert_eq!(act.on, r#"$("a") > 0"#);
 }
 
 #[test]

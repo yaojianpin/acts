@@ -1,5 +1,5 @@
 use crate::{
-    event::ActionState, sch::tests::create_proc, utils, Act, StmtBuild, TaskState, Workflow,
+    event::ActionState, sch::tests::create_proc_signal, utils, Act, StmtBuild, TaskState, Workflow,
 };
 
 #[tokio::test]
@@ -11,10 +11,10 @@ async fn sch_act_cmd_submit_on_step() {
     });
 
     workflow.print();
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert_eq!(
         proc.task_by_nid("step1").get(0).unwrap().action_state(),
@@ -31,10 +31,10 @@ async fn sch_act_cmd_sumit_on_step_with_inputs() {
     });
 
     workflow.print();
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert_eq!(
         proc.task_by_nid("step1").get(0).unwrap().action_state(),
@@ -44,7 +44,7 @@ async fn sch_act_cmd_sumit_on_step_with_inputs() {
         proc.task_by_nid("step1")
             .get(0)
             .unwrap()
-            .env()
+            .data()
             .get::<i32>("a")
             .unwrap(),
         5
@@ -63,10 +63,10 @@ async fn sch_act_cmd_submit_on_act() {
     });
 
     workflow.print();
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert_eq!(
         proc.task_by_nid("act1").get(0).unwrap().action_state(),
@@ -78,11 +78,11 @@ async fn sch_act_cmd_submit_on_act() {
 async fn sch_act_cmd_submit_auto() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_act(Act::r#if(|act| {
-            act.with_on(r#"env.get("is_auto_submit") == ()"#)
+            act.with_on(r#"$("is_auto_submit") == null"#)
                 .with_then(|acts| {
                     acts.add(Act::cmd(|cmd| {
                         cmd.with_name("submit")
-                            .with_input("uid", r#"${ env.get("initiator") }"#)
+                            .with_input("uid", r#"${ $("initiator") }"#)
                             .with_input("is_auto_submit", true)
                     }))
                 })
@@ -91,10 +91,10 @@ async fn sch_act_cmd_submit_auto() {
     });
 
     workflow.print();
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert_eq!(proc.task_by_nid("act1").len(), 0);
     assert_eq!(
@@ -121,10 +121,10 @@ async fn sch_act_cmd_complete_on_step() {
     });
 
     workflow.print();
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert_eq!(
         proc.task_by_nid("step1").get(0).unwrap().action_state(),
@@ -141,10 +141,10 @@ async fn sch_act_cmd_complete_on_step_with_inputs() {
     });
 
     workflow.print();
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert_eq!(
         proc.task_by_nid("step1").get(0).unwrap().action_state(),
@@ -154,7 +154,7 @@ async fn sch_act_cmd_complete_on_step_with_inputs() {
         proc.task_by_nid("step1")
             .get(0)
             .unwrap()
-            .env()
+            .data()
             .get::<i32>("a")
             .unwrap(),
         5
@@ -173,10 +173,10 @@ async fn sch_act_cmd_complete_on_act() {
     });
 
     workflow.print();
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert_eq!(
         proc.task_by_nid("act1").get(0).unwrap().action_state(),
@@ -193,10 +193,10 @@ async fn sch_act_cmd_abort_on_step() {
     });
 
     workflow.print();
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert_eq!(
         proc.task_by_nid("step1").get(0).unwrap().action_state(),
@@ -214,10 +214,10 @@ async fn sch_act_cmd_abort_on_step_with_inputs() {
     });
 
     workflow.print();
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert_eq!(
         proc.task_by_nid("step1").get(0).unwrap().action_state(),
@@ -227,7 +227,7 @@ async fn sch_act_cmd_abort_on_step_with_inputs() {
         proc.task_by_nid("step1")
             .get(0)
             .unwrap()
-            .env()
+            .data()
             .get::<i32>("a")
             .unwrap(),
         5
@@ -246,10 +246,10 @@ async fn sch_act_cmd_abort_on_act() {
     });
 
     workflow.print();
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert_eq!(
         proc.task_by_nid("act1").get(0).unwrap().action_state(),
@@ -268,10 +268,10 @@ async fn sch_act_cmd_error_on_step() {
     });
 
     workflow.print();
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert_eq!(
         proc.task_by_nid("step1").get(0).unwrap().action_state(),
@@ -295,10 +295,10 @@ async fn sch_act_cmd_error_on_step_with_inputs() {
     });
 
     workflow.print();
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert_eq!(
         proc.task_by_nid("step1").get(0).unwrap().action_state(),
@@ -308,7 +308,7 @@ async fn sch_act_cmd_error_on_step_with_inputs() {
         proc.task_by_nid("step1")
             .get(0)
             .unwrap()
-            .env()
+            .data()
             .get::<i32>("a")
             .unwrap(),
         5
@@ -324,10 +324,10 @@ async fn sch_act_cmd_error_on_step_with_no_err_code() {
     });
 
     workflow.print();
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert_eq!(
         proc.task_by_nid("step1").get(0).unwrap().action_state(),
@@ -337,7 +337,7 @@ async fn sch_act_cmd_error_on_step_with_no_err_code() {
         .task_by_nid("step1")
         .get(0)
         .unwrap()
-        .env()
+        .data()
         .get::<i32>("a")
         .is_none(),);
 }
@@ -357,10 +357,10 @@ async fn sch_act_cmd_error_on_act() {
     });
 
     workflow.print();
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert_eq!(
         proc.task_by_nid("act1").get(0).unwrap().action_state(),
@@ -377,10 +377,10 @@ async fn sch_act_cmd_skip() {
     });
 
     workflow.print();
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert_eq!(
         proc.task_by_nid("step1").get(0).unwrap().action_state(),
@@ -398,10 +398,10 @@ async fn sch_act_cmd_not_exist() {
     });
 
     workflow.print();
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert!(proc.task_by_nid("step1").get(0).unwrap().state().is_error(),);
     assert!(proc.state().is_error());

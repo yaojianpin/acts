@@ -1,9 +1,7 @@
-use crate::{sch::tests::create_proc, utils, Act, StmtBuild, Workflow};
-use std::sync::{Arc, Mutex};
+use crate::{sch::tests::create_proc_signal, utils, Act, Message, StmtBuild, Workflow};
 
 #[tokio::test]
 async fn sch_step_timeout_one() {
-    let ret = Arc::new(Mutex::new(false));
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_timeout(|t| {
@@ -13,24 +11,22 @@ async fn sch_step_timeout_one() {
             .with_act(Act::req(|act| act.with_id("act1")))
     });
     workflow.print();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
-    let r = ret.clone();
+    let (proc, scher, emitter, tx, rx) =
+        create_proc_signal::<bool>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         if e.is_key("msg1") {
-            *r.lock().unwrap() = true;
-            e.close();
+            rx.send(true);
         }
     });
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    let ret = tx.recv().await;
     proc.print();
-    assert!(*ret.lock().unwrap())
+    assert!(ret)
 }
 
 #[tokio::test]
 async fn sch_step_timeout_many() {
-    let ret = Arc::new(Mutex::new(Vec::new()));
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_timeout(|t| {
@@ -44,22 +40,21 @@ async fn sch_step_timeout_many() {
             .with_act(Act::req(|act| act.with_id("act1")))
     });
     workflow.print();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
-    let r = ret.clone();
+    let (proc, scher, emitter, tx, rx) =
+        create_proc_signal::<Vec<Message>>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         if e.is_key("msg1") {
-            r.lock().unwrap().push(e.inner().clone());
+            rx.update(|data| data.push(e.inner().clone()));
         }
 
         if e.is_key("msg2") {
-            r.lock().unwrap().push(e.inner().clone());
-            e.close();
+            rx.update(|data| data.push(e.inner().clone()));
+            rx.close();
         }
     });
 
     scher.launch(&proc);
-    scher.event_loop().await;
+    let ret = tx.recv().await;
     proc.print();
-    let ret = ret.lock().unwrap();
     assert_eq!(ret.len(), 2)
 }

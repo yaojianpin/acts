@@ -1,5 +1,8 @@
 use crate::{
-    sch::{tests::create_proc, NodeTree, TaskState},
+    sch::{
+        tests::{create_proc, create_proc_signal},
+        NodeTree, TaskState,
+    },
     utils, Workflow,
 };
 
@@ -7,7 +10,7 @@ use crate::{
 async fn sch_proc_send() {
     let mut workflow = Workflow::default();
     let id = utils::longid();
-    let (proc, scher, ..) = create_proc(&mut workflow, &id);
+    let (proc, scher, ..) = create_proc_signal::<()>(&mut workflow, &id);
     scher.launch(&proc);
     scher.next().await;
 
@@ -41,9 +44,9 @@ async fn sch_proc_cost() {
 #[tokio::test]
 async fn sch_proc_time() {
     let mut workflow = Workflow::new().with_step(|step| step.with_name("step1"));
-    let (proc, scher, ..) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, .., tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
 
     assert!(proc.start_time() > 0);
     assert!(proc.end_time() > 0)

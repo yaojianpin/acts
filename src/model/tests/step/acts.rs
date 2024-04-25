@@ -13,7 +13,7 @@ fn model_step_yml_acts() {
             - !req
               id: act1
               inputs:
-                b: ${ env.get("5") }
+                b: ${ $("5") }
     "#;
     let m = Workflow::from_yml(text).unwrap();
     let step = m.steps.get(0).unwrap();

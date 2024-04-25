@@ -29,7 +29,7 @@ fn model_act_parse_nest() {
             - !msg
               id: msg2
             - !if
-              on: env.get("a") > 0
+              on: $("a") > 0
               then:
                 - !msg
                   id: msg3

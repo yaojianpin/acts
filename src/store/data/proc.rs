@@ -8,8 +8,8 @@ pub struct Proc {
     pub name: String,
     pub start_time: i64,
     pub end_time: i64,
-    pub vars: String,
     pub timestamp: i64,
     pub model: String,
     pub root_tid: String,
+    pub env_local: String,
 }

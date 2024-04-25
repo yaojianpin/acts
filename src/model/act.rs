@@ -52,7 +52,6 @@ pub enum Act {
     #[serde(rename = "call")]
     Call(Call),
 
-    #[cfg(feature = "wit")]
     #[serde(rename = "pack")]
     Pack(Pack),
 
@@ -84,7 +83,8 @@ impl ModelBase for Act {
             Act::Req(req) => &req.id,
             Act::Msg(msg) => &msg.id,
             Act::Call(r#use) => &r#use.id,
-            Act::Block(pack) => &pack.id,
+            Act::Block(b) => &b.id,
+            Act::Pack(p) => &p.id,
             _ => "",
         }
     }
@@ -110,7 +110,6 @@ impl Act {
             Act::Block(_) => "block",
             Act::If(_) => "if",
             Act::Call(_) => "use",
-            #[cfg(feature = "wit")]
             Act::Pack(_) => "pack",
             Act::OnCreated(_) => "on_created",
             Act::OnTimeout(_) => "on_timeout",
@@ -125,7 +124,6 @@ impl Act {
     pub fn is_taskable(&self) -> bool {
         match self {
             Act::Req(_) | Act::Block(_) | Act::Call(_) => true,
-            #[cfg(feature = "wit")]
             Act::Pack(_) => true,
             _ => false,
         }
@@ -137,7 +135,6 @@ impl Act {
             Act::Msg(msg) => msg.id = id.to_string(),
             Act::Call(r#use) => r#use.id = id.to_string(),
             Act::Block(b) => b.id = id.to_string(),
-            #[cfg(feature = "wit")]
             Act::Pack(p) => p.id = id.to_string(),
             _ => {}
         }
@@ -164,7 +161,6 @@ impl Act {
             Act::Req(req) => &req.name,
             Act::Msg(msg) => &msg.name,
             Act::Cmd(cmd) => &cmd.name,
-            #[cfg(feature = "wit")]
             Act::Pack(p) => &p.name,
             _ => "",
         }
@@ -175,7 +171,6 @@ impl Act {
             Act::Req(req) => req.inputs.clone(),
             Act::Msg(msg) => msg.inputs.clone(),
             Act::Call(r#use) => r#use.inputs.clone(),
-            #[cfg(feature = "wit")]
             Act::Pack(p) => p.inputs.clone(),
             _ => Vars::new(),
         }
@@ -185,7 +180,6 @@ impl Act {
         match self {
             Act::Req(req) => req.outputs.clone(),
             Act::Call(u) => u.outputs.clone(),
-            #[cfg(feature = "wit")]
             Act::Pack(p) => p.outputs.clone(),
             _ => Vars::new(),
         }
@@ -246,7 +240,6 @@ impl Act {
         Act::Block(build(block))
     }
 
-    #[cfg(feature = "wit")]
     pub fn pack(build: fn(Pack) -> Pack) -> Self {
         let pack = Pack::default();
         Act::Pack(build(pack))

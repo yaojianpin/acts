@@ -8,7 +8,6 @@ use std::sync::Arc;
 #[tokio::test]
 async fn sch_scher_next() {
     let engine = Engine::new();
-    engine.start();
     let store = engine.scher().cache().store();
     let scher = engine.scher();
     let workflow = Workflow::new().with_id(&utils::longid());
@@ -27,7 +26,8 @@ async fn sch_scher_next() {
 
 #[tokio::test]
 async fn sch_scher_task() {
-    let scher = Scheduler::new();
+    let engine = Engine::new();
+    let scher = engine.scher();
     let workflow = Workflow::new();
     let pid = utils::longid();
     let s = scher.clone();
@@ -53,18 +53,16 @@ async fn sch_scher_start_default() {
 
 #[tokio::test]
 async fn sch_scher_start_with_vars() {
-    let scher = Scheduler::new();
+    let engine = Engine::new();
+    let scher = engine.scher();
     let workflow = Workflow::new();
     let s = scher.clone();
     let mut vars = Vars::new();
     vars.insert("a".to_string(), json!(100));
     vars.insert("b".to_string(), json!("string"));
 
-    let result = s.start(&workflow, &vars).unwrap();
-
-    let pid = result.outputs().get_value("pid").unwrap().as_str().unwrap();
+    let proc = s.start(&workflow, &vars).unwrap();
     scher.next().await;
-    let proc = scher.proc(pid).unwrap();
 
     assert_eq!(proc.inputs().get::<i64>("a").unwrap(), 100);
     assert_eq!(proc.inputs().get::<String>("b").unwrap(), "string");
@@ -72,14 +70,17 @@ async fn sch_scher_start_with_vars() {
 
 #[tokio::test]
 async fn sch_scher_do_action() {
-    let scher = Scheduler::new();
+    let engine = Engine::new();
+    let scher = engine.scher();
+    let sig = scher.signal(());
+    let rx = sig.clone();
     let workflow = Workflow::new().with_step(|step| {
         step.with_name("step1").with_act(Act::req(|act| {
             act.with_id("act1").with_input("uid", json!("u1"))
         }))
     });
     let s = scher.clone();
-    scher.emitter().on_complete(|e| e.close());
+    scher.emitter().on_complete(move |_| rx.close());
     scher.emitter().on_message(move |e| {
         if e.is_key("act1") && e.is_state("created") {
             let mut options = Vars::new();
@@ -91,7 +92,7 @@ async fn sch_scher_do_action() {
     let proc = Arc::new(Proc::new(&utils::longid()));
     proc.load(&workflow).unwrap();
     scher.launch(&proc);
-    scher.event_loop().await;
+    sig.recv().await;
 
     assert_eq!(proc.state().is_success(), true);
 }

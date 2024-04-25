@@ -3,17 +3,18 @@ use crate::{
     event::ActionState,
     model::Step,
     sch::{Context, NodeContent, TaskState},
-    ActTask, Result,
+    ActError, ActTask, Result, StoreAdapter,
 };
 use async_trait::async_trait;
 
 #[async_trait]
 impl ActTask for Step {
     fn init(&self, ctx: &Context) -> Result<()> {
+        let task = ctx.task();
         if let Some(expr) = &self.r#if {
-            let cond = ctx.eval(expr)?;
+            let cond = ctx.eval::<bool>(expr)?;
             if !cond {
-                ctx.task.set_action_state(ActionState::Skipped);
+                task.set_action_state(ActionState::Skipped);
                 return Ok(());
             }
         }
@@ -21,14 +22,14 @@ impl ActTask for Step {
         // add catch hooks
         if self.catches.len() > 0 {
             for c in &self.catches {
-                ctx.task.add_hook_catch(TaskLifeCycle::ErrorCatch, c);
+                task.add_hook_catch(TaskLifeCycle::ErrorCatch, c);
             }
         }
 
         // add timeout hooks
         if self.timeout.len() > 0 {
             for s in &self.timeout {
-                ctx.task.add_hook_timeout(TaskLifeCycle::Timeout, s);
+                task.add_hook_timeout(TaskLifeCycle::Timeout, s);
             }
         }
 
@@ -43,11 +44,18 @@ impl ActTask for Step {
     }
 
     fn run(&self, ctx: &Context) -> Result<()> {
+        let task = ctx.task();
         if let Some(script) = &self.run {
-            ctx.run(script)?;
+            ctx.eval::<()>(script)?;
         }
 
-        let children = ctx.task.node.children();
+        if let Some(pack_id) = &self.uses {
+            let pack = ctx.scher.cache().store().packages().find(pack_id)?;
+            let script: String = String::from_utf8(pack.file_data).map_err(ActError::from)?;
+            ctx.eval(&script)?;
+        }
+
+        let children = task.node.children();
         if children.len() > 0 {
             for child in &children {
                 if let NodeContent::Act(act) = &child.content {
@@ -66,21 +74,20 @@ impl ActTask for Step {
     }
 
     fn next(&self, ctx: &Context) -> Result<bool> {
-        let state = ctx.task.state();
+        let task = ctx.task();
+        let state = task.state();
         let mut is_next: bool = false;
         if state.is_running() {
-            let tasks = ctx.task.children();
+            let tasks = task.children();
             let mut count = 0;
 
             for task in tasks.iter() {
                 if task.state().is_none() || task.state().is_running() {
                     is_next = true;
                 } else if task.state().is_pending() && task.is_ready() {
-                    let ctx = task.create_context(&ctx.scher);
-
                     // resume task
                     task.set_state(TaskState::Running);
-                    ctx.scher.emitter().emit_task_event(task);
+                    ctx.scher.emitter().emit_task_event(task)?;
                     task.exec(&ctx)?;
                     is_next = true;
                 }
@@ -95,18 +102,18 @@ impl ActTask for Step {
             }
 
             if count == tasks.len() {
-                if !ctx.task.state().is_completed() {
-                    ctx.task.set_action_state(ActionState::Completed);
+                if !task.state().is_completed() {
+                    task.set_action_state(ActionState::Completed);
                 }
 
-                if let Some(next) = &ctx.task.node.next().upgrade() {
+                if let Some(next) = &task.node.next().upgrade() {
                     ctx.sched_task(next);
                     return Ok(true);
                 }
             }
         } else if state.is_skip() {
             // if the step is skipped, still find the next to run
-            if let Some(next) = ctx.task.node.next().upgrade() {
+            if let Some(next) = task.node.next().upgrade() {
                 ctx.sched_task(&next);
                 return Ok(true);
             }
@@ -116,17 +123,16 @@ impl ActTask for Step {
     }
 
     fn review(&self, ctx: &Context) -> Result<bool> {
-        let state = ctx.task.state();
+        let task = ctx.task();
+        let state = task.state();
         if state.is_running() {
-            let tasks = ctx.task.children();
+            let tasks = task.children();
             let mut count = 0;
             for task in tasks.iter() {
                 if task.state().is_pending() && task.is_ready() {
-                    let ctx = task.create_context(&ctx.scher);
-
                     // resume task
                     task.set_state(TaskState::Running);
-                    ctx.scher.emitter().emit_task_event(task);
+                    ctx.scher.emitter().emit_task_event(task)?;
                     task.exec(&ctx)?;
                     return Ok(false);
                 }
@@ -142,11 +148,11 @@ impl ActTask for Step {
             }
 
             if count == tasks.len() {
-                if !ctx.task.state().is_completed() {
-                    ctx.task.set_action_state(ActionState::Completed);
+                if !task.state().is_completed() {
+                    task.set_action_state(ActionState::Completed);
                 }
 
-                if let Some(next) = &ctx.task.node.next().upgrade() {
+                if let Some(next) = &task.node.next().upgrade() {
                     ctx.sched_task(next);
                     return Ok(false);
                 }
@@ -154,7 +160,7 @@ impl ActTask for Step {
             }
         } else if state.is_skip() {
             // if the step is skipped, still find the next to run
-            if let Some(next) = ctx.task.node.next().upgrade() {
+            if let Some(next) = task.node.next().upgrade() {
                 ctx.sched_task(&next);
                 return Ok(false);
             }

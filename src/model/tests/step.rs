@@ -125,3 +125,9 @@ fn model_step_acts() {
         .with_act(Act::req(|act| act.with_id("act2")));
     assert_eq!(step.acts.len(), 2);
 }
+
+#[test]
+fn model_step_uses() {
+    let step = Step::new().with_uses("p1");
+    assert_eq!(step.uses.unwrap(), "p1");
+}

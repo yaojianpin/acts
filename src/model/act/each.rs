@@ -1,4 +1,4 @@
-use crate::{Act, ActError, Candidate, Context, Result};
+use crate::{Act, ActError, Context, Result};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -9,20 +9,19 @@ pub struct Each {
 }
 
 impl Each {
-    pub fn parse(&self, ctx: &Context, scr: &str) -> Result<Candidate> {
+    pub fn parse(&self, ctx: &Context, scr: &str) -> Result<Vec<String>> {
         if scr.is_empty() {
             return Err(ActError::Runtime("each's 'in' is empty".to_string()));
         }
 
-        let result = ctx.eval_with::<rhai::Dynamic>(scr)?;
-        let cand = Candidate::parse(&result.to_string())?;
-        if cand.is_empty() {
+        let result = ctx.eval::<Vec<String>>(scr)?;
+        if result.len() == 0 {
             return Err(ActError::Runtime(format!(
                 "each.in is empty in task({})",
-                ctx.task.id
+                ctx.task().id
             )));
         }
-        Ok(cand)
+        Ok(result)
     }
 
     pub fn new() -> Self {

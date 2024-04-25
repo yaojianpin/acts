@@ -74,6 +74,13 @@ impl DbSchema for Task {
             },
         ));
         map.push((
+            "data".to_string(),
+            DbColumn {
+                db_type: DbType::Text,
+                ..
+            },
+        ));
+        map.push((
             "action_state".to_string(),
             DbColumn {
                 db_type: DbType::Text,

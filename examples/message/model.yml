@@ -1,7 +1,9 @@
 name: event_test
 id: m1
-outputs:
+inputs:
   value: 0
+outputs:
+  value:
 setup:
   - !on_created
       - !msg
@@ -30,6 +32,6 @@ steps:
           - !msg
             id: fn3
             inputs:
-              a: ${ env.get("value") }
+              a: ${ $("value") }
   - name: step 4
     

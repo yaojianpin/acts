@@ -3,8 +3,11 @@ use acts::{Engine, Vars, Workflow};
 #[tokio::main]
 async fn main() {
     let engine = Engine::new();
-    engine.start();
+
     let executor = engine.executor();
+    let sig = engine.signal(());
+    let s = sig.clone();
+
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text).unwrap();
     workflow.print();
@@ -18,9 +21,8 @@ async fn main() {
     });
 
     engine.emitter().on_complete(move |e| {
-        println!("{:?}", e.outputs());
-        e.close();
+        println!("on_complete: {:?}", e.outputs());
+        s.close();
     });
-
-    engine.eloop().await;
+    sig.recv().await;
 }

@@ -4,7 +4,7 @@ use async_trait::async_trait;
 #[async_trait]
 impl ActTask for Block {
     fn init(&self, ctx: &Context) -> Result<()> {
-        ctx.task.set_emit_disabled(true);
+        ctx.task().set_emit_disabled(true);
         Ok(())
     }
 
@@ -19,21 +19,21 @@ impl ActTask for Block {
     }
 
     fn next(&self, ctx: &Context) -> Result<bool> {
-        let state = ctx.task.state();
+        let task = ctx.task();
+        let state = task.state();
         let mut is_next: bool = false;
         if state.is_running() {
-            let tasks = ctx.task.children();
+            let tasks = task.children();
             let mut count = 0;
 
             for task in tasks.iter() {
                 if task.state().is_none() || task.state().is_running() {
                     is_next = true;
                 } else if task.state().is_pending() && task.is_ready() {
-                    let ctx = task.create_context(&ctx.scher);
-
                     // resume task
                     task.set_state(TaskState::Running);
-                    ctx.scher.emitter().emit_task_event(task);
+                    ctx.scher.emitter().emit_task_event(task)?;
+
                     task.exec(&ctx)?;
                     is_next = true;
                 }
@@ -43,8 +43,8 @@ impl ActTask for Block {
             }
 
             if count == tasks.len() {
-                if !ctx.task.state().is_completed() {
-                    ctx.task.set_action_state(ActionState::Completed);
+                if !task.state().is_completed() {
+                    task.set_action_state(ActionState::Completed);
                 }
 
                 if let Some(next) = &self.next {
@@ -63,9 +63,10 @@ impl ActTask for Block {
     }
 
     fn review(&self, ctx: &Context) -> Result<bool> {
-        let state = ctx.task.state();
+        let task = ctx.task();
+        let state = task.state();
         if state.is_running() {
-            let tasks = ctx.task.children();
+            let tasks = task.children();
 
             let mut count = 0;
             for task in tasks.iter() {
@@ -75,7 +76,7 @@ impl ActTask for Block {
                     return Ok(false);
                 }
                 if task.state().is_skip() {
-                    ctx.task.set_action_state(ActionState::Skipped);
+                    task.set_action_state(ActionState::Skipped);
                     return Ok(true);
                 }
 
@@ -84,8 +85,8 @@ impl ActTask for Block {
                 }
             }
             if count == tasks.len() {
-                if !ctx.task.state().is_completed() {
-                    ctx.task.set_action_state(ActionState::Completed);
+                if !task.state().is_completed() {
+                    task.set_action_state(ActionState::Completed);
                 }
 
                 if let Some(next) = &self.next {

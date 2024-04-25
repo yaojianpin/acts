@@ -1,39 +1,17 @@
-use crate::{utils, Act, Engine, Vars, Workflow};
+use crate::{utils, Act, Builder, Engine, Vars, Workflow};
 use serde_json::json;
 
 #[tokio::test]
 async fn engine_start() {
     let engine = Engine::new();
-
-    let e = engine.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        e.close();
-    });
-    engine.start();
-    assert!(true);
-}
-
-#[tokio::test]
-async fn engine_start_async() {
-    let engine = Engine::new();
-    engine.start();
-    let e = engine.clone();
-    tokio::spawn(async move {
-        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
-        e.close();
-    });
-
-    engine.eloop().await;
-
-    assert!(true);
+    assert!(engine.is_running());
 }
 
 #[tokio::test]
 async fn engine_event_on_message() {
     let engine = Engine::new();
-    engine.start();
-
+    let sig = engine.signal("".to_string());
+    let s = sig.clone();
     let mid = utils::longid();
     let workflow = Workflow::new()
         .with_id(&mid)
@@ -41,10 +19,9 @@ async fn engine_event_on_message() {
 
     engine.emitter().on_message(move |e| {
         if e.is_source("act") {
-            assert_eq!(e.id, "test");
+            s.update(|data| *data = e.key.clone());
+            s.close();
         }
-
-        e.close();
     });
 
     let executor = engine.executor();
@@ -53,22 +30,23 @@ async fn engine_event_on_message() {
     let mut options = Vars::new();
     options.insert("pid".to_string(), json!(utils::longid()));
     executor.start(&workflow.id, &options).unwrap();
-    engine.eloop().await;
+    let ret = sig.recv().await;
+    assert_eq!(ret, "test");
 }
 
 #[tokio::test]
 async fn engine_event_on_start() {
     let engine = Engine::new();
-    engine.start();
 
+    let sig = engine.signal("".to_string());
+    let s = sig.clone();
     let mid = utils::longid();
     let workflow = Workflow::new()
         .with_id(&mid)
         .with_step(|step| step.with_act(Act::req(|act| act.with_id("test"))));
 
     engine.emitter().on_start(move |e| {
-        assert_eq!(e.mid, mid);
-        e.close();
+        s.send(e.mid.clone());
     });
 
     let executor = engine.executor();
@@ -77,22 +55,22 @@ async fn engine_event_on_start() {
     let mut options = Vars::new();
     options.insert("pid".to_string(), json!(utils::longid()));
     executor.start(&workflow.id, &options).unwrap();
-    engine.eloop().await;
+    let ret = sig.recv().await;
+    assert_eq!(ret, mid);
 }
 
 #[tokio::test]
 async fn engine_event_on_complete() {
     let engine = Engine::new();
-    engine.start();
-
+    let sig = engine.signal(false);
+    let s1 = sig.clone();
     let mid = utils::longid();
     let workflow = Workflow::new()
         .with_id(&mid)
         .with_step(|step| step.with_id("step1"));
 
     engine.emitter().on_complete(move |e| {
-        assert_eq!(e.mid, mid);
-        e.close();
+        s1.send(e.mid == mid);
     });
 
     let executor = engine.executor();
@@ -101,23 +79,23 @@ async fn engine_event_on_complete() {
     let mut options = Vars::new();
     options.insert("pid".to_string(), json!(utils::longid()));
     executor.start(&workflow.id, &options).unwrap();
-    engine.eloop().await;
+    let ret = sig.recv().await;
+    assert!(ret);
 }
 
 #[tokio::test]
 async fn engine_event_on_error() {
     let engine = Engine::new();
-    engine.start();
-
     let mid = utils::longid();
     let workflow = Workflow::new().with_id(&mid).with_step(|step| {
         step.with_id("step1")
             .with_act(Act::req(|a| a.with_id("act1")))
     });
 
+    let sig = engine.signal(false);
+    let s1 = sig.clone();
     engine.emitter().on_error(move |e| {
-        assert_eq!(e.mid, mid);
-        e.close();
+        s1.send(e.mid == mid);
     });
 
     engine.emitter().on_message(move |e| {
@@ -136,11 +114,12 @@ async fn engine_event_on_error() {
     let mut options = Vars::new();
     options.insert("pid".to_string(), json!(utils::longid()));
     executor.start(&workflow.id, &options).unwrap();
-    engine.eloop().await;
+    let ret = sig.recv().await;
+    assert!(ret);
 }
 
 #[tokio::test]
-async fn engine_builder() {
+async fn engine_model_create() {
     let workflow = Workflow::new()
         .with_name("w1")
         .with_input("v", 0.into())
@@ -150,12 +129,12 @@ async fn engine_builder() {
                 .with_run(r#"print("step1")"#)
                 .with_branch(|branch| {
                     branch
-                        .with_if(r#"${ env.get("v") > 100 }"#)
+                        .with_if(r#"${ $("v") > 100 }"#)
                         .with_step(|step| step.with_name("step3").with_run(r#"print("step3")"#))
                 })
                 .with_branch(|branch| {
                     branch
-                        .with_if(r#"${ env.get("v") <= 100 }"#)
+                        .with_if(r#"${ $("v") <= 100 }"#)
                         .with_step(|step| step.with_name("step4").with_run(r#"print("step4")"#))
                 })
         })
@@ -165,4 +144,40 @@ async fn engine_builder() {
     let step = workflow.step("step1").unwrap();
     assert_eq!(step.name, "step1");
     assert_eq!(step.branches.len(), 2);
+}
+
+#[tokio::test]
+async fn engine_build_cache_size() {
+    let engine = Builder::new().cache_size(100).build();
+    assert_eq!(engine.config().cache_cap, 100)
+}
+
+#[tokio::test]
+async fn engine_build_data_dir() {
+    let engine = Builder::new().data_dir("test").build();
+    assert_eq!(engine.config().data_dir, "test")
+}
+
+#[tokio::test]
+async fn engine_build_db_name() {
+    let engine = Builder::new().db_name("test.db").build();
+    assert_eq!(engine.config().db_name, "test.db")
+}
+
+#[tokio::test]
+async fn engine_build_log_dir() {
+    let engine = Builder::new().log_dir("test").build();
+    assert_eq!(engine.config().log_dir, "test")
+}
+
+#[tokio::test]
+async fn engine_build_log_level() {
+    let engine = Builder::new().log_level("DEBUG").build();
+    assert_eq!(engine.config().log_level, "DEBUG")
+}
+
+#[tokio::test]
+async fn engine_build_tick_interval_secs() {
+    let engine = Builder::new().tick_interval_secs(10).build();
+    assert_eq!(engine.config().tick_interval_secs, 10)
 }

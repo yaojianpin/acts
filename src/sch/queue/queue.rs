@@ -1,16 +1,11 @@
-use crate::{
-    sch::{queue::Signal, Scheduler},
-    Engine, ShareLock,
-};
-use std::sync::{Arc, RwLock};
+use crate::sch::queue::Signal;
+use std::sync::Arc;
 use tokio::{runtime::Handle, sync::mpsc, sync::Mutex};
 
 #[derive(Clone)]
 pub struct Queue {
     receiver: Arc<Mutex<mpsc::Receiver<Signal>>>,
     sender: Arc<mpsc::Sender<Signal>>,
-
-    scher: ShareLock<Option<Arc<Scheduler>>>,
 }
 
 impl Queue {
@@ -20,15 +15,9 @@ impl Queue {
         let queue = Arc::new(Self {
             receiver: Arc::new(Mutex::new(rx)),
             sender: Arc::new(tx),
-            scher: Arc::new(RwLock::new(None)),
         });
 
         queue
-    }
-
-    pub fn init(&self, engine: &Engine) {
-        let scher = engine.scher();
-        *self.scher.write().unwrap() = Some(scher.clone());
     }
 
     pub async fn next(&self) -> Option<Signal> {

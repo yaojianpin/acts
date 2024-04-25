@@ -12,7 +12,6 @@ pub const INITIATOR: &str = "initiator";
 
 pub const ACT_USE_PARENT_PROC_ID: &str = "use_parent_pid";
 pub const ACT_USE_PARENT_TASK_ID: &str = "use_parent_tid";
-pub const ENV_PARENT_TASK_ID: &str = "env_parent_tid";
 
 pub const FOR_ACT_KEY_UID: &str = "uid";
 pub const STEP_NODE_ID: &str = "node_id";

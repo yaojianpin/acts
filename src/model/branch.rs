@@ -1,5 +1,6 @@
-use crate::{model::Step, ActValue, ModelBase, Vars};
+use crate::{model::Step, ModelBase, Vars};
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Branch {
@@ -61,12 +62,12 @@ impl Branch {
         self
     }
 
-    pub fn with_input(mut self, name: &str, value: ActValue) -> Self {
+    pub fn with_input(mut self, name: &str, value: JsonValue) -> Self {
         self.inputs.insert(name.to_string(), value);
         self
     }
 
-    pub fn with_output(mut self, name: &str, value: ActValue) -> Self {
+    pub fn with_output(mut self, name: &str, value: JsonValue) -> Self {
         self.outputs.insert(name.to_string(), value);
         self
     }

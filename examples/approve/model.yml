@@ -21,7 +21,7 @@ steps:
           pm:
         on_completed:
           - !each
-            in: env.get("pm")
+            in: $("pm")
             run:
               - !req
                 id: pm_act
@@ -40,9 +40,9 @@ steps:
           - !req
             id: gm_act
             inputs:
-              v: ${ env.get("gm") }
+              v: ${ $("gm") }
           - !each
-            in: env.get("gm")
+            in: $("gm")
             run:
               - !msg
                 id: gm_act_msg

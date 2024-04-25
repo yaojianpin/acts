@@ -114,6 +114,12 @@ impl From<serde_json::Map<String, Value>> for Vars {
     }
 }
 
+impl Into<serde_json::Value> for Vars {
+    fn into(self) -> serde_json::Value {
+        serde_json::Value::Object(self.inner)
+    }
+}
+
 impl Vars {
     pub fn new() -> Self {
         Self { inner: Map::new() }

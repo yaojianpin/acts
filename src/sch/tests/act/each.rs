@@ -1,5 +1,5 @@
 use crate::{
-    sch::{tests::create_proc, TaskState},
+    sch::{tests::create_proc_signal, TaskState},
     utils::{self, consts},
     Act, StmtBuild, Vars, Workflow,
 };
@@ -17,15 +17,15 @@ async fn sch_step_setup_each_list() {
     });
 
     workflow.print();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
         if e.is_source("act") {
-            e.close();
+            rx.close();
         }
     });
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert_eq!(
         proc.task_by_nid("act1").get(0).unwrap().state(),
@@ -58,22 +58,22 @@ async fn sch_step_setup_each_var() {
             stmts
                 .add(Act::set(Vars::new().with("a", ["u1", "u2"])))
                 .add(Act::each(|each| {
-                    each.with_in(r#"env.get("a")"#)
+                    each.with_in(r#"$("a")"#)
                         .with_run(|stmts| stmts.add(Act::req(|act| act.with_id("act1"))))
                 }))
         })
     });
 
     workflow.print();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
         if e.is_source("act") {
-            e.close();
+            rx.close();
         }
     });
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert_eq!(
         proc.task_by_nid("act1").get(0).unwrap().state(),
@@ -104,16 +104,16 @@ async fn sch_step_setup_each_var_not_exist() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_setup(|stmts| {
             stmts.add(Act::each(|each| {
-                each.with_in(r#"env.get("not_exists")"#)
+                each.with_in(r#"$("not_exists")"#)
                     .with_run(|stmts| stmts.add(Act::req(|act| act.with_id("act1"))))
             }))
         })
     });
 
     workflow.print();
-    let (proc, scher, _) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert!(proc.state().is_error());
 }
@@ -127,13 +127,13 @@ async fn sch_step_setup_each_code() {
                 .add(Act::each(|each| {
                     each.with_in(
                         r#"
-                        let a = env.get("a");
+                        let a = $("a");
                         let b = ["u3"];
                         let c = [ "u1" ];
                         let d = [ "u3", "u4" ];
 
                         // result = u3
-                        a.union(b).except(c).intersect(d)
+                        a.union(b).difference(c).intersection(d)
                         "#,
                     )
                     .with_run(|stmts| stmts.add(Act::req(|act| act.with_id("act1"))))
@@ -142,15 +142,15 @@ async fn sch_step_setup_each_code() {
     });
 
     workflow.print();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
         if e.is_source("act") {
-            e.close();
+            rx.close();
         }
     });
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert_eq!(
         proc.task_by_nid("act1").get(0).unwrap().state(),

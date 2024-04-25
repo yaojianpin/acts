@@ -3,7 +3,9 @@ use acts::{Engine, Vars, Workflow};
 #[tokio::main]
 async fn main() {
     let engine = Engine::new();
-    engine.start();
+    let sig = engine.signal(());
+    let s1 = sig.clone();
+    let s2 = sig.clone();
 
     let executor = engine.executor();
     let text = include_str!("./model.yml");
@@ -14,7 +16,10 @@ async fn main() {
     let mut vars = Vars::new();
     vars.insert("input".into(), 10.into());
     executor.start(&workflow.id, &vars).expect("start workflow");
-
+    engine.emitter().on_error(move |e| {
+        print!("on_error: {e:?}");
+        s1.close();
+    });
     engine.emitter().on_complete(move |e| {
         println!(
             "on_workflow_complete: state={} cost={}ms output={:?}",
@@ -22,7 +27,7 @@ async fn main() {
             e.cost(),
             e.outputs()
         );
-        e.close();
+        s2.close();
     });
-    engine.eloop().await;
+    sig.recv().await;
 }

@@ -6,23 +6,25 @@ use crate::{
 
 impl ActTask for Call {
     fn init(&self, ctx: &Context) -> Result<()> {
+        let task = ctx.task();
         if self.mid.is_empty() {
-            ctx.task.set_state(TaskState::Fail(format!(
-                "not find 'mid' in act '{}'",
-                ctx.task.id
+            task.set_state(TaskState::Fail(format!(
+                "cannot find 'mid' in act '{}'",
+                task.id
             )));
             return self.error(ctx);
         }
-        ctx.task.set_emit_disabled(true);
+        task.set_emit_disabled(true);
         Ok(())
     }
 
     fn run(&self, ctx: &Context) -> Result<()> {
+        let task = ctx.task();
         let executor = Executor::new(&ctx.scher);
 
-        let mut inputs = ctx.task.inputs();
+        let mut inputs = task.inputs();
         inputs.set(consts::ACT_USE_PARENT_PROC_ID, &ctx.proc.id());
-        inputs.set(consts::ACT_USE_PARENT_TASK_ID, &ctx.task.id);
+        inputs.set(consts::ACT_USE_PARENT_TASK_ID, &task.id);
         executor.start(&self.mid, &inputs)?;
 
         Ok(())

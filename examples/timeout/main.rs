@@ -1,17 +1,15 @@
-use acts::{Engine, Options, Vars, Workflow};
+use acts::{Builder, Vars, Workflow};
 
 mod client;
 
 #[tokio::main]
 async fn main() {
     let client = client::Client::new();
+    let engine = Builder::new().tick_interval_secs(1).build();
+    let sig = engine.signal(());
+    let s1 = sig.clone();
+    let s2 = sig.clone();
 
-    let options = Options {
-        tick_interval_secs: 1,
-        ..Default::default()
-    };
-    let engine = Engine::new_with_options(&options);
-    engine.start();
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text).unwrap();
     workflow.print();
@@ -37,17 +35,17 @@ async fn main() {
             e.cost(),
             e.outputs()
         );
-        e.close();
+        s1.close();
     });
 
-    engine.emitter().on_error(|e| {
+    engine.emitter().on_error(move |e| {
         println!(
             "on_workflow_error: pid={} cost={}ms state={:?}",
             e.pid,
             e.cost(),
             e.state
         );
-        e.close();
+        s2.close();
     });
-    engine.eloop().await;
+    sig.recv().await;
 }

@@ -1,14 +1,11 @@
 use crate::{
     event::ActionState,
-    sch::{tests::create_proc, TaskState},
+    sch::{tests::create_proc_signal, TaskState},
     utils, Act, StmtBuild, Workflow,
 };
-use std::sync::Arc;
-use std::sync::Mutex;
 
 #[tokio::test]
 async fn sch_act_block_msg() {
-    let ret = Arc::new(Mutex::new(false));
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_act(Act::block(|act| {
             act.with_acts(|stmts| stmts.add(Act::msg(|msg| msg.with_id("msg1"))))
@@ -16,24 +13,22 @@ async fn sch_act_block_msg() {
     });
 
     workflow.print();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
-    let r = ret.clone();
+    let (proc, scher, emitter, tx, rx) =
+        create_proc_signal::<bool>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
         if e.is_key("msg1") {
-            *r.lock().unwrap() = true;
-            e.close();
+            rx.send(true);
         }
     });
     scher.launch(&proc);
-    scher.event_loop().await;
+    let ret = tx.recv().await;
     proc.print();
-    assert_eq!(*ret.lock().unwrap(), true);
+    assert_eq!(ret, true);
 }
 
 #[tokio::test]
 async fn sch_act_block_next() {
-    let ret = Arc::new(Mutex::new(false));
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_act(Act::block(|act| {
             act.with_acts(|stmts| stmts.add(Act::msg(|msg| msg.with_id("msg1"))))
@@ -44,19 +39,18 @@ async fn sch_act_block_next() {
     });
 
     workflow.print();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
-    let r = ret.clone();
+    let (proc, scher, emitter, tx, rx) =
+        create_proc_signal::<bool>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
         if e.is_key("msg2") {
-            *r.lock().unwrap() = true;
-            e.close();
+            rx.send(true);
         }
     });
     scher.launch(&proc);
-    scher.event_loop().await;
+    let ret = tx.recv().await;
     proc.print();
-    assert_eq!(*ret.lock().unwrap(), true);
+    assert_eq!(ret, true);
 }
 
 #[tokio::test]
@@ -72,15 +66,15 @@ async fn sch_act_block_acts() {
     });
 
     workflow.print();
-    let (proc, scher, emitter) = create_proc(&mut workflow, &utils::longid());
+    let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
         if e.is_key("act1") && e.is_state("created") {
-            e.close();
+            rx.close();
         }
     });
     scher.launch(&proc);
-    scher.event_loop().await;
+    tx.recv().await;
     proc.print();
     assert_eq!(
         proc.task_by_nid("act1").get(0).unwrap().action_state(),

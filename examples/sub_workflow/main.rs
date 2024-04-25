@@ -6,11 +6,13 @@ async fn main() {
     let client = client::Client::new();
 
     let engine = Engine::new();
-    engine.start();
+    let sig = engine.signal(());
+    let s1 = sig.clone();
+    let s2 = sig.clone();
 
     let mgr = engine.manager();
-    deploy_model(mgr, include_str!("./model/main.yml"));
-    deploy_model(mgr, include_str!("./model/sub.yml"));
+    deploy_model(&mgr, include_str!("./model/main.yml"));
+    deploy_model(&mgr, include_str!("./model/sub.yml"));
 
     let executor = engine.executor().clone();
     executor
@@ -42,15 +44,15 @@ async fn main() {
         );
 
         if e.mid == "main" {
-            e.close();
+            s1.close();
         }
     });
 
     engine.emitter().on_error(move |e| {
         eprintln!("on_workflow_error: pid={} state={:?}", e.pid, e.state);
-        e.close();
+        s2.close();
     });
-    engine.eloop().await;
+    sig.recv().await;
 }
 
 fn deploy_model(mgr: &Manager, model: &str) {

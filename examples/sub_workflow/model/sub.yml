@@ -13,6 +13,6 @@ steps:
           v:
   - name: t2
     run: |
-      print(env.get("v"));
+      console.log(`${$("v")}`);
 
 
