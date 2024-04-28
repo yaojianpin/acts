@@ -12,4 +12,5 @@ pub struct Proc {
     pub model: String,
     pub root_tid: String,
     pub env_local: String,
+    pub err: Option<String>,
 }

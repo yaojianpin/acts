@@ -1,17 +1,12 @@
-use crate::{
-    sch::{ActTask, TaskState},
-    utils::consts,
-    Call, Context, Executor, Result,
-};
+use crate::{sch::ActTask, utils::consts, ActError, Call, Context, Executor, Result};
 
 impl ActTask for Call {
     fn init(&self, ctx: &Context) -> Result<()> {
         let task = ctx.task();
         if self.mid.is_empty() {
-            task.set_state(TaskState::Fail(format!(
-                "cannot find 'mid' in act '{}'",
-                task.id
-            )));
+            task.set_err(
+                &ActError::Model(format!("cannot find 'mid' in act '{}'", task.id)).into(),
+            );
             return self.error(ctx);
         }
         task.set_emit_disabled(true);

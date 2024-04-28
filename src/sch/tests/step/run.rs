@@ -1,5 +1,4 @@
 use crate::{
-    data,
     sch::tests::create_proc_signal2,
     utils::{self, consts},
     Act, Event, Message, Signal, StmtBuild, Workflow,

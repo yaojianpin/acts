@@ -10,7 +10,6 @@ mod tests;
 
 use async_trait::async_trait;
 
-use crate::event::ActionState;
 pub use crate::Result;
 pub use context::Context;
 pub use proc::{Proc, StatementBatch, Task, TaskLifeCycle};
@@ -37,12 +36,6 @@ pub trait ActTask: Clone + Send {
     }
 
     fn error(&self, ctx: &Context) -> Result<()> {
-        let task = ctx.task();
-        if !task.state().is_error() {
-            let err = ctx.err().unwrap_or_default();
-            task.set_pure_action_state(ActionState::Error);
-            task.set_state(TaskState::Fail(err.to_string()));
-        }
         ctx.emit_error()
     }
 }

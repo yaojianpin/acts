@@ -58,6 +58,7 @@ fn create_proc_signal<R: Clone + Default + Sync + Send + 'static>(
     let rx2 = sig.clone();
     let rx3 = sig.clone();
     emitter.on_complete(move |p| {
+        println!("message: {p:?}");
         if p.inner().state.is_completed() {
             rx2.close();
         }

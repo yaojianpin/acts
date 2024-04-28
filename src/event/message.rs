@@ -1,6 +1,21 @@
-use super::ActionState;
-use crate::{utils, Msg, Vars};
+use crate::{utils, Msg, TaskState, Vars};
+use core::fmt;
 use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+pub enum MessageState {
+    #[default]
+    None,
+    Created,
+    Completed,
+    Submitted,
+    Backed,
+    Cancelled,
+    Aborted,
+    Skipped,
+    Error,
+    Removed,
+}
 
 #[derive(Default, Serialize, Deserialize, Clone, Debug)]
 pub struct Model {
@@ -22,7 +37,7 @@ pub struct Message {
     pub name: String,
 
     /// task action state
-    pub state: String,
+    pub state: MessageState,
 
     /// message type
     /// msg | req
@@ -68,7 +83,7 @@ impl Message {
         }
     }
 
-    pub fn state(&self) -> ActionState {
+    pub fn state(&self) -> MessageState {
         let state = self.state.clone().into();
         state
     }
@@ -78,7 +93,7 @@ impl Message {
     }
 
     pub fn is_state(&self, state: &str) -> bool {
-        self.state == state
+        self.state == state.into()
     }
 
     pub fn is_type(&self, t: &str) -> bool {
@@ -114,5 +129,53 @@ impl Message {
         }
 
         None
+    }
+}
+
+impl fmt::Display for MessageState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
+        let s: String = self.into();
+        f.write_str(&s)
+    }
+}
+
+impl From<TaskState> for MessageState {
+    fn from(state: TaskState) -> Self {
+        match state {
+            TaskState::None => MessageState::None,
+            TaskState::Pending | TaskState::Running | TaskState::Interrupt => MessageState::Created,
+            TaskState::Completed => MessageState::Completed,
+            TaskState::Submitted => MessageState::Submitted,
+            TaskState::Backed => MessageState::Backed,
+            TaskState::Cancelled => MessageState::Cancelled,
+            TaskState::Error => MessageState::Error,
+            TaskState::Aborted => MessageState::Aborted,
+            TaskState::Skipped => MessageState::Skipped,
+            TaskState::Removed => MessageState::Removed,
+        }
+    }
+}
+
+impl From<MessageState> for String {
+    fn from(state: MessageState) -> Self {
+        utils::message_state_to_str(state)
+    }
+}
+
+impl From<&str> for MessageState {
+    fn from(str: &str) -> Self {
+        utils::str_to_message_state(str)
+    }
+}
+
+impl From<String> for MessageState {
+    fn from(str: String) -> Self {
+        utils::str_to_message_state(&str)
+    }
+}
+
+impl From<&MessageState> for String {
+    fn from(state: &MessageState) -> Self {
+        utils::message_state_to_str(state.clone())
     }
 }

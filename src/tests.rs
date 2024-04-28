@@ -101,7 +101,7 @@ async fn engine_event_on_error() {
     engine.emitter().on_message(move |e| {
         let mut options = Vars::new();
         options.insert("uid".to_string(), json!("u1"));
-        options.insert("err_code".to_string(), json!("err1"));
+        options.insert("error".to_string(), json!({ "ecode": "err1" }));
 
         if e.is_key("act1") && e.is_state("created") {
             e.do_action(&e.proc_id, &e.id, "error", &options).unwrap();

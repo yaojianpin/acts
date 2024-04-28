@@ -1,7 +1,7 @@
 use core::{clone::Clone, fmt};
 use serde::{Deserialize, Serialize};
 
-use crate::{utils, Error};
+use crate::utils;
 
 #[derive(Debug, Deserialize, Serialize, Default, Clone, PartialEq)]
 pub enum TaskState {
@@ -18,17 +18,26 @@ pub enum TaskState {
     /// task is interrupted and waiting for the external action to resume
     Interrupt,
 
-    /// task is completed with success
-    Success,
+    /// task is completed
+    Completed,
+
+    /// task is submitted by submit action
+    Submitted,
+
+    /// task is backed by back action
+    Backed,
+
+    /// task is cancelled by cancel action
+    Cancelled,
 
     /// task is failed with some reasons
-    Fail(String),
+    Error,
 
-    /// task is aborted by external action
-    Abort,
+    /// task is aborted by abort action
+    Aborted,
 
     /// task is skippted by exteral action or internal conditions
-    Skip,
+    Skipped,
 
     /// task is removed
     Removed,
@@ -38,12 +47,23 @@ impl TaskState {
     pub fn is_none(&self) -> bool {
         *self == TaskState::None
     }
+
+    pub fn is_created(&self) -> bool {
+        match self {
+            TaskState::Running | TaskState::Interrupt | TaskState::Pending => true,
+            _ => false,
+        }
+    }
+
     pub fn is_completed(&self) -> bool {
         match self {
-            TaskState::Success
-            | TaskState::Fail(..)
-            | TaskState::Skip
-            | TaskState::Abort
+            TaskState::Completed
+            | TaskState::Cancelled
+            | TaskState::Submitted
+            | TaskState::Backed
+            | TaskState::Error
+            | TaskState::Skipped
+            | TaskState::Aborted
             | TaskState::Removed => true,
             _ => false,
         }
@@ -51,14 +71,14 @@ impl TaskState {
 
     pub fn is_abort(&self) -> bool {
         match self {
-            TaskState::Abort => true,
+            TaskState::Aborted => true,
             _ => false,
         }
     }
 
     pub fn is_error(&self) -> bool {
         match self {
-            TaskState::Fail(..) => true,
+            TaskState::Error => true,
             _ => false,
         }
     }
@@ -76,11 +96,11 @@ impl TaskState {
     }
 
     pub fn is_success(&self) -> bool {
-        *self == TaskState::Success
+        *self == TaskState::Completed
     }
 
     pub fn is_skip(&self) -> bool {
-        *self == TaskState::Skip
+        *self == TaskState::Skipped
     }
 
     pub fn is_next(&self) -> bool {
@@ -89,14 +109,6 @@ impl TaskState {
 
     pub fn is_interrupted(&self) -> bool {
         *self == TaskState::Interrupt
-    }
-
-    pub fn as_err(&self) -> Option<Error> {
-        if let TaskState::Fail(err) = self {
-            return Some(Error::parse(err));
-        }
-
-        None
     }
 }
 

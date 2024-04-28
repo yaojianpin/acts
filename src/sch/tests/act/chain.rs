@@ -22,7 +22,7 @@ async fn sch_act_chain_list() {
         println!("message: {:?}", e.inner());
         if e.is_key("act1") && e.is_state("created") {
             rx.update(|data| data.push(e.inputs.get::<String>(consts::ACT_VALUE).unwrap()));
-            e.do_action(&e.proc_id, &e.id, consts::EVT_COMPLETE, &Vars::new())
+            e.do_action(&e.proc_id, &e.id, consts::EVT_NEXT, &Vars::new())
                 .unwrap();
         }
     });
@@ -52,7 +52,7 @@ async fn sch_act_chain_order() {
         if e.is_key("act1") && e.is_state("created") {
             rx.update(|data| data.push(e.start_time));
             std::thread::sleep(std::time::Duration::from_secs(1));
-            e.do_action(&e.proc_id, &e.id, "complete", &Vars::new())
+            e.do_action(&e.proc_id, &e.id, consts::EVT_NEXT, &Vars::new())
                 .unwrap();
         }
     });
@@ -85,7 +85,7 @@ async fn sch_act_chain_var() {
         println!("message: {:?}", e.inner());
         if e.is_key("act1") && e.is_state("created") {
             rx.update(|data| data.push(e.inputs.get::<String>(consts::ACT_VALUE).unwrap()));
-            e.do_action(&e.proc_id, &e.id, consts::EVT_COMPLETE, &Vars::new())
+            e.do_action(&e.proc_id, &e.id, consts::EVT_NEXT, &Vars::new())
                 .unwrap();
         }
     });

@@ -1,4 +1,4 @@
-pub const EVT_COMPLETE: &str = "complete";
+pub const EVT_NEXT: &str = "next";
 pub const EVT_ABORT: &str = "abort";
 pub const EVT_BACK: &str = "back";
 pub const EVT_CANCEL: &str = "cancel";
@@ -19,9 +19,8 @@ pub const STEP_NODE_NAME: &str = "node_name";
 pub const STEP_TASK_ID: &str = "task_id";
 pub const STEP_KEY: &str = "step";
 
-pub const ACT_ERR_CODE: &str = "err_code";
-pub const ACT_ERR_MESSAGE: &str = "err_message";
-pub const ACT_ERR_INNER: &str = "err_inner";
+pub const ACT_ERR_KEY: &str = "error";
+pub const ACT_ERR_CODE: &str = "ecode";
 
 pub const ACT_INDEX: &str = "act_index";
 pub const ACT_VALUE: &str = "act_value";

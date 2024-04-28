@@ -30,7 +30,7 @@ fn env_eval_number() {
 }
 
 #[test]
-fn env_eval_error() {
+fn env_eval_throw_error() {
     let env = Enviroment::new();
 
     let script = r#"
@@ -40,7 +40,10 @@ fn env_eval_error() {
     let result = env.eval::<()>(script);
     assert_eq!(
         result.err().unwrap(),
-        ActError::Exception("err1".to_string())
+        ActError::Exception {
+            ecode: "".to_string(),
+            message: "err1".to_string()
+        }
     );
 }
 
@@ -250,8 +253,9 @@ async fn env_env_get_global() {
     let env = engine.env();
     env.set("a", 10);
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    let proc = engine.scher().start(&workflow, &Vars::new()).unwrap();
     engine.emitter().on_complete(move |_| s1.close());
+    let proc = engine.scher().start(&workflow, &Vars::new()).unwrap();
+
     sig.recv().await;
     let task = proc.root().unwrap();
     let script = r#"

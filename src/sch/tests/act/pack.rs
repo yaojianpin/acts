@@ -327,7 +327,7 @@ async fn sch_act_pack_skip() {
     .await;
     assert_eq!(
         proc.task_by_nid("pack1").get(0).unwrap().state(),
-        TaskState::Skip
+        TaskState::Skipped
     );
 }
 

@@ -1,6 +1,5 @@
 use super::hook::TaskLifeCycle;
 use crate::{
-    event::ActionState,
     model::Step,
     sch::{Context, NodeContent, TaskState},
     ActError, ActTask, Result, StoreAdapter,
@@ -14,7 +13,7 @@ impl ActTask for Step {
         if let Some(expr) = &self.r#if {
             let cond = ctx.eval::<bool>(expr)?;
             if !cond {
-                task.set_action_state(ActionState::Skipped);
+                task.set_state(TaskState::Skipped);
                 return Ok(());
             }
         }
@@ -91,11 +90,6 @@ impl ActTask for Step {
                     task.exec(&ctx)?;
                     is_next = true;
                 }
-                // else if task.state().is_error() {
-                //     ctx.set_err(&task.state().as_err().unwrap_or_default());
-                //     ctx.emit_error()?;
-                //     return Ok(false);
-                // }
                 if task.state().is_completed() {
                     count += 1;
                 }
@@ -103,7 +97,7 @@ impl ActTask for Step {
 
             if count == tasks.len() {
                 if !task.state().is_completed() {
-                    task.set_action_state(ActionState::Completed);
+                    task.set_state(TaskState::Completed);
                 }
 
                 if let Some(next) = &task.node.next().upgrade() {
@@ -136,12 +130,6 @@ impl ActTask for Step {
                     task.exec(&ctx)?;
                     return Ok(false);
                 }
-                // else if task.state().is_error() {
-                //     ctx.set_err(&task.state().as_err().unwrap_or_default());
-                //     ctx.emit_error()?;
-                //     return Ok(false);
-                // }
-
                 if task.state().is_completed() {
                     count += 1;
                 }
@@ -149,7 +137,7 @@ impl ActTask for Step {
 
             if count == tasks.len() {
                 if !task.state().is_completed() {
-                    task.set_action_state(ActionState::Completed);
+                    task.set_state(TaskState::Completed);
                 }
 
                 if let Some(next) = &task.node.next().upgrade() {
@@ -169,12 +157,4 @@ impl ActTask for Step {
 
         return Ok(false);
     }
-
-    // fn error(&self, ctx: &Context) -> Result<()> {
-    //     self.catches.run(ctx)?;
-    //     if ctx.task.state().is_error() {
-    //         return ctx.emit_error();
-    //     }
-    //     Ok(())
-    // }
 }

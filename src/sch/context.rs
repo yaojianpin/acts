@@ -1,10 +1,10 @@
 use super::ActTask;
 use crate::{
     env::Enviroment,
-    event::{Action, ActionState, EventAction, Model},
+    event::{Action, EventAction, Model},
     sch::{tree::NodeContent, Node, Proc, Scheduler, Task},
     utils::{self, consts, shortid},
-    Act, ActError, Error, Message, ModelBase, Msg, NodeKind, Result, TaskState, Vars,
+    Act, ActError, Message, ModelBase, Msg, NodeKind, Result, TaskState, Vars,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{cell::RefCell, sync::Arc};
@@ -21,8 +21,7 @@ pub struct Context {
     pub proc: Arc<Proc>,
     task: RefCell<Arc<Task>>,
     action: RefCell<Option<EventAction>>,
-    pub err: RefCell<Option<Error>>,
-    pub vars: RefCell<Vars>,
+    vars: RefCell<Vars>,
 }
 
 impl std::fmt::Debug for Context {
@@ -58,7 +57,6 @@ impl Context {
             proc: proc.clone(),
             action: RefCell::new(None),
             task: RefCell::new(task.clone()),
-            err: RefCell::new(task.state().as_err()),
             vars: RefCell::new(Vars::new()),
         };
 
@@ -109,13 +107,6 @@ impl Context {
         }
 
         Ok(())
-    }
-
-    pub fn err(&self) -> Option<Error> {
-        self.err.borrow().clone()
-    }
-    pub fn set_err(&self, err: &Error) {
-        *self.err.borrow_mut() = Some(err.clone());
     }
 
     pub fn vars(&self) -> Vars {
@@ -206,11 +197,11 @@ impl Context {
             if task.state().is_completed() {
                 continue;
             }
-            task.set_action_state(ActionState::Skipped);
+            task.set_state(TaskState::Skipped);
             self.emit_task(task)?;
         }
 
-        task.set_action_state(ActionState::Backed);
+        task.set_state(TaskState::Backed);
         self.emit_task(task)?;
 
         // find parent util to the step task and marks it as backed
@@ -218,7 +209,7 @@ impl Context {
             let mut parent = task.parent();
             while let Some(p) = parent {
                 if p.is_kind(NodeKind::Step) || p.is_kind(NodeKind::Act) {
-                    p.set_action_state(ActionState::Backed);
+                    p.set_state(TaskState::Backed);
                     self.emit_task(&p)?;
                     break;
                 }
@@ -229,10 +220,10 @@ impl Context {
         // marks the state in the paths
         for p in paths {
             if p.state().is_running() {
-                p.set_action_state(ActionState::Completed);
+                p.set_state(TaskState::Completed);
                 self.emit_task(&p)?;
             } else if p.state().is_pending() {
-                p.set_action_state(ActionState::Skipped);
+                p.set_state(TaskState::Skipped);
                 self.emit_task(&p)?;
             }
         }
@@ -246,27 +237,27 @@ impl Context {
             if task.state().is_completed() {
                 continue;
             }
-            task.set_action_state(ActionState::Skipped);
+            task.set_state(TaskState::Skipped);
             self.emit_task(task)?;
         }
 
-        task.set_action_state(ActionState::Aborted);
+        task.set_state(TaskState::Aborted);
         self.emit_task(task)?;
 
         // abort all running task
         let ctx = self;
         let mut parent = task.parent();
         while let Some(task) = parent {
-            task.set_action_state(ActionState::Aborted);
+            task.set_state(TaskState::Aborted);
             ctx.set_task(&task);
             ctx.emit_task(&ctx.task())?;
 
             for t in task.children() {
                 if t.state().is_pending() {
-                    t.set_action_state(ActionState::Skipped);
+                    t.set_state(TaskState::Skipped);
                     ctx.emit_task(&t)?;
                 } else if t.state().is_running() {
-                    t.set_action_state(ActionState::Aborted);
+                    t.set_state(TaskState::Aborted);
                     ctx.emit_task(&t)?;
                 }
             }
@@ -294,30 +285,31 @@ impl Context {
                 if t.state().is_completed() {
                     continue;
                 }
-                t.set_action_state(ActionState::Cancelled);
+                t.set_state(TaskState::Cancelled);
                 self.emit_task(&t)?;
                 nexts.extend_from_slice(&t.children());
             }
 
             children = nexts;
         }
-        task.set_action_state(ActionState::Completed);
+        task.set_state(TaskState::Completed);
         self.emit_task(&task)?;
 
         Ok(())
     }
 
     pub fn emit_error(&self) -> Result<()> {
-        let task: Arc<Task> = self.task();
-        let state = task.state();
-        if state.is_error() {
+        let task = self.task();
+        if task.state().is_error() {
             self.emit_task(&task)?;
 
             // after emitting, re-check the task state
             if task.state().is_error() {
-                if let Some(parent) = task.parent() {
-                    self.set_err(&state.as_err().unwrap_or_default());
-                    return parent.error(self);
+                if let Some(err) = task.err() {
+                    if let Some(parent) = task.parent() {
+                        parent.set_err(&err);
+                        return parent.error(self);
+                    }
                 }
             }
         }
@@ -330,29 +322,21 @@ impl Context {
 
         // on workflow start
         if let NodeContent::Workflow(_) = &task.node.content {
-            if task.action_state() == ActionState::Created {
+            if task.state().is_created() {
                 self.proc.set_state(TaskState::Running);
                 self.scher.emitter().emit_proc_event(&self.proc);
             }
         }
 
-        // if task.action_state() == ActionState::Completed
-        //     || task.action_state() == ActionState::Submitted
-        // {
-        //     let outputs = task.outputs();
-        //     if outputs.len() > 0 {
-        //         if let Some(parent) = task.parent() {
-        //             parent.update_data(&outputs);
-        //         }
-        //     }
-        // }
-
         self.scher.emitter().emit_task_event(task)?;
 
         // on workflow complete
         if let NodeContent::Workflow(_) = &task.node.content {
-            if task.action_state() != ActionState::Created {
+            if task.state().is_completed() {
                 self.proc.set_state(task.state());
+                if let Some(err) = task.err() {
+                    self.proc.set_err(&err);
+                }
                 self.scher.emitter().emit_proc_event(&self.proc);
             }
         }
@@ -364,7 +348,8 @@ impl Context {
         debug!("emit_message: {:?}", msg);
         let workflow = self.proc.model();
 
-        let inputs = utils::fill_inputs(&msg.inputs, self);
+        let mut inputs = utils::fill_inputs(&msg.inputs, self);
+
         // if there is no key, use id instead
         let mut key = &msg.key;
         if key.is_empty() {
@@ -372,11 +357,14 @@ impl Context {
         }
 
         let task = self.task();
+        if let Some(err) = task.err() {
+            inputs.set(consts::ACT_ERR_KEY, err);
+        }
         let msg = Message {
             id: utils::shortid(),
             r#type: consts::ACT_TYPE_MSG.to_string(),
             source: task.node.kind().to_string(),
-            state: task.action_state().to_string(),
+            state: task.state().into(),
             proc_id: task.proc_id.clone(),
             key: key.to_string(),
             name: msg.name.clone(),

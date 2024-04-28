@@ -1,4 +1,4 @@
-use crate::{event::ActionState, sch::Context, Act, ActTask, Block, Result, TaskState};
+use crate::{sch::Context, Act, ActTask, Block, Result, TaskState};
 use async_trait::async_trait;
 
 #[async_trait]
@@ -44,7 +44,7 @@ impl ActTask for Block {
 
             if count == tasks.len() {
                 if !task.state().is_completed() {
-                    task.set_action_state(ActionState::Completed);
+                    task.set_state(TaskState::Completed);
                 }
 
                 if let Some(next) = &self.next {
@@ -71,12 +71,11 @@ impl ActTask for Block {
             let mut count = 0;
             for task in tasks.iter() {
                 if task.state().is_error() {
-                    ctx.set_err(&task.state().as_err().unwrap_or_default());
                     ctx.emit_error()?;
                     return Ok(false);
                 }
                 if task.state().is_skip() {
-                    task.set_action_state(ActionState::Skipped);
+                    task.set_state(TaskState::Skipped);
                     return Ok(true);
                 }
 
@@ -86,7 +85,7 @@ impl ActTask for Block {
             }
             if count == tasks.len() {
                 if !task.state().is_completed() {
-                    task.set_action_state(ActionState::Completed);
+                    task.set_state(TaskState::Completed);
                 }
 
                 if let Some(next) = &self.next {

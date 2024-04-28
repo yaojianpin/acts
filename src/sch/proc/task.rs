@@ -6,7 +6,7 @@ mod workflow;
 
 use crate::{
     engine::Runtime,
-    event::{ActionState, EventAction, Model},
+    event::{EventAction, Model},
     sch::{
         tree::{Node, NodeContent},
         Context, Proc, TaskState,
@@ -43,8 +43,8 @@ pub struct Task {
     /// task state
     state: ShareLock<TaskState>,
 
-    /// action state by do_action function
-    action_state: ShareLock<ActionState>,
+    /// task error
+    err: ShareLock<Option<Error>>,
 
     start_time: ShareLock<i64>,
     end_time: ShareLock<i64>,
@@ -67,7 +67,7 @@ impl Task {
             node: node.clone(),
             data: Arc::new(RwLock::new(Vars::new())),
             state: Arc::new(RwLock::new(TaskState::None)),
-            action_state: Arc::new(RwLock::new(ActionState::None)),
+            err: Arc::new(RwLock::new(None)),
             start_time: Arc::new(RwLock::new(0)),
             end_time: Arc::new(RwLock::new(0)),
             prev: Arc::new(RwLock::new(None)),
@@ -93,11 +93,6 @@ impl Task {
 
     pub fn state(&self) -> TaskState {
         let state = &*self.state.read().unwrap();
-        state.clone()
-    }
-
-    pub fn action_state(&self) -> ActionState {
-        let state = &*self.action_state.read().unwrap();
         state.clone()
     }
 
@@ -156,6 +151,11 @@ impl Task {
             }
         }
 
+        // add error to inputs
+        if let Some(err) = self.err() {
+            inputs.set(consts::ACT_ERR_KEY, err);
+        }
+
         // if there is no key, use id instead
         let mut key = self.node.key();
         if key.is_empty() {
@@ -167,7 +167,7 @@ impl Task {
             name: self.node.content.name(),
             r#type: self.node.r#type(),
             source: self.node.kind().to_string(),
-            state: self.action_state().to_string(),
+            state: self.state().into(),
             proc_id: self.proc_id.clone(),
             key: key.to_string(),
             tag: self.node.tag().to_string(),
@@ -256,36 +256,29 @@ impl Task {
         } else if state.is_running() || state.is_interrupted() {
             self.set_start_time(utils::time::time());
         }
-        *self.state.write().unwrap() = state;
+        *self.state.write().unwrap() = state.clone();
+
+        // clean the err
+        if state != TaskState::Error {
+            *self.err.write().unwrap() = None;
+        }
     }
 
-    pub fn set_action_state(&self, state: ActionState) {
-        match state {
-            ActionState::None => self.set_state(TaskState::None),
-            ActionState::Created => {
-                if self.state().is_none() {
-                    self.set_state(TaskState::Running);
-                }
-            }
-            ActionState::Cancelled
-            | ActionState::Backed
-            | ActionState::Submitted
-            | ActionState::Completed => self.set_state(TaskState::Success),
-            ActionState::Aborted => self.set_state(TaskState::Abort),
-            ActionState::Skipped => self.set_state(TaskState::Skip),
-            ActionState::Error => self.set_state(TaskState::Fail(format!("action error"))),
-            ActionState::Removed => self.set_state(TaskState::Removed),
-        }
+    pub fn set_err(&self, err: &Error) {
+        *self.err.write().unwrap() = Some(err.clone());
+        self.set_state(TaskState::Error);
+    }
 
-        *self.action_state.write().unwrap() = state;
+    pub(crate) fn set_pure_err(&self, err: &Error) {
+        *self.err.write().unwrap() = Some(err.clone());
+    }
+
+    pub fn err(&self) -> Option<Error> {
+        self.err.read().unwrap().clone()
     }
 
     pub fn set_pure_state(&self, state: TaskState) {
         *self.state.write().unwrap() = state;
-    }
-
-    pub fn set_pure_action_state(&self, state: ActionState) {
-        *self.action_state.write().unwrap() = state;
     }
 
     pub fn set_start_time(&self, time: i64) {
@@ -348,21 +341,21 @@ impl Task {
                 ctx.append_act(&act)?;
             }
             EventAction::Remove => {
-                self.set_action_state(ActionState::Removed);
+                self.set_state(TaskState::Removed);
                 self.next(ctx)?;
             }
             EventAction::Submit => {
-                self.set_action_state(ActionState::Submitted);
+                self.set_state(TaskState::Submitted);
                 self.next(ctx)?;
             }
-            EventAction::Complete => {
+            EventAction::Next => {
                 if self.state().is_completed() {
                     return Err(ActError::Action(format!(
                         "task '{}' is already completed",
                         self.id
                     )));
                 }
-                self.set_action_state(ActionState::Completed);
+                self.set_state(TaskState::Completed);
                 self.next(ctx)?;
             }
             EventAction::Back => {
@@ -425,10 +418,10 @@ impl Task {
                 // mark the path tasks as completed
                 for p in path_tasks {
                     if p.state().is_running() {
-                        p.set_action_state(ActionState::Completed);
+                        p.set_state(TaskState::Completed);
                         ctx.emit_task(&p)?;
                     } else if p.state().is_pending() {
-                        p.set_action_state(ActionState::Skipped);
+                        p.set_state(TaskState::Skipped);
                         ctx.emit_task(&p)?;
                     }
                 }
@@ -459,24 +452,27 @@ impl Task {
                     if task.state().is_completed() {
                         continue;
                     }
-                    task.set_action_state(ActionState::Skipped);
+                    task.set_state(TaskState::Skipped);
                     ctx.emit_task(&task)?;
                 }
 
                 // set both current act and parent step to skip
-                self.set_action_state(ActionState::Skipped);
+                self.set_state(TaskState::Skipped);
                 self.next(ctx)?;
             }
             EventAction::Error => {
-                let err_code =
-                    ctx.get_var::<String>(consts::ACT_ERR_CODE)
-                        .ok_or(ActError::Action(format!(
-                            "cannot find '{}' in options",
-                            consts::ACT_ERR_CODE
-                        )))?;
-                if err_code.is_empty() {
+                let err = ctx
+                    .get_var::<Vars>(consts::ACT_ERR_KEY)
+                    .ok_or(ActError::Action(format!(
+                        "cannot find '{}' in options",
+                        consts::ACT_ERR_KEY
+                    )))?;
+
+                let err = Error::from_var(&err)?;
+                if err.ecode.is_empty() {
                     return Err(ActError::Action(format!(
-                        "the var '{}' cannot be empty",
+                        "the '{}.{}' cannot be empty",
+                        consts::ACT_ERR_KEY,
                         consts::ACT_ERR_CODE
                     )));
                 }
@@ -497,17 +493,10 @@ impl Task {
                     if sub.state().is_completed() {
                         continue;
                     }
-                    sub.set_action_state(ActionState::Skipped);
+                    sub.set_state(TaskState::Skipped);
                     ctx.emit_task(&sub)?;
                 }
-
-                let err_message = ctx
-                    .get_var::<String>(consts::ACT_ERR_MESSAGE)
-                    .unwrap_or_default();
-                ctx.set_err(&Error {
-                    key: Some(err_code.to_string()),
-                    message: err_message,
-                });
+                task.set_err(&err);
                 task.error(ctx)?;
             }
         }
@@ -544,31 +533,12 @@ impl Task {
                             || iter.state().is_success()
                             || iter.state().is_abort()
                     }) {
-                        self.set_action_state(ActionState::Skipped);
+                        self.set_state(TaskState::Skipped);
                     }
                 }
 
                 false
             }
-            // NodeData::Act(n) => {
-            //     if n.needs.len() > 0 {
-            //         let siblings = self.siblings();
-            //         if siblings
-            //             .iter()
-            //             .filter(|iter| {
-            //                 iter.state().is_completed() && n.needs.contains(&iter.node_id())
-            //             })
-            //             .count()
-            //             > 0
-            //         {
-            //             return true;
-            //         }
-
-            //         return false;
-            //     }
-
-            //     true
-            // }
             _ => true,
         }
     }
@@ -615,10 +585,10 @@ impl Task {
     }
 
     pub fn run_hooks(&self, ctx: &Context) -> Result<()> {
-        let state = self.action_state();
+        let state = self.state();
         match state {
-            ActionState::None => {}
-            ActionState::Created => {
+            TaskState::None => {}
+            TaskState::Pending | TaskState::Running | TaskState::Interrupt => {
                 self.run_hooks_by(TaskLifeCycle::Created, ctx)?;
                 if self.is_kind(NodeKind::Act) {
                     if let Some(task) = self.parent() {
@@ -634,13 +604,13 @@ impl Task {
                     }
                 }
             }
-            ActionState::Completed
-            | ActionState::Submitted
-            | ActionState::Backed
-            | ActionState::Cancelled
-            | ActionState::Aborted
-            | ActionState::Skipped
-            | ActionState::Removed => {
+            TaskState::Completed
+            | TaskState::Backed
+            | TaskState::Cancelled
+            | TaskState::Submitted
+            | TaskState::Aborted
+            | TaskState::Removed
+            | TaskState::Skipped => {
                 self.run_hooks_by(TaskLifeCycle::Completed, ctx)?;
                 if self.is_kind(NodeKind::Act) {
                     // triggers step updated hook when the act is completed
@@ -657,7 +627,7 @@ impl Task {
                     }
                 }
             }
-            ActionState::Error => self.run_hooks_by(TaskLifeCycle::ErrorCatch, ctx)?,
+            TaskState::Error => self.run_hooks_by(TaskLifeCycle::ErrorCatch, ctx)?,
         }
 
         Ok(())
@@ -761,7 +731,10 @@ impl ActTask for Arc<Task> {
                 NodeContent::Step(step) => step.init(ctx)?,
                 NodeContent::Act(act) => act.init(ctx)?,
             }
-            self.set_action_state(ActionState::Created);
+            if ctx.task().state().is_none() {
+                self.set_state(TaskState::Running);
+            }
+
             ctx.emit_task(&ctx.task())?;
         }
 
@@ -853,11 +826,11 @@ impl std::fmt::Debug for Task {
             .field("proc_id", &self.proc_id)
             .field("node_id", &self.node.id())
             .field("state", &self.state())
-            .field("action_state", &self.action_state())
             .field("start_time", &self.start_time())
             .field("end_time", &self.end_time())
             .field("prev", &self.prev())
             .field("data", &self.data())
+            .field("err", &self.err())
             .finish()
     }
 }

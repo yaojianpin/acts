@@ -1,5 +1,4 @@
 use crate::{
-    event::ActionState,
     utils::{self, consts},
     Act, ActTask, Catch, Context, Result, TaskState, Timeout,
 };
@@ -31,7 +30,7 @@ impl StatementBatch {
             }
             StatementBatch::Catch(c) => {
                 let task = ctx.task();
-                if let Some(err) = task.state().as_err() {
+                if let Some(err) = task.err() {
                     let is_catch_processed = task
                         .with_data(|data| data.get::<bool>(consts::IS_CATCH_PROCESSED))
                         .unwrap_or_default();
@@ -39,10 +38,9 @@ impl StatementBatch {
                         return Ok(());
                     }
                     // if the catch is no err key, it will catch all error
-                    if c.err.is_none() || err.key == c.err {
+                    if c.err.is_none() || &err.ecode == c.err.as_ref().unwrap() {
                         task.set_data_with(|data| data.set(consts::IS_CATCH_PROCESSED, true));
                         task.set_state(TaskState::Running);
-                        task.set_pure_action_state(ActionState::Created);
                         for s in &c.then {
                             s.exec(ctx)?;
                         }

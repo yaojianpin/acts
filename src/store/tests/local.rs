@@ -1,5 +1,4 @@
 use crate::{
-    event::ActionState,
     sch::NodeKind,
     store::{data::*, db::LocalStore, Cond, Expr, Query},
     utils, StoreAdapter, TaskState, Vars,
@@ -26,10 +25,11 @@ async fn store_local_proc_create() {
         state: TaskState::None.into(),
         start_time: 0,
         end_time: 0,
-        vars: "".to_string(),
         timestamp: 0,
         model: "".to_string(),
         root_tid: "".to_string(),
+        env_local: "{}".to_string(),
+        err: None,
     };
     store.procs().create(&proc).unwrap();
     assert_eq!(store.procs().exists(&proc.id).unwrap(), true);
@@ -46,10 +46,11 @@ async fn store_local_proc_find() {
         state: TaskState::None.into(),
         start_time: 0,
         end_time: 0,
-        vars: "".to_string(),
         timestamp: 0,
         model: "".to_string(),
         root_tid: "".to_string(),
+        env_local: "{}".to_string(),
+        err: None,
     };
     store.procs().create(&proc).unwrap();
     assert_eq!(store.procs().find(&pid).unwrap().id, pid);
@@ -68,10 +69,11 @@ async fn store_local_proc_query() {
             state: TaskState::None.into(),
             start_time: 0,
             end_time: 0,
-            vars: "{}".to_string(),
             timestamp: 0,
             model: "".to_string(),
             root_tid: "".to_string(),
+            env_local: "{}".to_string(),
+            err: None,
         };
         procs.create(&proc).unwrap();
     }
@@ -97,20 +99,21 @@ async fn store_local_proc_update() {
         state: TaskState::None.into(),
         start_time: 0,
         end_time: 0,
-        vars: "".to_string(),
         timestamp: 0,
         model: "".to_string(),
         root_tid: "".to_string(),
+        env_local: "{}".to_string(),
+        err: None,
     };
     store.procs().create(&proc).unwrap();
 
     proc.state = TaskState::Running.into();
-    proc.vars = serde_yaml::to_string(&vars).unwrap();
+    proc.err = None;
     store.procs().update(&proc).unwrap();
 
     let p = store.procs().find(&proc.id).unwrap();
     assert_eq!(p.state, proc.state);
-    assert_eq!(p.vars, proc.vars);
+    assert_eq!(p.err, None);
 }
 
 #[tokio::test]
@@ -123,10 +126,11 @@ async fn store_local_proc_delete() {
         state: TaskState::None.into(),
         start_time: 0,
         end_time: 0,
-        vars: "".to_string(),
         timestamp: 0,
         model: "".to_string(),
         root_tid: "".to_string(),
+        env_local: "{}".to_string(),
+        err: None,
     };
     store.procs().create(&proc).unwrap();
     store.procs().delete(&proc.id).unwrap();
@@ -146,12 +150,13 @@ async fn store_local_task_create() {
         task_id: "tid".to_string(),
         node_id: "nid".to_string(),
         state: TaskState::None.into(),
-        action_state: ActionState::None.into(),
         prev: None,
         start_time: 0,
         end_time: 0,
         hooks: "{}".to_string(),
         timestamp: 0,
+        data: "{}".to_string(),
+        err: None,
     };
     tasks.create(&task).unwrap();
     assert_eq!(tasks.exists(&task.id).unwrap(), true);
@@ -170,12 +175,13 @@ async fn store_local_task_find() {
         task_id: "tid".to_string(),
         node_id: "nid".to_string(),
         state: TaskState::None.into(),
-        action_state: ActionState::None.into(),
         prev: None,
         start_time: 0,
         end_time: 0,
         hooks: "{}".to_string(),
         timestamp: 0,
+        data: "{}".to_string(),
+        err: None,
     };
     tasks.create(&task).unwrap();
     assert_eq!(tasks.find(&tid).unwrap().id, tid);
@@ -195,12 +201,13 @@ async fn store_local_task_query() {
             task_id: "tid".to_string(),
             node_id: "nid".to_string(),
             state: TaskState::None.into(),
-            action_state: ActionState::None.into(),
             prev: None,
             start_time: 0,
             end_time: 0,
             hooks: "{}".to_string(),
             timestamp: 0,
+            data: "{}".to_string(),
+            err: None,
         };
         tasks.create(&task).unwrap();
     }
@@ -224,23 +231,22 @@ async fn store_local_task_update() {
         task_id: "tid".to_string(),
         node_id: "nid".to_string(),
         state: TaskState::None.into(),
-        action_state: ActionState::None.into(),
         prev: None,
         start_time: 0,
         end_time: 0,
         hooks: "{}".to_string(),
         timestamp: 0,
+        data: "{}".to_string(),
+        err: None,
     };
     table.create(&task).unwrap();
 
-    task.state = TaskState::Success.into();
-    task.action_state = ActionState::Completed.into();
+    task.state = TaskState::Completed.into();
     task.prev = Some("tid1".to_string());
     table.update(&task).unwrap();
 
     let t = table.find(&task.id).unwrap();
     assert_eq!(t.state, task.state);
-    assert_eq!(t.action_state, task.action_state);
     assert_eq!(t.prev, task.prev);
 }
 
@@ -256,12 +262,13 @@ async fn store_local_task_delete() {
         task_id: "tid".to_string(),
         node_id: "nid".to_string(),
         state: TaskState::None.into(),
-        action_state: ActionState::None.into(),
         prev: None,
         start_time: 0,
         end_time: 0,
         hooks: "{}".to_string(),
         timestamp: 0,
+        data: "{}".to_string(),
+        err: None,
     };
     table.create(&task).unwrap();
     table.delete(&task.id).unwrap();

@@ -46,13 +46,13 @@ impl Client {
         vars.insert("uid".to_string(), json!("u2"));
 
         // will catch by catch1
-        vars.insert("err_code".to_string(), json!("err1"));
+        vars.insert("error".to_string(), json!({ "ecode": "err1" }));
 
         // will catch by catch2
-        // vars.insert("err_code".to_string(), json!("err2"));
+        // vars.insert("error".to_string(), json!({ "ecode": "err2" }));
 
         // will catch by catch_others
-        // vars.insert("err_code".to_string(), json!("the_other_err_code"));
+        // vars.insert("error".to_string(), json!({ "ecode": "the_other_err_code" }));
 
         // cause the error
         executor.error(&e.proc_id, &e.id, &vars)
@@ -60,7 +60,7 @@ impl Client {
     pub fn catch1(executor: &Executor, e: &Event<Message>) -> Result<ActionResult> {
         let mut vars = Vars::new();
         vars.insert("uid".to_string(), json!("u3"));
-        vars.insert("err_code".to_string(), json!("err1"));
+        vars.insert("error".to_string(), json!({ "ecode":"err1"}));
 
         executor.complete(&e.proc_id, &e.id, &vars)
     }

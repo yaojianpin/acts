@@ -24,8 +24,8 @@ async fn sch_proc_state() {
     let id = utils::longid();
     let (proc, ..) = create_proc(&mut workflow, &id);
 
-    proc.set_state(TaskState::Skip);
-    assert_eq!(proc.state(), TaskState::Skip)
+    proc.set_state(TaskState::Skipped);
+    assert_eq!(proc.state(), TaskState::Skipped)
 }
 
 #[tokio::test]
@@ -34,7 +34,7 @@ async fn sch_proc_cost() {
     let id = utils::longid();
     let (proc, ..) = create_proc(&mut workflow, &id);
 
-    proc.set_state(TaskState::Success);
+    proc.set_state(TaskState::Completed);
     proc.set_start_time(100);
     proc.set_end_time(120);
 

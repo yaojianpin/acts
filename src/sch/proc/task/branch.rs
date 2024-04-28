@@ -1,5 +1,4 @@
 use crate::{
-    event::ActionState,
     model::Branch,
     sch::{Context, TaskState},
     ActTask, Result,
@@ -22,7 +21,7 @@ impl ActTask for Branch {
                 let is_true = ctx.eval::<bool>(expr)?;
                 debug!("{} = {}", expr, is_true);
                 if !is_true {
-                    task.set_action_state(ActionState::Skipped);
+                    task.set_state(TaskState::Skipped);
                     return Ok(());
                 }
             }
@@ -33,7 +32,7 @@ impl ActTask for Branch {
                 }
 
                 if !self.r#else {
-                    task.set_action_state(ActionState::Skipped);
+                    task.set_state(TaskState::Skipped);
                     return Ok(());
                 }
 
@@ -64,7 +63,7 @@ impl ActTask for Branch {
                     ctx.sched_task(child);
                 }
             } else {
-                task.set_action_state(ActionState::Completed);
+                task.set_state(TaskState::Completed);
             }
             return Ok(children.len() > 0);
         }
@@ -76,7 +75,7 @@ impl ActTask for Branch {
         let task = ctx.task();
         let state = task.state();
         if state.is_running() {
-            task.set_action_state(ActionState::Completed);
+            task.set_state(TaskState::Completed);
             return Ok(true);
         } else if state.is_skip() {
             return Ok(true);

@@ -123,6 +123,7 @@ fn cache_restore_count() {
             model: model.to_json().unwrap(),
             root_tid: "".to_string(),
             env_local: "{}".to_string(),
+            err: None,
         };
         cache.store().base().procs().create(&proc).unwrap();
     }
@@ -169,6 +170,7 @@ fn cache_restore_working_state() {
             model: model.to_json().unwrap(),
             root_tid: "".to_string(),
             env_local: "{}".to_string(),
+            err: None,
         };
         cache.store().base().procs().create(&proc).unwrap();
     }
@@ -192,16 +194,16 @@ fn cache_restore_completed_state() {
     assert_eq!(cache.count(), 0);
 
     let states = [
-        TaskState::Skip,
-        TaskState::Skip,
-        TaskState::Skip,
-        TaskState::Abort,
-        TaskState::Abort,
-        TaskState::Abort,
-        TaskState::Fail(format!("err")),
-        TaskState::Fail(format!("err")),
-        TaskState::Success,
-        TaskState::Success,
+        TaskState::Skipped,
+        TaskState::Skipped,
+        TaskState::Skipped,
+        TaskState::Aborted,
+        TaskState::Aborted,
+        TaskState::Aborted,
+        TaskState::Error,
+        TaskState::Error,
+        TaskState::Completed,
+        TaskState::Completed,
     ];
     for i in 0..10 {
         let proc = data::Proc {
@@ -215,6 +217,7 @@ fn cache_restore_completed_state() {
             model: model.to_json().unwrap(),
             root_tid: "".to_string(),
             env_local: "{}".to_string(),
+            err: None,
         };
         cache.store().base().procs().create(&proc).unwrap();
     }
@@ -250,6 +253,7 @@ fn cache_restore_less_cap() {
             model: model.to_json().unwrap(),
             root_tid: "".to_string(),
             env_local: "{}".to_string(),
+            err: None,
         };
         cache.store().base().procs().create(&proc).unwrap();
     }

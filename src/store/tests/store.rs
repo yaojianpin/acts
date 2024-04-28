@@ -1,5 +1,4 @@
 use crate::{
-    event::ActionState,
     sch::NodeKind,
     store::{data, Cond, DbSet, Expr, Store, StoreKind},
     utils, Query, StoreAdapter, TaskState, Workflow,
@@ -67,7 +66,7 @@ async fn store_load_by_state() {
     for _ in 0..100 {
         let id = format!("{}_{}", prefix, utils::longid());
         let workflow = create_workflow();
-        let proc = create_proc(&id, TaskState::Success, &workflow);
+        let proc = create_proc(&id, TaskState::Completed, &workflow);
         store.procs().create(&proc).expect("create proc");
     }
 
@@ -241,11 +240,12 @@ async fn store_task_create() {
         task_id: tid.clone(),
         node_id: nid,
         state: TaskState::None.to_string(),
-        action_state: ActionState::None.to_string(),
         start_time: 0,
         end_time: 0,
         hooks: "{}".to_string(),
         timestamp: 0,
+        data: "{}".to_string(),
+        err: None,
     };
 
     store.tasks().create(&task).expect("create task");
@@ -271,11 +271,12 @@ async fn store_task_update() {
         task_id: tid.clone(),
         node_id: nid,
         state: TaskState::None.to_string(),
-        action_state: ActionState::None.to_string(),
         start_time: 0,
         end_time: 0,
         hooks: "{}".to_string(),
         timestamp: 0,
+        data: "{}".to_string(),
+        err: None,
     };
 
     store.tasks().create(&task).expect("create task");
@@ -305,11 +306,12 @@ async fn store_task_remove() {
         task_id: tid.clone(),
         node_id: nid,
         state: TaskState::None.to_string(),
-        action_state: ActionState::None.to_string(),
         start_time: 0,
         end_time: 0,
         hooks: "{}".to_string(),
         timestamp: 0,
+        data: "{}".to_string(),
+        err: None,
     };
 
     store.tasks().create(&task).expect("create task");
@@ -333,10 +335,11 @@ fn create_proc(id: &str, state: TaskState, model: &Workflow) -> Proc {
         state: state.to_string(),
         start_time: 0,
         end_time: 0,
-        vars: "".to_string(),
         timestamp: utils::time::timestamp(),
         model: model.to_json().unwrap(),
         root_tid: "".to_string(),
+        env_local: "{}".to_string(),
+        err: None,
     }
 }
 

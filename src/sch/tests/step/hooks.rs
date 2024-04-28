@@ -1,6 +1,9 @@
+use serde_json::json;
+
 use crate::{
     sch::{tests::create_proc_signal, TaskState},
-    utils, Act, Catch, Message, StmtBuild, Timeout, Vars, Workflow,
+    utils::{self, consts},
+    Act, Catch, Message, StmtBuild, Timeout, Vars, Workflow,
 };
 
 #[tokio::test]
@@ -54,7 +57,7 @@ async fn sch_step_hooks_completed() {
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
         if e.is_key("act1") {
-            e.do_action(&e.proc_id, &e.id, "complete", &Vars::new())
+            e.do_action(&e.proc_id, &e.id, consts::EVT_NEXT, &Vars::new())
                 .unwrap();
         }
 
@@ -124,7 +127,7 @@ async fn sch_step_hooks_updated() {
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
         if e.is_source("act") && e.is_state("created") {
-            e.do_action(&e.proc_id, &e.id, "complete", &Vars::new())
+            e.do_action(&e.proc_id, &e.id, consts::EVT_NEXT, &Vars::new())
                 .unwrap();
         }
 
@@ -195,7 +198,7 @@ async fn sch_step_hooks_error() {
         println!("message: {:?}", e);
         if e.is_type("req") {
             let mut vars = Vars::new();
-            vars.set("err_code", "100");
+            vars.set(consts::ACT_ERR_KEY, json!({ "ecode": "100"}));
             e.do_action(&e.proc_id, &e.id, "error", &vars).unwrap();
         }
 

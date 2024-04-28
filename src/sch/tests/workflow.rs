@@ -1,6 +1,7 @@
 use crate::{
-    sch::tests::create_proc_signal, utils, Act, Catch, Message, StmtBuild, TaskState, Timeout,
-    Vars, Workflow,
+    sch::tests::create_proc_signal,
+    utils::{self, consts},
+    Act, Catch, Error, Message, StmtBuild, TaskState, Timeout, Vars, Workflow,
 };
 use serde_json::json;
 
@@ -91,7 +92,6 @@ async fn sch_workflow_setup_on_created() {
     scher.launch(&proc);
     let messages = tx.recv().await;
     proc.print();
-    // assert_eq!(proc.state(), TaskState::Running);
     assert_eq!(messages.len(), 1);
     assert_eq!(messages.get(0).unwrap().key, "msg1");
     assert_eq!(messages.get(0).unwrap().inputs.get::<i32>("a").unwrap(), 5);
@@ -121,7 +121,7 @@ async fn sch_workflow_setup_on_completed() {
     scher.launch(&proc);
     let messages = sig.recv().await;
     proc.print();
-    assert_eq!(proc.state(), TaskState::Success);
+    assert_eq!(proc.state(), TaskState::Completed);
     assert_eq!(messages.len(), 1);
     assert_eq!(messages.get(0).unwrap().key, "msg1");
     assert_eq!(messages.get(0).unwrap().inputs.get::<i32>("a").unwrap(), 5);
@@ -156,7 +156,7 @@ async fn sch_workflow_setup_on_step() {
     scher.launch(&proc);
     let messages = sig.recv().await;
     proc.print();
-    assert_eq!(proc.state(), TaskState::Success);
+    assert_eq!(proc.state(), TaskState::Completed);
     assert_eq!(messages.len(), 4);
     assert_eq!(messages.get(0).unwrap().key, "msg1");
     assert_eq!(messages.get(0).unwrap().inputs.get::<i32>("a").unwrap(), 5);
@@ -185,7 +185,7 @@ async fn sch_workflow_setup_on_before_update() {
     let s2 = sig.clone();
     emitter.on_message(move |e| {
         if e.is_type("req") && e.is_state("created") {
-            e.do_action(&e.proc_id, &e.id, "complete", &Vars::new())
+            e.do_action(&e.proc_id, &e.id, consts::EVT_NEXT, &Vars::new())
                 .unwrap();
         }
 
@@ -200,7 +200,7 @@ async fn sch_workflow_setup_on_before_update() {
     scher.launch(&proc);
     let messages = sig.recv().await;
     proc.print();
-    assert_eq!(proc.state(), TaskState::Success);
+    assert_eq!(proc.state(), TaskState::Completed);
     assert_eq!(messages.len(), 2);
     assert_eq!(messages.get(0).unwrap().key, "msg1");
     assert_eq!(messages.get(0).unwrap().inputs.get::<i32>("a").unwrap(), 5);
@@ -229,7 +229,7 @@ async fn sch_workflow_setup_on_updated() {
     let s2 = sig.clone();
     emitter.on_message(move |e| {
         if e.is_type("req") && e.is_state("created") {
-            e.do_action(&e.proc_id, &e.id, "complete", &Vars::new())
+            e.do_action(&e.proc_id, &e.id, consts::EVT_NEXT, &Vars::new())
                 .unwrap();
         }
 
@@ -244,7 +244,7 @@ async fn sch_workflow_setup_on_updated() {
     scher.launch(&proc);
     let messages = sig.recv().await;
     proc.print();
-    assert_eq!(proc.state(), TaskState::Success);
+    assert_eq!(proc.state(), TaskState::Completed);
     assert_eq!(messages.len(), 2);
     assert_eq!(messages.get(0).unwrap().key, "msg1");
     assert_eq!(messages.get(0).unwrap().inputs.get::<i32>("a").unwrap(), 5);
@@ -269,14 +269,15 @@ async fn sch_workflow_setup_on_catch() {
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
         if e.is_type("req") && e.is_state("created") {
-            let options = Vars::new().with("err_code", "err1");
-            e.do_action(&e.proc_id, &e.id, "error", &options).unwrap();
+            let options = Vars::new().with(consts::ACT_ERR_KEY, Error::new("", "err1"));
+            e.do_action(&e.proc_id, &e.id, consts::EVT_ERR, &options)
+                .unwrap();
         }
     });
     scher.launch(&proc);
     tx.recv().await;
     proc.print();
-    assert_eq!(proc.state(), TaskState::Success);
+    assert_eq!(proc.state(), TaskState::Completed);
 }
 
 #[tokio::test]

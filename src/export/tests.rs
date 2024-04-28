@@ -148,6 +148,7 @@ async fn export_executor_start_dup_pid_error() {
         model: model.to_json().unwrap(),
         root_tid: "".to_string(),
         env_local: "{}".to_string(),
+        err: None,
     };
     store.procs().create(&proc).expect("create proc");
     engine
@@ -533,14 +534,11 @@ async fn export_executeor_error() {
     let scher = engine.scher();
     let sig = scher.signal(false);
     let s1 = sig.clone();
-    // scher.emitter().on_error(|e| {
-    //     e.close();
-    // });
     scher.emitter().on_message(move |e| {
         if e.is_key("act1") && e.is_state("created") {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
-            vars.insert("err_code".to_string(), json!("code_1"));
+            vars.insert("error".to_string(), json!({ "ecode": "code_1"}));
             let ret = engine.executor().error(&e.proc_id, &e.id, &vars);
             s1.send(ret.is_ok());
         }

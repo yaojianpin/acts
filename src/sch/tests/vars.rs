@@ -1,4 +1,4 @@
-use crate::{sch::tests::create_proc_signal, utils, Act, Action, Vars, Workflow};
+use crate::{sch::tests::create_proc_signal, utils::{self, consts}, Act, Action, Vars, Workflow};
 use serde_json::json;
 
 #[tokio::test]
@@ -306,7 +306,7 @@ async fn sch_vars_act_outputs() {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.insert("var1".to_string(), 10.into());
-            let action = Action::new(&e.inner().proc_id, &e.inner().id, "complete", &options);
+            let action = Action::new(&e.inner().proc_id, &e.inner().id, consts::EVT_NEXT, &options);
             s.do_action(&action).unwrap();
         }
     });
@@ -337,7 +337,7 @@ async fn sch_vars_act_options() {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.insert("var1".to_string(), 10.into());
-            let action = Action::new(&e.inner().proc_id, &e.inner().id, "complete", &options);
+            let action = Action::new(&e.inner().proc_id, &e.inner().id, consts::EVT_NEXT, &options);
             s.do_action(&action).unwrap();
         }
     });

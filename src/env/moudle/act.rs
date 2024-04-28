@@ -12,7 +12,7 @@ impl Act {
 mod act {
     use crate::{
         env::value::ActValue, utils::consts, Act, ActError, Action, Block, Call, Chain, Context,
-        Each, Msg, Req, Vars,
+        Each, Error, Msg, Req, Vars,
     };
 
     #[rquickjs::function]
@@ -68,7 +68,7 @@ mod act {
             ctx.set_action(&Action::new(
                 &task.proc_id,
                 &task.id,
-                consts::EVT_COMPLETE,
+                consts::EVT_NEXT,
                 &Vars::new(),
             ))?;
             task.update_no_lock(ctx)?;
@@ -129,9 +129,8 @@ mod act {
 
     #[rquickjs::function]
     pub fn fail(ecode: String, message: String) -> rquickjs::Result<()> {
-        let vars = Vars::new()
-            .with(consts::ACT_ERR_CODE, ecode)
-            .with(consts::ACT_ERR_MESSAGE, message);
+        let err = Error::new(&message, &ecode);
+        let vars = Vars::new().with(consts::ACT_ERR_KEY, err);
         Context::with(|ctx| {
             let task = ctx.task();
             ctx.set_action(&Action::new(

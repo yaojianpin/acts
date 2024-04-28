@@ -1,7 +1,8 @@
 use crate::{
-    event::{Action, ActionState},
+    event::{Action, MessageState},
     sch::{tests::create_proc_signal, TaskState},
-    utils, Act, Message, StmtBuild, Vars, Workflow,
+    utils::{self, consts},
+    Act, Message, StmtBuild, Vars, Workflow,
 };
 use serde_json::{json, Value};
 use std::sync::Arc;
@@ -140,12 +141,12 @@ async fn sch_act_req_complete() {
     let s = scher.clone();
     emitter.on_message(move |e| {
         if e.is_source("act") {
-            if e.state() == ActionState::Created {
+            if e.state() == MessageState::Created {
                 let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
                 let mut options = Vars::new();
                 options.insert("uid".to_string(), json!(uid.to_string()));
 
-                let action = Action::new(&e.proc_id, &e.id, "complete", &options);
+                let action = Action::new(&e.proc_id, &e.id, consts::EVT_NEXT, &options);
                 if let Err(err) = s.do_action(&action) {
                     println!("error: {}", err);
                     rx.send(false);
@@ -198,20 +199,20 @@ async fn sch_act_req_cancel_normal() {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
             let tid = &e.id;
 
-            if uid == "a" && e.state == ActionState::Created.to_string() {
+            if uid == "a" && e.state == MessageState::Created {
                 if *count == 0 {
                     *act_req_id.lock().unwrap() = Some(tid.to_string());
 
                     let mut options = Vars::new();
                     options.insert("uid".to_string(), json!(uid.to_string()));
 
-                    let action = Action::new(&e.proc_id, tid, "complete", &options);
+                    let action = Action::new(&e.proc_id, tid, consts::EVT_NEXT, &options);
                     s.do_action(&action).unwrap();
                 } else {
                     rx.send(true);
                 }
                 *count += 1;
-            } else if uid == "b" && e.state == ActionState::Created.to_string() {
+            } else if uid == "b" && e.state == MessageState::Created {
                 // cancel the b's task by a
                 let mut options = Vars::new();
                 options.insert("uid".to_string(), json!("a".to_string()));
@@ -268,17 +269,17 @@ async fn sch_act_req_back() {
                 let mut options = Vars::new();
                 options.insert("uid".to_string(), json!(uid.to_string()));
 
-                let action = Action::new(&msg.proc_id, tid, "complete", &options);
+                let action = Action::new(&msg.proc_id, tid, consts::EVT_NEXT, &options);
                 s.do_action(&action).unwrap();
             } else if uid == "b" {
-                if msg.state() == ActionState::Created {
+                if msg.state() == MessageState::Created {
                     let mut options = Vars::new();
                     options.insert("uid".to_string(), json!("b".to_string()));
                     options.insert("to".to_string(), json!("step1".to_string()));
                     let action = Action::new(&msg.proc_id, tid, "back", &options);
                     s.do_action(&action).unwrap();
                 }
-            } else if msg.state() == ActionState::Created && uid == "a" && *count > 0 {
+            } else if msg.state() == MessageState::Created && uid == "a" && *count > 0 {
                 rx.send(uid == "a");
             }
 
@@ -351,7 +352,7 @@ async fn sch_act_req_submit() {
     emitter.on_message(move |e| {
         if e.is_source("act") && e.is_state("created") {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
-            if uid == "a" && e.state() == ActionState::Created {
+            if uid == "a" && e.state() == MessageState::Created {
                 let mut options = Vars::new();
                 options.insert("uid".to_string(), json!(uid.to_string()));
 
@@ -364,12 +365,12 @@ async fn sch_act_req_submit() {
     scher.launch(&proc);
     tx.recv().await;
     assert_eq!(
-        proc.task_by_nid("fn1").get(0).unwrap().action_state(),
-        ActionState::Submitted
+        proc.task_by_nid("fn1").get(0).unwrap().state(),
+        TaskState::Submitted
     );
     assert_eq!(
         proc.task_by_nid("step1").get(0).unwrap().state(),
-        TaskState::Success
+        TaskState::Completed
     );
 }
 
@@ -391,7 +392,7 @@ async fn sch_act_req_skip() {
     emitter.on_message(move |e| {
         if e.is_source("act") {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
-            if uid == "a" && e.state() == ActionState::Created {
+            if uid == "a" && e.state() == MessageState::Created {
                 let mut options = Vars::new();
                 options.insert("uid".to_string(), json!(uid.to_string()));
 
@@ -405,11 +406,11 @@ async fn sch_act_req_skip() {
     tx.recv().await;
     assert_eq!(
         proc.task_by_nid("fn1").get(0).unwrap().state(),
-        TaskState::Skip
+        TaskState::Skipped
     );
     assert_eq!(
         proc.task_by_nid("step1").get(0).unwrap().state(),
-        TaskState::Success
+        TaskState::Completed
     );
 }
 
@@ -430,7 +431,7 @@ async fn sch_act_req_skip_next() {
     emitter.on_message(move |e| {
         if e.is_key("act1") && e.is_state("created") {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
-            if uid == "a" && e.state() == ActionState::Created {
+            if uid == "a" && e.state() == MessageState::Created {
                 let mut options = Vars::new();
                 options.insert("uid".to_string(), json!(uid.to_string()));
 
@@ -444,15 +445,15 @@ async fn sch_act_req_skip_next() {
     tx.recv().await;
     assert_eq!(
         proc.task_by_nid("act1").get(0).unwrap().state(),
-        TaskState::Skip
+        TaskState::Skipped
     );
     assert_eq!(
         proc.task_by_nid("step1").get(0).unwrap().state(),
-        TaskState::Success
+        TaskState::Completed
     );
     assert_eq!(
         proc.task_by_nid("step2").get(0).unwrap().state(),
-        TaskState::Success
+        TaskState::Completed
     );
 }
 
@@ -470,11 +471,13 @@ async fn sch_act_req_error_action() {
     emitter.on_message(move |e| {
         if e.is_key("fn1") && e.is_state("created") {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
-            if uid == "a" && e.state() == ActionState::Created {
+            if uid == "a" && e.state() == MessageState::Created {
                 let mut options = Vars::new();
                 options.insert("uid".to_string(), json!(uid.to_string()));
-                options.insert("err_code".to_string(), json!("1"));
-                options.insert("err_message".to_string(), json!("biz error"));
+                options.insert(
+                    consts::ACT_ERR_KEY.to_string(),
+                    json!({ "ecode": "1", "message": "biz error"}),
+                );
 
                 let action = Action::new(&e.proc_id, &e.id, "error", &options);
                 s.do_action(&action).unwrap();
@@ -503,7 +506,7 @@ async fn sch_act_req_error_action_without_err_code() {
     emitter.on_message(move |e| {
         if e.is_key("fn1") && e.is_state("created") {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
-            if uid == "a" && e.state() == ActionState::Created {
+            if uid == "a" && e.state() == MessageState::Created {
                 let mut options = Vars::new();
                 options.insert("uid".to_string(), json!(uid.to_string()));
 
@@ -589,7 +592,7 @@ async fn sch_act_req_next_by_complete_state() {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!(uid.to_string()));
 
-            let action = Action::new(&e.proc_id, tid, "complete", &options);
+            let action = Action::new(&e.proc_id, tid, consts::EVT_NEXT, &options);
             s.do_action(&action).unwrap();
 
             // action again
@@ -652,13 +655,13 @@ async fn sch_act_req_do_action_complete() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.state() == ActionState::Created && e.r#type == "req" {
+        if e.state() == MessageState::Created && e.r#type == "req" {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
 
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!(uid.to_string()));
 
-            let action = Action::new(&e.proc_id, &e.id, "complete", &options);
+            let action = Action::new(&e.proc_id, &e.id, consts::EVT_NEXT, &options);
             let ret = s.do_action(&action).is_ok();
 
             rx.send(ret);
@@ -684,7 +687,7 @@ async fn sch_act_req_do_action_remove() {
     let s = scher.clone();
     emitter.on_message(move |e| {
         println!("message: {e:?}");
-        if e.state() == ActionState::Created && e.r#type == "req" {
+        if e.state() == MessageState::Created && e.r#type == "req" {
             let action = Action::new(&e.proc_id, &e.id, "remove", &Vars::new());
             s.do_action(&action).unwrap();
 
@@ -720,7 +723,7 @@ async fn sch_act_req_do_action_outputs() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.state() == ActionState::Created && e.r#type == "req" {
+        if e.state() == MessageState::Created && e.r#type == "req" {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
 
             let mut options = Vars::new();
@@ -729,7 +732,7 @@ async fn sch_act_req_do_action_outputs() {
             options.insert("b".to_string(), json!(5));
             options.insert("c".to_string(), json!(["u1", "u2"]));
 
-            let action = Action::new(&e.proc_id, &e.id, "complete", &options);
+            let action = Action::new(&e.proc_id, &e.id, consts::EVT_NEXT, &options);
             s.do_action(&action).unwrap();
             rx.close();
         }
@@ -794,7 +797,7 @@ async fn sch_act_req_do_action_rets() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.state() == ActionState::Created && e.r#type == "req" {
+        if e.state() == MessageState::Created && e.r#type == "req" {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
 
             let mut options = Vars::new();
@@ -804,7 +807,7 @@ async fn sch_act_req_do_action_rets() {
             options.insert("c".to_string(), json!(["u1", "u2"]));
             options.insert("d".to_string(), json!({ "value": "test" } ));
 
-            let action = Action::new(&e.proc_id, &e.id, "complete", &options);
+            let action = Action::new(&e.proc_id, &e.id, consts::EVT_NEXT, &options);
             s.do_action(&action).unwrap();
             rx.close();
         }
@@ -867,7 +870,7 @@ async fn sch_act_req_do_action_no_rets() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.state() == ActionState::Created && e.r#type == "req" {
+        if e.state() == MessageState::Created && e.r#type == "req" {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
 
             // create options that not satisfy the outputs
@@ -875,7 +878,7 @@ async fn sch_act_req_do_action_no_rets() {
             options.insert("uid".to_string(), json!(uid.to_string()));
             options.insert("any".to_string(), json!(100));
 
-            let action = Action::new(&e.proc_id, &e.id, "complete", &options);
+            let action = Action::new(&e.proc_id, &e.id, consts::EVT_NEXT, &options);
             let ret = s.do_action(&action).is_ok();
             rx.send(ret);
         }
@@ -904,10 +907,10 @@ async fn sch_act_req_do_action_ret_key_check() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.state() == ActionState::Created && e.r#type == "req" {
+        if e.state() == MessageState::Created && e.r#type == "req" {
             // create options that not contains uid key
             let options = Vars::new();
-            let action = Action::new(&e.proc_id, &e.id, "complete", &options);
+            let action = Action::new(&e.proc_id, &e.id, consts::EVT_NEXT, &options);
             let ret = s.do_action(&action).is_err();
             rx.send(ret);
         }
@@ -935,10 +938,10 @@ async fn sch_act_req_do_action_proc_id_error() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.state() == ActionState::Created && e.r#type == "req" {
+        if e.state() == MessageState::Created && e.r#type == "req" {
             // create options that not contains uid key
             let options = Vars::new();
-            let action = Action::new("no_exist_proc_id", &e.id, "complete", &options);
+            let action = Action::new("no_exist_proc_id", &e.id, consts::EVT_NEXT, &options);
             let ret = s.do_action(&action).is_err();
             rx.send(ret);
         }
@@ -966,10 +969,10 @@ async fn sch_act_req_do_action_msg_id_error() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.state() == ActionState::Created && e.r#type == "req" {
+        if e.state() == MessageState::Created && e.r#type == "req" {
             // create options that not contains uid key
             let options = Vars::new();
-            let action = Action::new(&e.proc_id, "no_exist_msg_id", "complete", &options);
+            let action = Action::new(&e.proc_id, "no_exist_msg_id", consts::EVT_NEXT, &options);
             let ret = s.do_action(&action).is_err();
             rx.send(ret);
         }
@@ -995,10 +998,10 @@ async fn sch_act_req_do_action_not_act_req_task() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.state() == ActionState::Created && e.r#type == "step" {
+        if e.state() == MessageState::Created && e.r#type == "step" {
             // create options that not contains uid key
             let options = Vars::new();
-            let action = Action::new(&e.proc_id, &e.id, "complete", &options);
+            let action = Action::new(&e.proc_id, &e.id, consts::EVT_NEXT, &options);
             let ret = s.do_action(&action).is_err();
             rx.send(ret);
         }
@@ -1075,7 +1078,7 @@ async fn sch_act_req_on_completed_msg() {
     emitter.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_key("act1") && e.is_state("created") {
-            e.do_action(&e.proc_id, &e.id, "complete", &Vars::new())
+            e.do_action(&e.proc_id, &e.id, consts::EVT_NEXT, &Vars::new())
                 .unwrap();
         }
 
@@ -1104,7 +1107,7 @@ async fn sch_act_req_on_completed_act() {
     emitter.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_key("act1") && e.is_state("created") {
-            e.do_action(&e.proc_id, &e.id, "complete", &Vars::new())
+            e.do_action(&e.proc_id, &e.id, consts::EVT_NEXT, &Vars::new())
                 .unwrap();
         }
 
@@ -1140,12 +1143,11 @@ async fn sch_act_req_on_catch() {
             e.do_action(
                 &e.proc_id,
                 &e.id,
-                "error",
-                &Vars::new().with("err_code", "err1"),
+                consts::EVT_ERR,
+                &Vars::new().with(consts::ACT_ERR_KEY, json!({ "ecode": "err1"})),
             )
             .unwrap();
         }
-
         if e.is_key("act2") {
             rx.close();
         }
@@ -1179,7 +1181,7 @@ async fn sch_act_req_on_catch_as_error() {
                 &e.proc_id,
                 &e.id,
                 "error",
-                &Vars::new().with("err_code", "err1"),
+                &Vars::new().with(consts::ACT_ERR_KEY, json!({ "ecode": "err1"})),
             )
             .unwrap();
         }
@@ -1189,7 +1191,7 @@ async fn sch_act_req_on_catch_as_error() {
                 &e.proc_id,
                 &e.id,
                 "error",
-                &Vars::new().with("err_code", "err2"),
+                &Vars::new().with(consts::ACT_ERR_KEY, json!({ "ecode": "err2"})),
             )
             .unwrap();
         }
@@ -1199,12 +1201,12 @@ async fn sch_act_req_on_catch_as_error() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act1").get(0).unwrap().action_state(),
-        ActionState::Completed
+        proc.task_by_nid("act1").get(0).unwrap().state(),
+        TaskState::Completed
     );
     assert_eq!(
-        proc.task_by_nid("act2").get(0).unwrap().action_state(),
-        ActionState::Error
+        proc.task_by_nid("act2").get(0).unwrap().state(),
+        TaskState::Error
     );
     assert!(proc.state().is_error());
 }
@@ -1228,7 +1230,7 @@ async fn sch_act_req_on_catch_as_skip() {
                 &e.proc_id,
                 &e.id,
                 "error",
-                &Vars::new().with("err_code", "err1"),
+                &Vars::new().with(consts::ACT_ERR_KEY, json!({ "ecode": "err1"})),
             )
             .unwrap();
         }
@@ -1243,12 +1245,12 @@ async fn sch_act_req_on_catch_as_skip() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act1").get(0).unwrap().action_state(),
-        ActionState::Completed
+        proc.task_by_nid("act1").get(0).unwrap().state(),
+        TaskState::Completed
     );
     assert_eq!(
-        proc.task_by_nid("act2").get(0).unwrap().action_state(),
-        ActionState::Skipped
+        proc.task_by_nid("act2").get(0).unwrap().state(),
+        TaskState::Skipped
     );
 }
 
@@ -1271,7 +1273,7 @@ async fn sch_act_req_on_catch_no_match() {
                 &e.proc_id,
                 &e.id,
                 "error",
-                &Vars::new().with("err_code", "err2"),
+                &Vars::new().with(consts::ACT_ERR_KEY, json!({ "ecode": "err2"})),
             )
             .unwrap();
         }
@@ -1301,7 +1303,7 @@ async fn sch_act_req_on_catch_match_any() {
                 &e.proc_id,
                 &e.id,
                 "error",
-                &Vars::new().with("err_code", "err2"),
+                &Vars::new().with(consts::ACT_ERR_KEY, json!({ "ecode": "err2"})),
             )
             .unwrap();
         }
@@ -1315,8 +1317,8 @@ async fn sch_act_req_on_catch_match_any() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act1").get(0).unwrap().action_state(),
-        ActionState::Completed
+        proc.task_by_nid("act1").get(0).unwrap().state(),
+        TaskState::Completed
     );
     assert!(proc
         .task_by_nid("act2")
@@ -1345,13 +1347,13 @@ async fn sch_act_req_on_catch_as_complete() {
                 &e.proc_id,
                 &e.id,
                 "error",
-                &Vars::new().with("err_code", "err1"),
+                &Vars::new().with(consts::ACT_ERR_KEY, json!({ "ecode": "err1"})),
             )
             .unwrap();
         }
 
         if e.is_key("act2") {
-            e.do_action(&e.proc_id, &e.id, "complete", &Vars::new())
+            e.do_action(&e.proc_id, &e.id, consts::EVT_NEXT, &Vars::new())
                 .unwrap();
         }
     });
@@ -1360,12 +1362,12 @@ async fn sch_act_req_on_catch_as_complete() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act2").get(0).unwrap().action_state(),
-        ActionState::Completed
+        proc.task_by_nid("act2").get(0).unwrap().state(),
+        TaskState::Completed
     );
     assert_eq!(
-        proc.task_by_nid("act1").get(0).unwrap().action_state(),
-        ActionState::Completed
+        proc.task_by_nid("act1").get(0).unwrap().state(),
+        TaskState::Completed
     );
 }
 
@@ -1388,7 +1390,7 @@ async fn sch_act_req_chain() {
                 TaskState::Interrupt
             );
             assert!(p.task_by_nid("act2").get(0).is_none());
-            e.do_action(&e.proc_id, &e.id, "complete", &Vars::new())
+            e.do_action(&e.proc_id, &e.id, consts::EVT_NEXT, &Vars::new())
                 .unwrap();
         }
 
@@ -1406,7 +1408,7 @@ async fn sch_act_req_chain() {
     );
     assert_eq!(
         proc.task_by_nid("act1").get(0).unwrap().state(),
-        TaskState::Success
+        TaskState::Completed
     );
 }
 

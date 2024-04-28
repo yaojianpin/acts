@@ -1,4 +1,3 @@
-use super::TaskState;
 use crate::{
     cache::Cache,
     config::Config,
@@ -9,9 +8,8 @@ use crate::{
         Proc, Task,
     },
     utils::{self, consts},
-    ActError, ActionResult, Error, Result, Vars,
+    ActError, ActionResult, Result, Vars,
 };
-use serde_json::json;
 use std::sync::{Arc, Mutex};
 use tokio::{
     runtime::Handle,
@@ -279,26 +277,16 @@ impl Scheduler {
         // proc.print();
         let mut vars = proc.outputs();
         println!("sub outputs: {vars}");
-        let mut event = consts::EVT_COMPLETE;
+        let mut event = consts::EVT_NEXT;
         if state.is_abort() {
             event = consts::EVT_ABORT;
         } else if state.is_skip() {
             event = consts::EVT_SKIP;
-        } else if let TaskState::Fail(ref s) = state {
+        } else if state.is_error() {
             event = consts::EVT_ERR;
-            let err = Error::parse(s);
-            match err.key {
-                Some(key) => {
-                    vars.insert(consts::ACT_ERR_CODE.to_string(), json!(key));
-                }
-                None => {
-                    vars.insert(
-                        consts::ACT_ERR_CODE.to_string(),
-                        json!(consts::ACT_ERR_INNER),
-                    );
-                }
+            if let Some(err) = proc.err() {
+                vars.set(consts::ACT_ERR_KEY, err);
             }
-            vars.insert(consts::ACT_ERR_MESSAGE.to_string(), json!(err.message));
         }
         let action = Action::new(pid, tid, event, &vars);
         let scher = self.clone();

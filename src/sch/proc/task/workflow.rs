@@ -1,4 +1,4 @@
-use crate::{event::ActionState, sch::Context, ActTask, Result, Workflow};
+use crate::{sch::Context, ActTask, Result, TaskState, Workflow};
 use async_trait::async_trait;
 
 #[async_trait]
@@ -35,7 +35,7 @@ impl ActTask for Workflow {
                 ctx.sched_task(step);
             }
         } else {
-            task.set_action_state(ActionState::Completed);
+            task.set_state(TaskState::Completed);
         }
 
         Ok(children.len() > 0)
@@ -45,7 +45,7 @@ impl ActTask for Workflow {
         let task = ctx.task();
         let state = task.state();
         if state.is_running() {
-            task.set_action_state(ActionState::Completed);
+            task.set_state(TaskState::Completed);
             return Ok(true);
         }
 

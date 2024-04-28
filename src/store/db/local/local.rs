@@ -1,8 +1,6 @@
-use crate::store::{data::*, DbSet, StoreAdapter};
-use once_cell::sync::OnceCell;
-use std::sync::{Arc, RwLock};
-
 use super::{collect::Collect, database::Database};
+use crate::store::{data::*, DbSet, StoreAdapter};
+use std::sync::{Arc, RwLock};
 
 #[derive(Debug, Clone)]
 pub struct LocalStore {
@@ -13,10 +11,9 @@ pub struct LocalStore {
     packages: Arc<Collect<Package>>,
 }
 
-static LOCAL_DB: OnceCell<Arc<RwLock<Database>>> = OnceCell::new();
 impl LocalStore {
     pub fn new(path: &str, name: &str) -> Self {
-        let db = LOCAL_DB.get_or_init(|| Arc::new(RwLock::new(Database::new(path, name))));
+        let db = Arc::new(RwLock::new(Database::new(path, name)));
         let models = Collect::new(&db, "models");
         let procs = Collect::new(&db, "procs");
         let tasks = Collect::new(&db, "tasks");

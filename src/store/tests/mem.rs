@@ -1,5 +1,4 @@
 use crate::{
-    event::ActionState,
     sch::NodeKind,
     store::{data::*, db::MemStore, Cond, Expr, Query},
     utils, StoreAdapter, TaskState, Vars,
@@ -30,6 +29,7 @@ async fn store_mem_proc_create() {
         model: "".to_string(),
         root_tid: "".to_string(),
         env_local: "".to_string(),
+        err: None,
     };
     store.procs().create(&proc).unwrap();
     assert_eq!(store.procs().exists(&proc.id).unwrap(), true);
@@ -50,6 +50,7 @@ async fn store_mem_proc_find() {
         model: "".to_string(),
         root_tid: "".to_string(),
         env_local: "".to_string(),
+        err: None,
     };
     store.procs().create(&proc).unwrap();
     assert_eq!(store.procs().find(&pid).unwrap().id, pid);
@@ -72,6 +73,7 @@ async fn store_mem_proc_query() {
             model: "".to_string(),
             root_tid: "".to_string(),
             env_local: "".to_string(),
+            err: None,
         };
         procs.create(&proc).unwrap();
     }
@@ -101,6 +103,7 @@ async fn store_mem_proc_update() {
         model: "".to_string(),
         root_tid: "".to_string(),
         env_local: "".to_string(),
+        err: None,
     };
     store.procs().create(&proc).unwrap();
 
@@ -125,6 +128,7 @@ async fn store_mem_proc_delete() {
         model: "".to_string(),
         root_tid: "".to_string(),
         env_local: "".to_string(),
+        err: None,
     };
     store.procs().create(&proc).unwrap();
     store.procs().delete(&proc.id).unwrap();
@@ -144,13 +148,13 @@ async fn store_mem_task_create() {
         task_id: "tid".to_string(),
         node_id: "nid".to_string(),
         state: TaskState::None.into(),
-        data: "".to_string(),
-        action_state: ActionState::None.into(),
         prev: None,
         start_time: 0,
         end_time: 0,
         hooks: "{}".to_string(),
         timestamp: 0,
+        data: "{}".to_string(),
+        err: None,
     };
     tasks.create(&task).unwrap();
     assert_eq!(tasks.exists(&task.id).unwrap(), true);
@@ -169,13 +173,13 @@ async fn store_mem_task_find() {
         task_id: "tid".to_string(),
         node_id: "nid".to_string(),
         state: TaskState::None.into(),
-        data: "".to_string(),
-        action_state: ActionState::None.into(),
+        data: "{}".to_string(),
         prev: None,
         start_time: 0,
         end_time: 0,
         hooks: "{}".to_string(),
         timestamp: 0,
+        err: None,
     };
     tasks.create(&task).unwrap();
     assert_eq!(tasks.find(&tid).unwrap().id, tid);
@@ -195,13 +199,13 @@ async fn store_mem_task_query() {
             task_id: "tid".to_string(),
             node_id: "nid".to_string(),
             state: TaskState::None.into(),
-            data: "".to_string(),
-            action_state: ActionState::None.into(),
             prev: None,
             start_time: 0,
             end_time: 0,
             hooks: "{}".to_string(),
             timestamp: 0,
+            data: "{}".to_string(),
+            err: None,
         };
         tasks.create(&task).unwrap();
     }
@@ -225,24 +229,22 @@ async fn store_mem_task_update() {
         task_id: "tid".to_string(),
         node_id: "nid".to_string(),
         state: TaskState::None.into(),
-        data: "".to_string(),
-        action_state: ActionState::None.into(),
         prev: None,
         start_time: 0,
         end_time: 0,
         hooks: "{}".to_string(),
         timestamp: 0,
+        data: "{}".to_string(),
+        err: None,
     };
     table.create(&task).unwrap();
 
-    task.state = TaskState::Success.into();
-    task.action_state = ActionState::Completed.into();
+    task.state = TaskState::Completed.into();
     task.prev = Some("tid1".to_string());
     table.update(&task).unwrap();
 
     let t = table.find(&task.id).unwrap();
     assert_eq!(t.state, task.state);
-    assert_eq!(t.action_state, task.action_state);
     assert_eq!(t.prev, task.prev);
 }
 
@@ -258,13 +260,13 @@ async fn store_mem_task_delete() {
         task_id: "tid".to_string(),
         node_id: "nid".to_string(),
         state: TaskState::None.into(),
-        data: "".to_string(),
-        action_state: ActionState::None.into(),
         prev: None,
         start_time: 0,
         end_time: 0,
         hooks: "{}".to_string(),
         timestamp: 0,
+        data: "{}".to_string(),
+        err: None,
     };
     table.create(&task).unwrap();
     table.delete(&task.id).unwrap();

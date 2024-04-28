@@ -79,7 +79,10 @@ impl Enviroment {
             if let Err(rquickjs::Error::Exception) = result {
                 let exception = rquickjs::Exception::from_js(&ctx, ctx.catch()).unwrap();
                 eprintln!("error: {exception:?}");
-                return Err(ActError::Exception(exception.message().unwrap_or_default()));
+                return Err(ActError::Exception {
+                    ecode: "".to_string(),
+                    message: exception.message().unwrap_or_default(),
+                });
             }
 
             let value = result.map_err(ActError::from)?;

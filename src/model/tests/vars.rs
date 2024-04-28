@@ -8,6 +8,13 @@ fn model_vars_new() {
 }
 
 #[test]
+fn model_vars_from() {
+    let vars = json!({ "a": 10 });
+    let vars: Vars = vars.into();
+    assert_eq!(vars.get::<i32>("a").unwrap(), 10);
+}
+
+#[test]
 fn model_vars_insert() {
     let mut vars = Vars::new();
     vars.insert("a".to_string(), json!(10));

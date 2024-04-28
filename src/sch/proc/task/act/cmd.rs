@@ -1,7 +1,6 @@
 use crate::{
-    event::ActionState,
     utils::{self, consts},
-    ActError, ActTask, Cmd, Context, Error, Result,
+    ActError, ActTask, Cmd, Context, Error, Result, TaskState, Vars,
 };
 
 impl Cmd {
@@ -17,17 +16,17 @@ impl Cmd {
         match name {
             consts::EVT_SUBMIT => {
                 set_inputs();
-                task.set_action_state(ActionState::Submitted);
+                task.set_state(TaskState::Submitted);
                 task.next(ctx)?;
             }
-            consts::EVT_COMPLETE => {
+            consts::EVT_NEXT => {
                 set_inputs();
-                task.set_action_state(ActionState::Completed);
+                task.set_state(TaskState::Completed);
                 task.next(ctx)?;
             }
             consts::EVT_SKIP => {
                 set_inputs();
-                task.set_action_state(ActionState::Skipped);
+                task.set_state(TaskState::Skipped);
                 task.next(ctx)?;
             }
             consts::EVT_ABORT => {
@@ -35,30 +34,17 @@ impl Cmd {
                 ctx.abort_task(&task)?;
             }
             consts::EVT_ERR => {
-                let err_code =
-                    self.inputs
-                        .get::<String>(consts::ACT_ERR_CODE)
-                        .ok_or(ActError::Action(format!(
-                            "cannot find '{}' in cmd.inputs",
-                            consts::ACT_ERR_CODE
-                        )))?;
-
-                if err_code.is_empty() {
-                    return Err(ActError::Action(format!(
-                        "the var '{}' cannot be empty in cmd.inputs",
-                        consts::ACT_ERR_CODE
-                    )));
-                }
-                let err_message = self
+                let err = self
                     .inputs
-                    .get::<String>(consts::ACT_ERR_MESSAGE)
-                    .unwrap_or_default();
-                ctx.set_err(&Error {
-                    key: Some(err_code.to_string()),
-                    message: err_message,
-                });
+                    .get::<Vars>(consts::ACT_ERR_KEY)
+                    .ok_or(ActError::Action(format!(
+                        "cannot find '{}' in cmd.inputs",
+                        consts::ACT_ERR_KEY
+                    )))?;
 
+                let err = Error::from_var(&err)?;
                 set_inputs();
+                task.set_err(&err);
                 task.error(ctx)?;
             }
             _ => {

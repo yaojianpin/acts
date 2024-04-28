@@ -1,8 +1,8 @@
 use crate::{
-    event::ActionState,
+    event::MessageState,
     sch::tests::create_proc_signal,
     utils::{self, consts},
-    Act, Action, Message, Vars, Workflow,
+    Act, Action, Error, Message, Vars, Workflow,
 };
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -13,7 +13,7 @@ async fn sch_message_workflow_created() {
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
     emitter.on_message(move |msg| {
-        if msg.r#type == "workflow" && msg.state() == ActionState::Created {
+        if msg.r#type == "workflow" && msg.state() == MessageState::Created {
             rx.send(true);
         }
     });
@@ -28,7 +28,7 @@ async fn sch_message_workflow_name() {
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<String>(&mut workflow, &id);
     emitter.on_message(move |msg| {
-        if msg.r#type == "workflow" && msg.state() == ActionState::Created {
+        if msg.r#type == "workflow" && msg.state() == MessageState::Created {
             rx.send(msg.model.name.clone());
         }
     });
@@ -43,7 +43,7 @@ async fn sch_message_workflow_tag() {
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<String>(&mut workflow, &id);
     emitter.on_message(move |msg| {
-        if msg.r#type == "workflow" && msg.state() == ActionState::Created {
+        if msg.r#type == "workflow" && msg.state() == MessageState::Created {
             rx.send(msg.model.tag.clone());
         }
     });
@@ -58,7 +58,7 @@ async fn sch_message_workflow_id() {
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<String>(&mut workflow, &id);
     emitter.on_message(move |msg| {
-        if msg.r#type == "workflow" && msg.state() == ActionState::Created {
+        if msg.r#type == "workflow" && msg.state() == MessageState::Created {
             rx.send(msg.model.id.clone());
         }
     });
@@ -73,7 +73,7 @@ async fn sch_message_workflow_inputs() {
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<Message>(&mut workflow, &id);
     emitter.on_message(move |e| {
-        if e.r#type == "workflow" && e.state() == ActionState::Created {
+        if e.r#type == "workflow" && e.state() == MessageState::Created {
             rx.send(e.inner().clone());
         }
     });
@@ -93,7 +93,7 @@ async fn sch_message_workflow_outputs() {
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<Message>(&mut workflow, &id);
     emitter.on_message(move |e| {
-        if e.r#type == "workflow" && e.state() == ActionState::Created {
+        if e.r#type == "workflow" && e.state() == MessageState::Created {
             rx.send(e.inner().clone());
         }
     });
@@ -111,11 +111,11 @@ async fn sch_message_time() {
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<Vec<bool>>(&mut workflow, &id);
 
     emitter.on_message(move |msg| {
-        if msg.state() == ActionState::Created {
+        if msg.state() == MessageState::Created {
             rx.update(|data| data.push(msg.start_time > 0));
         }
 
-        if msg.state() == ActionState::Completed {
+        if msg.state() == MessageState::Completed {
             rx.update(|data| data.push(msg.end_time > 0));
             rx.close();
         }
@@ -133,7 +133,7 @@ async fn sch_message_step_created() {
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
     emitter.on_message(move |msg| {
-        if msg.r#type == "step" && msg.state() == ActionState::Created {
+        if msg.r#type == "step" && msg.state() == MessageState::Created {
             rx.send(true);
         }
     });
@@ -152,7 +152,7 @@ async fn sch_message_step_outputs() {
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<Message>(&mut workflow, &id);
     emitter.on_message(move |e| {
-        if e.r#type == "step" && e.state() == ActionState::Created {
+        if e.r#type == "step" && e.state() == MessageState::Created {
             rx.send(e.inner().clone());
         }
     });
@@ -167,7 +167,7 @@ async fn sch_message_step_completed() {
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
     emitter.on_message(move |msg| {
-        if msg.r#type == "step" && msg.state() == ActionState::Completed {
+        if msg.r#type == "step" && msg.state() == MessageState::Completed {
             rx.send(true);
         }
     });
@@ -204,7 +204,7 @@ async fn sch_message_act_created() {
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
     emitter.on_message(move |e| {
-        if e.r#type == "req" && e.state() == ActionState::Created {
+        if e.r#type == "req" && e.state() == MessageState::Created {
             rx.send(true);
         }
     });
@@ -223,7 +223,7 @@ async fn sch_message_act_created_by_push_action() {
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
     emitter.on_message(move |e| {
         println!("message: {e:?}");
-        if e.r#type == "step" && e.state() == ActionState::Created {
+        if e.r#type == "step" && e.state() == MessageState::Created {
             let options = Vars::new()
                 .with("id", "act2")
                 .with("name", "act 2")
@@ -251,7 +251,7 @@ async fn sch_message_act_tag_by_push_action() {
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
     emitter.on_message(move |e| {
         println!("message: {e:?}");
-        if e.r#type == "step" && e.state() == ActionState::Created {
+        if e.r#type == "step" && e.state() == MessageState::Created {
             let options = Vars::new().with("id", "act2").with("tag", "tag2");
             e.do_action(&e.proc_id, &e.id, "push", &options).unwrap();
         }
@@ -276,7 +276,7 @@ async fn sch_message_act_inputs_by_push_action() {
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
     emitter.on_message(move |e| {
         println!("message: {e:?}");
-        if e.r#type == "step" && e.state() == ActionState::Created {
+        if e.r#type == "step" && e.state() == MessageState::Created {
             let options = Vars::new()
                 .with("id", "act2")
                 .with("inputs", &Vars::new().with("a", 5));
@@ -303,7 +303,7 @@ async fn sch_message_act_outputs_by_push_action() {
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
     emitter.on_message(move |e| {
         println!("message: {e:?}");
-        if e.r#type == "step" && e.state() == ActionState::Created {
+        if e.r#type == "step" && e.state() == MessageState::Created {
             let options = Vars::new()
                 .with("id", "act2")
                 .with("outputs", &Vars::new().with("a", 5));
@@ -330,7 +330,7 @@ async fn sch_message_act_rets_by_push_action() {
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
     emitter.on_message(move |e| {
         println!("message: {e:?}");
-        if e.r#type == "step" && e.state() == ActionState::Created {
+        if e.r#type == "step" && e.state() == MessageState::Created {
             let options = Vars::new()
                 .with("id", "act2")
                 .with("rets", &Vars::new().with("a", json!(null)));
@@ -339,7 +339,7 @@ async fn sch_message_act_rets_by_push_action() {
 
         if e.is_key("act2") && e.is_state("created") {
             rx.send(
-                e.do_action(&e.proc_id, &e.id, "complete", &Vars::new())
+                e.do_action(&e.proc_id, &e.id, consts::EVT_NEXT, &Vars::new())
                     .is_err(),
             );
         }
@@ -362,7 +362,7 @@ async fn sch_message_act_outputs() {
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<Message>(&mut workflow, &id);
     emitter.on_message(move |e| {
-        if e.r#type == "req" && e.state() == ActionState::Created {
+        if e.r#type == "req" && e.state() == MessageState::Created {
             rx.send(e.inner().clone());
         }
     });
@@ -381,13 +381,13 @@ async fn sch_message_act_completed() {
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
     let s = scher.clone();
     emitter.on_message(move |msg| {
-        if msg.r#type == "req" && msg.state() == ActionState::Created {
+        if msg.r#type == "req" && msg.state() == MessageState::Created {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            let action = Action::new(&msg.proc_id, &msg.id, "complete", &options);
+            let action = Action::new(&msg.proc_id, &msg.id, consts::EVT_NEXT, &options);
             s.do_action(&action).unwrap();
         }
-        if msg.r#type == "req" && msg.state() == ActionState::Completed {
+        if msg.r#type == "req" && msg.state() == MessageState::Completed {
             rx.send(true);
         }
     });
@@ -406,13 +406,13 @@ async fn sch_message_act_sumitted() {
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
     let s = scher.clone();
     emitter.on_message(move |msg| {
-        if msg.is_key("act1") && msg.state() == ActionState::Created {
+        if msg.is_key("act1") && msg.state() == MessageState::Created {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             let action = Action::new(&msg.proc_id, &msg.id, "submit", &options);
             s.do_action(&action).unwrap();
         }
-        if msg.is_key("act1") && msg.state() == ActionState::Submitted {
+        if msg.is_key("act1") && msg.state() == MessageState::Submitted {
             rx.send(true);
         }
     });
@@ -431,13 +431,13 @@ async fn sch_message_act_skip() {
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
     let s = scher.clone();
     emitter.on_message(move |msg| {
-        if msg.is_key("act1") && msg.state() == ActionState::Created {
+        if msg.is_key("act1") && msg.state() == MessageState::Created {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             let action = Action::new(&msg.proc_id, &msg.id, "skip", &options);
             s.do_action(&action).unwrap();
         }
-        if msg.is_key("act1") && msg.state() == ActionState::Skipped {
+        if msg.is_key("act1") && msg.state() == MessageState::Skipped {
             rx.send(true);
         }
     });
@@ -464,7 +464,7 @@ async fn sch_message_act_back() {
         if msg.is_key("act1") && msg.is_state("created") {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            let action = Action::new(&msg.proc_id, &msg.id, "complete", &options);
+            let action = Action::new(&msg.proc_id, &msg.id, consts::EVT_NEXT, &options);
             s.do_action(&action).unwrap();
         }
 
@@ -476,7 +476,7 @@ async fn sch_message_act_back() {
             s.do_action(&action).unwrap();
         }
 
-        if msg.is_key("act2") && msg.state() == ActionState::Backed {
+        if msg.is_key("act2") && msg.state() == MessageState::Backed {
             rx.send(true);
         }
     });
@@ -505,7 +505,7 @@ async fn sch_message_act_cancel() {
         if msg.is_key("act1") && msg.is_state("created") {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            let action = Action::new(&msg.proc_id, &msg.id, "complete", &options);
+            let action = Action::new(&msg.proc_id, &msg.id, consts::EVT_NEXT, &options);
             s.do_action(&action).unwrap();
         }
 
@@ -532,7 +532,7 @@ async fn sch_message_act_cancel() {
             s.do_action(&action).unwrap();
         }
 
-        if msg.is_key("act2") && msg.state() == ActionState::Cancelled {
+        if msg.is_key("act2") && msg.state() == MessageState::Cancelled {
             rx.send(true);
         }
     });
@@ -552,13 +552,13 @@ async fn sch_message_act_remove() {
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
     let s = scher.clone();
     emitter.on_message(move |msg| {
-        if msg.is_key("act1") && msg.inner().state() == ActionState::Created {
+        if msg.is_key("act1") && msg.inner().state() == MessageState::Created {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             let action = Action::new(&msg.inner().proc_id, &msg.inner().id, "remove", &options);
             s.do_action(&action).unwrap();
         }
-        if msg.is_key("act1") && msg.state() == ActionState::Removed {
+        if msg.is_key("act1") && msg.state() == MessageState::Removed {
             rx.send(true);
         }
     });
@@ -584,7 +584,7 @@ async fn sch_message_act_abort() {
             s.do_action(&action).unwrap();
         }
 
-        if msg.is_key("act1") && msg.state() == ActionState::Aborted {
+        if msg.is_key("act1") && msg.state() == MessageState::Aborted {
             rx.send(true);
         }
     });
@@ -608,12 +608,12 @@ async fn sch_message_act_error() {
         if e.is_key("act1") && e.is_state("created") {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            options.insert("err_code".to_string(), json!("err1"));
+            options.set(consts::ACT_ERR_KEY, Error::new("", "err1"));
             let action = Action::new(&e.proc_id, &e.id, "error", &options);
             s.do_action(&action).unwrap();
         }
 
-        if e.is_key("act1") && e.state() == ActionState::Error {
+        if e.is_key("act1") && e.state() == MessageState::Error {
             rx.send(true);
         }
     });
@@ -621,6 +621,49 @@ async fn sch_message_act_error() {
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(ret, true);
+}
+
+#[tokio::test]
+async fn sch_message_act_inputs_with_err() {
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::req(|act| act.with_id("act1")))
+    });
+    workflow.id = utils::longid();
+    let (proc, scher, emitter, tx, rx) =
+        create_proc_signal::<Vars>(&mut workflow, &utils::longid());
+
+    emitter.on_message(move |e| {
+        if e.is_key("act1") && e.is_state("created") {
+            let mut options = Vars::new();
+            options.insert("uid".to_string(), json!("u1"));
+            options.set(consts::ACT_ERR_KEY, Error::new("abc", "err1"));
+            e.do_action(&e.proc_id, &e.id, consts::EVT_ERR, &options)
+                .unwrap();
+        }
+
+        if e.is_key("act1") && e.state() == MessageState::Error {
+            rx.send(e.inputs.clone());
+        }
+    });
+
+    scher.launch(&proc);
+    let ret = tx.recv().await;
+    proc.print();
+    assert_eq!(
+        ret.get::<Vars>(consts::ACT_ERR_KEY)
+            .unwrap()
+            .get::<String>(consts::ACT_ERR_CODE)
+            .unwrap(),
+        "err1"
+    );
+    assert_eq!(
+        ret.get::<Vars>(consts::ACT_ERR_KEY)
+            .unwrap()
+            .get::<String>("message")
+            .unwrap(),
+        "abc"
+    );
 }
 
 #[tokio::test]

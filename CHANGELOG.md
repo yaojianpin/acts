@@ -7,5 +7,7 @@
 - remove `start` function from `Engine`
 - add `Builder` to build engine with different config
 - add workflow `env` to support all workflows can get env vars and set locally
+- simplified the options of the `error` action
+- merge action state to task state
 
 

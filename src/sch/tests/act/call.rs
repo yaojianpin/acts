@@ -1,7 +1,7 @@
 use crate::{
     sch::{tests::create_proc_signal, TaskState},
     utils::{self, consts},
-    Act, Manager, Vars, Workflow,
+    Act, Error, Manager, Vars, Workflow,
 };
 use serde_json::json;
 
@@ -104,7 +104,7 @@ async fn sch_act_call_act_complete() {
     emitter.on_message(move |e| {
         if e.is_key("act2") && e.is_state("created") {
             let options = Vars::new();
-            e.do_action(&e.proc_id, &e.id, consts::EVT_COMPLETE, &options)
+            e.do_action(&e.proc_id, &e.id, consts::EVT_NEXT, &options)
                 .unwrap();
         }
     });
@@ -114,7 +114,7 @@ async fn sch_act_call_act_complete() {
     proc.print();
     assert_eq!(
         proc.task_by_nid("act1").get(0).unwrap().state(),
-        TaskState::Success
+        TaskState::Completed
     );
 }
 
@@ -153,7 +153,7 @@ async fn sch_act_call_act_skip() {
     // sub workflow's skip does not affect the parent act state
     assert_eq!(
         proc.task_by_nid("act1").get(0).unwrap().state(),
-        TaskState::Success
+        TaskState::Completed
     );
 }
 
@@ -190,7 +190,7 @@ async fn sch_act_call_act_abort() {
     proc.print();
     assert_eq!(
         proc.task_by_nid("act1").get(0).unwrap().state(),
-        TaskState::Abort
+        TaskState::Aborted
     );
 }
 
@@ -217,7 +217,10 @@ async fn sch_act_call_act_error() {
     emitter.on_message(move |e| {
         if e.is_key("act2") && e.is_state("created") {
             let mut options = Vars::new();
-            options.insert("err_code".to_string(), "sub workflow error".into());
+            options.set(
+                consts::ACT_ERR_KEY,
+                Error::new("sub workflow error", "err1"),
+            );
             e.do_action(&e.proc_id, &e.id, consts::EVT_ERR, &options)
                 .unwrap();
         }

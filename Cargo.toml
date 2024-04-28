@@ -38,7 +38,7 @@ tracing = "0.1.37"
 criterion = { version = "0.4.0", features = ["async_tokio"] }
 
 [features]
-default = ["multi-thread"]
+default = ["multi-thread", "store"]
 store = ["duckdb", "r2d2"]
 multi-thread = ["tokio/rt-multi-thread"]
 

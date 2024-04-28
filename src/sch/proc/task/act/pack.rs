@@ -1,4 +1,4 @@
-use crate::{event::ActionState, sch::Context, ActError, ActTask, Pack, Result, StoreAdapter};
+use crate::{sch::Context, ActError, ActTask, Pack, Result, StoreAdapter, TaskState};
 use async_trait::async_trait;
 
 #[async_trait]
@@ -15,7 +15,7 @@ impl ActTask for Pack {
         ctx.eval(&script)?;
 
         if task.state().is_running() {
-            task.set_action_state(ActionState::Completed);
+            task.set_state(TaskState::Completed);
         }
         Ok(())
     }

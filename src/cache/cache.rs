@@ -51,7 +51,7 @@ impl Cache {
         Runtime::with(|runtime| {
             #[cfg(feature = "store")]
             {
-                let config = engine.config();
+                let config = runtime.config();
                 *self.store.write().unwrap() =
                     Arc::new(Store::local(&config.data_dir, &config.db_name));
             }
@@ -92,6 +92,7 @@ impl Cache {
             timestamp: proc.timestamp(),
             root_tid: proc.root_tid().unwrap_or_default(),
             env_local: proc.env_local().to_string(),
+            err: proc.err().map(|err| err.to_string()),
         };
         store.procs().create(&data).expect("failed to create proc");
     }
@@ -156,11 +157,11 @@ impl Cache {
             Ok(mut store_task) => {
                 let state = task.state();
                 store_task.state = state.into();
-                store_task.action_state = task.action_state().into();
                 store_task.end_time = task.end_time();
                 store_task.hooks = serde_json::to_string(&task.hooks())
                     .map_err(|err| ActError::Store(err.to_string()))?;
                 store_task.data = task.data().to_string();
+                store_task.err = task.err().map(|err| err.to_string());
                 store.tasks().update(&store_task)?;
             }
             Err(_) => {
@@ -175,12 +176,12 @@ impl Cache {
                     node_id: task.node.id().to_string(),
                     state: task.state().into(),
                     data: task.data().to_string(),
-                    action_state: task.action_state().into(),
                     start_time: task.start_time(),
                     end_time: task.end_time(),
                     hooks: serde_json::to_string(&task.hooks())
                         .map_err(|err| ActError::Store(err.to_string()))?,
                     timestamp: task.timestamp,
+                    err: task.err().map(|err| err.to_string()),
                 };
                 store.tasks().create(&task)?;
             }

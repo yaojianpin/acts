@@ -1,5 +1,4 @@
 use crate::{
-    event::ActionState,
     sch::{tests::create_proc_signal, TaskState},
     utils, Act, StmtBuild, Workflow,
 };
@@ -77,8 +76,8 @@ async fn sch_act_block_acts() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act1").get(0).unwrap().action_state(),
-        ActionState::Created
+        proc.task_by_nid("act1").get(0).unwrap().state(),
+        TaskState::Interrupt
     );
     assert_eq!(
         proc.task_by_nid("pack1").get(0).unwrap().state(),

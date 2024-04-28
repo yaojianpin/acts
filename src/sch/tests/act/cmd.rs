@@ -1,5 +1,9 @@
+use serde_json::json;
+
 use crate::{
-    event::ActionState, sch::tests::create_proc_signal, utils, Act, StmtBuild, TaskState, Workflow,
+    sch::tests::create_proc_signal,
+    utils::{self, consts},
+    Act, StmtBuild, TaskState, Workflow,
 };
 
 #[tokio::test]
@@ -17,8 +21,8 @@ async fn sch_act_cmd_submit_on_step() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("step1").get(0).unwrap().action_state(),
-        ActionState::Submitted
+        proc.task_by_nid("step1").get(0).unwrap().state(),
+        TaskState::Submitted
     );
 }
 
@@ -37,8 +41,8 @@ async fn sch_act_cmd_sumit_on_step_with_inputs() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("step1").get(0).unwrap().action_state(),
-        ActionState::Submitted
+        proc.task_by_nid("step1").get(0).unwrap().state(),
+        TaskState::Submitted
     );
     assert_eq!(
         proc.task_by_nid("step1")
@@ -69,8 +73,8 @@ async fn sch_act_cmd_submit_on_act() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act1").get(0).unwrap().action_state(),
-        ActionState::Submitted
+        proc.task_by_nid("act1").get(0).unwrap().state(),
+        TaskState::Submitted
     );
 }
 
@@ -99,7 +103,7 @@ async fn sch_act_cmd_submit_auto() {
     assert_eq!(proc.task_by_nid("act1").len(), 0);
     assert_eq!(
         proc.task_by_nid("step1").get(0).unwrap().state(),
-        TaskState::Success
+        TaskState::Submitted
     );
     assert_eq!(
         proc.task_by_nid("step1")
@@ -117,7 +121,7 @@ async fn sch_act_cmd_complete_on_step() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::req(|req| req.with_id("act1")))
-            .with_act(Act::cmd(|cmd| cmd.with_name("complete")))
+            .with_act(Act::cmd(|cmd| cmd.with_name(consts::EVT_NEXT)))
     });
 
     workflow.print();
@@ -127,8 +131,8 @@ async fn sch_act_cmd_complete_on_step() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("step1").get(0).unwrap().action_state(),
-        ActionState::Completed
+        proc.task_by_nid("step1").get(0).unwrap().state(),
+        TaskState::Completed
     );
 }
 
@@ -137,7 +141,9 @@ async fn sch_act_cmd_complete_on_step_with_inputs() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::req(|req| req.with_id("act1")))
-            .with_act(Act::cmd(|cmd| cmd.with_name("complete").with_input("a", 5)))
+            .with_act(Act::cmd(|cmd| {
+                cmd.with_name(consts::EVT_NEXT).with_input("a", 5)
+            }))
     });
 
     workflow.print();
@@ -147,8 +153,8 @@ async fn sch_act_cmd_complete_on_step_with_inputs() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("step1").get(0).unwrap().action_state(),
-        ActionState::Completed
+        proc.task_by_nid("step1").get(0).unwrap().state(),
+        TaskState::Completed
     );
     assert_eq!(
         proc.task_by_nid("step1")
@@ -166,8 +172,9 @@ async fn sch_act_cmd_complete_on_act() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_act({
             Act::req(|req| {
-                req.with_id("act1")
-                    .with_on_created(|stmts| stmts.add(Act::cmd(|cmd| cmd.with_name("complete"))))
+                req.with_id("act1").with_on_created(|stmts| {
+                    stmts.add(Act::cmd(|cmd| cmd.with_name(consts::EVT_NEXT)))
+                })
             })
         })
     });
@@ -179,8 +186,8 @@ async fn sch_act_cmd_complete_on_act() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act1").get(0).unwrap().action_state(),
-        ActionState::Completed
+        proc.task_by_nid("act1").get(0).unwrap().state(),
+        TaskState::Completed
     );
 }
 
@@ -199,10 +206,10 @@ async fn sch_act_cmd_abort_on_step() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("step1").get(0).unwrap().action_state(),
-        ActionState::Aborted
+        proc.task_by_nid("step1").get(0).unwrap().state(),
+        TaskState::Aborted
     );
-    assert_eq!(proc.state(), TaskState::Abort);
+    assert_eq!(proc.state(), TaskState::Aborted);
 }
 
 #[tokio::test]
@@ -220,8 +227,8 @@ async fn sch_act_cmd_abort_on_step_with_inputs() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("step1").get(0).unwrap().action_state(),
-        ActionState::Aborted
+        proc.task_by_nid("step1").get(0).unwrap().state(),
+        TaskState::Aborted
     );
     assert_eq!(
         proc.task_by_nid("step1")
@@ -252,8 +259,8 @@ async fn sch_act_cmd_abort_on_act() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act1").get(0).unwrap().action_state(),
-        ActionState::Aborted
+        proc.task_by_nid("act1").get(0).unwrap().state(),
+        TaskState::Aborted
     );
 }
 
@@ -263,7 +270,8 @@ async fn sch_act_cmd_error_on_step() {
         step.with_id("step1")
             .with_act(Act::req(|req| req.with_id("act1")))
             .with_act(Act::cmd(|cmd| {
-                cmd.with_name("error").with_input("err_code", "err1")
+                cmd.with_name("error")
+                    .with_input("error", json!({ "ecode": "err1"}))
             }))
     });
 
@@ -274,8 +282,8 @@ async fn sch_act_cmd_error_on_step() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("step1").get(0).unwrap().action_state(),
-        ActionState::Error
+        proc.task_by_nid("step1").get(0).unwrap().state(),
+        TaskState::Error
     );
     assert!(proc.state().is_error());
 }
@@ -288,7 +296,7 @@ async fn sch_act_cmd_error_on_step_with_inputs() {
             .with_act({
                 Act::cmd(|cmd| {
                     cmd.with_name("error")
-                        .with_input("err_code", "err1")
+                        .with_input("error", json!({ "ecode": "err1" }))
                         .with_input("a", 5)
                 })
             })
@@ -301,8 +309,8 @@ async fn sch_act_cmd_error_on_step_with_inputs() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("step1").get(0).unwrap().action_state(),
-        ActionState::Error
+        proc.task_by_nid("step1").get(0).unwrap().state(),
+        TaskState::Error
     );
     assert_eq!(
         proc.task_by_nid("step1")
@@ -330,8 +338,8 @@ async fn sch_act_cmd_error_on_step_with_no_err_code() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("step1").get(0).unwrap().action_state(),
-        ActionState::Error
+        proc.task_by_nid("step1").get(0).unwrap().state(),
+        TaskState::Error
     );
     assert!(proc
         .task_by_nid("step1")
@@ -349,7 +357,8 @@ async fn sch_act_cmd_error_on_act() {
             Act::req(|req| {
                 req.with_id("act1").with_on_created(|stmts| {
                     stmts.add(Act::cmd(|cmd| {
-                        cmd.with_name("error").with_input("err_code", "err1")
+                        cmd.with_name("error")
+                            .with_input("error", json!({ "ecode":"err1" }))
                     }))
                 })
             })
@@ -363,8 +372,8 @@ async fn sch_act_cmd_error_on_act() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act1").get(0).unwrap().action_state(),
-        ActionState::Error
+        proc.task_by_nid("act1").get(0).unwrap().state(),
+        TaskState::Error
     );
 }
 
@@ -383,8 +392,8 @@ async fn sch_act_cmd_skip() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("step1").get(0).unwrap().action_state(),
-        ActionState::Skipped
+        proc.task_by_nid("step1").get(0).unwrap().state(),
+        TaskState::Skipped
     );
     assert!(proc.state().is_completed());
 }

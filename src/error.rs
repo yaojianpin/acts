@@ -3,6 +3,8 @@ use serde::{Deserialize, Serialize};
 use std::{io::ErrorKind, string::FromUtf8Error};
 use thiserror::Error;
 
+use crate::{Result, Vars};
+
 #[derive(Deserialize, Serialize, Error, Debug, Clone, PartialEq)]
 pub enum ActError {
     #[error("{0}")]
@@ -11,8 +13,8 @@ pub enum ActError {
     #[error("{0}")]
     Script(String),
 
-    #[error("{0}")]
-    Exception(String),
+    #[error("ecode: {ecode}, message: {message}")]
+    Exception { ecode: String, message: String },
 
     #[error("{0}")]
     Model(String),
@@ -33,52 +35,49 @@ pub enum ActError {
     IoError(String),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Default, Debug, Clone, Deserialize, Serialize)]
 pub struct Error {
-    pub key: Option<String>,
+    #[serde(default)]
+    pub ecode: String,
+    #[serde(default)]
     pub message: String,
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let Some(key) = &self.key {
-            f.write_fmt(format_args!("{}:{}", &self.message, key))
-        } else {
-            f.write_fmt(format_args!("{}", &self.message))
-        }
-    }
-}
-
-impl Default for Error {
-    fn default() -> Self {
-        Self {
-            key: None,
-            message: Default::default(),
-        }
+        let text = serde_json::to_string(self).unwrap();
+        f.write_str(&text)
     }
 }
 
 impl Error {
-    pub fn parse(s: &str) -> Error {
-        let parts = s.split(':').collect::<Vec<_>>();
-
-        if parts.len() == 2 {
-            return Error {
-                message: parts[0].to_string(),
-                key: Some(parts[1].to_string()),
-            };
+    pub fn new(message: &str, ecode: &str) -> Self {
+        Self {
+            message: message.to_string(),
+            ecode: ecode.to_string(),
         }
+    }
 
-        Error {
-            key: None,
-            message: s.to_string(),
-        }
+    pub fn from_var(value: &Vars) -> Result<Self> {
+        serde_json::from_value::<Self>(value.clone().into()).map_err(|err| err.into())
     }
 }
 
 impl Into<String> for ActError {
     fn into(self) -> String {
         self.to_string()
+    }
+}
+
+impl Into<Error> for ActError {
+    fn into(self) -> Error {
+        match self {
+            ActError::Exception { ecode, message } => Error { ecode, message },
+            err => Error {
+                ecode: "".to_string(),
+                message: err.to_string(),
+            },
+        }
     }
 }
 
@@ -121,5 +120,53 @@ impl From<serde_json::Error> for ActError {
 impl<'a> From<rquickjs::CaughtError<'a>> for ActError {
     fn from(error: rquickjs::CaughtError<'a>) -> Self {
         ActError::Script(error.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use crate::{ActError, Error, Vars};
+
+    #[test]
+    fn engine_error_default() {
+        let err = Error::default();
+        assert_eq!(err.message, "");
+        assert_eq!(err.ecode, "");
+    }
+
+    #[test]
+    fn engine_error_json_full() {
+        let err = Error::new("abc", "err1");
+        let v = serde_json::to_value(err).unwrap();
+        assert_eq!(v, json!({ "ecode": "err1", "message": "abc" }))
+    }
+
+    #[test]
+    fn engine_error_from_value() {
+        let err = Vars::new().with("ecode", "err1").with("message", "test");
+        let v = Error::from_var(&err).unwrap();
+        assert_eq!(v.ecode, "err1");
+        assert_eq!(v.message, "test");
+    }
+
+    #[test]
+    fn engine_act_error_into() {
+        let err = ActError::Action("error message".to_string());
+        let v: Error = err.into();
+        assert_eq!(v.message, "error message");
+        assert_eq!(v.ecode, "");
+    }
+
+    #[test]
+    fn engine_act_exception_into() {
+        let err = ActError::Exception {
+            ecode: "err1".to_string(),
+            message: "error message".to_string(),
+        };
+        let v: Error = err.into();
+        assert_eq!(v.message, "error message");
+        assert_eq!(v.ecode, "err1");
     }
 }

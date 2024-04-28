@@ -141,18 +141,3 @@ impl Client<'_> {
         ret
     }
 }
-
-// you can also implement the OrgAdapter to get the org users
-// impl OrgAdapter for Client<'_> {
-//     fn dept(&self, _value: &str) -> Vec<String> {
-//         todo!()
-//     }
-
-//     fn unit(&self, _value: &str) -> Vec<String> {
-//         todo!()
-//     }
-
-//     fn relate(&self, _value: &str) -> Vec<String> {
-//         todo!()
-//     }
-// }

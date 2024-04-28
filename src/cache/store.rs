@@ -1,8 +1,7 @@
 use crate::{
-    event::ActionState,
     sch::{self, StatementBatch, TaskLifeCycle, TaskState},
     store::{Cond, Expr, Query, Store},
-    ActError, Result, StoreAdapter, Workflow,
+    ActError, Error, Result, StoreAdapter, Workflow,
 };
 use std::{collections::HashMap, sync::Arc};
 use tracing::debug;
@@ -23,6 +22,8 @@ impl Store {
             let procs = self.procs().query(&query)?;
             for p in procs {
                 let model = Workflow::from_json(&p.model)?;
+                let env_local: serde_json::Value = serde_json::from_str(&p.env_local)
+                    .map_err(|err| ActError::Store(err.to_string()))?;
                 let state = p.state.clone();
                 let mut proc = sch::Proc::new(&p.id);
                 proc.load(&model)?;
@@ -30,6 +31,12 @@ impl Store {
                 proc.set_start_time(p.start_time);
                 proc.set_end_time(p.end_time);
                 proc.set_timestamp(p.timestamp);
+                proc.set_env_local(&env_local.into());
+                if let Some(err) = p.err {
+                    let err: Error = serde_json::from_str(&err)
+                        .map_err(|err| ActError::Store(err.to_string()))?;
+                    proc.set_pure_err(&err)
+                }
 
                 let proc = Arc::new(proc);
                 self.load_tasks(&proc)?;
@@ -46,15 +53,19 @@ impl Store {
             Ok(p) => {
                 let model = Workflow::from_json(&p.model)?;
                 let mut proc = Arc::new(sch::Proc::new(pid));
-                let env_local = serde_json::from_str(&p.env_local)
+                let env_local: serde_json::Value = serde_json::from_str(&p.env_local)
                     .map_err(|err| ActError::Store(err.to_string()))?;
 
                 proc.load(&model)?;
                 proc.set_state(p.state.into());
                 proc.set_root_tid(&p.root_tid);
-                proc.set_env_local(&env_local);
+                proc.set_env_local(&env_local.into());
                 self.load_tasks(&mut proc)?;
-
+                if let Some(err) = p.err {
+                    let err: Error = serde_json::from_str(&err)
+                        .map_err(|err| ActError::Store(err.to_string()))?;
+                    proc.set_pure_err(&err)
+                }
                 return Ok(Some(proc));
             }
             Err(_) => Ok(None),
@@ -78,11 +89,9 @@ impl Store {
         let tasks = self.tasks().query(&query)?;
         for t in tasks {
             let state: TaskState = t.state.into();
-            let action_state: ActionState = t.action_state.into();
             if let Some(node) = proc.node(&t.node_id) {
                 let mut task = sch::Task::new(&proc, &t.task_id, node);
                 task.set_pure_state(state.clone());
-                task.set_pure_action_state(action_state);
                 task.set_start_time(t.start_time);
                 task.set_end_time(t.end_time);
                 task.timestamp = t.timestamp;
@@ -95,7 +104,13 @@ impl Store {
                 let hooks: HashMap<TaskLifeCycle, Vec<StatementBatch>> =
                     serde_json::from_str(&t.hooks)
                         .map_err(|err| ActError::Store(err.to_string()))?;
+
                 task.set_hooks(&hooks);
+                if let Some(err) = t.err {
+                    let err: Error = serde_json::from_str(&err)
+                        .map_err(|err| ActError::Store(err.to_string()))?;
+                    task.set_pure_err(&err)
+                }
 
                 proc.push_task(Arc::new(task));
             }

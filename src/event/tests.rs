@@ -1,4 +1,4 @@
-use super::{ActionState, EventAction};
+use super::{EventAction, MessageState};
 use crate::{
     event::{Emitter, Message, Model},
     sch::{Proc, Scheduler, TaskState},
@@ -7,8 +7,8 @@ use crate::{
 use std::sync::Arc;
 #[tokio::test]
 async fn event_action_parse() {
-    let action = EventAction::parse("complete").unwrap();
-    assert_eq!(action, EventAction::Complete);
+    let action = EventAction::parse("next").unwrap();
+    assert_eq!(action, EventAction::Next);
 
     let action = EventAction::parse("submit").unwrap();
     assert_eq!(action, EventAction::Submit);
@@ -126,7 +126,7 @@ async fn event_message() {
         id: "a1".to_string(),
         r#type: "msg".to_string(),
         source: NodeKind::Act.to_string(),
-        state: ActionState::Created.to_string(),
+        state: MessageState::Created,
         model: Model {
             id: "mid".to_string(),
             name: "mname".to_string(),

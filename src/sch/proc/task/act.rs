@@ -6,10 +6,9 @@ mod req;
 
 use super::TaskLifeCycle;
 use crate::{
-    event::ActionState,
     sch::Context,
     utils::{self, consts},
-    Act, ActTask, Block, Result, Vars,
+    Act, ActTask, Block, Result, TaskState, Vars,
 };
 use async_trait::async_trait;
 use std::{cell::RefCell, rc::Rc};
@@ -104,7 +103,7 @@ impl Act {
                     task.add_hook_stmts(TaskLifeCycle::Created, self);
                 } else {
                     if let Err(err) = cmd.run(ctx) {
-                        task.set_pure_action_state(ActionState::Error);
+                        task.set_state(TaskState::Error);
                         return Err(err);
                     };
                 }

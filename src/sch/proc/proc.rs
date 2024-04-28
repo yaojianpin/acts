@@ -1,12 +1,13 @@
 use crate::{
     env::Enviroment,
-    event::{Action, ActionState},
+    event::Action,
     sch::{
         tree::{Node, NodeTree, TaskTree},
         Context, Scheduler, Task, TaskLifeCycle, TaskState,
     },
     utils::{self, consts},
-    ActError, ActionResult, NodeKind, ProcInfo, Result, ShareLock, Vars, Workflow, WorkflowState,
+    ActError, ActionResult, Error, NodeKind, ProcInfo, Result, ShareLock, Vars, Workflow,
+    WorkflowState,
 };
 use serde::Deserialize;
 use std::{
@@ -23,6 +24,7 @@ pub struct Proc {
     tasks: ShareLock<TaskTree>,
     state: ShareLock<TaskState>,
     start_time: ShareLock<i64>,
+    err: ShareLock<Option<Error>>,
     end_time: ShareLock<i64>,
     timestamp: i64,
     root_tid: ShareLock<Option<String>>,
@@ -36,6 +38,7 @@ impl std::fmt::Debug for Proc {
             .field("pid", &self.id)
             .field("mid", &self.model().id)
             .field("state", &self.state())
+            .field("err", &self.err())
             .field("start_time", &self.start_time())
             .field("end_time", &self.end_time())
             .field("timestamp", &self.timestamp)
@@ -57,6 +60,7 @@ impl Proc {
             timestamp: utils::time::timestamp(),
             root_tid: Arc::new(RwLock::new(None)),
             env_local: Arc::new(RwLock::new(Vars::new())),
+            err: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -80,11 +84,6 @@ impl Proc {
     }
 
     pub fn load(&self, model: &Workflow) -> Result<()> {
-        // let env = &self.env;
-        // let vars = utils::fill_proc_vars(&env, &model.inputs);
-        // env.append(&model.outputs);
-        // env.append(&vars);
-
         let tree = &mut self.tree.write().unwrap();
         tree.load(model)
     }
@@ -99,6 +98,15 @@ impl Proc {
 
     pub fn state(&self) -> TaskState {
         self.state.read().unwrap().clone()
+    }
+
+    pub fn set_err(&self, err: &Error) {
+        *self.err.write().unwrap() = Some(err.clone());
+        self.set_state(TaskState::Error);
+    }
+
+    pub fn err(&self) -> Option<Error> {
+        self.err.read().unwrap().clone()
     }
 
     pub fn start_time(&self) -> i64 {
@@ -262,6 +270,10 @@ impl Proc {
         *self.state.write().unwrap() = state;
     }
 
+    pub(crate) fn set_pure_err(&self, err: &Error) {
+        *self.err.write().unwrap() = Some(err.clone());
+    }
+
     pub(crate) fn set_timestamp(&mut self, time: i64) {
         self.timestamp = time;
     }
@@ -287,15 +299,6 @@ impl Proc {
                     eprintln!("{}", err);
                     error!("{}", err);
                 });
-
-                // block_on(Context::scope(ctx, async move {
-                //     Context::with(move |ctx| {
-                //         task.run_hooks_timeout(&ctx).unwrap_or_else(|err| {
-                //             eprintln!("{}", err);
-                //             error!("{}", err);
-                //         });
-                //     });
-                // }));
             });
     }
 
@@ -355,8 +358,7 @@ impl Proc {
         if let Some(task) = &self.task(tid) {
             task.exec(ctx).unwrap_or_else(|err| {
                 eprintln!("error: {err}");
-                task.set_pure_action_state(ActionState::Error);
-                task.set_state(TaskState::Fail(err.to_string()));
+                task.set_err(&err.into());
                 let _ = ctx.emit_error();
             });
         }
@@ -428,7 +430,7 @@ impl Proc {
                 }
 
                 println!(
-                    "Task({}) {}  nid={} name={} tag={} prev={} state={} action_state={}  data={}",
+                    "Task({}) {}  nid={} name={} tag={} prev={} state={}  data={} err={:?}",
                     task.id,
                     task.node.r#type(),
                     task.node.id(),
@@ -439,8 +441,8 @@ impl Proc {
                         None => "nil".to_string(),
                     },
                     task.state(),
-                    task.action_state(),
                     task.data(),
+                    task.err(),
                 );
             })
         }
@@ -460,7 +462,7 @@ impl Proc {
                     level -= 1;
                 }
                 s.borrow_mut().push_str(&format!(
-                    "Task({}) prev={} kind={} nid={} name={} state={} action_state={}\n",
+                    "Task({}) prev={} kind={} nid={} name={} state={}\n",
                     task.id,
                     match task.prev() {
                         Some(v) => v,
@@ -470,7 +472,6 @@ impl Proc {
                     task.node.id(),
                     task.node.content.name(),
                     task.state(),
-                    task.action_state(),
                 ));
             })
         }

@@ -1,5 +1,7 @@
 use crate::store::db::local::{DbColumn, DbType};
+#[allow(unused_imports)]
 use duckdb::{params, AccessMode, Config, DuckdbConnectionManager};
+#[allow(unused_imports)]
 use std::{fs, path::Path};
 use tracing::debug;
 
@@ -15,18 +17,35 @@ impl std::fmt::Debug for Database {
 }
 
 impl Database {
+    #[allow(unused_variables)]
     pub fn new(path: &str, name: &str) -> Self {
-        fs::create_dir_all(path).unwrap();
-        let config = Config::default()
-            .access_mode(AccessMode::ReadWrite)
-            .unwrap();
-        let manager =
-            DuckdbConnectionManager::file_with_flags(Path::new(path).join(name), config).unwrap();
-        let pool = r2d2::Pool::new(manager).unwrap();
+        // the db path will be conflict in tokio::test
+        // just use memory mode to test
+        #[cfg(not(test))]
+        {
+            fs::create_dir_all(path).unwrap();
+            let config = Config::default()
+                .access_mode(AccessMode::ReadWrite)
+                .unwrap();
+            let manager =
+                DuckdbConnectionManager::file_with_flags(Path::new(path).join(name), config)
+                    .unwrap();
+            let pool = r2d2::Pool::new(manager).unwrap();
 
-        Self {
-            pool,
-            path: path.to_string(),
+            Self {
+                pool,
+                path: path.to_string(),
+            }
+        }
+
+        #[cfg(test)]
+        {
+            let manager = DuckdbConnectionManager::memory().unwrap();
+            let pool = r2d2::Pool::new(manager).unwrap();
+            Self {
+                pool,
+                path: path.to_string(),
+            }
         }
     }
 

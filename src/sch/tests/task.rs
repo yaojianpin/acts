@@ -1,5 +1,5 @@
 use crate::{
-    event::ActionState,
+    event::MessageState,
     sch::tests::{create_proc, create_proc_signal},
     utils, Act, TaskState, Workflow,
 };
@@ -38,7 +38,7 @@ async fn sch_task_steps() {
     let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &id);
     scher.launch(&proc);
     tx.recv().await;
-    assert_eq!(proc.state(), TaskState::Success);
+    assert_eq!(proc.state(), TaskState::Completed);
 }
 
 #[tokio::test]
@@ -47,7 +47,7 @@ async fn sch_task_step_completed() {
     let (proc, scher, emitter, tx, rx) =
         create_proc_signal::<bool>(&mut workflow, &utils::longid());
     emitter.on_message(move |msg| {
-        if msg.inner().r#type == "step" && msg.inner().state() == ActionState::Completed {
+        if msg.inner().r#type == "step" && msg.inner().state() == MessageState::Completed {
             rx.send(true);
         }
     });
@@ -64,7 +64,7 @@ async fn sch_task_step() {
     let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &id);
     scher.launch(&proc);
     tx.recv().await;
-    assert_eq!(proc.state(), TaskState::Success);
+    assert_eq!(proc.state(), TaskState::Completed);
 }
 
 #[tokio::test]
@@ -81,12 +81,12 @@ async fn sch_task_step_if_false() {
 
     assert_eq!(
         proc.task_by_nid("step1").get(0).unwrap().state(),
-        TaskState::Skip
+        TaskState::Skipped
     );
 
     assert_eq!(
         proc.task_by_nid("step2").get(0).unwrap().state(),
-        TaskState::Success
+        TaskState::Completed
     );
 }
 
@@ -103,11 +103,11 @@ async fn sch_task_step_if_true() {
     proc.print();
     assert_eq!(
         proc.task_by_nid("step1").get(0).unwrap().state(),
-        TaskState::Success
+        TaskState::Completed
     );
     assert_eq!(
         proc.task_by_nid("step2").get(0).unwrap().state(),
-        TaskState::Success
+        TaskState::Completed
     );
 }
 
@@ -133,7 +133,7 @@ async fn sch_task_branch_basic() {
     let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     scher.launch(&proc);
     tx.recv().await;
-    assert_eq!(proc.state(), TaskState::Success);
+    assert_eq!(proc.state(), TaskState::Completed);
 }
 
 #[tokio::test]
@@ -157,7 +157,7 @@ async fn sch_task_branch_skip() {
 
     assert_eq!(
         proc.task_by_nid("b1").get(0).unwrap().state(),
-        TaskState::Skip
+        TaskState::Skipped
     );
     assert_eq!(proc.task_by_nid("step11").get(0).is_none(), true);
 }
@@ -182,7 +182,7 @@ async fn sch_task_branch_empty_if() {
 
     assert_eq!(
         proc.task_by_nid("b1").get(0).unwrap().state(),
-        TaskState::Skip
+        TaskState::Skipped
     );
 }
 
@@ -215,7 +215,7 @@ async fn sch_task_branch_if_false_else_success() {
     proc.print();
     assert_eq!(
         proc.task_by_nid("b1").get(0).unwrap().state(),
-        TaskState::Success
+        TaskState::Completed
     );
 }
 
@@ -304,11 +304,11 @@ async fn sch_task_branch_if_true_else() {
 
     assert_eq!(
         proc.task_by_nid("b1").get(0).unwrap().state(),
-        TaskState::Success
+        TaskState::Completed
     );
     assert_eq!(
         proc.task_by_nid("b2").get(0).unwrap().state(),
-        TaskState::Skip
+        TaskState::Skipped
     );
 }
 
@@ -341,11 +341,11 @@ async fn sch_task_branch_if_two_no_else() {
 
     assert_eq!(
         proc.task_by_nid("b1").get(0).unwrap().state(),
-        TaskState::Success
+        TaskState::Completed
     );
     assert_eq!(
         proc.task_by_nid("b2").get(0).unwrap().state(),
-        TaskState::Skip
+        TaskState::Skipped
     );
 }
 
@@ -385,15 +385,15 @@ async fn sch_task_branch_if_mutli_true() {
 
     assert_eq!(
         proc.task_by_nid("b1").get(0).unwrap().state(),
-        TaskState::Success
+        TaskState::Completed
     );
     assert_eq!(
         proc.task_by_nid("b3").get(0).unwrap().state(),
-        TaskState::Success
+        TaskState::Completed
     );
     assert_eq!(
         proc.task_by_nid("b2").get(0).unwrap().state(),
-        TaskState::Skip
+        TaskState::Skipped
     );
 }
 

@@ -165,10 +165,6 @@ impl Engine {
         Runtime::with(|rt| rt.config.clone())
     }
 
-    // pub fn adapter(&self) -> Arc<Adapter> {
-    //     Runtime::with(|rt| rt.adapter.clone())
-    // }
-
     /// engine executor
     pub fn executor(&self) -> Arc<Executor> {
         Runtime::with(|rt| rt.executor.clone())

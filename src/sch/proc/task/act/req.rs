@@ -1,6 +1,5 @@
 use super::TaskLifeCycle;
 use crate::{
-    event::ActionState,
     sch::{Context, TaskState},
     ActTask, Req, Result,
 };
@@ -55,12 +54,11 @@ impl ActTask for Req {
             let mut count = 0;
             for t in tasks.iter() {
                 if t.state().is_error() {
-                    ctx.set_err(&t.state().as_err().unwrap_or_default());
                     ctx.emit_error()?;
                     return Ok(false);
                 }
                 if t.state().is_skip() {
-                    task.set_action_state(ActionState::Skipped);
+                    task.set_state(TaskState::Skipped);
                     return Ok(true);
                 }
 
@@ -71,7 +69,7 @@ impl ActTask for Req {
 
             if count == tasks.len() {
                 if !task.state().is_completed() {
-                    task.set_action_state(ActionState::Completed);
+                    task.set_state(TaskState::Completed);
                 }
             }
         }

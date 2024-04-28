@@ -47,7 +47,7 @@ impl Executor {
     }
 
     pub fn complete(&self, pid: &str, tid: &str, options: &Vars) -> Result<ActionResult> {
-        self.do_action(pid, consts::EVT_COMPLETE, tid, options)
+        self.do_action(pid, consts::EVT_NEXT, tid, options)
     }
 
     pub fn abort(&self, pid: &str, tid: &str, options: &Vars) -> Result<ActionResult> {

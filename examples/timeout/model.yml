@@ -29,6 +29,7 @@ steps:
           - !cmd
             name: error
             inputs:
-              err_code: err_timeout_8s
+              error:
+                ecode: err_timeout_8s
   - name: final
     id: final

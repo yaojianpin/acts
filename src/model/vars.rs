@@ -114,6 +114,15 @@ impl From<serde_json::Map<String, Value>> for Vars {
     }
 }
 
+impl From<serde_json::Value> for Vars {
+    fn from(value: serde_json::Value) -> Self {
+        if let serde_json::Value::Object(map) = &value {
+            return from_json(map);
+        }
+        Vars::new()
+    }
+}
+
 impl Into<serde_json::Value> for Vars {
     fn into(self) -> serde_json::Value {
         serde_json::Value::Object(self.inner)

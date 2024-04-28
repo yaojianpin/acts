@@ -1,6 +1,7 @@
 use crate::{
     sch::{Proc, Scheduler},
-    utils, Act, Action, Engine, TaskState, Vars, Workflow,
+    utils::{self, consts},
+    Act, Action, Engine, TaskState, Vars, Workflow,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -85,7 +86,7 @@ async fn sch_scher_do_action() {
         if e.is_key("act1") && e.is_state("created") {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            let action = Action::new(&e.proc_id, &e.id, "complete", &options);
+            let action = Action::new(&e.proc_id, &e.id, consts::EVT_NEXT, &options);
             s.do_action(&action).unwrap();
         }
     });

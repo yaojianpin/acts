@@ -1,5 +1,5 @@
 use crate::{
-    event::ActionState,
+    event::MessageState,
     sch::{Task, TaskState},
     Context, Vars,
 };
@@ -111,33 +111,33 @@ pub fn get_expr(text: &str) -> Option<String> {
     None
 }
 
-pub fn action_state_to_str(state: ActionState) -> String {
+pub fn message_state_to_str(state: MessageState) -> String {
     match state {
-        ActionState::None => "none".to_string(),
-        ActionState::Aborted => "aborted".to_string(),
-        ActionState::Backed => "backed".to_string(),
-        ActionState::Cancelled => "cancelled".to_string(),
-        ActionState::Completed => "completed".to_string(),
-        ActionState::Created => "created".to_string(),
-        ActionState::Skipped => "skipped".to_string(),
-        ActionState::Submitted => "submitted".to_string(),
-        ActionState::Error => "error".to_string(),
-        ActionState::Removed => "removed".to_string(),
+        MessageState::None => "none".to_string(),
+        MessageState::Aborted => "aborted".to_string(),
+        MessageState::Backed => "backed".to_string(),
+        MessageState::Cancelled => "cancelled".to_string(),
+        MessageState::Completed => "completed".to_string(),
+        MessageState::Created => "created".to_string(),
+        MessageState::Skipped => "skipped".to_string(),
+        MessageState::Submitted => "submitted".to_string(),
+        MessageState::Error => "error".to_string(),
+        MessageState::Removed => "removed".to_string(),
     }
 }
 
-pub fn str_to_action_state(s: &str) -> ActionState {
+pub fn str_to_message_state(s: &str) -> MessageState {
     match s {
-        "aborted" => ActionState::Aborted,
-        "backed" => ActionState::Backed,
-        "cancelled" => ActionState::Cancelled,
-        "completed" => ActionState::Completed,
-        "created" => ActionState::Created,
-        "skipped" => ActionState::Skipped,
-        "submitted" => ActionState::Submitted,
-        "error" => ActionState::Error,
-        "removed" => ActionState::Removed,
-        "none" | _ => ActionState::None,
+        "aborted" => MessageState::Aborted,
+        "backed" => MessageState::Backed,
+        "cancelled" => MessageState::Cancelled,
+        "completed" => MessageState::Completed,
+        "created" => MessageState::Created,
+        "skipped" => MessageState::Skipped,
+        "submitted" => MessageState::Submitted,
+        "error" => MessageState::Error,
+        "removed" => MessageState::Removed,
+        "none" | _ => MessageState::None,
     }
 }
 
@@ -146,37 +146,28 @@ pub fn state_to_str(state: TaskState) -> String {
         TaskState::Pending => "pending".to_string(),
         TaskState::Running => "running".to_string(),
         TaskState::Interrupt => "interrupt".to_string(),
-        TaskState::Success => "success".to_string(),
-        TaskState::Fail(s) => format!("fail({})", s),
-        TaskState::Skip => "skip".to_string(),
-        TaskState::Abort => "abort".to_string(),
+        TaskState::Completed => "completed".to_string(),
+        TaskState::Submitted => "submitted".to_string(),
+        TaskState::Backed => "backed".to_string(),
+        TaskState::Cancelled => "cancelled".to_string(),
+        TaskState::Error => "fail".to_string(),
+        TaskState::Skipped => "skip".to_string(),
+        TaskState::Aborted => "abort".to_string(),
         TaskState::Removed => "removed".to_string(),
         TaskState::None => "none".to_string(),
     }
 }
 
 pub fn str_to_state(str: &str) -> TaskState {
-    let re = regex::Regex::new(r"^(.*)\((.*)\)$").unwrap();
     match str {
         "none" => TaskState::None,
         "pending" => TaskState::Pending,
         "running" => TaskState::Running,
-        "success" => TaskState::Success,
-        "skip" => TaskState::Skip,
-        "abort" => TaskState::Abort,
+        "ok" => TaskState::Completed,
+        "skip" => TaskState::Skipped,
+        "abort" => TaskState::Aborted,
         "interrupt" => TaskState::Interrupt,
-        _ => {
-            let caps = re.captures(str);
-            if let Some(caps) = caps {
-                let name = caps.get(1).map_or("", |m| m.as_str());
-                let err = caps.get(2).map_or("", |m| m.as_str());
-
-                if name == "fail" {
-                    return TaskState::Fail(err.to_string());
-                }
-            }
-
-            TaskState::None
-        }
+        "fail" => TaskState::Error,
+        _ => TaskState::None,
     }
 }
