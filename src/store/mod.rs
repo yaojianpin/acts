@@ -7,7 +7,7 @@ mod store;
 mod tests;
 
 use data::*;
-pub use query::{Cond, Expr, Query};
+pub use query::*;
 #[allow(unused_imports)]
 pub use store::{Store, StoreKind};
 
@@ -33,7 +33,7 @@ pub trait DbSet: Send + Sync {
 ///
 /// # Example
 /// ```no_run
-/// use acts::{data::{Model, Proc, Task, Package}, DbSet, StoreAdapter};
+/// use acts::{data::{Model, Proc, Task, Package, Message}, DbSet, StoreAdapter};
 /// use std::sync::Arc;
 /// struct TestStore;
 /// impl StoreAdapter for TestStore {
@@ -50,6 +50,9 @@ pub trait DbSet: Send + Sync {
 ///     fn packages(&self) -> Arc<dyn DbSet<Item =Package>> {
 ///         todo!()
 ///     }
+///     fn messages(&self) -> Arc<dyn DbSet<Item =Message>> {
+///         todo!()
+///     }
 ///     fn init(&self) {}
 ///     fn close(&self) {}
 /// }
@@ -61,6 +64,6 @@ pub trait StoreAdapter: Send + Sync {
     fn procs(&self) -> Arc<dyn DbSet<Item = Proc>>;
     fn tasks(&self) -> Arc<dyn DbSet<Item = Task>>;
     fn packages(&self) -> Arc<dyn DbSet<Item = Package>>;
-
+    fn messages(&self) -> Arc<dyn DbSet<Item = Message>>;
     fn close(&self);
 }

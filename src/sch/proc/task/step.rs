@@ -49,11 +49,10 @@ impl ActTask for Step {
         }
 
         if let Some(pack_id) = &self.uses {
-            let pack = ctx.scher.cache().store().packages().find(pack_id)?;
+            let pack = ctx.runtime.cache().store().packages().find(pack_id)?;
             let script: String = String::from_utf8(pack.file_data).map_err(ActError::from)?;
             ctx.eval(&script)?;
         }
-
         let children = task.node.children();
         if children.len() > 0 {
             for child in &children {
@@ -86,7 +85,7 @@ impl ActTask for Step {
                 } else if task.state().is_pending() && task.is_ready() {
                     // resume task
                     task.set_state(TaskState::Running);
-                    ctx.scher.emitter().emit_task_event(task)?;
+                    ctx.runtime.scher().emit_task_event(task)?;
                     task.exec(&ctx)?;
                     is_next = true;
                 }
@@ -126,7 +125,7 @@ impl ActTask for Step {
                 if task.state().is_pending() && task.is_ready() {
                     // resume task
                     task.set_state(TaskState::Running);
-                    ctx.scher.emitter().emit_task_event(task)?;
+                    ctx.runtime.scher().emit_task_event(task)?;
                     task.exec(&ctx)?;
                     return Ok(false);
                 }

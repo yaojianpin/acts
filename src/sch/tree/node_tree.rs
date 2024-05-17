@@ -101,7 +101,7 @@ impl NodeTree {
 
                 println!(
                     "{} id:{} name={}  next={}",
-                    node.r#type(),
+                    node.typ(),
                     node.id(),
                     node.name(),
                     next,

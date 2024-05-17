@@ -1,4 +1,4 @@
-mod emitter;
+mod channel;
 mod executor;
 mod extender;
 mod manager;
@@ -6,7 +6,7 @@ mod manager;
 #[cfg(test)]
 mod tests;
 
-pub use emitter::Emitter;
+pub use channel::{Channel, ChannelOptions};
 pub use executor::Executor;
 pub use extender::Extender;
 pub use manager::Manager;

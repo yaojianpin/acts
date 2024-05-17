@@ -3,10 +3,7 @@ use acts::{Engine, Vars, Workflow};
 #[tokio::main]
 async fn main() {
     let engine = Engine::new();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-    let s2 = sig.clone();
-
+    let (s1, s2, sig) = engine.signal(()).triple();
     let executor = engine.executor();
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text).unwrap();
@@ -25,7 +22,7 @@ async fn main() {
             "on_workflow_complete: state={} cost={}ms output={:?}",
             e.state,
             e.cost(),
-            e.outputs()
+            e.outputs
         );
         s2.close();
     });

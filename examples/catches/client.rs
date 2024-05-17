@@ -39,7 +39,7 @@ impl Client {
     pub fn init(executor: &Executor, e: &Event<Message>) -> Result<ActionResult> {
         let mut vars = Vars::new();
         vars.insert("uid".to_string(), json!("u1"));
-        executor.complete(&e.proc_id, &e.id, &vars)
+        executor.complete(&e.pid, &e.tid, &vars)
     }
     pub fn act1(executor: &Executor, e: &Event<Message>) -> Result<ActionResult> {
         let mut vars = Vars::new();
@@ -55,25 +55,25 @@ impl Client {
         // vars.insert("error".to_string(), json!({ "ecode": "the_other_err_code" }));
 
         // cause the error
-        executor.error(&e.proc_id, &e.id, &vars)
+        executor.error(&e.pid, &e.tid, &vars)
     }
     pub fn catch1(executor: &Executor, e: &Event<Message>) -> Result<ActionResult> {
         let mut vars = Vars::new();
         vars.insert("uid".to_string(), json!("u3"));
         vars.insert("error".to_string(), json!({ "ecode":"err1"}));
 
-        executor.complete(&e.proc_id, &e.id, &vars)
+        executor.complete(&e.pid, &e.tid, &vars)
     }
     pub fn catch2(executor: &Executor, e: &Event<Message>) -> Result<ActionResult> {
         let mut vars = Vars::new();
         vars.insert("uid".to_string(), json!("u4"));
 
-        executor.complete(&e.proc_id, &e.id, &vars)
+        executor.complete(&e.pid, &e.tid, &vars)
     }
 
     pub fn catch_others(executor: &Executor, e: &Event<Message>) -> Result<ActionResult> {
         let mut vars = Vars::new();
         vars.insert("uid".to_string(), json!("u5"));
-        executor.complete(&e.proc_id, &e.id, &vars)
+        executor.complete(&e.pid, &e.tid, &vars)
     }
 }

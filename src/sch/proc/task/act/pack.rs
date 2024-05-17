@@ -10,7 +10,7 @@ impl ActTask for Pack {
 
     fn run(&self, ctx: &Context) -> Result<()> {
         let task = ctx.task();
-        let pack = ctx.scher.cache().store().packages().find(&self.uses)?;
+        let pack = ctx.runtime.cache().store().packages().find(&self.uses)?;
         let script: String = String::from_utf8(pack.file_data).map_err(ActError::from)?;
         ctx.eval(&script)?;
 

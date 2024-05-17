@@ -10,38 +10,17 @@ impl Env {
 
 #[rquickjs::module(rename_vars = "camelCase")]
 mod env {
-    use crate::{env::value::ActValue, Context, Vars};
+    use crate::{env::value::ActValue, Context};
 
     #[rquickjs::function]
     pub fn get(name: String) -> Option<ActValue> {
-        Context::with(|ctx| {
-            // find the env from env local firstly
-            if let Some(v) = ctx.proc.with_env_local(|vars| vars.get(&name)) {
-                let v = ActValue::new(v);
-                return Some(v);
-            }
-
-            // then get the value from global env
-            if let Some(v) = ctx.env.get(&name) {
-                let v = ActValue::new(v);
-                return Some(v);
-            }
-            None
-        })
+        Context::with(|ctx| ctx.get_env(&name).map(|v| ActValue::new(v)))
     }
 
     #[rquickjs::function]
     pub fn set(name: String, value: ActValue) {
         Context::with(|ctx| {
-            let vars = Vars::new().with(&name, value.inner());
-
-            // in context, the global env is not writable
-            // just set the value to local env of the proc
-            ctx.proc.with_env_local_mut(|data| {
-                for (k, v) in vars.iter() {
-                    data.set(k, v.clone());
-                }
-            });
+            ctx.set_env(&name, value.inner());
         })
     }
 }

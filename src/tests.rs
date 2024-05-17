@@ -46,7 +46,7 @@ async fn engine_event_on_start() {
         .with_step(|step| step.with_act(Act::req(|act| act.with_id("test"))));
 
     engine.emitter().on_start(move |e| {
-        s.send(e.mid.clone());
+        s.send(e.model.id.clone());
     });
 
     let executor = engine.executor();
@@ -70,7 +70,7 @@ async fn engine_event_on_complete() {
         .with_step(|step| step.with_id("step1"));
 
     engine.emitter().on_complete(move |e| {
-        s1.send(e.mid == mid);
+        s1.send(e.model.id == mid);
     });
 
     let executor = engine.executor();
@@ -95,7 +95,7 @@ async fn engine_event_on_error() {
     let sig = engine.signal(false);
     let s1 = sig.clone();
     engine.emitter().on_error(move |e| {
-        s1.send(e.mid == mid);
+        s1.send(e.model.id == mid);
     });
 
     engine.emitter().on_message(move |e| {
@@ -104,7 +104,7 @@ async fn engine_event_on_error() {
         options.insert("error".to_string(), json!({ "ecode": "err1" }));
 
         if e.is_key("act1") && e.is_state("created") {
-            e.do_action(&e.proc_id, &e.id, "error", &options).unwrap();
+            e.do_action(&e.pid, &e.tid, "error", &options).unwrap();
         }
     });
 
@@ -180,4 +180,18 @@ async fn engine_build_log_level() {
 async fn engine_build_tick_interval_secs() {
     let engine = Builder::new().tick_interval_secs(10).build();
     assert_eq!(engine.config().tick_interval_secs, 10)
+}
+
+#[tokio::test]
+async fn engine_build_max_message_retry_times() {
+    let engine = Builder::new().max_message_retry_times(100).build();
+    assert_eq!(engine.config().max_message_retry_times, 100)
+}
+
+#[tokio::test]
+async fn engine_drop() {
+    let engine = Engine::new();
+    drop(engine);
+    let engine = Engine::new();
+    drop(engine)
 }

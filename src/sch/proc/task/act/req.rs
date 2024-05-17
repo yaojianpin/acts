@@ -12,7 +12,6 @@ impl ActTask for Req {
         for s in self.on_created.iter() {
             task.add_hook_stmts(TaskLifeCycle::Created, s);
         }
-
         for s in self.on_completed.iter() {
             task.add_hook_stmts(TaskLifeCycle::Completed, s);
         }
@@ -29,20 +28,6 @@ impl ActTask for Req {
 
         task.set_state(TaskState::Interrupt);
         Ok(())
-    }
-
-    fn run(&self, ctx: &Context) -> Result<()> {
-        let task = ctx.task();
-        // when resuming the pending task, the current state is running
-        // for general act task, reset the state to interrupt
-        if task.state().is_running() {
-            task.set_state(TaskState::Interrupt);
-        }
-        Ok(())
-    }
-
-    fn next(&self, _ctx: &Context) -> Result<bool> {
-        Ok(false)
     }
 
     fn review(&self, ctx: &Context) -> Result<bool> {

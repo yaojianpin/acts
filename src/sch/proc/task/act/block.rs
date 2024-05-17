@@ -32,7 +32,7 @@ impl ActTask for Block {
                 } else if task.state().is_pending() && task.is_ready() {
                     // resume task
                     task.set_state(TaskState::Running);
-                    ctx.scher.emitter().emit_task_event(task)?;
+                    ctx.runtime.scher().emit_task_event(task)?;
 
                     task.exec(&ctx)?;
                     is_next = true;
@@ -58,7 +58,6 @@ impl ActTask for Block {
                 return Ok(true);
             }
         }
-
         Ok(is_next)
     }
 

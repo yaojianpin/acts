@@ -5,11 +5,11 @@ mod step;
 mod workflow;
 
 use crate::{
-    engine::Runtime,
+    data::{self, MessageStatus},
     event::{EventAction, Model},
     sch::{
         tree::{Node, NodeContent},
-        Context, Proc, TaskState,
+        Context, Proc, Runtime, TaskState,
     },
     utils::{self, consts},
     Act, ActError, ActTask, Catch, Error, Message, NodeKind, Req, Result, ShareLock, Timeout, Vars,
@@ -27,13 +27,10 @@ use tracing::{debug, info};
 #[derive(Clone)]
 pub struct Task {
     /// proc id
-    pub proc_id: String,
+    pub pid: String,
 
     /// task id
     pub id: String,
-
-    /// task node
-    pub node: Arc<Node>,
 
     pub timestamp: i64,
 
@@ -54,17 +51,21 @@ pub struct Task {
 
     proc: Arc<Proc>,
 
+    node: Arc<Node>,
+
     // lifecycle hooks
     hooks: ShareLock<HashMap<TaskLifeCycle, Vec<StatementBatch>>>,
-    sync: Arc<spin::Mutex<usize>>,
+
+    runtime: Arc<Runtime>,
+    // sync: Arc<std::sync::Mutex<usize>>,
 }
 
 impl Task {
-    pub fn new(proc: &Arc<Proc>, task_id: &str, node: Arc<Node>) -> Self {
+    pub fn new(proc: &Arc<Proc>, tid: &str, node: Arc<Node>, rt: &Arc<Runtime>) -> Self {
         let task = Self {
-            proc_id: proc.id(),
-            id: task_id.to_string(),
-            node: node.clone(),
+            pid: proc.id().to_string(),
+            id: tid.to_string(),
+            node,
             data: Arc::new(RwLock::new(Vars::new())),
             state: Arc::new(RwLock::new(TaskState::None)),
             err: Arc::new(RwLock::new(None)),
@@ -73,15 +74,29 @@ impl Task {
             prev: Arc::new(RwLock::new(None)),
             timestamp: utils::time::timestamp(),
             proc: proc.clone(),
+
             hooks: Arc::new(RwLock::new(HashMap::new())),
-            sync: Arc::new(spin::Mutex::new(0)),
+            runtime: rt.clone(),
+            // sync: Arc::new(std::sync::Mutex::new(0)),
         };
 
         task
     }
 
+    pub fn unique_id(&self) -> String {
+        format!("{}:{}", self.pid, self.id)
+    }
+
     pub fn proc(&self) -> &Arc<Proc> {
         &self.proc
+    }
+
+    pub(crate) fn runtime(&self) -> &Arc<Runtime> {
+        &self.runtime
+    }
+
+    pub fn node(&self) -> &Arc<Node> {
+        &self.node
     }
 
     pub fn start_time(&self) -> i64 {
@@ -94,10 +109,6 @@ impl Task {
     pub fn state(&self) -> TaskState {
         let state = &*self.state.read().unwrap();
         state.clone()
-    }
-
-    pub fn task_id(&self) -> String {
-        self.id.clone()
     }
 
     pub fn cost(&self) -> i64 {
@@ -120,10 +131,7 @@ impl Task {
     }
 
     pub fn create_context(self: &Arc<Self>) -> Context {
-        Runtime::with(move |runtime| {
-            self.proc
-                .create_context(self, runtime.scher(), runtime.env())
-        })
+        self.proc.create_context(self)
     }
 
     pub fn create_message(self: &Arc<Self>) -> Message {
@@ -163,12 +171,13 @@ impl Task {
         }
 
         Message {
-            id: self.id.clone(),
+            id: utils::longid(),
+            tid: self.id.clone(),
             name: self.node.content.name(),
-            r#type: self.node.r#type(),
+            r#type: self.node.typ(),
             source: self.node.kind().to_string(),
             state: self.state().into(),
-            proc_id: self.proc_id.clone(),
+            pid: self.pid.clone(),
             key: key.to_string(),
             tag: self.node.tag().to_string(),
 
@@ -182,6 +191,7 @@ impl Task {
             outputs: self.outputs(),
             start_time: self.start_time(),
             end_time: self.end_time(),
+            retry_times: 0,
         }
     }
 
@@ -232,8 +242,18 @@ impl Task {
 
     pub fn outputs(self: &Arc<Self>) -> Vars {
         let ctx = self.create_context();
-        let mut outputs = utils::fill_outputs(&self.node.content.outputs(), &ctx);
 
+        let mut outputs = self.node.content.outputs();
+
+        // sets the default outputs
+        // sets once uses in each outputs of the task
+        if let Some(values) = ctx.get_env::<Vec<String>>(consts::ACT_DEFAULT_OUTPUTS) {
+            for v in &values {
+                outputs.set(v, json!(null));
+            }
+        }
+
+        let mut outputs = utils::fill_outputs(&outputs, &ctx);
         // The task(Workflow) can also set the outputs by expose act
         // These data is stored in consts::ACT_OUTPUTS
         // merge the expose data with the outputs
@@ -252,9 +272,9 @@ impl Task {
 
     pub fn set_state(&self, state: TaskState) {
         if state.is_completed() {
-            self.set_end_time(utils::time::time());
-        } else if state.is_running() || state.is_interrupted() {
-            self.set_start_time(utils::time::time());
+            self.set_end_time(utils::time::time_millis());
+        } else if state.is_created() {
+            self.set_start_time(utils::time::time_millis());
         }
         *self.state.write().unwrap() = state.clone();
 
@@ -294,18 +314,18 @@ impl Task {
 
     pub fn is_act(&self, v: &str) -> bool {
         if self.node.kind() == NodeKind::Act {
-            return self.node.r#type() == v;
+            return self.node.typ() == v;
         }
         false
     }
 
     pub fn exec(self: &Arc<Self>, ctx: &Context) -> Result<()> {
+        // let _lock = self.sync.lock().unwrap();
         debug!("exec task={:?}", ctx.task());
-        let _ = self.sync.lock();
         if self.state().is_completed() {
             return Err(ActError::Runtime(format!(
-                "task({}) is already completed",
-                self.id
+                "task({}:{}) is already completed",
+                self.pid, self.id
             )));
         }
         self.init(ctx)?;
@@ -315,7 +335,7 @@ impl Task {
     }
 
     pub fn update(self: &Arc<Self>, ctx: &Context) -> Result<()> {
-        let _ = self.sync.lock();
+        // let _lock = self.sync.lock().unwrap();
         self.update_no_lock(ctx)
     }
 
@@ -324,7 +344,9 @@ impl Task {
         let action = ctx
             .action()
             .ok_or(ActError::Action(format!("cannot find action in context")))?;
-        match action {
+
+        let event = EventAction::parse(&action.event)?;
+        match event {
             EventAction::Push => {
                 let act = Act::Req(Req {
                     id: ctx
@@ -351,8 +373,8 @@ impl Task {
             EventAction::Next => {
                 if self.state().is_completed() {
                     return Err(ActError::Action(format!(
-                        "task '{}' is already completed",
-                        self.id
+                        "task '{}:{}' is already completed",
+                        self.pid, self.id
                     )));
                 }
                 self.set_state(TaskState::Completed);
@@ -361,8 +383,8 @@ impl Task {
             EventAction::Back => {
                 if self.state().is_completed() {
                     return Err(ActError::Action(format!(
-                        "task '{}' is already completed",
-                        self.id
+                        "task '{}:{}' is already completed",
+                        self.pid, self.id
                     )));
                 }
                 let nid = ctx
@@ -434,8 +456,8 @@ impl Task {
             EventAction::Abort => {
                 if self.state().is_completed() {
                     return Err(ActError::Action(format!(
-                        "task '{}' is already completed",
-                        self.id
+                        "task '{}:{}' is already completed",
+                        self.pid, self.id
                     )));
                 }
                 ctx.abort_task(&ctx.task())?;
@@ -443,8 +465,8 @@ impl Task {
             EventAction::Skip => {
                 if self.state().is_completed() {
                     return Err(ActError::Action(format!(
-                        "task '{}' is already completed",
-                        self.id
+                        "task '{}:{}' is already completed",
+                        self.pid, self.id
                     )));
                 }
 
@@ -480,8 +502,8 @@ impl Task {
                 let task = &ctx.task();
                 if task.state().is_completed() {
                     return Err(ActError::Action(format!(
-                        "task '{}' is already completed",
-                        task.id
+                        "task '{}:{}' is already completed",
+                        task.pid, task.id
                     )));
                 }
                 let parent = task.parent().ok_or(ActError::Action(format!(
@@ -499,6 +521,15 @@ impl Task {
                 task.set_err(&err);
                 task.error(ctx)?;
             }
+        };
+
+        if event != EventAction::Push {
+            // update the message status after doing action
+            ctx.runtime.cache().store().set_message_with(
+                &action.pid,
+                &action.tid,
+                MessageStatus::Completed,
+            )?;
         }
         Ok(())
     }
@@ -546,7 +577,7 @@ impl Task {
     pub fn resume(self: &Arc<Self>, ctx: &Context) -> Result<()> {
         if self.is_ready() {
             self.set_state(TaskState::Running);
-            ctx.scher.emitter().emit_task_event(self)?;
+            ctx.runtime.scher().emit_task_event(self)?;
             self.exec(&ctx)?;
         }
 
@@ -587,8 +618,8 @@ impl Task {
     pub fn run_hooks(&self, ctx: &Context) -> Result<()> {
         let state = self.state();
         match state {
-            TaskState::None => {}
-            TaskState::Pending | TaskState::Running | TaskState::Interrupt => {
+            TaskState::None | TaskState::Running => {}
+            TaskState::Ready | TaskState::Pending | TaskState::Interrupt => {
                 self.run_hooks_by(TaskLifeCycle::Created, ctx)?;
                 if self.is_kind(NodeKind::Act) {
                     if let Some(task) = self.parent() {
@@ -654,6 +685,26 @@ impl Task {
 
     pub(crate) fn hooks(&self) -> HashMap<TaskLifeCycle, Vec<StatementBatch>> {
         self.hooks.read().unwrap().clone()
+    }
+
+    pub fn into_data(self: &Arc<Self>) -> Result<data::Task> {
+        let id = utils::Id::new(&self.pid, &self.id);
+        Ok(data::Task {
+            id: id.id(),
+            prev: self.prev(),
+            name: self.node.content.name(),
+            kind: self.node.typ(),
+            pid: self.pid.clone(),
+            tid: self.id.clone(),
+            node_data: self.node.to_string(),
+            state: self.state().into(),
+            data: self.data().to_string(),
+            start_time: self.start_time(),
+            end_time: self.end_time(),
+            hooks: serde_json::to_string(&self.hooks()).map_err(ActError::from)?,
+            timestamp: self.timestamp,
+            err: self.err().map(|err| err.to_string()),
+        })
     }
 
     /// check if the task includes act
@@ -725,16 +776,13 @@ impl ActTask for Arc<Task> {
         ctx.set_task(self);
         if ctx.task().state().is_none() {
             ctx.prepare();
+            ctx.task().set_state(TaskState::Ready);
             match &self.node.content {
                 NodeContent::Workflow(workflow) => workflow.init(ctx)?,
                 NodeContent::Branch(branch) => branch.init(ctx)?,
                 NodeContent::Step(step) => step.init(ctx)?,
                 NodeContent::Act(act) => act.init(ctx)?,
             }
-            if ctx.task().state().is_none() {
-                self.set_state(TaskState::Running);
-            }
-
             ctx.emit_task(&ctx.task())?;
         }
 
@@ -742,13 +790,16 @@ impl ActTask for Arc<Task> {
     }
 
     fn run(&self, ctx: &Context) -> Result<()> {
-        if ctx.task().state().is_running() {
+        let task = ctx.task();
+        if task.state().is_ready() {
+            task.set_state(TaskState::Running);
             match &self.node.content {
                 NodeContent::Workflow(workflow) => workflow.run(ctx),
                 NodeContent::Branch(branch) => branch.run(ctx),
                 NodeContent::Step(step) => step.run(ctx),
                 NodeContent::Act(act) => act.run(ctx),
             }?;
+            ctx.emit_task(&ctx.task())?;
         }
 
         Ok(())
@@ -791,7 +842,7 @@ impl ActTask for Arc<Task> {
             NodeContent::Act(data) => data.review(ctx)?,
         };
 
-        info!("is_review:{} task={:?}", is_review, ctx.task());
+        debug!("is_review:{} task={:?}", is_review, ctx.task());
         if self.state().is_completed() {
             ctx.emit_task(self)?;
         }
@@ -823,8 +874,8 @@ impl std::fmt::Debug for Task {
             .field("id", &self.id)
             .field("name", &self.node.name())
             .field("type", &self.node.kind())
-            .field("proc_id", &self.proc_id)
-            .field("node_id", &self.node.id())
+            .field("pid", &self.pid)
+            .field("nid", &self.node.id())
             .field("state", &self.state())
             .field("start_time", &self.start_time())
             .field("end_time", &self.end_time())

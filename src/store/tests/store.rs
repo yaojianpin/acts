@@ -1,26 +1,35 @@
 use crate::{
     sch::NodeKind,
-    store::{data, Cond, DbSet, Expr, Store, StoreKind},
+    store::{data, query::Expr, Cond, DbSet, Store, StoreKind},
     utils, Query, StoreAdapter, TaskState, Workflow,
 };
-use data::{Proc, Task};
+use data::{Message, MessageStatus, Package, Proc, Task};
+use serde_json::json;
 use std::sync::Arc;
 use tokio::sync::OnceCell;
 
-static STORE: OnceCell<Store> = OnceCell::const_new();
-async fn init() -> Store {
-    let s = Store::local("test_data", "test.db");
-    s
+static STORE: OnceCell<Arc<Store>> = OnceCell::const_new();
+async fn init() -> Arc<Store> {
+    #[cfg(feature = "store")]
+    {
+        return Arc::new(Store::local("test_data", "test.db"));
+    }
+
+    #[cfg(not(feature = "store"))]
+    Store::default()
 }
 
-async fn store() -> &'static Store {
+async fn store() -> &'static Arc<Store> {
     STORE.get_or_init(init).await
 }
 
 #[tokio::test]
-async fn store_local() {
+async fn store_kind() {
     let store = store().await;
+    #[cfg(feature = "store")]
     assert_eq!(store.kind(), StoreKind::Local);
+    #[cfg(not(feature = "store"))]
+    assert_eq!(store.kind(), StoreKind::Memory);
 }
 
 #[tokio::test]
@@ -236,9 +245,9 @@ async fn store_task_create() {
         name: "test".to_string(),
         prev: None,
         kind: NodeKind::Step.to_string(),
-        proc_id: pid.clone(),
-        task_id: tid.clone(),
-        node_id: nid,
+        pid: pid.clone(),
+        tid: tid.clone(),
+        node_data: nid,
         state: TaskState::None.to_string(),
         start_time: 0,
         end_time: 0,
@@ -267,9 +276,9 @@ async fn store_task_update() {
         name: "test".to_string(),
         prev: None,
         kind: NodeKind::Step.to_string(),
-        proc_id: pid.clone(),
-        task_id: tid.clone(),
-        node_id: nid,
+        pid: pid.clone(),
+        tid: tid.clone(),
+        node_data: nid,
         state: TaskState::None.to_string(),
         start_time: 0,
         end_time: 0,
@@ -302,9 +311,9 @@ async fn store_task_remove() {
         name: "test".to_string(),
         prev: None,
         kind: NodeKind::Step.to_string(),
-        proc_id: pid.clone(),
-        task_id: tid.clone(),
-        node_id: nid,
+        pid: pid.clone(),
+        tid: tid.clone(),
+        node_data: nid,
         state: TaskState::None.to_string(),
         start_time: 0,
         end_time: 0,
@@ -318,6 +327,251 @@ async fn store_task_remove() {
     store.tasks().delete(&task.id).expect("remove proc");
 
     let ret = store.tasks().find(&task.id);
+    assert!(ret.is_err());
+}
+
+#[tokio::test]
+async fn store_message_create() {
+    let store = store().await;
+
+    let pid = utils::longid();
+    let tid = utils::shortid();
+    let msg = Message {
+        id: format!("{pid}:{tid}"),
+        name: "test".to_string(),
+        pid: pid.clone(),
+        tid: tid.clone(),
+        state: "created".to_string(),
+        start_time: 0,
+        end_time: 0,
+        r#type: "step".to_string(),
+        source: "step".to_string(),
+        model: json!({ "id": "m1"}).to_string(),
+        key: "test".to_string(),
+        inputs: json!({}).to_string(),
+        outputs: json!({}).to_string(),
+        tag: "tag1".to_string(),
+        emit_id: "test1".to_string(),
+        emit_pattern: "*:*:*:*".to_string(),
+        emit_count: 0,
+        create_time: 0,
+        update_time: 0,
+        retry_times: 0,
+        status: MessageStatus::Created,
+    };
+
+    store.messages().create(&msg).expect("create message");
+
+    let id = utils::Id::new(&pid, &tid);
+    let ret = store.messages().find(&id.id());
+    assert!(ret.is_ok());
+}
+
+#[tokio::test]
+async fn store_message_query() {
+    let store = store().await;
+
+    let pid = utils::longid();
+    let tid = utils::shortid();
+    let msg = Message {
+        id: format!("{pid}:{tid}"),
+        name: "test".to_string(),
+        pid: pid.clone(),
+        tid: tid.clone(),
+        state: "created".to_string(),
+        start_time: 0,
+        end_time: 0,
+        r#type: "step".to_string(),
+        source: "step".to_string(),
+        model: json!({ "id": "m1"}).to_string(),
+        key: "test".to_string(),
+        inputs: json!({}).to_string(),
+        outputs: json!({}).to_string(),
+        tag: "tag1".to_string(),
+        emit_id: "test1".to_string(),
+        emit_pattern: "*:*:*:*".to_string(),
+        emit_count: 0,
+        create_time: 0,
+        update_time: 0,
+        retry_times: 0,
+        status: MessageStatus::Created,
+    };
+
+    store.messages().create(&msg).unwrap();
+
+    let id = utils::Id::new(&pid, &tid);
+    let q = Query::new().push(Cond::and().push(Expr::eq("id", id.id())));
+    let ret = store.messages().query(&q);
+    assert!(ret.is_ok());
+}
+
+#[tokio::test]
+async fn store_message_update() {
+    let store = store().await;
+
+    let pid = utils::longid();
+    let tid = utils::shortid();
+    let msg = Message {
+        id: format!("{pid}:{tid}"),
+        name: "test".to_string(),
+        pid: pid.clone(),
+        tid: tid.clone(),
+        state: "created".to_string(),
+        start_time: 0,
+        end_time: 0,
+        r#type: "step".to_string(),
+        source: "step".to_string(),
+        model: json!({ "id": "m1"}).to_string(),
+        key: "test".to_string(),
+        inputs: json!({}).to_string(),
+        outputs: json!({}).to_string(),
+        tag: "tag1".to_string(),
+        emit_id: "test1".to_string(),
+        emit_pattern: "*:*:*:*".to_string(),
+        emit_count: 0,
+        create_time: 0,
+        update_time: 0,
+        retry_times: 0,
+        status: MessageStatus::Created,
+    };
+
+    store.messages().create(&msg).unwrap();
+
+    let id = utils::Id::new(&pid, &tid);
+    let mut msg = store.messages().find(&id.id()).unwrap();
+    msg.state = "completed".to_string();
+    msg.emit_count = 1;
+    msg.status = MessageStatus::Completed;
+    store.messages().update(&msg).unwrap();
+
+    let msg2 = store.messages().find(&id.id()).unwrap();
+    assert_eq!(msg2.state, "completed");
+    assert_eq!(msg2.emit_count, 1);
+    assert_eq!(msg2.status, MessageStatus::Completed);
+}
+
+#[tokio::test]
+async fn store_message_remove() {
+    let store = store().await;
+
+    let pid = utils::longid();
+    let tid = utils::shortid();
+    let msg = Message {
+        id: format!("{pid}:{tid}"),
+        name: "test".to_string(),
+        pid: pid.clone(),
+        tid: tid.clone(),
+        state: "created".to_string(),
+        start_time: 0,
+        end_time: 0,
+        r#type: "step".to_string(),
+        source: "step".to_string(),
+        model: json!({ "id": "m1"}).to_string(),
+        key: "test".to_string(),
+        inputs: json!({}).to_string(),
+        outputs: json!({}).to_string(),
+        tag: "tag1".to_string(),
+        emit_id: "test1".to_string(),
+        emit_pattern: "*:*:*:*".to_string(),
+        emit_count: 0,
+        create_time: 0,
+        update_time: 0,
+        retry_times: 0,
+        status: MessageStatus::Created,
+    };
+
+    store.messages().create(&msg).unwrap();
+    store.messages().delete(&msg.id).unwrap();
+
+    let ret = store.messages().find(&msg.id);
+    assert!(ret.is_err());
+}
+
+#[tokio::test]
+async fn store_package_create() {
+    let store = store().await;
+
+    let id = utils::longid();
+    let package = Package {
+        id,
+        name: "test package".to_string(),
+        size: 100,
+        file_data: vec![0x01, 0x02],
+        create_time: 0,
+        update_time: 0,
+        timestamp: 0,
+    };
+
+    store.packages().create(&package).unwrap();
+    let ret = store.packages().find(&package.id);
+    assert!(ret.is_ok());
+}
+
+#[tokio::test]
+async fn store_package_query() {
+    let store = store().await;
+
+    let id = utils::longid();
+    let package = Package {
+        id,
+        name: "test package".to_string(),
+        size: 100,
+        file_data: vec![0x01, 0x02],
+        create_time: 0,
+        update_time: 0,
+        timestamp: 0,
+    };
+    store.packages().create(&package).unwrap();
+    let q = Query::new().push(Cond::and().push(Expr::eq("id", package.id)));
+    let ret = store.packages().query(&q);
+    assert!(ret.is_ok());
+}
+
+#[tokio::test]
+async fn store_package_update() {
+    let store = store().await;
+
+    let id = utils::longid();
+    let package = Package {
+        id,
+        name: "test package".to_string(),
+        size: 100,
+        file_data: vec![0x01, 0x02],
+        create_time: 0,
+        update_time: 0,
+        timestamp: 0,
+    };
+    store.packages().create(&package).unwrap();
+    let mut p = store.packages().find(&package.id).unwrap();
+    p.name = "my name".to_string();
+    p.size = 200;
+    p.file_data = vec![0x02, 0x03];
+    store.packages().update(&p).unwrap();
+
+    let p2 = store.packages().find(&package.id).unwrap();
+    assert_eq!(p2.name, "my name");
+    assert_eq!(p2.size, 200);
+    assert_eq!(p2.file_data, vec![0x02, 0x03]);
+}
+
+#[tokio::test]
+async fn store_package_remove() {
+    let store = store().await;
+
+    let id = utils::longid();
+    let package = Package {
+        id,
+        name: "test package".to_string(),
+        size: 100,
+        file_data: vec![0x01, 0x02],
+        create_time: 0,
+        update_time: 0,
+        timestamp: 0,
+    };
+    store.packages().create(&package).unwrap();
+    store.packages().delete(&package.id).unwrap();
+
+    let ret = store.packages().find(&package.id);
     assert!(ret.is_err());
 }
 
@@ -337,7 +591,6 @@ fn create_proc(id: &str, state: TaskState, model: &Workflow) -> Proc {
         end_time: 0,
         timestamp: utils::time::timestamp(),
         model: model.to_json().unwrap(),
-        root_tid: "".to_string(),
         env_local: "{}".to_string(),
         err: None,
     }
@@ -362,7 +615,9 @@ impl StoreAdapter for TestStore {
     fn packages(&self) -> Arc<dyn DbSet<Item = data::Package>> {
         todo!()
     }
-
+    fn messages(&self) -> Arc<dyn DbSet<Item = data::Message>> {
+        todo!()
+    }
     fn init(&self) {}
     fn close(&self) {}
 }

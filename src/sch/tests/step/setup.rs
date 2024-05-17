@@ -216,7 +216,7 @@ async fn sch_step_setup_chain() {
         println!("message: {:?}", e.inner());
         if e.is_key("act1") && e.is_state("created") {
             rx.update(|data| data.push(e.inputs.get::<String>(consts::ACT_VALUE).unwrap()));
-            e.do_action(&e.proc_id, &e.id, consts::EVT_NEXT, &Vars::new())
+            e.do_action(&e.pid, &e.tid, consts::EVT_NEXT, &Vars::new())
                 .unwrap();
         }
     });
@@ -248,7 +248,7 @@ async fn sch_step_setup_pack() {
         println!("message: {:?}", e.inner());
         if e.is_type("msg") {
             rx.update(|data| data.push(e.key.clone()));
-            e.do_action(&e.proc_id, &e.id, consts::EVT_NEXT, &Vars::new())
+            e.do_action(&e.pid, &e.tid, consts::EVT_NEXT, &Vars::new())
                 .unwrap();
         }
     });

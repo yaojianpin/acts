@@ -10,7 +10,6 @@ pub struct Proc {
     pub end_time: i64,
     pub timestamp: i64,
     pub model: String,
-    pub root_tid: String,
     pub env_local: String,
     pub err: Option<String>,
 }

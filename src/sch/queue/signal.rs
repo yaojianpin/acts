@@ -14,8 +14,9 @@ impl std::fmt::Debug for Signal {
             Self::Terminal => write!(f, "Terminal"),
             Self::Task(t) => f
                 .debug_tuple("Task")
-                .field(&t.node.kind())
-                .field(&t.node.content.name())
+                .field(&t.node().kind())
+                .field(&t.node().content.name())
+                .field(&t.pid)
                 .field(&t.id)
                 .finish(),
         }

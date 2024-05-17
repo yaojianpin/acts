@@ -1,4 +1,8 @@
 # Acts workflow engine
+[![Build](https://github.com/yaojianpin/acts/actions/workflows/rust.yml/badge.svg)](https://github.com/yaojianpin/acts/actions?workflow=rust)
+
+[![Test](https://github.com/yaojianpin/acts/actions/workflows/test.yml/badge.svg)](https://github.com/yaojianpin/acts/actions?workflow=test)
+
 `acts` is a fast, tiny, extensiable workflow engine, which provides the abilities to execute workflow based on yml model.
 
 The yml workflow model is not as same as the tranditional workflow. such as `bpmn`.  The yml format is inspired by Github actions.  The main point of this workflow is to create a top abstraction to run the workflow logic and interact with the client via `act` node.
@@ -10,36 +14,16 @@ This workflow engine focus on the workflow logics itself and message distributio
 ### Fast
 Uses rust to create the lib, there is no virtual machine, no db dependencies. It also provides the feature `store` to enable the local store. 
 
+1. bechmark with memory store
 ```txt,no_run
-load                    time:   [67.642 µs 76.809 µs 87.116 µs]
-                        change: [-11.599% +0.4158% +14.468%] (p = 0.94 > 0.05)
-                        No change in performance detected.
-Found 10 outliers among 100 measurements (10.00%)
-  10 (10.00%) high mild
-
-deploy                  time:   [14.454 µs 15.247 µs 16.115 µs]
-                        change: [-12.299% -3.4100% +6.0857%] (p = 0.50 > 0.05)
-                        No change in performance detected.
-Found 3 outliers among 100 measurements (3.00%)
-  3 (3.00%) high mild
-
-start                   time:   [561.64 µs 568.94 µs 576.65 µs]
-                        change: [-2.1262% -0.2373% +1.7080%] (p = 0.81 > 0.05)
-                        No change in performance detected.
-Found 6 outliers among 100 measurements (6.00%)
-  5 (5.00%) high mild
-  1 (1.00%) high severe
-
-act                     time:   [86.485 µs 87.823 µs 89.289 µs]
-                        change: [-36.744% -18.558% -3.3112%] (p = 0.13 > 0.05)
-                        No change in performance detected.
-Found 4 outliers among 100 measurements (4.00%)
-  3 (3.00%) high mild
-  1 (1.00%) high severe
+load                    time:   [66.438 µs 75.248 µs 84.207 µs]
+deploy                  time:   [6.612 µs 17.356 µs 18.282 µs]
+start                   time:   [69.952 µs 70.628 µs 71.287 µs]
+act                     time:   [7.9698 ms 8.5588 ms 9.0608 ms]
 ```
 
 ### Tiny
-The lib size is only 4.2mb (no store), you can use Adapter to create external store.
+The lib size is only 3mb (no store), you can use Adapter to create external store.
 
 ### Extensiable
 Supports for extending the plugin
@@ -86,11 +70,11 @@ async fn main() {
     });
 
     emitter.on_complete(|e| {
-        println!("outputs: {:?} end_time: {}", e.outputs(), e.end_time);
+        println!("outputs: {:?} end_time: {}", e.outputs, e.end_time);
     });
 
     emitter.on_error(|e| {
-        println!("error on proc id: {} model id: {}", e.pid, e.mid);
+        println!("error on proc id: {} model id: {}", e.pid, e.model.id);
     });
 }
 ```
@@ -471,7 +455,7 @@ acts = { version = "*", features = ["store"] }
 For external store:
 
  ```rust,no_run
- use acts::{Engine, Builder, data::{Model, Proc, Task, Package}, DbSet, StoreAdapter};
+ use acts::{Engine, Builder, data::{Model, Proc, Task, Package, Message}, DbSet, StoreAdapter};
  use std::sync::Arc;
 
  #[derive(Clone)]
@@ -488,6 +472,9 @@ For external store:
          todo!()
      }
      fn packages(&self) -> Arc<dyn DbSet<Item =Package>> {
+         todo!()
+     }
+     fn messages(&self) -> Arc<dyn DbSet<Item =Message>> {
          todo!()
      }
      fn init(&self) {}

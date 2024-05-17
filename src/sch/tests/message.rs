@@ -1,8 +1,10 @@
 use crate::{
+    data::MessageStatus,
     event::MessageState,
-    sch::tests::create_proc_signal,
+    sch::tests::{create_proc_signal, create_proc_signal2, create_proc_signal_config},
+    store::{Cond, Expr},
     utils::{self, consts},
-    Act, Action, Error, Message, Vars, Workflow,
+    Act, Action, Config, ChannelOptions, Error, Message, Query, StoreAdapter, Vars, Workflow,
 };
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -228,7 +230,7 @@ async fn sch_message_act_created_by_push_action() {
                 .with("id", "act2")
                 .with("name", "act 2")
                 .with("tag", "tag2");
-            e.do_action(&e.proc_id, &e.id, "push", &options).unwrap();
+            e.do_action(&e.pid, &e.tid, "push", &options).unwrap();
         }
 
         if e.is_key("act2") && e.is_state("created") {
@@ -253,7 +255,7 @@ async fn sch_message_act_tag_by_push_action() {
         println!("message: {e:?}");
         if e.r#type == "step" && e.state() == MessageState::Created {
             let options = Vars::new().with("id", "act2").with("tag", "tag2");
-            e.do_action(&e.proc_id, &e.id, "push", &options).unwrap();
+            e.do_action(&e.pid, &e.tid, "push", &options).unwrap();
         }
 
         if e.is_key("act2") && e.is_state("created") {
@@ -280,7 +282,7 @@ async fn sch_message_act_inputs_by_push_action() {
             let options = Vars::new()
                 .with("id", "act2")
                 .with("inputs", &Vars::new().with("a", 5));
-            e.do_action(&e.proc_id, &e.id, "push", &options).unwrap();
+            e.do_action(&e.pid, &e.tid, "push", &options).unwrap();
         }
 
         if e.is_key("act2") && e.is_state("created") {
@@ -307,7 +309,7 @@ async fn sch_message_act_outputs_by_push_action() {
             let options = Vars::new()
                 .with("id", "act2")
                 .with("outputs", &Vars::new().with("a", 5));
-            e.do_action(&e.proc_id, &e.id, "push", &options).unwrap();
+            e.do_action(&e.pid, &e.tid, "push", &options).unwrap();
         }
 
         if e.is_key("act2") && e.is_state("created") {
@@ -334,12 +336,12 @@ async fn sch_message_act_rets_by_push_action() {
             let options = Vars::new()
                 .with("id", "act2")
                 .with("rets", &Vars::new().with("a", json!(null)));
-            e.do_action(&e.proc_id, &e.id, "push", &options).unwrap();
+            e.do_action(&e.pid, &e.tid, "push", &options).unwrap();
         }
 
         if e.is_key("act2") && e.is_state("created") {
             rx.send(
-                e.do_action(&e.proc_id, &e.id, consts::EVT_NEXT, &Vars::new())
+                e.do_action(&e.pid, &e.tid, consts::EVT_NEXT, &Vars::new())
                     .is_err(),
             );
         }
@@ -384,7 +386,7 @@ async fn sch_message_act_completed() {
         if msg.r#type == "req" && msg.state() == MessageState::Created {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            let action = Action::new(&msg.proc_id, &msg.id, consts::EVT_NEXT, &options);
+            let action = Action::new(&msg.pid, &msg.tid, consts::EVT_NEXT, &options);
             s.do_action(&action).unwrap();
         }
         if msg.r#type == "req" && msg.state() == MessageState::Completed {
@@ -409,7 +411,7 @@ async fn sch_message_act_sumitted() {
         if msg.is_key("act1") && msg.state() == MessageState::Created {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            let action = Action::new(&msg.proc_id, &msg.id, "submit", &options);
+            let action = Action::new(&msg.pid, &msg.tid, "submit", &options);
             s.do_action(&action).unwrap();
         }
         if msg.is_key("act1") && msg.state() == MessageState::Submitted {
@@ -434,7 +436,7 @@ async fn sch_message_act_skip() {
         if msg.is_key("act1") && msg.state() == MessageState::Created {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            let action = Action::new(&msg.proc_id, &msg.id, "skip", &options);
+            let action = Action::new(&msg.pid, &msg.tid, "skip", &options);
             s.do_action(&action).unwrap();
         }
         if msg.is_key("act1") && msg.state() == MessageState::Skipped {
@@ -464,7 +466,7 @@ async fn sch_message_act_back() {
         if msg.is_key("act1") && msg.is_state("created") {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            let action = Action::new(&msg.proc_id, &msg.id, consts::EVT_NEXT, &options);
+            let action = Action::new(&msg.pid, &msg.tid, consts::EVT_NEXT, &options);
             s.do_action(&action).unwrap();
         }
 
@@ -472,7 +474,7 @@ async fn sch_message_act_back() {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.insert("to".to_string(), json!("step1"));
-            let action = Action::new(&msg.proc_id, &msg.id, "back", &options);
+            let action = Action::new(&msg.pid, &msg.tid, "back", &options);
             s.do_action(&action).unwrap();
         }
 
@@ -505,7 +507,7 @@ async fn sch_message_act_cancel() {
         if msg.is_key("act1") && msg.is_state("created") {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            let action = Action::new(&msg.proc_id, &msg.id, consts::EVT_NEXT, &options);
+            let action = Action::new(&msg.pid, &msg.tid, consts::EVT_NEXT, &options);
             s.do_action(&action).unwrap();
         }
 
@@ -513,8 +515,8 @@ async fn sch_message_act_cancel() {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
 
-            *act_req_id.lock().unwrap() = Some(msg.id.to_string());
-            let action = Action::new(&msg.proc_id, &msg.id, "cancel", &options);
+            *act_req_id.lock().unwrap() = Some(msg.tid.to_string());
+            let action = Action::new(&msg.pid, &msg.tid, "cancel", &options);
             s.do_action(&action).unwrap();
         }
 
@@ -523,12 +525,7 @@ async fn sch_message_act_cancel() {
             options.insert("uid".to_string(), json!("u1"));
 
             let act_req_id = &*act_req_id.lock().unwrap();
-            let action = Action::new(
-                &msg.proc_id,
-                act_req_id.as_deref().unwrap(),
-                "cancel",
-                &options,
-            );
+            let action = Action::new(&msg.pid, act_req_id.as_deref().unwrap(), "cancel", &options);
             s.do_action(&action).unwrap();
         }
 
@@ -555,7 +552,7 @@ async fn sch_message_act_remove() {
         if msg.is_key("act1") && msg.inner().state() == MessageState::Created {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            let action = Action::new(&msg.inner().proc_id, &msg.inner().id, "remove", &options);
+            let action = Action::new(&msg.inner().pid, &msg.inner().tid, "remove", &options);
             s.do_action(&action).unwrap();
         }
         if msg.is_key("act1") && msg.state() == MessageState::Removed {
@@ -580,7 +577,7 @@ async fn sch_message_act_abort() {
         if msg.is_key("act1") && msg.is_state("created") {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            let action = Action::new(&msg.proc_id, &msg.id, "abort", &options);
+            let action = Action::new(&msg.pid, &msg.tid, "abort", &options);
             s.do_action(&action).unwrap();
         }
 
@@ -609,7 +606,7 @@ async fn sch_message_act_error() {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_KEY, Error::new("", "err1"));
-            let action = Action::new(&e.proc_id, &e.id, "error", &options);
+            let action = Action::new(&e.pid, &e.tid, "error", &options);
             s.do_action(&action).unwrap();
         }
 
@@ -638,7 +635,7 @@ async fn sch_message_act_inputs_with_err() {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_KEY, Error::new("abc", "err1"));
-            e.do_action(&e.proc_id, &e.id, consts::EVT_ERR, &options)
+            e.do_action(&e.pid, &e.tid, consts::EVT_ERR, &options)
                 .unwrap();
         }
 
@@ -681,7 +678,7 @@ async fn sch_message_act_inputs_with_step_id() {
     let tid = step_task_id.clone();
     emitter.on_message(move |e| {
         if e.is_key("step1") {
-            *tid.lock().unwrap() = e.id.to_string();
+            *tid.lock().unwrap() = e.tid.to_string();
         }
         if e.is_source("act") && e.is_state("created") {
             rx.send(e.inputs.clone());
@@ -704,4 +701,225 @@ async fn sch_message_act_inputs_with_step_id() {
         ret.get_value(consts::STEP_KEY).clone().unwrap()[consts::STEP_NODE_NAME],
         json!("my step")
     );
+}
+
+#[tokio::test]
+async fn sch_message_emit_options_with_id() {
+    let mut workflow = Workflow::new();
+    let id = utils::longid();
+    let (engine, proc, tx, rx) = create_proc_signal2::<bool>(&mut workflow, &id);
+
+    let options = ChannelOptions {
+        id: "e1".to_string(),
+        ..Default::default()
+    };
+    engine.channel(&options).on_message(move |msg| {
+        if msg.r#type == "workflow" && msg.state() == MessageState::Created {
+            rx.send(true);
+        }
+    });
+    engine.runtime().launch(&proc);
+    let ret = tx.recv().await;
+    assert_eq!(ret, true);
+}
+
+#[tokio::test]
+async fn sch_message_ack_not_exist_message_in_store() {
+    let mut workflow = Workflow::new();
+    let id = utils::longid();
+    let (engine, proc, tx, rx) = create_proc_signal2::<bool>(&mut workflow, &id);
+    let e2 = engine.clone();
+    engine.emitter().on_message(move |msg| {
+        if msg.r#type == "workflow" && msg.state() == MessageState::Created {
+            let ret = engine.executor().ack(&msg.id);
+            rx.send(ret.is_ok());
+        }
+    });
+    e2.runtime().launch(&proc);
+    let ret = tx.recv().await;
+    assert_eq!(ret, true);
+}
+
+#[tokio::test]
+async fn sch_message_ack_exist_message_in_store() {
+    let mut workflow = Workflow::new();
+    let id = utils::longid();
+    let (engine, proc, tx, rx) = create_proc_signal2::<Message>(&mut workflow, &id);
+
+    let options = ChannelOptions {
+        id: "e1".to_string(),
+        ack: true,
+        ..Default::default()
+    };
+    let e2 = engine.clone();
+    engine.channel(&options).on_message(move |msg| {
+        if msg.r#type == "workflow" && msg.state() == MessageState::Created {
+            engine.executor().ack(&msg.id).unwrap();
+            rx.send(msg.inner().clone());
+        }
+    });
+    e2.runtime().launch(&proc);
+    let ret = tx.recv().await;
+    let message = e2
+        .runtime()
+        .cache()
+        .store()
+        .messages()
+        .find(&ret.id)
+        .unwrap();
+    assert_eq!(message.r#type, "workflow");
+    assert_eq!(message.pid, id);
+    assert_eq!(message.state, "created");
+    assert_eq!(message.status, MessageStatus::Acked);
+    assert!(message.start_time > 0);
+}
+
+#[tokio::test]
+async fn sch_message_complete_message_in_store() {
+    let mut workflow = Workflow::new()
+        .with_step(|step| step.with_act(Act::req(|act| act.with_id("act1"))))
+        .with_step(|step| step.with_act(Act::req(|act| act.with_id("act2"))));
+    let id = utils::longid();
+    let (engine, proc, tx, rx) = create_proc_signal2::<String>(&mut workflow, &id);
+
+    let options = ChannelOptions {
+        id: "e1".to_string(),
+        ack: true,
+        ..Default::default()
+    };
+    let e2 = engine.clone();
+    engine.channel(&options).on_message(move |msg| {
+        if msg.is_key("act1") && msg.state() == MessageState::Created {
+            engine
+                .executor()
+                .complete(&msg.pid, &msg.tid, &Vars::new())
+                .unwrap();
+            rx.update(|data| *data = msg.id.clone());
+        }
+
+        if msg.is_key("act2") && msg.state() == MessageState::Created {
+            rx.close();
+        }
+    });
+    e2.runtime().launch(&proc);
+    let ret = tx.recv().await;
+    let message = e2.runtime().cache().store().messages().find(&ret).unwrap();
+    assert_eq!(message.r#type, "req");
+    assert_eq!(message.pid, id);
+    assert_eq!(message.state, "created");
+    assert_eq!(message.status, MessageStatus::Completed);
+    assert!(message.create_time > 0);
+    assert!(message.update_time > 0);
+}
+
+#[tokio::test]
+async fn sch_messages_not_removed_when_completed_in_store() {
+    let mut workflow = Workflow::new()
+        .with_step(|step| step.with_id("step1"))
+        .with_step(|step| step.with_id("step2"));
+    let id = utils::longid();
+    let (engine, proc, tx, rx) = create_proc_signal2::<()>(&mut workflow, &id);
+
+    let options = ChannelOptions {
+        id: "e1".to_string(),
+        ack: true,
+        ..Default::default()
+    };
+    engine.channel(&options).on_complete(move |_| {
+        rx.close();
+    });
+    engine.runtime().launch(&proc);
+    tx.recv().await;
+
+    let q = Query::new().push(Cond::and().push(Expr::eq("pid", id)));
+    let messages = engine
+        .runtime()
+        .cache()
+        .store()
+        .messages()
+        .query(&q)
+        .unwrap();
+    assert_eq!(messages.len(), 1);
+}
+
+#[tokio::test]
+async fn sch_message_re_sent_if_not_ack() {
+    let mut workflow =
+        Workflow::new().with_step(|step| step.with_act(Act::req(|act| act.with_id("act1"))));
+    let id = utils::longid();
+    let (engine, proc, tx, rx) = create_proc_signal2::<Vec<Message>>(&mut workflow, &id);
+
+    let options = ChannelOptions {
+        id: "e1".to_string(),
+        ack: true,
+        ..Default::default()
+    };
+    engine.channel(&options).on_message(move |e| {
+        if e.r#type == "workflow" && e.state() == MessageState::Created {
+            // not ack the message
+            rx.update(|data| data.push(e.inner().clone()));
+
+            if rx.data().len() > 1 {
+                rx.close();
+            }
+        }
+    });
+    engine.runtime().launch(&proc);
+    let ret = tx.recv().await;
+    assert!(ret.len() > 1);
+
+    let m = ret.get(0).unwrap();
+    let message = engine
+        .runtime()
+        .cache()
+        .store()
+        .messages()
+        .find(&m.id)
+        .unwrap();
+    assert_eq!(message.r#type, "workflow");
+    assert_eq!(message.pid, id);
+    assert_eq!(message.state, "created");
+    assert_eq!(message.status, MessageStatus::Created);
+    assert!(message.create_time > 0);
+    assert!(message.update_time > 0);
+    assert!(message.retry_times > 0);
+}
+
+#[tokio::test]
+async fn sch_message_error_if_not_ack_and_exceed_max_reties() {
+    let workflow =
+        Workflow::new().with_step(|step| step.with_act(Act::req(|act| act.with_id("act1"))));
+    let id = utils::longid();
+
+    let mut config = Config::default();
+    config.max_message_retry_times = 2;
+    let (engine, proc, sig) = create_proc_signal_config::<Vec<Message>>(&config, &workflow, &id);
+    let rx = sig.clone();
+    let options = ChannelOptions {
+        id: "e1".to_string(),
+        ack: true,
+        ..Default::default()
+    };
+    let e2 = engine.clone();
+    engine.channel(&options).on_message(move |e| {
+        if e.r#type == "workflow" && e.state() == MessageState::Created {
+            // not ack the message
+            rx.update(|data| data.push(e.inner().clone()));
+        } else {
+            engine.executor().ack(&e.id).unwrap();
+        }
+    });
+    e2.runtime().launch(&proc);
+    let ret = sig.timeout(4000).await;
+    assert!(ret.len() > 1);
+
+    let m = ret.get(0).unwrap();
+    let message = e2.runtime().cache().store().messages().find(&m.id).unwrap();
+    assert_eq!(message.r#type, "workflow");
+    assert_eq!(message.pid, id);
+    assert_eq!(message.state, "created");
+    assert_eq!(message.status, MessageStatus::Error);
+    assert!(message.create_time > 0);
+    assert!(message.update_time > 0);
+    assert_eq!(message.retry_times, config.max_message_retry_times);
 }

@@ -1,3 +1,5 @@
+use serde::Serialize;
+use serde_json::{json, Value};
 use std::{collections::HashSet, slice::IterMut};
 
 #[derive(Debug, Clone)]
@@ -20,18 +22,96 @@ pub struct Cond {
     pub result: HashSet<Box<[u8]>>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExprOp {
+    /// equal
+    EQ,
+
+    /// not equal
+    NE,
+
+    /// less then
+    LT,
+
+    /// less and equal
+    LE,
+
+    /// greater then
+    GT,
+
+    /// greater and equal
+    GE,
+}
+
 #[derive(Debug, Clone)]
 pub struct Expr {
+    pub op: ExprOp,
     pub key: String,
-    pub value: String,
-    pub result: HashSet<Box<[u8]>>,
+    pub value: Value,
+}
+
+impl Expr {
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+    pub fn value(&self) -> &Value {
+        &self.value
+    }
+
+    pub fn eq<T: Serialize>(key: &str, v: T) -> Self {
+        Self {
+            op: ExprOp::EQ,
+            key: key.to_string(),
+            value: json!(v),
+        }
+    }
+
+    pub fn ne<T: Serialize>(key: &str, v: T) -> Self {
+        Self {
+            op: ExprOp::NE,
+            key: key.to_string(),
+            value: json!(v),
+        }
+    }
+
+    pub fn gt<T: Serialize>(key: &str, v: T) -> Self {
+        Self {
+            op: ExprOp::GT,
+            key: key.to_string(),
+            value: json!(v),
+        }
+    }
+
+    pub fn lt<T: Serialize>(key: &str, v: T) -> Self {
+        Self {
+            op: ExprOp::LT,
+            key: key.to_string(),
+            value: json!(v),
+        }
+    }
+
+    pub fn le<T: Serialize>(key: &str, v: T) -> Self {
+        Self {
+            op: ExprOp::LE,
+            key: key.to_string(),
+            value: json!(v),
+        }
+    }
+
+    pub fn ge<T: Serialize>(key: &str, v: T) -> Self {
+        Self {
+            op: ExprOp::GE,
+            key: key.to_string(),
+            value: json!(v),
+        }
+    }
 }
 
 impl Cond {
     pub fn or() -> Self {
         Self {
             r#type: CondType::Or,
-            conds: Vec::new(),
+            conds: Default::default(),
             result: HashSet::new(),
         }
     }
@@ -39,27 +119,18 @@ impl Cond {
     pub fn and() -> Self {
         Self {
             r#type: CondType::And,
-            conds: Vec::new(),
+            conds: Default::default(),
             result: HashSet::new(),
         }
+    }
+
+    pub fn conds(&self) -> &Vec<Expr> {
+        &self.conds
     }
 
     pub fn push(mut self, expr: Expr) -> Self {
         self.conds.push(expr);
-
         self
-    }
-
-    
-}
-
-impl Expr {
-    pub fn eq(key: &str, value: &str) -> Self {
-        Self {
-            key: key.to_string(),
-            value: value.to_string(),
-            result: HashSet::new(),
-        }
     }
 }
 
@@ -127,5 +198,99 @@ impl Query {
 
     pub fn is_cond(&self) -> bool {
         self.conds.len() > 0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Expr;
+    use crate::store::{ExprOp, MessageStatus};
+    use serde_json::json;
+
+    #[test]
+    fn store_query_expr_eq_null() {
+        let expr = Expr::eq("a", json!(null));
+        assert_eq!(expr.key(), "a");
+        assert_eq!(expr.value(), &json!(null));
+        assert_eq!(expr.op, ExprOp::EQ);
+    }
+
+    #[test]
+    fn store_query_expr_ne_null() {
+        let expr = Expr::ne("a", json!(null));
+        assert_eq!(expr.key(), "a");
+        assert_eq!(expr.value(), &json!(null));
+        assert_eq!(expr.op, ExprOp::NE);
+    }
+
+    #[test]
+    fn store_query_expr_eq_str() {
+        let expr = Expr::eq("a", "abc");
+        assert_eq!(expr.key(), "a");
+        assert_eq!(expr.value(), &json!("abc"));
+        assert_eq!(expr.op, ExprOp::EQ);
+    }
+
+    #[test]
+    fn store_query_expr_ne_str() {
+        let expr = Expr::ne("a", "abc");
+        assert_eq!(expr.key(), "a");
+        assert_eq!(expr.value(), &json!("abc"));
+        assert_eq!(expr.op, ExprOp::NE);
+    }
+
+    #[test]
+    fn store_query_expr_eq_num() {
+        let expr = Expr::eq("a", 5);
+        assert_eq!(expr.key(), "a");
+        assert_eq!(expr.value(), &json!(5));
+        assert_eq!(expr.op, ExprOp::EQ);
+    }
+
+    #[test]
+    fn store_query_expr_ne_num() {
+        let expr = Expr::ne("a", 5);
+        assert_eq!(expr.key(), "a");
+        assert_eq!(expr.value(), &json!(5));
+        assert_eq!(expr.op, ExprOp::NE);
+    }
+
+    #[test]
+    fn store_query_expr_lt_num() {
+        let expr = Expr::lt("a", 5);
+        assert_eq!(expr.key(), "a");
+        assert_eq!(expr.value(), &json!(5));
+        assert_eq!(expr.op, ExprOp::LT);
+    }
+
+    #[test]
+    fn store_query_expr_le_num() {
+        let expr = Expr::le("a", 5);
+        assert_eq!(expr.key(), "a");
+        assert_eq!(expr.value(), &json!(5));
+        assert_eq!(expr.op, ExprOp::LE);
+    }
+
+    #[test]
+    fn store_query_expr_gt_num() {
+        let expr = Expr::gt("a", 5);
+        assert_eq!(expr.key(), "a");
+        assert_eq!(expr.value(), &json!(5));
+        assert_eq!(expr.op, ExprOp::GT);
+    }
+
+    #[test]
+    fn store_query_expr_ge_num() {
+        let expr = Expr::ge("a", 5);
+        assert_eq!(expr.key(), "a");
+        assert_eq!(expr.value(), &json!(5));
+        assert_eq!(expr.op, ExprOp::GE);
+    }
+
+    #[test]
+    fn store_query_expr_enum() {
+        let expr = Expr::eq("a", MessageStatus::Acked);
+        assert_eq!(expr.key(), "a");
+        assert_eq!(expr.value(), &json!(MessageStatus::Acked));
     }
 }

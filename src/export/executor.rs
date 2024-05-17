@@ -1,25 +1,25 @@
 use std::sync::Arc;
 
 use crate::{
-    event::Action, sch::Scheduler, store::StoreAdapter, utils::consts, ActionResult, ModelInfo,
+    event::Action, sch::Runtime, store::StoreAdapter, utils::consts, ActionResult, ModelInfo,
     Result, Vars,
 };
 
 #[derive(Clone)]
 pub struct Executor {
-    scher: Arc<Scheduler>,
+    runtime: Arc<Runtime>,
 }
 
 impl Executor {
-    pub(crate) fn new(scher: &Arc<Scheduler>) -> Self {
+    pub(crate) fn new(rt: &Arc<Runtime>) -> Self {
         Self {
-            scher: scher.clone(),
+            runtime: rt.clone(),
         }
     }
 
     pub fn start(&self, mid: &str, options: &Vars) -> Result<ActionResult> {
-        let mut state = ActionResult::begin();
-        let model: ModelInfo = self.scher.cache().store().models().find(mid)?.into();
+        let state = ActionResult::begin();
+        let model: ModelInfo = self.runtime.cache().store().models().find(mid)?.into();
         let workflow = model.workflow()?;
 
         let mut vars = options.clone();
@@ -27,11 +27,12 @@ impl Executor {
         if let Some(uid) = options.get_value(consts::FOR_ACT_KEY_UID) {
             vars.insert(consts::INITIATOR.to_string(), uid.clone());
         }
-        let proc = self.scher.start(&workflow, &vars)?;
-        state.insert("pid", proc.id().into());
-        state.end();
+        let proc = self.runtime.start(&workflow, &vars)?;
+        state.end_with_data("pid", proc.id())
+    }
 
-        Ok(state)
+    pub fn ack(&self, id: &str) -> Result<ActionResult> {
+        self.runtime.ack(id)
     }
 
     pub fn submit(&self, pid: &str, tid: &str, options: &Vars) -> Result<ActionResult> {
@@ -77,7 +78,7 @@ impl Executor {
         tid: &str,
         options: &Vars,
     ) -> Result<ActionResult> {
-        self.scher
+        self.runtime
             .do_action(&Action::new(pid, tid, action, options))
     }
 }

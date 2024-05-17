@@ -30,7 +30,7 @@ pub struct TaskInfo {
     pub id: String,
     pub prev: Option<String>,
     pub name: String,
-    pub proc_id: String,
+    pub pid: String,
     pub node_id: String,
     pub r#type: String,
     pub state: String,
@@ -107,11 +107,11 @@ impl From<&data::Proc> for ProcInfo {
 impl From<data::Task> for TaskInfo {
     fn from(t: data::Task) -> Self {
         Self {
-            id: t.task_id,
+            id: t.tid,
             prev: t.prev,
             name: t.name,
-            proc_id: t.proc_id,
-            node_id: t.node_id,
+            pid: t.pid,
+            node_id: t.node_data,
             r#type: t.kind,
             state: t.state,
             data: t.data,
@@ -140,7 +140,7 @@ impl Into<serde_json::Value> for TaskInfo {
         json!({
             "id": self.id,
             "name": self.name,
-            "proc_id": self.proc_id,
+            "pid": self.pid,
             "node_id": self.node_id,
             "type": self.r#type,
             "state": self.state,
@@ -185,10 +185,10 @@ impl From<&Arc<sch::Task>> for TaskInfo {
         Self {
             id: t.id.clone(),
             prev: t.prev(),
-            name: t.node.content.name(),
-            proc_id: t.proc_id.clone(),
-            node_id: t.node.id().to_string(),
-            r#type: t.node.kind().into(),
+            name: t.node().content.name(),
+            pid: t.pid.clone(),
+            node_id: t.node().id().to_string(),
+            r#type: t.node().kind().into(),
             state: t.state().into(),
             data: t.data().to_string(),
             start_time: t.start_time(),

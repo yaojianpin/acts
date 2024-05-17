@@ -19,7 +19,7 @@ async fn store() -> &'static TestStore {
 async fn adapter_set_extern_store_test() {
     let store = store().await;
     let engine = Builder::new().store(store).build();
-    let store = engine.scher().cache().store();
+    let store = engine.runtime().cache().store();
     assert_eq!(store.kind(), StoreKind::Extern);
     store.reset();
 }
@@ -30,6 +30,7 @@ pub struct TestStore {
     procs: Collect<data::Proc>,
     tasks: Collect<data::Task>,
     packages: Collect<data::Package>,
+    messages: Collect<data::Message>,
 }
 
 impl TestStore {
@@ -39,6 +40,7 @@ impl TestStore {
             procs: Collect::new(),
             tasks: Collect::new(),
             packages: Collect::new(),
+            messages: Collect::new(),
         }
     }
 }
@@ -61,6 +63,10 @@ impl StoreAdapter for TestStore {
 
     fn packages(&self) -> Arc<dyn DbSet<Item = data::Package>> {
         Arc::new(self.packages.clone())
+    }
+
+    fn messages(&self) -> Arc<dyn DbSet<Item = data::Message>> {
+        Arc::new(self.messages.clone())
     }
 }
 

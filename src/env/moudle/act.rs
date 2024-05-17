@@ -66,7 +66,7 @@ mod act {
         Context::with(|ctx| {
             let task = ctx.task();
             ctx.set_action(&Action::new(
-                &task.proc_id,
+                &task.pid,
                 &task.id,
                 consts::EVT_NEXT,
                 &Vars::new(),
@@ -82,7 +82,7 @@ mod act {
         Context::with(|ctx| {
             let task = ctx.task();
             ctx.set_action(&Action::new(
-                &task.proc_id,
+                &task.pid,
                 &task.id,
                 consts::EVT_ABORT,
                 &Vars::new(),
@@ -99,12 +99,7 @@ mod act {
         let vars = Vars::new().with(consts::ACT_TO, nid);
         Context::with(|ctx| {
             let task = ctx.task();
-            ctx.set_action(&Action::new(
-                &task.proc_id,
-                &task.id,
-                consts::EVT_BACK,
-                &vars,
-            ))?;
+            ctx.set_action(&Action::new(&task.pid, &task.id, consts::EVT_BACK, &vars))?;
             task.update_no_lock(&ctx)?;
             Ok(())
         })
@@ -116,7 +111,7 @@ mod act {
         Context::with(|ctx| {
             let task = ctx.task();
             ctx.set_action(&Action::new(
-                &task.proc_id,
+                &task.pid,
                 &task.id,
                 consts::EVT_SKIP,
                 &Vars::new(),
@@ -133,12 +128,7 @@ mod act {
         let vars = Vars::new().with(consts::ACT_ERR_KEY, err);
         Context::with(|ctx| {
             let task = ctx.task();
-            ctx.set_action(&Action::new(
-                &task.proc_id,
-                &task.id,
-                consts::EVT_ERR,
-                &vars,
-            ))?;
+            ctx.set_action(&Action::new(&task.pid, &task.id, consts::EVT_ERR, &vars))?;
             task.update_no_lock(&ctx)?;
             Ok(())
         })

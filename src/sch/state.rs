@@ -1,13 +1,14 @@
 use core::{clone::Clone, fmt};
 use serde::{Deserialize, Serialize};
 
-use crate::utils;
-
 #[derive(Debug, Deserialize, Serialize, Default, Clone, PartialEq)]
 pub enum TaskState {
     /// initialized state
     #[default]
     None,
+
+    // task is ready to run
+    Ready,
 
     /// task is pending and waiting for the other task to wake up
     Pending,
@@ -50,7 +51,7 @@ impl TaskState {
 
     pub fn is_created(&self) -> bool {
         match self {
-            TaskState::Running | TaskState::Interrupt | TaskState::Pending => true,
+            TaskState::Ready | TaskState::Interrupt | TaskState::Pending => true,
             _ => false,
         }
     }
@@ -87,6 +88,10 @@ impl TaskState {
         *self == TaskState::Removed
     }
 
+    pub fn is_ready(&self) -> bool {
+        *self == TaskState::Ready
+    }
+
     pub fn is_running(&self) -> bool {
         *self == TaskState::Running
     }
@@ -121,24 +126,61 @@ impl fmt::Display for TaskState {
 
 impl From<TaskState> for String {
     fn from(state: TaskState) -> Self {
-        utils::state_to_str(state)
+        state_to_str(state)
     }
 }
 
 impl From<&str> for TaskState {
     fn from(str: &str) -> Self {
-        utils::str_to_state(str)
+        str_to_state(str)
     }
 }
 
 impl From<String> for TaskState {
     fn from(str: String) -> Self {
-        utils::str_to_state(&str)
+        str_to_state(&str)
     }
 }
 
 impl From<&TaskState> for String {
     fn from(state: &TaskState) -> Self {
-        utils::state_to_str(state.clone())
+        state_to_str(state.clone())
+    }
+}
+
+fn state_to_str(state: TaskState) -> String {
+    match state {
+        TaskState::Ready => "ready".to_string(),
+        TaskState::Pending => "pending".to_string(),
+        TaskState::Running => "running".to_string(),
+        TaskState::Interrupt => "interrupted".to_string(),
+        TaskState::Completed => "completed".to_string(),
+        TaskState::Submitted => "submitted".to_string(),
+        TaskState::Backed => "backed".to_string(),
+        TaskState::Cancelled => "cancelled".to_string(),
+        TaskState::Error => "error".to_string(),
+        TaskState::Skipped => "skipped".to_string(),
+        TaskState::Aborted => "aborted".to_string(),
+        TaskState::Removed => "removed".to_string(),
+        TaskState::None => "none".to_string(),
+    }
+}
+
+fn str_to_state(str: &str) -> TaskState {
+    match str {
+        "none" => TaskState::None,
+        "ready" => TaskState::Ready,
+        "pending" => TaskState::Pending,
+        "running" => TaskState::Running,
+        "completed" => TaskState::Completed,
+        "cancelled" => TaskState::Cancelled,
+        "backed" => TaskState::Backed,
+        "submitted" => TaskState::Submitted,
+        "removed" => TaskState::Removed,
+        "skipped" => TaskState::Skipped,
+        "aborted" => TaskState::Aborted,
+        "interrupted" => TaskState::Interrupt,
+        "error" => TaskState::Error,
+        _ => TaskState::None,
     }
 }

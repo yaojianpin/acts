@@ -9,6 +9,7 @@ pub struct LocalStore {
     procs: Arc<Collect<Proc>>,
     tasks: Arc<Collect<Task>>,
     packages: Arc<Collect<Package>>,
+    messages: Arc<Collect<Message>>,
 }
 
 impl LocalStore {
@@ -18,12 +19,14 @@ impl LocalStore {
         let procs = Collect::new(&db, "procs");
         let tasks = Collect::new(&db, "tasks");
         let packages = Collect::new(&db, "packages");
+        let messages = Collect::new(&db, "messages");
         let store = Self {
             db: db.clone(),
             models: Arc::new(models),
             procs: Arc::new(procs),
             tasks: Arc::new(tasks),
             packages: Arc::new(packages),
+            messages: Arc::new(messages),
         };
 
         store.init();
@@ -52,5 +55,9 @@ impl StoreAdapter for LocalStore {
 
     fn packages(&self) -> Arc<dyn DbSet<Item = Package>> {
         self.packages.clone()
+    }
+
+    fn messages(&self) -> Arc<dyn DbSet<Item = Message>> {
+        self.messages.clone()
     }
 }

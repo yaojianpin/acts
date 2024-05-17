@@ -6,7 +6,7 @@ mod message;
 #[cfg(test)]
 mod tests;
 
-use crate::{sch::Scheduler, utils::consts, ActError, Result};
+use crate::{sch::Runtime, utils::consts, ActError, Result};
 pub use action::Action;
 pub use emitter::Emitter;
 pub use extra::TaskExtra;
@@ -19,7 +19,7 @@ pub struct Event<T, E = ()> {
     inner: T,
     extra: E,
     #[cfg(test)]
-    scher: Option<Arc<Scheduler>>,
+    runtime: Option<Arc<Runtime>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
@@ -74,19 +74,19 @@ where
     pub fn inner(&self) -> &T {
         &self.inner
     }
-    pub fn new(_s: &Option<Arc<Scheduler>>, inner: &T) -> Self {
+    pub fn new(_s: &Option<Arc<Runtime>>, inner: &T) -> Self {
         Self {
             #[cfg(test)]
-            scher: _s.clone(),
+            runtime: _s.clone(),
             extra: E::default(),
             inner: inner.clone(),
         }
     }
 
-    pub fn new_with_extra(_s: &Option<Arc<Scheduler>>, inner: &T, extra: &E) -> Self {
+    pub fn new_with_extra(_rt: &Option<Arc<Runtime>>, inner: &T, extra: &E) -> Self {
         Self {
             #[cfg(test)]
-            scher: _s.clone(),
+            runtime: _rt.clone(),
             extra: extra.clone(),
             inner: inner.clone(),
         }
@@ -104,7 +104,7 @@ where
         action: &str,
         options: &crate::Vars,
     ) -> Result<crate::ActionResult> {
-        if let Some(scher) = &self.scher {
+        if let Some(scher) = &self.runtime {
             return scher.do_action(&Action::new(pid, tid, action, options));
         }
         Err(ActError::Action(format!("scher is not define in Event")))

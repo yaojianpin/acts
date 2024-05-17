@@ -1,5 +1,5 @@
 use crate::{
-    store::{Model, Package, Proc, StoreAdapter, Task},
+    store::{Message, Model, Package, Proc, StoreAdapter, Task},
     utils, ActError, Result, ShareLock, Workflow,
 };
 use std::sync::{Arc, Mutex, RwLock};
@@ -41,6 +41,10 @@ impl StoreAdapter for Store {
 
     fn packages(&self) -> Arc<dyn super::DbSet<Item = Package>> {
         self.base.read().unwrap().packages()
+    }
+
+    fn messages(&self) -> Arc<dyn super::DbSet<Item = Message>> {
+        self.base.read().unwrap().messages()
     }
 
     fn close(&self) {
@@ -104,14 +108,14 @@ impl Store {
             Ok(m) => {
                 let data = Package {
                     create_time: m.create_time,
-                    update_time: utils::time::time(),
+                    update_time: utils::time::time_millis(),
                     ..pack.clone()
                 };
                 packages.update(&data)
             }
             Err(_) => {
                 let data = Package {
-                    create_time: utils::time::time(),
+                    create_time: utils::time::time_millis(),
                     ..pack.clone()
                 };
                 packages.create(&data)
@@ -133,7 +137,7 @@ impl Store {
                     data: text.clone(),
                     ver: m.ver + 1,
                     size: text.len() as u32,
-                    time: utils::time::time(),
+                    time: utils::time::time_millis(),
                 };
                 models.update(&data)
             }
@@ -145,7 +149,7 @@ impl Store {
                     data: text.clone(),
                     ver: 1,
                     size: text.len() as u32,
-                    time: utils::time::time(),
+                    time: utils::time::time_millis(),
                 };
                 models.create(&data)
             }

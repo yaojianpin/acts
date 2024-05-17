@@ -13,9 +13,9 @@ impl DbDocument for Task {
         let mut map = HashMap::new();
         map.insert("id".to_string(), json!(self.id.clone()));
         map.insert("name".to_string(), json!(self.name.clone()));
-        map.insert("proc_id".to_string(), json!(self.proc_id.clone()));
-        map.insert("task_id".to_string(), json!(self.task_id.clone()));
-        map.insert("node_id".to_string(), json!(self.node_id.clone()));
+        map.insert("pid".to_string(), json!(self.pid.clone()));
+        map.insert("tid".to_string(), json!(self.tid.clone()));
+        map.insert("node_data".to_string(), json!(self.node_data.clone()));
         map.insert("kind".to_string(), json!(self.kind.clone()));
         map.insert("prev".to_string(), json!(self.prev.clone()));
         map.insert("state".to_string(), json!(self.state.clone()));

@@ -1,5 +1,5 @@
   id: test1
-  env: 
+  inputs: 
     a: 100
   jobs:
     - id: job1

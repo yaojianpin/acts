@@ -298,7 +298,7 @@ async fn run_test<T: Clone + Send + 'static + Default>(
     engine.emitter().on_error(move |_| {
         s.close();
     });
-    engine.scher().launch(&proc);
+    engine.runtime().launch(&proc);
     tx.recv().await
 }
 
@@ -313,6 +313,6 @@ async fn run_test_dep<T: Clone + Send + 'static + Default>(
         println!("message: {:?}", e);
         exit_if(e, rx.clone());
     });
-    engine.scher().launch(&proc);
+    engine.runtime().launch(&proc);
     tx.recv().await
 }

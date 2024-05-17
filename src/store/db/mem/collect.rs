@@ -2,9 +2,9 @@ use serde::de::DeserializeOwned;
 use tracing::debug;
 
 use crate::store::query::CondType;
-use crate::store::{map_db_err, Cond};
+use crate::store::{map_db_err, Cond, Expr, ExprOp};
 use crate::{ActError, DbSet, Query, Result, ShareLock};
-use serde_json::{json, Value as JsonValue};
+use serde_json::Value as JsonValue;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Debug;
 use std::marker::PhantomData;
@@ -62,16 +62,18 @@ where
         if q.is_cond() {
             let mut q = q.clone();
             for cond in q.queries_mut() {
-                for expr in cond.conds.iter_mut() {
+                let mut result = HashSet::new();
+                for expr in cond.conds().iter() {
                     for (k, v) in db.iter() {
-                        let prop_value = v.get(&expr.key).unwrap();
-                        let cond_value = json!(expr.value.clone());
-                        if prop_value == &cond_value {
-                            expr.result.insert(k.as_bytes().to_vec().into_boxed_slice());
+                        let prop_value = v.get(expr.key()).unwrap();
+                        let cond_value = expr.value();
+
+                        if expr.op(prop_value, cond_value) {
+                            result.insert(k.as_bytes().to_vec().into_boxed_slice());
                         }
                     }
                 }
-                cond.calc();
+                cond.calc(&result);
             }
 
             let keys = q
@@ -127,33 +129,78 @@ where
 }
 
 impl Cond {
-    pub fn calc(&mut self) {
+    pub fn calc(&mut self, v: &HashSet<Box<[u8]>>) {
         match self.r#type {
             CondType::And => {
-                for c in self.conds.iter_mut() {
-                    if self.result.len() == 0 {
-                        self.result = c.result.clone();
-                    } else {
-                        self.result = self
-                            .result
-                            .intersection(&c.result)
-                            .cloned()
-                            .collect::<HashSet<_>>()
-                    }
+                if self.result.len() == 0 {
+                    self.result = v.clone();
+                } else {
+                    self.result = self.result.intersection(v).cloned().collect::<HashSet<_>>()
                 }
             }
             CondType::Or => {
-                for c in self.conds.iter_mut() {
-                    if self.result.len() == 0 {
-                        self.result = c.result.clone();
-                    } else {
-                        self.result = self
-                            .result
-                            .union(&c.result)
-                            .cloned()
-                            .collect::<HashSet<_>>()
+                if self.result.len() == 0 {
+                    self.result = v.clone();
+                } else {
+                    self.result = self.result.union(v).cloned().collect::<HashSet<_>>()
+                }
+            }
+        }
+    }
+}
+
+impl Expr {
+    pub fn op(&self, l: &serde_json::Value, r: &serde_json::Value) -> bool {
+        match &self.op {
+            ExprOp::EQ => l == r,
+            ExprOp::NE => l != r,
+            ExprOp::LT => {
+                if let (serde_json::Value::Number(v1), serde_json::Value::Number(v2)) = (l, r) {
+                    if v1.is_f64() {
+                        return v1.as_f64().unwrap() < v2.as_f64().unwrap_or_default();
+                    } else if v1.is_i64() {
+                        return v1.as_i64().unwrap() < v2.as_i64().unwrap_or_default();
+                    } else if v1.is_u64() {
+                        return v1.as_u64().unwrap() < v2.as_u64().unwrap_or_default();
                     }
                 }
+                return false;
+            }
+            ExprOp::LE => {
+                if let (serde_json::Value::Number(v1), serde_json::Value::Number(v2)) = (l, r) {
+                    if v1.is_f64() {
+                        return v1.as_f64().unwrap() <= v2.as_f64().unwrap_or_default();
+                    } else if v1.is_i64() {
+                        return v1.as_i64().unwrap() <= v2.as_i64().unwrap_or_default();
+                    } else if v1.is_u64() {
+                        return v1.as_u64().unwrap() <= v2.as_u64().unwrap_or_default();
+                    }
+                }
+                return false;
+            }
+            ExprOp::GT => {
+                if let (serde_json::Value::Number(v1), serde_json::Value::Number(v2)) = (l, r) {
+                    if v1.is_f64() {
+                        return v1.as_f64().unwrap() > v2.as_f64().unwrap_or_default();
+                    } else if v1.is_i64() {
+                        return v1.as_i64().unwrap() > v2.as_i64().unwrap_or_default();
+                    } else if v1.is_u64() {
+                        return v1.as_u64().unwrap() > v2.as_u64().unwrap_or_default();
+                    }
+                }
+                return false;
+            }
+            ExprOp::GE => {
+                if let (serde_json::Value::Number(v1), serde_json::Value::Number(v2)) = (l, r) {
+                    if v1.is_f64() {
+                        return v1.as_f64().unwrap() >= v2.as_f64().unwrap_or_default();
+                    } else if v1.is_i64() {
+                        return v1.as_i64().unwrap() >= v2.as_i64().unwrap_or_default();
+                    } else if v1.is_u64() {
+                        return v1.as_u64().unwrap() >= v2.as_u64().unwrap_or_default();
+                    }
+                }
+                return false;
             }
         }
     }

@@ -1,6 +1,11 @@
+use std::sync::Arc;
+
 use crate::{
-    sch::tree::{NodeContent, NodeTree},
-    Act, Workflow,
+    sch::{
+        tree::{NodeContent, NodeTree},
+        Node,
+    },
+    Act, NodeKind, Workflow,
 };
 
 #[derive(Clone)]
@@ -204,4 +209,118 @@ async fn sch_tree_acts() {
     assert_eq!(step.children().len(), 2);
     assert_eq!(act1.parent().unwrap().id(), "step1");
     assert_eq!(act2.parent().unwrap().id(), "step1");
+}
+
+#[tokio::test]
+async fn sch_tree_node_workflow_ser_de() {
+    let mut workflow = Workflow::new()
+        .with_id("w1")
+        .with_step(|step| step.with_id("step1"));
+    let tree = NodeTree::build(&mut workflow).unwrap();
+    let w = tree.node("w1").unwrap();
+
+    let data = w.to_string();
+    let w2 = Node::from_str(&data, &tree);
+    assert_eq!(w2.children().len(), w.children().len());
+    assert_eq!(w2.id, w.id);
+    assert_eq!(w2.kind(), w.kind());
+    assert_eq!(w2.level, w.level);
+    assert!(w2.parent().is_none());
+    assert!(w2.prev().upgrade().is_none());
+}
+
+#[tokio::test]
+async fn sch_tree_node_step_ser_de() {
+    let mut workflow = Workflow::new().with_id("w1").with_step(|step| {
+        step.with_id("step1")
+            .with_branch(|b| b.with_id("b1").with_step(|s| s.with_id("step2")))
+            .with_branch(|b| b.with_id("b2").with_step(|s| s.with_id("step3")))
+    });
+    let tree = NodeTree::build(&mut workflow).unwrap();
+    let step1 = tree.node("step1").unwrap();
+
+    let data = step1.to_string();
+    let step = Node::from_str(&data, &tree);
+    assert_eq!(step.children().len(), 2);
+    assert_eq!(step.id, "step1");
+    assert_eq!(step.kind(), NodeKind::Step);
+    assert_eq!(step.level, step.level);
+    assert_eq!(step.parent().unwrap().id, "w1");
+    assert!(step.prev().upgrade().is_none());
+}
+
+#[tokio::test]
+async fn sch_tree_node_branch_ser_de() {
+    let mut workflow = Workflow::new().with_id("w1").with_step(|step| {
+        step.with_id("step1")
+            .with_branch(|b| b.with_id("b1").with_step(|s| s.with_id("step2")))
+            .with_branch(|b| b.with_id("b2").with_step(|s| s.with_id("step3")))
+    });
+    let tree = NodeTree::build(&mut workflow).unwrap();
+    let b1 = tree.node("b1").unwrap();
+    let data = b1.to_string();
+
+    let b = Node::from_str(&data, &tree);
+    assert_eq!(b.children().len(), 1);
+    assert_eq!(b.id, "b1");
+    assert_eq!(b.kind(), NodeKind::Branch);
+    assert_eq!(b.level, b1.level);
+    assert_eq!(b.parent().unwrap().id, "step1");
+}
+
+#[tokio::test]
+async fn sch_tree_node_act_ser_de() {
+    let mut workflow = Workflow::new()
+        .with_id("w1")
+        .with_step(|step| step.with_id("step1"));
+    let tree = NodeTree::build(&mut workflow).unwrap();
+    let step1 = tree.node("step1").unwrap();
+    let act1 = Arc::new(Node::new(
+        "act_id_1",
+        NodeContent::Act(Act::req(|r| r.with_id("act1"))),
+        step1.level + 1,
+    ));
+
+    act1.set_parent(&step1);
+
+    let data = act1.to_string();
+    let act = Node::from_str(&data, &tree);
+    assert_eq!(act.children().len(), 0);
+    assert_eq!(act.id, "act_id_1");
+    assert_eq!(act.kind(), NodeKind::Act);
+    assert_eq!(act.level, step1.level + 1);
+
+    // not care about the parent when deserialize
+    assert!(act.parent().is_none());
+}
+
+#[tokio::test]
+async fn sch_tree_node_act2_ser_de() {
+    let mut workflow = Workflow::new()
+        .with_id("w1")
+        .with_step(|step| step.with_id("step1"));
+    let tree = NodeTree::build(&mut workflow).unwrap();
+    let step1 = tree.node("step1").unwrap();
+    let act1 = Arc::new(Node::new(
+        "act_id_1",
+        NodeContent::Act(Act::req(|r| r.with_id("act1"))),
+        step1.level + 1,
+    ));
+
+    let act2 = Arc::new(Node::new(
+        "act_id_2",
+        NodeContent::Act(Act::req(|r| r.with_id("act2"))),
+        act1.level + 1,
+    ));
+
+    act2.set_parent(&act1);
+
+    let data = act2.to_string();
+    let act = Node::from_str(&data, &tree);
+    assert_eq!(act.children().len(), 0);
+    assert_eq!(act.id, "act_id_2");
+    assert_eq!(act.kind(), NodeKind::Act);
+    assert_eq!(act.level, act1.level + 1);
+    // not care the parent for act when resume data from string
+    assert!(act.parent().is_none());
 }

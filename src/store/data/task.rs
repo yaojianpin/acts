@@ -4,9 +4,9 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Task {
     pub id: String,
-    pub proc_id: String,
-    pub task_id: String,
-    pub node_id: String,
+    pub pid: String,
+    pub tid: String,
+    pub node_data: String,
     pub kind: String,
     pub prev: Option<String>,
 

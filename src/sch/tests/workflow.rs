@@ -33,10 +33,10 @@ async fn sch_workflow_setup_expose() {
     workflow.print();
     let (proc, scher, emitter, tx, rx) =
         create_proc_signal::<Vars>(&mut workflow, &utils::longid());
-    emitter.reset();
+    // emitter.reset();
     emitter.on_complete(move |e| {
-        println!("message: {:?}", e.outputs());
-        rx.send(e.outputs().clone())
+        println!("message: {:?}", e.outputs);
+        rx.send(e.outputs.clone())
     });
     scher.launch(&proc);
     let ret = tx.recv().await;
@@ -185,7 +185,7 @@ async fn sch_workflow_setup_on_before_update() {
     let s2 = sig.clone();
     emitter.on_message(move |e| {
         if e.is_type("req") && e.is_state("created") {
-            e.do_action(&e.proc_id, &e.id, consts::EVT_NEXT, &Vars::new())
+            e.do_action(&e.pid, &e.tid, consts::EVT_NEXT, &Vars::new())
                 .unwrap();
         }
 
@@ -229,7 +229,7 @@ async fn sch_workflow_setup_on_updated() {
     let s2 = sig.clone();
     emitter.on_message(move |e| {
         if e.is_type("req") && e.is_state("created") {
-            e.do_action(&e.proc_id, &e.id, consts::EVT_NEXT, &Vars::new())
+            e.do_action(&e.pid, &e.tid, consts::EVT_NEXT, &Vars::new())
                 .unwrap();
         }
 
@@ -270,7 +270,7 @@ async fn sch_workflow_setup_on_catch() {
         println!("message: {:?}", e);
         if e.is_type("req") && e.is_state("created") {
             let options = Vars::new().with(consts::ACT_ERR_KEY, Error::new("", "err1"));
-            e.do_action(&e.proc_id, &e.id, consts::EVT_ERR, &options)
+            e.do_action(&e.pid, &e.tid, consts::EVT_ERR, &options)
                 .unwrap();
         }
     });
@@ -346,15 +346,16 @@ async fn sch_workflow_hooks_store() {
         });
 
     workflow.print();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal(&mut workflow, &utils::longid());
-    let cache = scher.cache().clone();
-    let pid = proc.id().clone();
+    let (proc, rt, emitter, tx, rx) = create_proc_signal(&mut workflow, &utils::longid());
+    let cache = rt.cache().clone();
+    let pid = proc.id().to_string();
+    let rt2 = rt.clone();
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
         if e.is_type("req") && e.is_state("created") {
             cache.uncache(&pid);
             cache
-                .restore(|proc| {
+                .restore(&rt2, |proc| {
                     if let Some(task) = proc.task("$") {
                         rx.update(move |data| *data = task.hooks().len());
                     }
@@ -363,7 +364,7 @@ async fn sch_workflow_hooks_store() {
             rx.close();
         }
     });
-    scher.launch(&proc);
+    rt.launch(&proc);
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(ret, 7);

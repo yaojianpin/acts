@@ -59,7 +59,7 @@ impl ActTask for Branch {
         if task.state().is_running() {
             let children = task.node.children();
             if children.len() > 0 {
-                for child in &task.node.children() {
+                for child in &children {
                     ctx.sched_task(child);
                 }
             } else {

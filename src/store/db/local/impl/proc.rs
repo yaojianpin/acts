@@ -81,14 +81,6 @@ impl DbSchema for Proc {
             },
         ));
         map.push((
-            "root_tid".to_string(),
-            DbColumn {
-                db_type: DbType::Text,
-                is_not_null: true,
-                ..Default::default()
-            },
-        ));
-        map.push((
             "env_local".to_string(),
             DbColumn {
                 db_type: DbType::Text,
@@ -122,9 +114,8 @@ impl DbRow for Proc {
             end_time: row.get::<usize, i64>(5).unwrap(),
             timestamp: row.get::<usize, i64>(6).unwrap(),
             model: row.get::<usize, String>(7).unwrap(),
-            root_tid: row.get::<usize, String>(8).unwrap(),
-            env_local: row.get::<usize, String>(9).unwrap(),
-            err: row.get::<usize, Option<String>>(10).unwrap(),
+            env_local: row.get::<usize, String>(8).unwrap(),
+            err: row.get::<usize, Option<String>>(9).unwrap(),
         })
     }
 
@@ -139,7 +130,6 @@ impl DbRow for Proc {
         ret.push(("end_time".to_string(), Value::BigInt(self.end_time)));
         ret.push(("timestamp".to_string(), Value::BigInt(self.timestamp)));
         ret.push(("model".to_string(), Value::Text(self.model.clone())));
-        ret.push(("root_tid".to_string(), Value::Text(self.root_tid.clone())));
         ret.push(("env_local".to_string(), Value::Text(self.env_local.clone())));
         ret.push((
             "err".to_string(),

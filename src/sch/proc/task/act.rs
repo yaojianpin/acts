@@ -12,6 +12,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use std::{cell::RefCell, rc::Rc};
+use tracing::debug;
 
 #[async_trait]
 impl ActTask for Act {
@@ -59,6 +60,7 @@ impl ActTask for Act {
 impl Act {
     pub fn exec(&self, ctx: &Context) -> Result<()> {
         let task = ctx.task();
+        debug!("act.exec task={}", task.id);
         match self {
             Act::Set(vars) => {
                 let inputs = utils::fill_inputs(vars, ctx);

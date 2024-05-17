@@ -8,13 +8,13 @@ use crate::{
 
 #[tokio::test]
 async fn sch_proc_send() {
-    let mut workflow = Workflow::default();
+    let mut workflow = Workflow::default().with_step(|step| step.with_id("step1"));
     let id = utils::longid();
-    let (proc, scher, ..) = create_proc_signal::<()>(&mut workflow, &id);
-    scher.launch(&proc);
-    scher.next().await;
+    let (proc, rt, ..) = create_proc_signal::<()>(&mut workflow, &id);
+    rt.launch(&proc);
+    rt.scher().next().await;
 
-    assert!(scher.proc(&id).is_some())
+    assert!(rt.proc(&id).is_some())
 }
 
 #[tokio::test]

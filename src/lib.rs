@@ -29,14 +29,14 @@ pub use config::Config;
 pub use engine::Engine;
 pub use env::ActModule;
 pub use error::{ActError, Error};
-pub use event::{Action, Event, Message};
-pub use export::{Emitter, Executor, Extender, Manager};
+pub use event::{Action, Event, Message, MessageState};
+pub use export::{Channel, ChannelOptions, Executor, Extender, Manager};
 pub use model::*;
 pub use plugin::ActPlugin;
-pub use sch::{Context, NodeKind};
 pub use signal::Signal;
 pub use store::{data, DbSet, Query, StoreAdapter};
 pub type Result<T> = std::result::Result<T, ActError>;
 
+pub(crate) use sch::{Context, NodeKind};
 pub(crate) type ShareLock<T> = Arc<RwLock<T>>;
 pub(crate) use sch::{ActTask, TaskState};

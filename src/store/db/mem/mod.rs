@@ -16,6 +16,7 @@ pub struct MemStore {
     procs: Arc<Collect<Proc>>,
     tasks: Arc<Collect<Task>>,
     packages: Arc<Collect<Package>>,
+    messages: Arc<Collect<Message>>,
 }
 
 trait DbDocument: Serialize + DeserializeOwned {
@@ -29,11 +30,13 @@ impl MemStore {
         let procs = Collect::new("procs");
         let tasks = Collect::new("tasks");
         let packages = Collect::new("packages");
+        let messages = Collect::new("messages");
         let store = Self {
             models: Arc::new(models),
             procs: Arc::new(procs),
             tasks: Arc::new(tasks),
             packages: Arc::new(packages),
+            messages: Arc::new(messages),
         };
 
         store.init();
@@ -60,5 +63,9 @@ impl StoreAdapter for MemStore {
 
     fn packages(&self) -> Arc<dyn DbSet<Item = Package>> {
         self.packages.clone()
+    }
+
+    fn messages(&self) -> Arc<dyn DbSet<Item = Message>> {
+        self.messages.clone()
     }
 }

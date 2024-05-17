@@ -1,8 +1,4 @@
-use crate::{
-    event::MessageState,
-    sch::{Task, TaskState},
-    Context, Vars,
-};
+use crate::{sch::Task, Context, Vars};
 use regex::Regex;
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
@@ -15,7 +11,9 @@ pub fn fill_inputs<'a>(inputs: &'a Vars, ctx: &Context) -> Vars {
     for (k, v) in inputs {
         if let JsonValue::String(string) = v {
             if let Some(expr) = get_expr(string) {
-                let result = Context::scope(ctx.clone(), move || ctx.env.eval::<JsonValue>(&expr));
+                let result = Context::scope(ctx.clone(), move || {
+                    ctx.runtime.env().eval::<JsonValue>(&expr)
+                });
                 let new_value = match result {
                     Ok(v) => v,
                     Err(err) => {
@@ -44,7 +42,9 @@ pub fn fill_outputs(outputs: &Vars, ctx: &Context) -> Vars {
     for (k, v) in outputs {
         if let JsonValue::String(string) = v {
             if let Some(expr) = get_expr(string) {
-                let result = Context::scope(ctx.clone(), move || ctx.env.eval::<JsonValue>(&expr));
+                let result = Context::scope(ctx.clone(), move || {
+                    ctx.runtime.env().eval::<JsonValue>(&expr)
+                });
                 let new_value = match result {
                     Ok(v) => v,
                     Err(_err) => JsonValue::Null,
@@ -77,7 +77,8 @@ pub fn fill_proc_vars<'a>(task: &Arc<Task>, values: &'a Vars, ctx: &Context) -> 
     for (k, v) in values {
         if let JsonValue::String(string) = v {
             if let Some(expr) = get_expr(string) {
-                let result = Context::scope(ctx.clone(), || ctx.env.eval::<JsonValue>(&expr));
+                let result =
+                    Context::scope(ctx.clone(), || ctx.runtime.env().eval::<JsonValue>(&expr));
                 let new_value = match result {
                     Ok(v) => v,
                     Err(_err) => JsonValue::Null,
@@ -109,65 +110,4 @@ pub fn get_expr(text: &str) -> Option<String> {
     }
 
     None
-}
-
-pub fn message_state_to_str(state: MessageState) -> String {
-    match state {
-        MessageState::None => "none".to_string(),
-        MessageState::Aborted => "aborted".to_string(),
-        MessageState::Backed => "backed".to_string(),
-        MessageState::Cancelled => "cancelled".to_string(),
-        MessageState::Completed => "completed".to_string(),
-        MessageState::Created => "created".to_string(),
-        MessageState::Skipped => "skipped".to_string(),
-        MessageState::Submitted => "submitted".to_string(),
-        MessageState::Error => "error".to_string(),
-        MessageState::Removed => "removed".to_string(),
-    }
-}
-
-pub fn str_to_message_state(s: &str) -> MessageState {
-    match s {
-        "aborted" => MessageState::Aborted,
-        "backed" => MessageState::Backed,
-        "cancelled" => MessageState::Cancelled,
-        "completed" => MessageState::Completed,
-        "created" => MessageState::Created,
-        "skipped" => MessageState::Skipped,
-        "submitted" => MessageState::Submitted,
-        "error" => MessageState::Error,
-        "removed" => MessageState::Removed,
-        "none" | _ => MessageState::None,
-    }
-}
-
-pub fn state_to_str(state: TaskState) -> String {
-    match state {
-        TaskState::Pending => "pending".to_string(),
-        TaskState::Running => "running".to_string(),
-        TaskState::Interrupt => "interrupt".to_string(),
-        TaskState::Completed => "completed".to_string(),
-        TaskState::Submitted => "submitted".to_string(),
-        TaskState::Backed => "backed".to_string(),
-        TaskState::Cancelled => "cancelled".to_string(),
-        TaskState::Error => "fail".to_string(),
-        TaskState::Skipped => "skip".to_string(),
-        TaskState::Aborted => "abort".to_string(),
-        TaskState::Removed => "removed".to_string(),
-        TaskState::None => "none".to_string(),
-    }
-}
-
-pub fn str_to_state(str: &str) -> TaskState {
-    match str {
-        "none" => TaskState::None,
-        "pending" => TaskState::Pending,
-        "running" => TaskState::Running,
-        "ok" => TaskState::Completed,
-        "skip" => TaskState::Skipped,
-        "abort" => TaskState::Aborted,
-        "interrupt" => TaskState::Interrupt,
-        "fail" => TaskState::Error,
-        _ => TaskState::None,
-    }
 }

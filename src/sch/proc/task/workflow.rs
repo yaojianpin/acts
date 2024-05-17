@@ -14,20 +14,16 @@ impl ActTask for Workflow {
         }
 
         // run setup
+
         if self.setup.len() > 0 {
             for s in &self.setup {
                 s.exec(ctx)?;
             }
         }
-
         Ok(())
     }
 
-    fn run(&self, _ctx: &Context) -> Result<()> {
-        Ok(())
-    }
-
-    fn next(&self, ctx: &Context) -> Result<bool> {
+    fn run(&self, ctx: &Context) -> Result<()> {
         let task = ctx.task();
         let children = task.node.children();
         if children.len() > 0 {
@@ -38,7 +34,14 @@ impl ActTask for Workflow {
             task.set_state(TaskState::Completed);
         }
 
-        Ok(children.len() > 0)
+        Ok(())
+    }
+
+    fn next(&self, ctx: &Context) -> Result<bool> {
+        let task = ctx.task();
+        let tasks = task.children();
+
+        Ok(tasks.iter().all(|t| t.state().is_completed()))
     }
 
     fn review(&self, ctx: &Context) -> Result<bool> {

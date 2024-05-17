@@ -31,7 +31,6 @@ impl Database {
                 DuckdbConnectionManager::file_with_flags(Path::new(path).join(name), config)
                     .unwrap();
             let pool = r2d2::Pool::new(manager).unwrap();
-
             Self {
                 pool,
                 path: path.to_string(),
@@ -68,6 +67,8 @@ impl Database {
                     DbType::Boolean => "BOOLEAN".to_string(),
                     DbType::Double => "DOUBLE".to_string(),
                     DbType::Decimal(width, scale) => format!("DECIMAL({width},{scale})"),
+                    DbType::Int8 => "TINYINT".to_string(),
+                    DbType::Int16 => "SMALLINT".to_string(),
                     DbType::Int32 => "INTEGER".to_string(),
                     DbType::Int64 => "BIGINT".to_string(),
                     DbType::Text => "VARCHAR".to_string(),
@@ -121,5 +122,9 @@ impl Database {
         tr.commit().unwrap();
     }
 
-    pub fn close(&self) {}
+    pub fn close(&self) {
+        if let Ok(conn) = self.pool.get() {
+            drop(conn)
+        }
+    }
 }

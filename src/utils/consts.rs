@@ -34,3 +34,7 @@ pub const ACT_TYPE_MSG: &str = "msg";
 pub const ACT_OUTPUTS: &str = "outputs";
 
 pub const ACT_TO: &str = "to";
+
+pub const ACT_DEFAULT_OUTPUTS: &str = "default_outputs";
+
+pub const TASK_ROOT_TID: &str = "$";

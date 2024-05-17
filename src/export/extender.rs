@@ -1,39 +1,49 @@
+use core::fmt;
 use std::sync::{Arc, Mutex};
 
-use crate::{env::Enviroment, ActModule, ActPlugin};
+use crate::{sch::Runtime, ActModule, ActPlugin};
 
 #[derive(Clone)]
 pub struct Extender {
-    env: Arc<Enviroment>,
+    runtime: Arc<Runtime>,
     plugins: Arc<Mutex<Vec<Box<dyn ActPlugin>>>>,
 }
 
+impl fmt::Debug for Extender {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Extender").finish()
+    }
+}
+
 impl Extender {
-    pub(crate) fn new(
-        env: &Arc<Enviroment>,
-        plugins: &Arc<Mutex<Vec<Box<dyn ActPlugin>>>>,
-    ) -> Self {
+    pub(crate) fn new(runtime: &Arc<Runtime>) -> Self {
         Self {
-            env: env.clone(),
-            plugins: plugins.clone(),
+            runtime: runtime.clone(),
+            plugins: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
     /// register module
     ///
     /// ## Example
-    /// ```rust
-    /// #[tokio::test]
-    /// async fn engine_register_module() {
-    ///     let engine = Engine::new();
-    ///     let mut module = Module::new();
-    ///     combine_with_exported_module!(&mut module, "role", test_module);
-    ///     engine.mgr().register_module("test", &module);
-    ///     assert!(engine.mgr().modules().contains_key("test"));
+    /// ```no_run
+    /// use acts::Engine;
+    /// mod test_module {
+    ///   use acts::{ActModule, Result};
+    ///   #[derive(Clone)]
+    ///   pub struct TestModule;
+    ///   impl ActModule for TestModule {
+    ///     fn init<'a>(&self, _ctx: &rquickjs::Ctx<'a>) -> Result<()> {
+    ///         Ok(())
+    ///     }
+    ///   }
     /// }
+    /// let engine = Engine::new();
+    /// let module = test_module::TestModule;
+    /// engine.extender().register_module(&module);
     /// ```
     pub fn register_module<T: ActModule + Clone + 'static>(&self, module: &T) {
-        self.env.register_module(module)
+        self.runtime.env().register_module(module)
     }
 
     /// register plugin
@@ -41,7 +51,7 @@ impl Extender {
     /// ## Example
     ///
     /// ```no_run
-    /// use acts::{ActPlugin, WorkflowState, Message, Engine, Workflow};
+    /// use acts::{ActPlugin, Message, Engine, Workflow};
     ///
     /// #[derive(Clone)]
     /// struct TestPlugin;
@@ -65,5 +75,9 @@ impl Extender {
     pub fn register_plugin<T: ActPlugin + 'static + Clone>(&self, plugin: &T) {
         let mut plugins = self.plugins.lock().unwrap();
         plugins.push(Box::new(plugin.clone()));
+    }
+
+    pub fn plugins(&self) -> Arc<Mutex<Vec<Box<dyn ActPlugin>>>> {
+        self.plugins.clone()
     }
 }

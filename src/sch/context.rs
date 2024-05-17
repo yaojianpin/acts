@@ -1,8 +1,7 @@
-use super::ActTask;
+use super::{ActTask, Runtime};
 use crate::{
-    env::Enviroment,
-    event::{Action, EventAction, Model},
-    sch::{tree::NodeContent, Node, Proc, Scheduler, Task},
+    event::{Action, Model},
+    sch::{tree::NodeContent, Node, Proc, Task},
     utils::{self, consts, shortid},
     Act, ActError, Message, ModelBase, Msg, NodeKind, Result, TaskState, Vars,
 };
@@ -16,11 +15,12 @@ tokio::task_local! {
 
 #[derive(Clone)]
 pub struct Context {
-    pub scher: Arc<Scheduler>,
-    pub env: Arc<Enviroment>,
+    // pub scher: Arc<Scheduler>,
+    // pub env: Arc<Enviroment>,
+    pub runtime: Arc<Runtime>,
     pub proc: Arc<Proc>,
     task: RefCell<Arc<Task>>,
-    action: RefCell<Option<EventAction>>,
+    action: RefCell<Option<Action>>,
     vars: RefCell<Vars>,
 }
 
@@ -45,15 +45,9 @@ impl Context {
         });
     }
 
-    pub fn new(
-        proc: &Arc<Proc>,
-        task: &Arc<Task>,
-        scher: &Arc<Scheduler>,
-        env: &Arc<Enviroment>,
-    ) -> Self {
+    pub fn new(proc: &Arc<Proc>, task: &Arc<Task>) -> Self {
         let ctx = Context {
-            scher: scher.clone(),
-            env: env.clone(),
+            runtime: task.runtime().clone(),
             proc: proc.clone(),
             action: RefCell::new(None),
             task: RefCell::new(task.clone()),
@@ -96,7 +90,7 @@ impl Context {
     }
 
     pub fn set_action(&self, action: &Action) -> Result<()> {
-        *self.action.borrow_mut() = Some(EventAction::parse(action.event.as_str())?);
+        *self.action.borrow_mut() = Some(action.clone());
 
         // set the action options to the context
         let mut vars = self.vars.borrow_mut();
@@ -111,6 +105,33 @@ impl Context {
 
     pub fn vars(&self) -> Vars {
         self.vars.borrow().clone()
+    }
+
+    pub fn set_env<T>(&self, name: &str, value: T)
+    where
+        T: Serialize + Clone,
+    {
+        // in context, the global env is not writable
+        // just set the value to local env of the proc
+        self.proc.with_env_local_mut(|data| {
+            data.set(name, value);
+        });
+    }
+
+    pub fn get_env<T>(&self, name: &str) -> Option<T>
+    where
+        T: for<'de> Deserialize<'de> + Clone,
+    {
+        // find the env from env local firstly
+        if let Some(v) = self.proc.with_env_local(|vars| vars.get(&name)) {
+            return Some(v);
+        }
+
+        // then get the value from global env
+        if let Some(v) = self.runtime.env().get(&name) {
+            return Some(v);
+        }
+        None
     }
 
     pub fn set_var<T>(&self, name: &str, value: T)
@@ -128,17 +149,18 @@ impl Context {
     }
 
     pub fn eval<T: DeserializeOwned + Serialize>(&self, expr: &str) -> Result<T> {
-        Context::scope(self.clone(), || self.env.eval::<T>(expr))
+        Context::scope(self.clone(), || self.runtime.env().eval::<T>(expr))
     }
 
     #[allow(unused)]
-    pub(in crate::sch) fn action(&self) -> Option<EventAction> {
+    pub(in crate::sch) fn action(&self) -> Option<Action> {
         self.action.borrow().clone()
     }
 
     pub fn sched_task(&self, node: &Arc<Node>) {
+        debug!("sched_task: {}", node.to_string());
         let task = self.proc.create_task(&node, Some(self.task()));
-        self.scher.push(&task);
+        self.runtime.push(&task);
     }
 
     pub fn append_act(&self, act: &Act) -> Result<Arc<Node>> {
@@ -168,13 +190,12 @@ impl Context {
         let node = Arc::new(Node::new(
             &id,
             NodeContent::Act(act.clone()),
-            task.node.level + 1,
+            task.node().level + 1,
         ));
-        node.set_parent(&task.node);
-
-        if task.state().is_running() {
+        // node.set_parent(task.node());
+        if task.state().is_ready() || task.state().is_running() {
             let task = self.proc.create_task(&node, Some(task));
-            self.scher.push(&task);
+            self.runtime.push(&task);
         }
 
         Ok(node)
@@ -184,8 +205,8 @@ impl Context {
     pub fn redo_task(&self, task: &Arc<Task>) -> Result<()> {
         if let Some(prev) = task.prev() {
             if let Some(prev_task) = self.proc.task(&prev) {
-                let task = self.proc.create_task(&task.node, Some(prev_task));
-                self.scher.push(&task);
+                let task = self.proc.create_task(task.node(), Some(prev_task));
+                self.runtime.push(&task);
             }
         }
 
@@ -321,23 +342,25 @@ impl Context {
         debug!("ctx::emit_task, task={:?}", task);
 
         // on workflow start
-        if let NodeContent::Workflow(_) = &task.node.content {
+        if let NodeContent::Workflow(_) = &task.node().content {
             if task.state().is_created() {
-                self.proc.set_state(TaskState::Running);
-                self.scher.emitter().emit_proc_event(&self.proc);
+                if self.proc.state().is_none() {
+                    self.proc.set_state(TaskState::Running);
+                }
+                self.runtime.scher().emit_proc_event(&self.proc);
             }
         }
 
-        self.scher.emitter().emit_task_event(task)?;
+        self.runtime.scher().emit_task_event(task)?;
 
         // on workflow complete
-        if let NodeContent::Workflow(_) = &task.node.content {
+        if let NodeContent::Workflow(_) = &task.node().content {
             if task.state().is_completed() {
                 self.proc.set_state(task.state());
                 if let Some(err) = task.err() {
                     self.proc.set_err(&err);
                 }
-                self.scher.emitter().emit_proc_event(&self.proc);
+                self.runtime.scher().emit_proc_event(&self.proc);
             }
         }
 
@@ -360,12 +383,14 @@ impl Context {
         if let Some(err) = task.err() {
             inputs.set(consts::ACT_ERR_KEY, err);
         }
+
         let msg = Message {
-            id: utils::shortid(),
+            id: utils::longid(),
             r#type: consts::ACT_TYPE_MSG.to_string(),
-            source: task.node.kind().to_string(),
+            source: task.node().kind().to_string(),
             state: task.state().into(),
-            proc_id: task.proc_id.clone(),
+            pid: task.pid.clone(),
+            tid: task.id.clone(),
             key: key.to_string(),
             name: msg.name.clone(),
 
@@ -380,7 +405,7 @@ impl Context {
             ..Default::default()
         };
 
-        self.scher.emitter().emit_message(&msg);
+        self.runtime.emitter().emit_message(&msg);
         Ok(())
     }
 }

@@ -22,7 +22,7 @@ async fn sch_act_call_start() {
     // deploy w2 workflow
     Manager::new(&scher).deploy(&w2).unwrap();
     emitter.on_start(move |e| {
-        if e.mid == "w2" {
+        if e.model.id == "w2" {
             rx.update(|data| *data = true);
         }
     });
@@ -67,7 +67,7 @@ async fn sch_act_call_act_running() {
         println!("message: {:?}", e.inner());
     });
     emitter.on_start(move |e| {
-        if e.mid == "w2" {
+        if e.model.id == "w2" {
             rx.close();
         }
     });
@@ -104,7 +104,7 @@ async fn sch_act_call_act_complete() {
     emitter.on_message(move |e| {
         if e.is_key("act2") && e.is_state("created") {
             let options = Vars::new();
-            e.do_action(&e.proc_id, &e.id, consts::EVT_NEXT, &options)
+            e.do_action(&e.pid, &e.tid, consts::EVT_NEXT, &options)
                 .unwrap();
         }
     });
@@ -141,7 +141,7 @@ async fn sch_act_call_act_skip() {
     emitter.on_message(move |e| {
         if e.is_key("act2") && e.is_state("created") {
             let options = Vars::new();
-            e.do_action(&e.proc_id, &e.id, consts::EVT_SKIP, &options)
+            e.do_action(&e.pid, &e.tid, consts::EVT_SKIP, &options)
                 .unwrap();
         }
     });
@@ -181,13 +181,14 @@ async fn sch_act_call_act_abort() {
         println!("message: {:?}", e.inner());
         if e.is_key("act2") && e.is_state("created") {
             let options = Vars::new();
-            e.do_action(&e.proc_id, &e.id, consts::EVT_ABORT, &options)
+            e.do_action(&e.pid, &e.tid, consts::EVT_ABORT, &options)
                 .unwrap();
         }
     });
     scher.launch(&proc);
     tx.recv().await;
     proc.print();
+    
     assert_eq!(
         proc.task_by_nid("act1").get(0).unwrap().state(),
         TaskState::Aborted
@@ -211,17 +212,23 @@ async fn sch_act_call_act_error() {
 
     main.print();
     let main_pid = utils::longid();
-    let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut main, &main_pid);
+    let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut main, &main_pid);
 
     Manager::new(&scher).deploy(&w2).unwrap();
+    emitter.on_error(move |e| {
+        if e.model.id == "main" {
+            rx.close();
+        }
+    });
     emitter.on_message(move |e| {
+        println!("message: {e:?}");
         if e.is_key("act2") && e.is_state("created") {
             let mut options = Vars::new();
             options.set(
                 consts::ACT_ERR_KEY,
                 Error::new("sub workflow error", "err1"),
             );
-            e.do_action(&e.proc_id, &e.id, consts::EVT_ERR, &options)
+            e.do_action(&e.pid, &e.tid, consts::EVT_ERR, &options)
                 .unwrap();
         }
     });

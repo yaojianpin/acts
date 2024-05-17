@@ -1,4 +1,4 @@
-use crate::{utils, Msg, TaskState, Vars};
+use crate::{data, utils, TaskState, Vars};
 use core::fmt;
 use serde::{Deserialize, Serialize};
 
@@ -30,8 +30,11 @@ pub struct Model {
 }
 #[derive(Default, Serialize, Deserialize, Clone, Debug)]
 pub struct Message {
-    /// task id
+    /// message id
     pub id: String,
+
+    /// task id
+    pub tid: String,
 
     /// node name or action name
     pub name: String,
@@ -49,7 +52,7 @@ pub struct Message {
     pub model: Model,
 
     /// proc id
-    pub proc_id: String,
+    pub pid: String,
 
     /// nodeId or specific message key
     pub key: String,
@@ -69,20 +72,12 @@ pub struct Message {
 
     /// task end time in million second
     pub end_time: i64,
+
+    /// record the message retry times
+    pub retry_times: i32,
 }
 
 impl Message {
-    pub fn from(msg: &Msg) -> Self {
-        Self {
-            name: msg.name.to_string(),
-            id: msg.id.to_string(),
-            tag: msg.tag.to_string(),
-            inputs: msg.inputs.clone(),
-            start_time: utils::time::time(),
-            ..Default::default()
-        }
-    }
-
     pub fn state(&self) -> MessageState {
         let state = self.state.clone().into();
         state
@@ -130,6 +125,58 @@ impl Message {
 
         None
     }
+
+    /// workflow cost in million seconds
+    pub fn cost(&self) -> i64 {
+        if self.state.is_completed() {
+            return self.end_time - self.start_time;
+        }
+
+        0
+    }
+
+    pub fn into(&self, emit_id: &str, pat: &str) -> data::Message {
+        let value = self.clone();
+        data::Message {
+            id: value.id,
+            tid: value.tid,
+            name: value.name,
+            state: value.state.to_string(),
+            r#type: value.r#type,
+            source: value.source,
+            model: serde_json::to_string(&value.model).unwrap(),
+            pid: value.pid,
+            key: value.key,
+            inputs: value.inputs.to_string(),
+            outputs: value.outputs.to_string(),
+            tag: value.tag,
+            start_time: value.start_time,
+            end_time: value.end_time,
+            emit_id: emit_id.to_string(),
+            emit_pattern: pat.to_string(),
+            emit_count: 0,
+            create_time: utils::time::time_millis(),
+            update_time: 0,
+            retry_times: 0,
+            status: data::MessageStatus::Created,
+        }
+    }
+}
+
+impl MessageState {
+    pub fn is_completed(&self) -> bool {
+        match self {
+            MessageState::Completed
+            | MessageState::Cancelled
+            | MessageState::Submitted
+            | MessageState::Backed
+            | MessageState::Error
+            | MessageState::Skipped
+            | MessageState::Aborted
+            | MessageState::Removed => true,
+            _ => false,
+        }
+    }
 }
 
 impl fmt::Display for MessageState {
@@ -143,7 +190,9 @@ impl From<TaskState> for MessageState {
     fn from(state: TaskState) -> Self {
         match state {
             TaskState::None => MessageState::None,
-            TaskState::Pending | TaskState::Running | TaskState::Interrupt => MessageState::Created,
+            TaskState::Ready | TaskState::Pending | TaskState::Running | TaskState::Interrupt => {
+                MessageState::Created
+            }
             TaskState::Completed => MessageState::Completed,
             TaskState::Submitted => MessageState::Submitted,
             TaskState::Backed => MessageState::Backed,
@@ -158,24 +207,76 @@ impl From<TaskState> for MessageState {
 
 impl From<MessageState> for String {
     fn from(state: MessageState) -> Self {
-        utils::message_state_to_str(state)
+        message_state_to_str(state)
+    }
+}
+
+impl From<data::Message> for Message {
+    fn from(v: data::Message) -> Self {
+        Self {
+            id: v.id,
+            tid: v.tid,
+            name: v.name,
+            state: v.state.into(),
+            r#type: v.r#type,
+            source: v.source,
+            model: serde_json::from_str(&v.model).unwrap_or_default(),
+            pid: v.pid,
+            key: v.key,
+            inputs: serde_json::from_str(&v.inputs).unwrap_or_default(),
+            outputs: serde_json::from_str(&v.outputs).unwrap_or_default(),
+            tag: v.tag,
+            start_time: v.start_time,
+            end_time: v.end_time,
+            retry_times: v.retry_times,
+        }
     }
 }
 
 impl From<&str> for MessageState {
     fn from(str: &str) -> Self {
-        utils::str_to_message_state(str)
+        str_to_message_state(str)
     }
 }
 
 impl From<String> for MessageState {
     fn from(str: String) -> Self {
-        utils::str_to_message_state(&str)
+        str_to_message_state(&str)
     }
 }
 
 impl From<&MessageState> for String {
     fn from(state: &MessageState) -> Self {
-        utils::message_state_to_str(state.clone())
+        message_state_to_str(state.clone())
+    }
+}
+
+fn message_state_to_str(state: MessageState) -> String {
+    match state {
+        MessageState::None => "none".to_string(),
+        MessageState::Aborted => "aborted".to_string(),
+        MessageState::Backed => "backed".to_string(),
+        MessageState::Cancelled => "cancelled".to_string(),
+        MessageState::Completed => "completed".to_string(),
+        MessageState::Created => "created".to_string(),
+        MessageState::Skipped => "skipped".to_string(),
+        MessageState::Submitted => "submitted".to_string(),
+        MessageState::Error => "error".to_string(),
+        MessageState::Removed => "removed".to_string(),
+    }
+}
+
+fn str_to_message_state(s: &str) -> MessageState {
+    match s {
+        "aborted" => MessageState::Aborted,
+        "backed" => MessageState::Backed,
+        "cancelled" => MessageState::Cancelled,
+        "completed" => MessageState::Completed,
+        "created" => MessageState::Created,
+        "skipped" => MessageState::Skipped,
+        "submitted" => MessageState::Submitted,
+        "error" => MessageState::Error,
+        "removed" => MessageState::Removed,
+        "none" | _ => MessageState::None,
     }
 }

@@ -154,11 +154,11 @@ async fn env_task_get() {
     let sig = engine.signal(());
     let s1 = sig.clone();
 
-    let env = engine.env();
+    let env = engine.runtime().env().clone();
     let workflow = Workflow::new()
         .with_input("a", 10.into())
         .with_step(|step| step.with_id("step1"));
-    let proc = engine.scher().start(&workflow, &Vars::new()).unwrap();
+    let proc = engine.runtime().start(&workflow, &Vars::new()).unwrap();
     engine.emitter().on_complete(move |_| s1.close());
     sig.recv().await;
     let task = proc.root().unwrap();
@@ -179,11 +179,11 @@ async fn env_task_set() {
     let sig = engine.signal(());
     let s1 = sig.clone();
 
-    let env = engine.env();
+    let env = engine.runtime().env().clone();
     let workflow = Workflow::new()
         .with_input("a", 10.into())
         .with_step(|step| step.with_id("step1"));
-    let proc = engine.scher().start(&workflow, &Vars::new()).unwrap();
+    let proc = engine.runtime().start(&workflow, &Vars::new()).unwrap();
     engine.emitter().on_complete(move |_| s1.close());
     sig.recv().await;
     let task = proc.root().unwrap();
@@ -203,9 +203,9 @@ async fn env_task_multi_line() {
     let sig = engine.signal(());
     let s1 = sig.clone();
 
-    let env = engine.env();
+    let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    let proc = engine.scher().start(&workflow, &Vars::new()).unwrap();
+    let proc = engine.runtime().start(&workflow, &Vars::new()).unwrap();
     engine.emitter().on_complete(move |_| s1.close());
     sig.recv().await;
     let task = proc.root().unwrap();
@@ -225,11 +225,11 @@ async fn env_env_get_local() {
     let sig = engine.signal(());
     let s1 = sig.clone();
 
-    let env = engine.env();
+    let env = engine.runtime().env().clone();
     let workflow = Workflow::new()
         .with_env("a", 10.into())
         .with_step(|step| step.with_id("step1"));
-    let proc = engine.scher().start(&workflow, &Vars::new()).unwrap();
+    let proc = engine.runtime().start(&workflow, &Vars::new()).unwrap();
     engine.emitter().on_complete(move |_| s1.close());
     sig.recv().await;
     let task = proc.root().unwrap();
@@ -250,11 +250,11 @@ async fn env_env_get_global() {
     let sig = engine.signal(());
     let s1 = sig.clone();
 
-    let env = engine.env();
+    let env = engine.runtime().env().clone();
     env.set("a", 10);
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
     engine.emitter().on_complete(move |_| s1.close());
-    let proc = engine.scher().start(&workflow, &Vars::new()).unwrap();
+    let proc = engine.runtime().start(&workflow, &Vars::new()).unwrap();
 
     sig.recv().await;
     let task = proc.root().unwrap();
@@ -275,10 +275,10 @@ async fn env_env_set_from_global() {
     let sig = engine.signal(());
     let s1 = sig.clone();
 
-    let env = engine.env();
+    let env = engine.runtime().env().clone();
     env.set("a", 10);
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    let proc = engine.scher().start(&workflow, &Vars::new()).unwrap();
+    let proc = engine.runtime().start(&workflow, &Vars::new()).unwrap();
     engine.emitter().on_complete(move |_| s1.close());
     sig.recv().await;
     let task = proc.root().unwrap();
@@ -303,12 +303,12 @@ async fn env_env_set_both_local_global() {
     let sig = engine.signal(());
     let s1 = sig.clone();
 
-    let env = engine.env();
+    let env = engine.runtime().env().clone();
     env.set("a", 10);
     let workflow = Workflow::new()
         .with_env("a", 100.into())
         .with_step(|step| step.with_id("step1"));
-    let proc = engine.scher().start(&workflow, &Vars::new()).unwrap();
+    let proc = engine.runtime().start(&workflow, &Vars::new()).unwrap();
     engine.emitter().on_complete(move |_| s1.close());
     sig.recv().await;
     let task = proc.root().unwrap();
@@ -333,9 +333,9 @@ async fn env_env_multi_line() {
     let sig = engine.signal(());
     let s1 = sig.clone();
 
-    let env = engine.env();
+    let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    let proc = engine.scher().start(&workflow, &Vars::new()).unwrap();
+    let proc = engine.runtime().start(&workflow, &Vars::new()).unwrap();
     engine.emitter().on_complete(move |_| s1.close());
     sig.recv().await;
     let task = proc.root().unwrap();
@@ -514,7 +514,7 @@ async fn run_test<T: Clone + Send + 'static + Default>(
         step.with_id("step1")
             .with_act(Act::req(|act| act.with_id("act1")))
     });
-    let proc = engine.scher().start(&workflow, &Vars::new()).unwrap();
+    let proc = engine.runtime().start(&workflow, &Vars::new()).unwrap();
     engine.emitter().on_message(move |e| {
         // println!("message: {e:?}");
         if e.is_key("act1") {

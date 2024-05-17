@@ -1,4 +1,4 @@
-pub fn time() -> i64 {
+pub fn time_millis() -> i64 {
     let time: chrono::DateTime<chrono::Utc> = chrono::Utc::now();
     let time_millis = time.timestamp_millis();
 

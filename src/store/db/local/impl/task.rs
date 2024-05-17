@@ -27,7 +27,7 @@ impl DbSchema for Task {
             },
         ));
         map.push((
-            "proc_id".to_string(),
+            "pid".to_string(),
             DbColumn {
                 db_type: DbType::Text,
                 is_index: true,
@@ -35,7 +35,7 @@ impl DbSchema for Task {
             },
         ));
         map.push((
-            "task_id".to_string(),
+            "tid".to_string(),
             DbColumn {
                 db_type: DbType::Text,
                 is_not_null: true,
@@ -43,7 +43,7 @@ impl DbSchema for Task {
             },
         ));
         map.push((
-            "node_id".to_string(),
+            "node_data".to_string(),
             DbColumn {
                 db_type: DbType::Text,
                 is_not_null: true,
@@ -128,9 +128,9 @@ impl DbRow for Task {
         Ok(Task {
             id: row.get::<usize, String>(0).unwrap(),
             name: row.get::<usize, String>(1).unwrap(),
-            proc_id: row.get::<usize, String>(2).unwrap(),
-            task_id: row.get::<usize, String>(3).unwrap(),
-            node_id: row.get::<usize, String>(4).unwrap(),
+            pid: row.get::<usize, String>(2).unwrap(),
+            tid: row.get::<usize, String>(3).unwrap(),
+            node_data: row.get::<usize, String>(4).unwrap(),
             kind: row.get::<usize, String>(5).unwrap(),
             prev: row.get::<usize, Option<String>>(6).unwrap(),
             state: row.get::<usize, String>(7).unwrap(),
@@ -148,9 +148,9 @@ impl DbRow for Task {
 
         ret.push(("id".to_string(), Value::Text(self.id.clone())));
         ret.push(("name".to_string(), Value::Text(self.name.clone())));
-        ret.push(("proc_id".to_string(), Value::Text(self.proc_id.clone())));
-        ret.push(("task_id".to_string(), Value::Text(self.task_id.clone())));
-        ret.push(("node_id".to_string(), Value::Text(self.node_id.clone())));
+        ret.push(("pid".to_string(), Value::Text(self.pid.clone())));
+        ret.push(("tid".to_string(), Value::Text(self.tid.clone())));
+        ret.push(("node_data".to_string(), Value::Text(self.node_data.clone())));
         ret.push(("kind".to_string(), Value::Text(self.kind.clone())));
         ret.push((
             "prev".to_string(),

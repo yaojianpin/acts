@@ -450,7 +450,7 @@ async fn run_test<T: Clone + Send + 'static + Default>(
         println!("message: {:?}", e);
         exit_if(e, rx.clone());
     });
-    engine.scher().launch(&proc);
+    engine.runtime().launch(&proc);
     let ret = tx.recv().await;
     proc.print();
     ret
@@ -467,7 +467,7 @@ async fn run_test_proc<T: Clone + Send + 'static + Default>(
         println!("message: {:?}", e);
         exit_if(e, rx.clone());
     });
-    engine.scher().launch(&proc);
+    engine.runtime().launch(&proc);
     let ret = tx.recv().await;
     proc.print();
     (ret, proc.clone())
@@ -486,6 +486,6 @@ async fn run_test_dep<T: Clone + Send + 'static + Default>(
         println!("message: {:?}", e);
         exit_if(e, rx.clone());
     });
-    engine.scher().launch(&proc);
+    engine.runtime().launch(&proc);
     tx.recv().await
 }

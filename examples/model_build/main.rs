@@ -3,9 +3,7 @@ use nanoid::nanoid;
 #[tokio::main]
 async fn main() {
     let engine = Engine::new();
-    let sig = engine.signal(());
-    let s = sig.clone();
-
+    let (s, sig) = engine.signal(()).double();
     let workflow = Workflow::new()
         .with_id("m1")
         .with_input("index", 0.into())
@@ -42,11 +40,7 @@ async fn main() {
     });
 
     engine.emitter().on_complete(move |e| {
-        println!(
-            "on_workflow_complete: {:?}, cost={}ms",
-            e.outputs(),
-            e.cost()
-        );
+        println!("on_workflow_complete: {:?}, cost={}ms", e.outputs, e.cost());
         s.close();
     });
     sig.recv().await;

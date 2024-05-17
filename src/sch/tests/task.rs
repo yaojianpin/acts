@@ -1,7 +1,6 @@
 use crate::{
-    event::MessageState,
     sch::tests::{create_proc, create_proc_signal},
-    utils, Act, TaskState, Workflow,
+    utils, Act, MessageState, TaskState, Workflow,
 };
 
 #[tokio::test]
@@ -13,11 +12,11 @@ async fn sch_task_state() {
 
 #[tokio::test]
 async fn sch_task_start() {
-    let mut workflow = Workflow::new();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<TaskState>(&mut workflow, "w1");
+    let mut workflow = Workflow::new().with_step(|step| step.with_id("step1"));
+    let (proc, rt, _, tx, rx) = create_proc_signal::<TaskState>(&mut workflow, "w1");
 
-    proc.start(&scher);
-    emitter.on_proc(move |e| rx.send(e.state()));
+    proc.start();
+    rt.scher().on_proc(move |e| rx.send(e.state()));
 
     let ret = tx.recv().await;
     assert_eq!(ret, TaskState::Running);
@@ -261,7 +260,7 @@ async fn sch_task_branch_if_false_else_running() {
 
     // check the branch state is updated to store
     let task = proc.task_by_nid("b1").get(0).unwrap().clone();
-    let task_id = utils::Id::new(&task.proc_id, &task.id);
+    let task_id = utils::Id::new(&task.pid, &task.id);
     assert_eq!(
         scher
             .cache()

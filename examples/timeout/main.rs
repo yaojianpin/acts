@@ -6,10 +6,7 @@ mod client;
 async fn main() {
     let client = client::Client::new();
     let engine = Builder::new().tick_interval_secs(1).build();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-    let s2 = sig.clone();
-
+    let (s1, s2, sig) = engine.signal(()).triple();
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text).unwrap();
     workflow.print();
@@ -33,7 +30,7 @@ async fn main() {
             "on_workflow_complete: pid={} cost={}ms outputs={:?}",
             e.pid,
             e.cost(),
-            e.outputs()
+            e.outputs
         );
         s1.close();
     });

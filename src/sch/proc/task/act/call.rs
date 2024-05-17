@@ -15,7 +15,7 @@ impl ActTask for Call {
 
     fn run(&self, ctx: &Context) -> Result<()> {
         let task = ctx.task();
-        let executor = Executor::new(&ctx.scher);
+        let executor = Executor::new(&ctx.runtime);
 
         let mut inputs = task.inputs();
         inputs.set(consts::ACT_USE_PARENT_PROC_ID, &ctx.proc.id());

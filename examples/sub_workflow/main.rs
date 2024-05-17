@@ -6,10 +6,7 @@ async fn main() {
     let client = client::Client::new();
 
     let engine = Engine::new();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-    let s2 = sig.clone();
-
+    let (s1, s2, sig) = engine.signal(()).triple();
     let mgr = engine.manager();
     deploy_model(&mgr, include_str!("./model/main.yml"));
     deploy_model(&mgr, include_str!("./model/sub.yml"));
@@ -29,21 +26,19 @@ async fn main() {
     engine.emitter().on_start(move |e| {
         println!(
             "on_workflow_start: mid={} pid={} inputs={:?}\n",
-            e.mid,
-            e.pid,
-            e.inputs()
+            e.model.id, e.pid, e.inputs
         );
     });
     engine.emitter().on_complete(move |e| {
         println!(
             "on_workflow_complete: mid={} pid={} cost={}ms outputs={:?}\n",
-            e.mid,
+            e.model.id,
             e.pid,
             e.cost(),
-            e.outputs()
+            e.outputs
         );
 
-        if e.mid == "main" {
+        if e.model.id == "main" {
             s1.close();
         }
     });

@@ -60,7 +60,7 @@ impl StatementBatch {
                     return Ok(());
                 }
 
-                let millis = utils::time::time() - task.start_time();
+                let millis = utils::time::time_millis() - task.start_time();
                 if millis >= t.on.as_secs() * 1000 {
                     task.set_data_with(|data| data.set(&key, true));
                     for s in &t.then {

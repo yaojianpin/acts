@@ -9,19 +9,17 @@ mod tree;
 mod vars;
 mod workflow;
 
-use super::{Proc, Scheduler};
-use crate::{event::Emitter, Engine, Signal, Workflow};
+use super::{Proc, Runtime};
+use crate::{export::Channel, Builder, Config, Engine, Signal, Workflow};
 use std::sync::Arc;
 
-fn create_proc(workflow: &mut Workflow, pid: &str) -> (Arc<Proc>, Arc<Scheduler>, Arc<Emitter>) {
-    let runtime = Engine::new();
-    let scher = runtime.scher().clone();
+fn create_proc(workflow: &mut Workflow, pid: &str) -> (Arc<Proc>, Arc<Runtime>, Arc<Channel>) {
+    let engine = Engine::new();
+    let rt = engine.runtime();
 
-    let proc = Arc::new(Proc::new(&pid));
-    proc.load(workflow).unwrap();
-
-    let emitter = scher.emitter().clone();
-    let sig = scher.signal(());
+    let proc = rt.create_proc(pid, workflow);
+    let emitter = engine.emitter().clone();
+    let sig = engine.signal(());
     let s1 = sig.clone();
     let s2 = sig.clone();
     emitter.on_complete(move |p| {
@@ -31,10 +29,10 @@ fn create_proc(workflow: &mut Workflow, pid: &str) -> (Arc<Proc>, Arc<Scheduler>
     });
 
     emitter.on_error(move |p| {
-        println!("error in '{}', error={}", p.inner().pid, p.inner().state);
+        println!("error in '{}', error={}", p.pid, p.state);
         s2.close();
     });
-    (proc, scher, emitter)
+    (proc, rt, emitter)
 }
 
 fn create_proc_signal<R: Clone + Default + Sync + Send + 'static>(
@@ -42,24 +40,23 @@ fn create_proc_signal<R: Clone + Default + Sync + Send + 'static>(
     pid: &str,
 ) -> (
     Arc<Proc>,
-    Arc<Scheduler>,
-    Arc<Emitter>,
+    Arc<Runtime>,
+    Arc<crate::export::Channel>,
     Signal<R>,
     Signal<R>,
 ) {
-    let runtime = Engine::new();
-    let scher = runtime.scher().clone();
+    let engine = Engine::new();
+    let rt = engine.runtime();
 
-    let proc = Arc::new(Proc::new(&pid));
-    proc.load(workflow).unwrap();
+    let proc = rt.create_proc(pid, workflow);
 
-    let emitter = scher.emitter().clone();
-    let sig = scher.signal(R::default());
+    let emitter = engine.emitter().clone();
+    let sig = engine.signal(R::default());
     let rx2 = sig.clone();
     let rx3 = sig.clone();
     emitter.on_complete(move |p| {
         println!("message: {p:?}");
-        if p.inner().state.is_completed() {
+        if p.state.is_completed() {
             rx2.close();
         }
     });
@@ -68,7 +65,7 @@ fn create_proc_signal<R: Clone + Default + Sync + Send + 'static>(
         println!("error in '{}', error={}", p.inner().pid, p.inner().state);
         rx3.close();
     });
-    (proc, scher, emitter, sig.clone(), sig.clone())
+    (proc, rt, emitter, sig.clone(), sig.clone())
 }
 
 fn create_proc_signal2<R: Clone + Default + Send + 'static>(
@@ -76,13 +73,12 @@ fn create_proc_signal2<R: Clone + Default + Send + 'static>(
     pid: &str,
 ) -> (Engine, Arc<Proc>, Signal<R>, Signal<R>) {
     let engine = Engine::new();
-    let scher = engine.scher().clone();
+    let rt = engine.runtime();
 
-    let proc = Arc::new(Proc::new(&pid));
-    proc.load(workflow).unwrap();
+    let proc = rt.create_proc(pid, workflow);
 
-    let emitter = scher.emitter().clone();
-    let sig = scher.signal(R::default());
+    let emitter = engine.emitter().clone();
+    let sig = engine.signal(R::default());
     let rx2 = sig.clone();
     let rx3 = sig.clone();
     emitter.on_complete(move |p| {
@@ -96,4 +92,31 @@ fn create_proc_signal2<R: Clone + Default + Send + 'static>(
         rx3.close();
     });
     (engine, proc, sig.clone(), sig.clone())
+}
+
+fn create_proc_signal_config<R: Clone + Default + Send + 'static>(
+    config: &Config,
+    workflow: &Workflow,
+    pid: &str,
+) -> (Engine, Arc<Proc>, Signal<R>) {
+    let mut builder = Builder::new();
+    builder.set_config(config);
+    let engine = builder.build();
+    let rt = engine.runtime();
+
+    let proc = rt.create_proc(pid, workflow);
+
+    let emitter = engine.emitter().clone();
+    let (s1, s2, sig) = engine.signal(R::default()).triple();
+    emitter.on_complete(move |p| {
+        if p.inner().state.is_completed() {
+            s1.close();
+        }
+    });
+
+    emitter.on_error(move |p| {
+        println!("error in '{}', error={}", p.inner().pid, p.inner().state);
+        s2.close();
+    });
+    (engine, proc, sig)
 }

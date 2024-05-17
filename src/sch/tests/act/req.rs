@@ -1,6 +1,6 @@
 use crate::{
     event::{Action, MessageState},
-    sch::{tests::create_proc_signal, TaskState},
+    sch::{tests::*, TaskState},
     utils::{self, consts},
     Act, Message, StmtBuild, Vars, Workflow,
 };
@@ -30,6 +30,45 @@ async fn sch_act_req_one() {
         proc.task_by_nid("act1").get(0).unwrap().state(),
         TaskState::Interrupt
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn sch_act_req_multi_threads() {
+    let workflow = Workflow::new().with_id("m1").with_step(|step| {
+        step.with_id("step1")
+            .with_setup(|setup| setup.add(Act::req(|act| act.with_id("act1"))))
+    });
+
+    workflow.print();
+    let engine = Builder::new().cache_size(5).build();
+    engine.manager().deploy(&workflow).unwrap();
+    let (s1, s2) = engine.signal(false).double();
+    let count = Arc::new(Mutex::new(0));
+    let len = 1000;
+    let e2 = engine.clone();
+    engine.emitter().on_message(move |e| {
+        if e.is_key("act1") && e.is_state("created") {
+            let ret = engine.executor().complete(&e.pid, &e.tid, &Vars::new());
+            if ret.is_err() {
+                println!("error: {:?}", ret.err().unwrap());
+                s1.send(false);
+            }
+
+            let mut count = count.lock().unwrap();
+            *count += 1;
+            println!("count: {}", *count);
+            if *count == len {
+                s1.send(true);
+            }
+        }
+    });
+
+    for _ in 0..len {
+        e2.executor().start("m1", &Vars::new()).unwrap();
+    }
+
+    let ret = s2.recv().await;
+    assert!(ret);
 }
 
 #[tokio::test]
@@ -146,7 +185,7 @@ async fn sch_act_req_complete() {
                 let mut options = Vars::new();
                 options.insert("uid".to_string(), json!(uid.to_string()));
 
-                let action = Action::new(&e.proc_id, &e.id, consts::EVT_NEXT, &options);
+                let action = Action::new(&e.pid, &e.tid, consts::EVT_NEXT, &options);
                 if let Err(err) = s.do_action(&action) {
                     println!("error: {}", err);
                     rx.send(false);
@@ -197,7 +236,7 @@ async fn sch_act_req_cancel_normal() {
         if e.is_source("act") {
             let mut count = count.lock().unwrap();
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
-            let tid = &e.id;
+            let tid = &e.tid;
 
             if uid == "a" && e.state == MessageState::Created {
                 if *count == 0 {
@@ -206,7 +245,7 @@ async fn sch_act_req_cancel_normal() {
                     let mut options = Vars::new();
                     options.insert("uid".to_string(), json!(uid.to_string()));
 
-                    let action = Action::new(&e.proc_id, tid, consts::EVT_NEXT, &options);
+                    let action = Action::new(&e.pid, tid, consts::EVT_NEXT, &options);
                     s.do_action(&action).unwrap();
                 } else {
                     rx.send(true);
@@ -220,7 +259,7 @@ async fn sch_act_req_cancel_normal() {
                 // get the completed act id in previous step
                 let act_req_id = &*act_req_id.lock().unwrap();
                 let aid = act_req_id.as_deref().unwrap();
-                let action = Action::new(&e.proc_id, aid, "cancel", &options);
+                let action = Action::new(&e.pid, aid, "cancel", &options);
                 s.do_action(&action).unwrap();
             }
         }
@@ -264,19 +303,19 @@ async fn sch_act_req_back() {
         if msg.is_source("act") {
             let mut count = count.lock().unwrap();
             let uid = msg.inputs.get_value("uid").unwrap().as_str().unwrap();
-            let tid = &msg.id;
+            let tid = &msg.tid;
             if uid == "a" && *count == 0 {
                 let mut options = Vars::new();
                 options.insert("uid".to_string(), json!(uid.to_string()));
 
-                let action = Action::new(&msg.proc_id, tid, consts::EVT_NEXT, &options);
+                let action = Action::new(&msg.pid, tid, consts::EVT_NEXT, &options);
                 s.do_action(&action).unwrap();
             } else if uid == "b" {
                 if msg.state() == MessageState::Created {
                     let mut options = Vars::new();
                     options.insert("uid".to_string(), json!("b".to_string()));
                     options.insert("to".to_string(), json!("step1".to_string()));
-                    let action = Action::new(&msg.proc_id, tid, "back", &options);
+                    let action = Action::new(&msg.pid, tid, "back", &options);
                     s.do_action(&action).unwrap();
                 }
             } else if msg.state() == MessageState::Created && uid == "a" && *count > 0 {
@@ -323,7 +362,7 @@ async fn sch_act_req_abort() {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
 
-            let message = Action::new(&e.proc_id, &e.id, "abort", &options);
+            let message = Action::new(&e.pid, &e.tid, "abort", &options);
             s.do_action(&message).unwrap();
         }
     });
@@ -356,7 +395,7 @@ async fn sch_act_req_submit() {
                 let mut options = Vars::new();
                 options.insert("uid".to_string(), json!(uid.to_string()));
 
-                let action = Action::new(&e.proc_id, &e.id, "submit", &options);
+                let action = Action::new(&e.pid, &e.tid, "submit", &options);
                 s.do_action(&action).unwrap();
             }
         }
@@ -396,7 +435,7 @@ async fn sch_act_req_skip() {
                 let mut options = Vars::new();
                 options.insert("uid".to_string(), json!(uid.to_string()));
 
-                let action = Action::new(&e.proc_id, &e.id, "skip", &options);
+                let action = Action::new(&e.pid, &e.tid, "skip", &options);
                 s.do_action(&action).unwrap();
             }
         }
@@ -435,7 +474,7 @@ async fn sch_act_req_skip_next() {
                 let mut options = Vars::new();
                 options.insert("uid".to_string(), json!(uid.to_string()));
 
-                let action = Action::new(&e.proc_id, &e.id, "skip", &options);
+                let action = Action::new(&e.pid, &e.tid, "skip", &options);
                 s.do_action(&action).unwrap();
             }
         }
@@ -479,7 +518,7 @@ async fn sch_act_req_error_action() {
                     json!({ "ecode": "1", "message": "biz error"}),
                 );
 
-                let action = Action::new(&e.proc_id, &e.id, "error", &options);
+                let action = Action::new(&e.pid, &e.tid, "error", &options);
                 s.do_action(&action).unwrap();
             }
         }
@@ -510,7 +549,7 @@ async fn sch_act_req_error_action_without_err_code() {
                 let mut options = Vars::new();
                 options.insert("uid".to_string(), json!(uid.to_string()));
 
-                let action = Action::new(&e.proc_id, &e.id, "error", &options);
+                let action = Action::new(&e.pid, &e.tid, "error", &options);
                 let result = s.do_action(&action);
                 rx.update(|data| *data = result.is_err());
                 rx.close();
@@ -543,12 +582,12 @@ async fn sch_act_req_not_support_action() {
         if e.is_source("act") {
             let mut count = count.lock().unwrap();
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
-            let tid = &e.id;
+            let tid = &e.tid;
             if uid == "a" && *count == 0 {
                 let mut options = Vars::new();
                 options.insert("uid".to_string(), json!(uid.to_string()));
 
-                let action = Action::new(&e.proc_id, tid, "not_support", &options);
+                let action = Action::new(&e.pid, tid, "not_support", &options);
                 let ret = s.do_action(&action).is_err();
                 rx.send(ret);
             }
@@ -588,11 +627,11 @@ async fn sch_act_req_next_by_complete_state() {
     emitter.on_message(move |e| {
         if e.is_source("act") {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
-            let tid = &e.id;
+            let tid = &e.tid;
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!(uid.to_string()));
 
-            let action = Action::new(&e.proc_id, tid, consts::EVT_NEXT, &options);
+            let action = Action::new(&e.pid, tid, consts::EVT_NEXT, &options);
             s.do_action(&action).unwrap();
 
             // action again
@@ -623,11 +662,11 @@ async fn sch_act_req_cancel_by_running_state() {
     emitter.on_message(move |e| {
         if e.is_source("act") {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
-            let tid = &e.id;
+            let tid = &e.tid;
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!(uid.to_string()));
 
-            let action = Action::new(&e.proc_id, tid, "cancel", &options);
+            let action = Action::new(&e.pid, tid, "cancel", &options);
             let ret = s.do_action(&action).is_err();
             rx.send(ret);
         }
@@ -661,7 +700,7 @@ async fn sch_act_req_do_action_complete() {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!(uid.to_string()));
 
-            let action = Action::new(&e.proc_id, &e.id, consts::EVT_NEXT, &options);
+            let action = Action::new(&e.pid, &e.tid, consts::EVT_NEXT, &options);
             let ret = s.do_action(&action).is_ok();
 
             rx.send(ret);
@@ -688,7 +727,7 @@ async fn sch_act_req_do_action_remove() {
     emitter.on_message(move |e| {
         println!("message: {e:?}");
         if e.state() == MessageState::Created && e.r#type == "req" {
-            let action = Action::new(&e.proc_id, &e.id, "remove", &Vars::new());
+            let action = Action::new(&e.pid, &e.tid, "remove", &Vars::new());
             s.do_action(&action).unwrap();
 
             rx.close();
@@ -732,7 +771,7 @@ async fn sch_act_req_do_action_outputs() {
             options.insert("b".to_string(), json!(5));
             options.insert("c".to_string(), json!(["u1", "u2"]));
 
-            let action = Action::new(&e.proc_id, &e.id, consts::EVT_NEXT, &options);
+            let action = Action::new(&e.pid, &e.tid, consts::EVT_NEXT, &options);
             s.do_action(&action).unwrap();
             rx.close();
         }
@@ -807,7 +846,7 @@ async fn sch_act_req_do_action_rets() {
             options.insert("c".to_string(), json!(["u1", "u2"]));
             options.insert("d".to_string(), json!({ "value": "test" } ));
 
-            let action = Action::new(&e.proc_id, &e.id, consts::EVT_NEXT, &options);
+            let action = Action::new(&e.pid, &e.tid, consts::EVT_NEXT, &options);
             s.do_action(&action).unwrap();
             rx.close();
         }
@@ -878,7 +917,7 @@ async fn sch_act_req_do_action_no_rets() {
             options.insert("uid".to_string(), json!(uid.to_string()));
             options.insert("any".to_string(), json!(100));
 
-            let action = Action::new(&e.proc_id, &e.id, consts::EVT_NEXT, &options);
+            let action = Action::new(&e.pid, &e.tid, consts::EVT_NEXT, &options);
             let ret = s.do_action(&action).is_ok();
             rx.send(ret);
         }
@@ -910,7 +949,7 @@ async fn sch_act_req_do_action_ret_key_check() {
         if e.state() == MessageState::Created && e.r#type == "req" {
             // create options that not contains uid key
             let options = Vars::new();
-            let action = Action::new(&e.proc_id, &e.id, consts::EVT_NEXT, &options);
+            let action = Action::new(&e.pid, &e.tid, consts::EVT_NEXT, &options);
             let ret = s.do_action(&action).is_err();
             rx.send(ret);
         }
@@ -941,7 +980,7 @@ async fn sch_act_req_do_action_proc_id_error() {
         if e.state() == MessageState::Created && e.r#type == "req" {
             // create options that not contains uid key
             let options = Vars::new();
-            let action = Action::new("no_exist_proc_id", &e.id, consts::EVT_NEXT, &options);
+            let action = Action::new("no_exist_proc_id", &e.tid, consts::EVT_NEXT, &options);
             let ret = s.do_action(&action).is_err();
             rx.send(ret);
         }
@@ -972,7 +1011,7 @@ async fn sch_act_req_do_action_msg_id_error() {
         if e.state() == MessageState::Created && e.r#type == "req" {
             // create options that not contains uid key
             let options = Vars::new();
-            let action = Action::new(&e.proc_id, "no_exist_msg_id", consts::EVT_NEXT, &options);
+            let action = Action::new(&e.pid, "no_exist_msg_id", consts::EVT_NEXT, &options);
             let ret = s.do_action(&action).is_err();
             rx.send(ret);
         }
@@ -1001,7 +1040,7 @@ async fn sch_act_req_do_action_not_act_req_task() {
         if e.state() == MessageState::Created && e.r#type == "step" {
             // create options that not contains uid key
             let options = Vars::new();
-            let action = Action::new(&e.proc_id, &e.id, consts::EVT_NEXT, &options);
+            let action = Action::new(&e.pid, &e.tid, consts::EVT_NEXT, &options);
             let ret = s.do_action(&action).is_err();
             rx.send(ret);
         }
@@ -1078,7 +1117,7 @@ async fn sch_act_req_on_completed_msg() {
     emitter.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_key("act1") && e.is_state("created") {
-            e.do_action(&e.proc_id, &e.id, consts::EVT_NEXT, &Vars::new())
+            e.do_action(&e.pid, &e.tid, consts::EVT_NEXT, &Vars::new())
                 .unwrap();
         }
 
@@ -1107,7 +1146,7 @@ async fn sch_act_req_on_completed_act() {
     emitter.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_key("act1") && e.is_state("created") {
-            e.do_action(&e.proc_id, &e.id, consts::EVT_NEXT, &Vars::new())
+            e.do_action(&e.pid, &e.tid, consts::EVT_NEXT, &Vars::new())
                 .unwrap();
         }
 
@@ -1141,8 +1180,8 @@ async fn sch_act_req_on_catch() {
         println!("message: {e:?}");
         if e.is_key("act1") && e.is_state("created") {
             e.do_action(
-                &e.proc_id,
-                &e.id,
+                &e.pid,
+                &e.tid,
                 consts::EVT_ERR,
                 &Vars::new().with(consts::ACT_ERR_KEY, json!({ "ecode": "err1"})),
             )
@@ -1178,8 +1217,8 @@ async fn sch_act_req_on_catch_as_error() {
         println!("message: {e:?}");
         if e.is_key("act1") && e.is_state("created") {
             e.do_action(
-                &e.proc_id,
-                &e.id,
+                &e.pid,
+                &e.tid,
                 "error",
                 &Vars::new().with(consts::ACT_ERR_KEY, json!({ "ecode": "err1"})),
             )
@@ -1188,8 +1227,8 @@ async fn sch_act_req_on_catch_as_error() {
 
         if e.is_key("act2") {
             e.do_action(
-                &e.proc_id,
-                &e.id,
+                &e.pid,
+                &e.tid,
                 "error",
                 &Vars::new().with(consts::ACT_ERR_KEY, json!({ "ecode": "err2"})),
             )
@@ -1227,8 +1266,8 @@ async fn sch_act_req_on_catch_as_skip() {
         println!("message: {e:?}");
         if e.is_key("act1") && e.is_state("created") {
             e.do_action(
-                &e.proc_id,
-                &e.id,
+                &e.pid,
+                &e.tid,
                 "error",
                 &Vars::new().with(consts::ACT_ERR_KEY, json!({ "ecode": "err1"})),
             )
@@ -1236,8 +1275,7 @@ async fn sch_act_req_on_catch_as_skip() {
         }
 
         if e.is_key("act2") {
-            e.do_action(&e.proc_id, &e.id, "skip", &Vars::new())
-                .unwrap();
+            e.do_action(&e.pid, &e.tid, "skip", &Vars::new()).unwrap();
         }
     });
 
@@ -1270,8 +1308,8 @@ async fn sch_act_req_on_catch_no_match() {
         println!("message: {e:?}");
         if e.is_key("act1") && e.is_state("created") {
             e.do_action(
-                &e.proc_id,
-                &e.id,
+                &e.pid,
+                &e.tid,
                 "error",
                 &Vars::new().with(consts::ACT_ERR_KEY, json!({ "ecode": "err2"})),
             )
@@ -1300,8 +1338,8 @@ async fn sch_act_req_on_catch_match_any() {
         println!("message: {e:?}");
         if e.is_key("act1") && e.is_state("created") {
             e.do_action(
-                &e.proc_id,
-                &e.id,
+                &e.pid,
+                &e.tid,
                 "error",
                 &Vars::new().with(consts::ACT_ERR_KEY, json!({ "ecode": "err2"})),
             )
@@ -1344,8 +1382,8 @@ async fn sch_act_req_on_catch_as_complete() {
         println!("message: {e:?}");
         if e.is_key("act1") && e.is_state("created") {
             e.do_action(
-                &e.proc_id,
-                &e.id,
+                &e.pid,
+                &e.tid,
                 "error",
                 &Vars::new().with(consts::ACT_ERR_KEY, json!({ "ecode": "err1"})),
             )
@@ -1353,7 +1391,7 @@ async fn sch_act_req_on_catch_as_complete() {
         }
 
         if e.is_key("act2") {
-            e.do_action(&e.proc_id, &e.id, consts::EVT_NEXT, &Vars::new())
+            e.do_action(&e.pid, &e.tid, consts::EVT_NEXT, &Vars::new())
                 .unwrap();
         }
     });
@@ -1390,7 +1428,7 @@ async fn sch_act_req_chain() {
                 TaskState::Interrupt
             );
             assert!(p.task_by_nid("act2").get(0).is_none());
-            e.do_action(&e.proc_id, &e.id, consts::EVT_NEXT, &Vars::new())
+            e.do_action(&e.pid, &e.tid, consts::EVT_NEXT, &Vars::new())
                 .unwrap();
         }
 

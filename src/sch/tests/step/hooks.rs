@@ -57,7 +57,7 @@ async fn sch_step_hooks_completed() {
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
         if e.is_key("act1") {
-            e.do_action(&e.proc_id, &e.id, consts::EVT_NEXT, &Vars::new())
+            e.do_action(&e.pid, &e.tid, consts::EVT_NEXT, &Vars::new())
                 .unwrap();
         }
 
@@ -127,7 +127,7 @@ async fn sch_step_hooks_updated() {
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
         if e.is_source("act") && e.is_state("created") {
-            e.do_action(&e.proc_id, &e.id, consts::EVT_NEXT, &Vars::new())
+            e.do_action(&e.pid, &e.tid, consts::EVT_NEXT, &Vars::new())
                 .unwrap();
         }
 
@@ -199,7 +199,7 @@ async fn sch_step_hooks_error() {
         if e.is_type("req") {
             let mut vars = Vars::new();
             vars.set(consts::ACT_ERR_KEY, json!({ "ecode": "100"}));
-            e.do_action(&e.proc_id, &e.id, "error", &vars).unwrap();
+            e.do_action(&e.pid, &e.tid, "error", &vars).unwrap();
         }
 
         if e.is_type("msg") {
@@ -245,16 +245,16 @@ async fn sch_step_hooks_store() {
     });
 
     workflow.print();
-    let (proc, scher, emitter, tx, rx) =
-        create_proc_signal::<usize>(&mut workflow, &utils::longid());
-    let cache = scher.cache().clone();
-    let pid = proc.id().clone();
+    let (proc, rt, emitter, tx, rx) = create_proc_signal::<usize>(&mut workflow, &utils::longid());
+    let cache = rt.cache().clone();
+    let pid = proc.id().to_string();
+    let rt2 = rt.clone();
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
         if e.is_type("req") && e.is_state("created") {
             cache.uncache(&pid);
             cache
-                .restore(|proc| {
+                .restore(&rt2, |proc| {
                     if let Some(task) = proc.task_by_nid("step1").get(0) {
                         rx.update(|data| *data = task.hooks().len());
                     }
@@ -263,7 +263,7 @@ async fn sch_step_hooks_store() {
             rx.close();
         }
     });
-    scher.launch(&proc);
+    rt.launch(&proc);
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(ret, 7);

@@ -1,4 +1,5 @@
 use crate::{store::StoreAdapter, Engine, ShareLock};
+use core::fmt;
 use std::sync::{Arc, RwLock};
 use tracing::info;
 
@@ -10,6 +11,12 @@ pub fn init(_engine: &Engine) {}
 #[derive(Clone)]
 pub struct Adapter {
     store: ShareLock<Option<Arc<dyn StoreAdapter>>>,
+}
+
+impl fmt::Debug for Adapter {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Adapter").finish()
+    }
 }
 
 impl Adapter {

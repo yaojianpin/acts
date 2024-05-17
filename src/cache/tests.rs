@@ -3,47 +3,52 @@ use crate::{
     data,
     sch::{NodeTree, Proc, TaskState},
     store::StoreKind,
-    utils, Workflow,
+    utils, Engine, Workflow,
 };
-use std::sync::Arc;
 
-#[test]
-fn cache_new() {
+#[tokio::test]
+async fn cache_new() {
     let cache = Cache::new(1);
     assert_eq!(cache.cap(), 1);
     assert_eq!(cache.store().kind(), StoreKind::Memory);
 }
 
-#[test]
-fn cache_count() {
+#[tokio::test]
+async fn cache_count() {
+    let engine = Engine::new();
+    let rt = engine.runtime();
     let cache = Cache::new(10);
 
-    let proc = Arc::new(Proc::new(&utils::longid()));
-    cache.push(&proc);
+    let proc = Proc::new(&utils::longid(), &rt);
+    cache.push_proc(&proc);
     assert_eq!(cache.count(), 1);
 }
 
-#[test]
-fn cache_push_get() {
+#[tokio::test]
+async fn cache_push_get() {
+    let engine = Engine::new();
+    let rt = engine.runtime();
     let cache = Cache::new(10);
     let pid = utils::longid();
-    let proc = Arc::new(Proc::new(&pid));
-    cache.push(&proc);
+    let proc = Proc::new(&pid, &rt);
+    cache.push_proc(&proc);
     assert_eq!(cache.count(), 1);
 
-    let proc = cache.proc(&pid);
+    let proc = cache.proc(&pid, &engine.runtime());
     assert_eq!(proc.is_some(), true);
 }
 
-#[test]
-fn cache_push_to_store() {
+#[tokio::test]
+async fn cache_push_to_store() {
+    let engine = Engine::new();
+    let rt = engine.runtime();
     let cache = Cache::new(1);
 
     let mut pids = Vec::new();
     for _ in 0..5 {
         let pid = utils::longid();
-        let proc = Arc::new(Proc::new(&pid));
-        cache.push(&proc);
+        let proc = Proc::new(&pid, &rt);
+        cache.push_proc(&proc);
         pids.push(pid);
     }
 
@@ -54,15 +59,17 @@ fn cache_push_to_store() {
     }
 }
 
-#[test]
-fn cache_remove() {
+#[tokio::test]
+async fn cache_remove() {
+    let engine = Engine::new();
+    let rt = engine.runtime();
     let cache = Cache::new(10);
 
     let mut pids = Vec::new();
     for _ in 0..5 {
         let pid = utils::longid();
-        let proc = Arc::new(Proc::new(&pid));
-        cache.push(&proc);
+        let proc = Proc::new(&pid, &rt);
+        cache.push_proc(&proc);
         pids.push(pid);
     }
 
@@ -72,7 +79,7 @@ fn cache_remove() {
         assert_eq!(exists, true);
 
         cache.remove(pid).unwrap();
-        assert_eq!(cache.proc(pid).is_none(), true);
+        assert_eq!(cache.proc(pid, &engine.runtime()).is_none(), true);
 
         let exists = cache.store().base().procs().exists(pid).unwrap();
         assert_eq!(exists, false);
@@ -80,16 +87,18 @@ fn cache_remove() {
     assert_eq!(cache.count(), 0);
 }
 
-#[test]
-fn cache_upsert() {
+#[tokio::test]
+async fn cache_upsert() {
+    let engine = Engine::new();
+    let rt = engine.runtime();
     let mut workflow = Workflow::new().with_step(|step| step.with_name("step1"));
 
     let pid = utils::longid();
     let tree = NodeTree::build(&mut workflow).unwrap();
 
     let cache = Cache::new(10);
-    let proc = Arc::new(Proc::new(&pid));
-    cache.push(&proc);
+    let proc = Proc::new(&pid, &rt);
+    cache.push_proc(&proc);
     assert_eq!(cache.count(), 1);
 
     let node = tree.root.as_ref().unwrap();
@@ -98,12 +107,13 @@ fn cache_upsert() {
     proc.set_state(TaskState::Running);
     cache.upsert(&task).unwrap();
 
-    let proc = cache.proc(&pid).unwrap();
+    let proc = cache.proc(&pid, &engine.runtime()).unwrap();
     assert_eq!(proc.state(), TaskState::Running);
 }
 
-#[test]
-fn cache_restore_count() {
+#[tokio::test]
+async fn cache_restore_count() {
+    let engine = Engine::new();
     let model = Workflow::new()
         .with_id("m1")
         .with_step(|step| step.with_name("step1"));
@@ -121,7 +131,6 @@ fn cache_restore_count() {
             end_time: 0,
             timestamp: 0,
             model: model.to_json().unwrap(),
-            root_tid: "".to_string(),
             env_local: "{}".to_string(),
             err: None,
         };
@@ -129,15 +138,16 @@ fn cache_restore_count() {
     }
 
     cache
-        .restore(|proc| {
+        .restore(&engine.runtime(), |proc| {
             println!("on_load: {:?}", proc);
         })
         .unwrap();
     assert_eq!(cache.count(), 5);
 }
 
-#[test]
-fn cache_restore_working_state() {
+#[tokio::test]
+async fn cache_restore_working_state() {
+    let engine = Engine::new();
     let model = Workflow::new()
         .with_id("m1")
         .with_step(|step| step.with_name("step1"));
@@ -168,7 +178,6 @@ fn cache_restore_working_state() {
             end_time: 0,
             timestamp: 0,
             model: model.to_json().unwrap(),
-            root_tid: "".to_string(),
             env_local: "{}".to_string(),
             err: None,
         };
@@ -176,15 +185,16 @@ fn cache_restore_working_state() {
     }
 
     cache
-        .restore(|proc| {
+        .restore(&engine.runtime(), |proc| {
             println!("on_load: {:?}", proc);
         })
         .unwrap();
     assert_eq!(cache.count(), 5);
 }
 
-#[test]
-fn cache_restore_completed_state() {
+#[tokio::test]
+async fn cache_restore_completed_state() {
+    let engine = Engine::new();
     let model = Workflow::new()
         .with_id("m1")
         .with_step(|step| step.with_name("step1"));
@@ -215,7 +225,6 @@ fn cache_restore_completed_state() {
             end_time: 0,
             timestamp: 0,
             model: model.to_json().unwrap(),
-            root_tid: "".to_string(),
             env_local: "{}".to_string(),
             err: None,
         };
@@ -223,15 +232,16 @@ fn cache_restore_completed_state() {
     }
 
     cache
-        .restore(|proc| {
+        .restore(&engine.runtime(), |proc| {
             println!("on_load: {:?}", proc);
         })
         .unwrap();
     assert_eq!(cache.count(), 0);
 }
 
-#[test]
-fn cache_restore_less_cap() {
+#[tokio::test]
+async fn cache_restore_less_cap() {
+    let engine = Engine::new();
     let model = Workflow::new()
         .with_id("m1")
         .with_step(|step| step.with_name("step1"));
@@ -251,7 +261,6 @@ fn cache_restore_less_cap() {
             end_time: 0,
             timestamp: 0,
             model: model.to_json().unwrap(),
-            root_tid: "".to_string(),
             env_local: "{}".to_string(),
             err: None,
         };
@@ -259,7 +268,7 @@ fn cache_restore_less_cap() {
     }
 
     cache
-        .restore(|proc| {
+        .restore(&engine.runtime(), |proc| {
             println!("on_load: {:?}", proc);
         })
         .unwrap();

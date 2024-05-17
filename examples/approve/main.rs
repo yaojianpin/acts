@@ -8,9 +8,7 @@ async fn main() {
     store.init();
 
     let engine = Engine::new();
-    let sig = engine.signal(());
-    let s = sig.clone();
-
+    let (s, sig) = engine.signal(()).double();
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text).unwrap();
     workflow.print();
@@ -34,7 +32,7 @@ async fn main() {
             "on_workflow_complete: pid={} cost={}ms outputs={:?}",
             e.pid,
             e.cost(),
-            e.outputs()
+            e.outputs
         );
         s.close();
     });

@@ -4,13 +4,10 @@ use acts::{data::Package, Engine, Vars, Workflow};
 async fn main() {
     let engine = Engine::new();
 
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-    let s2 = sig.clone();
-
+    let (s1, s2, sig) = engine.signal(()).triple();
     let executor = engine.executor();
-    let data = include_str!("./pack1.js");
 
+    let data = include_str!("./pack1.js");
     let pack = Package {
         id: "pack1".to_string(),
         name: "package 1".to_string(),
@@ -18,7 +15,17 @@ async fn main() {
         file_data: data.as_bytes().to_vec(),
         ..Default::default()
     };
-    engine.manager().publish(&pack).expect("publish package");
+    engine.manager().publish(&pack).expect("publish pack1");
+
+    let data = include_str!("./pack2.js");
+    let pack = Package {
+        id: "pack2".to_string(),
+        name: "package 2".to_string(),
+        size: data.len() as u32,
+        file_data: data.as_bytes().to_vec(),
+        ..Default::default()
+    };
+    engine.manager().publish(&pack).expect("publish pack2");
 
     let mut vars = Vars::new();
     vars.insert("input".into(), 10.into());
@@ -37,7 +44,7 @@ async fn main() {
             "on_workflow_complete: state={} cost={}ms output={:?}",
             e.state,
             e.cost(),
-            e.outputs()
+            e.outputs
         );
         s1.close();
     });
@@ -46,4 +53,5 @@ async fn main() {
         s2.close();
     });
     sig.recv().await;
+    
 }

@@ -21,6 +21,7 @@ pub fn build_workflow(workflow: &mut Workflow, tree: &mut NodeTree) -> Result<()
     for step in workflow.steps.iter_mut() {
         build_step(step, tree, &root, &mut prev, level + 1)?;
     }
+
     tree.model = Box::new(workflow.clone());
     tree.set_root(&root);
 
@@ -71,7 +72,6 @@ pub fn build_step(
             build_act(act, tree, &node, &mut act_prev, level + 1)?;
         }
     }
-
     *prev = node.clone();
 
     Ok(())

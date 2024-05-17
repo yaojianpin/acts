@@ -14,6 +14,11 @@ impl Builder {
             store: None,
         }
     }
+
+    pub fn set_config(&mut self, config: &Config) {
+        self.config = config.clone();
+    }
+
     pub fn log_dir(mut self, log_dir: &str) -> Self {
         self.config.log_dir = log_dir.to_string();
         self
@@ -41,6 +46,11 @@ impl Builder {
 
     pub fn tick_interval_secs(mut self, secs: u64) -> Self {
         self.config.tick_interval_secs = secs;
+        self
+    }
+
+    pub fn max_message_retry_times(mut self, retry_times: i32) -> Self {
+        self.config.max_message_retry_times = retry_times;
         self
     }
 

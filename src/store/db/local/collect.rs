@@ -1,6 +1,6 @@
 use super::{database::Database, DbRow, DbSchema};
 use crate::{
-    store::{map_db_err, query::CondType, DbSet, Query},
+    store::{map_db_err, query::CondType, DbSet, Expr, ExprOp, Query},
     Result, ShareLock,
 };
 use duckdb::{params, params_from_iter};
@@ -79,9 +79,9 @@ where
                     CondType::Or => "or",
                 };
                 filter.push_str("(");
-                for (index, expr) in cond.conds.iter().enumerate() {
-                    filter.push_str(&format!("{} = '{}'", expr.key, expr.value));
-                    if index != cond.conds.len() - 1 {
+                for (index, expr) in cond.conds().iter().enumerate() {
+                    filter.push_str(&expr.sql()?);
+                    if index != cond.conds().len() - 1 {
                         filter.push_str(&format!(" {typ} "));
                     }
                 }
@@ -200,4 +200,138 @@ fn repeat_var(len: usize) -> String {
     var.pop();
 
     var
+}
+
+impl Expr {
+    pub fn sql(&self) -> Result<String> {
+        let key = &self.key;
+        let op = match self.op {
+            ExprOp::EQ => "=",
+            ExprOp::NE => "!=",
+            ExprOp::LT => "<",
+            ExprOp::LE => "<=",
+            ExprOp::GT => ">",
+            ExprOp::GE => ">=",
+        };
+        match &self.value {
+            serde_json::Value::Null => {
+                if self.op == ExprOp::EQ {
+                    return Ok(format!("{key} is null"));
+                } else if self.op == ExprOp::NE {
+                    return Ok(format!("{key} is not null"));
+                }
+                Err(crate::ActError::Store(format!(
+                    "the operation({op}) is not support for null"
+                )))
+            }
+            serde_json::Value::Bool(v) => {
+                if self.op == ExprOp::EQ || self.op == ExprOp::NE {
+                    return Ok(format!("{key} {op} {v}"));
+                }
+                Err(crate::ActError::Store(format!(
+                    "the operation({op}) is not support for bool"
+                )))
+            }
+            serde_json::Value::Number(v) => Ok(format!("{key} {op} {v}")),
+            serde_json::Value::String(v) => {
+                if self.op == ExprOp::EQ || self.op == ExprOp::NE {
+                    return Ok(format!("{key} {op} '{v}'"));
+                }
+                Err(crate::ActError::Store(format!(
+                    "the operation({op}) is not support for string"
+                )))
+            }
+            v @ _ => Err(crate::ActError::Store(format!(
+                "not support sql value for '{v}'"
+            ))),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::store::{Expr, MessageStatus};
+    use serde_json::json;
+
+    #[test]
+    fn store_query_expr_eq_sql_null() {
+        let expr = Expr::eq("a", json!(null));
+        assert_eq!(expr.key(), "a");
+        assert_eq!(expr.sql().unwrap(), "a is null");
+    }
+
+    #[test]
+    fn store_query_expr_eq_sql_not_null() {
+        let expr = Expr::ne("a", json!(null));
+        assert_eq!(expr.key(), "a");
+        assert_eq!(expr.sql().unwrap(), "a is not null");
+    }
+
+    #[test]
+    fn store_query_expr_eq_sql_str() {
+        let expr = Expr::eq("a", "abc");
+        assert_eq!(expr.key(), "a");
+        assert_eq!(expr.sql().unwrap(), "a = 'abc'");
+    }
+
+    #[test]
+    fn store_query_expr_ne_sql_str() {
+        let expr = Expr::ne("a", "abc");
+        assert_eq!(expr.key(), "a");
+        assert_eq!(expr.sql().unwrap(), "a != 'abc'");
+    }
+
+    #[test]
+    fn store_query_expr_eq_sql_num() {
+        let expr = Expr::eq("a", 5);
+        assert_eq!(expr.key(), "a");
+        assert_eq!(expr.sql().unwrap(), "a = 5");
+    }
+
+    #[test]
+    fn store_query_expr_ne_sql_num() {
+        let expr = Expr::ne("a", 5);
+        assert_eq!(expr.key(), "a");
+        assert_eq!(expr.sql().unwrap(), "a != 5");
+    }
+
+    #[test]
+    fn store_query_expr_lt_sql_num() {
+        let expr = Expr::lt("a", 5);
+        assert_eq!(expr.key(), "a");
+        assert_eq!(expr.sql().unwrap(), "a < 5");
+    }
+
+    #[test]
+    fn store_query_expr_le_sql_num() {
+        let expr = Expr::le("a", 5);
+        assert_eq!(expr.key(), "a");
+        assert_eq!(expr.sql().unwrap(), "a <= 5");
+    }
+
+    #[test]
+    fn store_query_expr_gt_sql_num() {
+        let expr = Expr::gt("a", 5);
+        assert_eq!(expr.key(), "a");
+        assert_eq!(expr.sql().unwrap(), "a > 5");
+    }
+
+    #[test]
+    fn store_query_expr_ge_sql_num() {
+        let expr = Expr::ge("a", 5);
+        assert_eq!(expr.key(), "a");
+        assert_eq!(expr.sql().unwrap(), "a >= 5");
+    }
+
+    #[test]
+    fn store_query_expr_eq_sql_enum() {
+        let expr = Expr::eq("a", MessageStatus::Created);
+        assert_eq!(expr.sql().unwrap(), "a = 0");
+
+        let expr = Expr::eq("a", MessageStatus::Acked);
+        assert_eq!(expr.sql().unwrap(), "a = 1");
+
+        let expr = Expr::eq("a", MessageStatus::Completed);
+        assert_eq!(expr.sql().unwrap(), "a = 2");
+    }
 }

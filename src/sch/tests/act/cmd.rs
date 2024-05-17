@@ -254,7 +254,6 @@ async fn sch_act_cmd_abort_on_act() {
 
     workflow.print();
     let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
-
     scher.launch(&proc);
     tx.recv().await;
     proc.print();

@@ -1,9 +1,10 @@
-use serde::{Deserialize, Serialize};
-
 use crate::{Act, Branch, ModelBase, Step, Vars, Workflow};
+use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock, Weak};
 
-#[derive(Debug, Clone)]
+use super::node_tree;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NodeContent {
     Workflow(Workflow),
     Branch(Branch),
@@ -29,6 +30,17 @@ pub struct Node {
     pub children: Arc<RwLock<Vec<Arc<Node>>>>,
     pub prev: Arc<RwLock<Weak<Node>>>,
     pub next: Arc<RwLock<Weak<Node>>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct NodeJsonData {
+    pub id: String,
+    pub content: NodeContent,
+    pub level: usize,
+    // pub parent: Option<String>,
+    // pub children: Vec<String>,
+    // pub prev: Option<String>,
+    // pub next: Option<String>,
 }
 
 impl NodeContent {
@@ -102,6 +114,11 @@ impl Node {
         None
     }
 
+    pub fn push_child(&self, child: &Arc<Node>) {
+        let mut children = self.children.write().unwrap();
+        children.push(child.clone());
+    }
+
     pub fn set_parent(&self, parent: &Arc<Node>) {
         *self.parent.write().unwrap() = Arc::downgrade(&parent);
         parent
@@ -117,6 +134,13 @@ impl Node {
             *node.prev.write().unwrap() = Arc::downgrade(self);
         }
     }
+
+    // fn set_prev(self: &Arc<Node>, node: &Arc<Node>, is_next: bool) {
+    //     *self.prev.write().unwrap() = Arc::downgrade(node);
+    //     if is_next {
+    //         *node.next.write().unwrap() = Arc::downgrade(self);
+    //     }
+    // }
 
     pub fn children(&self) -> Vec<Arc<Node>> {
         let node = self.children.read().unwrap();
@@ -163,7 +187,7 @@ impl Node {
         }
     }
 
-    pub fn r#type(&self) -> String {
+    pub fn typ(&self) -> String {
         if let NodeContent::Act(act) = &self.content {
             return act.kind().to_string();
         }
@@ -178,6 +202,55 @@ impl Node {
             NodeContent::Step(data) => &data.tag,
             NodeContent::Act(data) => data.tag(),
         }
+    }
+
+    pub fn to_string(&self) -> String {
+        let data = NodeJsonData {
+            id: self.id.clone(),
+            content: self.content.clone(),
+            level: self.level,
+            // parent: self.parent().map(|p| p.id.clone()),
+            // children: self
+            //     .children()
+            //     .iter()
+            //     .map(|it| it.id.clone())
+            //     .collect::<Vec<_>>(),
+            // prev: self.prev().upgrade().map(|n| n.id.clone()),
+            // next: self.next().upgrade().map(|n| n.id.clone()),
+        };
+        serde_json::to_string(&data).unwrap()
+    }
+
+    pub fn from_str(s: &str, tree: &node_tree::NodeTree) -> Arc<Self> {
+        let data: NodeJsonData = serde_json::from_str(s).unwrap();
+        let ret = Arc::new(Self::new(&data.id, data.content, data.level));
+        if let Some(node) = tree.node(&ret.id) {
+            return node;
+        }
+        // for c in &data.children {
+        //     if let Some(n) = tree.node(c) {
+        //         ret.push_child(&n);
+        //     }
+        // }
+        // if let Some(parent) = &data.parent {
+        //     if let Some(n) = tree.node(parent) {
+        //         ret.set_parent(&n);
+        //     }
+        // }
+
+        // if let Some(prev) = &data.prev {
+        //     if let Some(n) = tree.node(prev) {
+        //         ret.set_prev(&n, false);
+        //     }
+        // }
+
+        // if let Some(next) = &data.next {
+        //     if let Some(n) = tree.node(next) {
+        //         ret.set_next(&n, false);
+        //     }
+        // }
+
+        ret
     }
 }
 

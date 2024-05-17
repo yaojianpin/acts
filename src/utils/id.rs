@@ -52,12 +52,12 @@ impl<'a> Id<'a> {
     }
 
     #[allow(unused)]
-    pub fn pid(&self) -> &'a str {
+    pub fn pid(&self) -> &str {
         self.pid
     }
 
     #[allow(unused)]
-    pub fn tid(&self) -> &'a str {
+    pub fn tid(&self) -> &str {
         self.tid
     }
 }

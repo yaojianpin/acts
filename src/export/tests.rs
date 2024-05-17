@@ -1,4 +1,9 @@
-use crate::{data, sch::TaskState, utils, Act, ActPlugin, Engine, StoreAdapter, Vars, Workflow};
+use crate::{
+    data,
+    event::{MessageState, Model},
+    sch::TaskState,
+    utils, Act, ActPlugin, ChannelOptions, Engine, Message, StoreAdapter, Vars, Workflow,
+};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 
@@ -136,7 +141,7 @@ async fn export_executor_start_dup_pid_error() {
         .with_id(&mid)
         .with_step(|step| step.with_act(Act::req(|act| act.with_id("test"))));
 
-    let store = engine.scher().cache().store();
+    let store = engine.runtime().cache().store();
     let proc = data::Proc {
         id: pid.clone(),
         name: model.name.clone(),
@@ -146,7 +151,6 @@ async fn export_executor_start_dup_pid_error() {
         end_time: 0,
         timestamp: 0,
         model: model.to_json().unwrap(),
-        root_tid: "".to_string(),
         env_local: "{}".to_string(),
         err: None,
     };
@@ -226,12 +230,12 @@ async fn export_manager_procs_get_one() {
             .with_act(Act::req(|act| act.with_id("act1")))
     });
 
-    let scher = engine.scher();
-    let sig = scher.signal(());
+    let rt = engine.runtime();
+    let sig = engine.signal(());
     let s1 = sig.clone();
-    let proc = scher.create_proc(&utils::longid(), &model);
-    scher.emitter().on_start(move |_| s1.close());
-    scher.launch(&proc);
+    let proc = rt.create_proc(&utils::longid(), &model);
+    engine.emitter().on_start(move |_| s1.close());
+    rt.launch(&proc);
     sig.recv().await;
 
     assert_eq!(manager.procs(10).unwrap().len(), 1);
@@ -246,11 +250,11 @@ async fn export_manager_procs_get_many() {
             .with_act(Act::req(|act| act.with_id("act1")))
     });
 
-    let scher = engine.scher();
-    let sig = scher.signal(());
+    let rt = engine.runtime();
+    let sig = engine.signal(());
     let s1 = sig.clone();
     let count = Arc::new(Mutex::new(0));
-    scher.emitter().on_start(move |_e| {
+    engine.emitter().on_start(move |_e| {
         println!("message:{_e:?}");
         let mut count = count.lock().unwrap();
         *count += 1;
@@ -260,8 +264,8 @@ async fn export_manager_procs_get_many() {
         }
     });
     for _ in 0..5 {
-        let proc = scher.create_proc(&utils::longid(), &model);
-        scher.launch(&proc);
+        let proc = rt.create_proc(&utils::longid(), &model);
+        rt.launch(&proc);
     }
     sig.recv().await;
     assert_eq!(manager.procs(10).unwrap().len(), 5);
@@ -276,13 +280,13 @@ async fn export_manager_proc_get_json() {
             .with_act(Act::req(|act| act.with_id("act1")))
     });
 
-    let scher = engine.scher();
-    let sig = scher.signal(());
+    let rt = engine.runtime();
+    let sig = engine.signal(());
     let s1 = sig.clone();
-    scher.emitter().on_start(move |_| s1.close());
+    engine.emitter().on_start(move |_| s1.close());
     let pid = utils::longid();
-    let proc = scher.create_proc(&pid, &model);
-    scher.launch(&proc);
+    let proc = rt.create_proc(&pid, &model);
+    rt.launch(&proc);
     sig.recv().await;
 
     let info = manager.proc(&pid, "json").unwrap();
@@ -299,13 +303,13 @@ async fn export_manager_proc_get_tree() {
             .with_act(Act::req(|act| act.with_id("act1")))
     });
 
-    let scher = engine.scher();
-    let sig = scher.signal(());
+    let rt = engine.runtime();
+    let sig = engine.signal(());
     let s1 = sig.clone();
-    scher.emitter().on_start(move |_| s1.close());
+    engine.emitter().on_start(move |_| s1.close());
     let pid = utils::longid();
-    let proc = scher.create_proc(&pid, &model);
-    scher.launch(&proc);
+    let proc = rt.create_proc(&pid, &model);
+    rt.launch(&proc);
     sig.recv().await;
 
     let info = manager.proc(&pid, "tree").unwrap();
@@ -322,10 +326,10 @@ async fn export_manager_tasks() {
             .with_act(Act::req(|act| act.with_id("act1")))
     });
 
-    let scher = engine.scher();
-    let sig = scher.signal(());
+    let rt = engine.runtime();
+    let sig = engine.signal(());
     let s1 = sig.clone();
-    scher.emitter().on_message(move |e| {
+    engine.emitter().on_message(move |e| {
         if e.is_key("act1") {
             s1.close()
         }
@@ -335,7 +339,7 @@ async fn export_manager_tasks() {
     vars.insert("uid".to_string(), json!("u1"));
     vars.insert("pid".to_string(), json!(pid));
 
-    scher.start(&model, &vars).unwrap();
+    rt.start(&model, &vars).unwrap();
     sig.recv().await;
 
     let tasks = manager.tasks(&pid, 10).unwrap();
@@ -351,10 +355,10 @@ async fn export_manager_task_get() {
             .with_act(Act::req(|act| act.with_id("act1")))
     });
 
-    let scher = engine.scher();
-    let sig = scher.signal(());
+    let rt = engine.runtime();
+    let sig = engine.signal(());
     let s1 = sig.clone();
-    scher.emitter().on_message(move |e| {
+    engine.emitter().on_message(move |e| {
         if e.is_key("act1") {
             s1.close()
         }
@@ -364,7 +368,7 @@ async fn export_manager_task_get() {
     vars.insert("uid".to_string(), json!("u1"));
     vars.insert("pid".to_string(), json!(pid));
 
-    scher.start(&model, &vars).unwrap();
+    rt.start(&model, &vars).unwrap();
     sig.recv().await;
     let tasks = manager.tasks(&pid, 10).unwrap();
     let mut result = true;
@@ -381,10 +385,9 @@ async fn export_executeor_start() {
         .with_id(&utils::longid())
         .with_step(|step| step.with_id("step1"));
 
-    let scher = engine.scher();
-    let sig = scher.signal(());
+    let sig = engine.signal(());
     let s1 = sig.clone();
-    scher.emitter().on_complete(move |_| s1.close());
+    engine.emitter().on_complete(move |_| s1.close());
 
     engine.manager().deploy(&model).unwrap();
 
@@ -401,10 +404,9 @@ async fn export_executeor_start() {
 #[tokio::test]
 async fn export_executeor_start_not_found_model() {
     let engine = Engine::new();
-    let scher = engine.scher();
-    let sig = scher.signal(());
+    let sig = engine.signal(());
     let s1 = sig.clone();
-    scher.emitter().on_complete(move |_| s1.close());
+    engine.emitter().on_complete(move |_| s1.close());
 
     let pid = utils::longid();
     let mut vars = Vars::new();
@@ -423,20 +425,20 @@ async fn export_executeor_complete() {
             .with_act(Act::req(|act| act.with_id("act1")))
     });
 
-    let scher = engine.scher();
-    let sig = scher.signal(false);
+    let rt = engine.runtime();
+    let sig = engine.signal(false);
     let s1 = sig.clone();
-    scher.emitter().on_message(move |e| {
+    engine.emitter().on_message(move |e| {
         if e.is_key("act1") && e.is_state("created") {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
-            let ret = engine.executor().complete(&e.proc_id, &e.id, &vars);
+            let ret = engine.executor().complete(&e.pid, &e.tid, &vars);
             s1.send(ret.is_ok());
         }
     });
     let mut vars = Vars::new();
     vars.insert("uid".to_string(), json!("u1"));
-    scher.start(&model, &vars).unwrap();
+    rt.start(&model, &vars).unwrap();
     let ret = sig.recv().await;
     assert_eq!(ret, true);
 }
@@ -449,21 +451,21 @@ async fn export_executeor_complete_no_uid() {
             .with_act(Act::req(|act| act.with_id("act1")))
     });
 
-    let scher = engine.scher();
-    let sig = scher.signal(false);
+    let rt = engine.runtime();
+    let sig = engine.signal(false);
     let s1 = sig.clone();
     // scher.emitter().on_complete(|e| rx.close());
 
-    scher.emitter().on_message(move |e| {
+    engine.emitter().on_message(move |e| {
         if e.is_key("act1") && e.is_state("created") {
             let vars = Vars::new();
-            let ret = engine.executor().complete(&e.proc_id, &e.id, &vars);
+            let ret = engine.executor().complete(&e.pid, &e.tid, &vars);
 
             // no uid is still ok in version 0.7.0+
             s1.send(ret.is_ok());
         }
     });
-    scher.start(&model, &Vars::new()).unwrap();
+    rt.start(&model, &Vars::new()).unwrap();
     let ret = sig.recv().await;
     assert_eq!(ret, true);
 }
@@ -476,22 +478,22 @@ async fn export_executeor_submit() {
             .with_act(Act::req(|act| act.with_id("act1")))
     });
 
-    let scher = engine.scher();
-    let sig = scher.signal(false);
+    let rt = engine.runtime();
+    let sig = engine.signal(false);
     let s1 = sig.clone();
     // scher.emitter().on_complete(|e| e.close());
 
-    scher.emitter().on_message(move |e| {
+    engine.emitter().on_message(move |e| {
         if e.is_key("act1") && e.is_state("created") {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
-            let ret = engine.executor().submit(&e.proc_id, &e.id, &vars);
+            let ret = engine.executor().submit(&e.pid, &e.tid, &vars);
             s1.send(ret.is_ok());
         }
     });
     let mut vars = Vars::new();
     vars.insert("uid".to_string(), json!("u1"));
-    scher.start(&model, &vars).unwrap();
+    rt.start(&model, &vars).unwrap();
     let ret = sig.recv().await;
     assert_eq!(ret, true);
 }
@@ -504,21 +506,21 @@ async fn export_executeor_skip() {
             .with_act(Act::req(|act| act.with_id("act1")))
     });
 
-    let scher = engine.scher();
-    let sig = scher.signal(false);
+    let rt = engine.runtime();
+    let sig = engine.signal(false);
     let s1 = sig.clone();
     // scher.emitter().on_complete(|e| e.close());
-    scher.emitter().on_message(move |e| {
+    engine.emitter().on_message(move |e| {
         if e.is_key("act1") && e.is_state("created") {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
-            let ret = engine.executor().skip(&e.proc_id, &e.id, &vars);
+            let ret = engine.executor().skip(&e.pid, &e.tid, &vars);
             s1.send(ret.is_ok());
         }
     });
     let mut vars = Vars::new();
     vars.insert("uid".to_string(), json!("u1"));
-    scher.start(&model, &vars).unwrap();
+    rt.start(&model, &vars).unwrap();
     let ret = sig.recv().await;
     assert_eq!(ret, true);
 }
@@ -531,21 +533,21 @@ async fn export_executeor_error() {
             .with_act(Act::req(|act| act.with_id("act1")))
     });
 
-    let scher = engine.scher();
-    let sig = scher.signal(false);
+    let rt = engine.runtime();
+    let sig = engine.signal(false);
     let s1 = sig.clone();
-    scher.emitter().on_message(move |e| {
+    engine.emitter().on_message(move |e| {
         if e.is_key("act1") && e.is_state("created") {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             vars.insert("error".to_string(), json!({ "ecode": "code_1"}));
-            let ret = engine.executor().error(&e.proc_id, &e.id, &vars);
+            let ret = engine.executor().error(&e.pid, &e.tid, &vars);
             s1.send(ret.is_ok());
         }
     });
     let mut vars = Vars::new();
     vars.insert("uid".to_string(), json!("u1"));
-    scher.start(&model, &vars).unwrap();
+    rt.start(&model, &vars).unwrap();
     let ret = sig.recv().await;
     assert_eq!(ret, true);
 }
@@ -558,22 +560,22 @@ async fn export_executeor_abort() {
             .with_act(Act::req(|act| act.with_id("act1")))
     });
 
-    let scher = engine.scher();
-    let sig = scher.signal(false);
+    let rt = engine.runtime();
+    let sig = engine.signal(false);
     let s1 = sig.clone();
     // scher.emitter().on_complete(|e| e.close());
-    scher.emitter().on_message(move |e| {
+    engine.emitter().on_message(move |e| {
         println!("message: {:?}", e.inner());
         if e.is_key("act1") && e.is_state("created") {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
-            let ret = engine.executor().abort(&e.proc_id, &e.id, &vars);
+            let ret = engine.executor().abort(&e.pid, &e.tid, &vars);
             s1.send(ret.is_ok());
         }
     });
     let mut vars = Vars::new();
     vars.insert("uid".to_string(), json!("u1"));
-    scher.start(&model, &vars).unwrap();
+    rt.start(&model, &vars).unwrap();
     let ret = sig.recv().await;
     assert_eq!(ret, true);
 }
@@ -591,13 +593,13 @@ async fn export_executeor_back() {
                 .with_act(Act::req(|act| act.with_id("act2")))
         });
 
-    let scher = engine.scher();
-    let sig = scher.signal(false);
+    let rt = engine.runtime();
+    let sig = engine.signal(false);
     let s1 = sig.clone();
     // scher.emitter().on_complete(|e| e.close());
 
     let count = Arc::new(Mutex::new(0));
-    scher.emitter().on_message(move |e| {
+    engine.emitter().on_message(move |e| {
         if e.is_key("act1") && e.is_state("created") {
             let mut count = count.lock().unwrap();
             if *count == 1 {
@@ -605,10 +607,7 @@ async fn export_executeor_back() {
             }
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
-            engine
-                .executor()
-                .complete(&e.proc_id, &e.id, &vars)
-                .unwrap();
+            engine.executor().complete(&e.pid, &e.tid, &vars).unwrap();
 
             *count += 1;
         }
@@ -617,13 +616,13 @@ async fn export_executeor_back() {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             vars.insert("to".to_string(), json!("step1"));
-            let ret = engine.executor().back(&e.proc_id, &e.id, &vars);
+            let ret = engine.executor().back(&e.pid, &e.tid, &vars);
             s1.update(|data| *data = ret.is_ok());
         }
     });
     let mut vars = Vars::new();
     vars.insert("uid".to_string(), json!("u1"));
-    scher.start(&model, &vars).unwrap();
+    rt.start(&model, &vars).unwrap();
     let ret = sig.recv().await;
     assert_eq!(ret, true);
 }
@@ -641,13 +640,13 @@ async fn export_executeor_cancel() {
                 .with_act(Act::req(|act| act.with_id("act2")))
         });
 
-    let scher = engine.scher();
-    let sig = scher.signal(false);
+    let rt = engine.runtime();
+    let sig = engine.signal(false);
     let s1 = sig.clone();
     // scher.emitter().on_complete(|e| e.close());
     let count = Arc::new(Mutex::new(0));
     let tid = Arc::new(Mutex::new("".to_string()));
-    scher.emitter().on_message(move |e| {
+    engine.emitter().on_message(move |e| {
         if e.is_key("act1") && e.is_state("created") {
             let mut count = count.lock().unwrap();
             if *count == 1 {
@@ -655,12 +654,9 @@ async fn export_executeor_cancel() {
             }
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
-            engine
-                .executor()
-                .complete(&e.proc_id, &e.id, &vars)
-                .unwrap();
+            engine.executor().complete(&e.pid, &e.tid, &vars).unwrap();
 
-            *tid.lock().unwrap() = e.id.clone();
+            *tid.lock().unwrap() = e.tid.clone();
             *count += 1;
         }
 
@@ -669,13 +665,13 @@ async fn export_executeor_cancel() {
             vars.insert("uid".to_string(), json!("u1"));
             let ret = engine
                 .executor()
-                .cancel(&e.proc_id, &tid.lock().unwrap(), &vars);
+                .cancel(&e.pid, &tid.lock().unwrap(), &vars);
             s1.update(|data| *data = ret.is_ok());
         }
     });
     let mut vars = Vars::new();
     vars.insert("uid".to_string(), json!("u1"));
-    scher.start(&model, &vars).unwrap();
+    rt.start(&model, &vars).unwrap();
     let ret = sig.recv().await;
     assert_eq!(ret, true);
 }
@@ -688,16 +684,16 @@ async fn export_executeor_push() {
             .with_act(Act::req(|act| act.with_id("act1")))
     });
 
-    let scher = engine.scher();
-    let sig = scher.signal(false);
+    let rt = engine.runtime();
+    let sig = engine.signal(false);
     let s1 = sig.clone();
     // scher.emitter().on_complete(|e| e.close());
-    scher.emitter().on_message(move |e| {
+    engine.emitter().on_message(move |e| {
         println!("message: {e:?}");
         if e.is_key("step1") && e.is_state("created") {
             let mut vars = Vars::new();
             vars.insert("id".to_string(), json!("act2"));
-            engine.executor().push(&e.proc_id, &e.id, &vars).unwrap();
+            engine.executor().push(&e.pid, &e.tid, &vars).unwrap();
         }
 
         if e.is_key("act2") && e.is_state("created") {
@@ -706,7 +702,7 @@ async fn export_executeor_push() {
     });
     let mut vars = Vars::new();
     vars.insert("uid".to_string(), json!("u1"));
-    scher.start(&model, &vars).unwrap();
+    rt.start(&model, &vars).unwrap();
     let ret = sig.recv().await;
     assert_eq!(ret, true);
 }
@@ -719,24 +715,24 @@ async fn export_executeor_push_no_id_error() {
             .with_act(Act::req(|act| act.with_id("act1")))
     });
 
-    let scher = engine.scher();
-    let sig = scher.signal(false);
+    let rt = engine.runtime();
+    let sig = engine.signal(false);
     let s1 = sig.clone();
     // scher.emitter().on_complete(|e| e.close());
-    scher.emitter().on_message(move |e| {
+    engine.emitter().on_message(move |e| {
         println!("message: {e:?}");
         if e.is_key("step1") && e.is_state("created") {
             s1.send(
                 engine
                     .executor()
-                    .push(&e.proc_id, &e.id, &Vars::new())
+                    .push(&e.pid, &e.tid, &Vars::new())
                     .is_err(),
             );
         }
     });
     let mut vars = Vars::new();
     vars.insert("uid".to_string(), json!("u1"));
-    scher.start(&model, &vars).unwrap();
+    rt.start(&model, &vars).unwrap();
     let ret = sig.recv().await;
     assert_eq!(ret, true);
 }
@@ -749,20 +745,20 @@ async fn export_executeor_push_not_step_id_error() {
             .with_act(Act::req(|act| act.with_id("act1")))
     });
 
-    let scher = engine.scher();
-    let sig = scher.signal(false);
+    let rt = engine.runtime();
+    let sig = engine.signal(false);
     let s1 = sig.clone();
     // scher.emitter().on_complete(|e| e.close());
-    scher.emitter().on_message(move |e| {
+    engine.emitter().on_message(move |e| {
         println!("message: {e:?}");
         if e.is_key("act1") && e.is_state("created") {
             let vars = Vars::new();
-            s1.send(engine.executor().push(&e.proc_id, &e.id, &vars).is_err());
+            s1.send(engine.executor().push(&e.pid, &e.tid, &vars).is_err());
         }
     });
     let mut vars = Vars::new();
     vars.insert("uid".to_string(), json!("u1"));
-    scher.start(&model, &vars).unwrap();
+    rt.start(&model, &vars).unwrap();
     let ret = sig.recv().await;
     assert_eq!(ret, true);
 }
@@ -775,24 +771,23 @@ async fn export_executeor_remove() {
             .with_act(Act::req(|act| act.with_id("act1")))
     });
 
-    let scher = engine.scher();
-    let sig = scher.signal(false);
+    let rt = engine.runtime();
+    let sig = engine.signal(false);
     let s1 = sig.clone();
-    // scher.emitter().on_complete(|e| e.close());
-    scher.emitter().on_message(move |e| {
+    engine.emitter().on_message(move |e| {
         println!("message: {e:?}");
         if e.is_key("act1") && e.is_state("created") {
             s1.send(
                 engine
                     .executor()
-                    .remove(&e.proc_id, &e.id, &Vars::new())
+                    .remove(&e.pid, &e.tid, &Vars::new())
                     .is_ok(),
             );
         }
     });
     let mut vars = Vars::new();
     vars.insert("uid".to_string(), json!("u1"));
-    scher.start(&model, &vars).unwrap();
+    rt.start(&model, &vars).unwrap();
     let ret = sig.recv().await;
     assert_eq!(ret, true);
 }
@@ -806,16 +801,428 @@ async fn engine_extender_register_plugin() {
     assert_eq!(engine.plugins().lock().unwrap().len(), plugin_count + 1);
 }
 
-// #[tokio::test]
-// async fn export_extender_register_module() {
-//     let engine = Engine::new();
-//     let extender = engine.extender();
-//     let mut module = Module::new();
-//     combine_with_exported_module!(&mut module, "role", test_module);
-//     extender.register_module("test", &module);
+#[tokio::test]
+async fn export_extender_register_module() {
+    let engine = Engine::new();
+    let extender = engine.extender();
 
-//     assert!(extender.modules().contains_key("test"));
-// }
+    let before_count = engine.runtime().env().modules_count();
+    let module = test_module::TestModule;
+    extender.register_module(&module);
+    let count = engine.runtime().env().modules_count();
+    assert_eq!(count, before_count + 1);
+}
+
+#[tokio::test]
+async fn export_emitter_default() {
+    let engine = Engine::new();
+    let emitter = engine.emitter();
+    let sig = engine.signal::<Vec<Message>>(Vec::new());
+    let s = sig.clone();
+    emitter.on_message(move |e| {
+        s.update(|data| data.push(e.inner().clone()));
+        s.close();
+    });
+
+    let msg = Message::default();
+    engine.runtime().emitter().emit_message(&msg);
+    let ret = sig.recv().await;
+    assert_eq!(ret.len(), 1);
+}
+
+#[tokio::test]
+async fn export_emitter_type_match() {
+    let engine = Engine::new();
+    let emitter = engine.channel(&ChannelOptions {
+        r#type: "a*".to_string(),
+        ..Default::default()
+    });
+    let sig = engine.signal::<Vec<Message>>(Vec::new());
+    let s = sig.clone();
+    emitter.on_message(move |e| {
+        s.update(|data| data.push(e.inner().clone()));
+        s.close();
+    });
+
+    let msg = Message {
+        r#type: "abc".to_string(),
+        ..Message::default()
+    };
+    engine.runtime().emitter().emit_message(&msg);
+    let ret = sig.recv().await;
+    assert_eq!(ret.len(), 1);
+}
+
+#[tokio::test]
+async fn export_emitter_type_not_match() {
+    let engine = Engine::new();
+    let emitter = engine.channel(&ChannelOptions {
+        r#type: "a*".to_string(),
+        ..Default::default()
+    });
+    let sig = engine.signal::<Vec<Message>>(Vec::new());
+    let s = sig.clone();
+    emitter.on_message(move |e| {
+        s.update(|data| data.push(e.inner().clone()));
+        s.close();
+    });
+
+    let msg = Message {
+        r#type: "bac".to_string(),
+        ..Message::default()
+    };
+    engine.runtime().emitter().emit_message(&msg);
+    let ret = sig.timeout(100).await;
+    assert_eq!(ret.len(), 0);
+}
+
+#[tokio::test]
+async fn export_emitter_state_match() {
+    let engine = Engine::new();
+    let emitter = engine.channel(&ChannelOptions {
+        state: "completed".to_string(),
+        ..Default::default()
+    });
+    let sig = engine.signal::<Vec<Message>>(Vec::new());
+    let s = sig.clone();
+    emitter.on_message(move |e| {
+        s.update(|data| data.push(e.inner().clone()));
+        s.close();
+    });
+
+    let msg = Message {
+        state: MessageState::Completed,
+        ..Message::default()
+    };
+    engine.runtime().emitter().emit_message(&msg);
+    let ret = sig.recv().await;
+    assert_eq!(ret.len(), 1);
+}
+
+#[tokio::test]
+async fn export_emitter_state_not_match() {
+    let engine = Engine::new();
+    let emitter = engine.channel(&ChannelOptions {
+        r#type: "error".to_string(),
+        ..Default::default()
+    });
+    let sig = engine.signal::<Vec<Message>>(Vec::new());
+    let s = sig.clone();
+    emitter.on_message(move |e| {
+        s.update(|data| data.push(e.inner().clone()));
+        s.close();
+    });
+
+    let msg = Message {
+        state: MessageState::Completed,
+        ..Message::default()
+    };
+    engine.runtime().emitter().emit_message(&msg);
+    let ret = sig.timeout(100).await;
+    assert_eq!(ret.len(), 0);
+}
+
+#[tokio::test]
+async fn export_emitter_tag_match() {
+    let engine = Engine::new();
+    let emitter = engine.channel(&ChannelOptions {
+        tag: "tag*".to_string(),
+        ..Default::default()
+    });
+    let sig = engine.signal::<Vec<Message>>(Vec::new());
+    let s = sig.clone();
+    emitter.on_message(move |e| {
+        s.update(|data| data.push(e.inner().clone()));
+    });
+
+    let msg = Message {
+        tag: "tag1".to_string(),
+        ..Message::default()
+    };
+    engine.runtime().emitter().emit_message(&msg);
+
+    let msg = Message {
+        tag: "aaaa".to_string(),
+        model: Model {
+            tag: "tag2".to_string(),
+            ..Default::default()
+        },
+        ..Message::default()
+    };
+    engine.runtime().emitter().emit_message(&msg);
+
+    let ret = sig.timeout(100).await;
+    assert_eq!(ret.len(), 2);
+}
+
+#[tokio::test]
+async fn export_emitter_tag_not_match() {
+    let engine = Engine::new();
+    let emitter = engine.channel(&ChannelOptions {
+        tag: "tag*".to_string(),
+        ..Default::default()
+    });
+    let sig = engine.signal::<Vec<Message>>(Vec::new());
+    let s = sig.clone();
+    emitter.on_message(move |e| {
+        s.update(|data| data.push(e.inner().clone()));
+        s.close();
+    });
+
+    let msg = Message {
+        tag: "aaaa".to_string(),
+        ..Message::default()
+    };
+    engine.runtime().emitter().emit_message(&msg);
+    let ret = sig.timeout(100).await;
+    assert_eq!(ret.len(), 0);
+}
+
+#[tokio::test]
+async fn export_emitter_key_match() {
+    let engine = Engine::new();
+    let emitter = engine.channel(&ChannelOptions {
+        key: "key*".to_string(),
+        ..Default::default()
+    });
+    let sig = engine.signal::<Vec<Message>>(Vec::new());
+    let s = sig.clone();
+    emitter.on_message(move |e| {
+        s.update(|data| data.push(e.inner().clone()));
+        s.close();
+    });
+
+    let msg = Message {
+        key: "key1".to_string(),
+        ..Message::default()
+    };
+    engine.runtime().emitter().emit_message(&msg);
+    let ret = sig.recv().await;
+    assert_eq!(ret.len(), 1);
+}
+
+#[tokio::test]
+async fn export_emitter_key_not_match() {
+    let engine = Engine::new();
+    let emitter = engine.channel(&ChannelOptions {
+        key: "key*".to_string(),
+        ..Default::default()
+    });
+    let sig = engine.signal::<Vec<Message>>(Vec::new());
+    let s = sig.clone();
+    emitter.on_message(move |e| {
+        s.update(|data| data.push(e.inner().clone()));
+        s.close();
+    });
+
+    let msg = Message {
+        key: "aaaa".to_string(),
+        ..Message::default()
+    };
+    engine.runtime().emitter().emit_message(&msg);
+    let ret = sig.timeout(100).await;
+    assert_eq!(ret.len(), 0);
+}
+
+#[tokio::test]
+async fn export_message_store_with_emit_id() {
+    let engine = Engine::new();
+    let emitter = engine.channel(&ChannelOptions {
+        id: "my_emit_id".to_string(),
+        ack: true,
+        ..Default::default()
+    });
+    let (s1, s2) = engine.signal::<Message>(Message::default()).double();
+    emitter.on_message(move |e| {
+        s1.send(e.inner().clone());
+    });
+
+    let msg = Message {
+        id: "1".to_string(),
+        ..Message::default()
+    };
+    engine.runtime().emitter().emit_message(&msg);
+    let ret = s2.recv().await;
+    assert_eq!(ret.id, "1");
+    assert_eq!(
+        engine
+            .runtime()
+            .cache()
+            .store()
+            .messages()
+            .exists("1")
+            .unwrap(),
+        true
+    );
+}
+
+#[tokio::test]
+async fn export_message_store_with_emit_id_and_options() {
+    let engine = Engine::new();
+    let emitter = engine.channel(&ChannelOptions {
+        id: "my_emit_id".to_string(),
+        tag: "tag*".to_string(),
+        ack: true,
+        ..Default::default()
+    });
+    let (s1, s2) = engine.signal::<Message>(Message::default()).double();
+    emitter.on_message(move |e| {
+        s1.send(e.inner().clone());
+    });
+
+    let msg = Message {
+        id: utils::longid(),
+        tag: "tagaaaa".to_string(),
+        ..Message::default()
+    };
+    engine.runtime().emitter().emit_message(&msg);
+    let ret = s2.recv().await;
+    assert_eq!(ret.id, msg.id);
+    let message = engine
+        .runtime()
+        .cache()
+        .store()
+        .messages()
+        .find(&msg.id)
+        .unwrap();
+    assert_eq!(message.tag, msg.tag);
+    assert_eq!(message.emit_id, "my_emit_id");
+    assert_eq!(message.emit_pattern, "*:*:tag*:*");
+}
+
+#[tokio::test]
+async fn export_message_not_store_without_emit_id() {
+    let engine = Engine::new();
+    let emitter = engine.channel(&ChannelOptions {
+        id: "my_emit_id".to_string(),
+        tag: "tag*".to_string(),
+        ..Default::default()
+    });
+    let (s1, s2) = engine.signal::<Message>(Message::default()).double();
+    emitter.on_message(move |e| {
+        s1.send(e.inner().clone());
+    });
+
+    let msg = Message {
+        id: utils::longid(),
+        tag: "not_match_tag".to_string(),
+        ..Message::default()
+    };
+    engine.runtime().emitter().emit_message(&msg);
+    s2.timeout(20).await;
+    assert_eq!(
+        engine
+            .runtime()
+            .cache()
+            .store()
+            .messages()
+            .exists(&msg.id)
+            .unwrap(),
+        false
+    );
+}
+
+#[tokio::test]
+async fn export_message_not_store_with_empty_emit_id_and_not_match_option() {
+    let engine = Engine::new();
+    let emitter = engine.channel(&ChannelOptions {
+        id: "".to_string(),
+        ..Default::default()
+    });
+    let (s1, s2) = engine.signal::<Message>(Message::default()).double();
+    emitter.on_message(move |e| {
+        s1.send(e.inner().clone());
+    });
+
+    let msg = Message {
+        id: "1".to_string(),
+        ..Message::default()
+    };
+    engine.runtime().emitter().emit_message(&msg);
+    s2.timeout(20).await;
+    assert_eq!(
+        engine
+            .runtime()
+            .cache()
+            .store()
+            .messages()
+            .exists("1")
+            .unwrap(),
+        false
+    );
+}
+
+#[tokio::test]
+async fn export_message_clear_error_messages() {
+    let engine = Engine::new();
+    let msg = data::Message {
+        id: utils::longid(),
+        status: data::MessageStatus::Error,
+        ..data::Message::default()
+    };
+    engine
+        .runtime()
+        .cache()
+        .store()
+        .messages()
+        .create(&msg)
+        .unwrap();
+    let message = engine
+        .runtime()
+        .cache()
+        .store()
+        .messages()
+        .find(&msg.id)
+        .unwrap();
+    assert_eq!(message.status, data::MessageStatus::Error);
+    engine.manager().clear_error_messages().unwrap();
+    assert_eq!(
+        engine
+            .runtime()
+            .cache()
+            .store()
+            .messages()
+            .exists(&msg.id)
+            .unwrap(),
+        false
+    );
+}
+
+#[tokio::test]
+async fn export_message_resend_error_messages() {
+    let engine = Engine::new();
+    let msg = data::Message {
+        id: utils::longid(),
+        status: data::MessageStatus::Error,
+        ..data::Message::default()
+    };
+    engine
+        .runtime()
+        .cache()
+        .store()
+        .messages()
+        .create(&msg)
+        .unwrap();
+    let message = engine
+        .runtime()
+        .cache()
+        .store()
+        .messages()
+        .find(&msg.id)
+        .unwrap();
+    assert_eq!(message.status, data::MessageStatus::Error);
+    engine.manager().resend_error_messages().unwrap();
+
+    let message = engine
+        .runtime()
+        .cache()
+        .store()
+        .messages()
+        .find(&msg.id)
+        .unwrap();
+    assert_eq!(message.status, data::MessageStatus::Created);
+    assert_eq!(message.retry_times, 0);
+}
 
 #[derive(Debug, Default, Clone)]
 struct TestPlugin;
@@ -826,9 +1233,14 @@ impl ActPlugin for TestPlugin {
     }
 }
 
-// #[export_module]
-// mod test_module {
+mod test_module {
+    use crate::ActModule;
 
-//     #[export_fn]
-//     pub fn test(_name: &str) {}
-// }
+    #[derive(Clone)]
+    pub struct TestModule;
+    impl ActModule for TestModule {
+        fn init<'a>(&self, _ctx: &rquickjs::Ctx<'a>) -> crate::Result<()> {
+            Ok(())
+        }
+    }
+}
