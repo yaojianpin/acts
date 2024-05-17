@@ -1,6 +1,6 @@
 use crate::{
     sch::NodeKind,
-    store::{data, query::Expr, Cond, DbSet, Store, StoreKind},
+    store::{data, query::Expr, Cond, Store, StoreKind},
     utils, Query, StoreAdapter, TaskState, Workflow,
 };
 use data::{Message, MessageStatus, Package, Proc, Task};
@@ -351,9 +351,8 @@ async fn store_message_create() {
         inputs: json!({}).to_string(),
         outputs: json!({}).to_string(),
         tag: "tag1".to_string(),
-        emit_id: "test1".to_string(),
-        emit_pattern: "*:*:*:*".to_string(),
-        emit_count: 0,
+        chan_id: "test1".to_string(),
+        chan_pattern: "*:*:*:*".to_string(),
         create_time: 0,
         update_time: 0,
         retry_times: 0,
@@ -388,9 +387,8 @@ async fn store_message_query() {
         inputs: json!({}).to_string(),
         outputs: json!({}).to_string(),
         tag: "tag1".to_string(),
-        emit_id: "test1".to_string(),
-        emit_pattern: "*:*:*:*".to_string(),
-        emit_count: 0,
+        chan_id: "test1".to_string(),
+        chan_pattern: "*:*:*:*".to_string(),
         create_time: 0,
         update_time: 0,
         retry_times: 0,
@@ -426,9 +424,8 @@ async fn store_message_update() {
         inputs: json!({}).to_string(),
         outputs: json!({}).to_string(),
         tag: "tag1".to_string(),
-        emit_id: "test1".to_string(),
-        emit_pattern: "*:*:*:*".to_string(),
-        emit_count: 0,
+        chan_id: "test1".to_string(),
+        chan_pattern: "*:*:*:*".to_string(),
         create_time: 0,
         update_time: 0,
         retry_times: 0,
@@ -440,13 +437,13 @@ async fn store_message_update() {
     let id = utils::Id::new(&pid, &tid);
     let mut msg = store.messages().find(&id.id()).unwrap();
     msg.state = "completed".to_string();
-    msg.emit_count = 1;
+    msg.retry_times = 1;
     msg.status = MessageStatus::Completed;
     store.messages().update(&msg).unwrap();
 
     let msg2 = store.messages().find(&id.id()).unwrap();
     assert_eq!(msg2.state, "completed");
-    assert_eq!(msg2.emit_count, 1);
+    assert_eq!(msg2.retry_times, 1);
     assert_eq!(msg2.status, MessageStatus::Completed);
 }
 
@@ -471,9 +468,8 @@ async fn store_message_remove() {
         inputs: json!({}).to_string(),
         outputs: json!({}).to_string(),
         tag: "tag1".to_string(),
-        emit_id: "test1".to_string(),
-        emit_pattern: "*:*:*:*".to_string(),
-        emit_count: 0,
+        chan_id: "test1".to_string(),
+        chan_pattern: "*:*:*:*".to_string(),
         create_time: 0,
         update_time: 0,
         retry_times: 0,
@@ -594,30 +590,4 @@ fn create_proc(id: &str, state: TaskState, model: &Workflow) -> Proc {
         env_local: "{}".to_string(),
         err: None,
     }
-}
-
-#[derive(Debug)]
-struct TestStore;
-
-impl StoreAdapter for TestStore {
-    fn models(&self) -> Arc<dyn DbSet<Item = data::Model>> {
-        todo!()
-    }
-
-    fn procs(&self) -> Arc<dyn DbSet<Item = data::Proc>> {
-        todo!()
-    }
-
-    fn tasks(&self) -> Arc<dyn DbSet<Item = data::Task>> {
-        todo!()
-    }
-
-    fn packages(&self) -> Arc<dyn DbSet<Item = data::Package>> {
-        todo!()
-    }
-    fn messages(&self) -> Arc<dyn DbSet<Item = data::Message>> {
-        todo!()
-    }
-    fn init(&self) {}
-    fn close(&self) {}
 }

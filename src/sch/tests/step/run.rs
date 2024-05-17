@@ -290,12 +290,12 @@ async fn run_test<T: Clone + Send + 'static + Default>(
 ) -> T {
     let (engine, proc, tx, rx) = create_proc_signal2::<T>(workflow, &utils::longid());
     let s = rx.clone();
-    engine.emitter().on_message(move |e| {
+    engine.channel().on_message(move |e| {
         println!("message: {:?}", e);
         exit_if(e, rx.clone());
     });
 
-    engine.emitter().on_error(move |_| {
+    engine.channel().on_error(move |_| {
         s.close();
     });
     engine.runtime().launch(&proc);
@@ -309,7 +309,7 @@ async fn run_test_dep<T: Clone + Send + 'static + Default>(
 ) -> T {
     let (engine, proc, tx, rx) = create_proc_signal2::<T>(workflow, &utils::longid());
     engine.manager().deploy(&dep).unwrap();
-    engine.emitter().on_message(move |e| {
+    engine.channel().on_message(move |e| {
         println!("message: {:?}", e);
         exit_if(e, rx.clone());
     });

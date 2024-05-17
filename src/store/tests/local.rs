@@ -293,9 +293,8 @@ async fn store_local_message_create() {
         inputs: json!({}).to_string(),
         outputs: json!({}).to_string(),
         tag: "tag1".to_string(),
-        emit_id: "test1".to_string(),
-        emit_pattern: "*:*:*:*".to_string(),
-        emit_count: 0,
+        chan_id: "test1".to_string(),
+        chan_pattern: "*:*:*:*".to_string(),
         create_time: 0,
         update_time: 0,
         retry_times: 0,
@@ -330,9 +329,8 @@ async fn store_local_message_query() {
         inputs: json!({}).to_string(),
         outputs: json!({}).to_string(),
         tag: "tag1".to_string(),
-        emit_id: "test1".to_string(),
-        emit_pattern: "*:*:*:*".to_string(),
-        emit_count: 0,
+        chan_id: "test1".to_string(),
+        chan_pattern: "*:*:*:*".to_string(),
         create_time: 0,
         update_time: 0,
         retry_times: 0,
@@ -368,9 +366,8 @@ async fn store_local_message_update() {
         inputs: json!({}).to_string(),
         outputs: json!({}).to_string(),
         tag: "tag1".to_string(),
-        emit_id: "test1".to_string(),
-        emit_pattern: "*:*:*:*".to_string(),
-        emit_count: 0,
+        chan_id: "test1".to_string(),
+        chan_pattern: "*:*:*:*".to_string(),
         create_time: 0,
         update_time: 0,
         retry_times: 0,
@@ -382,13 +379,13 @@ async fn store_local_message_update() {
     let id = utils::Id::new(&pid, &tid);
     let mut msg = store.messages().find(&id.id()).unwrap();
     msg.state = "completed".to_string();
-    msg.emit_count = 1;
+    msg.retry_times = 1;
     msg.status = MessageStatus::Acked;
     store.messages().update(&msg).unwrap();
 
     let msg2 = store.messages().find(&id.id()).unwrap();
     assert_eq!(msg2.state, "completed");
-    assert_eq!(msg2.emit_count, 1);
+    assert_eq!(msg2.retry_times, 1);
     assert_eq!(msg2.status, MessageStatus::Acked);
 }
 
@@ -413,9 +410,8 @@ async fn store_local_message_remove() {
         inputs: json!({}).to_string(),
         outputs: json!({}).to_string(),
         tag: "tag1".to_string(),
-        emit_id: "test1".to_string(),
-        emit_pattern: "*:*:*:*".to_string(),
-        emit_count: 0,
+        chan_id: "test1".to_string(),
+        chan_pattern: "*:*:*:*".to_string(),
         create_time: 0,
         update_time: 0,
         retry_times: 0,

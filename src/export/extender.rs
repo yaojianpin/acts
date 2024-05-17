@@ -63,10 +63,9 @@ impl Extender {
     /// impl ActPlugin for TestPlugin {
     ///     fn on_init(&self, engine: &Engine) {
     ///         println!("TestPlugin");
-    ///         // engine.extender().register_module("name", module);
-    ///         engine.emitter().on_start(|e| {});
-    ///         engine.emitter().on_complete(|e| {});
-    ///         engine.emitter().on_message(|e| {});
+    ///         engine.channel().on_start(|e| {});
+    ///         engine.channel().on_complete(|e| {});
+    ///         engine.channel().on_message(|e| {});
     ///     }
     /// }
     /// let engine = Engine::new();

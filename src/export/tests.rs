@@ -234,7 +234,7 @@ async fn export_manager_procs_get_one() {
     let sig = engine.signal(());
     let s1 = sig.clone();
     let proc = rt.create_proc(&utils::longid(), &model);
-    engine.emitter().on_start(move |_| s1.close());
+    engine.channel().on_start(move |_| s1.close());
     rt.launch(&proc);
     sig.recv().await;
 
@@ -254,7 +254,7 @@ async fn export_manager_procs_get_many() {
     let sig = engine.signal(());
     let s1 = sig.clone();
     let count = Arc::new(Mutex::new(0));
-    engine.emitter().on_start(move |_e| {
+    engine.channel().on_start(move |_e| {
         println!("message:{_e:?}");
         let mut count = count.lock().unwrap();
         *count += 1;
@@ -283,7 +283,7 @@ async fn export_manager_proc_get_json() {
     let rt = engine.runtime();
     let sig = engine.signal(());
     let s1 = sig.clone();
-    engine.emitter().on_start(move |_| s1.close());
+    engine.channel().on_start(move |_| s1.close());
     let pid = utils::longid();
     let proc = rt.create_proc(&pid, &model);
     rt.launch(&proc);
@@ -306,7 +306,7 @@ async fn export_manager_proc_get_tree() {
     let rt = engine.runtime();
     let sig = engine.signal(());
     let s1 = sig.clone();
-    engine.emitter().on_start(move |_| s1.close());
+    engine.channel().on_start(move |_| s1.close());
     let pid = utils::longid();
     let proc = rt.create_proc(&pid, &model);
     rt.launch(&proc);
@@ -329,7 +329,7 @@ async fn export_manager_tasks() {
     let rt = engine.runtime();
     let sig = engine.signal(());
     let s1 = sig.clone();
-    engine.emitter().on_message(move |e| {
+    engine.channel().on_message(move |e| {
         if e.is_key("act1") {
             s1.close()
         }
@@ -358,7 +358,7 @@ async fn export_manager_task_get() {
     let rt = engine.runtime();
     let sig = engine.signal(());
     let s1 = sig.clone();
-    engine.emitter().on_message(move |e| {
+    engine.channel().on_message(move |e| {
         if e.is_key("act1") {
             s1.close()
         }
@@ -387,7 +387,7 @@ async fn export_executeor_start() {
 
     let sig = engine.signal(());
     let s1 = sig.clone();
-    engine.emitter().on_complete(move |_| s1.close());
+    engine.channel().on_complete(move |_| s1.close());
 
     engine.manager().deploy(&model).unwrap();
 
@@ -406,7 +406,7 @@ async fn export_executeor_start_not_found_model() {
     let engine = Engine::new();
     let sig = engine.signal(());
     let s1 = sig.clone();
-    engine.emitter().on_complete(move |_| s1.close());
+    engine.channel().on_complete(move |_| s1.close());
 
     let pid = utils::longid();
     let mut vars = Vars::new();
@@ -428,7 +428,7 @@ async fn export_executeor_complete() {
     let rt = engine.runtime();
     let sig = engine.signal(false);
     let s1 = sig.clone();
-    engine.emitter().on_message(move |e| {
+    engine.channel().on_message(move |e| {
         if e.is_key("act1") && e.is_state("created") {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
@@ -456,7 +456,7 @@ async fn export_executeor_complete_no_uid() {
     let s1 = sig.clone();
     // scher.emitter().on_complete(|e| rx.close());
 
-    engine.emitter().on_message(move |e| {
+    engine.channel().on_message(move |e| {
         if e.is_key("act1") && e.is_state("created") {
             let vars = Vars::new();
             let ret = engine.executor().complete(&e.pid, &e.tid, &vars);
@@ -483,7 +483,7 @@ async fn export_executeor_submit() {
     let s1 = sig.clone();
     // scher.emitter().on_complete(|e| e.close());
 
-    engine.emitter().on_message(move |e| {
+    engine.channel().on_message(move |e| {
         if e.is_key("act1") && e.is_state("created") {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
@@ -510,7 +510,7 @@ async fn export_executeor_skip() {
     let sig = engine.signal(false);
     let s1 = sig.clone();
     // scher.emitter().on_complete(|e| e.close());
-    engine.emitter().on_message(move |e| {
+    engine.channel().on_message(move |e| {
         if e.is_key("act1") && e.is_state("created") {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
@@ -536,7 +536,7 @@ async fn export_executeor_error() {
     let rt = engine.runtime();
     let sig = engine.signal(false);
     let s1 = sig.clone();
-    engine.emitter().on_message(move |e| {
+    engine.channel().on_message(move |e| {
         if e.is_key("act1") && e.is_state("created") {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
@@ -564,7 +564,7 @@ async fn export_executeor_abort() {
     let sig = engine.signal(false);
     let s1 = sig.clone();
     // scher.emitter().on_complete(|e| e.close());
-    engine.emitter().on_message(move |e| {
+    engine.channel().on_message(move |e| {
         println!("message: {:?}", e.inner());
         if e.is_key("act1") && e.is_state("created") {
             let mut vars = Vars::new();
@@ -599,7 +599,7 @@ async fn export_executeor_back() {
     // scher.emitter().on_complete(|e| e.close());
 
     let count = Arc::new(Mutex::new(0));
-    engine.emitter().on_message(move |e| {
+    engine.channel().on_message(move |e| {
         if e.is_key("act1") && e.is_state("created") {
             let mut count = count.lock().unwrap();
             if *count == 1 {
@@ -646,7 +646,7 @@ async fn export_executeor_cancel() {
     // scher.emitter().on_complete(|e| e.close());
     let count = Arc::new(Mutex::new(0));
     let tid = Arc::new(Mutex::new("".to_string()));
-    engine.emitter().on_message(move |e| {
+    engine.channel().on_message(move |e| {
         if e.is_key("act1") && e.is_state("created") {
             let mut count = count.lock().unwrap();
             if *count == 1 {
@@ -688,7 +688,7 @@ async fn export_executeor_push() {
     let sig = engine.signal(false);
     let s1 = sig.clone();
     // scher.emitter().on_complete(|e| e.close());
-    engine.emitter().on_message(move |e| {
+    engine.channel().on_message(move |e| {
         println!("message: {e:?}");
         if e.is_key("step1") && e.is_state("created") {
             let mut vars = Vars::new();
@@ -719,7 +719,7 @@ async fn export_executeor_push_no_id_error() {
     let sig = engine.signal(false);
     let s1 = sig.clone();
     // scher.emitter().on_complete(|e| e.close());
-    engine.emitter().on_message(move |e| {
+    engine.channel().on_message(move |e| {
         println!("message: {e:?}");
         if e.is_key("step1") && e.is_state("created") {
             s1.send(
@@ -749,7 +749,7 @@ async fn export_executeor_push_not_step_id_error() {
     let sig = engine.signal(false);
     let s1 = sig.clone();
     // scher.emitter().on_complete(|e| e.close());
-    engine.emitter().on_message(move |e| {
+    engine.channel().on_message(move |e| {
         println!("message: {e:?}");
         if e.is_key("act1") && e.is_state("created") {
             let vars = Vars::new();
@@ -774,7 +774,7 @@ async fn export_executeor_remove() {
     let rt = engine.runtime();
     let sig = engine.signal(false);
     let s1 = sig.clone();
-    engine.emitter().on_message(move |e| {
+    engine.channel().on_message(move |e| {
         println!("message: {e:?}");
         if e.is_key("act1") && e.is_state("created") {
             s1.send(
@@ -816,7 +816,7 @@ async fn export_extender_register_module() {
 #[tokio::test]
 async fn export_emitter_default() {
     let engine = Engine::new();
-    let emitter = engine.emitter();
+    let emitter = engine.channel();
     let sig = engine.signal::<Vec<Message>>(Vec::new());
     let s = sig.clone();
     emitter.on_message(move |e| {
@@ -833,7 +833,7 @@ async fn export_emitter_default() {
 #[tokio::test]
 async fn export_emitter_type_match() {
     let engine = Engine::new();
-    let emitter = engine.channel(&ChannelOptions {
+    let emitter = engine.channel_with_options(&ChannelOptions {
         r#type: "a*".to_string(),
         ..Default::default()
     });
@@ -856,7 +856,7 @@ async fn export_emitter_type_match() {
 #[tokio::test]
 async fn export_emitter_type_not_match() {
     let engine = Engine::new();
-    let emitter = engine.channel(&ChannelOptions {
+    let emitter = engine.channel_with_options(&ChannelOptions {
         r#type: "a*".to_string(),
         ..Default::default()
     });
@@ -879,7 +879,7 @@ async fn export_emitter_type_not_match() {
 #[tokio::test]
 async fn export_emitter_state_match() {
     let engine = Engine::new();
-    let emitter = engine.channel(&ChannelOptions {
+    let emitter = engine.channel_with_options(&ChannelOptions {
         state: "completed".to_string(),
         ..Default::default()
     });
@@ -902,7 +902,7 @@ async fn export_emitter_state_match() {
 #[tokio::test]
 async fn export_emitter_state_not_match() {
     let engine = Engine::new();
-    let emitter = engine.channel(&ChannelOptions {
+    let emitter = engine.channel_with_options(&ChannelOptions {
         r#type: "error".to_string(),
         ..Default::default()
     });
@@ -925,7 +925,7 @@ async fn export_emitter_state_not_match() {
 #[tokio::test]
 async fn export_emitter_tag_match() {
     let engine = Engine::new();
-    let emitter = engine.channel(&ChannelOptions {
+    let emitter = engine.channel_with_options(&ChannelOptions {
         tag: "tag*".to_string(),
         ..Default::default()
     });
@@ -958,7 +958,7 @@ async fn export_emitter_tag_match() {
 #[tokio::test]
 async fn export_emitter_tag_not_match() {
     let engine = Engine::new();
-    let emitter = engine.channel(&ChannelOptions {
+    let emitter = engine.channel_with_options(&ChannelOptions {
         tag: "tag*".to_string(),
         ..Default::default()
     });
@@ -981,7 +981,7 @@ async fn export_emitter_tag_not_match() {
 #[tokio::test]
 async fn export_emitter_key_match() {
     let engine = Engine::new();
-    let emitter = engine.channel(&ChannelOptions {
+    let emitter = engine.channel_with_options(&ChannelOptions {
         key: "key*".to_string(),
         ..Default::default()
     });
@@ -1004,7 +1004,7 @@ async fn export_emitter_key_match() {
 #[tokio::test]
 async fn export_emitter_key_not_match() {
     let engine = Engine::new();
-    let emitter = engine.channel(&ChannelOptions {
+    let emitter = engine.channel_with_options(&ChannelOptions {
         key: "key*".to_string(),
         ..Default::default()
     });
@@ -1027,7 +1027,7 @@ async fn export_emitter_key_not_match() {
 #[tokio::test]
 async fn export_message_store_with_emit_id() {
     let engine = Engine::new();
-    let emitter = engine.channel(&ChannelOptions {
+    let emitter = engine.channel_with_options(&ChannelOptions {
         id: "my_emit_id".to_string(),
         ack: true,
         ..Default::default()
@@ -1059,7 +1059,7 @@ async fn export_message_store_with_emit_id() {
 #[tokio::test]
 async fn export_message_store_with_emit_id_and_options() {
     let engine = Engine::new();
-    let emitter = engine.channel(&ChannelOptions {
+    let emitter = engine.channel_with_options(&ChannelOptions {
         id: "my_emit_id".to_string(),
         tag: "tag*".to_string(),
         ack: true,
@@ -1086,14 +1086,14 @@ async fn export_message_store_with_emit_id_and_options() {
         .find(&msg.id)
         .unwrap();
     assert_eq!(message.tag, msg.tag);
-    assert_eq!(message.emit_id, "my_emit_id");
-    assert_eq!(message.emit_pattern, "*:*:tag*:*");
+    assert_eq!(message.chan_id, "my_emit_id");
+    assert_eq!(message.chan_pattern, "*:*:tag*:*");
 }
 
 #[tokio::test]
 async fn export_message_not_store_without_emit_id() {
     let engine = Engine::new();
-    let emitter = engine.channel(&ChannelOptions {
+    let emitter = engine.channel_with_options(&ChannelOptions {
         id: "my_emit_id".to_string(),
         tag: "tag*".to_string(),
         ..Default::default()
@@ -1125,7 +1125,7 @@ async fn export_message_not_store_without_emit_id() {
 #[tokio::test]
 async fn export_message_not_store_with_empty_emit_id_and_not_match_option() {
     let engine = Engine::new();
-    let emitter = engine.channel(&ChannelOptions {
+    let emitter = engine.channel_with_options(&ChannelOptions {
         id: "".to_string(),
         ..Default::default()
     });

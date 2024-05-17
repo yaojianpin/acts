@@ -13,11 +13,11 @@ async fn main() {
     let mut vars = Vars::new();
     vars.insert("input".into(), 10.into());
     executor.start(&workflow.id, &vars).expect("start workflow");
-    engine.emitter().on_error(move |e| {
+    engine.channel().on_error(move |e| {
         print!("on_error: {e:?}");
         s1.close();
     });
-    engine.emitter().on_complete(move |e| {
+    engine.channel().on_complete(move |e| {
         println!(
             "on_workflow_complete: state={} cost={}ms output={:?}",
             e.state,

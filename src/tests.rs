@@ -17,7 +17,7 @@ async fn engine_event_on_message() {
         .with_id(&mid)
         .with_step(|step| step.with_act(Act::req(|act| act.with_id("test"))));
 
-    engine.emitter().on_message(move |e| {
+    engine.channel().on_message(move |e| {
         if e.is_source("act") {
             s.update(|data| *data = e.key.clone());
             s.close();
@@ -45,7 +45,7 @@ async fn engine_event_on_start() {
         .with_id(&mid)
         .with_step(|step| step.with_act(Act::req(|act| act.with_id("test"))));
 
-    engine.emitter().on_start(move |e| {
+    engine.channel().on_start(move |e| {
         s.send(e.model.id.clone());
     });
 
@@ -69,7 +69,7 @@ async fn engine_event_on_complete() {
         .with_id(&mid)
         .with_step(|step| step.with_id("step1"));
 
-    engine.emitter().on_complete(move |e| {
+    engine.channel().on_complete(move |e| {
         s1.send(e.model.id == mid);
     });
 
@@ -94,11 +94,11 @@ async fn engine_event_on_error() {
 
     let sig = engine.signal(false);
     let s1 = sig.clone();
-    engine.emitter().on_error(move |e| {
+    engine.channel().on_error(move |e| {
         s1.send(e.model.id == mid);
     });
 
-    engine.emitter().on_message(move |e| {
+    engine.channel().on_message(move |e| {
         let mut options = Vars::new();
         options.insert("uid".to_string(), json!("u1"));
         options.insert("error".to_string(), json!({ "ecode": "err1" }));

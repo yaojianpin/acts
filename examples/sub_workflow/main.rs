@@ -16,20 +16,20 @@ async fn main() {
         .start("main", &Vars::new())
         .expect("start workflow");
 
-    engine.emitter().on_message(move |e| {
+    engine.channel().on_message(move |e| {
         let ret = client.process(&executor, e);
         if ret.is_err() {
             eprintln!("{}", ret.err().unwrap());
             std::process::exit(1);
         }
     });
-    engine.emitter().on_start(move |e| {
+    engine.channel().on_start(move |e| {
         println!(
             "on_workflow_start: mid={} pid={} inputs={:?}\n",
             e.model.id, e.pid, e.inputs
         );
     });
-    engine.emitter().on_complete(move |e| {
+    engine.channel().on_complete(move |e| {
         println!(
             "on_workflow_complete: mid={} pid={} cost={}ms outputs={:?}\n",
             e.model.id,
@@ -43,7 +43,7 @@ async fn main() {
         }
     });
 
-    engine.emitter().on_error(move |e| {
+    engine.channel().on_error(move |e| {
         eprintln!("on_workflow_error: pid={} state={:?}", e.pid, e.state);
         s2.close();
     });

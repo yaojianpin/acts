@@ -120,7 +120,7 @@ impl DbSchema for Message {
             },
         ));
         map.push((
-            "emit_id".to_string(),
+            "chan_id".to_string(),
             DbColumn {
                 db_type: DbType::Text,
                 is_not_null: true,
@@ -128,17 +128,10 @@ impl DbSchema for Message {
             },
         ));
         map.push((
-            "emit_pattern".to_string(),
+            "chan_pattern".to_string(),
             DbColumn {
                 db_type: DbType::Text,
                 is_not_null: true,
-                ..Default::default()
-            },
-        ));
-        map.push((
-            "emit_count".to_string(),
-            DbColumn {
-                db_type: DbType::Int64,
                 ..Default::default()
             },
         ));
@@ -197,13 +190,12 @@ impl DbRow for Message {
             tag: row.get::<usize, String>(11).unwrap(),
             start_time: row.get::<usize, i64>(12).unwrap(),
             end_time: row.get::<usize, i64>(13).unwrap(),
-            emit_id: row.get::<usize, String>(14).unwrap(),
-            emit_pattern: row.get::<usize, String>(15).unwrap(),
-            emit_count: row.get::<usize, i64>(16).unwrap(),
-            create_time: row.get::<usize, i64>(17).unwrap().into(),
-            update_time: row.get::<usize, i64>(18).unwrap().into(),
-            status: row.get::<usize, i8>(19).unwrap().into(),
-            retry_times: row.get::<usize, i32>(20).unwrap().into(),
+            chan_id: row.get::<usize, String>(14).unwrap(),
+            chan_pattern: row.get::<usize, String>(15).unwrap(),
+            create_time: row.get::<usize, i64>(16).unwrap().into(),
+            update_time: row.get::<usize, i64>(17).unwrap().into(),
+            status: row.get::<usize, i8>(18).unwrap().into(),
+            retry_times: row.get::<usize, i32>(19).unwrap().into(),
         })
     }
 
@@ -224,12 +216,11 @@ impl DbRow for Message {
         ret.push(("tag".to_string(), Value::Text(self.tag.clone())));
         ret.push(("start_time".to_string(), Value::BigInt(self.start_time)));
         ret.push(("end_time".to_string(), Value::BigInt(self.end_time)));
-        ret.push(("emit_id".to_string(), Value::Text(self.emit_id.clone())));
+        ret.push(("chan_id".to_string(), Value::Text(self.chan_id.clone())));
         ret.push((
-            "emit_pattern".to_string(),
-            Value::Text(self.emit_pattern.clone()),
+            "chan_pattern".to_string(),
+            Value::Text(self.chan_pattern.clone()),
         ));
-        ret.push(("emit_count".to_string(), Value::BigInt(self.emit_count)));
         ret.push(("create_time".to_string(), Value::BigInt(self.create_time)));
         ret.push(("update_time".to_string(), Value::BigInt(self.update_time)));
         ret.push(("status".to_string(), Value::TinyInt(self.status.into())));

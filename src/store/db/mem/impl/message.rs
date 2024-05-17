@@ -26,9 +26,8 @@ impl DbDocument for Message {
         map.insert("tag".to_string(), json!(self.tag.clone()));
         map.insert("start_time".to_string(), json!(self.start_time));
         map.insert("end_time".to_string(), json!(self.end_time));
-        map.insert("emit_id".to_string(), json!(self.emit_id.clone()));
-        map.insert("emit_pattern".to_string(), json!(self.emit_pattern));
-        map.insert("emit_count".to_string(), json!(self.emit_count));
+        map.insert("chan_id".to_string(), json!(self.chan_id.clone()));
+        map.insert("chan_pattern".to_string(), json!(self.chan_pattern));
         map.insert("create_time".to_string(), json!(self.create_time));
         map.insert("update_time".to_string(), json!(self.update_time));
         map.insert("status".to_string(), json!(self.status));

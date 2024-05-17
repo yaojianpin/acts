@@ -4,7 +4,7 @@ use crate::{
     sch::tests::{create_proc_signal, create_proc_signal2, create_proc_signal_config},
     store::{Cond, Expr},
     utils::{self, consts},
-    Act, Action, Config, ChannelOptions, Error, Message, Query, StoreAdapter, Vars, Workflow,
+    Act, Action, ChannelOptions, Config, Error, Message, Query, StoreAdapter, Vars, Workflow,
 };
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -713,11 +713,13 @@ async fn sch_message_emit_options_with_id() {
         id: "e1".to_string(),
         ..Default::default()
     };
-    engine.channel(&options).on_message(move |msg| {
-        if msg.r#type == "workflow" && msg.state() == MessageState::Created {
-            rx.send(true);
-        }
-    });
+    engine
+        .channel_with_options(&options)
+        .on_message(move |msg| {
+            if msg.r#type == "workflow" && msg.state() == MessageState::Created {
+                rx.send(true);
+            }
+        });
     engine.runtime().launch(&proc);
     let ret = tx.recv().await;
     assert_eq!(ret, true);
@@ -729,7 +731,7 @@ async fn sch_message_ack_not_exist_message_in_store() {
     let id = utils::longid();
     let (engine, proc, tx, rx) = create_proc_signal2::<bool>(&mut workflow, &id);
     let e2 = engine.clone();
-    engine.emitter().on_message(move |msg| {
+    engine.channel().on_message(move |msg| {
         if msg.r#type == "workflow" && msg.state() == MessageState::Created {
             let ret = engine.executor().ack(&msg.id);
             rx.send(ret.is_ok());
@@ -752,12 +754,14 @@ async fn sch_message_ack_exist_message_in_store() {
         ..Default::default()
     };
     let e2 = engine.clone();
-    engine.channel(&options).on_message(move |msg| {
-        if msg.r#type == "workflow" && msg.state() == MessageState::Created {
-            engine.executor().ack(&msg.id).unwrap();
-            rx.send(msg.inner().clone());
-        }
-    });
+    engine
+        .channel_with_options(&options)
+        .on_message(move |msg| {
+            if msg.r#type == "workflow" && msg.state() == MessageState::Created {
+                engine.executor().ack(&msg.id).unwrap();
+                rx.send(msg.inner().clone());
+            }
+        });
     e2.runtime().launch(&proc);
     let ret = tx.recv().await;
     let message = e2
@@ -788,19 +792,21 @@ async fn sch_message_complete_message_in_store() {
         ..Default::default()
     };
     let e2 = engine.clone();
-    engine.channel(&options).on_message(move |msg| {
-        if msg.is_key("act1") && msg.state() == MessageState::Created {
-            engine
-                .executor()
-                .complete(&msg.pid, &msg.tid, &Vars::new())
-                .unwrap();
-            rx.update(|data| *data = msg.id.clone());
-        }
+    engine
+        .channel_with_options(&options)
+        .on_message(move |msg| {
+            if msg.is_key("act1") && msg.state() == MessageState::Created {
+                engine
+                    .executor()
+                    .complete(&msg.pid, &msg.tid, &Vars::new())
+                    .unwrap();
+                rx.update(|data| *data = msg.id.clone());
+            }
 
-        if msg.is_key("act2") && msg.state() == MessageState::Created {
-            rx.close();
-        }
-    });
+            if msg.is_key("act2") && msg.state() == MessageState::Created {
+                rx.close();
+            }
+        });
     e2.runtime().launch(&proc);
     let ret = tx.recv().await;
     let message = e2.runtime().cache().store().messages().find(&ret).unwrap();
@@ -825,7 +831,7 @@ async fn sch_messages_not_removed_when_completed_in_store() {
         ack: true,
         ..Default::default()
     };
-    engine.channel(&options).on_complete(move |_| {
+    engine.channel_with_options(&options).on_complete(move |_| {
         rx.close();
     });
     engine.runtime().launch(&proc);
@@ -854,7 +860,7 @@ async fn sch_message_re_sent_if_not_ack() {
         ack: true,
         ..Default::default()
     };
-    engine.channel(&options).on_message(move |e| {
+    engine.channel_with_options(&options).on_message(move |e| {
         if e.r#type == "workflow" && e.state() == MessageState::Created {
             // not ack the message
             rx.update(|data| data.push(e.inner().clone()));
@@ -901,7 +907,7 @@ async fn sch_message_error_if_not_ack_and_exceed_max_reties() {
         ..Default::default()
     };
     let e2 = engine.clone();
-    engine.channel(&options).on_message(move |e| {
+    engine.channel_with_options(&options).on_message(move |e| {
         if e.r#type == "workflow" && e.state() == MessageState::Created {
             // not ack the message
             rx.update(|data| data.push(e.inner().clone()));

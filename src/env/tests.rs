@@ -159,7 +159,7 @@ async fn env_task_get() {
         .with_input("a", 10.into())
         .with_step(|step| step.with_id("step1"));
     let proc = engine.runtime().start(&workflow, &Vars::new()).unwrap();
-    engine.emitter().on_complete(move |_| s1.close());
+    engine.channel().on_complete(move |_| s1.close());
     sig.recv().await;
     let task = proc.root().unwrap();
     let script = r#"
@@ -184,7 +184,7 @@ async fn env_task_set() {
         .with_input("a", 10.into())
         .with_step(|step| step.with_id("step1"));
     let proc = engine.runtime().start(&workflow, &Vars::new()).unwrap();
-    engine.emitter().on_complete(move |_| s1.close());
+    engine.channel().on_complete(move |_| s1.close());
     sig.recv().await;
     let task = proc.root().unwrap();
     let script = r#"
@@ -206,7 +206,7 @@ async fn env_task_multi_line() {
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
     let proc = engine.runtime().start(&workflow, &Vars::new()).unwrap();
-    engine.emitter().on_complete(move |_| s1.close());
+    engine.channel().on_complete(move |_| s1.close());
     sig.recv().await;
     let task = proc.root().unwrap();
 
@@ -230,7 +230,7 @@ async fn env_env_get_local() {
         .with_env("a", 10.into())
         .with_step(|step| step.with_id("step1"));
     let proc = engine.runtime().start(&workflow, &Vars::new()).unwrap();
-    engine.emitter().on_complete(move |_| s1.close());
+    engine.channel().on_complete(move |_| s1.close());
     sig.recv().await;
     let task = proc.root().unwrap();
     let script = r#"
@@ -253,7 +253,7 @@ async fn env_env_get_global() {
     let env = engine.runtime().env().clone();
     env.set("a", 10);
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    engine.emitter().on_complete(move |_| s1.close());
+    engine.channel().on_complete(move |_| s1.close());
     let proc = engine.runtime().start(&workflow, &Vars::new()).unwrap();
 
     sig.recv().await;
@@ -279,7 +279,7 @@ async fn env_env_set_from_global() {
     env.set("a", 10);
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
     let proc = engine.runtime().start(&workflow, &Vars::new()).unwrap();
-    engine.emitter().on_complete(move |_| s1.close());
+    engine.channel().on_complete(move |_| s1.close());
     sig.recv().await;
     let task = proc.root().unwrap();
 
@@ -309,7 +309,7 @@ async fn env_env_set_both_local_global() {
         .with_env("a", 100.into())
         .with_step(|step| step.with_id("step1"));
     let proc = engine.runtime().start(&workflow, &Vars::new()).unwrap();
-    engine.emitter().on_complete(move |_| s1.close());
+    engine.channel().on_complete(move |_| s1.close());
     sig.recv().await;
     let task = proc.root().unwrap();
 
@@ -336,7 +336,7 @@ async fn env_env_multi_line() {
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
     let proc = engine.runtime().start(&workflow, &Vars::new()).unwrap();
-    engine.emitter().on_complete(move |_| s1.close());
+    engine.channel().on_complete(move |_| s1.close());
     sig.recv().await;
     let task = proc.root().unwrap();
 
@@ -515,13 +515,13 @@ async fn run_test<T: Clone + Send + 'static + Default>(
             .with_act(Act::req(|act| act.with_id("act1")))
     });
     let proc = engine.runtime().start(&workflow, &Vars::new()).unwrap();
-    engine.emitter().on_message(move |e| {
+    engine.channel().on_message(move |e| {
         // println!("message: {e:?}");
         if e.is_key("act1") {
             s1.close();
         }
     });
-    engine.emitter().on_message(move |e| exit_if(e, s2.clone()));
+    engine.channel().on_message(move |e| exit_if(e, s2.clone()));
 
     sig1.recv().await;
     let task = proc.root().unwrap();

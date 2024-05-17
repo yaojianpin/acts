@@ -7,7 +7,7 @@ keywords = ["workflow"]
 license = "Apache-2.0"
 name = "acts"
 repository = "https://github.com/yaojianpin/acts.git"
-version = "0.10.0"
+version = "0.10.1"
 
 [dependencies]
 async-trait = "0.1.57"
@@ -40,7 +40,7 @@ tracing = "0.1.37"
 criterion = { version = "0.4.0", features = ["async_tokio"] }
 
 [features]
-default = ["store"]
+default = []
 store = ["duckdb", "r2d2"]
 
 

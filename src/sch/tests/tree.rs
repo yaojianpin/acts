@@ -8,15 +8,6 @@ use crate::{
     Act, NodeKind, Workflow,
 };
 
-#[derive(Clone)]
-struct Data(i32);
-
-impl std::fmt::Display for Data {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0.to_string())
-    }
-}
-
 const SIMPLE_WORKFLOW: &str = r#"
 id: m1
 steps:

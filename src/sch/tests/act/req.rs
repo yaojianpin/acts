@@ -40,13 +40,13 @@ async fn sch_act_req_multi_threads() {
     });
 
     workflow.print();
-    let engine = Builder::new().cache_size(5).build();
+    let engine = Builder::new().cache_size(10).build();
     engine.manager().deploy(&workflow).unwrap();
     let (s1, s2) = engine.signal(false).double();
     let count = Arc::new(Mutex::new(0));
     let len = 1000;
     let e2 = engine.clone();
-    engine.emitter().on_message(move |e| {
+    engine.channel().on_message(move |e| {
         if e.is_key("act1") && e.is_state("created") {
             let ret = engine.executor().complete(&e.pid, &e.tid, &Vars::new());
             if ret.is_err() {

@@ -27,9 +27,8 @@ pub struct Message {
     pub tag: String,
     pub start_time: i64,
     pub end_time: i64,
-    pub emit_id: String,
-    pub emit_pattern: String,
-    pub emit_count: i64,
+    pub chan_id: String,
+    pub chan_pattern: String,
 
     pub create_time: i64,
     pub update_time: i64,

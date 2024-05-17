@@ -78,8 +78,8 @@ async fn sch_scher_do_action() {
         }))
     });
     let s = rt.clone();
-    engine.emitter().on_complete(move |_| rx.close());
-    engine.emitter().on_message(move |e| {
+    engine.channel().on_complete(move |_| rx.close());
+    engine.channel().on_message(move |e| {
         if e.is_key("act1") && e.is_state("created") {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));

@@ -35,11 +35,11 @@ async fn main() {
     vars.insert("count".into(), 100.into());
     executor.start(&workflow.id, &vars).expect("start workflow");
 
-    engine.emitter().on_error(|e| {
+    engine.channel().on_error(|e| {
         println!("error {:?}", e.state);
     });
 
-    engine.emitter().on_complete(move |e| {
+    engine.channel().on_complete(move |e| {
         println!("on_workflow_complete: {:?}, cost={}ms", e.outputs, e.cost());
         s.close();
     });

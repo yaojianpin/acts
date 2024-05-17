@@ -16,7 +16,7 @@ async fn main() {
 
     // channel messages will store in db
     engine
-        .channel(&ChannelOptions {
+        .channel_with_options(&ChannelOptions {
             id: "client1".to_string(),
             ..Default::default()
         })
@@ -24,7 +24,7 @@ async fn main() {
             println!("on_message: {:?}", message);
         });
 
-    engine.emitter().on_complete(move |e| {
+    engine.channel().on_complete(move |e| {
         println!("on_complete: {:?}", e.outputs);
         s.close();
     });

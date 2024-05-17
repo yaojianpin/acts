@@ -10,4 +10,10 @@
 - merge action state to task state
 - add engine channel to receive messages by options and the channel messages can re-send if not acked
 
-
+# 0.10.1
+- remove the warning code
+- fix the doc test error
+- rename engine.emitter to engine.channel
+- rename data::message emit_id to chan_id, emit_pattern to chan_pattern
+- delete data::message emit_count
+- remove default feature

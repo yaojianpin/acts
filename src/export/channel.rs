@@ -96,7 +96,7 @@ impl Channel {
     ///             step.with_id("step1").with_act(Act::req(|act| act.with_id("act1")))
     ///     });
     ///
-    ///     engine.emitter().on_message(move |e| {
+    ///     engine.channel().on_message(move |e| {
     ///         if e.r#type == "req" {
     ///             println!("act message: state={} inputs={:?} outputs={:?}", e.state, e.inputs, e.outputs);
     ///         }
@@ -112,40 +112,40 @@ impl Channel {
     /// }
     /// ```
     pub fn on_message(self: &Arc<Self>, f: impl Fn(&Event<Message>) + Send + Sync + 'static) {
-        let emitter = self.clone();
+        let chan = self.clone();
         self.runtime.emitter().on_message(&self.emit_id, move |e| {
-            if emitter.matches(e) {
-                emitter.store_if_emit_id(e);
+            if chan.matches(e) {
+                chan.store_if(e);
                 f(e);
             }
         });
     }
 
     pub fn on_start(self: &Arc<Self>, f: impl Fn(&Event<Message>) + Send + Sync + 'static) {
-        let emitter = self.clone();
+        let chan = self.clone();
         self.runtime.emitter().on_start(&self.emit_id, move |e| {
-            if emitter.matches(e) {
-                emitter.store_if_emit_id(e);
+            if chan.matches(e) {
+                chan.store_if(e);
                 f(e);
             }
         });
     }
 
     pub fn on_complete(self: &Arc<Self>, f: impl Fn(&Event<Message>) + Send + Sync + 'static) {
-        let emitter = self.clone();
+        let chan = self.clone();
         self.runtime.emitter().on_complete(&self.emit_id, move |e| {
-            if emitter.matches(e) {
-                emitter.store_if_emit_id(e);
+            if chan.matches(e) {
+                chan.store_if(e);
                 f(e);
             }
         });
     }
 
     pub fn on_error(self: &Arc<Self>, f: impl Fn(&Event<Message>) + Send + Sync + 'static) {
-        let emitter = self.clone();
+        let chan = self.clone();
         self.runtime.emitter().on_error(&self.emit_id, move |e| {
-            if emitter.matches(e) {
-                emitter.store_if_emit_id(e);
+            if chan.matches(e) {
+                chan.store_if(e);
                 f(e);
             }
         });
@@ -163,7 +163,7 @@ impl Channel {
             && pat_key.is_match(&message.key)
     }
 
-    fn store_if_emit_id(&self, message: &Message) {
+    fn store_if(&self, message: &Message) {
         if self.ack && !self.emit_id.is_empty() && message.retry_times == 0 {
             let msg = message.into(&self.emit_id, &self.pattern);
             self.runtime
@@ -173,8 +173,8 @@ impl Channel {
                 .messages()
                 .create(&msg)
                 .unwrap_or_else(|err| {
-                    error!("emitter.store_if_emit_id: {}", err.to_string());
-                    eprintln!("emitter.store_if_emit_id: {}", err.to_string());
+                    error!("channel.store_if_emit_id: {}", err.to_string());
+                    eprintln!("channel.store_if_emit_id: {}", err.to_string());
                     false
                 });
         }

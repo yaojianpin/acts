@@ -1,6 +1,5 @@
 # Acts workflow engine
 [![Build](https://github.com/yaojianpin/acts/actions/workflows/rust.yml/badge.svg)](https://github.com/yaojianpin/acts/actions?workflow=rust)
-
 [![Test](https://github.com/yaojianpin/acts/actions/workflows/test.yml/badge.svg)](https://github.com/yaojianpin/acts/actions?workflow=test)
 
 `acts` is a fast, tiny, extensiable workflow engine, which provides the abilities to execute workflow based on yml model.
@@ -39,7 +38,7 @@ cargo add acts
 1. Create and start the workflow engine by `engine.new()`.
 2. Load a yaml model to create a `workflow`. 
 3. Deploy the model in step 2 by `engine.manager()`.
-4. Config events by `engine.emitter()`.
+4. Config events by `engine.channel()`.
 5. Start the workflow by `engine.executor()`.
 
 ```rust,no_run
@@ -59,21 +58,21 @@ async fn main() {
     vars.insert("input".into(), 3.into());
     vars.insert("pid".to_string(), "w1".into());
     executor.start(&workflow.id, &vars).expect("fail to start workflow");;
-    let emitter = engine.emitter();
+    let chan = engine.channel();
 
-    emitter.on_start(|e| {
+    chan.on_start(|e| {
         println!("start: {}", e.start_time);
     });
 
-    emitter.on_message(|e| {
+    chan.on_message(|e| {
         println!("message: {:?}", e);
     });
 
-    emitter.on_complete(|e| {
+    chan.on_complete(|e| {
         println!("outputs: {:?} end_time: {}", e.outputs, e.end_time);
     });
 
-    emitter.on_error(|e| {
+    chan.on_error(|e| {
         println!("error on proc id: {} model id: {}", e.pid, e.model.id);
     });
 }
@@ -489,8 +488,8 @@ async fn main() {
 }
  ```
 
-## Wit package
-`acts` engine intergrates the [`ruickjs`](<https://github.com/delskayn/rquickjs>) runtime to execute the package, which can extend the engine abilities.
+## Package
+`acts` engine intergrates the [`rquickjs`](<https://github.com/delskayn/rquickjs>) runtime to execute the package, which can extend the engine abilities.
 for more information please see the example [`package`](<https://github.com/yaojianpin/acts/tree/main/examples/package>)
 
 ## Acts-Server

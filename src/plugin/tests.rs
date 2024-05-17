@@ -39,7 +39,7 @@ impl ActPlugin for TestPlugin {
         *self.is_init.lock().unwrap() = true;
 
         // engine.register_module("name", module);
-        let emitter = engine.emitter();
+        let emitter = engine.channel();
         emitter.on_start(|_w| {});
         emitter.on_complete(|_w| {});
 

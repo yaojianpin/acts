@@ -17,7 +17,7 @@ async fn main() {
         .start(&workflow.id, &Vars::new())
         .expect("start workflow");
 
-    engine.emitter().on_message(move |e| {
+    engine.channel().on_message(move |e| {
         let ret = client.process(&executor, e);
         if ret.is_err() {
             eprintln!("{}", ret.err().unwrap());
@@ -25,7 +25,7 @@ async fn main() {
         }
     });
 
-    engine.emitter().on_complete(move |e| {
+    engine.channel().on_complete(move |e| {
         println!(
             "on_workflow_complete: pid={} cost={}ms outputs={:?}",
             e.pid,
@@ -35,7 +35,7 @@ async fn main() {
         s1.close();
     });
 
-    engine.emitter().on_error(move |e| {
+    engine.channel().on_error(move |e| {
         println!(
             "on_workflow_error: pid={} cost={}ms state={:?}",
             e.pid,

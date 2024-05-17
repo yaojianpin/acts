@@ -35,7 +35,7 @@ async fn main() {
     engine.manager().deploy(&workflow).unwrap();
 
     executor.start(&workflow.id, &vars).expect("start workflow");
-    let emitter = engine.emitter();
+    let emitter = engine.channel();
     emitter.on_message(move |e| {
         println!("on_message: e={:?}", e);
     });

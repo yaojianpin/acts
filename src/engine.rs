@@ -25,7 +25,7 @@ use tracing::info;
 ///     let model = include_str!("../examples/simple/model.yml");
 ///     let workflow = Workflow::from_yml(model).unwrap();
 ///     
-///     engine.emitter().on_complete(|e| {
+///     engine.channel().on_complete(|e| {
 ///         println!("{:?}", e.outputs);
 ///     });
 ///
@@ -65,24 +65,24 @@ impl Engine {
         Arc::new(Executor::new(&self.runtime))
     }
 
-    /// event emitter (default to not support re-send)
-    pub fn emitter(&self) -> Arc<Channel> {
+    /// event channel (default to not support re-send)
+    pub fn channel(&self) -> Arc<Channel> {
         Arc::new(Channel::new(&self.runtime))
     }
 
-    /// create named emitter channel to receive messages
-    /// if setting the emit_id by [`EmitOptions`] it will check the status and re-send when not acking
+    /// create named channel to receive messages
+    /// if setting the emit_id by [`ChannelOptions`] it will check the status and re-send when not acking
     /// # Example
     /// ```no_run
-    /// use acts::{ Engine, EmitOptions };
+    /// use acts::{ Engine, ChannelOptions };
     ///
     /// let engine = Engine::new();
-    /// let chan = engine.channel(&EmitOptions {  id: "chan1".to_string(),  ack: true,  r#type: "step".to_string(), key: "my_key*".to_string(), state: "{created, completed}".to_string(), tag: "*".to_string()  });
+    /// let chan = engine.channel_with_options(&ChannelOptions {  id: "chan1".to_string(),  ack: true,  r#type: "step".to_string(), key: "my_key*".to_string(), state: "{created, completed}".to_string(), tag: "*".to_string()  });
     /// chan.on_message(|e| {
     ///     // do something
     /// });
     /// ```
-    pub fn channel(&self, matcher: &ChannelOptions) -> Arc<Channel> {
+    pub fn channel_with_options(&self, matcher: &ChannelOptions) -> Arc<Channel> {
         Arc::new(Channel::channel(&self.runtime, matcher))
     }
 

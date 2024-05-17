@@ -446,7 +446,7 @@ async fn run_test<T: Clone + Send + 'static + Default>(
 ) -> T {
     let (engine, proc, tx, rx) = create_proc_signal2::<T>(workflow, &utils::longid());
     engine.manager().publish(&package).unwrap();
-    engine.emitter().on_message(move |e| {
+    engine.channel().on_message(move |e| {
         println!("message: {:?}", e);
         exit_if(e, rx.clone());
     });
@@ -463,7 +463,7 @@ async fn run_test_proc<T: Clone + Send + 'static + Default>(
 ) -> (T, Arc<Proc>) {
     let (engine, proc, tx, rx) = create_proc_signal2::<T>(workflow, &utils::longid());
     engine.manager().publish(&package).unwrap();
-    engine.emitter().on_message(move |e| {
+    engine.channel().on_message(move |e| {
         println!("message: {:?}", e);
         exit_if(e, rx.clone());
     });
@@ -482,7 +482,7 @@ async fn run_test_dep<T: Clone + Send + 'static + Default>(
     let (engine, proc, tx, rx) = create_proc_signal2::<T>(workflow, &utils::longid());
     engine.manager().deploy(&dep).unwrap();
     engine.manager().publish(&package).unwrap();
-    engine.emitter().on_message(move |e| {
+    engine.channel().on_message(move |e| {
         println!("message: {:?}", e);
         exit_if(e, rx.clone());
     });

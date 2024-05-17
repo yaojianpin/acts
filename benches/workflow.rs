@@ -64,7 +64,7 @@ fn act(c: &mut Criterion) {
             let count = Arc::new(Mutex::new(0));
             let t = time.clone();
             let e2 = engine.clone();
-            let chan = engine.emitter();
+            let chan = engine.channel();
             chan.on_message(move |e| {
                 if e.is_key("act1") && e.is_state("created") {
                     let start = Instant::now();
