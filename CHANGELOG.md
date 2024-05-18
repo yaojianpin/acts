@@ -17,3 +17,7 @@
 - rename data::message emit_id to chan_id, emit_pattern to chan_pattern
 - delete data::message emit_count
 - remove default feature
+
+# 0.10.2
+- update readme.md
+- add homepage

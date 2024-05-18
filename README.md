@@ -86,7 +86,7 @@ Please see [`examples`](<https://github.com/yaojianpin/acts/tree/main/examples>)
 
 The model is a yaml format file. where there are different type of node, including [`Workflow`], [`Branch`], [`Step`] and [`Act`]. Every workflow can have more steps, a step can have more branches. In a step,  it consists of many acts to complete the step task, such as 'req', 'msg', 'each', 'chain', 'set', 'expose' and so on. these acts are responsible to act with client or do a single task simplely.
 
-The `run` property is the script based on [rhai script](https://github.com/rhaiscript/rhai)
+The `run` property is the script based on `javascript`
 The `inputs` property can be set the initialzed vars in each node.
 
 ```yml
