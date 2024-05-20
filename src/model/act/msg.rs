@@ -43,7 +43,7 @@ impl Msg {
         self.tag = tag.to_string();
         self
     }
-    
+
     pub fn with_key(mut self, key: &str) -> Self {
         self.key = key.to_string();
         self

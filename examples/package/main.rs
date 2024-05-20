@@ -53,5 +53,4 @@ async fn main() {
         s2.close();
     });
     sig.recv().await;
-    
 }
