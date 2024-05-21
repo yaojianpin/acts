@@ -36,7 +36,7 @@ async fn store_mem_model_find() {
     let store = store().await;
     let mid: String = utils::longid();
     let model = Model {
-        id: mid,
+        id: mid.clone(),
         name: "test".to_string(),
         ver: 1,
         size: 1245,
@@ -51,7 +51,6 @@ async fn store_mem_model_find() {
 async fn store_mem_model_query() {
     let store = store().await;
     let models = store.models();
-    let mid = utils::longid();
     for _ in 0..5 {
         let model = Model {
             id: utils::longid(),
@@ -392,6 +391,7 @@ async fn store_local_message_create() {
         update_time: 0,
         retry_times: 0,
         status: MessageStatus::Created,
+        timestamp: 0,
     };
 
     store.messages().create(&msg).expect("create message");
@@ -428,6 +428,7 @@ async fn store_local_message_query() {
         update_time: 0,
         retry_times: 0,
         status: MessageStatus::Created,
+        timestamp: 0,
     };
 
     store.messages().create(&msg).expect("create message");
@@ -465,6 +466,7 @@ async fn store_local_message_update() {
         update_time: 0,
         retry_times: 0,
         status: MessageStatus::Created,
+        timestamp: 0,
     };
 
     store.messages().create(&msg).unwrap();
@@ -509,6 +511,7 @@ async fn store_local_message_remove() {
         update_time: 0,
         retry_times: 0,
         status: MessageStatus::Created,
+        timestamp: 0,
     };
 
     store.messages().create(&msg).unwrap();

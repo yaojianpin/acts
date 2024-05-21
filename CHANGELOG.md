@@ -25,3 +25,6 @@
 # 0.10.3
 - remove action result, the time will caculate by acts-channel
 - refactor the info struct to make is easier to understand.
+
+# 0.10.4
+- modify the test error with 'store' feature
