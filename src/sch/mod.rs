@@ -17,7 +17,7 @@ pub use proc::{Proc, StatementBatch, Task, TaskLifeCycle};
 pub use runtime::Runtime;
 pub use scher::Scheduler;
 pub use state::TaskState;
-pub use tree::{Node, NodeContent, NodeKind, NodeTree};
+pub use tree::{Node, NodeContent, NodeData, NodeKind, NodeTree};
 
 #[async_trait]
 pub trait ActTask: Clone + Send {

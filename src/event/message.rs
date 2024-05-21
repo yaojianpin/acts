@@ -157,6 +157,7 @@ impl Message {
             create_time: utils::time::time_millis(),
             update_time: 0,
             retry_times: 0,
+            timestamp: utils::time::timestamp(),
             status: data::MessageStatus::Created,
         }
     }

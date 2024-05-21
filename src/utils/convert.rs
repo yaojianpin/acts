@@ -17,7 +17,7 @@ pub fn fill_inputs<'a>(inputs: &'a Vars, ctx: &Context) -> Vars {
                 let new_value = match result {
                     Ok(v) => v,
                     Err(err) => {
-                        eprintln!("fill_inputs: {err}");
+                        eprintln!("fill_inputs: expr:{string}, err={err}");
                         JsonValue::Null
                     }
                 };
@@ -47,7 +47,10 @@ pub fn fill_outputs(outputs: &Vars, ctx: &Context) -> Vars {
                 });
                 let new_value = match result {
                     Ok(v) => v,
-                    Err(_err) => JsonValue::Null,
+                    Err(err) => {
+                        eprintln!("fill_outputs: expr:{string}, err={err}");
+                        JsonValue::Null
+                    }
                 };
 
                 // satisfies the rule 1

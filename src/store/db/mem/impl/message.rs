@@ -32,6 +32,7 @@ impl DbDocument for Message {
         map.insert("update_time".to_string(), json!(self.update_time));
         map.insert("status".to_string(), json!(self.status));
         map.insert("retry_times".to_string(), json!(self.retry_times));
+        map.insert("timestamp".to_string(), json!(self.timestamp));
         Ok(map)
     }
 }

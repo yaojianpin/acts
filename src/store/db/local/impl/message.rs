@@ -164,6 +164,13 @@ impl DbSchema for Message {
                 ..Default::default()
             },
         ));
+        map.push((
+            "timestamp".to_string(),
+            DbColumn {
+                db_type: DbType::Int64,
+                ..Default::default()
+            },
+        ));
 
         Ok(map)
     }
@@ -196,6 +203,7 @@ impl DbRow for Message {
             update_time: row.get::<usize, i64>(17).unwrap().into(),
             status: row.get::<usize, i8>(18).unwrap().into(),
             retry_times: row.get::<usize, i32>(19).unwrap().into(),
+            timestamp: row.get::<usize, i64>(20).unwrap().into(),
         })
     }
 
@@ -225,6 +233,7 @@ impl DbRow for Message {
         ret.push(("update_time".to_string(), Value::BigInt(self.update_time)));
         ret.push(("status".to_string(), Value::TinyInt(self.status.into())));
         ret.push(("retry_times".to_string(), Value::Int(self.retry_times)));
+        ret.push(("timestamp".to_string(), Value::BigInt(self.timestamp)));
 
         Ok(ret)
     }

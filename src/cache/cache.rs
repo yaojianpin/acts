@@ -97,7 +97,6 @@ impl Cache {
                     self.push_proc_pri(&proc, false);
                     return Some(proc);
                 }
-                error!("not to load proc:{}", pid);
                 None
             }
         }

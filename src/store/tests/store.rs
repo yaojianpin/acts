@@ -356,6 +356,7 @@ async fn store_message_create() {
         create_time: 0,
         update_time: 0,
         retry_times: 0,
+        timestamp: 0,
         status: MessageStatus::Created,
     };
 
@@ -392,6 +393,7 @@ async fn store_message_query() {
         create_time: 0,
         update_time: 0,
         retry_times: 0,
+        timestamp: 0,
         status: MessageStatus::Created,
     };
 
@@ -429,6 +431,7 @@ async fn store_message_update() {
         create_time: 0,
         update_time: 0,
         retry_times: 0,
+        timestamp: 0,
         status: MessageStatus::Created,
     };
 
@@ -473,6 +476,7 @@ async fn store_message_remove() {
         create_time: 0,
         update_time: 0,
         retry_times: 0,
+        timestamp: 0,
         status: MessageStatus::Created,
     };
 

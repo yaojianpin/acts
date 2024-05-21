@@ -2,7 +2,7 @@ use crate::{sch::Runtime, utils, Event, Message};
 use std::sync::Arc;
 use tracing::error;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ChannelOptions {
     pub id: String,
 
@@ -47,7 +47,7 @@ impl ChannelOptions {
 pub struct Channel {
     runtime: Arc<Runtime>,
     ack: bool,
-    emit_id: String,
+    chan_id: String,
     pattern: String,
     glob: (
         globset::GlobMatcher,
@@ -65,6 +65,7 @@ impl Channel {
     /// create a emit channel to receive message
     /// if the message is not received by client, the engine will re-send at the next time interval
     pub fn channel(rt: &Arc<Runtime>, options: &ChannelOptions) -> Self {
+        println!("channel: {options:?}");
         let pat_type = globset::Glob::new(&options.r#type)
             .unwrap()
             .compile_matcher();
@@ -77,7 +78,7 @@ impl Channel {
         Self {
             runtime: rt.clone(),
             ack: options.ack,
-            emit_id: options.id.clone(),
+            chan_id: options.id.clone(),
             pattern: options.pattern(),
             glob: (pat_type, pat_state, pat_tag, pat_key),
         }
@@ -113,7 +114,8 @@ impl Channel {
     /// ```
     pub fn on_message(self: &Arc<Self>, f: impl Fn(&Event<Message>) + Send + Sync + 'static) {
         let chan = self.clone();
-        self.runtime.emitter().on_message(&self.emit_id, move |e| {
+        self.runtime.emitter().on_message(&self.chan_id, move |e| {
+            println!("on_message: chan={} {e:?}", chan.chan_id);
             if chan.matches(e) {
                 chan.store_if(e);
                 f(e);
@@ -123,7 +125,7 @@ impl Channel {
 
     pub fn on_start(self: &Arc<Self>, f: impl Fn(&Event<Message>) + Send + Sync + 'static) {
         let chan = self.clone();
-        self.runtime.emitter().on_start(&self.emit_id, move |e| {
+        self.runtime.emitter().on_start(&self.chan_id, move |e| {
             if chan.matches(e) {
                 chan.store_if(e);
                 f(e);
@@ -133,7 +135,7 @@ impl Channel {
 
     pub fn on_complete(self: &Arc<Self>, f: impl Fn(&Event<Message>) + Send + Sync + 'static) {
         let chan = self.clone();
-        self.runtime.emitter().on_complete(&self.emit_id, move |e| {
+        self.runtime.emitter().on_complete(&self.chan_id, move |e| {
             if chan.matches(e) {
                 chan.store_if(e);
                 f(e);
@@ -143,7 +145,7 @@ impl Channel {
 
     pub fn on_error(self: &Arc<Self>, f: impl Fn(&Event<Message>) + Send + Sync + 'static) {
         let chan = self.clone();
-        self.runtime.emitter().on_error(&self.emit_id, move |e| {
+        self.runtime.emitter().on_error(&self.chan_id, move |e| {
             if chan.matches(e) {
                 chan.store_if(e);
                 f(e);
@@ -152,7 +154,7 @@ impl Channel {
     }
 
     pub fn close(&self) {
-        self.runtime.emitter().remove(&self.emit_id);
+        self.runtime.emitter().remove(&self.chan_id);
     }
 
     fn matches(&self, message: &Message) -> bool {
@@ -164,8 +166,9 @@ impl Channel {
     }
 
     fn store_if(&self, message: &Message) {
-        if self.ack && !self.emit_id.is_empty() && message.retry_times == 0 {
-            let msg = message.into(&self.emit_id, &self.pattern);
+        if self.ack && !self.chan_id.is_empty() && message.retry_times == 0 {
+            println!("store: {message:?}");
+            let msg = message.into(&self.chan_id, &self.pattern);
             self.runtime
                 .cache()
                 .store()

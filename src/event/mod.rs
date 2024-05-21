@@ -103,7 +103,7 @@ where
         tid: &str,
         action: &str,
         options: &crate::Vars,
-    ) -> Result<crate::ActionResult> {
+    ) -> Result<()> {
         if let Some(scher) = &self.runtime {
             return scher.do_action(&Action::new(pid, tid, action, options));
         }

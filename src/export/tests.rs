@@ -1,5 +1,5 @@
 use crate::{
-    data,
+    data::{self, Package},
     event::{MessageState, Model},
     sch::TaskState,
     utils, Act, ActPlugin, ChannelOptions, Engine, Message, StoreAdapter, Vars, Workflow,
@@ -107,10 +107,7 @@ async fn engine_executor_start_with_pid() {
     let result = executor.start(&workflow.id, &options);
     assert_eq!(result.is_ok(), true);
 
-    assert_eq!(
-        result.unwrap().outputs().get::<String>("pid").unwrap(),
-        "123"
-    );
+    assert_eq!(result.unwrap(), "123");
 }
 
 #[tokio::test]
@@ -191,7 +188,7 @@ async fn export_manager_model_get_text() {
 
     let result = manager.model(&model.id, "text").unwrap();
     assert_eq!(result.id, model.id);
-    assert_eq!(result.model.is_empty(), false);
+    assert_eq!(result.data.is_empty(), false);
 }
 
 #[tokio::test]
@@ -205,7 +202,7 @@ async fn export_manager_model_get_tree() {
 
     let result = manager.model(&model.id, "tree").unwrap();
     assert_eq!(result.id, model.id);
-    assert_eq!(result.model.is_empty(), false);
+    assert_eq!(result.data.is_empty(), false);
 }
 
 #[tokio::test]
@@ -217,7 +214,7 @@ async fn export_manager_model_remove() {
     model.set_id(&utils::longid());
     manager.deploy(&model).unwrap();
 
-    manager.remove(&model.id).unwrap();
+    manager.rm_model(&model.id).unwrap();
     assert_eq!(manager.models(10).unwrap().len(), 0);
 }
 
@@ -272,7 +269,7 @@ async fn export_manager_procs_get_many() {
 }
 
 #[tokio::test]
-async fn export_manager_proc_get_json() {
+async fn export_manager_proc_get() {
     let engine = Engine::new();
     let manager = engine.manager();
     let model = Workflow::new().with_step(|step| {
@@ -289,30 +286,7 @@ async fn export_manager_proc_get_json() {
     rt.launch(&proc);
     sig.recv().await;
 
-    let info = manager.proc(&pid, "json").unwrap();
-    assert_eq!(info.id, pid);
-    assert_eq!(info.tasks.is_empty(), false);
-}
-
-#[tokio::test]
-async fn export_manager_proc_get_tree() {
-    let engine = Engine::new();
-    let manager = engine.manager();
-    let model = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
-    });
-
-    let rt = engine.runtime();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-    engine.channel().on_start(move |_| s1.close());
-    let pid = utils::longid();
-    let proc = rt.create_proc(&pid, &model);
-    rt.launch(&proc);
-    sig.recv().await;
-
-    let info = manager.proc(&pid, "tree").unwrap();
+    let info = manager.proc(&pid).unwrap();
     assert_eq!(info.id, pid);
     assert_eq!(info.tasks.is_empty(), false);
 }
@@ -376,6 +350,152 @@ async fn export_manager_task_get() {
         result &= manager.task(&pid, &task.id).is_ok();
     }
     assert_eq!(result, true);
+}
+
+#[tokio::test]
+async fn export_manager_messages() {
+    let engine = Engine::new();
+    let manager = engine.manager();
+    let model = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::req(|act| act.with_id("act1")))
+    });
+
+    let rt = engine.runtime();
+    let (sig, s1) = engine.signal(0).double();
+    let count = Arc::new(Mutex::new(0));
+    let chan = engine.channel_with_options(&ChannelOptions {
+        ack: true,
+        ..Default::default()
+    });
+    chan.on_message(move |e| {
+        println!("message:{e:?}");
+        let mut count = count.lock().unwrap();
+        *count += 1;
+
+        if e.is_key("act1") && e.is_state("created") {
+            s1.send(*count);
+        }
+    });
+    let pid = utils::longid();
+    let proc = rt.create_proc(&pid, &model);
+    rt.launch(&proc);
+    let count = sig.recv().await;
+    assert_eq!(manager.messages(&pid, 1000).unwrap().len(), count);
+}
+
+#[tokio::test]
+async fn export_manager_message_get() {
+    let engine = Engine::new();
+    let manager = engine.manager();
+    let model = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::req(|act| act.with_id("act1")))
+    });
+
+    let rt = engine.runtime();
+    let (sig, s1) = engine.signal(0).double();
+    let count = Arc::new(Mutex::new(0));
+    let chan = engine.channel_with_options(&ChannelOptions {
+        ack: true,
+        ..Default::default()
+    });
+    chan.on_message(move |e| {
+        println!("message:{e:?}");
+        let mut count = count.lock().unwrap();
+        *count += 1;
+
+        if e.is_key("act1") && e.is_state("created") {
+            s1.send(*count);
+        }
+    });
+    let pid = utils::longid();
+    let proc = rt.create_proc(&pid, &model);
+    rt.launch(&proc);
+    sig.recv().await;
+
+    let messages = manager.messages(&pid, 1000).unwrap();
+    let message = messages[0].clone();
+
+    let m = manager.message(&message.id).unwrap();
+    assert_eq!(m.id, message.id);
+    assert_eq!(m.name, message.name);
+}
+
+#[tokio::test]
+async fn export_manager_message_rm() {
+    let engine = Engine::new();
+    let manager = engine.manager();
+    let model = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::req(|act| act.with_id("act1")))
+    });
+
+    let rt = engine.runtime();
+    let (sig, s1) = engine.signal(0).double();
+    let count = Arc::new(Mutex::new(0));
+    let chan = engine.channel_with_options(&ChannelOptions {
+        ack: true,
+        ..Default::default()
+    });
+    chan.on_message(move |e| {
+        println!("message:{e:?}");
+        let mut count = count.lock().unwrap();
+        *count += 1;
+
+        if e.is_key("act1") && e.is_state("created") {
+            s1.send(*count);
+        }
+    });
+    let pid = utils::longid();
+    let proc = rt.create_proc(&pid, &model);
+    rt.launch(&proc);
+    sig.recv().await;
+
+    let messages = manager.messages(&pid, 1000).unwrap();
+    let message = messages[0].clone();
+
+    let ret = manager.rm_message(&message.id).unwrap();
+    assert_eq!(ret, true);
+}
+
+#[tokio::test]
+async fn export_manager_packages() {
+    let engine = Engine::new();
+    let manager = engine.manager();
+
+    let count = 5;
+    for i in 0..count {
+        let package = Package {
+            id: utils::longid(),
+            name: i.to_string(),
+            size: i as u32,
+            file_data: [0x0, 0x1].to_vec(),
+            create_time: utils::time::time_millis(),
+            update_time: 0,
+            timestamp: utils::time::timestamp(),
+        };
+        manager.publish(&package).unwrap();
+    }
+    assert_eq!(manager.packages(1000).unwrap().len(), count);
+}
+
+#[tokio::test]
+async fn export_manager_package_rm() {
+    let engine = Engine::new();
+    let manager = engine.manager();
+
+    let package = Package {
+        id: utils::longid(),
+        name: "name".to_string(),
+        size: 10,
+        file_data: [0x0, 0x1].to_vec(),
+        create_time: utils::time::time_millis(),
+        update_time: 0,
+        timestamp: utils::time::timestamp(),
+    };
+    manager.publish(&package).unwrap();
+    assert_eq!(manager.rm_package(&package.id).unwrap(), true);
 }
 
 #[tokio::test]

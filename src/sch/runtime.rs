@@ -8,7 +8,7 @@ use crate::{
     env::Enviroment,
     event::Emitter,
     utils::{self, consts},
-    ActError, Action, ActionResult, Config, Engine, Result, Vars, Workflow,
+    ActError, Action, Config, Engine, Result, Vars, Workflow,
 };
 use std::{sync::Arc, time::Duration};
 
@@ -115,26 +115,21 @@ impl Runtime {
         self.scher.push(task);
     }
 
-    pub fn do_action(self: &Arc<Self>, action: &Action) -> Result<ActionResult> {
+    pub fn do_action(self: &Arc<Self>, action: &Action) -> Result<()> {
         debug!("sch::do_action  action={:?}", action);
-        let state = ActionResult::begin();
-        let ret = match self.cache.proc(&action.pid, self) {
+        match self.cache.proc(&action.pid, self) {
             Some(proc) => proc.do_action(&action),
             None => Err(ActError::Runtime(format!(
                 "cannot find proc '{}' when do_action({:?})",
                 action.pid, action
             ))),
-        };
-        state.end_with_result(ret)
+        }
     }
 
-    pub fn ack(&self, id: &str) -> Result<ActionResult> {
-        let state = ActionResult::begin();
-        let ret = self
-            .cache
+    pub fn ack(&self, id: &str) -> Result<()> {
+        self.cache
             .store()
-            .set_message(id, data::MessageStatus::Acked);
-        state.end_with_result(ret)
+            .set_message(id, data::MessageStatus::Acked)
     }
 
     pub fn event_loop(self: &Arc<Self>) {

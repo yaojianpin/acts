@@ -17,6 +17,98 @@ async fn store() -> &'static MemStore {
 }
 
 #[tokio::test]
+async fn store_mem_model_create() {
+    let store = store().await;
+    let model = Model {
+        id: utils::longid(),
+        name: "test".to_string(),
+        ver: 1,
+        size: 1245,
+        time: 3333,
+        data: "{}".to_string(),
+    };
+    store.models().create(&model).unwrap();
+    assert_eq!(store.models().exists(&model.id).unwrap(), true);
+}
+
+#[tokio::test]
+async fn store_mem_model_find() {
+    let store = store().await;
+    let mid: String = utils::longid();
+    let model = Model {
+        id: mid.clone(),
+        name: "test".to_string(),
+        ver: 1,
+        size: 1245,
+        time: 3333,
+        data: "{}".to_string(),
+    };
+    store.models().create(&model).unwrap();
+    assert_eq!(store.models().find(&mid).unwrap().id, mid);
+}
+
+#[tokio::test]
+async fn store_mem_model_query() {
+    let store = store().await;
+    let models = store.models();
+    for _ in 0..5 {
+        let model = Model {
+            id: utils::longid(),
+            name: "test_model".to_string(),
+            ver: 1,
+            size: 1245,
+            time: 3333,
+            data: "{}".to_string(),
+        };
+        models.create(&model).unwrap();
+    }
+
+    let q = Query::new()
+        .push(Cond::and().push(Expr::eq("name", "test_model")))
+        .set_limit(5);
+    let items = models.query(&q).unwrap();
+    assert_eq!(items.len(), 5);
+}
+
+#[tokio::test]
+async fn store_mem_model_update() {
+    let store = store().await;
+
+    let mut model = Model {
+        id: utils::longid(),
+        name: "test".to_string(),
+        ver: 1,
+        size: 1245,
+        time: 3333,
+        data: "{}".to_string(),
+    };
+    store.models().create(&model).unwrap();
+
+    model.ver = 3;
+    store.models().update(&model).unwrap();
+
+    let p = store.models().find(&model.id).unwrap();
+    assert_eq!(p.ver, model.ver);
+}
+
+#[tokio::test]
+async fn store_mem_model_delete() {
+    let store = store().await;
+    let model = Model {
+        id: utils::longid(),
+        name: "test".to_string(),
+        ver: 1,
+        size: 1245,
+        time: 3333,
+        data: "{}".to_string(),
+    };
+    store.models().create(&model).unwrap();
+    store.models().delete(&model.id).unwrap();
+
+    assert_eq!(store.procs().exists(&model.id).unwrap(), false);
+}
+
+#[tokio::test]
 async fn store_mem_proc_create() {
     let store = store().await;
     let proc = Proc {
@@ -296,6 +388,7 @@ async fn store_mem_message_create() {
         create_time: 0,
         update_time: 0,
         retry_times: 0,
+        timestamp: 0,
         status: MessageStatus::Created,
     };
 
@@ -332,6 +425,7 @@ async fn store_mem_message_query() {
         create_time: 0,
         update_time: 0,
         retry_times: 0,
+        timestamp: 0,
         status: MessageStatus::Created,
     };
 
@@ -369,6 +463,7 @@ async fn store_mem_message_update() {
         create_time: 0,
         update_time: 0,
         retry_times: 0,
+        timestamp: 0,
         status: MessageStatus::Created,
     };
 
@@ -413,6 +508,7 @@ async fn store_mem_message_remove() {
         create_time: 0,
         update_time: 0,
         retry_times: 0,
+        timestamp: 0,
         status: MessageStatus::Created,
     };
 

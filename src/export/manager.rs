@@ -3,7 +3,7 @@ use crate::{
     sch::Runtime,
     store::{Cond, Expr, StoreAdapter},
     utils::Id,
-    ActionResult, ModelInfo, PackageInfo, ProcInfo, Query, Result, TaskInfo, Workflow,
+    MessageInfo, ModelInfo, PackageInfo, ProcInfo, Query, Result, TaskInfo, Workflow,
 };
 use std::sync::Arc;
 use tracing::instrument;
@@ -21,22 +21,19 @@ impl Manager {
     }
 
     #[instrument(skip(self))]
-    pub fn publish(&self, pack: &Package) -> Result<ActionResult> {
-        let state = ActionResult::begin();
-        self.runtime.cache().store().publish(pack)?;
-        state.end()
+    pub fn publish(&self, pack: &Package) -> Result<bool> {
+        let ret = self.runtime.cache().store().publish(pack)?;
+        Ok(ret)
     }
 
-    pub fn resend_error_messages(&self) -> Result<ActionResult> {
-        let state = ActionResult::begin();
+    pub fn resend_error_messages(&self) -> Result<()> {
         self.runtime.cache().store().resend_error_messages()?;
-        state.end()
+        Ok(())
     }
 
-    pub fn clear_error_messages(&self) -> Result<ActionResult> {
-        let state = ActionResult::begin();
+    pub fn clear_error_messages(&self) -> Result<()> {
         self.runtime.cache().store().clear_error_messages()?;
-        state.end()
+        Ok(())
     }
 
     #[instrument(skip(self))]
@@ -57,11 +54,10 @@ impl Manager {
     }
 
     #[instrument(skip(self))]
-    pub fn deploy(&self, model: &Workflow) -> Result<ActionResult> {
-        let state = ActionResult::begin();
+    pub fn deploy(&self, model: &Workflow) -> Result<bool> {
         model.valid()?;
-        self.runtime.cache().store().deploy(model)?;
-        state.end()
+        let ret = self.runtime.cache().store().deploy(model)?;
+        Ok(ret)
     }
 
     #[instrument(skip(self))]
@@ -86,8 +82,8 @@ impl Manager {
             Ok(m) => {
                 let mut model: ModelInfo = m.into();
                 if fmt == "tree" {
-                    let workflow = Workflow::from_yml(&model.model)?;
-                    model.model = workflow.tree_output();
+                    let workflow = Workflow::from_yml(&model.data)?;
+                    model.data = workflow.tree_output();
                 }
                 Ok(model)
             }
@@ -96,8 +92,18 @@ impl Manager {
     }
 
     #[instrument(skip(self))]
-    pub fn remove(&self, model_id: &str) -> Result<bool> {
-        self.runtime.cache().store().models().delete(model_id)
+    pub fn rm_model(&self, id: &str) -> Result<bool> {
+        self.runtime.cache().store().models().delete(id)
+    }
+
+    #[instrument(skip(self))]
+    pub fn rm_package(&self, id: &str) -> Result<bool> {
+        self.runtime.cache().store().packages().delete(id)
+    }
+
+    #[instrument(skip(self))]
+    pub fn rm_message(&self, id: &str) -> Result<bool> {
+        self.runtime.cache().store().messages().delete(id)
     }
 
     #[instrument(skip(self))]
@@ -118,24 +124,19 @@ impl Manager {
     }
 
     #[instrument(skip(self))]
-    pub fn proc(&self, pid: &str, fmt: &str) -> Result<ProcInfo> {
+    pub fn proc(&self, pid: &str) -> Result<ProcInfo> {
         match self.runtime.cache().store().procs().find(pid) {
             Ok(ref proc) => {
                 let mut info: ProcInfo = proc.into();
 
                 if let Some(proc) = self.runtime.cache().proc(pid, &self.runtime) {
-                    if fmt == "tree" {
-                        info.tasks = proc.tree_output();
-                    } else if fmt == "json" {
-                        let mut tasks: Vec<TaskInfo> = Vec::new();
-                        for task in proc.tasks().iter() {
-                            tasks.push(task.into());
-                        }
-
-                        tasks.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-                        info.tasks = serde_json::to_string_pretty(&tasks)
-                            .unwrap_or_else(|err| err.to_string());
+                    let mut tasks: Vec<TaskInfo> = Vec::new();
+                    for task in proc.tasks().iter() {
+                        tasks.push(task.into());
                     }
+
+                    tasks.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+                    info.tasks = tasks;
                 }
 
                 Ok(info)
@@ -185,11 +186,36 @@ impl Manager {
     }
 
     #[instrument(skip(self))]
+    pub fn messages(self: &Arc<Self>, pid: &str, count: usize) -> Result<Vec<MessageInfo>> {
+        let query = Query::new()
+            .push(Cond::and().push(Expr::eq("pid", pid.to_string())))
+            .set_limit(10000);
+        match self.runtime.cache().store().messages().query(&query) {
+            Ok(mut messages) => {
+                let mut ret = Vec::new();
+                messages.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+                for t in messages.iter().take(count) {
+                    ret.push(t.into());
+                }
+
+                Ok(ret)
+            }
+            Err(err) => Err(err),
+        }
+    }
+
+    #[instrument(skip(self))]
     pub fn task(&self, pid: &str, tid: &str) -> Result<TaskInfo> {
         let id = Id::new(pid, tid);
         match self.runtime.cache().store().tasks().find(&id.id()) {
             Ok(t) => Ok(t.into()),
             Err(err) => Err(err),
         }
+    }
+
+    #[instrument(skip(self))]
+    pub fn message(self: &Arc<Self>, id: &str) -> Result<MessageInfo> {
+        let message = &self.runtime.cache().store().messages().find(id)?;
+        Ok(message.into())
     }
 }

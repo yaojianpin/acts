@@ -1,3 +1,5 @@
+use core::fmt;
+
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 
@@ -34,6 +36,18 @@ pub struct Message {
     pub update_time: i64,
     pub retry_times: i32,
     pub status: MessageStatus,
+    pub timestamp: i64,
+}
+
+impl fmt::Display for MessageStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            MessageStatus::Created => "created",
+            MessageStatus::Acked => "acked",
+            MessageStatus::Completed => "completed",
+            MessageStatus::Error => "error",
+        })
+    }
 }
 
 impl From<i8> for MessageStatus {
@@ -93,5 +107,13 @@ mod tests {
 
         let created: MessageStatus = 100.into();
         assert_eq!(created, MessageStatus::Created);
+    }
+
+    #[test]
+    fn store_data_message_status_to_string() {
+        assert_eq!(MessageStatus::Created.to_string(), "created");
+        assert_eq!(MessageStatus::Acked.to_string(), "acked");
+        assert_eq!(MessageStatus::Completed.to_string(), "completed");
+        assert_eq!(MessageStatus::Error.to_string(), "error");
     }
 }

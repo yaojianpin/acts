@@ -1,6 +1,9 @@
-use crate::{sch, store::data, ActError, Result, Workflow};
+use crate::{
+    sch::{self, NodeData},
+    store::data,
+    ActError, Result, Workflow,
+};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 use std::sync::Arc;
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -22,7 +25,7 @@ pub struct ProcInfo {
     pub start_time: i64,
     pub end_time: i64,
     pub timestamp: i64,
-    pub tasks: String,
+    pub tasks: Vec<TaskInfo>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -31,7 +34,7 @@ pub struct TaskInfo {
     pub prev: Option<String>,
     pub name: String,
     pub pid: String,
-    pub node_id: String,
+    pub nid: String,
     pub r#type: String,
     pub state: String,
     pub data: String,
@@ -47,7 +50,26 @@ pub struct ModelInfo {
     pub ver: u32,
     pub size: u32,
     pub time: i64,
-    pub model: String,
+    pub data: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct MessageInfo {
+    pub id: String,
+    pub tid: String,
+    pub name: String,
+    pub state: String,
+    pub r#type: String,
+    pub pid: String,
+    pub key: String,
+    pub inputs: String,
+    pub outputs: String,
+    pub tag: String,
+    pub create_time: i64,
+    pub update_time: i64,
+    pub retry_times: i32,
+    pub status: String,
+    pub timestamp: i64,
 }
 
 impl From<&data::Package> for PackageInfo {
@@ -65,7 +87,7 @@ impl From<&data::Package> for PackageInfo {
 
 impl ModelInfo {
     pub fn workflow(&self) -> Result<Workflow> {
-        let m = serde_yaml::from_str::<Workflow>(&self.model);
+        let m = serde_yaml::from_str::<Workflow>(&self.data);
         match m {
             Ok(mut m) => {
                 m.set_ver(self.ver);
@@ -84,7 +106,7 @@ impl From<data::Model> for ModelInfo {
             ver: m.ver,
             size: m.size,
             time: m.time,
-            model: m.data,
+            data: m.data,
         }
     }
 }
@@ -99,19 +121,20 @@ impl From<&data::Proc> for ProcInfo {
             start_time: p.start_time,
             end_time: p.end_time,
             timestamp: p.timestamp,
-            tasks: "".to_string(),
+            tasks: Vec::new(),
         }
     }
 }
 
 impl From<data::Task> for TaskInfo {
     fn from(t: data::Task) -> Self {
+        let node_data: NodeData = serde_json::from_str(&t.node_data).unwrap();
         Self {
             id: t.tid,
             prev: t.prev,
             name: t.name,
             pid: t.pid,
-            node_id: t.node_data,
+            nid: node_data.id,
             r#type: t.kind,
             state: t.state,
             data: t.data,
@@ -122,64 +145,6 @@ impl From<data::Task> for TaskInfo {
     }
 }
 
-impl Into<serde_json::Value> for PackageInfo {
-    fn into(self) -> serde_json::Value {
-        json!({
-            "id": self.id,
-            "name": self.name,
-            "size": self.size,
-            "timestamp": self.timestamp,
-            "create_time": self.create_time,
-            "update_time": self.update_time,
-        })
-    }
-}
-
-impl Into<serde_json::Value> for TaskInfo {
-    fn into(self) -> serde_json::Value {
-        json!({
-            "id": self.id,
-            "name": self.name,
-            "pid": self.pid,
-            "node_id": self.node_id,
-            "type": self.r#type,
-            "state": self.state,
-            "data": self.data,
-            "start_time": self.start_time,
-            "end_time": self.end_time,
-            "timestamp": self.timestamp,
-        })
-    }
-}
-
-impl Into<serde_json::Value> for ProcInfo {
-    fn into(self) -> serde_json::Value {
-        json!({
-            "id": self.id,
-            "mid": self.mid,
-            "name": self.name,
-            "state": self.state,
-            "start_time": self.start_time,
-            "end_time": self.end_time,
-            "timestamp": self.timestamp,
-            "tasks": self.tasks,
-        })
-    }
-}
-
-impl Into<serde_json::Value> for ModelInfo {
-    fn into(self) -> serde_json::Value {
-        json!({
-            "id": self.id,
-            "name": self.name,
-            "ver": self.ver,
-            "size": self.size,
-            "time": self.time,
-            "model": self.model,
-        })
-    }
-}
-
 impl From<&Arc<sch::Task>> for TaskInfo {
     fn from(t: &Arc<sch::Task>) -> Self {
         Self {
@@ -187,7 +152,7 @@ impl From<&Arc<sch::Task>> for TaskInfo {
             prev: t.prev(),
             name: t.node().content.name(),
             pid: t.pid.clone(),
-            node_id: t.node().id().to_string(),
+            nid: t.node().id().to_string(),
             r#type: t.node().kind().into(),
             state: t.state().into(),
             data: t.data().to_string(),
@@ -195,5 +160,58 @@ impl From<&Arc<sch::Task>> for TaskInfo {
             end_time: t.end_time(),
             timestamp: t.timestamp,
         }
+    }
+}
+
+impl From<&data::Message> for MessageInfo {
+    fn from(m: &data::Message) -> Self {
+        Self {
+            id: m.id.clone(),
+            name: m.name.clone(),
+            pid: m.pid.clone(),
+            tid: m.tid.clone(),
+            timestamp: m.timestamp,
+            create_time: m.create_time,
+            update_time: m.update_time,
+            state: m.state.clone(),
+            r#type: m.r#type.clone(),
+            key: m.key.clone(),
+            tag: m.tag.clone(),
+
+            inputs: m.inputs.clone(),
+            outputs: m.outputs.clone(),
+            retry_times: m.retry_times,
+            status: m.status.to_string(),
+        }
+    }
+}
+
+impl Into<serde_json::Value> for PackageInfo {
+    fn into(self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap()
+    }
+}
+
+impl Into<serde_json::Value> for TaskInfo {
+    fn into(self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap()
+    }
+}
+
+impl Into<serde_json::Value> for ProcInfo {
+    fn into(self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap()
+    }
+}
+
+impl Into<serde_json::Value> for ModelInfo {
+    fn into(self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap()
+    }
+}
+
+impl Into<serde_json::Value> for MessageInfo {
+    fn into(self) -> serde_json::Value {
+        serde_json::to_value(self).unwrap()
     }
 }

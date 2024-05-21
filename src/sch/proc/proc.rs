@@ -188,7 +188,7 @@ impl Proc {
             start_time: self.start_time(),
             end_time: self.end_time(),
             timestamp: self.timestamp,
-            tasks: "".to_string(),
+            tasks: Vec::new(),
         }
     }
 
@@ -301,6 +301,8 @@ impl Proc {
             }
         }
 
+        // check the outputs
+        task.outputs();
         // check act return
         let rets = task.node().content.rets();
         if rets.len() > 0 {

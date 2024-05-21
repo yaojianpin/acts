@@ -75,15 +75,6 @@ impl Store {
         }
     }
 
-    // pub fn save_proc(&self, proc: &Arc<Proc>) -> Result<()> {
-    //     for task in &proc.tasks() {
-    //         self.upsert_task(task)?;
-    //     }
-    //     self.upsert_proc(proc)?;
-
-    //     Ok(())
-    // }
-
     pub fn remove_proc(&self, pid: &str) -> Result<bool> {
         debug!("remove_proc pid={}", pid);
         let q = Query::new().push(Cond::and().push(Expr::eq("pid", pid.to_string())));
@@ -95,18 +86,16 @@ impl Store {
         Ok(true)
     }
 
-    pub fn set_message(&self, id: &str, status: MessageStatus) -> Result<bool> {
+    pub fn set_message(&self, id: &str, status: MessageStatus) -> Result<()> {
         if let Ok(mut message) = self.messages().find(id) {
             message.status = status;
             message.update_time = utils::time::time_millis();
 
-            return self.messages().update(&message);
+            self.messages().update(&message)?;
         }
 
         // it's ok there is no message
-        // the message does exist or not depends on the emitter
-        // it is allowed the client creates emitter without emit_id
-        Ok(true)
+        Ok(())
     }
 
     pub fn set_message_with(&self, pid: &str, tid: &str, status: MessageStatus) -> Result<bool> {

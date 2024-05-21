@@ -33,7 +33,7 @@ pub struct Node {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-struct NodeJsonData {
+pub struct NodeData {
     pub id: String,
     pub content: NodeContent,
     pub level: usize,
@@ -205,7 +205,7 @@ impl Node {
     }
 
     pub fn to_string(&self) -> String {
-        let data = NodeJsonData {
+        let data = NodeData {
             id: self.id.clone(),
             content: self.content.clone(),
             level: self.level,
@@ -222,7 +222,7 @@ impl Node {
     }
 
     pub fn from_str(s: &str, tree: &node_tree::NodeTree) -> Arc<Self> {
-        let data: NodeJsonData = serde_json::from_str(s).unwrap();
+        let data: NodeData = serde_json::from_str(s).unwrap();
         let ret = Arc::new(Self::new(&data.id, data.content, data.level));
         if let Some(node) = tree.node(&ret.id) {
             return node;
