@@ -21,3 +21,7 @@
 # 0.10.2
 - update readme.md
 - add homepage
+
+# 0.10.3
+- remove action result, the time will caculate by acts-channel
+- refactor the info struct to make is easier to understand.

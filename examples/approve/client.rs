@@ -57,37 +57,28 @@ impl<'a> Client<'a> {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
 
-            let state = executor.complete(&message.pid, &message.tid, &options)?;
+            executor.complete(&message.pid, &message.tid, &options)?;
             println!(
-                "action state: id={} key={} inputs={} cost={}ms",
-                &message.tid,
-                &message.key,
-                &message.inputs,
-                state.cost()
+                "action state: id={} key={} inputs={}",
+                &message.tid, &message.key, &message.inputs,
             );
         } else if message.is_key("pm_act") && message.is_state("created") {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
 
-            let state = executor.complete(&message.pid, &message.tid, &options)?;
+            executor.complete(&message.pid, &message.tid, &options)?;
             println!(
-                "action state: id={} key={} inputs={} cost={}ms",
-                &message.tid,
-                &message.key,
-                &message.inputs,
-                state.cost()
+                "action state: id={} key={} inputs={}",
+                &message.tid, &message.key, &message.inputs,
             );
         } else if message.is_key("gm_act") && message.is_state("created") {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u2"));
 
-            let state = executor.complete(&message.pid, &message.tid, &options)?;
+            executor.complete(&message.pid, &message.tid, &options)?;
             println!(
-                "action state: id={} key={} inputs={} cost={}ms",
-                &message.tid,
-                &message.key,
-                &message.inputs,
-                state.cost()
+                "action state: id={} key={} inputs={}",
+                &message.tid, &message.key, &message.inputs,
             );
         } else if message.is_key("pm") && message.is_state("created") {
             let mut options = Vars::new();
@@ -96,13 +87,10 @@ impl<'a> Client<'a> {
                 "pm".into(),
                 json!(self.role(&message.inputs.get::<String>("role_id").unwrap())),
             );
-            let state = executor.complete(&message.pid, &message.tid, &options)?;
+            executor.complete(&message.pid, &message.tid, &options)?;
             println!(
-                "action state: id={} key={} inputs={} cost={}ms",
-                &message.tid,
-                &message.key,
-                &message.inputs,
-                state.cost()
+                "action state: id={} key={} inputs={}",
+                &message.tid, &message.key, &message.inputs,
             );
         } else if message.is_key("gm") && message.is_state("created") {
             let mut options = Vars::new();
@@ -113,13 +101,8 @@ impl<'a> Client<'a> {
                 json!(self.role(&message.inputs.get::<String>("role_id").unwrap())),
             );
 
-            let state = executor.complete(&message.pid, &message.tid, &options)?;
-            println!(
-                "action state: id={} key={} cost={}ms",
-                &message.tid,
-                &message.key,
-                state.cost()
-            );
+            executor.complete(&message.pid, &message.tid, &options)?;
+            println!("action state: id={} key={}", &message.tid, &message.key,);
         } else if message.is_type("msg") {
             println!(
                 "msg: id={} key={} inputs={}",

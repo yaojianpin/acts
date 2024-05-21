@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
-use acts::{ActionResult, Event, Executor, Message, Result, Vars};
+use acts::{Event, Executor, Message, Result, Vars};
 use serde_json::json;
 
-type Action = fn(&Executor, &Event<Message>) -> Result<ActionResult>;
+type Action = fn(&Executor, &Event<Message>) -> Result<()>;
 pub struct Client {
     actions: HashMap<String, Box<Action>>,
 }
@@ -26,8 +26,8 @@ impl Client {
         if e.is_source("act") && e.is_state("created") {
             match self.actions.get(&e.key) {
                 Some(action) => {
-                    let state = action(executor, e)?;
-                    println!("action state: key={} cost={}ms", &e.key, state.cost(),);
+                    action(executor, e)?;
+                    println!("action state: key={}", &e.key);
                 }
                 None => eprintln!("cannot find action '{}'", e.key),
             }
@@ -36,12 +36,12 @@ impl Client {
         Ok(())
     }
 
-    pub fn init(executor: &Executor, e: &Event<Message>) -> Result<ActionResult> {
+    pub fn init(executor: &Executor, e: &Event<Message>) -> Result<()> {
         let mut vars = Vars::new();
         vars.insert("uid".to_string(), json!("u1"));
         executor.complete(&e.pid, &e.tid, &vars)
     }
-    pub fn act1(executor: &Executor, e: &Event<Message>) -> Result<ActionResult> {
+    pub fn act1(executor: &Executor, e: &Event<Message>) -> Result<()> {
         let mut vars = Vars::new();
         vars.insert("uid".to_string(), json!("u2"));
 
@@ -57,21 +57,21 @@ impl Client {
         // cause the error
         executor.error(&e.pid, &e.tid, &vars)
     }
-    pub fn catch1(executor: &Executor, e: &Event<Message>) -> Result<ActionResult> {
+    pub fn catch1(executor: &Executor, e: &Event<Message>) -> Result<()> {
         let mut vars = Vars::new();
         vars.insert("uid".to_string(), json!("u3"));
         vars.insert("error".to_string(), json!({ "ecode":"err1"}));
 
         executor.complete(&e.pid, &e.tid, &vars)
     }
-    pub fn catch2(executor: &Executor, e: &Event<Message>) -> Result<ActionResult> {
+    pub fn catch2(executor: &Executor, e: &Event<Message>) -> Result<()> {
         let mut vars = Vars::new();
         vars.insert("uid".to_string(), json!("u4"));
 
         executor.complete(&e.pid, &e.tid, &vars)
     }
 
-    pub fn catch_others(executor: &Executor, e: &Event<Message>) -> Result<ActionResult> {
+    pub fn catch_others(executor: &Executor, e: &Event<Message>) -> Result<()> {
         let mut vars = Vars::new();
         vars.insert("uid".to_string(), json!("u5"));
         executor.complete(&e.pid, &e.tid, &vars)
