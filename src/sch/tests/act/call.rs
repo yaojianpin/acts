@@ -188,7 +188,7 @@ async fn sch_act_call_act_abort() {
     scher.launch(&proc);
     tx.recv().await;
     proc.print();
-    
+
     assert_eq!(
         proc.task_by_nid("act1").get(0).unwrap().state(),
         TaskState::Aborted
