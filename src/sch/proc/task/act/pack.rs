@@ -12,7 +12,7 @@ impl ActTask for Pack {
         let task = ctx.task();
         let pack = ctx.runtime.cache().store().packages().find(&self.uses)?;
         let script: String = String::from_utf8(pack.file_data).map_err(ActError::from)?;
-        ctx.eval(&script)?;
+        ctx.eval::<()>(&script)?;
 
         if task.state().is_running() {
             task.set_state(TaskState::Completed);

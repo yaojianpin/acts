@@ -49,7 +49,7 @@ impl ActTask for Branch {
 
     fn run(&self, ctx: &Context) -> Result<()> {
         if let Some(script) = &self.run {
-            ctx.eval(script)?;
+            ctx.eval::<()>(script)?;
         }
         Ok(())
     }

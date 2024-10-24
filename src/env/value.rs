@@ -131,7 +131,8 @@ impl<'js> FromJs<'js> for ActValue {
             | rquickjs::Type::Module
             | rquickjs::Type::Constructor
             | rquickjs::Type::Symbol
-            | rquickjs::Type::Function => Err(rquickjs::Error::new_from_js_message(
+            | rquickjs::Type::Function
+            | rquickjs::Type::Promise => Err(rquickjs::Error::new_from_js_message(
                 v.type_name(),
                 "",
                 "cannot convert js to json value",

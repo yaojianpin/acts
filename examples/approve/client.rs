@@ -5,6 +5,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone)]
 pub struct User<'a> {
     pub id: &'a str,
+    #[allow(dead_code)]
     pub name: &'a str,
 }
 

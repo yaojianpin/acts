@@ -51,7 +51,7 @@ impl ActTask for Step {
         if let Some(pack_id) = &self.uses {
             let pack = ctx.runtime.cache().store().packages().find(pack_id)?;
             let script: String = String::from_utf8(pack.file_data).map_err(ActError::from)?;
-            ctx.eval(&script)?;
+            ctx.eval::<()>(&script)?;
         }
         let children = task.node.children();
         if children.len() > 0 {
