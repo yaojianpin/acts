@@ -15,6 +15,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - name: Install build tools
+        shell: bash
+        run: |
+          sudo apt install -y git g++ cmake ninja-build libssl-dev
       - name: Build
         run: cargo build --verbose
       - name: Run tests

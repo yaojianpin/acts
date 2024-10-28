@@ -37,3 +37,7 @@
 
 - remove the warnings in rust 1.82
 - remove the duckdb bundle feature
+
+# 0.10.6
+
+- reset the build mode to bundled for store feature
