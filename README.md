@@ -43,7 +43,7 @@ cargo add acts
 
 ## Build
 
-The package depended on [rquickjs](https://github.com/delskayn/rquickjs) and [duckdb-rs](https://github.com/duckdb/duckdb-rs), please read the build [`duckdb build doc`](https://duckdb.org/docs/dev/building/build_instructions.html) if using `store` feature, For Windows, recommeded [`MSYS2`](https://www.msys2.org/) and toolchain of stable-x86_64-pc-windows-gnu
+If you are using `store` feature, For Windows, recommeded [`MSYS2`](https://www.msys2.org/) and toolchain of stable-x86_64-pc-windows-gnu
 
 ## Quickstart
 

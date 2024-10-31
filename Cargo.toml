@@ -2,8 +2,8 @@
 [package]
 authors = ["Yao <yaojianpin@sohu.com>"]
 description = "a fast, tiny, extensiable workflow engine"
-edition = "2021"
 keywords = ["workflow"]
+edition = "2021"
 license = "Apache-2.0"
 name = "acts"
 homepage = "https://docs.rs/acts"
