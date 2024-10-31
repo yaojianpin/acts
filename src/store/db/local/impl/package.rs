@@ -5,7 +5,7 @@ use crate::{
     },
     Result,
 };
-use duckdb::{types::Value, Error as DbError, Result as DbResult};
+use rusqlite::{types::Value, Error as DbError, Result as DbResult, Row};
 impl DbSchema for Package {
     fn schema() -> Result<Vec<(String, DbColumn)>> {
         let mut map = Vec::new();
@@ -80,7 +80,7 @@ impl DbRow for Package {
         &self.id
     }
 
-    fn from_row<'a>(row: &duckdb::Row<'a>) -> DbResult<Package, DbError> {
+    fn from_row<'a>(row: &Row<'a>) -> DbResult<Package, DbError> {
         Ok(Package {
             id: row.get::<usize, String>(0).unwrap(),
             name: row.get::<usize, String>(1).unwrap(),
@@ -97,11 +97,11 @@ impl DbRow for Package {
 
         ret.push(("id".to_string(), Value::Text(self.id.clone())));
         ret.push(("name".to_string(), Value::Text(self.name.clone())));
-        ret.push(("size".to_string(), Value::UInt(self.size)));
+        ret.push(("size".to_string(), Value::Integer(self.size as i64)));
         ret.push(("file_data".to_string(), Value::Blob(self.file_data.clone())));
-        ret.push(("create_time".to_string(), Value::BigInt(self.create_time)));
-        ret.push(("update_time".to_string(), Value::BigInt(self.update_time)));
-        ret.push(("timestamp".to_string(), Value::BigInt(self.timestamp)));
+        ret.push(("create_time".to_string(), Value::Integer(self.create_time)));
+        ret.push(("update_time".to_string(), Value::Integer(self.update_time)));
+        ret.push(("timestamp".to_string(), Value::Integer(self.timestamp)));
 
         Ok(ret)
     }

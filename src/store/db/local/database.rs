@@ -1,13 +1,14 @@
 use crate::store::db::local::{DbColumn, DbType};
 #[allow(unused_imports)]
-use duckdb::{params, AccessMode, Config, DuckdbConnectionManager};
+use r2d2_sqlite::SqliteConnectionManager;
+use rusqlite::params;
 #[allow(unused_imports)]
 use std::{fs, path::Path};
 use tracing::debug;
 
 pub struct Database {
     path: String,
-    pool: r2d2::Pool<DuckdbConnectionManager>,
+    pool: r2d2::Pool<SqliteConnectionManager>,
 }
 
 impl std::fmt::Debug for Database {
@@ -24,12 +25,10 @@ impl Database {
         #[cfg(not(test))]
         {
             fs::create_dir_all(path).unwrap();
-            let config = Config::default()
-                .access_mode(AccessMode::ReadWrite)
-                .unwrap();
-            let manager =
-                DuckdbConnectionManager::file_with_flags(Path::new(path).join(name), config)
-                    .unwrap();
+            // let config = Config::default()
+            //     .access_mode(AccessMode::ReadWrite)
+            //     .unwrap();
+            let manager = SqliteConnectionManager::file(Path::new(path).join(name));
             let pool = r2d2::Pool::new(manager).unwrap();
             Self {
                 pool,
@@ -39,7 +38,7 @@ impl Database {
 
         #[cfg(test)]
         {
-            let manager = DuckdbConnectionManager::memory().unwrap();
+            let manager = SqliteConnectionManager::memory();
             let pool = r2d2::Pool::new(manager).unwrap();
             Self {
                 pool,
@@ -48,7 +47,7 @@ impl Database {
         }
     }
 
-    pub fn pool(&self) -> &r2d2::Pool<DuckdbConnectionManager> {
+    pub fn pool(&self) -> &r2d2::Pool<SqliteConnectionManager> {
         &self.pool
     }
 

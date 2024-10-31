@@ -41,7 +41,7 @@ impl Default for DbColumn {
 }
 
 use crate::Result;
-use duckdb::{types::Value, Error as DbError, Result as DbResult, Row};
+use rusqlite::{types::Value, Error as DbError, Result as DbResult, Row};
 
 trait DbSchema {
     fn schema() -> Result<Vec<(String, DbColumn)>>;

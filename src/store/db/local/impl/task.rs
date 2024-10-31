@@ -5,7 +5,7 @@ use crate::{
     },
     Result,
 };
-use duckdb::{types::Value, Error as DbError, Result as DbResult};
+use rusqlite::{types::Value, Error as DbError, Result as DbResult, Row};
 
 impl DbSchema for Task {
     fn schema() -> Result<Vec<(String, DbColumn)>> {
@@ -124,7 +124,7 @@ impl DbRow for Task {
         &self.id
     }
 
-    fn from_row<'a>(row: &duckdb::Row<'a>) -> DbResult<Task, DbError> {
+    fn from_row<'a>(row: &Row<'a>) -> DbResult<Task, DbError> {
         Ok(Task {
             id: row.get::<usize, String>(0).unwrap(),
             name: row.get::<usize, String>(1).unwrap(),
@@ -161,10 +161,10 @@ impl DbRow for Task {
         ));
 
         ret.push(("state".to_string(), Value::Text(self.state.clone())));
-        ret.push(("start_time".to_string(), Value::BigInt(self.start_time)));
-        ret.push(("end_time".to_string(), Value::BigInt(self.end_time)));
+        ret.push(("start_time".to_string(), Value::Integer(self.start_time)));
+        ret.push(("end_time".to_string(), Value::Integer(self.end_time)));
         ret.push(("hooks".to_string(), Value::Text(self.hooks.clone())));
-        ret.push(("timestamp".to_string(), Value::BigInt(self.timestamp)));
+        ret.push(("timestamp".to_string(), Value::Integer(self.timestamp)));
         ret.push(("data".to_string(), Value::Text(self.data.clone())));
         ret.push((
             "err".to_string(),

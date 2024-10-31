@@ -72,6 +72,17 @@ impl Into<i8> for MessageStatus {
     }
 }
 
+impl Into<i64> for MessageStatus {
+    fn into(self) -> i64 {
+        match self {
+            MessageStatus::Created => 0,
+            MessageStatus::Acked => 1,
+            MessageStatus::Completed => 2,
+            MessageStatus::Error => 3,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::MessageStatus;
