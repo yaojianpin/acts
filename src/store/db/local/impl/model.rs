@@ -5,7 +5,7 @@ use crate::{
     },
     Result,
 };
-use duckdb::{types::Value, Error as DbError, Result as DbResult};
+use rusqlite::{types::Value, Error as DbError, Result as DbResult, Row};
 
 impl DbSchema for Model {
     fn schema() -> Result<Vec<(String, DbColumn)>> {
@@ -70,7 +70,7 @@ impl DbRow for Model {
     fn id(&self) -> &str {
         &self.id
     }
-    fn from_row<'a>(row: &duckdb::Row<'a>) -> DbResult<Model, DbError> {
+    fn from_row<'a>(row: &Row<'a>) -> DbResult<Model, DbError> {
         Ok(Model {
             id: row.get::<usize, String>(0).unwrap(),
             name: row.get::<usize, String>(1).unwrap(),
@@ -86,9 +86,9 @@ impl DbRow for Model {
 
         ret.push(("id".to_string(), Value::Text(self.id.clone())));
         ret.push(("name".to_string(), Value::Text(self.name.clone())));
-        ret.push(("ver".to_string(), Value::UInt(self.ver)));
-        ret.push(("size".to_string(), Value::UInt(self.size)));
-        ret.push(("time".to_string(), Value::BigInt(self.time)));
+        ret.push(("ver".to_string(), Value::Integer(self.ver as i64)));
+        ret.push(("size".to_string(), Value::Integer(self.size as i64)));
+        ret.push(("time".to_string(), Value::Integer(self.time)));
         ret.push(("data".to_string(), Value::Text(self.data.clone())));
 
         Ok(ret)

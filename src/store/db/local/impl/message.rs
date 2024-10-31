@@ -5,7 +5,7 @@ use crate::{
     },
     Result,
 };
-use duckdb::{types::Value, Error as DbError, Result as DbResult};
+use rusqlite::{types::Value, Error as DbError, Result as DbResult, Row};
 impl DbSchema for Message {
     fn schema() -> Result<Vec<(String, DbColumn)>> {
         let mut map = Vec::new();
@@ -181,7 +181,7 @@ impl DbRow for Message {
         &self.id
     }
 
-    fn from_row<'a>(row: &duckdb::Row<'a>) -> DbResult<Message, DbError> {
+    fn from_row<'a>(row: &Row<'a>) -> DbResult<Message, DbError> {
         Ok(Message {
             id: row.get::<usize, String>(0).unwrap(),
             name: row.get::<usize, String>(1).unwrap(),
@@ -222,18 +222,21 @@ impl DbRow for Message {
         ret.push(("inputs".to_string(), Value::Text(self.inputs.clone())));
         ret.push(("outputs".to_string(), Value::Text(self.outputs.clone())));
         ret.push(("tag".to_string(), Value::Text(self.tag.clone())));
-        ret.push(("start_time".to_string(), Value::BigInt(self.start_time)));
-        ret.push(("end_time".to_string(), Value::BigInt(self.end_time)));
+        ret.push(("start_time".to_string(), Value::Integer(self.start_time)));
+        ret.push(("end_time".to_string(), Value::Integer(self.end_time)));
         ret.push(("chan_id".to_string(), Value::Text(self.chan_id.clone())));
         ret.push((
             "chan_pattern".to_string(),
             Value::Text(self.chan_pattern.clone()),
         ));
-        ret.push(("create_time".to_string(), Value::BigInt(self.create_time)));
-        ret.push(("update_time".to_string(), Value::BigInt(self.update_time)));
-        ret.push(("status".to_string(), Value::TinyInt(self.status.into())));
-        ret.push(("retry_times".to_string(), Value::Int(self.retry_times)));
-        ret.push(("timestamp".to_string(), Value::BigInt(self.timestamp)));
+        ret.push(("create_time".to_string(), Value::Integer(self.create_time)));
+        ret.push(("update_time".to_string(), Value::Integer(self.update_time)));
+        ret.push(("status".to_string(), Value::Integer(self.status.into())));
+        ret.push((
+            "retry_times".to_string(),
+            Value::Integer(self.retry_times as i64),
+        ));
+        ret.push(("timestamp".to_string(), Value::Integer(self.timestamp)));
 
         Ok(ret)
     }

@@ -3,7 +3,7 @@ use crate::{
     store::{map_db_err, query::CondType, DbSet, Expr, ExprOp, Query},
     Result, ShareLock,
 };
-use duckdb::{params, params_from_iter};
+use rusqlite::{params, params_from_iter};
 use std::{fmt::Debug, marker::PhantomData};
 use tracing::debug;
 

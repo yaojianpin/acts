@@ -37,3 +37,7 @@
 
 - remove the warnings in rust 1.82
 - remove the duckdb bundle feature
+
+# 0.11.0
+
+- change store db to sqlite
