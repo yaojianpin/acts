@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 pub struct Chain {
     #[serde(default)]
     pub r#in: String,
-    pub run: Vec<Act>,
+    pub then: Vec<Act>,
 }
 
 impl Chain {
@@ -14,7 +14,7 @@ impl Chain {
             return Err(ActError::Runtime("chain's 'in' is empty".to_string()));
         }
         let result = ctx.eval::<Vec<String>>(scr)?;
-        if result.len() == 0 {
+        if result.is_empty() {
             return Err(ActError::Runtime(format!(
                 "chain.in is empty in task({})",
                 ctx.task().id
@@ -32,9 +32,15 @@ impl Chain {
         self
     }
 
-    pub fn with_run(mut self, build: fn(Vec<Act>) -> Vec<Act>) -> Self {
+    pub fn with_then(mut self, build: fn(Vec<Act>) -> Vec<Act>) -> Self {
         let stmts = Vec::new();
-        self.run = build(stmts);
+        self.then = build(stmts);
         self
+    }
+}
+
+impl From<Chain> for Act {
+    fn from(val: Chain) -> Self {
+        Act::chain(|_| val.clone())
     }
 }

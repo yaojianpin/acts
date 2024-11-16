@@ -4,7 +4,7 @@ use crate::{
     sch::tests::{create_proc_signal, create_proc_signal2, create_proc_signal_config},
     store::{Cond, Expr},
     utils::{self, consts},
-    Act, Action, ChannelOptions, Config, Error, Message, Query, StoreAdapter, Vars, Workflow,
+    Act, Action, ChannelOptions, Config, Message, Query, StoreAdapter, Vars, Workflow,
 };
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -21,7 +21,7 @@ async fn sch_message_workflow_created() {
     });
     scher.launch(&proc);
     let ret = tx.recv().await;
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
@@ -141,7 +141,7 @@ async fn sch_message_step_created() {
     });
     scher.launch(&proc);
     let ret = tx.recv().await;
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
@@ -175,7 +175,7 @@ async fn sch_message_step_completed() {
     });
     scher.launch(&proc);
     let ret = tx.recv().await;
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
@@ -194,32 +194,32 @@ async fn sch_message_branch_no_message() {
     scher.launch(&proc);
     let ret = tx.recv().await;
     proc.print();
-    assert_eq!(ret, false);
+    assert!(!ret);
 }
 
 #[tokio::test]
 async fn sch_message_act_created() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
     emitter.on_message(move |e| {
-        if e.r#type == "req" && e.state() == MessageState::Created {
+        if e.r#type == "irq" && e.state() == MessageState::Created {
             rx.send(true);
         }
     });
     scher.launch(&proc);
     let ret = tx.recv().await;
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
 async fn sch_message_act_created_by_push_action() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
@@ -227,8 +227,9 @@ async fn sch_message_act_created_by_push_action() {
         println!("message: {e:?}");
         if e.r#type == "step" && e.state() == MessageState::Created {
             let options = Vars::new()
-                .with("id", "act2")
                 .with("name", "act 2")
+                .with("act", "irq")
+                .with("key", "act2")
                 .with("tag", "tag2");
             e.do_action(&e.pid, &e.tid, "push", &options).unwrap();
         }
@@ -240,21 +241,21 @@ async fn sch_message_act_created_by_push_action() {
     scher.launch(&proc);
     let ret = tx.recv().await;
     proc.print();
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
 async fn sch_message_act_tag_by_push_action() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
     emitter.on_message(move |e| {
         println!("message: {e:?}");
         if e.r#type == "step" && e.state() == MessageState::Created {
-            let options = Vars::new().with("id", "act2").with("tag", "tag2");
+            let options = Vars::new().with("key", "act2").with("tag", "tag2");
             e.do_action(&e.pid, &e.tid, "push", &options).unwrap();
         }
 
@@ -265,14 +266,14 @@ async fn sch_message_act_tag_by_push_action() {
     scher.launch(&proc);
     let ret = tx.recv().await;
     proc.print();
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
 async fn sch_message_act_inputs_by_push_action() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
@@ -280,8 +281,8 @@ async fn sch_message_act_inputs_by_push_action() {
         println!("message: {e:?}");
         if e.r#type == "step" && e.state() == MessageState::Created {
             let options = Vars::new()
-                .with("id", "act2")
-                .with("inputs", &Vars::new().with("a", 5));
+                .with("key", "act2")
+                .with("with", Vars::new().with("a", 5));
             e.do_action(&e.pid, &e.tid, "push", &options).unwrap();
         }
 
@@ -292,14 +293,14 @@ async fn sch_message_act_inputs_by_push_action() {
     scher.launch(&proc);
     let ret = tx.recv().await;
     proc.print();
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
 async fn sch_message_act_outputs_by_push_action() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
@@ -307,8 +308,8 @@ async fn sch_message_act_outputs_by_push_action() {
         println!("message: {e:?}");
         if e.r#type == "step" && e.state() == MessageState::Created {
             let options = Vars::new()
-                .with("id", "act2")
-                .with("outputs", &Vars::new().with("a", 5));
+                .with("key", "act2")
+                .with("outputs", Vars::new().with("a", 5));
             e.do_action(&e.pid, &e.tid, "push", &options).unwrap();
         }
 
@@ -319,14 +320,14 @@ async fn sch_message_act_outputs_by_push_action() {
     scher.launch(&proc);
     let ret = tx.recv().await;
     proc.print();
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
 async fn sch_message_act_rets_by_push_action() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
@@ -334,8 +335,8 @@ async fn sch_message_act_rets_by_push_action() {
         println!("message: {e:?}");
         if e.r#type == "step" && e.state() == MessageState::Created {
             let options = Vars::new()
-                .with("id", "act2")
-                .with("rets", &Vars::new().with("a", json!(null)));
+                .with("key", "act2")
+                .with("rets", Vars::new().with("a", json!(null)));
             e.do_action(&e.pid, &e.tid, "push", &options).unwrap();
         }
 
@@ -349,14 +350,14 @@ async fn sch_message_act_rets_by_push_action() {
     scher.launch(&proc);
     let ret = tx.recv().await;
     proc.print();
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
 async fn sch_message_act_outputs() {
     let mut workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_act(Act::req(|act| {
-            act.with_id("act1")
+        step.with_id("step1").with_act(Act::irq(|act| {
+            act.with_key("act1")
                 .with_input("a", json!(5))
                 .with_output("a", json!(null))
         }))
@@ -364,7 +365,7 @@ async fn sch_message_act_outputs() {
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<Message>(&mut workflow, &id);
     emitter.on_message(move |e| {
-        if e.r#type == "req" && e.state() == MessageState::Created {
+        if e.r#type == "irq" && e.state() == MessageState::Created {
             rx.send(e.inner().clone());
         }
     });
@@ -377,32 +378,32 @@ async fn sch_message_act_outputs() {
 async fn sch_message_act_completed() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
     let s = scher.clone();
     emitter.on_message(move |msg| {
-        if msg.r#type == "req" && msg.state() == MessageState::Created {
+        if msg.r#type == "irq" && msg.state() == MessageState::Created {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             let action = Action::new(&msg.pid, &msg.tid, consts::EVT_NEXT, &options);
             s.do_action(&action).unwrap();
         }
-        if msg.r#type == "req" && msg.state() == MessageState::Completed {
+        if msg.r#type == "irq" && msg.state() == MessageState::Completed {
             rx.send(true);
         }
     });
     scher.launch(&proc);
     let ret = tx.recv().await;
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
 async fn sch_message_act_sumitted() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
@@ -420,14 +421,14 @@ async fn sch_message_act_sumitted() {
     });
     scher.launch(&proc);
     let ret = tx.recv().await;
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
 async fn sch_message_act_skip() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
@@ -445,7 +446,7 @@ async fn sch_message_act_skip() {
     });
     scher.launch(&proc);
     let ret = tx.recv().await;
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
@@ -453,11 +454,11 @@ async fn sch_message_act_back() {
     let mut workflow = Workflow::new()
         .with_step(|step| {
             step.with_id("step1")
-                .with_act(Act::req(|act| act.with_id("act1")))
+                .with_act(Act::irq(|act| act.with_key("act1")))
         })
         .with_step(|step| {
             step.with_id("step2")
-                .with_act(Act::req(|act| act.with_id("act2")))
+                .with_act(Act::irq(|act| act.with_key("act2")))
         });
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
@@ -485,7 +486,7 @@ async fn sch_message_act_back() {
     scher.launch(&proc);
     let ret = tx.recv().await;
     proc.print();
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
@@ -494,11 +495,11 @@ async fn sch_message_act_cancel() {
     let mut workflow = Workflow::new()
         .with_step(|step| {
             step.with_id("step1")
-                .with_act(Act::req(|act| act.with_id("act1")))
+                .with_act(Act::irq(|act| act.with_key("act1")))
         })
         .with_step(|step| {
             step.with_id("step2")
-                .with_act(Act::req(|act| act.with_id("act2")))
+                .with_act(Act::irq(|act| act.with_key("act2")))
         });
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
@@ -536,14 +537,14 @@ async fn sch_message_act_cancel() {
     scher.launch(&proc);
     let ret = tx.recv().await;
     proc.print();
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
 async fn sch_message_act_remove() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
@@ -561,14 +562,14 @@ async fn sch_message_act_remove() {
     });
     scher.launch(&proc);
     let ret = tx.recv().await;
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
 async fn sch_message_act_abort() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
@@ -588,14 +589,14 @@ async fn sch_message_act_abort() {
     scher.launch(&proc);
     let ret = tx.recv().await;
     proc.print();
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
 async fn sch_message_act_error() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
@@ -605,7 +606,7 @@ async fn sch_message_act_error() {
         if e.is_key("act1") && e.is_state("created") {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            options.set(consts::ACT_ERR_KEY, Error::new("", "err1"));
+            options.set(consts::ACT_ERR_CODE, "err1");
             let action = Action::new(&e.pid, &e.tid, "error", &options);
             s.do_action(&action).unwrap();
         }
@@ -617,24 +618,26 @@ async fn sch_message_act_error() {
     scher.launch(&proc);
     let ret = tx.recv().await;
     proc.print();
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
 async fn sch_message_act_inputs_with_err() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
     workflow.id = utils::longid();
     let (proc, scher, emitter, tx, rx) =
         create_proc_signal::<Vars>(&mut workflow, &utils::longid());
 
     emitter.on_message(move |e| {
+        println!("message: {e:?}");
         if e.is_key("act1") && e.is_state("created") {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            options.set(consts::ACT_ERR_KEY, Error::new("abc", "err1"));
+            options.set(consts::ACT_ERR_CODE, "err1");
+            options.set(consts::ACT_ERR_MESSAGE, "abc");
             e.do_action(&e.pid, &e.tid, consts::EVT_ERR, &options)
                 .unwrap();
         }
@@ -647,20 +650,8 @@ async fn sch_message_act_inputs_with_err() {
     scher.launch(&proc);
     let ret = tx.recv().await;
     proc.print();
-    assert_eq!(
-        ret.get::<Vars>(consts::ACT_ERR_KEY)
-            .unwrap()
-            .get::<String>(consts::ACT_ERR_CODE)
-            .unwrap(),
-        "err1"
-    );
-    assert_eq!(
-        ret.get::<Vars>(consts::ACT_ERR_KEY)
-            .unwrap()
-            .get::<String>("message")
-            .unwrap(),
-        "abc"
-    );
+    assert_eq!(ret.get::<String>(consts::ACT_ERR_CODE).unwrap(), "err1");
+    assert_eq!(ret.get::<String>(consts::ACT_ERR_MESSAGE).unwrap(), "abc");
 }
 
 #[tokio::test]
@@ -668,7 +659,7 @@ async fn sch_message_act_inputs_with_step_id() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_name("my step")
-            .with_act(Act::req(|act| act.with_id("test")))
+            .with_act(Act::irq(|act| act.with_key("test")))
     });
     workflow.id = utils::longid();
     let (proc, scher, emitter, tx, rx) =
@@ -689,25 +680,25 @@ async fn sch_message_act_inputs_with_step_id() {
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(
-        ret.get_value(consts::STEP_KEY).clone().unwrap()[consts::STEP_NODE_ID],
+        ret.get_value(consts::STEP_KEY).unwrap()[consts::STEP_NODE_ID],
         json!("step1")
     );
     assert_eq!(
-        ret.get_value(consts::STEP_KEY).clone().unwrap()[consts::STEP_TASK_ID],
+        ret.get_value(consts::STEP_KEY).unwrap()[consts::STEP_TASK_ID],
         json!(*step_task_id.lock().unwrap())
     );
 
     assert_eq!(
-        ret.get_value(consts::STEP_KEY).clone().unwrap()[consts::STEP_NODE_NAME],
+        ret.get_value(consts::STEP_KEY).unwrap()[consts::STEP_NODE_NAME],
         json!("my step")
     );
 }
 
 #[tokio::test]
 async fn sch_message_emit_options_with_id() {
-    let mut workflow = Workflow::new();
+    let workflow = Workflow::new();
     let id = utils::longid();
-    let (engine, proc, tx, rx) = create_proc_signal2::<bool>(&mut workflow, &id);
+    let (engine, proc, tx, rx) = create_proc_signal2::<bool>(&workflow, &id);
 
     let options = ChannelOptions {
         id: "e1".to_string(),
@@ -722,31 +713,31 @@ async fn sch_message_emit_options_with_id() {
         });
     engine.runtime().launch(&proc);
     let ret = tx.recv().await;
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
 async fn sch_message_ack_not_exist_message_in_store() {
-    let mut workflow = Workflow::new();
+    let workflow = Workflow::new();
     let id = utils::longid();
-    let (engine, proc, tx, rx) = create_proc_signal2::<bool>(&mut workflow, &id);
+    let (engine, proc, tx, rx) = create_proc_signal2::<bool>(&workflow, &id);
     let e2 = engine.clone();
     engine.channel().on_message(move |msg| {
         if msg.r#type == "workflow" && msg.state() == MessageState::Created {
-            let ret = engine.executor().ack(&msg.id);
+            let ret = engine.executor().msg().ack(&msg.id);
             rx.send(ret.is_ok());
         }
     });
     e2.runtime().launch(&proc);
     let ret = tx.recv().await;
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
 async fn sch_message_ack_exist_message_in_store() {
-    let mut workflow = Workflow::new();
+    let workflow = Workflow::new();
     let id = utils::longid();
-    let (engine, proc, tx, rx) = create_proc_signal2::<Message>(&mut workflow, &id);
+    let (engine, proc, tx, rx) = create_proc_signal2::<Message>(&workflow, &id);
 
     let options = ChannelOptions {
         id: "e1".to_string(),
@@ -758,7 +749,7 @@ async fn sch_message_ack_exist_message_in_store() {
         .channel_with_options(&options)
         .on_message(move |msg| {
             if msg.r#type == "workflow" && msg.state() == MessageState::Created {
-                engine.executor().ack(&msg.id).unwrap();
+                engine.executor().msg().ack(&msg.id).unwrap();
                 rx.send(msg.inner().clone());
             }
         });
@@ -780,11 +771,11 @@ async fn sch_message_ack_exist_message_in_store() {
 
 #[tokio::test]
 async fn sch_message_complete_message_in_store() {
-    let mut workflow = Workflow::new()
-        .with_step(|step| step.with_act(Act::req(|act| act.with_id("act1"))))
-        .with_step(|step| step.with_act(Act::req(|act| act.with_id("act2"))));
+    let workflow = Workflow::new()
+        .with_step(|step| step.with_act(Act::irq(|act| act.with_key("act1"))))
+        .with_step(|step| step.with_act(Act::irq(|act| act.with_key("act2"))));
     let id = utils::longid();
-    let (engine, proc, tx, rx) = create_proc_signal2::<String>(&mut workflow, &id);
+    let (engine, proc, tx, rx) = create_proc_signal2::<String>(&workflow, &id);
 
     let options = ChannelOptions {
         id: "e1".to_string(),
@@ -798,6 +789,7 @@ async fn sch_message_complete_message_in_store() {
             if msg.is_key("act1") && msg.state() == MessageState::Created {
                 engine
                     .executor()
+                    .act()
                     .complete(&msg.pid, &msg.tid, &Vars::new())
                     .unwrap();
                 rx.update(|data| *data = msg.id.clone());
@@ -810,7 +802,7 @@ async fn sch_message_complete_message_in_store() {
     e2.runtime().launch(&proc);
     let ret = tx.recv().await;
     let message = e2.runtime().cache().store().messages().find(&ret).unwrap();
-    assert_eq!(message.r#type, "req");
+    assert_eq!(message.r#type, "irq");
     assert_eq!(message.pid, id);
     assert_eq!(message.state, "created");
     assert_eq!(message.status, MessageStatus::Completed);
@@ -820,11 +812,11 @@ async fn sch_message_complete_message_in_store() {
 
 #[tokio::test]
 async fn sch_messages_not_removed_when_completed_in_store() {
-    let mut workflow = Workflow::new()
+    let workflow = Workflow::new()
         .with_step(|step| step.with_id("step1"))
         .with_step(|step| step.with_id("step2"));
     let id = utils::longid();
-    let (engine, proc, tx, rx) = create_proc_signal2::<()>(&mut workflow, &id);
+    let (engine, proc, tx, rx) = create_proc_signal2::<()>(&workflow, &id);
 
     let options = ChannelOptions {
         id: "e1".to_string(),
@@ -850,10 +842,10 @@ async fn sch_messages_not_removed_when_completed_in_store() {
 
 #[tokio::test]
 async fn sch_message_re_sent_if_not_ack() {
-    let mut workflow =
-        Workflow::new().with_step(|step| step.with_act(Act::req(|act| act.with_id("act1"))));
+    let workflow =
+        Workflow::new().with_step(|step| step.with_act(Act::irq(|act| act.with_key("act1"))));
     let id = utils::longid();
-    let (engine, proc, tx, rx) = create_proc_signal2::<Vec<Message>>(&mut workflow, &id);
+    let (engine, proc, tx, rx) = create_proc_signal2::<Vec<Message>>(&workflow, &id);
 
     let options = ChannelOptions {
         id: "e1".to_string(),
@@ -874,7 +866,7 @@ async fn sch_message_re_sent_if_not_ack() {
     let ret = tx.recv().await;
     assert!(ret.len() > 1);
 
-    let m = ret.get(0).unwrap();
+    let m = ret.first().unwrap();
     let message = engine
         .runtime()
         .cache()
@@ -894,11 +886,13 @@ async fn sch_message_re_sent_if_not_ack() {
 #[tokio::test]
 async fn sch_message_error_if_not_ack_and_exceed_max_reties() {
     let workflow =
-        Workflow::new().with_step(|step| step.with_act(Act::req(|act| act.with_id("act1"))));
+        Workflow::new().with_step(|step| step.with_act(Act::irq(|act| act.with_key("act1"))));
     let id = utils::longid();
 
-    let mut config = Config::default();
-    config.max_message_retry_times = 2;
+    let config = Config {
+        max_message_retry_times: 2,
+        ..Config::default()
+    };
     let (engine, proc, sig) = create_proc_signal_config::<Vec<Message>>(&config, &workflow, &id);
     let rx = sig.clone();
     let options = ChannelOptions {
@@ -912,14 +906,14 @@ async fn sch_message_error_if_not_ack_and_exceed_max_reties() {
             // not ack the message
             rx.update(|data| data.push(e.inner().clone()));
         } else {
-            engine.executor().ack(&e.id).unwrap();
+            engine.executor().msg().ack(&e.id).unwrap();
         }
     });
     e2.runtime().launch(&proc);
     let ret = sig.timeout(4000).await;
     assert!(ret.len() > 1);
 
-    let m = ret.get(0).unwrap();
+    let m = ret.first().unwrap();
     let message = e2.runtime().cache().store().messages().find(&m.id).unwrap();
     assert_eq!(message.r#type, "workflow");
     assert_eq!(message.pid, id);

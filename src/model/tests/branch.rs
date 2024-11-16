@@ -42,10 +42,10 @@ fn model_branch_run() {
 #[test]
 fn model_branch_else() {
     let mut b = Branch::new();
-    assert_eq!(b.r#else, false);
+    assert!(!b.r#else);
 
     b = b.with_else(true);
-    assert_eq!(b.r#else, true);
+    assert!(b.r#else);
 }
 
 #[test]
@@ -54,7 +54,7 @@ fn model_branch_needs() {
     assert_eq!(b.needs.len(), 0);
 
     b = b.with_need("b1");
-    assert_eq!(b.needs.contains(&"b1".to_string()), true);
+    assert!(b.needs.contains(&"b1".to_string()));
 }
 
 #[test]

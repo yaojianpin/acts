@@ -31,7 +31,7 @@ impl Client {
     }
 
     pub fn process(&self, executor: &Executor, e: &Event<Message>) -> Result<()> {
-        if e.is_type("req") && e.is_state("created") {
+        if e.is_type("irq") && e.is_state("created") {
             match self.actions.get(&e.key) {
                 Some(action) => {
                     action(executor, e)?;
@@ -42,11 +42,8 @@ impl Client {
         }
 
         if e.is_type("msg") {
-            match self.messages.get(&e.key) {
-                Some(action) => {
-                    action(executor, e);
-                }
-                None => {}
+            if let Some(action) = self.messages.get(&e.key) {
+                action(executor, e);
             }
         }
 
@@ -57,7 +54,7 @@ impl Client {
         println!("req: {} inputs={}", e.key, e.inputs);
         let mut vars = Vars::new();
         vars.insert("uid".to_string(), json!("u1"));
-        executor.complete(&e.pid, &e.tid, &vars)
+        executor.act().complete(&e.pid, &e.tid, &vars)
     }
 
     pub fn timeout_2s(_executor: &Executor, e: &Event<Message>) {
@@ -65,6 +62,6 @@ impl Client {
     }
     pub fn timeout_5s(executor: &Executor, e: &Event<Message>) -> Result<()> {
         println!("req: {} inputs={}", e.key, e.inputs);
-        executor.complete(&e.pid, &e.tid, &Vars::new())
+        executor.act().complete(&e.pid, &e.tid, &Vars::new())
     }
 }

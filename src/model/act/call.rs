@@ -1,21 +1,16 @@
+use crate::{Act, Vars};
 use serde::{Deserialize, Serialize};
-
-use crate::Vars;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Call {
     #[serde(default)]
-    pub id: String,
-
-    // model id
-    #[serde(default)]
-    pub mid: String,
+    pub key: String,
 
     #[serde(default)]
     pub inputs: Vars,
 
     #[serde(default)]
-    pub outputs: Vars,
+    pub rets: Vars,
 }
 
 impl Call {
@@ -23,13 +18,8 @@ impl Call {
         Default::default()
     }
 
-    pub fn with_id(mut self, id: &str) -> Self {
-        self.id = id.to_string();
-        self
-    }
-
-    pub fn with_mid(mut self, mid: &str) -> Self {
-        self.mid = mid.to_string();
+    pub fn with_key(mut self, key: &str) -> Self {
+        self.key = key.to_string();
         self
     }
 
@@ -41,11 +31,17 @@ impl Call {
         self
     }
 
-    pub fn with_output<T>(mut self, name: &str, value: T) -> Self
+    pub fn with_ret<T>(mut self, name: &str, value: T) -> Self
     where
         T: Serialize + Clone,
     {
-        self.outputs.set(name, value);
+        self.rets.set(name, value);
         self
+    }
+}
+
+impl From<Call> for Act {
+    fn from(val: Call) -> Self {
+        Act::call(|_| val.clone())
     }
 }

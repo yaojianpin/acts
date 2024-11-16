@@ -12,12 +12,10 @@ impl Queue {
     pub fn new() -> Arc<Self> {
         let (tx, rx) = mpsc::channel::<Signal>(100);
 
-        let queue = Arc::new(Self {
+        Arc::new(Self {
             receiver: Arc::new(Mutex::new(rx)),
             sender: Arc::new(tx),
-        });
-
-        queue
+        })
     }
 
     pub async fn next(&self) -> Option<Signal> {

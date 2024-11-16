@@ -70,7 +70,7 @@ impl Array {
 }
 
 impl ActModule for Array {
-    fn init<'js>(&self, ctx: &rquickjs::Ctx<'js>) -> Result<()> {
+    fn init(&self, ctx: &rquickjs::Ctx<'_>) -> Result<()> {
         JsModule::declare_def::<js_array, _>(ctx.clone(), "@acts/array").unwrap();
 
         let source = r#"

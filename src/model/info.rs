@@ -14,6 +14,7 @@ pub struct PackageInfo {
     pub create_time: i64,
     pub update_time: i64,
     pub timestamp: i64,
+    pub data: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -33,6 +34,8 @@ pub struct TaskInfo {
     pub id: String,
     pub prev: Option<String>,
     pub name: String,
+    pub tag: String,
+    pub key: String,
     pub pid: String,
     pub nid: String,
     pub r#type: String,
@@ -61,6 +64,7 @@ pub struct MessageInfo {
     pub state: String,
     pub r#type: String,
     pub pid: String,
+    pub nid: String,
     pub key: String,
     pub inputs: String,
     pub outputs: String,
@@ -81,6 +85,7 @@ impl From<&data::Package> for PackageInfo {
             timestamp: m.timestamp,
             create_time: m.create_time,
             update_time: m.update_time,
+            data: String::from_utf8(m.data.clone()).unwrap(),
         }
     }
 }
@@ -141,6 +146,8 @@ impl From<data::Task> for TaskInfo {
             start_time: t.start_time,
             end_time: t.end_time,
             timestamp: t.timestamp,
+            key: node_data.content.key(),
+            tag: node_data.content.tag(),
         }
     }
 }
@@ -153,12 +160,14 @@ impl From<&Arc<sch::Task>> for TaskInfo {
             name: t.node().content.name(),
             pid: t.pid.clone(),
             nid: t.node().id().to_string(),
-            r#type: t.node().kind().into(),
+            r#type: t.node().typ(),
             state: t.state().into(),
             data: t.data().to_string(),
             start_time: t.start_time(),
             end_time: t.end_time(),
             timestamp: t.timestamp,
+            tag: t.node().tag(),
+            key: t.node().key(),
         }
     }
 }
@@ -170,6 +179,7 @@ impl From<&data::Message> for MessageInfo {
             name: m.name.clone(),
             pid: m.pid.clone(),
             tid: m.tid.clone(),
+            nid: m.nid.clone(),
             timestamp: m.timestamp,
             create_time: m.create_time,
             update_time: m.update_time,
@@ -186,32 +196,32 @@ impl From<&data::Message> for MessageInfo {
     }
 }
 
-impl Into<serde_json::Value> for PackageInfo {
-    fn into(self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap()
+impl From<PackageInfo> for serde_json::Value {
+    fn from(val: PackageInfo) -> Self {
+        serde_json::to_value(val).unwrap()
     }
 }
 
-impl Into<serde_json::Value> for TaskInfo {
-    fn into(self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap()
+impl From<TaskInfo> for serde_json::Value {
+    fn from(val: TaskInfo) -> Self {
+        serde_json::to_value(val).unwrap()
     }
 }
 
-impl Into<serde_json::Value> for ProcInfo {
-    fn into(self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap()
+impl From<ProcInfo> for serde_json::Value {
+    fn from(val: ProcInfo) -> Self {
+        serde_json::to_value(val).unwrap()
     }
 }
 
-impl Into<serde_json::Value> for ModelInfo {
-    fn into(self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap()
+impl From<ModelInfo> for serde_json::Value {
+    fn from(val: ModelInfo) -> Self {
+        serde_json::to_value(val).unwrap()
     }
 }
 
-impl Into<serde_json::Value> for MessageInfo {
-    fn into(self) -> serde_json::Value {
-        serde_json::to_value(self).unwrap()
+impl From<MessageInfo> for serde_json::Value {
+    fn from(val: MessageInfo) -> Self {
+        serde_json::to_value(val).unwrap()
     }
 }

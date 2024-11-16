@@ -4,7 +4,7 @@ use super::{
 };
 use crate::{
     utils::{longid, shortid},
-    Act, ActError, Branch, ModelBase, Result, Step, Workflow,
+    Act, ActError, Branch, Result, Step, Workflow,
 };
 use std::sync::Arc;
 
@@ -44,7 +44,7 @@ pub fn build_step(
     if node.level == prev.level {
         prev.set_next(&node, true);
     } else {
-        node.set_parent(&parent);
+        node.set_parent(parent);
     }
 
     match &step.next {
@@ -52,12 +52,13 @@ pub fn build_step(
             Some(next) => {
                 node.set_next(next, false);
             }
-            None => tree.set_error(
-                ActError::Runtime(format!("found next node error by '{}'", next)).into(),
-            ),
+            None => tree.set_error(ActError::Runtime(format!(
+                "found next node error by '{}'",
+                next
+            ))),
         },
         None => {
-            if step.branches.len() > 0 {
+            if !step.branches.is_empty() {
                 let mut branch_prev = node.clone();
                 for branch in step.branches.iter_mut() {
                     build_branch(branch, tree, &node, &mut branch_prev, level + 1)?;
@@ -66,7 +67,7 @@ pub fn build_step(
         }
     }
 
-    if step.acts.len() > 0 {
+    if !step.acts.is_empty() {
         let mut act_prev = node.clone();
         for act in step.acts.iter_mut() {
             build_act(act, tree, &node, &mut act_prev, level + 1)?;
@@ -89,7 +90,7 @@ pub fn build_branch(
     }
     let data = NodeContent::Branch(branch.clone());
     let node = tree.make(&data.id(), data, level)?;
-    node.set_parent(&parent);
+    node.set_parent(parent);
 
     let parent = node.clone();
     let mut step_prev = node.clone();
@@ -109,18 +110,13 @@ pub fn build_act(
     prev: &mut Arc<Node>,
     level: usize,
 ) -> Result<()> {
-    if act.id().is_empty() {
-        act.set_id(&shortid());
-    }
-
-    let mut id = act.id().to_string();
-    if id.is_empty() {
-        id = shortid();
+    if act.id.is_empty() {
+        act.id = shortid();
     }
 
     let data = NodeContent::Act(act.clone());
-    let node = tree.make(&id, data, level)?;
-    node.set_parent(&parent);
+    let node = tree.make(&act.id, data, level)?;
+    node.set_parent(parent);
 
     *prev = node.clone();
 

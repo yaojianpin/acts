@@ -8,7 +8,7 @@ license = "Apache-2.0"
 name = "acts"
 homepage = "https://docs.rs/acts"
 repository = "https://github.com/yaojianpin/acts.git"
-version = "0.11.0"
+version = "0.12.0"
 
 [dependencies]
 async-trait = "0.1.80"
@@ -56,5 +56,3 @@ codegen-units = 1
 lto = true
 opt-level = "z"
 strip = true
-
-workspace = { members = ["examples/packet/pack1"] }

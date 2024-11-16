@@ -35,7 +35,7 @@ impl<'js> IntoJs<'js> for ActValue {
                     let v = v.as_i64().unwrap_or_default() as i32;
                     JsValue::new_int(ctx.clone(), v)
                 } else if v.is_f64() {
-                    let v = v.as_f64().unwrap_or_default() as f64;
+                    let v = v.as_f64().unwrap_or_default();
                     JsValue::new_float(ctx.clone(), v)
                 } else {
                     let v = v.as_i64().unwrap_or_default() as i32;
@@ -143,9 +143,9 @@ impl<'js> FromJs<'js> for ActValue {
     }
 }
 
-impl Into<serde_json::Value> for ActValue {
-    fn into(self) -> serde_json::Value {
-        self.0
+impl From<ActValue> for serde_json::Value {
+    fn from(val: ActValue) -> Self {
+        val.0
     }
 }
 

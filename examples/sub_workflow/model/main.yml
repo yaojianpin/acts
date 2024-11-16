@@ -8,19 +8,19 @@ steps:
   - name: prepare
     id: prepare
     acts:
-      - !req
-        id: init
+      - act: irq
+        key: init
   - name: enter sub workflow
     acts:
-      - !call
-        mid: sub
+      - act: call
+        key: sub
         inputs:
             v: ${ $("v") }
   - name: final
     id: final
     acts:
-      - !req
-        id: action2
+      - act: irq
+        key: action2
         inputs:
           v: ${ $("v") }
     

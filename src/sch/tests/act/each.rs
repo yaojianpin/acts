@@ -10,8 +10,9 @@ async fn sch_step_setup_each_list() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_setup(|setup| {
             setup.add(Act::each(|each| {
-                each.with_in(r#"["u1", "u2"]"#)
-                    .with_run(|stmts| stmts.add(Act::req(|act| act.with_id("act1"))))
+                each.with_in(r#"["u1", "u2"]"#).with_then(|stmts| {
+                    stmts.add(Act::irq(|act| act.with_key("act1")).with_id("act1"))
+                })
             }))
         })
     });
@@ -28,12 +29,12 @@ async fn sch_step_setup_each_list() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act1").get(0).unwrap().state(),
+        proc.task_by_nid("act1").first().unwrap().state(),
         TaskState::Interrupt
     );
     assert_eq!(
         proc.task_by_nid("act1")
-            .get(0)
+            .first()
             .unwrap()
             .inputs()
             .get_value(consts::ACT_VALUE)
@@ -58,8 +59,9 @@ async fn sch_step_setup_each_var() {
             stmts
                 .add(Act::set(Vars::new().with("a", ["u1", "u2"])))
                 .add(Act::each(|each| {
-                    each.with_in(r#"$("a")"#)
-                        .with_run(|stmts| stmts.add(Act::req(|act| act.with_id("act1"))))
+                    each.with_in(r#"$("a")"#).with_then(|stmts| {
+                        stmts.add(Act::irq(|act| act.with_key("act1")).with_id("act1"))
+                    })
                 }))
         })
     });
@@ -76,12 +78,12 @@ async fn sch_step_setup_each_var() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act1").get(0).unwrap().state(),
+        proc.task_by_nid("act1").first().unwrap().state(),
         TaskState::Interrupt
     );
     assert_eq!(
         proc.task_by_nid("act1")
-            .get(0)
+            .first()
             .unwrap()
             .inputs()
             .get_value(consts::ACT_VALUE)
@@ -105,7 +107,7 @@ async fn sch_step_setup_each_var_not_exist() {
         step.with_id("step1").with_setup(|stmts| {
             stmts.add(Act::each(|each| {
                 each.with_in(r#"$("not_exists")"#)
-                    .with_run(|stmts| stmts.add(Act::req(|act| act.with_id("act1"))))
+                    .with_then(|stmts| stmts.add(Act::irq(|act| act.with_key("act1"))))
             }))
         })
     });
@@ -136,7 +138,9 @@ async fn sch_step_setup_each_code() {
                         a.union(b).difference(c).intersection(d)
                         "#,
                     )
-                    .with_run(|stmts| stmts.add(Act::req(|act| act.with_id("act1"))))
+                    .with_then(|stmts| {
+                        stmts.add(Act::irq(|act| act.with_key("act1")).with_id("act1"))
+                    })
                 }))
         })
     });
@@ -153,12 +157,12 @@ async fn sch_step_setup_each_code() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act1").get(0).unwrap().state(),
+        proc.task_by_nid("act1").first().unwrap().state(),
         TaskState::Interrupt
     );
     assert_eq!(
         proc.task_by_nid("act1")
-            .get(0)
+            .first()
             .unwrap()
             .inputs()
             .get_value(consts::ACT_VALUE)

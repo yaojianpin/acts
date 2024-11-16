@@ -11,7 +11,7 @@ fn model_info_package() {
         id: utils::shortid(),
         name: "test package".to_string(),
         size: 100,
-        file_data: vec![0x01, 0x02],
+        data: vec![0x01, 0x02],
         create_time: 0,
         update_time: 0,
         timestamp: 0,
@@ -110,7 +110,7 @@ fn model_info_package_arr_to_value() {
         id: utils::shortid(),
         name: "test package".to_string(),
         size: 100,
-        file_data: vec![0x01, 0x02],
+        data: vec![0x01, 0x02],
         create_time: 0,
         update_time: 0,
         timestamp: 0,
@@ -121,7 +121,7 @@ fn model_info_package_arr_to_value() {
     arr.push(info.clone());
 
     let v: Value = arr.into();
-    assert_eq!(v.is_array(), true);
+    assert!(v.is_array());
 
     let v = &v[0];
     assert_eq!(v.get("id").unwrap().as_str().unwrap(), info.id);
@@ -161,7 +161,7 @@ fn model_info_proc_arr_to_value() {
     arr.push(info.clone());
 
     let v: Value = arr.into();
-    assert_eq!(v.is_array(), true);
+    assert!(v.is_array());
 
     let v = &v[0];
     assert_eq!(v.get("id").unwrap().as_str().unwrap(), info.id);
@@ -212,7 +212,7 @@ fn model_info_task_arr_to_value() {
     arr.push(info.clone());
 
     let v: Value = arr.into();
-    assert_eq!(v.is_array(), true);
+    assert!(v.is_array());
 
     let v = &v[0];
     assert_eq!(v.get("id").unwrap().as_str().unwrap(), info.id);
@@ -249,7 +249,7 @@ fn model_info_model_arr_to_value() {
 
     let v: Value = arr.into();
 
-    assert_eq!(v.is_array(), true);
+    assert!(v.is_array());
 
     let v = &v[0];
     assert_eq!(v.get("name").unwrap().as_str().unwrap(), model.name);

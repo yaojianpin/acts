@@ -35,3 +35,9 @@ impl If {
         self
     }
 }
+
+impl From<If> for Act {
+    fn from(val: If) -> Self {
+        Act::r#if(|_| val.clone())
+    }
+}

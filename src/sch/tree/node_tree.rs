@@ -4,13 +4,9 @@ use super::{
     visit::VisitRoot,
 };
 use crate::{ActError, Result, ShareLock, Workflow};
-use std::{
-    cell::RefCell,
-    collections::HashMap,
-    sync::{Arc, RwLock},
-};
+use std::{cell::RefCell, collections::HashMap, sync::Arc};
 
-#[derive(Clone)]
+#[derive(Default, Clone)]
 pub struct NodeTree {
     pub(crate) root: Option<Arc<Node>>,
     pub(crate) node_map: ShareLock<HashMap<String, Arc<Node>>>,
@@ -20,12 +16,7 @@ pub struct NodeTree {
 
 impl NodeTree {
     pub fn new() -> Self {
-        NodeTree {
-            root: None,
-            node_map: Arc::new(RwLock::new(HashMap::new())),
-            error: None,
-            model: Box::new(Workflow::default()),
-        }
+        Self::default()
     }
 
     pub fn root(&self) -> Option<Arc<Node>> {
@@ -62,37 +53,29 @@ impl NodeTree {
 
     pub fn node(&self, key: &str) -> Option<Arc<Node>> {
         let map = self.node_map.read().unwrap();
-        match map.get(key) {
-            Some(node) => Some(node.clone()),
-            None => None,
-        }
+        map.get(key).cloned()
     }
 
     #[allow(unused)]
     pub fn print(&self) {
         if let Some(ref root) = self.root.clone() {
             VisitRoot::walk(root, &move |node| {
-                if node.level > 1 {
-                    // level start from 1
-                    // level 0 is the workflow itself
-                    let mut level = 1;
-                    while level < node.level {
-                        if node.is_sibling(&level) {
-                            print!("│ ");
-                        } else {
-                            print!("  ");
-                        }
-
-                        level += 1;
+                // print single line
+                for index in 0..node.level {
+                    if index == 0 {
+                        print!("│   ");
+                        // write!(f, "    ")?;
+                    } else {
+                        print!("    ");
+                        // write!(f, "│   ")?;
                     }
                 }
-
-                if node.is_next_sibling() {
-                    print!("├─");
+                if node.is_last {
+                    print!("└── ");
+                    // writeln!(f, "└── {}", leaf.0)?;
                 } else {
-                    if node.level != 0 {
-                        print!("└─");
-                    }
+                    print!("├── ");
+                    // writeln!(f, "├── {}", leaf.0)?;
                 }
                 let next = match node.next().upgrade() {
                     Some(n) => n.id().to_string(),
@@ -115,26 +98,42 @@ impl NodeTree {
         let s = &RefCell::new(String::new());
         if let Some(ref root) = self.root.clone() {
             VisitRoot::walk(root, &move |n| {
-                if n.level > 1 {
-                    let mut level = 0;
-                    while level < n.level {
-                        if n.is_sibling(&level) {
-                            s.borrow_mut().push_str(&format!("{}", "│ "));
-                        } else {
-                            s.borrow_mut().push_str(&format!("{}", "  "));
-                        }
-
-                        level += 1;
+                // print single line
+                for index in 0..n.level {
+                    if n.path[&index] {
+                        s.borrow_mut().push_str("│   ");
+                        // write!(f, "    ")?;
+                    } else {
+                        s.borrow_mut().push_str("    ");
+                        // write!(f, "│   ")?;
                     }
                 }
-
-                if n.is_next_sibling() {
-                    s.borrow_mut().push_str(&format!("{}", "├─"));
+                if n.is_last {
+                    s.borrow_mut().push_str("└── ");
+                    // writeln!(f, "└── {}", leaf.0)?;
                 } else {
-                    if n.level != 0 {
-                        s.borrow_mut().push_str(&format!("{}", "└─"));
-                    }
+                    s.borrow_mut().push_str("├── ");
+                    // writeln!(f, "├── {}", leaf.0)?;
                 }
+
+                // if n.level > 1 {
+                //     let mut level = 0;
+                //     while level < n.level {
+                //         if n.is_sibling(&level) {
+                //             s.borrow_mut().push_str("│ ");
+                //         } else {
+                //             s.borrow_mut().push_str("  ");
+                //         }
+
+                //         level += 1;
+                //     }
+                // }
+
+                // if n.is_next_sibling() {
+                //     s.borrow_mut().push_str("├─");
+                // } else if n.level != 0 {
+                //     s.borrow_mut().push_str("└─");
+                // }
 
                 let next = match n.next().upgrade() {
                     Some(n) => n.id().to_string(),

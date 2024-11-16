@@ -58,7 +58,9 @@ impl<'a> Client<'a> {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
 
-            executor.complete(&message.pid, &message.tid, &options)?;
+            executor
+                .act()
+                .complete(&message.pid, &message.tid, &options)?;
             println!(
                 "action state: id={} key={} inputs={}",
                 &message.tid, &message.key, &message.inputs,
@@ -67,7 +69,9 @@ impl<'a> Client<'a> {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
 
-            executor.complete(&message.pid, &message.tid, &options)?;
+            executor
+                .act()
+                .complete(&message.pid, &message.tid, &options)?;
             println!(
                 "action state: id={} key={} inputs={}",
                 &message.tid, &message.key, &message.inputs,
@@ -76,7 +80,9 @@ impl<'a> Client<'a> {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u2"));
 
-            executor.complete(&message.pid, &message.tid, &options)?;
+            executor
+                .act()
+                .complete(&message.pid, &message.tid, &options)?;
             println!(
                 "action state: id={} key={} inputs={}",
                 &message.tid, &message.key, &message.inputs,
@@ -88,7 +94,9 @@ impl<'a> Client<'a> {
                 "pm".into(),
                 json!(self.role(&message.inputs.get::<String>("role_id").unwrap())),
             );
-            executor.complete(&message.pid, &message.tid, &options)?;
+            executor
+                .act()
+                .complete(&message.pid, &message.tid, &options)?;
             println!(
                 "action state: id={} key={} inputs={}",
                 &message.tid, &message.key, &message.inputs,
@@ -102,7 +110,9 @@ impl<'a> Client<'a> {
                 json!(self.role(&message.inputs.get::<String>("role_id").unwrap())),
             );
 
-            executor.complete(&message.pid, &message.tid, &options)?;
+            executor
+                .act()
+                .complete(&message.pid, &message.tid, &options)?;
             println!("action state: id={} key={}", &message.tid, &message.key,);
         } else if message.is_type("msg") {
             println!(

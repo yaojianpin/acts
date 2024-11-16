@@ -7,7 +7,7 @@ use crate::{
 async fn sch_act_block_msg() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_act(Act::block(|act| {
-            act.with_acts(|stmts| stmts.add(Act::msg(|msg| msg.with_id("msg1"))))
+            act.with_then(|stmts| stmts.add(Act::msg(|msg| msg.with_key("msg1"))))
         }))
     });
 
@@ -23,17 +23,15 @@ async fn sch_act_block_msg() {
     scher.launch(&proc);
     let ret = tx.recv().await;
     proc.print();
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
 async fn sch_act_block_next() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_act(Act::block(|act| {
-            act.with_acts(|stmts| stmts.add(Act::msg(|msg| msg.with_id("msg1"))))
-                .with_next(|act| {
-                    act.with_acts(|stmts| stmts.add(Act::msg(|msg| msg.with_id("msg2"))))
-                })
+            act.with_then(|stmts| stmts.add(Act::msg(|msg| msg.with_key("msg1"))))
+                .with_next(|act| act.with_act("msg").with_key("msg2").with_id("msg2"))
         }))
     });
 
@@ -49,19 +47,22 @@ async fn sch_act_block_next() {
     scher.launch(&proc);
     let ret = tx.recv().await;
     proc.print();
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
 async fn sch_act_block_acts() {
     let mut workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_act(Act::block(|act| {
-            act.with_id("pack1").with_acts(|stmts| {
-                stmts
-                    .add(Act::msg(|msg| msg.with_id("msg1")))
-                    .add(Act::req(|act| act.with_id("act1")))
+        step.with_id("step1").with_act(
+            Act::block(|act| {
+                act.with_then(|stmts| {
+                    stmts
+                        .add(Act::msg(|msg| msg.with_key("msg1")).with_id("msg1"))
+                        .add(Act::irq(|act| act.with_key("act1")).with_id("act1"))
+                })
             })
-        }))
+            .with_id("pack1"),
+        )
     });
 
     workflow.print();
@@ -76,11 +77,11 @@ async fn sch_act_block_acts() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act1").get(0).unwrap().state(),
+        proc.task_by_nid("act1").first().unwrap().state(),
         TaskState::Interrupt
     );
     assert_eq!(
-        proc.task_by_nid("pack1").get(0).unwrap().state(),
+        proc.task_by_nid("pack1").first().unwrap().state(),
         TaskState::Running
     );
 }

@@ -24,12 +24,12 @@ impl TaskTree {
     }
 
     pub fn task_by_tid(&self, tid: &str) -> Option<Arc<Task>> {
-        self.maps.get(tid).map(|t| t.clone())
+        self.maps.get(tid).cloned()
     }
 
     pub fn find_tasks(&self, predicate: impl Fn(&Arc<Task>) -> bool) -> Vec<Arc<Task>> {
         let mut tasks = Vec::new();
-        for (_, t) in &self.maps {
+        for t in self.maps.values() {
             if predicate(t) {
                 tasks.push(t.clone());
             }

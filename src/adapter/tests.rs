@@ -7,8 +7,8 @@ use tokio::sync::OnceCell;
 
 static STORE: OnceCell<TestStore> = OnceCell::const_new();
 async fn init() -> TestStore {
-    let s = TestStore::new();
-    s
+    
+    TestStore::new()
 }
 
 async fn store() -> &'static TestStore {

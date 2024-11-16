@@ -1,5 +1,3 @@
-use serde_json::json;
-
 use crate::{
     sch::{tests::create_proc_signal, TaskState},
     utils::{self, consts},
@@ -12,8 +10,8 @@ async fn sch_step_hooks_created() {
         step.with_id("step1").with_setup(|stmts| {
             stmts.add(Act::on_created(|stmts| {
                 stmts
-                    .add(Act::req(|act| act.with_id("act1")))
-                    .add(Act::req(|act| act.with_id("act2")))
+                    .add(Act::irq(|act| act.with_key("act1")).with_id("act1"))
+                    .add(Act::irq(|act| act.with_key("act2")).with_id("act2"))
             }))
         })
     });
@@ -30,11 +28,11 @@ async fn sch_step_hooks_created() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act1").get(0).unwrap().state(),
+        proc.task_by_nid("act1").first().unwrap().state(),
         TaskState::Interrupt
     );
     assert_eq!(
-        proc.task_by_nid("act2").get(0).unwrap().state(),
+        proc.task_by_nid("act2").first().unwrap().state(),
         TaskState::Interrupt
     );
 }
@@ -44,9 +42,9 @@ async fn sch_step_hooks_completed() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_setup(|stmts| {
             stmts
-                .add(Act::req(|act| act.with_id("act1")))
+                .add(Act::irq(|act| act.with_key("act1")))
                 .add(Act::on_completed(|stmts| {
-                    stmts.add(Act::msg(|msg| msg.with_id("msg1")))
+                    stmts.add(Act::msg(|msg| msg.with_key("msg1")))
                 }))
         })
     });
@@ -70,7 +68,7 @@ async fn sch_step_hooks_completed() {
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(ret.len(), 1);
-    assert_eq!(ret.get(0).unwrap().key, "msg1");
+    assert_eq!(ret.first().unwrap().key, "msg1");
 }
 
 #[tokio::test]
@@ -78,10 +76,10 @@ async fn sch_step_hooks_before_update() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_setup(|stmts| {
             stmts
-                .add(Act::req(|act| act.with_id("act1")))
-                .add(Act::req(|act| act.with_id("act2")))
+                .add(Act::irq(|act| act.with_key("act1")))
+                .add(Act::irq(|act| act.with_key("act2")))
                 .add(Act::on_before_update(|stmts| {
-                    stmts.add(Act::msg(|msg| msg.with_id("msg1")))
+                    stmts.add(Act::msg(|msg| msg.with_key("msg1")))
                 }))
         })
     });
@@ -103,7 +101,7 @@ async fn sch_step_hooks_before_update() {
     proc.print();
 
     assert_eq!(ret.len(), 2);
-    assert_eq!(ret.get(0).unwrap().key, "msg1");
+    assert_eq!(ret.first().unwrap().key, "msg1");
     assert_eq!(ret.get(1).unwrap().key, "msg1");
 }
 
@@ -112,10 +110,10 @@ async fn sch_step_hooks_updated() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_setup(|stmts| {
             stmts
-                .add(Act::req(|act| act.with_id("act1")))
-                .add(Act::req(|act| act.with_id("act2")))
+                .add(Act::irq(|act| act.with_key("act1")))
+                .add(Act::irq(|act| act.with_key("act2")))
                 .add(Act::on_updated(|stmts| {
-                    stmts.add(Act::msg(|msg| msg.with_id("msg1")))
+                    stmts.add(Act::msg(|msg| msg.with_key("msg1")))
                 }))
         })
     });
@@ -142,7 +140,7 @@ async fn sch_step_hooks_updated() {
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(ret.len(), 2);
-    assert_eq!(ret.get(0).unwrap().key, "msg1");
+    assert_eq!(ret.first().unwrap().key, "msg1");
     assert_eq!(ret.get(1).unwrap().key, "msg1");
 }
 
@@ -151,10 +149,10 @@ async fn sch_step_hooks_on_step() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_setup(|stmts| {
             stmts
-                .add(Act::req(|act| act.with_id("act1")))
-                .add(Act::req(|act| act.with_id("act2")))
+                .add(Act::irq(|act| act.with_key("act1")))
+                .add(Act::irq(|act| act.with_key("act2")))
                 .add(Act::on_step(|stmts| {
-                    stmts.add(Act::msg(|msg| msg.with_id("msg1")))
+                    stmts.add(Act::msg(|msg| msg.with_key("msg1")))
                 }))
         })
     });
@@ -173,7 +171,7 @@ async fn sch_step_hooks_on_step() {
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(ret.len(), 1);
-    assert_eq!(ret.get(0).unwrap().key, "msg1");
+    assert_eq!(ret.first().unwrap().key, "msg1");
 }
 
 #[tokio::test]
@@ -181,11 +179,11 @@ async fn sch_step_hooks_error() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_setup(|stmts| {
             stmts
-                .add(Act::req(|act| act.with_id("act1")))
-                .add(Act::on_error_catch(|stmts| {
+                .add(Act::irq(|act| act.with_key("act1")))
+                .add(Act::on_catch(|stmts| {
                     stmts.add(
                         Catch::new()
-                            .with_then(|stmts| stmts.add(Act::msg(|msg| msg.with_id("msg1")))),
+                            .with_then(|stmts| stmts.add(Act::msg(|msg| msg.with_key("msg1")))),
                     )
                 }))
         })
@@ -196,9 +194,9 @@ async fn sch_step_hooks_error() {
         create_proc_signal::<Vec<Message>>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
-        if e.is_type("req") {
+        if e.is_type("irq") {
             let mut vars = Vars::new();
-            vars.set(consts::ACT_ERR_KEY, json!({ "ecode": "100"}));
+            vars.set(consts::ACT_ERR_CODE, "100");
             e.do_action(&e.pid, &e.tid, "error", &vars).unwrap();
         }
 
@@ -212,7 +210,7 @@ async fn sch_step_hooks_error() {
     proc.print();
 
     assert_eq!(ret.len(), 1);
-    assert_eq!(ret.get(0).unwrap().key, "msg1");
+    assert_eq!(ret.first().unwrap().key, "msg1");
 }
 
 #[tokio::test]
@@ -221,25 +219,25 @@ async fn sch_step_hooks_store() {
         step.with_id("step1").with_setup(|stmts| {
             stmts
                 .add(Act::on_created(|stmts| {
-                    stmts.add(Act::req(|act| act.with_id("act1")))
+                    stmts.add(Act::irq(|act| act.with_key("act1")))
                 }))
                 .add(Act::on_completed(|stmts| {
-                    stmts.add(Act::msg(|msg| msg.with_id("msg2")))
+                    stmts.add(Act::msg(|msg| msg.with_key("msg2")))
                 }))
                 .add(Act::on_before_update(|stmts| {
-                    stmts.add(Act::msg(|msg| msg.with_id("msg3")))
+                    stmts.add(Act::msg(|msg| msg.with_key("msg3")))
                 }))
                 .add(Act::on_updated(|stmts| {
-                    stmts.add(Act::msg(|msg| msg.with_id("msg4")))
+                    stmts.add(Act::msg(|msg| msg.with_key("msg4")))
                 }))
                 .add(Act::on_step(|stmts| {
-                    stmts.add(Act::msg(|msg| msg.with_id("msg5")))
+                    stmts.add(Act::msg(|msg| msg.with_key("msg5")))
                 }))
                 .add(Act::on_timeout(|stmts| {
                     stmts.add(Timeout::new().with_on("2h"))
                 }))
-                .add(Act::on_error_catch(|stmts| {
-                    stmts.add(Catch::new().with_err("err1"))
+                .add(Act::on_catch(|stmts| {
+                    stmts.add(Catch::new().with_on("err1"))
                 }))
         })
     });
@@ -251,11 +249,11 @@ async fn sch_step_hooks_store() {
     let rt2 = rt.clone();
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
-        if e.is_type("req") && e.is_state("created") {
+        if e.is_type("irq") && e.is_state("created") {
             cache.uncache(&pid);
             cache
                 .restore(&rt2, |proc| {
-                    if let Some(task) = proc.task_by_nid("step1").get(0) {
+                    if let Some(task) = proc.task_by_nid("step1").first() {
                         rx.update(|data| *data = task.hooks().len());
                     }
                 })

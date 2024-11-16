@@ -14,7 +14,7 @@ fn env_eval_void() {
     "#;
 
     let result = env.eval::<()>(script);
-    assert_eq!(result.is_ok(), true);
+    assert!(result.is_ok());
 }
 
 #[test]
@@ -56,7 +56,7 @@ fn env_eval_expr() {
     ret > 0
     "#;
     let result = env.eval::<bool>(script);
-    assert_eq!(result.unwrap(), true);
+    assert!(result.unwrap());
 }
 
 #[test]
@@ -215,7 +215,7 @@ async fn env_task_multi_line() {
         env.eval::<()>(r#"$("a", 100)"#).unwrap();
         env.eval::<()>(r#"$("b", 200)"#).unwrap();
         let value = env.eval::<bool>(r#"$("a") < $("b")"#).unwrap();
-        assert_eq!(value, true);
+        assert!(value);
     });
 }
 
@@ -345,7 +345,7 @@ async fn env_env_multi_line() {
         env.eval::<()>(r#"$env("a", 100)"#).unwrap();
         env.eval::<()>(r#"$env("b", 200)"#).unwrap();
         let value = env.eval::<bool>(r#"$env("a") < $env("b")"#).unwrap();
-        assert_eq!(value, true);
+        assert!(value);
     });
 }
 
@@ -388,8 +388,8 @@ fn env_vars_update() {
 #[tokio::test]
 async fn env_act_req() {
     let script = r#"
-    let req = { id: "act2"}
-    act.req(req);
+    let req = { key: "act2"}
+    act.irq(req);
     "#;
     let ret = run_test(script, |e, s| {
         if e.is_key("act2") {
@@ -403,7 +403,7 @@ async fn env_act_req() {
 #[tokio::test]
 async fn env_act_msg() {
     let script = r#"
-    act.msg({ id: "msg1"});
+    act.msg({ key: "msg1"});
     "#;
     let ret = run_test(script, |e, s| {
         if e.is_key("msg1") {
@@ -417,7 +417,7 @@ async fn env_act_msg() {
 #[tokio::test]
 async fn env_act_chain() {
     let script = r#"
-    act.chain({ in: "[ \"u1\", \"u2\" ]", run: [{ msg: { id: "msg1" } }] });
+    act.chain({ in: "[ \"u1\", \"u2\" ]", then: [{ act: "msg", key: "msg1" }] });
     "#;
 
     let ret: i32 = run_test(script, |e, s| {
@@ -435,7 +435,7 @@ async fn env_act_chain() {
 #[tokio::test]
 async fn env_act_each() {
     let script = r#"
-    act.each({ in: "[ \"u1\", \"u2\" ]", run: [{ msg: { id: "msg1" } }] });
+    act.each({ in: "[ \"u1\", \"u2\" ]", then: [{ act: "msg", key: "msg1" }] });
     "#;
 
     let ret: i32 = run_test(script, |e, s| {
@@ -453,7 +453,7 @@ async fn env_act_each() {
 #[tokio::test]
 async fn env_act_block() {
     let script = r#"
-    act.block({ acts: [{ msg: { id: "msg1" } }] });
+    act.block({ then: [{ act: "msg", key: "msg1" }] });
     "#;
 
     let ret = run_test(script, |e, s| {
@@ -468,11 +468,11 @@ async fn env_act_block() {
 #[tokio::test]
 async fn env_act_call() {
     let script = r#"
-    act.call({ mid: "m1" });
+    act.call({ key: "m1" });
     "#;
 
     let ret = run_test(script, |e, s| {
-        if e.is_key("m1") {
+        if e.nid == "m1" && e.r#type == "workflow" {
             s.send(true);
         }
     })
@@ -483,7 +483,7 @@ async fn env_act_call() {
 #[tokio::test]
 async fn env_act_push() {
     let script = r#"
-    act.push({ req: { id: "act1" } });
+    act.push({ act: "irq", key: "act1" });
     "#;
 
     let ret = run_test(script, |e, s| {
@@ -495,10 +495,32 @@ async fn env_act_push() {
     assert!(ret);
 }
 
+#[tokio::test]
+async fn env_act_push_no_act_error() {
+    let script = r#"
+    act.push({ key: "act1" });
+    "#;
+
+    let ret = run_test_result(script, |e, s| {
+        if e.is_key("act1") && e.is_type("irq") {
+            s.send(true);
+        }
+    })
+    .await;
+    assert!(ret.is_err());
+}
+
 async fn run_test<T: Clone + Send + 'static + Default>(
     script: &str,
     exit_if: fn(&Event<Message>, sig: Signal<T>),
 ) -> T {
+    run_test_result(script, exit_if).await.unwrap()
+}
+
+async fn run_test_result<T: Clone + Send + 'static + Default>(
+    script: &str,
+    exit_if: fn(&Event<Message>, sig: Signal<T>),
+) -> Result<T, ActError> {
     let engine = Engine::new();
     let sig1 = engine.signal(());
     let sig2 = engine.signal(T::default());
@@ -508,16 +530,16 @@ async fn run_test<T: Clone + Send + 'static + Default>(
     let m1 = Workflow::new()
         .with_id("m1")
         .with_step(|step| step.with_id("step1"));
-    engine.manager().deploy(&m1).unwrap();
+    engine.executor().model().deploy(&m1).unwrap();
 
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("rust_test")))
     });
     let proc = engine.runtime().start(&workflow, &Vars::new()).unwrap();
     engine.channel().on_message(move |e| {
-        // println!("message: {e:?}");
-        if e.is_key("act1") {
+        println!("message: {e:?}");
+        if e.is_key("rust_test") {
             s1.close();
         }
     });
@@ -526,6 +548,6 @@ async fn run_test<T: Clone + Send + 'static + Default>(
     sig1.recv().await;
     let task = proc.root().unwrap();
     let context = task.create_context();
-    context.eval::<()>(&script).unwrap();
-    sig2.recv().await
+    context.eval::<()>(script)?;
+    Ok(sig2.recv().await)
 }

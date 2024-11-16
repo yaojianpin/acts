@@ -28,12 +28,19 @@ async fn main() {
 
     workflow.print();
     let executor = engine.executor();
-    engine.manager().deploy(&workflow).expect("deploy model");
+    engine
+        .executor()
+        .model()
+        .deploy(&workflow)
+        .expect("deploy model");
 
     let mut vars = Vars::new();
     vars.insert("pid".to_string(), nanoid!().into());
     vars.insert("count".into(), 100.into());
-    executor.start(&workflow.id, &vars).expect("start workflow");
+    executor
+        .proc()
+        .start(&workflow.id, &vars)
+        .expect("start workflow");
 
     engine.channel().on_error(|e| {
         println!("error {:?}", e.state);

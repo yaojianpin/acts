@@ -99,7 +99,7 @@ impl Store {
             return Err(ActError::Action("missing id in package".into()));
         }
 
-        if pack.file_data.len() == 0 {
+        if pack.data.is_empty() {
             return Err(ActError::Action("missing file in package".into()));
         }
 

@@ -14,7 +14,7 @@ mod env {
 
     #[rquickjs::function]
     pub fn get(name: String) -> Option<ActValue> {
-        Context::with(|ctx| ctx.get_env(&name).map(|v| ActValue::new(v)))
+        Context::with(|ctx| ctx.get_env(&name).map(ActValue::new))
     }
 
     #[rquickjs::function]
@@ -26,7 +26,7 @@ mod env {
 }
 
 impl ActModule for Env {
-    fn init<'js>(&self, ctx: &rquickjs::Ctx<'js>) -> Result<()> {
+    fn init(&self, ctx: &rquickjs::Ctx<'_>) -> Result<()> {
         JsModule::declare_def::<js_env, _>(ctx.clone(), "@acts/env").unwrap();
 
         let source = r#"

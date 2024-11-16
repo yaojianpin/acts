@@ -6,7 +6,7 @@ pub struct Package {
     pub name: String,
     pub size: u32,
     #[serde(with = "hex")]
-    pub file_data: Vec<u8>,
+    pub data: Vec<u8>,
     pub create_time: i64,
     pub update_time: i64,
     pub timestamp: i64,

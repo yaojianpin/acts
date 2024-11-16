@@ -5,32 +5,38 @@ inputs:
 outputs:
   value:
 setup:
-  - !on_created
-      - !msg
-        id: fn1
-  - !on_step
-      - !msg
-        id: fn_on_step
-  - !on_completed
-      - !msg
-        id: fn1
+  - act: on_created
+    then:
+      - act: msg
+        key: fn1
+  - act: on_step
+    then:
+      - act: msg
+        key: fn_on_step
+  - act: on_completed
+    then:
+      - act: msg
+        key: fn1
 steps:
   - name: step 1
     id: step1
   - name: step 2
     id: step2
     setup:
-      - !set
-        value: 100
-      - !on_completed
-          - !msg
-            id: fn2
+      - act: set
+        inputs:
+          value: 100
+      - act: on_completed
+        then:
+          - act: msg
+            key: fn2
   - name: step 3
     id: step3
     setup:
-      - !on_completed
-          - !msg
-            id: fn3
+      - act: on_completed
+        then:
+          - act: msg
+            key: fn3
             inputs:
               a: ${ $("value") }
   - name: step 4

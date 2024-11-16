@@ -19,6 +19,12 @@ impl fmt::Debug for Adapter {
     }
 }
 
+impl Default for Adapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Adapter {
     pub fn new() -> Self {
         Self {

@@ -1,4 +1,4 @@
-use acts::{Engine, Manager, Vars, Workflow};
+use acts::{Engine, Executor, Vars, Workflow};
 mod client;
 
 #[tokio::main]
@@ -7,12 +7,13 @@ async fn main() {
 
     let engine = Engine::new();
     let (s1, s2, sig) = engine.signal(()).triple();
-    let mgr = engine.manager();
-    deploy_model(&mgr, include_str!("./model/main.yml"));
-    deploy_model(&mgr, include_str!("./model/sub.yml"));
+    let exec = engine.executor();
+    deploy_model(&exec, include_str!("./model/main.yml"));
+    deploy_model(&exec, include_str!("./model/sub.yml"));
 
     let executor = engine.executor().clone();
     executor
+        .proc()
         .start("main", &Vars::new())
         .expect("start workflow");
 
@@ -50,7 +51,7 @@ async fn main() {
     sig.recv().await;
 }
 
-fn deploy_model(mgr: &Manager, model: &str) {
+fn deploy_model(mgr: &Executor, model: &str) {
     let workflow = Workflow::from_yml(model).unwrap();
-    mgr.deploy(&workflow).expect("deploy model");
+    mgr.model().deploy(&workflow).expect("deploy model");
 }

@@ -41,3 +41,12 @@
 # 0.11.0
 
 - change store db to sqlite
+
+# 0.12.0
+
+- change the act yml format, use act: xx instead of !xx
+- add setup to act and remove on_created, on_completed
+- add act.expose for pack
+- add nid for Message
+- use 'do' act instead of 'cmd'
+- expands executor with msg(), pack(), proc(), task(), act() and mode() instead of manager

@@ -54,7 +54,7 @@ impl Proc {
     pub fn new_with_timestamp(pid: &str, timestamp: i64, rt: &Arc<Runtime>) -> Arc<Self> {
         let tree = NodeTree::new();
         // let cache = r.scher().cache();
-        let proc = Arc::new(Proc {
+        Arc::new(Proc {
             id: pid.to_string(),
             tree: Arc::new(RwLock::new(tree)),
             state: Arc::new(RwLock::new(TaskState::None)),
@@ -62,17 +62,12 @@ impl Proc {
             end_time: Arc::new(RwLock::new(0)),
             tasks: Arc::new(RwLock::new(TaskTree::new())),
             // sync: Arc::new(std::sync::Mutex::new(0)),
-            timestamp: timestamp,
+            timestamp,
             env_local: Arc::new(RwLock::new(Vars::new())),
             err: Arc::new(RwLock::new(None)),
             runtime: rt.clone(),
             // cache: cache.clone(),
-        });
-
-        // push the proc to cache
-        // cache.push_proc(&proc);
-
-        proc
+        })
     }
 
     pub fn data(&self) -> Vars {
@@ -203,7 +198,7 @@ impl Proc {
     pub fn find_tasks(&self, predicate: impl Fn(&Arc<Task>) -> bool) -> Vec<Arc<Task>> {
         let tasks = self.tasks.read().unwrap();
         let mut ret = tasks.find_tasks(predicate);
-        ret.sort_by(|a, b| a.start_time().cmp(&b.start_time()));
+        ret.sort_by_key(|a| a.start_time());
 
         ret
     }
@@ -233,7 +228,7 @@ impl Proc {
     }
 
     pub fn create_context(self: &Arc<Self>, task: &Arc<Task>) -> Context {
-        Context::new(&self, task)
+        Context::new(self, task)
     }
 
     pub fn set_state(&self, state: TaskState) {
@@ -292,13 +287,11 @@ impl Proc {
                     action.tid
                 )));
             }
-        } else {
-            if !task.is_kind(NodeKind::Act) {
-                return Err(ActError::Action(format!(
-                    "The task '{}' is not an Act task",
-                    action.tid
-                )));
-            }
+        } else if !task.is_kind(NodeKind::Act) {
+            return Err(ActError::Action(format!(
+                "The task '{}' is not an Act task",
+                action.tid
+            )));
         }
 
         // check the outputs
@@ -307,7 +300,7 @@ impl Proc {
         let rets = task.node().content.rets();
         if rets.len() > 0 {
             let mut options = Vars::new();
-            for (key, _) in &rets {
+            for (ref key, _) in &rets {
                 if !action.options.contains_key(key) {
                     return Err(ActError::Action(format!(
                         "the options is not satisfied with act's rets '{}' in task({})",
@@ -368,7 +361,7 @@ impl Proc {
             // a proc only has one root task
             tid = consts::TASK_ROOT_TID.to_string();
         }
-        let task = Arc::new(Task::new(&self, &tid, node.clone(), &self.runtime));
+        let task = Arc::new(Task::new(self, &tid, node.clone(), &self.runtime));
         if let Some(prev) = prev {
             task.set_prev(Some(prev.id.clone()));
         }
@@ -467,6 +460,7 @@ impl Proc {
 
         let tasks = task.children();
         for child in tasks {
+            #[allow(clippy::only_used_in_recursion)]
             self.visit(&child, f.clone());
         }
     }

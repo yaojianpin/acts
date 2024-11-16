@@ -26,7 +26,7 @@ fn deploy(c: &mut Criterion) {
             let text = include_str!("./start.yml");
             let workflow = Workflow::from_yml(text).unwrap();
             b.iter(move || {
-                engine.manager().deploy(&workflow).unwrap();
+                engine.executor().model().deploy(&workflow).unwrap();
             })
         });
     });
@@ -39,9 +39,13 @@ fn start(c: &mut Criterion) {
             let engine = Engine::new();
             let text = include_str!("./start.yml");
             let workflow = Workflow::from_yml(text).unwrap();
-            engine.manager().deploy(&workflow).unwrap();
+            engine.executor().model().deploy(&workflow).unwrap();
             b.iter(move || {
-                engine.executor().start(&workflow.id, &Vars::new()).unwrap();
+                engine
+                    .executor()
+                    .proc()
+                    .start(&workflow.id, &Vars::new())
+                    .unwrap();
             })
         });
     });
@@ -58,7 +62,7 @@ fn act(c: &mut Criterion) {
             let (s, sig) = engine.signal(()).double();
             let text = include_str!("./act.yml");
             let workflow = Workflow::from_yml(text).unwrap();
-            engine.manager().deploy(&workflow).unwrap();
+            engine.executor().model().deploy(&workflow).unwrap();
 
             let time = Arc::new(Mutex::new(Duration::new(0, 0)));
             let count = Arc::new(Mutex::new(0));
@@ -70,6 +74,7 @@ fn act(c: &mut Criterion) {
                     let start = Instant::now();
                     engine
                         .executor()
+                        .act()
                         .complete(&e.pid, &e.tid, &Vars::new())
                         .unwrap();
                     let elapsed = start.elapsed();
@@ -84,7 +89,11 @@ fn act(c: &mut Criterion) {
             });
 
             for _ in 0..iters {
-                let _ = e2.executor().start(&workflow.id, &Vars::new()).unwrap();
+                let _ = e2
+                    .executor()
+                    .proc()
+                    .start(&workflow.id, &Vars::new())
+                    .unwrap();
             }
             sig.recv().await;
             let time = time.lock().unwrap();

@@ -1,13 +1,13 @@
-use crate::{sch::ActTask, utils::consts, ActError, Call, Context, Executor, Result};
+use crate::{sch::ActTask, utils::consts, Call, Context, Executor, Result};
 
 impl ActTask for Call {
     fn init(&self, ctx: &Context) -> Result<()> {
         let task = ctx.task();
-        if self.mid.is_empty() {
-            task.set_err(
-                &ActError::Model(format!("cannot find 'mid' in act '{}'", task.id)).into(),
-            );
-            return self.error(ctx);
+        if self.key.is_empty() {
+            return Err(crate::ActError::Action(format!(
+                "cannot find 'key' in act '{}'",
+                task.node.id
+            )));
         }
         task.set_emit_disabled(true);
         Ok(())
@@ -20,7 +20,7 @@ impl ActTask for Call {
         let mut inputs = task.inputs();
         inputs.set(consts::ACT_USE_PARENT_PROC_ID, &ctx.proc.id());
         inputs.set(consts::ACT_USE_PARENT_TASK_ID, &task.id);
-        executor.start(&self.mid, &inputs)?;
+        executor.proc().start(&self.key, &inputs)?;
 
         Ok(())
     }

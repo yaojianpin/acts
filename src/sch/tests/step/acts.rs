@@ -10,7 +10,7 @@ use crate::{
 async fn sch_step_acts_msg() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::msg(|msg| msg.with_id("msg1")))
+            .with_act(Act::msg(|msg| msg.with_key("msg1")))
     });
 
     workflow.print();
@@ -27,14 +27,16 @@ async fn sch_step_acts_msg() {
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(ret.len(), 1);
-    assert_eq!(ret.get(0).unwrap().key, "msg1");
+    assert_eq!(ret.first().unwrap().key, "msg1");
 }
 
 #[tokio::test]
 async fn sch_step_acts_req() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|req: crate::Req| req.with_id("act1")))
+            .with_act(Act::irq(|req: crate::Irq| {
+                req.with_key("act1")
+            }))
     });
 
     workflow.print();
@@ -42,7 +44,7 @@ async fn sch_step_acts_req() {
         create_proc_signal::<Vec<Message>>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
-        if e.is_type("req") {
+        if e.is_type("irq") {
             rx.update(|data| data.push(e.inner().clone()));
             rx.close();
         }
@@ -51,7 +53,7 @@ async fn sch_step_acts_req() {
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(ret.len(), 1);
-    assert_eq!(ret.get(0).unwrap().key, "act1");
+    assert_eq!(ret.first().unwrap().key, "act1");
 }
 
 #[tokio::test]
@@ -69,7 +71,7 @@ async fn sch_step_acts_set() {
     proc.print();
     assert_eq!(
         proc.task_by_nid("step1")
-            .get(0)
+            .first()
             .unwrap()
             .data()
             .get::<i32>("a")
@@ -99,8 +101,9 @@ async fn sch_step_acts_if_true() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_input("a", json!(10)).with_id("step1").with_act({
             Act::r#if(|c| {
-                c.with_on(r#"$("a") > 0"#)
-                    .with_then(|stmts| stmts.add(Act::req(|act| act.with_id("act1"))))
+                c.with_on(r#"$("a") > 0"#).with_then(|stmts| {
+                    stmts.add(Act::irq(|act| act.with_key("act1")).with_id("act1"))
+                })
             })
         })
     });
@@ -125,7 +128,7 @@ async fn sch_step_acts_if_false() {
         step.with_input("a", json!(10)).with_id("step1").with_act({
             Act::r#if(|c| {
                 c.with_on(r#"$("a") < 0"#)
-                    .with_then(|stmts| stmts.add(Act::req(|act| act.with_id("act1"))))
+                    .with_then(|stmts| stmts.add(Act::irq(|act| act.with_key("act1"))))
             })
         })
     });
@@ -149,8 +152,9 @@ async fn sch_step_acts_each() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_input("a", json!(10)).with_id("step1").with_act({
             Act::each(|each| {
-                each.with_in(r#"["u1", "u2"]"#)
-                    .with_run(|stmts| stmts.add(Act::req(|act| act.with_id("act1"))))
+                each.with_in(r#"["u1", "u2"]"#).with_then(|stmts| {
+                    stmts.add(Act::irq(|act| act.with_key("act1")).with_id("act1"))
+                })
             })
         })
     });
@@ -167,12 +171,12 @@ async fn sch_step_acts_each() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act1").get(0).unwrap().state(),
+        proc.task_by_nid("act1").first().unwrap().state(),
         TaskState::Interrupt
     );
     assert_eq!(
         proc.task_by_nid("act1")
-            .get(0)
+            .first()
             .unwrap()
             .inputs()
             .get_value(consts::ACT_VALUE)
@@ -196,7 +200,7 @@ async fn sch_step_acts_chain() {
         step.with_input("a", json!(10)).with_id("step1").with_act({
             Act::chain(|act| {
                 act.with_in(r#"["u1", "u2"]"#)
-                    .with_run(|stmts| stmts.add(Act::req(|act| act.with_id("act1"))))
+                    .with_then(|stmts| stmts.add(Act::irq(|act| act.with_key("act1"))))
             })
         })
     });
@@ -223,10 +227,8 @@ async fn sch_step_acts_pack() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_input("a", json!(10)).with_id("step1").with_act({
             Act::block(|act| {
-                act.with_acts(|stmts| stmts.add(Act::msg(|msg| msg.with_id("msg1"))))
-                    .with_next(|act| {
-                        act.with_acts(|stmts| stmts.add(Act::msg(|msg| msg.with_id("msg2"))))
-                    })
+                act.with_then(|stmts| stmts.add(Act::msg(|msg| msg.with_key("msg1"))))
+                    .with_next(|act| act.with_act("msg").with_key("msg2"))
             })
         })
     });
@@ -236,7 +238,7 @@ async fn sch_step_acts_pack() {
         create_proc_signal::<Vec<String>>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {:?}", e.inner());
-        if e.is_type("msg") {
+        if e.is_type("msg") && e.is_state("created") {
             rx.update(|data| data.push(e.key.clone()));
             e.do_action(&e.pid, &e.tid, consts::EVT_NEXT, &Vars::new())
                 .unwrap();
@@ -253,7 +255,7 @@ async fn sch_step_acts_cmd() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_input("a", json!(10))
             .with_id("step1")
-            .with_act(Act::cmd(|act| act.with_name(consts::EVT_NEXT)))
+            .with_act(Act::cmd(|act| act.with_key(consts::EVT_NEXT)))
     });
 
     workflow.print();
@@ -262,7 +264,7 @@ async fn sch_step_acts_cmd() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("step1").get(0).unwrap().state(),
+        proc.task_by_nid("step1").first().unwrap().state(),
         TaskState::Completed
     );
 }

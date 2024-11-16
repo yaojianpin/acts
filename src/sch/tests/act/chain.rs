@@ -9,8 +9,9 @@ async fn sch_act_chain_list() {
     let mut main = Workflow::new().with_id("main").with_step(|step| {
         step.with_id("step1").with_act({
             Act::chain(|act| {
-                act.with_in(r#"["u1", "u2"]"#)
-                    .with_run(|stmts| stmts.add(Act::req(|act| act.with_id("act1"))))
+                act.with_in(r#"["u1", "u2"]"#).with_then(|stmts| {
+                    stmts.add(Act::irq(|act| act.with_key("act1")).with_id("act1"))
+                })
             })
         })
     });
@@ -38,8 +39,9 @@ async fn sch_act_chain_order() {
     let mut main = Workflow::new().with_id("main").with_step(|step| {
         step.with_id("step1").with_act({
             Act::chain(|act| {
-                act.with_in(r#"["u1", "u2"]"#)
-                    .with_run(|stmts| stmts.add(Act::req(|act| act.with_id("act1"))))
+                act.with_in(r#"["u1", "u2"]"#).with_then(|stmts| {
+                    stmts.add(Act::irq(|act| act.with_key("act1")).with_id("act1"))
+                })
             })
         })
     });
@@ -60,7 +62,7 @@ async fn sch_act_chain_order() {
     scher.launch(&proc);
     let ret = tx.recv().await;
     proc.print();
-    let time1 = ret.get(0).unwrap();
+    let time1 = ret.first().unwrap();
     let time2 = ret.get(1).unwrap();
     assert!(time2 - time1 > 1000);
 }
@@ -72,8 +74,9 @@ async fn sch_act_chain_var() {
             .with_act(Act::set(Vars::new().with("a", ["u1", "u2"])))
             .with_act({
                 Act::chain(|act| {
-                    act.with_in(r#"$("a")"#)
-                        .with_run(|stmts| stmts.add(Act::req(|act| act.with_id("act1"))))
+                    act.with_in(r#"$("a")"#).with_then(|stmts| {
+                        stmts.add(Act::irq(|act| act.with_key("act1")).with_id("act1"))
+                    })
                 })
             })
     });
@@ -102,7 +105,7 @@ async fn sch_act_chain_var_not_exist() {
         step.with_id("step1").with_act({
             Act::chain(|act| {
                 act.with_in(r#"$("a")"#)
-                    .with_run(|stmts| stmts.add(Act::req(|act| act.with_id("act1"))))
+                    .with_then(|stmts| stmts.add(Act::irq(|act| act.with_key("act1"))))
             })
         })
     });

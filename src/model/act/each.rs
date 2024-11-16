@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 pub struct Each {
     #[serde(default)]
     pub r#in: String,
-    pub run: Vec<Act>,
+    pub then: Vec<Act>,
 }
 
 impl Each {
@@ -15,7 +15,7 @@ impl Each {
         }
 
         let result = ctx.eval::<Vec<String>>(scr)?;
-        if result.len() == 0 {
+        if result.is_empty() {
             return Err(ActError::Runtime(format!(
                 "each.in is empty in task({})",
                 ctx.task().id
@@ -33,9 +33,15 @@ impl Each {
         self
     }
 
-    pub fn with_run(mut self, build: fn(Vec<Act>) -> Vec<Act>) -> Self {
+    pub fn with_then(mut self, build: fn(Vec<Act>) -> Vec<Act>) -> Self {
         let stmts = Vec::new();
-        self.run = build(stmts);
+        self.then = build(stmts);
         self
+    }
+}
+
+impl From<Each> for Act {
+    fn from(val: Each) -> Self {
+        Act::each(|_| val.clone())
     }
 }

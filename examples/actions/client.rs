@@ -27,7 +27,9 @@ impl Client {
             match self.actions.get(&message.key) {
                 Some(action) => {
                     let outputs = action(&message.inputs);
-                    executor.complete(&message.pid, &message.tid, &outputs)?;
+                    executor
+                        .act()
+                        .complete(&message.pid, &message.tid, &outputs)?;
                     println!("action state: key={}", &message.key);
                     println!("inputs:{:?}", &message.inputs);
                     println!("outputs:{:?}", &outputs);

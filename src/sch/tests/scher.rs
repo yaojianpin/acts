@@ -21,7 +21,7 @@ async fn sch_scher_next() {
     });
 
     let ret = rt.scher().next().await;
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
@@ -38,7 +38,7 @@ async fn sch_scher_task() {
     });
 
     let ret = rt.scher().next().await;
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
@@ -47,7 +47,7 @@ async fn sch_scher_start_default() {
     let rt = engine.runtime();
     let workflow = Workflow::new();
     let result = rt.start(&workflow, &Vars::new());
-    assert_eq!(result.is_ok(), true);
+    assert!(result.is_ok());
 }
 
 #[tokio::test]
@@ -73,8 +73,8 @@ async fn sch_scher_do_action() {
     let sig = engine.signal(());
     let rx = sig.clone();
     let workflow = Workflow::new().with_step(|step| {
-        step.with_name("step1").with_act(Act::req(|act| {
-            act.with_id("act1").with_input("uid", json!("u1"))
+        step.with_name("step1").with_act(Act::irq(|act| {
+            act.with_key("act1").with_ret("uid", json!("u1"))
         }))
     });
     let s = rt.clone();
@@ -91,5 +91,5 @@ async fn sch_scher_do_action() {
     rt.launch(&proc);
     sig.recv().await;
 
-    assert_eq!(proc.state().is_success(), true);
+    assert!(proc.state().is_success());
 }

@@ -84,7 +84,7 @@ impl Serialize for TimeoutLimit {
 impl TimeoutLimit {
     pub fn parse(expr: &str) -> Result<Self> {
         let re = Regex::new(r"^(.*)(s|m|h|d)$").unwrap();
-        let caps = re.captures(&expr);
+        let caps = re.captures(expr);
 
         if let Some(caps) = caps {
             let value = caps.get(1).map_or("0", |m| m.as_str());
@@ -133,7 +133,7 @@ impl Timeout {
     }
     pub fn with_on(mut self, v: &str) -> Self {
         self.on =
-            TimeoutLimit::parse(v).expect(&format!("failed with error format '{v}' for 'on' "));
+            TimeoutLimit::parse(v).unwrap_or_else(|_| panic!("failed with error format '{v}' for 'on' "));
         self
     }
 
@@ -142,5 +142,11 @@ impl Timeout {
         self.then = build(stmts);
 
         self
+    }
+}
+
+impl From<Timeout> for Act {
+    fn from(val: Timeout) -> Self {
+        Act::timeout(|_| val.clone())
     }
 }

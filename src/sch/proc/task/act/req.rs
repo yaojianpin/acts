@@ -1,30 +1,35 @@
-use super::TaskLifeCycle;
 use crate::{
     sch::{Context, TaskState},
-    ActTask, Req, Result,
+    ActTask, Irq, Result,
 };
 use async_trait::async_trait;
 
 #[async_trait]
-impl ActTask for Req {
+impl ActTask for Irq {
     fn init(&self, ctx: &Context) -> Result<()> {
         let task = ctx.task();
-        for s in self.on_created.iter() {
-            task.add_hook_stmts(TaskLifeCycle::Created, s);
+        if self.key.is_empty() {
+            return Err(crate::ActError::Action(format!(
+                "cannot find 'key' in act '{}'",
+                task.node.id
+            )));
         }
-        for s in self.on_completed.iter() {
-            task.add_hook_stmts(TaskLifeCycle::Completed, s);
-        }
+        // for s in self.on_created.iter() {
+        //     task.add_hook_stmts(TaskLifeCycle::Created, s);
+        // }
+        // for s in self.on_completed.iter() {
+        //     task.add_hook_stmts(TaskLifeCycle::Completed, s);
+        // }
 
-        for s in self.catches.iter() {
-            task.add_hook_catch(TaskLifeCycle::ErrorCatch, s);
-        }
+        // for s in self.catches.iter() {
+        //     task.add_hook_catch(TaskLifeCycle::ErrorCatch, s);
+        // }
 
-        if self.timeout.len() > 0 {
-            for s in &self.timeout {
-                task.add_hook_timeout(TaskLifeCycle::Timeout, s);
-            }
-        }
+        // if self.timeout.len() > 0 {
+        //     for s in &self.timeout {
+        //         task.add_hook_timeout(TaskLifeCycle::Timeout, s);
+        //     }
+        // }
 
         task.set_state(TaskState::Interrupt);
         Ok(())
@@ -52,13 +57,11 @@ impl ActTask for Req {
                 }
             }
 
-            if count == tasks.len() {
-                if !task.state().is_completed() {
-                    task.set_state(TaskState::Completed);
-                }
+            if count == tasks.len() && !task.state().is_completed() {
+                task.set_state(TaskState::Completed);
             }
         }
 
-        return Ok(true);
+        Ok(true)
     }
 }

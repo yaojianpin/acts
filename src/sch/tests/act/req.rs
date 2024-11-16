@@ -12,7 +12,7 @@ use std::sync::Mutex;
 async fn sch_act_req_one() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_setup(|setup| setup.add(Act::req(|act| act.with_id("act1"))))
+            .with_setup(|setup| setup.add(Act::irq(|act| act.with_key("act1")).with_id("act1")))
     });
 
     workflow.print();
@@ -27,7 +27,7 @@ async fn sch_act_req_one() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act1").get(0).unwrap().state(),
+        proc.task_by_nid("act1").first().unwrap().state(),
         TaskState::Interrupt
     );
 }
@@ -36,19 +36,22 @@ async fn sch_act_req_one() {
 async fn sch_act_req_multi_threads() {
     let workflow = Workflow::new().with_id("m1").with_step(|step| {
         step.with_id("step1")
-            .with_setup(|setup| setup.add(Act::req(|act| act.with_id("act1"))))
+            .with_setup(|setup| setup.add(Act::irq(|act| act.with_key("act1"))))
     });
 
     workflow.print();
     let engine = Builder::new().cache_size(10).build();
-    engine.manager().deploy(&workflow).unwrap();
+    engine.executor().model().deploy(&workflow).unwrap();
     let (s1, s2) = engine.signal(false).double();
     let count = Arc::new(Mutex::new(0));
     let len = 1000;
     let e2 = engine.clone();
     engine.channel().on_message(move |e| {
         if e.is_key("act1") && e.is_state("created") {
-            let ret = engine.executor().complete(&e.pid, &e.tid, &Vars::new());
+            let ret = engine
+                .executor()
+                .act()
+                .complete(&e.pid, &e.tid, &Vars::new());
             if ret.is_err() {
                 println!("error: {:?}", ret.err().unwrap());
                 s1.send(false);
@@ -64,7 +67,7 @@ async fn sch_act_req_multi_threads() {
     });
 
     for _ in 0..len {
-        e2.executor().start("m1", &Vars::new()).unwrap();
+        e2.executor().proc().start("m1", &Vars::new()).unwrap();
     }
 
     let ret = s2.recv().await;
@@ -76,9 +79,9 @@ async fn sch_act_req_many() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_setup(|setup| {
             setup
-                .add(Act::req(|act| act.with_id("act1")))
-                .add(Act::req(|act| act.with_id("act2")))
-                .add(Act::req(|act| act.with_id("act3")))
+                .add(Act::irq(|act| act.with_key("act1")).with_id("act1"))
+                .add(Act::irq(|act| act.with_key("act2")).with_id("act2"))
+                .add(Act::irq(|act| act.with_key("act3")).with_id("act3"))
         })
     });
 
@@ -94,15 +97,15 @@ async fn sch_act_req_many() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act1").get(0).unwrap().state(),
+        proc.task_by_nid("act1").first().unwrap().state(),
         TaskState::Interrupt
     );
     assert_eq!(
-        proc.task_by_nid("act2").get(0).unwrap().state(),
+        proc.task_by_nid("act2").first().unwrap().state(),
         TaskState::Interrupt
     );
     assert_eq!(
-        proc.task_by_nid("act3").get(0).unwrap().state(),
+        proc.task_by_nid("act3").first().unwrap().state(),
         TaskState::Interrupt
     );
 }
@@ -110,8 +113,9 @@ async fn sch_act_req_many() {
 #[tokio::test]
 async fn sch_act_req_with_inputs_value() {
     let mut workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_setup(|setup| setup.add(Act::req(|act| act.with_id("act1").with_input("a", 5))))
+        step.with_id("step1").with_setup(|setup| {
+            setup.add(Act::irq(|act| act.with_key("act1").with_input("a", 5)).with_id("act1"))
+        })
     });
 
     workflow.print();
@@ -119,7 +123,7 @@ async fn sch_act_req_with_inputs_value() {
         create_proc_signal::<Vars>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
-        if e.is_type("req") && e.is_state("created") {
+        if e.is_type("irq") && e.is_state("created") {
             rx.send(e.inputs.clone());
         }
     });
@@ -127,7 +131,7 @@ async fn sch_act_req_with_inputs_value() {
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act1").get(0).unwrap().state(),
+        proc.task_by_nid("act1").first().unwrap().state(),
         TaskState::Interrupt
     );
     assert_eq!(ret.get::<i32>("a").unwrap(), 5);
@@ -136,11 +140,9 @@ async fn sch_act_req_with_inputs_value() {
 #[tokio::test]
 async fn sch_act_req_with_inputs_var() {
     let mut workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_input("a", json!(5))
-            .with_act(Act::req(|act| {
-                act.with_id("act1").with_input("a", r#"${ $("a") }"#)
-            }))
+        step.with_id("step1").with_input("a", json!(5)).with_act(
+            Act::irq(|act| act.with_key("act1").with_input("a", r#"${ $("a") }"#)).with_id("act1"),
+        )
     });
 
     workflow.print();
@@ -148,7 +150,7 @@ async fn sch_act_req_with_inputs_var() {
         create_proc_signal::<Vars>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
-        if e.is_type("req") && e.is_state("created") {
+        if e.is_type("irq") && e.is_state("created") {
             rx.send(e.inputs.clone());
         }
     });
@@ -156,7 +158,7 @@ async fn sch_act_req_with_inputs_var() {
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act1").get(0).unwrap().state(),
+        proc.task_by_nid("act1").first().unwrap().state(),
         TaskState::Interrupt
     );
     assert_eq!(ret.get::<i32>("a").unwrap(), 5);
@@ -165,13 +167,9 @@ async fn sch_act_req_with_inputs_var() {
 #[tokio::test]
 async fn sch_act_req_complete() {
     let mut workflow = Workflow::new().with_step(|step| {
-        step.with_name("step1").with_act({
-            Act::req(|act| {
-                act.with_id("fn1")
-                    .with_name("fn 1")
-                    .with_input("uid", json!("u1"))
-            })
-        })
+        step.with_name("step1").with_act(Act::irq(|act| {
+            act.with_key("fn1").with_input("uid", json!("u1"))
+        }))
     });
     workflow.id = utils::longid();
     let (proc, scher, emitter, tx, rx) =
@@ -179,19 +177,17 @@ async fn sch_act_req_complete() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.is_source("act") {
-            if e.state() == MessageState::Created {
-                let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
-                let mut options = Vars::new();
-                options.insert("uid".to_string(), json!(uid.to_string()));
+        if e.is_source("act") && e.state() == MessageState::Created {
+            let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
+            let mut options = Vars::new();
+            options.insert("uid".to_string(), json!(uid.to_string()));
 
-                let action = Action::new(&e.pid, &e.tid, consts::EVT_NEXT, &options);
-                if let Err(err) = s.do_action(&action) {
-                    println!("error: {}", err);
-                    rx.send(false);
-                } else {
-                    rx.send(true);
-                }
+            let action = Action::new(&e.pid, &e.tid, consts::EVT_NEXT, &options);
+            if let Err(err) = s.do_action(&action) {
+                println!("error: {}", err);
+                rx.send(false);
+            } else {
+                rx.send(true);
             }
         }
     });
@@ -209,22 +205,14 @@ async fn sch_act_req_cancel_normal() {
     let mut workflow = Workflow::new()
         .with_id(&utils::longid())
         .with_step(|step| {
-            step.with_name("step1").with_act({
-                Act::req(|act| {
-                    act.with_id("fn1")
-                        .with_name("fn 1")
-                        .with_input("uid", json!("a"))
-                })
-            })
+            step.with_name("step1").with_act(Act::irq(|act| {
+                act.with_key("fn1").with_input("uid", json!("a"))
+            }))
         })
         .with_step(|step| {
-            step.with_name("step2").with_act({
-                Act::req(|act| {
-                    act.with_id("fn2")
-                        .with_name("fn 2")
-                        .with_input("uid", json!("b"))
-                })
-            })
+            step.with_name("step2").with_act(Act::irq(|act| {
+                act.with_key("fn2").with_input("uid", json!("b"))
+            }))
         });
 
     workflow.print();
@@ -277,22 +265,16 @@ async fn sch_act_req_back() {
     let mut workflow = Workflow::new()
         .with_id(&utils::longid())
         .with_step(|step| {
-            step.with_id("step1").with_name("step1").with_act({
-                Act::req(|act| {
-                    act.with_id("fn1")
-                        .with_name("fn 1")
-                        .with_input("uid", json!("a"))
-                })
-            })
+            step.with_id("step1")
+                .with_name("step1")
+                .with_act(Act::irq(|act| {
+                    act.with_key("fn1").with_input("uid", json!("a"))
+                }))
         })
         .with_step(|step| {
-            step.with_name("step2").with_act({
-                Act::req(|act| {
-                    act.with_id("fn2")
-                        .with_name("fn 2")
-                        .with_input("uid", json!("b"))
-                })
-            })
+            step.with_name("step2").with_act(Act::irq(|act| {
+                act.with_key("fn2").with_input("uid", json!("b"))
+            }))
         });
     let (proc, scher, emitter, tx, rx) =
         create_proc_signal::<bool>(&mut workflow, &utils::longid());
@@ -337,22 +319,16 @@ async fn sch_act_req_abort() {
     let mut workflow = Workflow::new()
         .with_id(&utils::longid())
         .with_step(|step| {
-            step.with_id("step1").with_name("step1").with_act({
-                Act::req(|act| {
-                    act.with_id("fn1")
-                        .with_name("fn 1")
-                        .with_input("uid", json!("a"))
-                })
-            })
+            step.with_id("step1")
+                .with_name("step1")
+                .with_act(Act::irq(|act| {
+                    act.with_key("fn1").with_input("uid", json!("a"))
+                }))
         })
         .with_step(|step| {
-            step.with_name("step2").with_act({
-                Act::req(|act| {
-                    act.with_id("fn2")
-                        .with_name("fn 2")
-                        .with_input("uid", json!("b"))
-                })
-            })
+            step.with_name("step2").with_act(Act::irq(|act| {
+                act.with_key("fn2").with_input("uid", json!("b"))
+            }))
         });
     let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 
@@ -375,13 +351,9 @@ async fn sch_act_req_abort() {
 #[tokio::test]
 async fn sch_act_req_submit() {
     let mut workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
-        step.with_id("step1").with_act({
-            Act::req(|act| {
-                act.with_id("fn1")
-                    .with_name("fn 1")
-                    .with_input("uid", json!("a"))
-            })
-        })
+        step.with_id("step1").with_act(
+            Act::irq(|act| act.with_key("fn1").with_input("uid", json!("a"))).with_id("fn1"),
+        )
     });
 
     let pid = utils::longid();
@@ -404,11 +376,11 @@ async fn sch_act_req_submit() {
     scher.launch(&proc);
     tx.recv().await;
     assert_eq!(
-        proc.task_by_nid("fn1").get(0).unwrap().state(),
+        proc.task_by_nid("fn1").first().unwrap().state(),
         TaskState::Submitted
     );
     assert_eq!(
-        proc.task_by_nid("step1").get(0).unwrap().state(),
+        proc.task_by_nid("step1").first().unwrap().state(),
         TaskState::Completed
     );
 }
@@ -416,13 +388,9 @@ async fn sch_act_req_submit() {
 #[tokio::test]
 async fn sch_act_req_skip() {
     let mut workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
-        step.with_id("step1").with_act({
-            Act::req(|act| {
-                act.with_id("fn1")
-                    .with_name("fn 1")
-                    .with_input("uid", json!("a"))
-            })
-        })
+        step.with_id("step1").with_act(
+            Act::irq(|act| act.with_key("fn1").with_input("uid", json!("a"))).with_id("fn1"),
+        )
     });
 
     let pid = utils::longid();
@@ -444,11 +412,11 @@ async fn sch_act_req_skip() {
     scher.launch(&proc);
     tx.recv().await;
     assert_eq!(
-        proc.task_by_nid("fn1").get(0).unwrap().state(),
+        proc.task_by_nid("fn1").first().unwrap().state(),
         TaskState::Skipped
     );
     assert_eq!(
-        proc.task_by_nid("step1").get(0).unwrap().state(),
+        proc.task_by_nid("step1").first().unwrap().state(),
         TaskState::Completed
     );
 }
@@ -458,9 +426,9 @@ async fn sch_act_req_skip_next() {
     let mut workflow = Workflow::new()
         .with_id(&utils::longid())
         .with_step(|step| {
-            step.with_id("step1").with_act(Act::req(|act| {
-                act.with_id("act1").with_input("uid", json!("a"))
-            }))
+            step.with_id("step1").with_act(
+                Act::irq(|act| act.with_key("act1").with_input("uid", json!("a"))).with_id("act1"),
+            )
         })
         .with_step(|step| step.with_id("step2"));
 
@@ -483,15 +451,15 @@ async fn sch_act_req_skip_next() {
     scher.launch(&proc);
     tx.recv().await;
     assert_eq!(
-        proc.task_by_nid("act1").get(0).unwrap().state(),
+        proc.task_by_nid("act1").first().unwrap().state(),
         TaskState::Skipped
     );
     assert_eq!(
-        proc.task_by_nid("step1").get(0).unwrap().state(),
+        proc.task_by_nid("step1").first().unwrap().state(),
         TaskState::Completed
     );
     assert_eq!(
-        proc.task_by_nid("step2").get(0).unwrap().state(),
+        proc.task_by_nid("step2").first().unwrap().state(),
         TaskState::Completed
     );
 }
@@ -499,9 +467,9 @@ async fn sch_act_req_skip_next() {
 #[tokio::test]
 async fn sch_act_req_error_action() {
     let mut workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
-        step.with_id("step1").with_act(Act::req(|act| {
-            act.with_id("fn1").with_input("uid", json!("a"))
-        }))
+        step.with_id("step1").with_act(
+            Act::irq(|act| act.with_key("fn1").with_input("uid", json!("a"))).with_id("fn1"),
+        )
     });
 
     let pid = utils::longid();
@@ -513,10 +481,8 @@ async fn sch_act_req_error_action() {
             if uid == "a" && e.state() == MessageState::Created {
                 let mut options = Vars::new();
                 options.insert("uid".to_string(), json!(uid.to_string()));
-                options.insert(
-                    consts::ACT_ERR_KEY.to_string(),
-                    json!({ "ecode": "1", "message": "biz error"}),
-                );
+                options.set("ecode", "1");
+                options.set("error", "biz error");
 
                 let action = Action::new(&e.pid, &e.tid, "error", &options);
                 s.do_action(&action).unwrap();
@@ -526,16 +492,21 @@ async fn sch_act_req_error_action() {
 
     scher.launch(&proc);
     tx.recv().await;
-    assert!(proc.task_by_nid("fn1").get(0).unwrap().state().is_error());
-    assert!(proc.task_by_nid("step1").get(0).unwrap().state().is_error());
+    assert!(proc.task_by_nid("fn1").first().unwrap().state().is_error());
+    assert!(proc
+        .task_by_nid("step1")
+        .first()
+        .unwrap()
+        .state()
+        .is_error());
     assert!(proc.state().is_error());
 }
 
 #[tokio::test]
 async fn sch_act_req_error_action_without_err_code() {
     let mut workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
-        step.with_id("step1").with_act(Act::req(|act| {
-            act.with_id("fn1").with_input("uid", json!("a"))
+        step.with_id("step1").with_act(Act::irq(|act| {
+            act.with_key("fn1").with_input("uid", json!("a"))
         }))
     });
 
@@ -559,20 +530,18 @@ async fn sch_act_req_error_action_without_err_code() {
 
     scher.launch(&proc);
     let ret = tx.recv().await;
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
 async fn sch_act_req_not_support_action() {
     let count = Arc::new(Mutex::new(0));
     let mut workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
-        step.with_id("step1").with_name("step1").with_act({
-            Act::req(|act| {
-                act.with_id("fn1")
-                    .with_name("fn 1")
-                    .with_input("uid", json!("a"))
-            })
-        })
+        step.with_id("step1")
+            .with_name("step1")
+            .with_act(Act::irq(|act| {
+                act.with_key("fn1").with_input("uid", json!("a"))
+            }))
     });
     let (proc, scher, emitter, tx, rx) =
         create_proc_signal::<bool>(&mut workflow, &utils::longid());
@@ -607,17 +576,13 @@ async fn sch_act_req_next_by_complete_state() {
         .with_step(|step| {
             step.with_id("step1")
                 .with_name("step1")
-                .with_act(Act::req(|act| {
-                    act.with_id("fn1")
-                        .with_name("fn 1")
-                        .with_input("uid", json!("a"))
+                .with_act(Act::irq(|act| {
+                    act.with_key("fn1").with_input("uid", json!("a"))
                 }))
         })
         .with_step(|step| {
-            step.with_name("step2").with_act(Act::req(|act| {
-                act.with_id("fn2")
-                    .with_name("fn 2")
-                    .with_input("uid", json!("b"))
+            step.with_name("step2").with_act(Act::irq(|act| {
+                act.with_key("fn2").with_input("uid", json!("b"))
             }))
         });
     let (proc, scher, emitter, tx, rx) =
@@ -650,10 +615,8 @@ async fn sch_act_req_cancel_by_running_state() {
     let mut workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
         step.with_id("step1")
             .with_name("step1")
-            .with_act(Act::req(|act| {
-                act.with_id("fn1")
-                    .with_name("fn 1")
-                    .with_input("uid", json!("a"))
+            .with_act(Act::irq(|act| {
+                act.with_key("fn1").with_input("uid", json!("a"))
             }))
     });
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, "w1");
@@ -682,10 +645,8 @@ async fn sch_act_req_do_action_complete() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_name("step1")
-            .with_act(Act::req(|act| {
-                act.with_id("fn1")
-                    .with_name("fn 1")
-                    .with_input("uid", json!("a"))
+            .with_act(Act::irq(|act| {
+                act.with_key("fn1").with_input("uid", json!("a"))
             }))
     });
 
@@ -694,7 +655,7 @@ async fn sch_act_req_do_action_complete() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.state() == MessageState::Created && e.r#type == "req" {
+        if e.state() == MessageState::Created && e.r#type == "irq" {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
 
             let mut options = Vars::new();
@@ -717,7 +678,7 @@ async fn sch_act_req_do_action_remove() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_name("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")).with_id("act1"))
     });
 
     let pid = utils::longid();
@@ -726,7 +687,7 @@ async fn sch_act_req_do_action_remove() {
     let s = scher.clone();
     emitter.on_message(move |e| {
         println!("message: {e:?}");
-        if e.state() == MessageState::Created && e.r#type == "req" {
+        if e.state() == MessageState::Created && e.r#type == "irq" {
             let action = Action::new(&e.pid, &e.tid, "remove", &Vars::new());
             s.do_action(&action).unwrap();
 
@@ -738,7 +699,7 @@ async fn sch_act_req_do_action_remove() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act1").get(0).unwrap().state(),
+        proc.task_by_nid("act1").first().unwrap().state(),
         TaskState::Removed
     );
 }
@@ -746,15 +707,15 @@ async fn sch_act_req_do_action_remove() {
 #[tokio::test]
 async fn sch_act_req_do_action_outputs() {
     let mut workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_name("step1")
-            .with_act(Act::req(|act| {
-                act.with_id("fn1")
-                    .with_name("fn 1")
+        step.with_id("step1").with_name("step1").with_act(
+            Act::irq(|act| {
+                act.with_key("fn1")
                     .with_output("a", json!(null))
                     .with_output("b", json!(null))
                     .with_input("uid", json!("a"))
-            }))
+            })
+            .with_id("fn1"),
+        )
     });
 
     let pid = utils::longid();
@@ -762,7 +723,7 @@ async fn sch_act_req_do_action_outputs() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.state() == MessageState::Created && e.r#type == "req" {
+        if e.state() == MessageState::Created && e.r#type == "irq" {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
 
             let mut options = Vars::new();
@@ -781,7 +742,7 @@ async fn sch_act_req_do_action_outputs() {
     tx.recv().await;
     assert_eq!(
         proc.task_by_nid("fn1")
-            .get(0)
+            .first()
             .unwrap()
             .data()
             .get::<String>("a")
@@ -790,7 +751,7 @@ async fn sch_act_req_do_action_outputs() {
     );
     assert_eq!(
         proc.task_by_nid("fn1")
-            .get(0)
+            .first()
             .unwrap()
             .data()
             .get::<i32>("b")
@@ -799,7 +760,7 @@ async fn sch_act_req_do_action_outputs() {
     );
     assert_eq!(
         proc.task_by_nid("step1")
-            .get(0)
+            .first()
             .unwrap()
             .data()
             .get::<Vec<String>>("c"),
@@ -807,7 +768,7 @@ async fn sch_act_req_do_action_outputs() {
     );
     assert_eq!(
         proc.task_by_nid("fn1")
-            .get(0)
+            .first()
             .unwrap()
             .data()
             .get::<Vec<String>>("c")
@@ -819,16 +780,16 @@ async fn sch_act_req_do_action_outputs() {
 #[tokio::test]
 async fn sch_act_req_do_action_rets() {
     let mut workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_name("step1")
-            .with_act(Act::req(|act| {
-                act.with_id("fn1")
-                    .with_name("fn 1")
+        step.with_id("step1").with_name("step1").with_act(
+            Act::irq(|act| {
+                act.with_key("fn1")
                     .with_ret("a", json!(null))
                     .with_ret("b", json!(null))
                     .with_ret("c", json!(null))
                     .with_input("uid", json!("a"))
-            }))
+            })
+            .with_id("fn1"),
+        )
     });
 
     let pid = utils::longid();
@@ -836,7 +797,7 @@ async fn sch_act_req_do_action_rets() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.state() == MessageState::Created && e.r#type == "req" {
+        if e.state() == MessageState::Created && e.r#type == "irq" {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
 
             let mut options = Vars::new();
@@ -857,7 +818,7 @@ async fn sch_act_req_do_action_rets() {
     proc.print();
     assert_eq!(
         proc.task_by_nid("fn1")
-            .get(0)
+            .first()
             .unwrap()
             .data()
             .get::<String>("a")
@@ -866,7 +827,7 @@ async fn sch_act_req_do_action_rets() {
     );
     assert_eq!(
         proc.task_by_nid("fn1")
-            .get(0)
+            .first()
             .unwrap()
             .data()
             .get::<i32>("b")
@@ -875,7 +836,7 @@ async fn sch_act_req_do_action_rets() {
     );
     assert_eq!(
         proc.task_by_nid("fn1")
-            .get(0)
+            .first()
             .unwrap()
             .data()
             .get::<Vec<String>>("c")
@@ -884,7 +845,7 @@ async fn sch_act_req_do_action_rets() {
     );
     assert_eq!(
         proc.task_by_nid("fn1")
-            .get(0)
+            .first()
             .unwrap()
             .data()
             .get::<Value>("d"),
@@ -897,10 +858,8 @@ async fn sch_act_req_do_action_no_rets() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_name("step1")
-            .with_act(Act::req(|act| {
-                act.with_id("fn1")
-                    .with_name("fn 1")
-                    .with_input("uid", json!("a"))
+            .with_act(Act::irq(|act| {
+                act.with_key("fn1").with_input("uid", json!("a"))
             }))
     });
 
@@ -909,7 +868,7 @@ async fn sch_act_req_do_action_no_rets() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.state() == MessageState::Created && e.r#type == "req" {
+        if e.state() == MessageState::Created && e.r#type == "irq" {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
 
             // create options that not satisfy the outputs
@@ -933,9 +892,8 @@ async fn sch_act_req_do_action_ret_key_check() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_name("step1")
-            .with_act(Act::req(|act| {
-                act.with_id("fn1")
-                    .with_name("fn 1")
+            .with_act(Act::irq(|act| {
+                act.with_key("fn1")
                     .with_ret("abc", json!(null))
                     .with_input("uid", json!("a"))
             }))
@@ -946,7 +904,7 @@ async fn sch_act_req_do_action_ret_key_check() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.state() == MessageState::Created && e.r#type == "req" {
+        if e.state() == MessageState::Created && e.r#type == "irq" {
             // create options that not contains uid key
             let options = Vars::new();
             let action = Action::new(&e.pid, &e.tid, consts::EVT_NEXT, &options);
@@ -965,10 +923,8 @@ async fn sch_act_req_do_action_proc_id_error() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_name("step1")
-            .with_act(Act::req(|act| {
-                act.with_id("fn1")
-                    .with_name("fn 1")
-                    .with_input("uid", json!("a"))
+            .with_act(Act::irq(|act| {
+                act.with_key("fn1").with_input("uid", json!("a"))
             }))
     });
 
@@ -977,7 +933,7 @@ async fn sch_act_req_do_action_proc_id_error() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.state() == MessageState::Created && e.r#type == "req" {
+        if e.state() == MessageState::Created && e.r#type == "irq" {
             // create options that not contains uid key
             let options = Vars::new();
             let action = Action::new("no_exist_proc_id", &e.tid, consts::EVT_NEXT, &options);
@@ -996,10 +952,8 @@ async fn sch_act_req_do_action_msg_id_error() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_name("step1")
-            .with_act(Act::req(|act| {
-                act.with_id("fn1")
-                    .with_name("fn 1")
-                    .with_input("uid", json!("a"))
+            .with_act(Act::irq(|act| {
+                act.with_key("fn1").with_input("uid", json!("a"))
             }))
     });
 
@@ -1008,7 +962,7 @@ async fn sch_act_req_do_action_msg_id_error() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.state() == MessageState::Created && e.r#type == "req" {
+        if e.state() == MessageState::Created && e.r#type == "irq" {
             // create options that not contains uid key
             let options = Vars::new();
             let action = Action::new(&e.pid, "no_exist_msg_id", consts::EVT_NEXT, &options);
@@ -1025,10 +979,8 @@ async fn sch_act_req_do_action_msg_id_error() {
 #[tokio::test]
 async fn sch_act_req_do_action_not_act_req_task() {
     let mut workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_act(Act::req(|act| {
-            act.with_id("fn1")
-                .with_name("fn 1")
-                .with_input("uid", json!("a"))
+        step.with_id("step1").with_act(Act::irq(|act| {
+            act.with_key("fn1").with_input("uid", json!("a"))
         }))
     });
 
@@ -1054,10 +1006,12 @@ async fn sch_act_req_do_action_not_act_req_task() {
 #[tokio::test]
 async fn sch_act_req_on_created_msg() {
     let mut workflow = Workflow::new().with_step(|step| {
-        step.with_name("step1").with_act(Act::req(|act| {
-            act.with_id("act1")
-                .with_on_created(|stmts| stmts.add(Act::msg(|msg| msg.with_id("msg1"))))
-        }))
+        step.with_name("step1")
+            .with_act(Act::irq(|act| act.with_key("act1")).with_setup(|stmts| {
+                stmts.add(Act::on_created(|stmts| {
+                    stmts.add(Act::msg(|msg| msg.with_key("msg1")))
+                }))
+            }))
     });
 
     let (proc, scher, emitter, tx, rx) =
@@ -1072,16 +1026,18 @@ async fn sch_act_req_on_created_msg() {
     scher.launch(&proc);
     let ret = tx.recv().await;
     proc.print();
-    assert_eq!(ret.get(0).unwrap().key, "msg1");
+    assert_eq!(ret.first().unwrap().key, "msg1");
 }
 
 #[tokio::test]
 async fn sch_act_req_on_created_act() {
     let mut workflow = Workflow::new().with_step(|step| {
-        step.with_name("step1").with_act(Act::req(|act| {
-            act.with_id("act1")
-                .with_on_created(|stmts| stmts.add(Act::req(|act| act.with_id("act2"))))
-        }))
+        step.with_name("step1")
+            .with_act(Act::irq(|act| act.with_key("act1")).with_setup(|stmts| {
+                stmts.add(Act::on_created(|stmts| {
+                    stmts.add(Act::irq(|act| act.with_key("act2")))
+                }))
+            }))
     });
 
     let (proc, scher, emitter, tx, rx) =
@@ -1099,17 +1055,19 @@ async fn sch_act_req_on_created_act() {
     scher.launch(&proc);
     let ret = tx.recv().await;
     proc.print();
-    assert_eq!(ret.get(0).unwrap().key, "act1");
+    assert_eq!(ret.first().unwrap().key, "act1");
     assert_eq!(ret.get(1).unwrap().key, "act2");
 }
 
 #[tokio::test]
 async fn sch_act_req_on_completed_msg() {
     let mut workflow = Workflow::new().with_step(|step| {
-        step.with_name("step1").with_act(Act::req(|act| {
-            act.with_id("act1")
-                .with_on_completed(|stmts| stmts.add(Act::msg(|msg| msg.with_id("msg1"))))
-        }))
+        step.with_name("step1")
+            .with_act(Act::irq(|act| act.with_key("act1")).with_setup(|stmts| {
+                stmts.add(Act::on_completed(|stmts| {
+                    stmts.add(Act::msg(|msg| msg.with_key("msg1")))
+                }))
+            }))
     });
 
     let (proc, scher, emitter, tx, rx) =
@@ -1130,16 +1088,21 @@ async fn sch_act_req_on_completed_msg() {
     scher.launch(&proc);
     let ret = tx.recv().await;
     proc.print();
-    assert_eq!(ret.get(0).unwrap().key, "msg1");
+    assert_eq!(ret.first().unwrap().key, "msg1");
 }
 
 #[tokio::test]
 async fn sch_act_req_on_completed_act() {
     let mut workflow = Workflow::new().with_step(|step| {
-        step.with_name("step1").with_act(Act::req(|act| {
-            act.with_id("act1")
-                .with_on_completed(|stmts| stmts.add(Act::req(|act| act.with_id("act2"))))
-        }))
+        step.with_name("step1").with_act(
+            Act::irq(|act| act.with_key("act1"))
+                .with_id("act1")
+                .with_setup(|stmts| {
+                    stmts.add(Act::on_completed(|stmts| {
+                        stmts.add(Act::irq(|act| act.with_key("act2")).with_id("act2"))
+                    }))
+                }),
+        )
     });
 
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
@@ -1159,7 +1122,7 @@ async fn sch_act_req_on_completed_act() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act2").get(0).unwrap().state(),
+        proc.task_by_nid("act2").first().unwrap().state(),
         TaskState::Interrupt
     );
 }
@@ -1167,12 +1130,19 @@ async fn sch_act_req_on_completed_act() {
 #[tokio::test]
 async fn sch_act_req_on_catch() {
     let mut workflow = Workflow::new().with_step(|step| {
-        step.with_name("step1").with_act(Act::req(|act| {
-            act.with_id("act1").with_catch(|c| {
-                c.with_err("err1")
-                    .with_then(|stmts| stmts.add(Act::req(|act| act.with_id("act2"))))
-            })
-        }))
+        step.with_name("step1").with_act(
+            Act::irq(|act| act.with_key("act1"))
+                .with_id("act1")
+                .with_setup(|stmts| {
+                    stmts.add(Act::on_catch(|stmts| {
+                        stmts.with(|c| {
+                            c.with_on("err1").with_then(|stmts| {
+                                stmts.add(Act::irq(|act| act.with_key("act2")).with_id("act2"))
+                            })
+                        })
+                    }))
+                }),
+        )
     });
 
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
@@ -1183,7 +1153,7 @@ async fn sch_act_req_on_catch() {
                 &e.pid,
                 &e.tid,
                 consts::EVT_ERR,
-                &Vars::new().with(consts::ACT_ERR_KEY, json!({ "ecode": "err1"})),
+                &Vars::new().with(consts::ACT_ERR_CODE, "err1"),
             )
             .unwrap();
         }
@@ -1196,7 +1166,7 @@ async fn sch_act_req_on_catch() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act2").get(0).unwrap().state(),
+        proc.task_by_nid("act2").first().unwrap().state(),
         TaskState::Interrupt
     );
 }
@@ -1204,12 +1174,19 @@ async fn sch_act_req_on_catch() {
 #[tokio::test]
 async fn sch_act_req_on_catch_as_error() {
     let mut workflow = Workflow::new().with_step(|step| {
-        step.with_name("step1").with_act(Act::req(|act| {
-            act.with_id("act1").with_catch(|c| {
-                c.with_err("err1")
-                    .with_then(|stmts| stmts.add(Act::req(|act| act.with_id("act2"))))
-            })
-        }))
+        step.with_name("step1").with_act(
+            Act::irq(|act| act.with_key("act1"))
+                .with_id("act1")
+                .with_setup(|stmts| {
+                    stmts.add(Act::on_catch(|stmts| {
+                        stmts.with(|c| {
+                            c.with_on("err1").with_then(|stmts| {
+                                stmts.add(Act::irq(|act| act.with_key("act2")).with_id("act2"))
+                            })
+                        })
+                    }))
+                }),
+        )
     });
 
     let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
@@ -1220,7 +1197,7 @@ async fn sch_act_req_on_catch_as_error() {
                 &e.pid,
                 &e.tid,
                 "error",
-                &Vars::new().with(consts::ACT_ERR_KEY, json!({ "ecode": "err1"})),
+                &Vars::new().with(consts::ACT_ERR_CODE, "err1"),
             )
             .unwrap();
         }
@@ -1230,7 +1207,7 @@ async fn sch_act_req_on_catch_as_error() {
                 &e.pid,
                 &e.tid,
                 "error",
-                &Vars::new().with(consts::ACT_ERR_KEY, json!({ "ecode": "err2"})),
+                &Vars::new().with(consts::ACT_ERR_CODE, "err2"),
             )
             .unwrap();
         }
@@ -1240,11 +1217,11 @@ async fn sch_act_req_on_catch_as_error() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act1").get(0).unwrap().state(),
+        proc.task_by_nid("act1").first().unwrap().state(),
         TaskState::Completed
     );
     assert_eq!(
-        proc.task_by_nid("act2").get(0).unwrap().state(),
+        proc.task_by_nid("act2").first().unwrap().state(),
         TaskState::Error
     );
     assert!(proc.state().is_error());
@@ -1253,12 +1230,19 @@ async fn sch_act_req_on_catch_as_error() {
 #[tokio::test]
 async fn sch_act_req_on_catch_as_skip() {
     let mut workflow = Workflow::new().with_step(|step| {
-        step.with_name("step1").with_act(Act::req(|act| {
-            act.with_id("act1").with_catch(|c| {
-                c.with_err("err1")
-                    .with_then(|stmts| stmts.add(Act::req(|act| act.with_id("act2"))))
-            })
-        }))
+        step.with_name("step1").with_act(
+            Act::irq(|act| act.with_key("act1"))
+                .with_id("act1")
+                .with_setup(|stmts| {
+                    stmts.add(Act::on_catch(|stmts| {
+                        stmts.with(|c| {
+                            c.with_on("err1").with_then(|stmts| {
+                                stmts.add(Act::irq(|act| act.with_key("act2")).with_id("act2"))
+                            })
+                        })
+                    }))
+                }),
+        )
     });
 
     let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
@@ -1269,7 +1253,7 @@ async fn sch_act_req_on_catch_as_skip() {
                 &e.pid,
                 &e.tid,
                 "error",
-                &Vars::new().with(consts::ACT_ERR_KEY, json!({ "ecode": "err1"})),
+                &Vars::new().with(consts::ACT_ERR_CODE, "err1"),
             )
             .unwrap();
         }
@@ -1283,11 +1267,11 @@ async fn sch_act_req_on_catch_as_skip() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act1").get(0).unwrap().state(),
+        proc.task_by_nid("act1").first().unwrap().state(),
         TaskState::Completed
     );
     assert_eq!(
-        proc.task_by_nid("act2").get(0).unwrap().state(),
+        proc.task_by_nid("act2").first().unwrap().state(),
         TaskState::Skipped
     );
 }
@@ -1295,12 +1279,19 @@ async fn sch_act_req_on_catch_as_skip() {
 #[tokio::test]
 async fn sch_act_req_on_catch_no_match() {
     let mut workflow = Workflow::new().with_step(|step| {
-        step.with_name("step1").with_act(Act::req(|act| {
-            act.with_id("act1").with_catch(|c| {
-                c.with_err("err1")
-                    .with_then(|stmts| stmts.add(Act::req(|act| act.with_id("act2"))))
-            })
-        }))
+        step.with_name("step1").with_act(
+            Act::irq(|act| act.with_key("act1"))
+                .with_id("act1")
+                .with_setup(|stmts| {
+                    stmts.add(Act::on_catch(|stmts| {
+                        stmts.with(|c| {
+                            c.with_on("err1").with_then(|stmts| {
+                                stmts.add(Act::irq(|act| act.with_key("act2")).with_id("act2"))
+                            })
+                        })
+                    }))
+                }),
+        )
     });
 
     let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
@@ -1311,7 +1302,7 @@ async fn sch_act_req_on_catch_no_match() {
                 &e.pid,
                 &e.tid,
                 "error",
-                &Vars::new().with(consts::ACT_ERR_KEY, json!({ "ecode": "err2"})),
+                &Vars::new().with(consts::ACT_ERR_CODE, "err2"),
             )
             .unwrap();
         }
@@ -1320,17 +1311,26 @@ async fn sch_act_req_on_catch_no_match() {
     scher.launch(&proc);
     tx.recv().await;
     proc.print();
-    assert!(proc.task_by_nid("act1").get(0).unwrap().state().is_error());
-    assert!(proc.task_by_nid("act2").get(0).is_none());
+    assert!(proc.task_by_nid("act1").first().unwrap().state().is_error());
+    assert!(proc.task_by_nid("act2").first().is_none());
 }
 
 #[tokio::test]
 async fn sch_act_req_on_catch_match_any() {
     let mut workflow = Workflow::new().with_step(|step| {
-        step.with_name("step1").with_act(Act::req(|act| {
-            act.with_id("act1")
-                .with_catch(|c| c.with_then(|stmts| stmts.add(Act::req(|act| act.with_id("act2")))))
-        }))
+        step.with_name("step1").with_act(
+            Act::irq(|act| act.with_key("act1"))
+                .with_id("act1")
+                .with_setup(|stmts| {
+                    stmts.add(Act::on_catch(|stmts| {
+                        stmts.with(|c| {
+                            c.with_then(|stmts| {
+                                stmts.add(Act::irq(|act| act.with_key("act2")).with_id("act2"))
+                            })
+                        })
+                    }))
+                }),
+        )
     });
 
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
@@ -1341,7 +1341,7 @@ async fn sch_act_req_on_catch_match_any() {
                 &e.pid,
                 &e.tid,
                 "error",
-                &Vars::new().with(consts::ACT_ERR_KEY, json!({ "ecode": "err2"})),
+                &Vars::new().with(consts::ACT_ERR_CODE, "err2"),
             )
             .unwrap();
         }
@@ -1355,12 +1355,12 @@ async fn sch_act_req_on_catch_match_any() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act1").get(0).unwrap().state(),
+        proc.task_by_nid("act1").first().unwrap().state(),
         TaskState::Completed
     );
     assert!(proc
         .task_by_nid("act2")
-        .get(0)
+        .first()
         .unwrap()
         .state()
         .is_interrupted());
@@ -1369,12 +1369,19 @@ async fn sch_act_req_on_catch_match_any() {
 #[tokio::test]
 async fn sch_act_req_on_catch_as_complete() {
     let mut workflow = Workflow::new().with_step(|step| {
-        step.with_name("step1").with_act(Act::req(|act| {
-            act.with_id("act1").with_catch(|c| {
-                c.with_err("err1")
-                    .with_then(|stmts| stmts.add(Act::req(|act| act.with_id("act2"))))
-            })
-        }))
+        step.with_name("step1").with_act(
+            Act::irq(|act| act.with_key("act1"))
+                .with_id("act1")
+                .with_setup(|stmts| {
+                    stmts.add(Act::on_catch(|stmts| {
+                        stmts.with(|c| {
+                            c.with_on("err1").with_then(|stmts| {
+                                stmts.add(Act::irq(|act| act.with_key("act2")).with_id("act2"))
+                            })
+                        })
+                    }))
+                }),
+        )
     });
 
     let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
@@ -1385,7 +1392,7 @@ async fn sch_act_req_on_catch_as_complete() {
                 &e.pid,
                 &e.tid,
                 "error",
-                &Vars::new().with(consts::ACT_ERR_KEY, json!({ "ecode": "err1"})),
+                &Vars::new().with(consts::ACT_ERR_CODE, "err1"),
             )
             .unwrap();
         }
@@ -1400,11 +1407,11 @@ async fn sch_act_req_on_catch_as_complete() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act2").get(0).unwrap().state(),
+        proc.task_by_nid("act2").first().unwrap().state(),
         TaskState::Completed
     );
     assert_eq!(
-        proc.task_by_nid("act1").get(0).unwrap().state(),
+        proc.task_by_nid("act1").first().unwrap().state(),
         TaskState::Completed
     );
 }
@@ -1412,10 +1419,15 @@ async fn sch_act_req_on_catch_as_complete() {
 #[tokio::test]
 async fn sch_act_req_chain() {
     let mut workflow = Workflow::new().with_step(|step| {
-        step.with_name("step1").with_act(Act::req(|act| {
-            act.with_id("act1")
-                .with_on_completed(|stmts| stmts.add(Act::req(|req| req.with_id("act2"))))
-        }))
+        step.with_name("step1").with_act(
+            Act::irq(|act| act.with_key("act1"))
+                .with_id("act1")
+                .with_setup(|stmts| {
+                    stmts.add(Act::on_completed(|stmts| {
+                        stmts.add(Act::irq(|req| req.with_key("act2")).with_id("act2"))
+                    }))
+                }),
+        )
     });
 
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
@@ -1424,10 +1436,10 @@ async fn sch_act_req_chain() {
     emitter.on_message(move |e| {
         if e.is_key("act1") {
             assert_eq!(
-                p.task_by_nid("act1").get(0).unwrap().state(),
+                p.task_by_nid("act1").first().unwrap().state(),
                 TaskState::Interrupt
             );
-            assert!(p.task_by_nid("act2").get(0).is_none());
+            assert!(p.task_by_nid("act2").first().is_none());
             e.do_action(&e.pid, &e.tid, consts::EVT_NEXT, &Vars::new())
                 .unwrap();
         }
@@ -1441,11 +1453,11 @@ async fn sch_act_req_chain() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act2").get(0).unwrap().state(),
+        proc.task_by_nid("act2").first().unwrap().state(),
         TaskState::Interrupt
     );
     assert_eq!(
-        proc.task_by_nid("act1").get(0).unwrap().state(),
+        proc.task_by_nid("act1").first().unwrap().state(),
         TaskState::Completed
     );
 }
@@ -1454,7 +1466,7 @@ async fn sch_act_req_chain() {
 async fn sch_act_req_with_key() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_setup(|setup| setup.add(Act::req(|act| act.with_id("act1").with_key("key1"))))
+            .with_setup(|setup| setup.add(Act::irq(|act| act.with_key("key1")).with_id("act1")))
     });
 
     workflow.print();
@@ -1462,7 +1474,7 @@ async fn sch_act_req_with_key() {
         create_proc_signal::<Vec<Message>>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
-        if e.is_type("req") && e.is_state("created") {
+        if e.is_type("irq") && e.is_state("created") {
             rx.update(|data| data.push(e.inner().clone()));
             rx.close();
         }
@@ -1471,22 +1483,29 @@ async fn sch_act_req_with_key() {
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act1").get(0).unwrap().state(),
+        proc.task_by_nid("act1").first().unwrap().state(),
         TaskState::Interrupt
     );
     assert_eq!(ret.len(), 1);
-    assert_eq!(ret.get(0).unwrap().key, "key1");
+    assert_eq!(ret.first().unwrap().key, "key1");
 }
 
 #[tokio::test]
 async fn sch_act_req_on_timeout() {
     let mut workflow = Workflow::new().with_step(|step| {
-        step.with_name("step1").with_act(Act::req(|act| {
-            act.with_id("act1").with_timeout(|c| {
-                c.with_on("2s")
-                    .with_then(|stmts| stmts.add(Act::req(|act| act.with_id("act2"))))
-            })
-        }))
+        step.with_name("step1").with_act(
+            Act::irq(|act| act.with_key("act1"))
+                .with_id("act1")
+                .with_setup(|stmts| {
+                    stmts.add(Act::on_timeout(|stmts| {
+                        stmts.with(|c| {
+                            c.with_on("2s").with_then(|stmts| {
+                                stmts.add(Act::irq(|act| act.with_key("act2")).with_id("act2"))
+                            })
+                        })
+                    }))
+                }),
+        )
     });
 
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
@@ -1501,7 +1520,7 @@ async fn sch_act_req_on_timeout() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act2").get(0).unwrap().state(),
+        proc.task_by_nid("act2").first().unwrap().state(),
         TaskState::Interrupt
     );
 }

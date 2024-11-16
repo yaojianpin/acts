@@ -61,6 +61,12 @@ impl std::fmt::Debug for Emitter {
     }
 }
 
+impl Default for Emitter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Emitter {
     pub fn new() -> Self {
         Self {
@@ -143,7 +149,7 @@ impl Emitter {
     pub fn emit_proc_event(&self, proc: &Arc<Proc>) {
         debug!("emit_proc_event: {}", proc.id());
         let handlers = self.procs.read().unwrap();
-        let e = &Event::new(&*self.runtime.read().unwrap(), proc);
+        let e = &Event::new(&self.runtime.read().unwrap(), proc);
         for handle in handlers.iter() {
             (handle)(e);
         }
@@ -153,7 +159,7 @@ impl Emitter {
         debug!("emit_task_event: task={:?}", task);
         let handlers = self.tasks.read().unwrap();
         let e = &Event::new_with_extra(
-            &*self.runtime.read().unwrap(),
+            &self.runtime.read().unwrap(),
             task,
             &TaskExtra { emit_message: true },
         );
@@ -168,7 +174,7 @@ impl Emitter {
         debug!("emit_task_event: task={:?}", task);
         let handlers = self.tasks.read().unwrap();
         let e = &Event::new_with_extra(
-            &*self.runtime.read().unwrap(),
+            &self.runtime.read().unwrap(),
             task,
             &TaskExtra {
                 emit_message,
@@ -182,25 +188,25 @@ impl Emitter {
 
     pub fn emit_start_event(&self, state: &Message) {
         debug!("emit_start_event: {:?}", state);
-        let e = Event::new(&*self.runtime.read().unwrap(), state);
+        let e = Event::new(&self.runtime.read().unwrap(), state);
         dispatch_key_event!(self, starts, &e);
     }
 
     pub fn emit_complete_event(&self, state: &Message) {
         debug!("emit_complete_event: {:?}", state);
-        let e = Event::new(&*self.runtime.read().unwrap(), state);
+        let e = Event::new(&self.runtime.read().unwrap(), state);
         dispatch_key_event!(self, completes, &e);
     }
 
     pub fn emit_message(&self, msg: &Message) {
         debug!("emit_message: {:?}", msg);
-        let e = Event::new(&*self.runtime.read().unwrap(), msg);
+        let e = Event::new(&self.runtime.read().unwrap(), msg);
         dispatch_key_event!(self, messages, &e);
     }
 
     pub fn emit_error(&self, state: &Message) {
         debug!("emit_error: {:?}", state);
-        let e = Event::new(&*self.runtime.read().unwrap(), state);
+        let e = Event::new(&self.runtime.read().unwrap(), state);
         dispatch_key_event!(self, errors, &e);
     }
 

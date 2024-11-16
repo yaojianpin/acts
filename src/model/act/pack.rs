@@ -1,16 +1,10 @@
-use crate::Vars;
+use crate::{Act, Vars};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Pack {
     #[serde(default)]
-    pub id: String,
-
-    #[serde(default)]
-    pub name: String,
-
-    #[serde(default)]
-    pub uses: String,
+    pub key: String,
 
     #[serde(default)]
     pub inputs: Vars,
@@ -22,16 +16,6 @@ pub struct Pack {
 impl Pack {
     pub fn new() -> Self {
         Default::default()
-    }
-
-    pub fn with_id(mut self, id: &str) -> Self {
-        self.id = id.to_string();
-        self
-    }
-
-    pub fn with_name(mut self, name: &str) -> Self {
-        self.name = name.to_string();
-        self
     }
 
     pub fn with_input<T>(mut self, name: &str, value: T) -> Self
@@ -50,8 +34,14 @@ impl Pack {
         self
     }
 
-    pub fn with_uses(mut self, pack_id: &str) -> Self {
-        self.uses = pack_id.to_string();
+    pub fn with_key(mut self, key: &str) -> Self {
+        self.key = key.to_string();
         self
+    }
+}
+
+impl From<Pack> for Act {
+    fn from(val: Pack) -> Self {
+        Act::pack(|_| val.clone())
     }
 }

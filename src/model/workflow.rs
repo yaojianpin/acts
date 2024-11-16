@@ -93,14 +93,14 @@ impl Workflow {
         self.ver = ver;
     }
 
-    pub fn to_yml<'a>(&self) -> Result<String> {
+    pub fn to_yml(&self) -> Result<String> {
         match serde_yaml::to_string(self) {
             Ok(s) => Ok(s),
             Err(e) => Err(ActError::Model(e.to_string())),
         }
     }
 
-    pub fn to_json<'a>(&self) -> Result<String> {
+    pub fn to_json(&self) -> Result<String> {
         match serde_json::to_string(self) {
             Ok(s) => Ok(s),
             Err(e) => Err(ActError::Model(e.to_string())),

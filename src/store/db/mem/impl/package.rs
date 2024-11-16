@@ -16,8 +16,8 @@ impl DbDocument for Package {
         map.insert("name".to_string(), json!(self.name.clone()));
         map.insert("size".to_string(), json!(self.size.clone()));
         map.insert(
-            "file_data".to_string(),
-            JsonValue::String(hex::encode(&self.file_data)),
+            "data".to_string(),
+            JsonValue::String(hex::encode(&self.data)),
         );
         map.insert("create_time".to_string(), json!(self.create_time.clone()));
         map.insert("update_time".to_string(), json!(self.update_time.clone()));

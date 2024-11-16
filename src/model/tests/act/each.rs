@@ -3,15 +3,19 @@ use crate::{Act, Each, StmtBuild, Vars};
 #[test]
 fn model_act_each_parse() {
     let text = r#"
-    !each
+    act: each
     in: "[\"a\", \"b\"]"
-    run:
-      - !msg
-        id: msg1
+    then:
+        - act: msg
+          key: msg1
     "#;
-    if let Act::Each(stmt) = serde_yaml::from_str(text).unwrap() {
-        assert_eq!(stmt.r#in, r#"["a", "b"]"#);
-        assert_eq!(stmt.run.len(), 1);
+    if let Ok(Act {
+        act, r#in, then, ..
+    }) = serde_yaml::from_str(text)
+    {
+        assert_eq!(act, "each");
+        assert_eq!(r#in, r#"["a", "b"]"#);
+        assert_eq!(then.len(), 1);
     } else {
         assert!(false);
     }
@@ -25,6 +29,6 @@ fn model_act_each_in() {
 
 #[test]
 fn model_act_each_run() {
-    let act = Each::new().with_run(|stmts| stmts.add(Act::set(Vars::new())));
-    assert_eq!(act.run.len(), 1);
+    let act = Each::new().with_then(|stmts| stmts.add(Act::set(Vars::new())));
+    assert_eq!(act.then.len(), 1);
 }

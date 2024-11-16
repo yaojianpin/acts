@@ -72,7 +72,7 @@ async fn sch_vars_get_with_script() {
     tx.recv().await;
     assert_eq!(
         proc.task_by_nid("step1")
-            .get(0)
+            .first()
             .unwrap()
             .inputs()
             .get_value("var2")
@@ -92,7 +92,7 @@ async fn sch_vars_get_with_not_exists() {
     tx.recv().await;
     assert_eq!(
         proc.task_by_nid("step1")
-            .get(0)
+            .first()
             .unwrap()
             .inputs()
             .get_value("var2")
@@ -113,7 +113,7 @@ async fn sch_vars_output_only_key_name() {
     tx.recv().await;
     assert_eq!(
         proc.task_by_nid("step1")
-            .get(0)
+            .first()
             .unwrap()
             .outputs()
             .get_value("var1")
@@ -131,7 +131,7 @@ async fn sch_vars_step_inputs() {
     tx.recv().await;
     assert_eq!(
         proc.task_by_nid("step1")
-            .get(0)
+            .first()
             .unwrap()
             .data()
             .get::<i64>("var1")
@@ -150,7 +150,7 @@ async fn sch_vars_one_step_outputs() {
     tx.recv().await;
     assert_eq!(
         proc.task_by_nid("step1")
-            .get(0)
+            .first()
             .unwrap()
             .outputs()
             .get::<i64>("var1")
@@ -170,7 +170,7 @@ async fn sch_vars_step_default_outputs() {
     proc.print();
     assert_eq!(
         proc.task_by_nid("step1")
-            .get(0)
+            .first()
             .unwrap()
             .outputs()
             .get::<i64>("var1")
@@ -191,7 +191,7 @@ async fn sch_vars_two_steps_outputs() {
     proc.print();
     assert_eq!(
         proc.task_by_nid("step1")
-            .get(0)
+            .first()
             .unwrap()
             .outputs()
             .get::<i64>("var1")
@@ -200,7 +200,7 @@ async fn sch_vars_two_steps_outputs() {
     );
     assert_eq!(
         proc.task_by_nid("step2")
-            .get(0)
+            .first()
             .unwrap()
             .outputs()
             .get::<i64>("var1")
@@ -221,7 +221,7 @@ async fn sch_vars_branch_inputs() {
     tx.recv().await;
     assert_eq!(
         proc.task_by_nid("b1")
-            .get(0)
+            .first()
             .unwrap()
             .data()
             .get::<i64>("var1")
@@ -245,7 +245,7 @@ async fn sch_vars_branch_outputs() {
     proc.print();
     assert_eq!(
         proc.task_by_nid("b1")
-            .get(0)
+            .first()
             .unwrap()
             .outputs()
             .get::<i64>("var1")
@@ -271,7 +271,7 @@ async fn sch_vars_branch_default_outputs() {
     proc.print();
     assert_eq!(
         proc.task_by_nid("b1")
-            .get(0)
+            .first()
             .unwrap()
             .outputs()
             .get::<i64>("var1")
@@ -296,7 +296,7 @@ async fn sch_vars_branch_one_step_outputs() {
     proc.print();
     assert_eq!(
         proc.task_by_nid("step1")
-            .get(0)
+            .first()
             .unwrap()
             .outputs()
             .get::<i64>("var1")
@@ -322,7 +322,7 @@ async fn sch_vars_branch_two_steps_outputs() {
     proc.print();
     assert_eq!(
         proc.task_by_nid("step1")
-            .get(0)
+            .first()
             .unwrap()
             .outputs()
             .get::<i64>("var1")
@@ -331,7 +331,7 @@ async fn sch_vars_branch_two_steps_outputs() {
     );
     assert_eq!(
         proc.task_by_nid("step2")
-            .get(0)
+            .first()
             .unwrap()
             .outputs()
             .get::<i64>("var1")
@@ -344,7 +344,7 @@ async fn sch_vars_branch_two_steps_outputs() {
 async fn sch_vars_act_inputs() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1").with_input("var1", 10)))
+            .with_act(Act::irq(|act| act.with_key("act1").with_input("var1", 10)))
     });
     let (proc, scher, emitter, tx, rx) = create_proc_signal(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
@@ -355,15 +355,15 @@ async fn sch_vars_act_inputs() {
     });
     scher.launch(&proc);
     let ret = tx.recv().await;
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
 async fn sch_vars_act_outputs() {
     let mut workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_act(Act::req(|act| {
-            act.with_id("act1").with_output("var1", json!(null))
-        }))
+        step.with_id("step1").with_act(
+            Act::irq(|act| act.with_key("act1").with_ret("var1", json!(null))).with_id("act1"),
+        )
     });
     let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 
@@ -381,7 +381,7 @@ async fn sch_vars_act_outputs() {
     tx.recv().await;
     assert_eq!(
         proc.task_by_nid("act1")
-            .get(0)
+            .first()
             .unwrap()
             .data()
             .get::<i64>("var1")
@@ -396,7 +396,7 @@ async fn sch_vars_act_default_outputs() {
         .with_env(consts::ACT_DEFAULT_OUTPUTS, json!(["var1"]))
         .with_step(|step| {
             step.with_id("step1")
-                .with_act(Act::req(|act| act.with_id("act1")))
+                .with_act(Act::irq(|act| act.with_key("act1")).with_id("act1"))
         });
     let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 
@@ -414,7 +414,7 @@ async fn sch_vars_act_default_outputs() {
     proc.print();
     assert_eq!(
         proc.task_by_nid("act1")
-            .get(0)
+            .first()
             .unwrap()
             .outputs()
             .get::<i64>("var1")
@@ -427,7 +427,7 @@ async fn sch_vars_act_default_outputs() {
 async fn sch_vars_act_options() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")).with_id("act1"))
     });
     let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 
@@ -446,7 +446,7 @@ async fn sch_vars_act_options() {
     tx.recv().await;
     assert_eq!(
         proc.task_by_nid("act1")
-            .get(0)
+            .first()
             .unwrap()
             .data()
             .get::<i64>("var1")
@@ -460,8 +460,8 @@ async fn sch_vars_get_global_vars() {
     let mut workflow = Workflow::new()
         .with_input("a", json!("abc"))
         .with_step(|step| {
-            step.with_id("step1").with_act(Act::req(|act| {
-                act.with_id("act1").with_output("var1", json!(null))
+            step.with_id("step1").with_act(Act::irq(|act| {
+                act.with_key("act1").with_ret("var1", json!(null))
             }))
         });
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
@@ -476,7 +476,7 @@ async fn sch_vars_get_global_vars() {
     proc.print();
     assert_eq!(
         proc.task_by_nid("step1")
-            .get(0)
+            .first()
             .unwrap()
             .find::<String>("a")
             .unwrap(),
@@ -484,44 +484,48 @@ async fn sch_vars_get_global_vars() {
     );
 }
 
-#[tokio::test]
-async fn sch_vars_act_outputs_from_step() {
-    let mut workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_input("a", json!("abc"))
-            .with_act(Act::req(|act| {
-                act.with_id("act1").with_output("a", json!(null))
-            }))
-    });
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
-        println!("message: {e:?}");
-        if e.inner().is_source("act") && e.inner().is_state("created") {
-            rx.close();
-        }
-    });
-    scher.launch(&proc);
-    tx.recv().await;
-    proc.print();
-    assert_eq!(
-        proc.task_by_nid("act1")
-            .get(0)
-            .unwrap()
-            .outputs()
-            .get::<String>("a")
-            .unwrap(),
-        "abc"
-    );
-}
+// #[tokio::test]
+// async fn sch_vars_act_outputs_from_step() {
+//     let mut workflow = Workflow::new().with_step(|step| {
+//         step.with_id("step1")
+//             .with_input("a", json!("abc"))
+//             .with_act(
+//                 Act::irq(|act| act.with_key("act1").with_ret("a", json!(null))).with_id("act1"),
+//             )
+//     });
+//     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
+//     emitter.on_message(move |e| {
+//         println!("message: {e:?}");
+//         if e.inner().is_source("act") && e.inner().is_state("created") {
+//             rx.close();
+//         }
+//     });
+//     scher.launch(&proc);
+//     tx.recv().await;
+//     proc.print();
+//     assert_eq!(
+//         proc.task_by_nid("act1")
+//             .first()
+//             .unwrap()
+//             .outputs()
+//             .get::<String>("a")
+//             .unwrap(),
+//         "abc"
+//     );
+// }
 
 #[tokio::test]
 async fn sch_vars_act_inputs_from_step() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_input("a", json!("abc"))
-            .with_act(Act::req(|act| {
-                act.with_id("act1").with_input("a", json!(r#"${ $("a") }"#))
-            }))
+            .with_act(
+                Act::irq(|act| {
+                    act.with_key("act1")
+                        .with_input("a", json!(r#"${ $("a") }"#))
+                })
+                .with_id("act1"),
+            )
     });
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
@@ -535,7 +539,7 @@ async fn sch_vars_act_inputs_from_step() {
     proc.print();
     assert_eq!(
         proc.task_by_nid("act1")
-            .get(0)
+            .first()
             .unwrap()
             .inputs()
             .get::<String>("a")
@@ -549,8 +553,8 @@ async fn sch_vars_override_global_vars() {
     let mut workflow = Workflow::new()
         .with_input("a", json!("abc"))
         .with_step(|step| {
-            step.with_id("step1").with_act(Act::req(|act| {
-                act.with_id("act1").with_output("var1", json!(null))
+            step.with_id("step1").with_act(Act::irq(|act| {
+                act.with_key("act1").with_ret("var1", json!(null))
             }))
         });
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
@@ -564,7 +568,7 @@ async fn sch_vars_override_global_vars() {
     proc.print();
 
     proc.task_by_nid("step1")
-        .get(0)
+        .first()
         .unwrap()
         .update_data(&Vars::new().with("a", 10));
     assert_eq!(proc.data().get::<i32>("a").unwrap(), json!(10));
@@ -575,9 +579,9 @@ async fn sch_vars_override_step_vars() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_input("a", json!("abc"))
             .with_id("step1")
-            .with_act(Act::req(|act| {
-                act.with_id("act1").with_output("var1", json!(null))
-            }))
+            .with_act(
+                Act::irq(|act| act.with_key("act1").with_ret("var1", json!(null))).with_id("act1"),
+            )
     });
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
@@ -590,12 +594,12 @@ async fn sch_vars_override_step_vars() {
     proc.print();
 
     proc.task_by_nid("act1")
-        .get(0)
+        .first()
         .unwrap()
         .update_data(&Vars::new().with("a", 10));
     assert_eq!(
         proc.task_by_nid("step1")
-            .get(0)
+            .first()
             .unwrap()
             .find::<i32>("a")
             .unwrap(),

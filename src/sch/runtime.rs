@@ -54,7 +54,7 @@ impl Runtime {
 
     #[allow(unused)]
     pub fn is_running(&self) -> bool {
-        self.scher.is_closed() == false
+        !self.scher.is_closed()
     }
 
     pub fn init(&self, engine: &Engine) {
@@ -79,7 +79,7 @@ impl Runtime {
         }
 
         let mut w = model.clone();
-        w.set_inputs(&options);
+        w.set_inputs(options);
 
         let proc = Proc::new(&proc_id, self);
         proc.load(&w)?;
@@ -111,14 +111,14 @@ impl Runtime {
         debug!("sch::push  task={:?}", task);
         self.cache
             .upsert(task)
-            .expect(&format!("fail to upsert task({})", task.id));
+            .unwrap_or_else(|_| panic!("fail to upsert task({})", task.id));
         self.scher.push(task);
     }
 
     pub fn do_action(self: &Arc<Self>, action: &Action) -> Result<()> {
         debug!("sch::do_action  action={:?}", action);
         match self.cache.proc(&action.pid, self) {
-            Some(proc) => proc.do_action(&action),
+            Some(proc) => proc.do_action(action),
             None => Err(ActError::Runtime(format!(
                 "cannot find proc '{}' when do_action({:?})",
                 action.pid, action
@@ -189,7 +189,7 @@ impl Runtime {
 
                         // proc.print();
                         debug!("remove: {:?}", proc.tasks());
-                        cache.remove(&proc.id()).unwrap_or_else(|err| {
+                        cache.remove(proc.id()).unwrap_or_else(|err| {
                             error!("scher.initialize remove={}", err);
                             false
                         });
@@ -223,12 +223,14 @@ impl Runtime {
                     .unwrap_or_else(|err| error!("scher.initialize hooks={}", err));
 
                 // check task is allowed to emit message to client
-                if e.extra().emit_message && !e.state().is_pending() && !e.state().is_running() {
-                    if !e.is_emit_disabled() {
-                        let msg = e.create_message();
-                        debug!("emit_message:{msg:?}");
-                        rt.emitter().emit_message(&msg);
-                    }
+                if e.extra().emit_message
+                    && !e.state().is_pending()
+                    && !e.state().is_running()
+                    && !e.is_emit_disabled()
+                {
+                    let msg = e.create_message();
+                    debug!("emit_message:{msg:?}");
+                    rt.emitter().emit_message(&msg);
                 }
             });
         }
@@ -293,7 +295,8 @@ impl Runtime {
         } else if state.is_error() {
             event = consts::EVT_ERR;
             if let Some(err) = proc.err() {
-                vars.set(consts::ACT_ERR_KEY, err);
+                vars.set(consts::ACT_ERR_CODE, err.ecode);
+                vars.set(consts::ACT_ERR_MESSAGE, err.message);
             }
         }
         let action = Action::new(pid, tid, event, &vars);

@@ -24,7 +24,7 @@ async fn sch_step_run_msg() {
 async fn sch_step_run_req() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_run(r#"act.req({ key: "act1" })"#)
+            .with_run(r#"act.irq({ key: "act1" })"#)
     });
     let ret = run_test(&workflow, |e, s| {
         if e.is_key("act1") {
@@ -39,7 +39,7 @@ async fn sch_step_run_req() {
 async fn sch_step_run_chain_array() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_run(r#"act.chain({ in: '["u1"]', run: [ { msg: { key: "msg1" } } ] })"#)
+            .with_run(r#"act.chain({ in: '["u1"]', then: [ { act: "msg", key: "msg1" }]})"#)
     });
     let ret = run_test(&workflow, |e, s| {
         if e.is_key("msg1") {
@@ -56,7 +56,7 @@ async fn sch_step_run_chain_var() {
         .with_input("a", json!(r#"["u1"]"#))
         .with_step(|step| {
             step.with_id("step1")
-                .with_run(r#"act.chain({ in: $("a"), run: [ { msg: { key: "msg1" } } ] })"#)
+                .with_run(r#"act.chain({ in: $("a"), then: [ { act: "msg", key: "msg1" } ] })"#)
         });
     let ret = run_test(&workflow, |e, s| {
         if e.is_key("msg1") {
@@ -71,7 +71,7 @@ async fn sch_step_run_chain_var() {
 async fn sch_step_run_each_array() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_run(r#"act.each({ in: '["u1"]', run: [ { msg: { key: "msg1" } } ] })"#)
+            .with_run(r#"act.each({ in: '["u1"]', then: [ { act: "msg", key: "msg1" } ] })"#)
     });
 
     let ret = run_test(&workflow, |e, s| {
@@ -89,7 +89,7 @@ async fn sch_step_run_each_var() {
         .with_input("a", json!(r#"["u1"]"#))
         .with_step(|step| {
             step.with_id("step1")
-                .with_run(r#"act.each({ in: $("a"), run: [ { msg: { key: "msg1" } } ] })"#)
+                .with_run(r#"act.each({ in: $("a"), then: [ { act: "msg", key: "msg1" } ] })"#)
         });
     let ret = run_test(&workflow, |e, s| {
         if e.is_key("msg1") {
@@ -104,7 +104,7 @@ async fn sch_step_run_each_var() {
 async fn sch_step_run_block() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_run(r#"act.block({ acts: [{ msg: { id: "msg1" } }] })"#)
+            .with_run(r#"act.block({ then: [{ act: "msg", key: "msg1" }] })"#)
     });
 
     let ret = run_test(&workflow, |e, s| {
@@ -119,7 +119,7 @@ async fn sch_step_run_block() {
 #[tokio::test]
 async fn sch_step_run_call() {
     let workflow = Workflow::new()
-        .with_step(|step| step.with_id("step1").with_run(r#"act.call({ mid: "m1" })"#));
+        .with_step(|step| step.with_id("step1").with_run(r#"act.call({ key: "m1" })"#));
     let dep = Workflow::new().with_id("m1");
     let ret = run_test_dep(&workflow, &dep, |e, s| {
         if e.is_key("m1") {
@@ -134,7 +134,7 @@ async fn sch_step_run_call() {
 async fn sch_step_run_push() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_run(r#"act.push({ req: { id: "act1" } })"#)
+            .with_run(r#"act.push({ act: "irq", key: "act1" })"#)
     });
     let ret = run_test(&workflow, |e, s| {
         if e.is_key("act1") {
@@ -273,7 +273,7 @@ async fn sch_step_run_catch_error() {
         step.with_id("step1")
             .with_output("my_data", json!(null))
             .with_run(r#" throw new Error("test error");"#)
-            .with_catch(|c| c.with_then(|stmts| stmts.add(Act::msg(|act| act.with_id("msg1")))))
+            .with_catch(|c| c.with_then(|stmts| stmts.add(Act::msg(|act| act.with_key("msg1")))))
     });
     let ret = run_test(&workflow, |e, s| {
         if e.is_key("step1") && e.is_state("completed") {
@@ -308,7 +308,7 @@ async fn run_test_dep<T: Clone + Send + 'static + Default>(
     exit_if: fn(&Event<Message>, sig: Signal<T>),
 ) -> T {
     let (engine, proc, tx, rx) = create_proc_signal2::<T>(workflow, &utils::longid());
-    engine.manager().deploy(&dep).unwrap();
+    engine.executor().model().deploy(dep).unwrap();
     engine.channel().on_message(move |e| {
         println!("message: {:?}", e);
         exit_if(e, rx.clone());

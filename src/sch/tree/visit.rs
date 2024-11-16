@@ -14,21 +14,23 @@ impl VisitRoot {
         let root = Box::new(VisitRoot {
             visits: HashMap::new(),
         });
-        let mut root = Visitor::new(&root, node, &HashMap::new(), false);
+        let mut root = Visitor::new(&root, node, 0, 0, true, &HashMap::new());
         root.walk(f);
     }
 
     pub fn visit_count(&self, id: &str) -> usize {
-        self.visits.get(id).map(|v| *v).unwrap_or(0)
+        self.visits.get(id).copied().unwrap_or(0)
     }
 }
 
 #[derive(Clone)]
 pub struct Visitor {
     root: Box<VisitRoot>,
-    is_next_sibling: bool,
+    pub level: usize,
+    pub is_last: bool,
+    pub index: usize,
     node: Arc<Node>,
-    path: HashMap<usize, bool>,
+    pub path: HashMap<usize, bool>,
 }
 
 impl Deref for Visitor {
@@ -38,25 +40,34 @@ impl Deref for Visitor {
     }
 }
 
+#[allow(clippy::borrowed_box)]
 impl Visitor {
     pub fn new(
         root: &Box<VisitRoot>,
         node: &Arc<Node>,
+        level: usize,
+        index: usize,
+        is_last: bool,
         path: &HashMap<usize, bool>,
-        next_sibling: bool,
+        // next_sibling: bool,
     ) -> Box<Self> {
         let mut path = path.clone();
         path.entry(node.level)
-            .and_modify(|v| *v = next_sibling)
-            .or_insert(next_sibling);
+            .and_modify(|v| *v = !is_last)
+            .or_insert(!is_last);
         Box::new(Self {
             root: root.clone(),
             node: node.clone(),
-            is_next_sibling: next_sibling,
+            level,
+            index,
+            is_last,
             path,
+            // is_next_sibling: next_sibling,
+            // path,
         })
     }
 
+    #[allow(clippy::vec_box)]
     pub fn children_visits(&self) -> Vec<Box<Self>> {
         let len = self.node.children().len();
         self.node
@@ -64,28 +75,29 @@ impl Visitor {
             .iter()
             .enumerate()
             .map(|(i, iter)| {
-                let mut is_sibling = i < len - 1;
+                let mut is_last = i == len - 1;
                 if iter.kind() == NodeKind::Step {
-                    is_sibling = false;
                     if let Some(next) = iter.next().upgrade() {
-                        if self.root.visit_count(&next.id()) == 0 {
-                            is_sibling = true
+                        if self.root.visit_count(next.id()) == 0 {
+                            is_last = false;
                         }
                     }
                 }
-                Visitor::new(&self.root, iter, &self.path, is_sibling)
+                Visitor::new(&self.root, iter, iter.level, i, is_last, &self.path)
             })
             .collect::<Vec<_>>()
     }
 
     pub fn next_visit(&self) -> Option<Box<Self>> {
         if let Some(next) = self.node.next().upgrade() {
-            if self.root.visit_count(&next.id()) == 0 {
+            if self.root.visit_count(next.id()) == 0 {
                 let node = Visitor::new(
                     &self.root,
                     &next,
+                    next.level,
+                    self.index + 1,
+                    next.next().upgrade().is_none(),
                     &self.path,
-                    next.next().upgrade().is_some(),
                 );
                 return Some(node);
             }
@@ -95,16 +107,16 @@ impl Visitor {
     }
 
     /// if there is next sibling node
-    pub fn is_next_sibling(&self) -> bool {
-        self.is_next_sibling
-    }
+    // pub fn is_next_sibling(&self) -> bool {
+    //     self.is_next_sibling
+    // }
 
-    pub fn is_sibling(&self, level: &usize) -> bool {
-        self.path.get(level).unwrap_or(&false).clone()
-    }
+    // pub fn is_sibling(&self, level: &usize) -> bool {
+    //     *self.path.get(level).unwrap_or(&false)
+    // }
 
     pub fn visit(&mut self) {
-        self.path.insert(self.node.level, self.is_next_sibling);
+        // self.path.insert(self.node.level, self.is_next_sibling);
         self.root
             .visits
             .entry(self.node.id().to_string())

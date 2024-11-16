@@ -15,7 +15,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            cache_cap: 300,
+            cache_cap: 1024,
             log_dir: "log".to_string(),
             data_dir: "data".to_string(),
             db_name: "acts.db".to_string(),

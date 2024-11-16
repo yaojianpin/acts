@@ -76,9 +76,6 @@ mod tests {
 
         let s = Signal::new("abc");
         assert_eq!(s.data(), "abc");
-
-        let s = Signal::new(());
-        assert_eq!(s.data(), ());
     }
 
     #[tokio::test]

@@ -3,15 +3,19 @@ use crate::{Act, Chain, StmtBuild, Vars};
 #[test]
 fn model_act_chain_parse() {
     let text = r#"
-    !chain
+    act: chain
     in: "[\"a\", \"b\"]"
-    run:
-      - !msg
-        id: msg1
+    then:
+        - act: msg
+          key: msg1
     "#;
-    if let Act::Chain(stmt) = serde_yaml::from_str(text).unwrap() {
-        assert_eq!(stmt.r#in, r#"["a", "b"]"#);
-        assert_eq!(stmt.run.len(), 1);
+    if let Ok(Act {
+        act, r#in, then, ..
+    }) = serde_yaml::from_str(text)
+    {
+        assert_eq!(act, "chain");
+        assert_eq!(r#in, r#"["a", "b"]"#);
+        assert_eq!(then.len(), 1);
     } else {
         assert!(false);
     }
@@ -25,6 +29,6 @@ fn model_act_chain_in() {
 
 #[test]
 fn model_act_chain_run() {
-    let act = Chain::new().with_run(|stmts| stmts.add(Act::set(Vars::new())));
-    assert_eq!(act.run.len(), 1);
+    let act = Chain::new().with_then(|stmts| stmts.add(Act::set(Vars::new())));
+    assert_eq!(act.then.len(), 1);
 }

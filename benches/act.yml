@@ -2,5 +2,5 @@ id: act_test
 steps:
   - id: step1
     acts:
-      - !req
-        id: act1
+      - act: irq
+        key: act1

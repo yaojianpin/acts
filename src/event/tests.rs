@@ -126,7 +126,7 @@ async fn event_action_parse() {
     assert_eq!(action, EventAction::Error);
 
     let action = EventAction::parse("aaaaa");
-    assert_eq!(action.is_err(), true);
+    assert!(action.is_err());
 }
 
 #[tokio::test]
@@ -158,7 +158,7 @@ async fn event_on_task() {
         assert_eq!(e.inner().state(), TaskState::Running);
     });
     proc.set_state(TaskState::Running);
-    let task = proc.create_task(&proc.tree().root.as_ref().unwrap(), None);
+    let task = proc.create_task(proc.tree().root.as_ref().unwrap(), None);
     task.set_state(TaskState::Running);
     rt.scher().emit_task_event(&task).unwrap();
 }

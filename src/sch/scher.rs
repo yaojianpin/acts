@@ -29,13 +29,13 @@ impl Scheduler {
     }
 
     pub fn new_with(_options: &Config) -> Arc<Self> {
-        let scher = Arc::new(Self {
+        
+
+        Arc::new(Self {
             queue: Queue::new(),
             emitter: Arc::new(Emitter::new()),
             closed: Arc::new(Mutex::new(false)),
-        });
-
-        scher
+        })
     }
 
     pub fn init(self: &Arc<Self>, _engine: &Engine) {
@@ -75,7 +75,7 @@ impl Scheduler {
     }
 
     pub fn is_closed(&self) -> bool {
-        self.closed.lock().unwrap().clone()
+        *self.closed.lock().unwrap()
     }
 
     pub fn on_proc(&self, f: impl Fn(&Event<Arc<Proc>>) + Send + Sync + 'static) {

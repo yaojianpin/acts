@@ -9,11 +9,11 @@ mod workflow;
 #[cfg(test)]
 mod tests;
 
-pub use act::{Act, Block, Call, Chain, Cmd, Each, If, Msg, Pack, Req};
+pub use act::{Act, ActFn, Block, Call, Catch, Chain, Do, Each, If, Irq, Msg, Pack, Timeout};
 pub use branch::Branch;
 pub use info::{MessageInfo, ModelInfo, PackageInfo, ProcInfo, TaskInfo};
 pub use output::{Output, OutputType, Outputs};
-pub use step::{Catch, Step, Timeout};
+pub use step::Step;
 pub use vars::Vars;
 pub use workflow::Workflow;
 
@@ -23,4 +23,7 @@ pub trait ModelBase {
 
 pub trait StmtBuild<T> {
     fn add(self, s: T) -> Self;
+    fn with<F: Fn(T) -> T>(self, build: F) -> Self
+    where
+        T: Default;
 }

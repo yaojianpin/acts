@@ -2,7 +2,7 @@ use crate::{
     data,
     sch::{tests::create_proc_signal2, Proc},
     utils::{self, consts},
-    Act, Event, Message, Signal, StmtBuild, TaskState, Workflow,
+    Act, Event, Message, Signal, StmtBuild, TaskState, Vars, Workflow,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -13,7 +13,7 @@ async fn sch_act_pack_msg() {
     let pack = data::Package {
         id: "pack1".to_string(),
         name: "package 1".to_string(),
-        file_data: br#"act.msg({ key: "msg1" })"#.to_vec(),
+        data: br#"act.msg({ key: "msg1" })"#.to_vec(),
         ..Default::default()
     };
     let ret = run_test(&workflow, &pack, |e, s| {
@@ -31,7 +31,7 @@ async fn sch_act_pack_req() {
     let pack = data::Package {
         id: "pack1".to_string(),
         name: "package 1".to_string(),
-        file_data: br#"act.req({ key: "act1" })"#.to_vec(),
+        data: br#"act.irq({ key: "act1" })"#.to_vec(),
         ..Default::default()
     };
     let ret = run_test(&workflow, &pack, |e, s| {
@@ -47,12 +47,12 @@ async fn sch_act_pack_req() {
 async fn sch_act_pack_chain_array() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::pack(|p| p.with_uses("pack1")))
+            .with_act(Act::pack(|p| p.with_key("pack1")))
     });
     let pack = data::Package {
         id: "pack1".to_string(),
         name: "package 1".to_string(),
-        file_data: br#"act.chain({ in: '["u1"]', run: [ { msg: { key: "msg1" } } ] })"#.to_vec(),
+        data: br#"act.chain({ in: '["u1"]', then: [ { act: "msg", key: "msg1" }] })"#.to_vec(),
         ..Default::default()
     };
     let ret = run_test(&workflow, &pack, |e, s| {
@@ -70,12 +70,12 @@ async fn sch_act_pack_chain_var() {
         .with_input("a", json!(r#"["u1"]"#))
         .with_step(|step| {
             step.with_id("step1")
-                .with_act(Act::pack(|p| p.with_uses("pack1")))
+                .with_act(Act::pack(|p| p.with_key("pack1")))
         });
     let pack = data::Package {
         id: "pack1".to_string(),
         name: "package 1".to_string(),
-        file_data: br#"act.chain({ in: $("a"), run: [ { msg: { key: "msg1" } } ] })"#.to_vec(),
+        data: br#"act.chain({ in: $("a"), then: [ { act: "msg", key: "msg1" }] })"#.to_vec(),
         ..Default::default()
     };
     let ret = run_test(&workflow, &pack, |e, s| {
@@ -91,12 +91,12 @@ async fn sch_act_pack_chain_var() {
 async fn sch_act_pack_each_array() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::pack(|p| p.with_uses("pack1")))
+            .with_act(Act::pack(|p| p.with_key("pack1")))
     });
     let pack = data::Package {
         id: "pack1".to_string(),
         name: "package 1".to_string(),
-        file_data: br#"act.each({ in: '["u1"]', run: [ { msg: { key: "msg1" } } ] })"#.to_vec(),
+        data: br#"act.each({ in: '["u1"]', then: [ { act: "msg", key: "msg1" }] })"#.to_vec(),
         ..Default::default()
     };
     let ret = run_test(&workflow, &pack, |e, s| {
@@ -114,12 +114,12 @@ async fn sch_act_pack_each_var() {
         .with_input("a", json!(r#"["u1"]"#))
         .with_step(|step| {
             step.with_id("step1")
-                .with_act(Act::pack(|p| p.with_uses("pack1")))
+                .with_act(Act::pack(|p| p.with_key("pack1")))
         });
     let pack = data::Package {
         id: "pack1".to_string(),
         name: "package 1".to_string(),
-        file_data: br#"act.each({ in: $("a"), run: [ { msg: { key: "msg1" } } ] })"#.to_vec(),
+        data: br#"act.each({ in: $("a"), then: [{ act: "msg", key: "msg1" }] })"#.to_vec(),
         ..Default::default()
     };
     let ret = run_test(&workflow, &pack, |e, s| {
@@ -135,12 +135,12 @@ async fn sch_act_pack_each_var() {
 async fn sch_act_pack_block() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::pack(|p| p.with_uses("pack1")))
+            .with_act(Act::pack(|p| p.with_key("pack1")))
     });
     let pack = data::Package {
         id: "pack1".to_string(),
         name: "package 1".to_string(),
-        file_data: br#"act.block({ acts: [{ msg: { id: "msg1" } }] })"#.to_vec(),
+        data: br#"act.block({ then: [ { act: "msg", key: "msg1" }] })"#.to_vec(),
         ..Default::default()
     };
     let ret = run_test(&workflow, &pack, |e, s| {
@@ -156,13 +156,13 @@ async fn sch_act_pack_block() {
 async fn sch_act_pack_call() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::pack(|p| p.with_uses("pack1")))
+            .with_act(Act::pack(|p| p.with_key("pack1")))
     });
     let dep = Workflow::new().with_id("m1");
     let pack = data::Package {
         id: "pack1".to_string(),
         name: "package 1".to_string(),
-        file_data: br#"act.call({ mid: "m1" })"#.to_vec(),
+        data: br#"act.call({ key: "m1" })"#.to_vec(),
         ..Default::default()
     };
     let ret = run_test_dep(&workflow, &dep, &pack, |e, s| {
@@ -178,12 +178,12 @@ async fn sch_act_pack_call() {
 async fn sch_act_pack_push() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::pack(|p| p.with_uses("pack1")))
+            .with_act(Act::pack(|p| p.with_key("pack1")))
     });
     let pack = data::Package {
         id: "pack1".to_string(),
         name: "package 1".to_string(),
-        file_data: br#"act.push({ req: { id: "act1" } })"#.to_vec(),
+        data: br#"act.push({ act: "irq", key: "act1" })"#.to_vec(),
         ..Default::default()
     };
     let ret = run_test(&workflow, &pack, |e, s| {
@@ -199,12 +199,12 @@ async fn sch_act_pack_push() {
 async fn sch_act_pack_set_output() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::pack(|p| p.with_id("pack1").with_uses("pack1")))
+            .with_act(Act::pack(|p| p.with_key("pack1")).with_id("pack1"))
     });
     let pack = data::Package {
         id: "pack1".to_string(),
         name: "package 1".to_string(),
-        file_data: br#"
+        data: br#"
         act.set_output("a", 100);
         "#
         .to_vec(),
@@ -219,7 +219,7 @@ async fn sch_act_pack_set_output() {
 
     assert_eq!(
         proc.task_by_nid("pack1")
-            .get(0)
+            .first()
             .unwrap()
             .outputs()
             .get::<i32>("a")
@@ -232,12 +232,12 @@ async fn sch_act_pack_set_output() {
 async fn sch_act_pack_abort() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::pack(|p| p.with_uses("pack1")))
+            .with_act(Act::pack(|p| p.with_key("pack1")))
     });
     let pack = data::Package {
         id: "pack1".to_string(),
         name: "package 1".to_string(),
-        file_data: br#"
+        data: br#"
         act.abort();
         "#
         .to_vec(),
@@ -256,12 +256,12 @@ async fn sch_act_pack_abort() {
 async fn sch_act_pack_fail() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::pack(|p| p.with_uses("pack1")))
+            .with_act(Act::pack(|p| p.with_key("pack1")))
     });
     let pack = data::Package {
         id: "pack1".to_string(),
         name: "package 1".to_string(),
-        file_data: br#"
+        data: br#"
         act.fail("err1", "error message");
         "#
         .to_vec(),
@@ -281,15 +281,15 @@ async fn sch_act_pack_fail_catch() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_catch(|c| {
-                c.with_err("err1")
-                    .with_then(|stmts| stmts.add(Act::msg(|act| act.with_id("msg1"))))
+                c.with_on("err1")
+                    .with_then(|stmts| stmts.add(Act::msg(|act| act.with_key("msg1"))))
             })
-            .with_act(Act::pack(|p| p.with_uses("pack1")))
+            .with_act(Act::pack(|p| p.with_key("pack1")))
     });
     let pack = data::Package {
         id: "pack1".to_string(),
         name: "package 1".to_string(),
-        file_data: br#"
+        data: br#"
         act.fail("err1", "error message");
         "#
         .to_vec(),
@@ -308,12 +308,12 @@ async fn sch_act_pack_fail_catch() {
 async fn sch_act_pack_skip() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::pack(|p| p.with_id("pack1").with_uses("pack1")))
+            .with_act(Act::pack(|p| p.with_key("pack1")).with_id("pack1"))
     });
     let pack = data::Package {
         id: "pack1".to_string(),
         name: "package 1".to_string(),
-        file_data: br#"
+        data: br#"
         act.skip();
         "#
         .to_vec(),
@@ -326,7 +326,7 @@ async fn sch_act_pack_skip() {
     })
     .await;
     assert_eq!(
-        proc.task_by_nid("pack1").get(0).unwrap().state(),
+        proc.task_by_nid("pack1").first().unwrap().state(),
         TaskState::Skipped
     );
 }
@@ -337,12 +337,12 @@ async fn sch_act_pack_back() {
         .with_step(|step| step.with_id("step1"))
         .with_step(|step| {
             step.with_id("step2")
-                .with_act(Act::pack(|p| p.with_uses("pack1")))
+                .with_act(Act::pack(|p| p.with_key("pack1")))
         });
     let pack = data::Package {
         id: "pack1".to_string(),
         name: "package 1".to_string(),
-        file_data: br#"
+        data: br#"
         act.back("step1");
         "#
         .to_vec(),
@@ -358,15 +358,69 @@ async fn sch_act_pack_back() {
 }
 
 #[tokio::test]
+async fn sch_act_pack_complete() {
+    let workflow = Workflow::new()
+        .with_step(|step| step.with_id("step1"))
+        .with_step(|step| {
+            step.with_id("step2")
+                .with_act(Act::pack(|p| p.with_key("pack1")))
+        });
+    let pack = data::Package {
+        id: "pack1".to_string(),
+        name: "package 1".to_string(),
+        data: br#"
+        act.complete();
+        "#
+        .to_vec(),
+        ..Default::default()
+    };
+    let ret: bool = run_test(&workflow, &pack, |e, s| {
+        if e.is_key("step2") && e.is_state("completed") {
+            s.send(true);
+        }
+    })
+    .await;
+    assert!(ret);
+}
+
+#[tokio::test]
+async fn sch_act_pack_expose() {
+    let workflow = Workflow::new()
+        .with_step(|step| step.with_id("step1"))
+        .with_step(|step| {
+            step.with_id("step2")
+                .with_output("v", json!(null))
+                .with_act(Act::pack(|p| p.with_key("pack1")))
+        });
+    let pack = data::Package {
+        id: "pack1".to_string(),
+        name: "package 1".to_string(),
+        data: br#"
+        act.expose("v", 123);
+        act.complete();
+        "#
+        .to_vec(),
+        ..Default::default()
+    };
+    let ret: Vars = run_test(&workflow, &pack, |e, s| {
+        if e.is_key("step2") && e.is_state("completed") {
+            s.send(e.outputs.clone());
+        }
+    })
+    .await;
+    assert_eq!(ret.get::<i32>("v").unwrap(), 123);
+}
+
+#[tokio::test]
 async fn sch_act_pack_state() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::pack(|p| p.with_id("pack1").with_uses("pack1")))
+            .with_act(Act::pack(|p| p.with_key("pack1")).with_id("pack1"))
     });
     let pack = data::Package {
         id: "pack1".to_string(),
         name: "package 1".to_string(),
-        file_data: br#"
+        data: br#"
         let state = act.state();
         act.set_output("state", state);
         "#
@@ -381,7 +435,7 @@ async fn sch_act_pack_state() {
     .await;
     assert_eq!(
         proc.task_by_nid("pack1")
-            .get(0)
+            .first()
             .unwrap()
             .outputs()
             .get::<String>("state")
@@ -394,12 +448,12 @@ async fn sch_act_pack_state() {
 async fn sch_act_pack_throw_error() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::pack(|p| p.with_uses("pack1")))
+            .with_act(Act::pack(|p| p.with_key("pack1")))
     });
     let pack = data::Package {
         id: "pack1".to_string(),
         name: "package 1".to_string(),
-        file_data: br#"
+        data: br#"
         throw new Error("test error");
         "#
         .to_vec(),
@@ -418,13 +472,13 @@ async fn sch_act_pack_throw_error() {
 async fn sch_act_pack_catch_error() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(|c| c.with_then(|stmts| stmts.add(Act::msg(|act| act.with_id("msg1")))))
-            .with_act(Act::pack(|p| p.with_uses("pack1")))
+            .with_catch(|c| c.with_then(|stmts| stmts.add(Act::msg(|act| act.with_key("msg1")))))
+            .with_act(Act::pack(|p| p.with_key("pack1")))
     });
     let pack = data::Package {
         id: "pack1".to_string(),
         name: "package 1".to_string(),
-        file_data: br#"
+        data: br#"
         throw new Error("test error");
         "#
         .to_vec(),
@@ -445,7 +499,7 @@ async fn run_test<T: Clone + Send + 'static + Default>(
     exit_if: fn(&Event<Message>, sig: Signal<T>),
 ) -> T {
     let (engine, proc, tx, rx) = create_proc_signal2::<T>(workflow, &utils::longid());
-    engine.manager().publish(&package).unwrap();
+    engine.executor().pack().publish(package).unwrap();
     engine.channel().on_message(move |e| {
         println!("message: {:?}", e);
         exit_if(e, rx.clone());
@@ -462,7 +516,7 @@ async fn run_test_proc<T: Clone + Send + 'static + Default>(
     exit_if: fn(&Event<Message>, sig: Signal<T>),
 ) -> (T, Arc<Proc>) {
     let (engine, proc, tx, rx) = create_proc_signal2::<T>(workflow, &utils::longid());
-    engine.manager().publish(&package).unwrap();
+    engine.executor().pack().publish(package).unwrap();
     engine.channel().on_message(move |e| {
         println!("message: {:?}", e);
         exit_if(e, rx.clone());
@@ -480,8 +534,8 @@ async fn run_test_dep<T: Clone + Send + 'static + Default>(
     exit_if: fn(&Event<Message>, sig: Signal<T>),
 ) -> T {
     let (engine, proc, tx, rx) = create_proc_signal2::<T>(workflow, &utils::longid());
-    engine.manager().deploy(&dep).unwrap();
-    engine.manager().publish(&package).unwrap();
+    engine.executor().model().deploy(dep).unwrap();
+    engine.executor().pack().publish(package).unwrap();
     engine.channel().on_message(move |e| {
         println!("message: {:?}", e);
         exit_if(e, rx.clone());

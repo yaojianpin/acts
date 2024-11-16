@@ -5,20 +5,23 @@ steps:
   - name: step 1
     id: step1
     setup:
-      - !on_created
-        - !set
-          # set step custom data
-          my_data: null
-      - !on_completed
-        - !msg
-          id: msg1
-          inputs:
-            # got the my_data value and send with the msg
-            my_data: ${ $("my_data") }
+      - act: on_created
+        then:
+          - act: set
+            # set step custom data
+            inputs:
+              my_data: null
+      - act: on_completed
+        then:
+          - act: msg
+            key: msg1
+            inputs:
+              # got the my_data value and send with the msg
+              my_data: ${ $("my_data") }
     acts:
-      - !pack
+      - act: pack
         # use package in pack act
-        uses: pack1
+        key: pack1
         inputs:
           # set the inputs variable from global 'input'
           a: ${ $("input") }

@@ -59,7 +59,7 @@ async fn sch_tree_set_parent() {
     let node = tr.make(&data.id(), data, 1).unwrap();
     node.set_parent(&parent);
 
-    assert!(parent.children().len() > 0);
+    assert!(!parent.children().is_empty());
     assert_eq!(node.parent().unwrap().id(), "1");
 }
 
@@ -190,9 +190,10 @@ async fn sch_tree_branch_steps() {
 async fn sch_tree_acts() {
     let mut workflow = Workflow::new().with_id("w1").with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
-            .with_act(Act::req(|act| act.with_id("act2")))
+            .with_act(Act::new().with_id("act1"))
+            .with_act(Act::new().with_id("act2"))
     });
+
     let tree = NodeTree::build(&mut workflow).unwrap();
     let step = tree.node("step1").unwrap();
     let act1 = tree.node("act1").unwrap();
@@ -268,7 +269,7 @@ async fn sch_tree_node_act_ser_de() {
     let step1 = tree.node("step1").unwrap();
     let act1 = Arc::new(Node::new(
         "act_id_1",
-        NodeContent::Act(Act::req(|r| r.with_id("act1"))),
+        NodeContent::Act(Act::irq(|r| r.with_key("act1"))),
         step1.level + 1,
     ));
 
@@ -294,13 +295,13 @@ async fn sch_tree_node_act2_ser_de() {
     let step1 = tree.node("step1").unwrap();
     let act1 = Arc::new(Node::new(
         "act_id_1",
-        NodeContent::Act(Act::req(|r| r.with_id("act1"))),
+        NodeContent::Act(Act::irq(|r| r.with_key("act1"))),
         step1.level + 1,
     ));
 
     let act2 = Arc::new(Node::new(
         "act_id_2",
-        NodeContent::Act(Act::req(|r| r.with_id("act2"))),
+        NodeContent::Act(Act::irq(|r| r.with_key("act2"))),
         act1.level + 1,
     ));
 

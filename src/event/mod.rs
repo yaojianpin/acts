@@ -19,7 +19,7 @@ pub struct Event<T, E = ()> {
     inner: T,
     extra: E,
     #[cfg(test)]
-    runtime: Option<Arc<Runtime>>,
+    pub(crate) runtime: Option<Arc<Runtime>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
@@ -107,7 +107,7 @@ where
         if let Some(scher) = &self.runtime {
             return scher.do_action(&Action::new(pid, tid, action, options));
         }
-        Err(ActError::Action(format!("scher is not define in Event")))
+        Err(ActError::Action("scher is not define in Event".to_string()))
     }
 }
 

@@ -16,7 +16,7 @@ async fn sch_act_set_one() {
     proc.print();
     assert_eq!(
         proc.task_by_nid("step1")
-            .get(0)
+            .first()
             .unwrap()
             .data()
             .get::<i64>("a")
@@ -40,7 +40,7 @@ async fn sch_act_set_many() {
     proc.print();
     assert_eq!(
         proc.task_by_nid("step1")
-            .get(0)
+            .first()
             .unwrap()
             .data()
             .get::<i64>("a")
@@ -50,7 +50,7 @@ async fn sch_act_set_many() {
 
     assert_eq!(
         proc.task_by_nid("step1")
-            .get(0)
+            .first()
             .unwrap()
             .data()
             .get::<String>("b")
@@ -75,7 +75,7 @@ async fn sch_act_set_local_var() {
     proc.print();
     assert_eq!(
         proc.task_by_nid("step1")
-            .get(0)
+            .first()
             .unwrap()
             .data()
             .get::<String>("a")
@@ -100,7 +100,7 @@ async fn sch_act_set_calc_str() {
     proc.print();
     assert_eq!(
         proc.task_by_nid("step1")
-            .get(0)
+            .first()
             .unwrap()
             .data()
             .get::<String>("a")
@@ -125,7 +125,7 @@ async fn sch_act_set_calc_int() {
     proc.print();
     assert_eq!(
         proc.task_by_nid("step1")
-            .get(0)
+            .first()
             .unwrap()
             .data()
             .get::<i32>("a")
@@ -150,7 +150,7 @@ async fn sch_act_set_update_local() {
     proc.print();
     assert_eq!(
         proc.task_by_nid("step1")
-            .get(0)
+            .first()
             .unwrap()
             .data()
             .get::<String>("a")
@@ -176,7 +176,7 @@ async fn sch_act_get_global_var() {
     proc.print();
     assert_eq!(
         proc.task_by_nid("step1")
-            .get(0)
+            .first()
             .unwrap()
             .data()
             .get::<String>("a")

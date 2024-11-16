@@ -1,21 +1,23 @@
-use crate::Vars;
+use crate::{Act, Vars};
 use serde::{Deserialize, Serialize};
 
+/// do an action command
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
-pub struct Cmd {
+pub struct Do {
+    /// action name
     #[serde(default)]
-    pub name: String,
+    pub key: String,
 
     #[serde(default)]
     pub inputs: Vars,
 }
 
-impl Cmd {
+impl Do {
     pub fn new() -> Self {
         Default::default()
     }
-    pub fn with_name(mut self, name: &str) -> Self {
-        self.name = name.to_string();
+    pub fn with_key(mut self, name: &str) -> Self {
+        self.key = name.to_string();
         self
     }
 
@@ -25,5 +27,11 @@ impl Cmd {
     {
         self.inputs.set(name, value);
         self
+    }
+}
+
+impl From<Do> for Act {
+    fn from(val: Do) -> Self {
+        Act::cmd(|_| val.clone())
     }
 }

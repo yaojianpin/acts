@@ -6,9 +6,9 @@ async fn sch_step_timeout_one() {
         step.with_id("step1")
             .with_timeout(|t| {
                 t.with_on("1s")
-                    .with_then(|stmts| stmts.add(Act::msg(|msg| msg.with_id("msg1"))))
+                    .with_then(|stmts| stmts.add(Act::msg(|msg| msg.with_key("msg1"))))
             })
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
     workflow.print();
     let (proc, scher, emitter, tx, rx) =
@@ -31,13 +31,13 @@ async fn sch_step_timeout_many() {
         step.with_id("step1")
             .with_timeout(|t| {
                 t.with_on("1s")
-                    .with_then(|stmts| stmts.add(Act::msg(|msg| msg.with_id("msg1"))))
+                    .with_then(|stmts| stmts.add(Act::msg(|msg| msg.with_key("msg1"))))
             })
             .with_timeout(|t| {
                 t.with_on("2s")
-                    .with_then(|stmts| stmts.add(Act::msg(|msg| msg.with_id("msg2"))))
+                    .with_then(|stmts| stmts.add(Act::msg(|msg| msg.with_key("msg2"))))
             })
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
     workflow.print();
     let (proc, scher, emitter, tx, rx) =

@@ -1,6 +1,6 @@
 use crate::{sch::Runtime, utils, Event, Message};
 use std::sync::Arc;
-use tracing::error;
+use tracing::{debug, error, info};
 
 #[derive(Debug, Clone)]
 pub struct ChannelOptions {
@@ -64,8 +64,9 @@ impl Channel {
 
     /// create a emit channel to receive message
     /// if the message is not received by client, the engine will re-send at the next time interval
+    #[allow(clippy::self_named_constructors)]
     pub fn channel(rt: &Arc<Runtime>, options: &ChannelOptions) -> Self {
-        println!("channel: {options:?}");
+        debug!("channel: {options:?}");
         let pat_type = globset::Glob::new(&options.r#type)
             .unwrap()
             .compile_matcher();
@@ -94,19 +95,19 @@ impl Channel {
     /// async fn main() {
     ///     let engine = Engine::new();
     ///     let workflow = Workflow::new().with_id("m1").with_step(|step| {
-    ///             step.with_id("step1").with_act(Act::req(|act| act.with_id("act1")))
+    ///             step.with_id("step1").with_act(Act::new().with_act("irq").with_key("act1"))
     ///     });
     ///
     ///     engine.channel().on_message(move |e| {
-    ///         if e.r#type == "req" {
+    ///         if e.r#type == "irq" {
     ///             println!("act message: state={} inputs={:?} outputs={:?}", e.state, e.inputs, e.outputs);
     ///         }
     ///     });
-    ///
-    ///     engine.manager().deploy(&workflow).expect("fail to deploy workflow");
+    ///     let exec = engine.executor();
+    ///     exec.model().deploy(&workflow).expect("fail to deploy workflow");
     ///     let mut vars = Vars::new();
     ///     vars.insert("pid".into(), "w1".into());
-    ///     engine.executor().start(
+    ///     exec.proc().start(
     ///        &workflow.id,
     ///        &vars,
     ///    );
@@ -115,7 +116,7 @@ impl Channel {
     pub fn on_message(self: &Arc<Self>, f: impl Fn(&Event<Message>) + Send + Sync + 'static) {
         let chan = self.clone();
         self.runtime.emitter().on_message(&self.chan_id, move |e| {
-            println!("on_message: chan={} {e:?}", chan.chan_id);
+            info!("on_message: chan={} {e:?}", chan.chan_id);
             if chan.matches(e) {
                 chan.store_if(e);
                 f(e);
@@ -160,7 +161,7 @@ impl Channel {
     fn matches(&self, message: &Message) -> bool {
         let (pat_type, pat_state, pat_tag, pat_key) = &self.glob;
         pat_type.is_match(&message.r#type)
-            && pat_state.is_match(&message.state.to_string())
+            && pat_state.is_match(message.state.to_string())
             && (pat_tag.is_match(&message.tag) || pat_tag.is_match(&message.model.tag))
             && pat_key.is_match(&message.key)
     }
@@ -177,7 +178,7 @@ impl Channel {
                 .create(&msg)
                 .unwrap_or_else(|err| {
                     error!("channel.store_if_emit_id: {}", err.to_string());
-                    eprintln!("channel.store_if_emit_id: {}", err.to_string());
+                    eprintln!("channel.store_if_emit_id: {}", err);
                     false
                 });
         }

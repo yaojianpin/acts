@@ -24,7 +24,7 @@ impl<T> Collect<T> {
         Self {
             name: name.to_string(),
             db: Arc::new(RwLock::new(BTreeMap::new())),
-            _t: PhantomData::default(),
+            _t: PhantomData,
         }
     }
 }
@@ -46,10 +46,7 @@ where
             .read()
             .unwrap()
             .get(id)
-            .map(|iter| {
-                let model = map_to_model::<Self::Item>(iter).unwrap();
-                model
-            })
+            .map(|iter| map_to_model::<Self::Item>(iter).unwrap())
             .ok_or(ActError::Store(format!(
                 "cannot find {} by '{}'",
                 self.name, id
@@ -132,14 +129,14 @@ impl Cond {
     pub fn calc(&mut self, v: &HashSet<Box<[u8]>>) {
         match self.r#type {
             CondType::And => {
-                if self.result.len() == 0 {
+                if self.result.is_empty() {
                     self.result = v.clone();
                 } else {
                     self.result = self.result.intersection(v).cloned().collect::<HashSet<_>>()
                 }
             }
             CondType::Or => {
-                if self.result.len() == 0 {
+                if self.result.is_empty() {
                     self.result = v.clone();
                 } else {
                     self.result = self.result.union(v).cloned().collect::<HashSet<_>>()
@@ -164,7 +161,7 @@ impl Expr {
                         return v1.as_u64().unwrap() < v2.as_u64().unwrap_or_default();
                     }
                 }
-                return false;
+                false
             }
             ExprOp::LE => {
                 if let (serde_json::Value::Number(v1), serde_json::Value::Number(v2)) = (l, r) {
@@ -176,7 +173,7 @@ impl Expr {
                         return v1.as_u64().unwrap() <= v2.as_u64().unwrap_or_default();
                     }
                 }
-                return false;
+                false
             }
             ExprOp::GT => {
                 if let (serde_json::Value::Number(v1), serde_json::Value::Number(v2)) = (l, r) {
@@ -188,7 +185,7 @@ impl Expr {
                         return v1.as_u64().unwrap() > v2.as_u64().unwrap_or_default();
                     }
                 }
-                return false;
+                false
             }
             ExprOp::GE => {
                 if let (serde_json::Value::Number(v1), serde_json::Value::Number(v2)) = (l, r) {
@@ -200,7 +197,7 @@ impl Expr {
                         return v1.as_u64().unwrap() >= v2.as_u64().unwrap_or_default();
                     }
                 }
-                return false;
+                false
             }
         }
     }

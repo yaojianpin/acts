@@ -12,7 +12,7 @@ use crate::{
         Context, Proc, Runtime, TaskState,
     },
     utils::{self, consts},
-    Act, ActError, ActTask, Catch, Error, Message, NodeKind, Req, Result, ShareLock, Timeout, Vars,
+    Act, ActError, ActTask, Catch, Error, Message, NodeKind, Result, ShareLock, Timeout, Vars,
 };
 use async_trait::async_trait;
 pub use hook::{StatementBatch, TaskLifeCycle};
@@ -140,7 +140,6 @@ impl Task {
         // if it is act, insert the step_node_id and step_task_id to the inputs
         // it is necessary to find the relation between the step and it's children acts
         let mut inputs = self.inputs();
-
         if self.node.kind() == NodeKind::Act {
             let mut parent = self.parent();
             while let Some(task) = parent {
@@ -161,15 +160,14 @@ impl Task {
 
         // add error to inputs
         if let Some(err) = self.err() {
-            inputs.set(consts::ACT_ERR_KEY, err);
+            inputs.set(consts::ACT_ERR_CODE, err.ecode);
+            inputs.set(consts::ACT_ERR_MESSAGE, err.message);
         }
 
-        // if there is no key, use id instead
         let mut key = self.node.key();
         if key.is_empty() {
-            key = self.node.id();
+            key = self.node.id().to_string();
         }
-
         Message {
             id: utils::longid(),
             tid: self.id.clone(),
@@ -178,7 +176,8 @@ impl Task {
             source: self.node.kind().to_string(),
             state: self.state().into(),
             pid: self.pid.clone(),
-            key: key.to_string(),
+            nid: self.node.id().to_string(),
+            key,
             tag: self.node.tag().to_string(),
 
             model: Model {
@@ -259,7 +258,7 @@ impl Task {
         // merge the expose data with the outputs
         if let Some(vars) = self.with_data(|data| data.get::<Vars>(consts::ACT_OUTPUTS)) {
             for (key, value) in &vars {
-                outputs.set(key, value.clone());
+                outputs.set(&key, value.clone());
             }
         }
 
@@ -341,25 +340,40 @@ impl Task {
 
     pub fn update_no_lock(self: &Arc<Self>, ctx: &Context) -> Result<()> {
         info!("update task={:?}", ctx.task());
-        let action = ctx
-            .action()
-            .ok_or(ActError::Action(format!("cannot find action in context")))?;
+        let action = ctx.action().ok_or(ActError::Action(
+            "cannot find action in context".to_string(),
+        ))?;
 
         let event = EventAction::parse(&action.event)?;
         match event {
             EventAction::Push => {
-                let act = Act::Req(Req {
-                    id: ctx
-                        .get_var::<String>("id")
-                        .ok_or(ActError::Runtime(format!("cannot find 'id' in options")))?,
+                let act_name = ctx.get_var::<String>("act").unwrap_or("irq".to_string());
+                let key = ctx.get_var::<String>("key").unwrap_or_default();
+                let act = Act {
+                    id: ctx.get_var::<String>("id").unwrap_or_default(),
                     name: ctx.get_var::<String>("name").unwrap_or_default(),
                     tag: ctx.get_var::<String>("tag").unwrap_or_default(),
-                    key: ctx.get_var::<String>("key").unwrap_or_default(),
-                    inputs: ctx.get_var("inputs").unwrap_or_default(),
-                    outputs: ctx.get_var("outputs").unwrap_or_default(),
+                    key: key.clone(),
+                    act: act_name.clone(),
+                    inputs: ctx.get_var("with").unwrap_or_default(),
                     rets: ctx.get_var("rets").unwrap_or_default(),
+                    outputs: ctx.get_var("outputs").unwrap_or_default(),
                     ..Default::default()
-                });
+                };
+
+                // check key property
+                if (act_name == "irq"
+                    || act_name == "pack"
+                    || act_name == "call"
+                    || act_name == "cmd"
+                    || act_name == "msg")
+                    && key.is_empty()
+                {
+                    return Err(crate::ActError::Action(
+                        "cannot find 'key' in act".to_string(),
+                    ));
+                }
+
                 ctx.append_act(&act)?;
             }
             EventAction::Remove => {
@@ -389,9 +403,9 @@ impl Task {
                 }
                 let nid = ctx
                     .get_var::<String>(consts::ACT_TO)
-                    .ok_or(ActError::Action(format!(
-                        "cannot find 'to' value in options",
-                    )))?;
+                    .ok_or(ActError::Action(
+                        "cannot find 'to' value in options".to_string(),
+                    ))?;
 
                 let mut path_tasks = Vec::new();
                 let task = self.backs(
@@ -433,8 +447,8 @@ impl Task {
                     &|t| t.is_kind(NodeKind::Step) && t.is_acts(),
                     &mut path_tasks,
                 );
-                if nexts.len() == 0 {
-                    return Err(ActError::Action(format!("cannot find cancelled tasks")));
+                if nexts.is_empty() {
+                    return Err(ActError::Action("cannot find cancelled tasks".to_string()));
                 }
 
                 // mark the path tasks as completed
@@ -483,22 +497,19 @@ impl Task {
                 self.next(ctx)?;
             }
             EventAction::Error => {
-                let err = ctx
-                    .get_var::<Vars>(consts::ACT_ERR_KEY)
+                let ecode = ctx
+                    .get_var::<String>(consts::ACT_ERR_CODE)
                     .ok_or(ActError::Action(format!(
                         "cannot find '{}' in options",
-                        consts::ACT_ERR_KEY
+                        consts::ACT_ERR_MESSAGE
                     )))?;
 
-                let err = Error::from_var(&err)?;
-                if err.ecode.is_empty() {
-                    return Err(ActError::Action(format!(
-                        "the '{}.{}' cannot be empty",
-                        consts::ACT_ERR_KEY,
-                        consts::ACT_ERR_CODE
-                    )));
-                }
+                let error = ctx
+                    .get_var::<String>(consts::ACT_ERR_MESSAGE)
+                    .unwrap_or("".to_string());
 
+                let err = Error::new(&error, &ecode);
+                println!("error: {err:?}");
                 let task = &ctx.task();
                 if task.state().is_completed() {
                     return Err(ActError::Action(format!(
@@ -516,7 +527,7 @@ impl Task {
                         continue;
                     }
                     sub.set_state(TaskState::Skipped);
-                    ctx.emit_task(&sub)?;
+                    ctx.emit_task(sub)?;
                 }
                 task.set_err(&err);
                 task.error(ctx)?;
@@ -538,7 +549,7 @@ impl Task {
         match &self.node.content {
             NodeContent::Branch(n) => {
                 let siblings = self.siblings();
-                if n.needs.len() > 0 {
+                if !n.needs.is_empty() {
                     if siblings
                         .iter()
                         .filter(|iter| {
@@ -578,7 +589,7 @@ impl Task {
         if self.is_ready() {
             self.set_state(TaskState::Running);
             ctx.runtime.scher().emit_task_event(self)?;
-            self.exec(&ctx)?;
+            self.exec(ctx)?;
         }
 
         Ok(())
@@ -750,7 +761,7 @@ impl Task {
     ) -> Vec<Arc<Self>> {
         let mut ret = Vec::new();
         let children = self.children();
-        if children.len() > 0 {
+        if !children.is_empty() {
             for task in &children {
                 if predicate(task) {
                     ret.push(task.clone());
@@ -826,7 +837,7 @@ impl ActTask for Arc<Task> {
         if !is_next {
             let parent = ctx.task().parent();
             if let Some(task) = &parent.clone() {
-                task.review(&ctx)?;
+                task.review(ctx)?;
             }
         }
 
@@ -850,7 +861,7 @@ impl ActTask for Arc<Task> {
         if is_review {
             let parent = ctx.task().parent();
             if let Some(task) = &parent.clone() {
-                return task.review(&ctx);
+                return task.review(ctx);
             }
         }
 
@@ -903,7 +914,7 @@ impl Task {
 
     pub fn set_data(&self, vars: &Vars) {
         let mut data = self.data.write().unwrap();
-        for (name, value) in vars {
+        for (ref name, value) in vars {
             data.set(name, value);
         }
     }
@@ -942,7 +953,7 @@ impl Task {
         }
 
         let mut locals = Vars::new();
-        for (name, value) in vars {
+        for (ref name, ref value) in vars {
             let mut is_shared_var = false;
             for t in refs.iter().rev() {
                 let is_updated = t.update_data_if_exists(|v| {

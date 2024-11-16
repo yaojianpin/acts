@@ -3,35 +3,39 @@ use crate::{Act, Msg};
 #[test]
 fn model_act_msg_parse() {
     let text = r#"
-    !msg
-    id: msg1
-    tag: tag1
+    act: msg
     inputs:
-        a: 1
+      key: msg1
+      a: 1
+    tag: tag1
     "#;
-    if let Act::Msg(stmt) = serde_yaml::from_str(text).unwrap() {
-        assert_eq!(stmt.id, "msg1");
-        assert_eq!(stmt.tag, "tag1");
-        assert_eq!(stmt.inputs.get::<i32>("a").unwrap(), 1);
+    if let Ok(Act {
+        act, tag, inputs, ..
+    }) = serde_yaml::from_str(text)
+    {
+        assert_eq!(act, "msg");
+        assert_eq!(inputs.get::<String>("key").unwrap(), "msg1");
+        assert_eq!(tag, "tag1");
+        assert_eq!(inputs.get::<i32>("a").unwrap(), 1);
     } else {
         assert!(false);
     }
 }
 
-#[test]
-fn model_act_msg_id() {
-    let act = Msg::new().with_id("act1");
-    assert_eq!(act.id, "act1");
-}
+// #[test]
+// fn model_act_msg_id() {
+//     let act = Msg::new().with_id("act1");
+//     assert_eq!(act.id, "act1");
+// }
+
+// #[test]
+// fn model_act_msg_name() {
+//     let act = Msg::new().with_name("my name");
+//     assert_eq!(act.name, "my name");
+// }
 
 #[test]
-fn model_act_msg_name() {
-    let act = Msg::new().with_name("my name");
-    assert_eq!(act.name, "my name");
-}
-
-#[test]
-fn model_act_msg_inputs() {
+fn model_act_msg_with() {
     let act = Msg::new().with_input("p1", 5);
     assert_eq!(act.inputs.len(), 1);
     assert_eq!(act.inputs.get("p1"), Some(5));

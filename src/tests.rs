@@ -15,7 +15,7 @@ async fn engine_event_on_message() {
     let mid = utils::longid();
     let workflow = Workflow::new()
         .with_id(&mid)
-        .with_step(|step| step.with_act(Act::req(|act| act.with_id("test"))));
+        .with_step(|step| step.with_act(Act::irq(|act| act.with_key("test"))));
 
     engine.channel().on_message(move |e| {
         if e.is_source("act") {
@@ -25,11 +25,11 @@ async fn engine_event_on_message() {
     });
 
     let executor = engine.executor();
-    engine.manager().deploy(&workflow).unwrap();
+    engine.executor().model().deploy(&workflow).unwrap();
 
     let mut options = Vars::new();
     options.insert("pid".to_string(), json!(utils::longid()));
-    executor.start(&workflow.id, &options).unwrap();
+    executor.proc().start(&workflow.id, &options).unwrap();
     let ret = sig.recv().await;
     assert_eq!(ret, "test");
 }
@@ -43,18 +43,18 @@ async fn engine_event_on_start() {
     let mid = utils::longid();
     let workflow = Workflow::new()
         .with_id(&mid)
-        .with_step(|step| step.with_act(Act::req(|act| act.with_id("test"))));
+        .with_step(|step| step.with_act(Act::irq(|act| act.with_key("test"))));
 
     engine.channel().on_start(move |e| {
         s.send(e.model.id.clone());
     });
 
     let executor = engine.executor();
-    engine.manager().deploy(&workflow).unwrap();
+    engine.executor().model().deploy(&workflow).unwrap();
 
     let mut options = Vars::new();
     options.insert("pid".to_string(), json!(utils::longid()));
-    executor.start(&workflow.id, &options).unwrap();
+    executor.proc().start(&workflow.id, &options).unwrap();
     let ret = sig.recv().await;
     assert_eq!(ret, mid);
 }
@@ -74,11 +74,11 @@ async fn engine_event_on_complete() {
     });
 
     let executor = engine.executor();
-    engine.manager().deploy(&workflow).unwrap();
+    engine.executor().model().deploy(&workflow).unwrap();
 
     let mut options = Vars::new();
     options.insert("pid".to_string(), json!(utils::longid()));
-    executor.start(&workflow.id, &options).unwrap();
+    executor.proc().start(&workflow.id, &options).unwrap();
     let ret = sig.recv().await;
     assert!(ret);
 }
@@ -89,7 +89,7 @@ async fn engine_event_on_error() {
     let mid = utils::longid();
     let workflow = Workflow::new().with_id(&mid).with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|a| a.with_id("act1")))
+            .with_act(Act::irq(|a| a.with_key("act1")))
     });
 
     let sig = engine.signal(false);
@@ -101,7 +101,7 @@ async fn engine_event_on_error() {
     engine.channel().on_message(move |e| {
         let mut options = Vars::new();
         options.insert("uid".to_string(), json!("u1"));
-        options.insert("error".to_string(), json!({ "ecode": "err1" }));
+        options.set("ecode", "err1");
 
         if e.is_key("act1") && e.is_state("created") {
             e.do_action(&e.pid, &e.tid, "error", &options).unwrap();
@@ -109,11 +109,11 @@ async fn engine_event_on_error() {
     });
 
     let executor = engine.executor();
-    engine.manager().deploy(&workflow).unwrap();
+    executor.model().deploy(&workflow).unwrap();
 
     let mut options = Vars::new();
     options.insert("pid".to_string(), json!(utils::longid()));
-    executor.start(&workflow.id, &options).unwrap();
+    executor.proc().start(&workflow.id, &options).unwrap();
     let ret = sig.recv().await;
     assert!(ret);
 }

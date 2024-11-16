@@ -25,7 +25,7 @@ use self::value::ActValue;
 ///   }
 /// ```
 pub trait ActModule: Send + Sync {
-    fn init<'a>(&self, ctx: &JsCtx<'a>) -> Result<()>;
+    fn init(&self, ctx: &JsCtx<'_>) -> Result<()>;
 }
 
 pub struct Enviroment {
@@ -43,6 +43,12 @@ impl fmt::Debug for Enviroment {
 
 unsafe impl Send for Enviroment {}
 unsafe impl Sync for Enviroment {}
+
+impl Default for Enviroment {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Enviroment {
     pub fn new() -> Self {

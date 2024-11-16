@@ -77,10 +77,18 @@ impl DbSchema for Message {
             },
         ));
         map.push((
-            "key".to_string(),
+            "nid".to_string(),
             DbColumn {
                 db_type: DbType::Text,
                 is_not_null: true,
+                is_index: true,
+                ..Default::default()
+            },
+        ));
+        map.push((
+            "key".to_string(),
+            DbColumn {
+                db_type: DbType::Text,
                 ..Default::default()
             },
         ));
@@ -191,19 +199,20 @@ impl DbRow for Message {
             source: row.get::<usize, String>(5).unwrap(),
             model: row.get::<usize, String>(6).unwrap(),
             pid: row.get::<usize, String>(7).unwrap(),
-            key: row.get::<usize, String>(8).unwrap(),
-            inputs: row.get::<usize, String>(9).unwrap(),
-            outputs: row.get::<usize, String>(10).unwrap(),
-            tag: row.get::<usize, String>(11).unwrap(),
-            start_time: row.get::<usize, i64>(12).unwrap(),
-            end_time: row.get::<usize, i64>(13).unwrap(),
-            chan_id: row.get::<usize, String>(14).unwrap(),
-            chan_pattern: row.get::<usize, String>(15).unwrap(),
-            create_time: row.get::<usize, i64>(16).unwrap().into(),
-            update_time: row.get::<usize, i64>(17).unwrap().into(),
-            status: row.get::<usize, i8>(18).unwrap().into(),
-            retry_times: row.get::<usize, i32>(19).unwrap().into(),
-            timestamp: row.get::<usize, i64>(20).unwrap().into(),
+            nid: row.get::<usize, String>(8).unwrap(),
+            key: row.get::<usize, String>(9).unwrap(),
+            inputs: row.get::<usize, String>(10).unwrap(),
+            outputs: row.get::<usize, String>(11).unwrap(),
+            tag: row.get::<usize, String>(12).unwrap(),
+            start_time: row.get::<usize, i64>(13).unwrap(),
+            end_time: row.get::<usize, i64>(14).unwrap(),
+            chan_id: row.get::<usize, String>(15).unwrap(),
+            chan_pattern: row.get::<usize, String>(16).unwrap(),
+            create_time: row.get::<usize, i64>(17).unwrap().into(),
+            update_time: row.get::<usize, i64>(18).unwrap().into(),
+            status: row.get::<usize, i8>(19).unwrap().into(),
+            retry_times: row.get::<usize, i32>(20).unwrap().into(),
+            timestamp: row.get::<usize, i64>(21).unwrap().into(),
         })
     }
 
@@ -218,6 +227,7 @@ impl DbRow for Message {
         ret.push(("source".to_string(), Value::Text(self.source.clone())));
         ret.push(("model".to_string(), Value::Text(self.model.clone())));
         ret.push(("pid".to_string(), Value::Text(self.pid.clone())));
+        ret.push(("nid".to_string(), Value::Text(self.nid.clone())));
         ret.push(("key".to_string(), Value::Text(self.key.clone())));
         ret.push(("inputs".to_string(), Value::Text(self.inputs.clone())));
         ret.push(("outputs".to_string(), Value::Text(self.outputs.clone())));

@@ -83,14 +83,12 @@ impl<'a> IntoIterator for &'a mut Vars {
     }
 }
 
-impl<'a> IntoIterator for &'a Vars {
-    type Item = (&'a String, &'a Value);
-    type IntoIter = Iter<'a>;
+impl IntoIterator for &Vars {
+    type Item = (String, Value);
+    type IntoIter = serde_json::map::IntoIter;
     #[inline]
     fn into_iter(self) -> Self::IntoIter {
-        Iter {
-            iter: self.inner.iter(),
-        }
+        self.inner.clone().into_iter()
     }
 }
 
@@ -123,9 +121,9 @@ impl From<serde_json::Value> for Vars {
     }
 }
 
-impl Into<serde_json::Value> for Vars {
-    fn into(self) -> serde_json::Value {
-        serde_json::Value::Object(self.inner)
+impl From<Vars> for serde_json::Value {
+    fn from(val: Vars) -> Self {
+        serde_json::Value::Object(val.inner)
     }
 }
 
@@ -171,6 +169,11 @@ impl Vars {
     pub fn get_value(&self, name: &str) -> Option<&Value> {
         self.inner.get(name)
     }
+
+    pub fn extend(mut self, vars: Vars) -> Self {
+        self.inner.extend(&vars);
+        self
+    }
 }
 
 #[allow(unused)]
@@ -180,7 +183,7 @@ pub fn from_json(map: &serde_json::Map<String, serde_json::Value>) -> Vars {
     for (k, v) in map {
         let value = match v {
             serde_json::Value::Null => Value::Null,
-            serde_json::Value::Bool(v) => Value::Bool(v.clone()),
+            serde_json::Value::Bool(v) => Value::Bool(*v),
             serde_json::Value::Number(v) => from_json_number(v),
             serde_json::Value::String(v) => Value::String(v.clone()),
             serde_json::Value::Array(v) => from_json_array(v),
@@ -199,7 +202,7 @@ fn from_json_array(arr: &Vec<serde_json::Value>) -> Value {
     for v in arr {
         let value = match v {
             serde_json::Value::Null => Value::Null,
-            serde_json::Value::Bool(v) => Value::Bool(v.clone()),
+            serde_json::Value::Bool(v) => Value::Bool(*v),
             serde_json::Value::Number(v) => from_json_number(v),
             serde_json::Value::String(v) => Value::String(v.clone()),
             serde_json::Value::Array(v) => from_json_array(v),
@@ -217,7 +220,7 @@ fn from_json_object(o: &serde_json::Map<String, serde_json::Value>) -> Value {
     for (k, v) in o {
         let value = match v {
             serde_json::Value::Null => Value::Null,
-            serde_json::Value::Bool(v) => Value::Bool(v.clone()),
+            serde_json::Value::Bool(v) => Value::Bool(*v),
             serde_json::Value::Number(v) => from_json_number(v),
             serde_json::Value::String(v) => Value::String(v.clone()),
             serde_json::Value::Array(v) => from_json_array(v),
@@ -233,7 +236,7 @@ fn from_json_object(o: &serde_json::Map<String, serde_json::Value>) -> Value {
 #[allow(unused)]
 fn from_json_number(n: &serde_json::Number) -> Value {
     if n.is_i64() {
-        return Value::Number(serde_json::Number::from(n.as_i64().unwrap()));
+        Value::Number(serde_json::Number::from(n.as_i64().unwrap()))
     } else if n.is_u64() {
         return Value::Number(serde_json::Number::from(n.as_u64().unwrap()));
     } else {

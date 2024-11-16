@@ -10,8 +10,9 @@ async fn sch_act_if_true() {
             setup
                 .add(Act::set(Vars::new().with("a", 10)))
                 .add(Act::r#if(|cond| {
-                    cond.with_on(r#"$("a") > 0"#)
-                        .with_then(|stmts| stmts.add(Act::req(|act| act.with_id("act1"))))
+                    cond.with_on(r#"$("a") > 0"#).with_then(|stmts| {
+                        stmts.add(Act::irq(|act| act.with_key("act1")).with_id("act1"))
+                    })
                 }))
         })
     });
@@ -28,7 +29,7 @@ async fn sch_act_if_true() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act1").get(0).unwrap().state(),
+        proc.task_by_nid("act1").first().unwrap().state(),
         TaskState::Interrupt
     );
 }
@@ -41,7 +42,7 @@ async fn sch_act_if_false() {
                 .add(Act::set(Vars::new().with("a", 10)))
                 .add(Act::r#if(|cond| {
                     cond.with_on(r#"$("a") < 0"#)
-                        .with_then(|stmts| stmts.add(Act::req(|act| act.with_id("act1"))))
+                        .with_then(|stmts| stmts.add(Act::irq(|act| act.with_key("act1"))))
                 }))
         })
     });
@@ -65,8 +66,9 @@ async fn sch_act_if_null_value() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_setup(|setup| {
             setup.add(Act::r#if(|cond| {
-                cond.with_on(r#"$("a") == null"#)
-                    .with_then(|stmts| stmts.add(Act::req(|act| act.with_id("act1"))))
+                cond.with_on(r#"$("a") == null"#).with_then(|stmts| {
+                    stmts.add(Act::irq(|act| act.with_key("act1")).with_id("act1"))
+                })
             }))
         })
     });
@@ -83,7 +85,7 @@ async fn sch_act_if_null_value() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act1").get(0).unwrap().state(),
+        proc.task_by_nid("act1").first().unwrap().state(),
         TaskState::Interrupt
     );
 }
@@ -95,8 +97,9 @@ async fn sch_act_if_else() {
             setup
                 .add(Act::set(Vars::new().with("a", 10)))
                 .add(Act::r#if(|cond| {
-                    cond.with_on(r#"$("a") < 0"#)
-                        .with_else(|stmts| stmts.add(Act::req(|act| act.with_id("act1"))))
+                    cond.with_on(r#"$("a") < 0"#).with_else(|stmts| {
+                        stmts.add(Act::irq(|act| act.with_key("act1")).with_id("act1"))
+                    })
                 }))
         })
     });

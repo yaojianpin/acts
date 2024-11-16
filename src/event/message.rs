@@ -43,7 +43,7 @@ pub struct Message {
     pub state: MessageState,
 
     /// message type
-    /// msg | req
+    /// workflow | step | branch | msg | irq
     pub r#type: String,
 
     // node kind
@@ -54,7 +54,11 @@ pub struct Message {
     /// proc id
     pub pid: String,
 
-    /// nodeId or specific message key
+    /// node id
+    pub nid: String,
+
+    /// node id or act key
+    /// if the key is empty, just using nid as the key
     pub key: String,
 
     /// from the task inputs
@@ -79,8 +83,7 @@ pub struct Message {
 
 impl Message {
     pub fn state(&self) -> MessageState {
-        let state = self.state.clone().into();
-        state
+        self.state.clone()
     }
 
     pub fn is_key(&self, key: &str) -> bool {
@@ -146,6 +149,7 @@ impl Message {
             source: value.source,
             model: serde_json::to_string(&value.model).unwrap(),
             pid: value.pid,
+            nid: value.nid,
             key: value.key,
             inputs: value.inputs.to_string(),
             outputs: value.outputs.to_string(),
@@ -222,6 +226,7 @@ impl From<data::Message> for Message {
             source: v.source,
             model: serde_json::from_str(&v.model).unwrap_or_default(),
             pid: v.pid,
+            nid: v.nid,
             key: v.key,
             inputs: serde_json::from_str(&v.inputs).unwrap_or_default(),
             outputs: serde_json::from_str(&v.outputs).unwrap_or_default(),

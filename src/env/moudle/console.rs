@@ -5,6 +5,12 @@ use rquickjs::class::Trace;
 #[rquickjs::class]
 pub struct Console {}
 
+impl Default for Console {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[rquickjs::methods]
 impl Console {
     pub fn new() -> Self {
@@ -29,7 +35,7 @@ impl Console {
 }
 
 impl ActModule for Console {
-    fn init<'a>(&self, ctx: &rquickjs::Ctx<'a>) -> Result<()> {
+    fn init(&self, ctx: &rquickjs::Ctx<'_>) -> Result<()> {
         ctx.globals().set("console", self.clone())?;
 
         Ok(())

@@ -69,7 +69,7 @@ impl Store {
                         .map_err(|err| ActError::Store(err.to_string()))?;
                     proc.set_pure_err(&err)
                 }
-                return Ok(Some(proc));
+                Ok(Some(proc))
             }
             Err(_) => Ok(None),
         }
@@ -197,7 +197,7 @@ impl Store {
     pub fn upsert_proc(&self, proc: &Arc<sch::Proc>) -> Result<()> {
         debug!("upsert proc: {}", proc.id());
         let data: data::Proc = proc.into_data()?;
-        match self.procs().find(&proc.id()) {
+        match self.procs().find(proc.id()) {
             Ok(_) => {
                 self.procs().update(&data)?;
             }
@@ -217,7 +217,7 @@ impl Store {
         for t in tasks {
             let state: TaskState = t.state.into();
             let node = Node::from_str(&t.node_data, tree);
-            let mut task = sch::Task::new(&proc, &t.tid, node, rt);
+            let mut task = sch::Task::new(proc, &t.tid, node, rt);
             task.set_pure_state(state.clone());
             task.set_start_time(t.start_time);
             task.set_end_time(t.end_time);

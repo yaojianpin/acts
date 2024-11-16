@@ -3,7 +3,7 @@ use crate::{
     event::{Action, Model},
     sch::{tree::NodeContent, Node, Proc, Task},
     utils::{self, consts, shortid},
-    Act, ActError, Message, ModelBase, Msg, NodeKind, Result, TaskState, Vars,
+    Act, ActError, Message, NodeKind, Result, TaskState, Vars,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{cell::RefCell, sync::Arc};
@@ -39,7 +39,7 @@ impl Context {
         let inputs = task.inputs();
         debug!("init_vars: {inputs}");
         self.task().set_data_with(|data| {
-            for (k, v) in &inputs {
+            for (ref k, v) in &inputs {
                 data.set(k, v.clone());
             }
         });
@@ -58,10 +58,10 @@ impl Context {
     }
 
     pub fn scope<T, F: Fn() -> T>(ctx: Context, f: F) -> T {
-        if let Ok(_) = Context::current() {
+        if Context::current().is_ok() {
             f()
         } else {
-            CONTEXT.sync_scope(ctx, || f())
+            CONTEXT.sync_scope(ctx, f)
         }
     }
 
@@ -123,12 +123,12 @@ impl Context {
         T: for<'de> Deserialize<'de> + Clone,
     {
         // find the env from env local firstly
-        if let Some(v) = self.proc.with_env_local(|vars| vars.get(&name)) {
+        if let Some(v) = self.proc.with_env_local(|vars| vars.get(name)) {
             return Some(v);
         }
 
         // then get the value from global env
-        if let Some(v) = self.runtime.env().get(&name) {
+        if let Some(v) = self.runtime.env().get(name) {
             return Some(v);
         }
         None
@@ -159,7 +159,7 @@ impl Context {
 
     pub fn sched_task(&self, node: &Arc<Node>) {
         debug!("sched_task: {}", node.to_string());
-        let task = self.proc.create_task(&node, Some(self.task()));
+        let task = self.proc.create_task(node, Some(self.task()));
         self.runtime.push(&task);
     }
 
@@ -170,7 +170,7 @@ impl Context {
             let is_package_act = task.is_act(consts::ACT_TYPE_BLOCK);
 
             // not package act or completed package
-            if !is_package_act || (is_package_act && task.state().is_completed()) {
+            if !is_package_act || task.state().is_completed() {
                 // find its parent to append task
                 while let Some(parent) = task.parent() {
                     if parent.is_kind(NodeKind::Step) || parent.is_act(consts::ACT_TYPE_BLOCK) {
@@ -182,7 +182,7 @@ impl Context {
             }
         }
 
-        let mut id = act.id().to_string();
+        let mut id = act.id.to_string();
         if id.is_empty() {
             id = shortid();
         }
@@ -242,10 +242,10 @@ impl Context {
         for p in paths {
             if p.state().is_running() {
                 p.set_state(TaskState::Completed);
-                self.emit_task(&p)?;
+                self.emit_task(p)?;
             } else if p.state().is_pending() {
                 p.set_state(TaskState::Skipped);
-                self.emit_task(&p)?;
+                self.emit_task(p)?;
             }
         }
 
@@ -300,21 +300,21 @@ impl Context {
 
         // cancel all of the task's children
         let mut children = task.children();
-        while children.len() > 0 {
+        while !children.is_empty() {
             let mut nexts = Vec::new();
             for t in &children {
                 if t.state().is_completed() {
                     continue;
                 }
                 t.set_state(TaskState::Cancelled);
-                self.emit_task(&t)?;
+                self.emit_task(t)?;
                 nexts.extend_from_slice(&t.children());
             }
 
             children = nexts;
         }
         task.set_state(TaskState::Completed);
-        self.emit_task(&task)?;
+        self.emit_task(task)?;
 
         Ok(())
     }
@@ -367,21 +367,15 @@ impl Context {
         Ok(())
     }
 
-    pub fn emit_message(&self, msg: &Msg) -> Result<()> {
+    pub fn emit_message(&self, msg: &Act) -> Result<()> {
         debug!("emit_message: {:?}", msg);
         let workflow = self.proc.model();
-
         let mut inputs = utils::fill_inputs(&msg.inputs, self);
-
-        // if there is no key, use id instead
-        let mut key = &msg.key;
-        if key.is_empty() {
-            key = &msg.id;
-        }
 
         let task = self.task();
         if let Some(err) = task.err() {
-            inputs.set(consts::ACT_ERR_KEY, err);
+            inputs.set(consts::ACT_ERR_MESSAGE, err.message);
+            inputs.set(consts::ACT_ERR_CODE, err.ecode);
         }
 
         let msg = Message {
@@ -391,8 +385,8 @@ impl Context {
             state: task.state().into(),
             pid: task.pid.clone(),
             tid: task.id.clone(),
-            key: key.to_string(),
-            name: msg.name.clone(),
+            key: msg.key.to_string(),
+            name: task.node().name(),
 
             model: Model {
                 id: workflow.id.clone(),

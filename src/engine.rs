@@ -1,7 +1,7 @@
 use crate::{
     adapter::{self, Adapter},
     config::Config,
-    export::{Channel, Executor, Extender, Manager},
+    export::{Channel, Executor, Extender},
     plugin,
     sch::Runtime,
     ActPlugin, ChannelOptions, Signal, StoreAdapter,
@@ -28,13 +28,13 @@ use tracing::info;
 ///     engine.channel().on_complete(|e| {
 ///         println!("{:?}", e.outputs);
 ///     });
-///
-///     engine.manager().deploy(&workflow).expect("fail to deploy workflow");
+///     let exec = engine.executor();
+///     exec.model().deploy(&workflow).expect("fail to deploy workflow");
 ///
 ///     let mut vars = Vars::new();
 ///     vars.insert("input".into(), 3.into());
 ///     vars.insert("pid".into(), "test1".into());
-///     engine.executor().start(
+///     exec.proc().start(
 ///        &workflow.id,
 ///        &vars);
 /// }
@@ -44,6 +44,12 @@ pub struct Engine {
     runtime: Arc<Runtime>,
     adapter: Arc<Adapter>,
     extender: Arc<Extender>,
+}
+
+impl Default for Engine {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Engine {
@@ -84,11 +90,6 @@ impl Engine {
     /// ```
     pub fn channel_with_options(&self, matcher: &ChannelOptions) -> Arc<Channel> {
         Arc::new(Channel::channel(&self.runtime, matcher))
-    }
-
-    /// engine manager
-    pub fn manager(&self) -> Arc<Manager> {
-        Arc::new(Manager::new(&self.runtime))
     }
 
     /// engine extender

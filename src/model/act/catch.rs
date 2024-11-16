@@ -1,10 +1,12 @@
-use crate::Act;
+use crate::{Act, Vars};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Catch {
     #[serde(default)]
-    pub err: Option<String>,
+    pub on: Option<String>,
+    #[serde(default)]
+    pub inputs: Vars,
     #[serde(default)]
     pub then: Vec<Act>,
 }
@@ -14,8 +16,13 @@ impl Catch {
         Default::default()
     }
 
-    pub fn with_err(mut self, err: &str) -> Self {
-        self.err = Some(err.to_string());
+    pub fn with_on(mut self, err: &str) -> Self {
+        self.on = Some(err.to_string());
+        self
+    }
+
+    pub fn with_error(mut self, err: &str) -> Self {
+        self.inputs.set("error", err.to_string());
         self
     }
 
@@ -24,5 +31,11 @@ impl Catch {
         self.then = build(stmts);
 
         self
+    }
+}
+
+impl From<Catch> for Act {
+    fn from(val: Catch) -> Self {
+        Act::catch(|_| val.clone())
     }
 }

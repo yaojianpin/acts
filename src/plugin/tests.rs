@@ -17,7 +17,7 @@ async fn plugin_init() {
     let test_plugin = TestPlugin::new();
     engine.extender().register_plugin(&test_plugin);
     plugin::init(&engine);
-    assert_eq!(*test_plugin.is_init.lock().unwrap(), true);
+    assert!(*test_plugin.is_init.lock().unwrap());
 }
 
 #[derive(Debug, Clone)]

@@ -54,6 +54,12 @@ impl Manager {
     }
 
     #[instrument(skip(self))]
+    pub fn package(&self, id: &str) -> Result<PackageInfo> {
+        let package = &self.runtime.cache().store().packages().find(id)?;
+        Ok(package.into())
+    }
+
+    #[instrument(skip(self))]
     pub fn deploy(&self, model: &Workflow) -> Result<bool> {
         model.valid()?;
         let ret = self.runtime.cache().store().deploy(model)?;

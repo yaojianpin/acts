@@ -16,6 +16,6 @@ fn model_step_yml_acts() {
                 b: ${ $("5") }
     "#;
     let m = Workflow::from_yml(text).unwrap();
-    let step = m.steps.get(0).unwrap();
+    let step = m.steps.first().unwrap();
     assert_eq!(step.acts.len(), 2);
 }

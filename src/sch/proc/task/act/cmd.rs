@@ -1,19 +1,25 @@
 use crate::{
     utils::{self, consts},
-    ActError, ActTask, Cmd, Context, Error, Result, TaskState, Vars,
+    ActError, ActTask, Do, Context, Error, Result, TaskState,
 };
 
-impl Cmd {
+impl Do {
     pub fn run(&self, ctx: &Context) -> Result<()> {
         let task = ctx.task();
+        if self.key.is_empty() {
+            return Err(crate::ActError::Action(format!(
+                "cannot find 'key' in act '{}'",
+                task.node.id
+            )));
+        }
         let set_inputs = || {
             if self.inputs.len() > 0 {
                 let inputs = utils::fill_inputs(&self.inputs, ctx);
                 task.update_data(&inputs);
             }
         };
-        let name: &str = &self.name;
-        match name {
+        let key: &str = &self.key;
+        match key {
             consts::EVT_SUBMIT => {
                 set_inputs();
                 task.set_state(TaskState::Submitted);
@@ -34,22 +40,25 @@ impl Cmd {
                 ctx.abort_task(&task)?;
             }
             consts::EVT_ERR => {
-                let err = self
+                let ecode =
+                    self.inputs
+                        .get::<String>(consts::ACT_ERR_CODE)
+                        .ok_or(ActError::Action(format!(
+                            "cannot find '{}' in cmd.inputs",
+                            consts::ACT_ERR_CODE
+                        )))?;
+                let error = self
                     .inputs
-                    .get::<Vars>(consts::ACT_ERR_KEY)
-                    .ok_or(ActError::Action(format!(
-                        "cannot find '{}' in cmd.inputs",
-                        consts::ACT_ERR_KEY
-                    )))?;
-
-                let err = Error::from_var(&err)?;
+                    .get::<String>(consts::ACT_ERR_MESSAGE)
+                    .unwrap_or("".to_string());
+                let err = Error::new(&error, &ecode);
                 set_inputs();
                 task.set_err(&err);
                 task.error(ctx)?;
             }
             _ => {
                 return Err(ActError::Runtime(format!(
-                    "the cmd.name({name}) does not exists"
+                    "the cmd.name({key}) does not exists"
                 )));
             }
         }

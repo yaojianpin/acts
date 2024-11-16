@@ -1,12 +1,5 @@
-mod catch;
-mod timeout;
-
 #[allow(unused_imports)]
-pub use self::{
-    catch::Catch,
-    timeout::{Timeout, TimeoutLimit, TimeoutUnit},
-};
-use crate::{model::Branch, Act, ModelBase, Vars};
+use crate::{model::Branch, Act, Catch, ModelBase, Timeout, Vars};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 

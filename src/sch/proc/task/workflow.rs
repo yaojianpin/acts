@@ -14,8 +14,7 @@ impl ActTask for Workflow {
         }
 
         // run setup
-
-        if self.setup.len() > 0 {
+        if !self.setup.is_empty() {
             for s in &self.setup {
                 s.exec(ctx)?;
             }
@@ -26,7 +25,7 @@ impl ActTask for Workflow {
     fn run(&self, ctx: &Context) -> Result<()> {
         let task = ctx.task();
         let children = task.node.children();
-        if children.len() > 0 {
+        if !children.is_empty() {
             for step in &children {
                 ctx.sched_task(step);
             }

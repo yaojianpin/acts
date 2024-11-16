@@ -1,76 +1,63 @@
-use std::sync::Arc;
+mod act;
+mod model;
+mod msg;
+mod pack;
+mod proc;
+mod task;
 
-use crate::{
-    event::Action, sch::Runtime, store::StoreAdapter, utils::consts, ModelInfo, Result, Vars,
-};
+use crate::sch::Runtime;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct Executor {
-    runtime: Arc<Runtime>,
+    msg: msg::MessageExecutor,
+    act: act::ActExecutor,
+    model: model::ModelExecutor,
+    proc: proc::ProcExecutor,
+    task: task::TaskExecutor,
+    pack: pack::PackageExecutor,
 }
 
 impl Executor {
     pub(crate) fn new(rt: &Arc<Runtime>) -> Self {
         Self {
-            runtime: rt.clone(),
+            msg: msg::MessageExecutor::new(rt),
+            act: act::ActExecutor::new(rt),
+            model: model::ModelExecutor::new(rt),
+            proc: proc::ProcExecutor::new(rt),
+            task: task::TaskExecutor::new(rt),
+            pack: pack::PackageExecutor::new(rt),
         }
     }
 
-    pub fn start(&self, mid: &str, options: &Vars) -> Result<String> {
-        let model: ModelInfo = self.runtime.cache().store().models().find(mid)?.into();
-        let workflow = model.workflow()?;
-
-        let mut vars = options.clone();
-        // set the workflow initiator
-        if let Some(uid) = options.get_value(consts::FOR_ACT_KEY_UID) {
-            vars.insert(consts::INITIATOR.to_string(), uid.clone());
-        }
-        let proc = self.runtime.start(&workflow, &vars)?;
-        Ok(proc.id().to_string())
+    /// executor for related message functions
+    pub fn msg(&self) -> &msg::MessageExecutor {
+        &self.msg
     }
 
-    pub fn ack(&self, id: &str) -> Result<()> {
-        self.runtime.ack(id)
+    /// executor for related act operations
+    /// such as 'complete', 'back', 'cancel' ..
+    pub fn act(&self) -> &act::ActExecutor {
+        &self.act
     }
 
-    pub fn submit(&self, pid: &str, tid: &str, options: &Vars) -> Result<()> {
-        self.do_action(pid, consts::EVT_SUBMIT, tid, options)
+    /// executor for related model functions
+    pub fn model(&self) -> &model::ModelExecutor {
+        &self.model
     }
 
-    pub fn back(&self, pid: &str, tid: &str, options: &Vars) -> Result<()> {
-        self.do_action(pid, consts::EVT_BACK, tid, options)
+    /// executor for related proc functions
+    pub fn proc(&self) -> &proc::ProcExecutor {
+        &self.proc
     }
 
-    pub fn cancel(&self, pid: &str, tid: &str, options: &Vars) -> Result<()> {
-        self.do_action(pid, consts::EVT_CANCEL, tid, options)
+    /// executor for related task functions
+    pub fn task(&self) -> &task::TaskExecutor {
+        &self.task
     }
 
-    pub fn complete(&self, pid: &str, tid: &str, options: &Vars) -> Result<()> {
-        self.do_action(pid, consts::EVT_NEXT, tid, options)
-    }
-
-    pub fn abort(&self, pid: &str, tid: &str, options: &Vars) -> Result<()> {
-        self.do_action(pid, consts::EVT_ABORT, tid, options)
-    }
-
-    pub fn skip(&self, pid: &str, tid: &str, options: &Vars) -> Result<()> {
-        self.do_action(pid, consts::EVT_SKIP, tid, options)
-    }
-
-    pub fn error(&self, pid: &str, tid: &str, options: &Vars) -> Result<()> {
-        self.do_action(pid, consts::EVT_ERR, tid, options)
-    }
-
-    pub fn push(&self, pid: &str, tid: &str, options: &Vars) -> Result<()> {
-        self.do_action(pid, consts::EVT_PUSH, tid, options)
-    }
-
-    pub fn remove(&self, pid: &str, tid: &str, options: &Vars) -> Result<()> {
-        self.do_action(pid, consts::EVT_REMOVE, tid, options)
-    }
-
-    fn do_action(&self, pid: &str, action: &str, tid: &str, options: &Vars) -> Result<()> {
-        self.runtime
-            .do_action(&Action::new(pid, tid, action, options))
+    /// executor for related package functions
+    pub fn pack(&self) -> &pack::PackageExecutor {
+        &self.pack
     }
 }

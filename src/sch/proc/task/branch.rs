@@ -11,7 +11,7 @@ impl ActTask for Branch {
     fn init(&self, ctx: &Context) -> Result<()> {
         let task = ctx.task();
         task.set_emit_disabled(true);
-        if self.needs.len() > 0 {
+        if !self.needs.is_empty() {
             task.set_state(TaskState::Pending);
             return Ok(());
         }
@@ -58,14 +58,14 @@ impl ActTask for Branch {
         let task = ctx.task();
         if task.state().is_running() {
             let children = task.node.children();
-            if children.len() > 0 {
+            if !children.is_empty() {
                 for child in &children {
                     ctx.sched_task(child);
                 }
             } else {
                 task.set_state(TaskState::Completed);
             }
-            return Ok(children.len() > 0);
+            return Ok(!children.is_empty());
         }
 
         Ok(false)

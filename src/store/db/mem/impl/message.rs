@@ -20,6 +20,7 @@ impl DbDocument for Message {
         map.insert("source".to_string(), json!(self.source.clone()));
         map.insert("model".to_string(), json!(self.model.clone()));
         map.insert("pid".to_string(), json!(self.pid.clone()));
+        map.insert("nid".to_string(), json!(self.nid.clone()));
         map.insert("key".to_string(), json!(self.key.clone()));
         map.insert("inputs".to_string(), json!(self.inputs.clone()));
         map.insert("outputs".to_string(), json!(self.outputs.clone()));

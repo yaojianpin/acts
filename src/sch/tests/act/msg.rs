@@ -5,7 +5,7 @@ use serde_json::json;
 async fn sch_act_msg() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_setup(|setup| setup.add(Act::msg(|msg| msg.with_id("msg1"))))
+            .with_setup(|setup| setup.add(Act::msg(|msg| msg.with_key("msg1"))))
     });
 
     workflow.print();
@@ -22,14 +22,14 @@ async fn sch_act_msg() {
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(ret.len(), 1);
-    assert_eq!(ret.get(0).unwrap().key, "msg1");
+    assert_eq!(ret.first().unwrap().key, "msg1");
 }
 
 #[tokio::test]
 async fn sch_act_msg_with_inputs() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_setup(|setup| setup.add(Act::msg(|msg| msg.with_id("msg1").with_input("a", 5))))
+            .with_setup(|setup| setup.add(Act::msg(|msg| msg.with_key("msg1").with_input("a", 5))))
     });
 
     workflow.print();
@@ -46,8 +46,8 @@ async fn sch_act_msg_with_inputs() {
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(ret.len(), 1);
-    assert_eq!(ret.get(0).unwrap().key, "msg1");
-    assert_eq!(ret.get(0).unwrap().inputs.get::<i32>("a").unwrap(), 5);
+    assert_eq!(ret.first().unwrap().key, "msg1");
+    assert_eq!(ret.first().unwrap().inputs.get::<i32>("a").unwrap(), 5);
 }
 
 #[tokio::test]
@@ -57,7 +57,7 @@ async fn sch_act_msg_with_inputs_var() {
             .with_input("a", json!(5))
             .with_setup(|setup| {
                 setup.add(Act::msg(|msg| {
-                    msg.with_id("msg1").with_input("a", r#"${ $("a") }"#)
+                    msg.with_key("msg1").with_input("a", r#"${ $("a") }"#)
                 }))
             })
     });
@@ -76,15 +76,15 @@ async fn sch_act_msg_with_inputs_var() {
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(ret.len(), 1);
-    assert_eq!(ret.get(0).unwrap().key, "msg1");
-    assert_eq!(ret.get(0).unwrap().inputs.get::<i32>("a").unwrap(), 5);
+    assert_eq!(ret.first().unwrap().key, "msg1");
+    assert_eq!(ret.first().unwrap().inputs.get::<i32>("a").unwrap(), 5);
 }
 
 #[tokio::test]
 async fn sch_act_msg_with_key() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_setup(|setup| setup.add(Act::msg(|msg| msg.with_id("msg1").with_key("key1"))))
+            .with_setup(|setup| setup.add(Act::msg(|msg| msg.with_key("msg1").with_key("key1"))))
     });
 
     workflow.print();
@@ -101,5 +101,5 @@ async fn sch_act_msg_with_key() {
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(ret.len(), 1);
-    assert_eq!(ret.get(0).unwrap().key, "key1");
+    assert_eq!(ret.first().unwrap().key, "key1");
 }

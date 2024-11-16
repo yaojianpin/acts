@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 /// fill the vars
 /// 1. if the inputs is an expression, just calculate it
-/// or insert the input itself
-pub fn fill_inputs<'a>(inputs: &'a Vars, ctx: &Context) -> Vars {
+///    or insert the input itself
+pub fn fill_inputs(inputs: &Vars, ctx: &Context) -> Vars {
     let mut ret = Vars::new();
-    for (k, v) in inputs {
+    for (k, ref v) in inputs {
         if let JsonValue::String(string) = v {
             if let Some(expr) = get_expr(string) {
                 let result = Context::scope(ctx.clone(), move || {
@@ -39,7 +39,7 @@ pub fn fill_inputs<'a>(inputs: &'a Vars, ctx: &Context) -> Vars {
 pub fn fill_outputs(outputs: &Vars, ctx: &Context) -> Vars {
     // println!("fill_outputs: outputs={outputs}");
     let mut ret = Vars::new();
-    for (k, v) in outputs {
+    for (ref k, ref v) in outputs {
         if let JsonValue::String(string) = v {
             if let Some(expr) = get_expr(string) {
                 let result = Context::scope(ctx.clone(), move || {
@@ -75,9 +75,9 @@ pub fn fill_outputs(outputs: &Vars, ctx: &Context) -> Vars {
     ret
 }
 
-pub fn fill_proc_vars<'a>(task: &Arc<Task>, values: &'a Vars, ctx: &Context) -> Vars {
+pub fn fill_proc_vars(task: &Arc<Task>, values: &Vars, ctx: &Context) -> Vars {
     let mut ret = Vars::new();
-    for (k, v) in values {
+    for (ref k, ref v) in values {
         if let JsonValue::String(string) = v {
             if let Some(expr) = get_expr(string) {
                 let result =
@@ -105,7 +105,7 @@ pub fn fill_proc_vars<'a>(task: &Arc<Task>, values: &'a Vars, ctx: &Context) -> 
 
 pub fn get_expr(text: &str) -> Option<String> {
     let re = Regex::new(r"^\$\{(.+)\}$").unwrap();
-    let caps = re.captures(&text);
+    let caps = re.captures(text);
 
     if let Some(caps) = caps {
         let value = caps.get(1).map_or("", |m| m.as_str());

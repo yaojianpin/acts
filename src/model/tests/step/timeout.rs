@@ -1,5 +1,5 @@
 use crate::{
-    model::step::{TimeoutLimit, TimeoutUnit},
+    model::act::{TimeoutLimit, TimeoutUnit},
     Act, Step, StmtBuild, Workflow,
 };
 
@@ -67,16 +67,16 @@ fn model_timeout_parse_days() {
 fn model_timeout_parse_error() {
     let timeout = TimeoutLimit::parse("");
 
-    assert_eq!(timeout.is_err(), true);
+    assert!(timeout.is_err());
 
     let timeout = TimeoutLimit::parse("100x");
-    assert_eq!(timeout.is_err(), true);
+    assert!(timeout.is_err());
 
     let timeout = TimeoutLimit::parse("xxd");
-    assert_eq!(timeout.is_err(), true);
+    assert!(timeout.is_err());
 
     let timeout = TimeoutLimit::parse("100");
-    assert_eq!(timeout.is_err(), true);
+    assert!(timeout.is_err());
 }
 
 #[test]
@@ -110,16 +110,16 @@ fn model_step_timeout() {
     step = step
         .with_timeout(|t| {
             t.with_on("1h")
-                .with_then(|stmts| stmts.add(Act::msg(|msg| msg.with_id("msg1"))))
+                .with_then(|stmts| stmts.add(Act::msg(|msg| msg.with_key("msg1"))))
         })
         .with_timeout(|t| {
             t.with_on("2d")
-                .with_then(|stmts| stmts.add(Act::msg(|msg| msg.with_id("msg2"))))
+                .with_then(|stmts| stmts.add(Act::msg(|msg| msg.with_key("msg2"))))
         });
 
     assert_eq!(step.timeout.len(), 2);
-    assert_eq!(step.timeout.get(0).unwrap().on.value, 1);
-    assert_eq!(step.timeout.get(0).unwrap().on.unit, TimeoutUnit::Hour);
+    assert_eq!(step.timeout.first().unwrap().on.value, 1);
+    assert_eq!(step.timeout.first().unwrap().on.unit, TimeoutUnit::Hour);
     assert_eq!(step.timeout.get(1).unwrap().on.value, 2);
     assert_eq!(step.timeout.get(1).unwrap().on.unit, TimeoutUnit::Day);
 }
@@ -135,14 +135,14 @@ fn model_step_yml_timeout() {
             - on: 2d
             - on: 3m
               then:
-                - !req
-                  id: act2
+                - act: irq
+                  key: act2
     "#;
     let m = Workflow::from_yml(text).unwrap();
-    let step = m.steps.get(0).unwrap();
+    let step = m.steps.first().unwrap();
     assert_eq!(step.timeout.len(), 2);
 
-    let timeout = step.timeout.get(0).unwrap();
+    let timeout = step.timeout.first().unwrap();
     assert_eq!(timeout.on.value, 2);
     assert_eq!(timeout.on.as_secs(), 2 * 24 * 60 * 60);
 

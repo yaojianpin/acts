@@ -14,8 +14,11 @@ async fn main() {
     workflow.print();
 
     let executor = engine.executor().clone();
-    engine.manager().deploy(&workflow).expect("deploy model");
+    engine
+    .executor()
+    .model().deploy(&workflow).expect("deploy model");
     executor
+        .proc()
         .start(&workflow.id, &Vars::new())
         .expect("start workflow");
 

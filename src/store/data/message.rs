@@ -23,6 +23,7 @@ pub struct Message {
     pub source: String,
     pub model: String,
     pub pid: String,
+    pub nid: String,
     pub key: String,
     pub inputs: String,
     pub outputs: String,
@@ -56,14 +57,14 @@ impl From<i8> for MessageStatus {
             1 => MessageStatus::Acked,
             2 => MessageStatus::Completed,
             3 => MessageStatus::Error,
-            0 | _ => MessageStatus::Created,
+            _ => MessageStatus::Created,
         }
     }
 }
 
-impl Into<i8> for MessageStatus {
-    fn into(self) -> i8 {
-        match self {
+impl From<MessageStatus> for i8 {
+    fn from(val: MessageStatus) -> i8 {
+        match val {
             MessageStatus::Created => 0,
             MessageStatus::Acked => 1,
             MessageStatus::Completed => 2,
@@ -72,9 +73,9 @@ impl Into<i8> for MessageStatus {
     }
 }
 
-impl Into<i64> for MessageStatus {
-    fn into(self) -> i64 {
-        match self {
+impl From<MessageStatus> for i64 {
+    fn from(val: MessageStatus) -> Self {
+        match val {
             MessageStatus::Created => 0,
             MessageStatus::Acked => 1,
             MessageStatus::Completed => 2,

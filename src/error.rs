@@ -63,15 +63,15 @@ impl Error {
     }
 }
 
-impl Into<String> for ActError {
-    fn into(self) -> String {
-        self.to_string()
+impl From<ActError> for String {
+    fn from(val: ActError) -> Self {
+        val.to_string()
     }
 }
 
-impl Into<Error> for ActError {
-    fn into(self) -> Error {
-        match self {
+impl From<ActError> for Error {
+    fn from(val: ActError) -> Self {
+        match val {
             ActError::Exception { ecode, message } => Error { ecode, message },
             err => Error {
                 ecode: "".to_string(),
@@ -87,9 +87,9 @@ impl From<std::io::Error> for ActError {
     }
 }
 
-impl Into<std::io::Error> for ActError {
-    fn into(self) -> std::io::Error {
-        std::io::Error::new(ErrorKind::Other, self.to_string())
+impl From<ActError> for std::io::Error {
+    fn from(val: ActError) -> Self {
+        std::io::Error::new(ErrorKind::Other, val.to_string())
     }
 }
 
@@ -99,9 +99,9 @@ impl From<rquickjs::Error> for ActError {
     }
 }
 
-impl Into<rquickjs::Error> for ActError {
-    fn into(self) -> rquickjs::Error {
-        std::io::Error::other(self.to_string()).into()
+impl From<ActError> for rquickjs::Error {
+    fn from(val: ActError) -> Self {
+        std::io::Error::other(val.to_string()).into()
     }
 }
 

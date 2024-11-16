@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::Act;
+use crate::ActFn;
 
 #[test]
 fn model_act_set_parse_primary() {
@@ -9,7 +9,7 @@ fn model_act_set_parse_primary() {
     a: 1
     b: abc
     "#;
-    if let Act::Set(stmt) = serde_yaml::from_str(text).unwrap() {
+    if let ActFn::Set(stmt) = serde_yaml::from_str(text).unwrap() {
         assert_eq!(stmt.get::<i32>("a").unwrap(), 1);
         assert_eq!(stmt.get::<String>("b").unwrap(), "abc");
     } else {
@@ -23,7 +23,7 @@ fn model_act_set_parse_arr() {
     !set
     a: ["a", "b"]
     "#;
-    if let Act::Set(stmt) = serde_yaml::from_str(text).unwrap() {
+    if let ActFn::Set(stmt) = serde_yaml::from_str(text).unwrap() {
         assert_eq!(stmt.get::<Vec<String>>("a").unwrap(), ["a", "b"]);
     } else {
         assert!(false);
@@ -44,7 +44,7 @@ fn model_act_set_parse_obj() {
       a: 1
       b: abc
     "#;
-    if let Act::Set(stmt) = serde_yaml::from_str(text).unwrap() {
+    if let ActFn::Set(stmt) = serde_yaml::from_str(text).unwrap() {
         assert_eq!(
             stmt.get::<TestModel>("a").unwrap(),
             TestModel {

@@ -10,71 +10,71 @@ use std::sync::{Arc, Mutex};
 #[tokio::test]
 async fn export_manager_publish_ok() {
     let engine = Engine::new();
-    let manager = engine.manager();
+    let manager = engine.executor();
     let pack = data::Package {
         id: "pack1".to_string(),
         name: "package 1".to_string(),
-        file_data: vec![0x01, 0x02],
+        data: vec![0x01, 0x02],
         ..Default::default()
     };
 
-    let result = manager.publish(&pack);
+    let result = manager.pack().publish(&pack);
 
-    assert_eq!(result.is_ok(), true);
-    assert_eq!(manager.publish(&pack).is_ok(), true);
+    assert!(result.is_ok());
+    assert!(manager.pack().publish(&pack).is_ok());
 }
 
 #[tokio::test]
 async fn export_manager_deploy_ok() {
     let engine = Engine::new();
-    let manager = engine.manager();
+    let manager = engine.executor();
     let model = Workflow::new()
         .with_id(&utils::longid())
-        .with_step(|step| step.with_act(Act::req(|act| act.with_id("test"))));
+        .with_step(|step| step.with_act(Act::irq(|act| act.with_key("test"))));
 
-    let result = manager.deploy(&model);
+    let result = manager.model().deploy(&model);
 
-    assert_eq!(result.is_ok(), true);
-    assert_eq!(manager.model(&model.id, "text").is_ok(), true);
+    assert!(result.is_ok());
+    assert!(manager.model().get(&model.id, "text").is_ok());
 }
 
 #[tokio::test]
 async fn export_manager_deploy_many_times() {
     let engine = Engine::new();
-    let manager = engine.manager();
+    let manager = engine.executor();
     let model = Workflow::new()
         .with_id(&utils::longid())
         .with_step(|step| step.with_id("step1"));
 
     let mut result = true;
     for _ in 0..10 {
-        let state = manager.deploy(&model);
+        let state = manager.model().deploy(&model);
         result &= state.is_ok();
     }
-    assert_eq!(result, true);
+    assert!(result);
 }
 
 #[tokio::test]
 async fn export_manager_deploy_no_model_id_error() {
     let engine = Engine::new();
-    let manager = engine.manager();
+    let manager = engine.executor();
     let model = Workflow::new().with_step(|step| step.with_id("step1"));
 
-    let result = manager.deploy(&model);
-    assert_eq!(result.is_err(), true);
+    let result = manager.model().deploy(&model);
+    assert!(result.is_err());
 }
 
 #[tokio::test]
 async fn export_manager_deploy_dup_id_error() {
     let engine = Engine::new();
-    let manager = engine.manager();
+    let executor = engine.executor();
     let model = Workflow::new()
         .with_id(&utils::longid())
         .with_step(|step| step.with_id("step1"))
         .with_step(|step| step.with_id("step1"));
 
-    let result = manager.deploy(&model);
-    assert_eq!(result.is_err(), true);
+    let result = executor.model().deploy(&model);
+    assert!(result.is_err());
 }
 
 #[tokio::test]
@@ -85,11 +85,11 @@ async fn engine_executor_start_no_pid() {
     let mid = utils::longid();
     let workflow = Workflow::new()
         .with_id(&mid)
-        .with_step(|step| step.with_act(Act::req(|act| act.with_id("test"))));
-    engine.manager().deploy(&workflow).unwrap();
+        .with_step(|step| step.with_act(Act::irq(|act| act.with_key("test"))));
+    engine.executor().model().deploy(&workflow).unwrap();
     let options = Vars::new();
-    let result = executor.start(&workflow.id, &options);
-    assert_eq!(result.is_ok(), true);
+    let result = executor.proc().start(&workflow.id, &options);
+    assert!(result.is_ok());
 }
 
 #[tokio::test]
@@ -100,12 +100,12 @@ async fn engine_executor_start_with_pid() {
     let mid = utils::longid();
     let workflow = Workflow::new()
         .with_id(&mid)
-        .with_step(|step| step.with_act(Act::req(|act| act.with_id("test"))));
-    engine.manager().deploy(&workflow).unwrap();
+        .with_step(|step| step.with_act(Act::irq(|act| act.with_key("test"))));
+    engine.executor().model().deploy(&workflow).unwrap();
     let mut options = Vars::new();
     options.insert("pid".to_string(), "123".into());
-    let result = executor.start(&workflow.id, &options);
-    assert_eq!(result.is_ok(), true);
+    let result = executor.proc().start(&workflow.id, &options);
+    assert!(result.is_ok());
 
     assert_eq!(result.unwrap(), "123");
 }
@@ -118,13 +118,13 @@ async fn export_executor_start_empty_pid() {
     let mid = utils::longid();
     let workflow = Workflow::new()
         .with_id(&mid)
-        .with_step(|step| step.with_act(Act::req(|act| act.with_id("test"))));
+        .with_step(|step| step.with_act(Act::irq(|act| act.with_key("test"))));
 
-    engine.manager().deploy(&workflow).unwrap();
+    engine.executor().model().deploy(&workflow).unwrap();
     let mut options = Vars::new();
     options.insert("pid".to_string(), "".into());
-    let result = executor.start(&workflow.id, &options);
-    assert_eq!(result.is_ok(), true);
+    let result = executor.proc().start(&workflow.id, &options);
+    assert!(result.is_ok());
 }
 
 #[tokio::test]
@@ -136,7 +136,7 @@ async fn export_executor_start_dup_pid_error() {
     let mid = utils::longid();
     let model = Workflow::new()
         .with_id(&mid)
-        .with_step(|step| step.with_act(Act::req(|act| act.with_id("test"))));
+        .with_step(|step| step.with_act(Act::irq(|act| act.with_key("test"))));
 
     let store = engine.runtime().cache().store();
     let proc = data::Proc {
@@ -153,78 +153,79 @@ async fn export_executor_start_dup_pid_error() {
     };
     store.procs().create(&proc).expect("create proc");
     engine
-        .manager()
+        .executor()
+        .model()
         .deploy(&model)
         .expect("fail to deploy workflow");
     let mut options = Vars::new();
     options.insert("pid".to_string(), json!(pid.to_string()));
-    let result = executor.start(&model.id, &options);
-    assert_eq!(result.is_err(), true);
+    let result = executor.proc().start(&model.id, &options);
+    assert!(result.is_err());
 }
 
 #[tokio::test]
 async fn export_manager_models_get() {
     let engine = Engine::new();
-    let manager = engine.manager();
+    let manager = engine.executor();
     let mut model = Workflow::new().with_step(|step| step.with_id("step1"));
 
     for _ in 0..5 {
         model.set_id(&utils::longid());
-        manager.deploy(&model).unwrap();
+        manager.model().deploy(&model).unwrap();
     }
 
-    let result = manager.models(10).unwrap();
+    let result = manager.model().list(10).unwrap();
     assert_eq!(result.len(), 5);
 }
 
 #[tokio::test]
 async fn export_manager_model_get_text() {
     let engine = Engine::new();
-    let manager = engine.manager();
+    let manager = engine.executor();
     let mut model = Workflow::new().with_step(|step| step.with_id("step1"));
 
     model.set_id(&utils::longid());
-    manager.deploy(&model).unwrap();
+    manager.model().deploy(&model).unwrap();
 
-    let result = manager.model(&model.id, "text").unwrap();
+    let result = manager.model().get(&model.id, "text").unwrap();
     assert_eq!(result.id, model.id);
-    assert_eq!(result.data.is_empty(), false);
+    assert!(!result.data.is_empty());
 }
 
 #[tokio::test]
 async fn export_manager_model_get_tree() {
     let engine = Engine::new();
-    let manager = engine.manager();
+    let manager = engine.executor();
     let mut model = Workflow::new().with_step(|step| step.with_id("step1"));
 
     model.set_id(&utils::longid());
-    manager.deploy(&model).unwrap();
+    manager.model().deploy(&model).unwrap();
 
-    let result = manager.model(&model.id, "tree").unwrap();
+    let result = manager.model().get(&model.id, "tree").unwrap();
     assert_eq!(result.id, model.id);
-    assert_eq!(result.data.is_empty(), false);
+    assert!(!result.data.is_empty());
 }
 
 #[tokio::test]
 async fn export_manager_model_remove() {
     let engine = Engine::new();
-    let manager = engine.manager();
+    let manager = engine.executor();
     let mut model = Workflow::new().with_step(|step| step.with_id("step1"));
 
     model.set_id(&utils::longid());
-    manager.deploy(&model).unwrap();
+    manager.model().deploy(&model).unwrap();
 
-    manager.rm_model(&model.id).unwrap();
-    assert_eq!(manager.models(10).unwrap().len(), 0);
+    manager.model().rm(&model.id).unwrap();
+    assert_eq!(manager.model().list(10).unwrap().len(), 0);
 }
 
 #[tokio::test]
 async fn export_manager_procs_get_one() {
     let engine = Engine::new();
-    let manager = engine.manager();
+    let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
 
     let rt = engine.runtime();
@@ -235,16 +236,16 @@ async fn export_manager_procs_get_one() {
     rt.launch(&proc);
     sig.recv().await;
 
-    assert_eq!(manager.procs(10).unwrap().len(), 1);
+    assert_eq!(manager.proc().list(10).unwrap().len(), 1);
 }
 
 #[tokio::test]
 async fn export_manager_procs_get_many() {
     let engine = Engine::new();
-    let manager = engine.manager();
+    let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
 
     let rt = engine.runtime();
@@ -265,16 +266,16 @@ async fn export_manager_procs_get_many() {
         rt.launch(&proc);
     }
     sig.recv().await;
-    assert_eq!(manager.procs(10).unwrap().len(), 5);
+    assert_eq!(manager.proc().list(10).unwrap().len(), 5);
 }
 
 #[tokio::test]
 async fn export_manager_proc_get() {
     let engine = Engine::new();
-    let manager = engine.manager();
+    let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
 
     let rt = engine.runtime();
@@ -286,18 +287,18 @@ async fn export_manager_proc_get() {
     rt.launch(&proc);
     sig.recv().await;
 
-    let info = manager.proc(&pid).unwrap();
+    let info = manager.proc().get(&pid).unwrap();
     assert_eq!(info.id, pid);
-    assert_eq!(info.tasks.is_empty(), false);
+    assert!(!info.tasks.is_empty());
 }
 
 #[tokio::test]
 async fn export_manager_tasks() {
     let engine = Engine::new();
-    let manager = engine.manager();
+    let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
 
     let rt = engine.runtime();
@@ -316,17 +317,17 @@ async fn export_manager_tasks() {
     rt.start(&model, &vars).unwrap();
     sig.recv().await;
 
-    let tasks = manager.tasks(&pid, 10).unwrap();
+    let tasks = manager.task().list(&pid, 10).unwrap();
     assert_eq!(tasks.len(), 3); // 3 means the tasks with workflow step act
 }
 
 #[tokio::test]
 async fn export_manager_task_get() {
     let engine = Engine::new();
-    let manager = engine.manager();
+    let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
 
     let rt = engine.runtime();
@@ -344,21 +345,21 @@ async fn export_manager_task_get() {
 
     rt.start(&model, &vars).unwrap();
     sig.recv().await;
-    let tasks = manager.tasks(&pid, 10).unwrap();
+    let tasks = manager.task().list(&pid, 10).unwrap();
     let mut result = true;
     for task in tasks {
-        result &= manager.task(&pid, &task.id).is_ok();
+        result &= manager.task().get(&pid, &task.id).is_ok();
     }
-    assert_eq!(result, true);
+    assert!(result);
 }
 
 #[tokio::test]
 async fn export_manager_messages() {
     let engine = Engine::new();
-    let manager = engine.manager();
+    let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
 
     let rt = engine.runtime();
@@ -381,16 +382,16 @@ async fn export_manager_messages() {
     let proc = rt.create_proc(&pid, &model);
     rt.launch(&proc);
     let count = sig.recv().await;
-    assert_eq!(manager.messages(&pid, 1000).unwrap().len(), count);
+    assert_eq!(manager.msg().list(&pid, 1000).unwrap().len(), count);
 }
 
 #[tokio::test]
 async fn export_manager_message_get() {
     let engine = Engine::new();
-    let manager = engine.manager();
+    let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
 
     let rt = engine.runtime();
@@ -414,10 +415,10 @@ async fn export_manager_message_get() {
     rt.launch(&proc);
     sig.recv().await;
 
-    let messages = manager.messages(&pid, 1000).unwrap();
+    let messages = manager.msg().list(&pid, 1000).unwrap();
     let message = messages[0].clone();
 
-    let m = manager.message(&message.id).unwrap();
+    let m = manager.msg().get(&message.id).unwrap();
     assert_eq!(m.id, message.id);
     assert_eq!(m.name, message.name);
 }
@@ -425,10 +426,10 @@ async fn export_manager_message_get() {
 #[tokio::test]
 async fn export_manager_message_rm() {
     let engine = Engine::new();
-    let manager = engine.manager();
+    let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
 
     let rt = engine.runtime();
@@ -452,17 +453,17 @@ async fn export_manager_message_rm() {
     rt.launch(&proc);
     sig.recv().await;
 
-    let messages = manager.messages(&pid, 1000).unwrap();
+    let messages = manager.msg().list(&pid, 1000).unwrap();
     let message = messages[0].clone();
 
-    let ret = manager.rm_message(&message.id).unwrap();
-    assert_eq!(ret, true);
+    let ret = manager.msg().rm(&message.id).unwrap();
+    assert!(ret);
 }
 
 #[tokio::test]
 async fn export_manager_packages() {
     let engine = Engine::new();
-    let manager = engine.manager();
+    let manager = engine.executor();
 
     let count = 5;
     for i in 0..count {
@@ -470,32 +471,32 @@ async fn export_manager_packages() {
             id: utils::longid(),
             name: i.to_string(),
             size: i as u32,
-            file_data: [0x0, 0x1].to_vec(),
+            data: [0x0, 0x1].to_vec(),
             create_time: utils::time::time_millis(),
             update_time: 0,
             timestamp: utils::time::timestamp(),
         };
-        manager.publish(&package).unwrap();
+        manager.pack().publish(&package).unwrap();
     }
-    assert_eq!(manager.packages(1000).unwrap().len(), count);
+    assert_eq!(manager.pack().list(1000).unwrap().len(), count);
 }
 
 #[tokio::test]
 async fn export_manager_package_rm() {
     let engine = Engine::new();
-    let manager = engine.manager();
+    let manager = engine.executor();
 
     let package = Package {
         id: utils::longid(),
         name: "name".to_string(),
         size: 10,
-        file_data: [0x0, 0x1].to_vec(),
+        data: [0x0, 0x1].to_vec(),
         create_time: utils::time::time_millis(),
         update_time: 0,
         timestamp: utils::time::timestamp(),
     };
-    manager.publish(&package).unwrap();
-    assert_eq!(manager.rm_package(&package.id).unwrap(), true);
+    manager.pack().publish(&package).unwrap();
+    assert!(manager.pack().rm(&package.id).unwrap());
 }
 
 #[tokio::test]
@@ -509,16 +510,16 @@ async fn export_executeor_start() {
     let s1 = sig.clone();
     engine.channel().on_complete(move |_| s1.close());
 
-    engine.manager().deploy(&model).unwrap();
+    engine.executor().model().deploy(&model).unwrap();
 
     let pid = utils::longid();
     let mut vars = Vars::new();
     vars.insert("uid".to_string(), json!("u1"));
     vars.insert("pid".to_string(), json!(pid));
 
-    let result = engine.executor().start(&model.id, &vars);
+    let result = engine.executor().proc().start(&model.id, &vars);
     sig.recv().await;
-    assert_eq!(result.is_ok(), true);
+    assert!(result.is_ok());
 }
 
 #[tokio::test]
@@ -533,8 +534,8 @@ async fn export_executeor_start_not_found_model() {
     vars.insert("uid".to_string(), json!("u1"));
     vars.insert("pid".to_string(), json!(pid));
 
-    let result = engine.executor().start("not_exists", &vars);
-    assert_eq!(result.is_ok(), false);
+    let result = engine.executor().proc().start("not_exists", &vars);
+    assert!(result.is_err());
 }
 
 #[tokio::test]
@@ -542,7 +543,7 @@ async fn export_executeor_complete() {
     let engine = Engine::new();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
 
     let rt = engine.runtime();
@@ -552,7 +553,7 @@ async fn export_executeor_complete() {
         if e.is_key("act1") && e.is_state("created") {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
-            let ret = engine.executor().complete(&e.pid, &e.tid, &vars);
+            let ret = engine.executor().act().complete(&e.pid, &e.tid, &vars);
             s1.send(ret.is_ok());
         }
     });
@@ -560,7 +561,7 @@ async fn export_executeor_complete() {
     vars.insert("uid".to_string(), json!("u1"));
     rt.start(&model, &vars).unwrap();
     let ret = sig.recv().await;
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
@@ -568,7 +569,7 @@ async fn export_executeor_complete_no_uid() {
     let engine = Engine::new();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
 
     let rt = engine.runtime();
@@ -579,7 +580,7 @@ async fn export_executeor_complete_no_uid() {
     engine.channel().on_message(move |e| {
         if e.is_key("act1") && e.is_state("created") {
             let vars = Vars::new();
-            let ret = engine.executor().complete(&e.pid, &e.tid, &vars);
+            let ret = engine.executor().act().complete(&e.pid, &e.tid, &vars);
 
             // no uid is still ok in version 0.7.0+
             s1.send(ret.is_ok());
@@ -587,7 +588,7 @@ async fn export_executeor_complete_no_uid() {
     });
     rt.start(&model, &Vars::new()).unwrap();
     let ret = sig.recv().await;
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
@@ -595,7 +596,7 @@ async fn export_executeor_submit() {
     let engine = Engine::new();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
 
     let rt = engine.runtime();
@@ -607,7 +608,7 @@ async fn export_executeor_submit() {
         if e.is_key("act1") && e.is_state("created") {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
-            let ret = engine.executor().submit(&e.pid, &e.tid, &vars);
+            let ret = engine.executor().act().submit(&e.pid, &e.tid, &vars);
             s1.send(ret.is_ok());
         }
     });
@@ -615,7 +616,7 @@ async fn export_executeor_submit() {
     vars.insert("uid".to_string(), json!("u1"));
     rt.start(&model, &vars).unwrap();
     let ret = sig.recv().await;
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
@@ -623,7 +624,7 @@ async fn export_executeor_skip() {
     let engine = Engine::new();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
 
     let rt = engine.runtime();
@@ -634,7 +635,7 @@ async fn export_executeor_skip() {
         if e.is_key("act1") && e.is_state("created") {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
-            let ret = engine.executor().skip(&e.pid, &e.tid, &vars);
+            let ret = engine.executor().act().skip(&e.pid, &e.tid, &vars);
             s1.send(ret.is_ok());
         }
     });
@@ -642,7 +643,7 @@ async fn export_executeor_skip() {
     vars.insert("uid".to_string(), json!("u1"));
     rt.start(&model, &vars).unwrap();
     let ret = sig.recv().await;
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
@@ -650,7 +651,7 @@ async fn export_executeor_error() {
     let engine = Engine::new();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
 
     let rt = engine.runtime();
@@ -660,8 +661,8 @@ async fn export_executeor_error() {
         if e.is_key("act1") && e.is_state("created") {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
-            vars.insert("error".to_string(), json!({ "ecode": "code_1"}));
-            let ret = engine.executor().error(&e.pid, &e.tid, &vars);
+            vars.insert("ecode".to_string(), json!("code_1"));
+            let ret = engine.executor().act().error(&e.pid, &e.tid, &vars);
             s1.send(ret.is_ok());
         }
     });
@@ -669,7 +670,7 @@ async fn export_executeor_error() {
     vars.insert("uid".to_string(), json!("u1"));
     rt.start(&model, &vars).unwrap();
     let ret = sig.recv().await;
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
@@ -677,7 +678,7 @@ async fn export_executeor_abort() {
     let engine = Engine::new();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
 
     let rt = engine.runtime();
@@ -689,7 +690,7 @@ async fn export_executeor_abort() {
         if e.is_key("act1") && e.is_state("created") {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
-            let ret = engine.executor().abort(&e.pid, &e.tid, &vars);
+            let ret = engine.executor().act().abort(&e.pid, &e.tid, &vars);
             s1.send(ret.is_ok());
         }
     });
@@ -697,7 +698,7 @@ async fn export_executeor_abort() {
     vars.insert("uid".to_string(), json!("u1"));
     rt.start(&model, &vars).unwrap();
     let ret = sig.recv().await;
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
@@ -706,11 +707,11 @@ async fn export_executeor_back() {
     let model = Workflow::new()
         .with_step(|step| {
             step.with_id("step1")
-                .with_act(Act::req(|act| act.with_id("act1")))
+                .with_act(Act::irq(|act| act.with_key("act1")))
         })
         .with_step(|step| {
             step.with_id("step2")
-                .with_act(Act::req(|act| act.with_id("act2")))
+                .with_act(Act::irq(|act| act.with_key("act2")))
         });
 
     let rt = engine.runtime();
@@ -727,7 +728,11 @@ async fn export_executeor_back() {
             }
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
-            engine.executor().complete(&e.pid, &e.tid, &vars).unwrap();
+            engine
+                .executor()
+                .act()
+                .complete(&e.pid, &e.tid, &vars)
+                .unwrap();
 
             *count += 1;
         }
@@ -736,7 +741,7 @@ async fn export_executeor_back() {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             vars.insert("to".to_string(), json!("step1"));
-            let ret = engine.executor().back(&e.pid, &e.tid, &vars);
+            let ret = engine.executor().act().back(&e.pid, &e.tid, &vars);
             s1.update(|data| *data = ret.is_ok());
         }
     });
@@ -744,7 +749,7 @@ async fn export_executeor_back() {
     vars.insert("uid".to_string(), json!("u1"));
     rt.start(&model, &vars).unwrap();
     let ret = sig.recv().await;
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
@@ -753,11 +758,11 @@ async fn export_executeor_cancel() {
     let model = Workflow::new()
         .with_step(|step| {
             step.with_id("step1")
-                .with_act(Act::req(|act| act.with_id("act1")))
+                .with_act(Act::irq(|act| act.with_key("act1")))
         })
         .with_step(|step| {
             step.with_id("step2")
-                .with_act(Act::req(|act| act.with_id("act2")))
+                .with_act(Act::irq(|act| act.with_key("act2")))
         });
 
     let rt = engine.runtime();
@@ -774,7 +779,11 @@ async fn export_executeor_cancel() {
             }
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
-            engine.executor().complete(&e.pid, &e.tid, &vars).unwrap();
+            engine
+                .executor()
+                .act()
+                .complete(&e.pid, &e.tid, &vars)
+                .unwrap();
 
             *tid.lock().unwrap() = e.tid.clone();
             *count += 1;
@@ -785,6 +794,7 @@ async fn export_executeor_cancel() {
             vars.insert("uid".to_string(), json!("u1"));
             let ret = engine
                 .executor()
+                .act()
                 .cancel(&e.pid, &tid.lock().unwrap(), &vars);
             s1.update(|data| *data = ret.is_ok());
         }
@@ -793,7 +803,7 @@ async fn export_executeor_cancel() {
     vars.insert("uid".to_string(), json!("u1"));
     rt.start(&model, &vars).unwrap();
     let ret = sig.recv().await;
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
@@ -801,7 +811,7 @@ async fn export_executeor_push() {
     let engine = Engine::new();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
 
     let rt = engine.runtime();
@@ -811,9 +821,8 @@ async fn export_executeor_push() {
     engine.channel().on_message(move |e| {
         println!("message: {e:?}");
         if e.is_key("step1") && e.is_state("created") {
-            let mut vars = Vars::new();
-            vars.insert("id".to_string(), json!("act2"));
-            engine.executor().push(&e.pid, &e.tid, &vars).unwrap();
+            let vars = Vars::new().with("key", "act2");
+            engine.executor().act().push(&e.pid, &e.tid, &vars).unwrap();
         }
 
         if e.is_key("act2") && e.is_state("created") {
@@ -824,15 +833,15 @@ async fn export_executeor_push() {
     vars.insert("uid".to_string(), json!("u1"));
     rt.start(&model, &vars).unwrap();
     let ret = sig.recv().await;
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
-async fn export_executeor_push_no_id_error() {
+async fn export_executeor_push_no_key_error() {
     let engine = Engine::new();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
 
     let rt = engine.runtime();
@@ -845,6 +854,7 @@ async fn export_executeor_push_no_id_error() {
             s1.send(
                 engine
                     .executor()
+                    .act()
                     .push(&e.pid, &e.tid, &Vars::new())
                     .is_err(),
             );
@@ -854,7 +864,7 @@ async fn export_executeor_push_no_id_error() {
     vars.insert("uid".to_string(), json!("u1"));
     rt.start(&model, &vars).unwrap();
     let ret = sig.recv().await;
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
@@ -862,7 +872,7 @@ async fn export_executeor_push_not_step_id_error() {
     let engine = Engine::new();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
 
     let rt = engine.runtime();
@@ -873,14 +883,14 @@ async fn export_executeor_push_not_step_id_error() {
         println!("message: {e:?}");
         if e.is_key("act1") && e.is_state("created") {
             let vars = Vars::new();
-            s1.send(engine.executor().push(&e.pid, &e.tid, &vars).is_err());
+            s1.send(engine.executor().act().push(&e.pid, &e.tid, &vars).is_err());
         }
     });
     let mut vars = Vars::new();
     vars.insert("uid".to_string(), json!("u1"));
     rt.start(&model, &vars).unwrap();
     let ret = sig.recv().await;
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
@@ -888,7 +898,7 @@ async fn export_executeor_remove() {
     let engine = Engine::new();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
 
     let rt = engine.runtime();
@@ -900,6 +910,7 @@ async fn export_executeor_remove() {
             s1.send(
                 engine
                     .executor()
+                    .act()
                     .remove(&e.pid, &e.tid, &Vars::new())
                     .is_ok(),
             );
@@ -909,7 +920,7 @@ async fn export_executeor_remove() {
     vars.insert("uid".to_string(), json!("u1"));
     rt.start(&model, &vars).unwrap();
     let ret = sig.recv().await;
-    assert_eq!(ret, true);
+    assert!(ret);
 }
 
 #[tokio::test]
@@ -917,7 +928,7 @@ async fn engine_extender_register_plugin() {
     let engine = Engine::new();
     let plugin_count = engine.plugins().lock().unwrap().len();
     let extender = engine.extender();
-    extender.register_plugin(&TestPlugin::default());
+    extender.register_plugin(&TestPlugin);
     assert_eq!(engine.plugins().lock().unwrap().len(), plugin_count + 1);
 }
 
@@ -1164,16 +1175,13 @@ async fn export_message_store_with_emit_id() {
     engine.runtime().emitter().emit_message(&msg);
     let ret = s2.recv().await;
     assert_eq!(ret.id, "1");
-    assert_eq!(
-        engine
-            .runtime()
-            .cache()
-            .store()
-            .messages()
-            .exists("1")
-            .unwrap(),
-        true
-    );
+    assert!(engine
+        .runtime()
+        .cache()
+        .store()
+        .messages()
+        .exists("1")
+        .unwrap());
 }
 
 #[tokio::test]
@@ -1230,16 +1238,13 @@ async fn export_message_not_store_without_emit_id() {
     };
     engine.runtime().emitter().emit_message(&msg);
     s2.timeout(20).await;
-    assert_eq!(
-        engine
-            .runtime()
-            .cache()
-            .store()
-            .messages()
-            .exists(&msg.id)
-            .unwrap(),
-        false
-    );
+    assert!(!engine
+        .runtime()
+        .cache()
+        .store()
+        .messages()
+        .exists(&msg.id)
+        .unwrap());
 }
 
 #[tokio::test]
@@ -1260,16 +1265,13 @@ async fn export_message_not_store_with_empty_emit_id_and_not_match_option() {
     };
     engine.runtime().emitter().emit_message(&msg);
     s2.timeout(20).await;
-    assert_eq!(
-        engine
-            .runtime()
-            .cache()
-            .store()
-            .messages()
-            .exists("1")
-            .unwrap(),
-        false
-    );
+    assert!(!engine
+        .runtime()
+        .cache()
+        .store()
+        .messages()
+        .exists("1")
+        .unwrap());
 }
 
 #[tokio::test]
@@ -1295,17 +1297,14 @@ async fn export_message_clear_error_messages() {
         .find(&msg.id)
         .unwrap();
     assert_eq!(message.status, data::MessageStatus::Error);
-    engine.manager().clear_error_messages().unwrap();
-    assert_eq!(
-        engine
-            .runtime()
-            .cache()
-            .store()
-            .messages()
-            .exists(&msg.id)
-            .unwrap(),
-        false
-    );
+    engine.executor().msg().clear().unwrap();
+    assert!(!engine
+        .runtime()
+        .cache()
+        .store()
+        .messages()
+        .exists(&msg.id)
+        .unwrap());
 }
 
 #[tokio::test]
@@ -1331,7 +1330,7 @@ async fn export_message_resend_error_messages() {
         .find(&msg.id)
         .unwrap();
     assert_eq!(message.status, data::MessageStatus::Error);
-    engine.manager().resend_error_messages().unwrap();
+    engine.executor().msg().redo().unwrap();
 
     let message = engine
         .runtime()
@@ -1359,7 +1358,7 @@ mod test_module {
     #[derive(Clone)]
     pub struct TestModule;
     impl ActModule for TestModule {
-        fn init<'a>(&self, _ctx: &rquickjs::Ctx<'a>) -> crate::Result<()> {
+        fn init(&self, _ctx: &rquickjs::Ctx<'_>) -> crate::Result<()> {
             Ok(())
         }
     }

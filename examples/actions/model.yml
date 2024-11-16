@@ -8,8 +8,8 @@ steps:
   - name: prepare
     id: prepare
     acts:
-      - !req
-        id: init
+      - act: irq
+        key: init
   - name: condition
     id: condition
     branches:
@@ -20,32 +20,31 @@ steps:
           - name: step1
             id: step1
             acts:
-              - !req
-                id: action1
+              - act: irq
+                key: action1
                 inputs:
                   v: ${ $("v") }
           - name: step2
             id: step2
             acts:
-              - !req
-                id: action2
+              - act: irq
+                key: action2
                 inputs:
                   v: ${ $("v") }        
       - name: cond 2
         id: cond2
         else: true
         steps:
-          - !req
+          - id: step3
             name: step3
-            id: step3
             acts:
-              - !req
-                id: action3
+              - act: irq
+                key: action3
   - name: final
     id: final
     acts:
-      - !req
-        id: action4
+      - act: irq
+        key: action4
         inputs:
           v: ${ $("v") }
   

@@ -12,7 +12,6 @@ pub struct Cache {
     cap: usize,
     procs: MokaCache<String, Arc<Proc>>,
     store: ShareLock<Arc<Store>>,
-    // sync: Arc<Mutex<usize>>,
 }
 
 impl std::fmt::Debug for Cache {
@@ -30,7 +29,6 @@ impl Cache {
             cap,
             procs: MokaCache::new(cap as u64),
             store: Arc::new(RwLock::new(Store::default())),
-            // sync: Arc::new(Mutex::new(0)),
         }
     }
 
@@ -61,7 +59,6 @@ impl Cache {
     }
 
     pub fn close(&self) {
-        // let _ = self.sync.lock();
         self.store.read().unwrap().close();
     }
 
@@ -80,7 +77,6 @@ impl Cache {
 
     #[instrument]
     pub fn proc(&self, pid: &str, rt: &Arc<Runtime>) -> Option<Arc<Proc>> {
-        // let _lock = self.sync.lock().unwrap();
         debug!("proc: pid={pid}");
         match self.get_proc(pid) {
             Some(proc) => Some(proc.clone()),
@@ -104,7 +100,6 @@ impl Cache {
 
     #[instrument]
     pub fn remove(&self, pid: &str) -> Result<bool> {
-        // let _lock = self.sync.lock().unwrap();
         debug!("remove pid={pid}");
         self.procs.remove(pid);
         self.store.read().unwrap().remove_proc(pid)?;

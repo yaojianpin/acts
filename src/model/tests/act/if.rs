@@ -3,15 +3,18 @@ use crate::{Act, If, StmtBuild, Vars};
 #[test]
 fn model_act_if_parse() {
     let text = r#"
-    !if
-    on: $("a") > 0
-    then:
-      - !msg
-        id: msg1
+    act: if
+    inputs:
+        on: $("a") > 0
+        then:
+        - act: msg
+          inputs:
+            key: msg1
     "#;
-    if let Act::If(stmt) = serde_yaml::from_str(text).unwrap() {
-        assert_eq!(stmt.on, r#"$("a") > 0"#);
-        assert_eq!(stmt.then.len(), 1);
+    if let Ok(Act { act, inputs, .. }) = serde_yaml::from_str(text) {
+        assert_eq!(act, "if");
+        assert_eq!(inputs.get::<String>("on").unwrap(), r#"$("a") > 0"#);
+        assert_eq!(inputs.get::<Vec<Act>>("then").unwrap().len(), 1);
     } else {
         assert!(false);
     }

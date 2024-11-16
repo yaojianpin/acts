@@ -1,4 +1,4 @@
-use crate::{Act, Branch, ModelBase, Step, Vars, Workflow};
+use crate::{Act, Branch, Step, Vars, Workflow};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock, Weak};
 
@@ -49,7 +49,7 @@ impl NodeContent {
             NodeContent::Workflow(data) => data.id.clone(),
             NodeContent::Branch(data) => data.id.clone(),
             NodeContent::Step(data) => data.id.clone(),
-            NodeContent::Act(data) => data.id().to_string(),
+            NodeContent::Act(data) => data.id.to_string(),
         }
     }
 
@@ -58,7 +58,7 @@ impl NodeContent {
             NodeContent::Workflow(data) => data.name.clone(),
             NodeContent::Branch(data) => data.name.clone(),
             NodeContent::Step(data) => data.name.clone(),
-            NodeContent::Act(data) => data.name().to_string(),
+            NodeContent::Act(data) => data.name.to_string(),
         }
     }
 
@@ -67,7 +67,7 @@ impl NodeContent {
             NodeContent::Workflow(c) => c.inputs.clone(),
             NodeContent::Branch(c) => c.inputs.clone(),
             NodeContent::Step(c) => c.inputs.clone(),
-            NodeContent::Act(c) => c.inputs(),
+            NodeContent::Act(c) => c.inputs.clone(),
         }
     }
 
@@ -76,14 +76,31 @@ impl NodeContent {
             NodeContent::Workflow(node) => node.outputs.clone(),
             NodeContent::Branch(node) => node.outputs.clone(),
             NodeContent::Step(node) => node.outputs.clone(),
-            NodeContent::Act(node) => node.outputs(),
+            NodeContent::Act(node) => node.outputs.clone(),
         }
     }
 
     pub fn rets(&self) -> Vars {
         match self {
-            NodeContent::Act(node) => node.rets(),
+            NodeContent::Act(node) => node.rets.clone(),
             _ => Vars::new(),
+        }
+    }
+
+    pub fn tag(&self) -> String {
+        match self {
+            NodeContent::Workflow(node) => node.tag.clone(),
+            NodeContent::Branch(node) => node.tag.clone(),
+            NodeContent::Step(node) => node.tag.clone(),
+            NodeContent::Act(node) => node.tag.clone(),
+        }
+    }
+
+    /// only the act has the key
+    pub fn key(&self) -> String {
+        match self {
+            NodeContent::Act(node) => node.key.clone(),
+            _ => "".to_string(),
         }
     }
 }
@@ -120,7 +137,7 @@ impl Node {
     }
 
     pub fn set_parent(&self, parent: &Arc<Node>) {
-        *self.parent.write().unwrap() = Arc::downgrade(&parent);
+        *self.parent.write().unwrap() = Arc::downgrade(parent);
         parent
             .children
             .write()
@@ -161,13 +178,8 @@ impl Node {
         &self.id
     }
 
-    pub fn key(&self) -> &str {
-        match &self.content {
-            NodeContent::Workflow(n) => &n.id,
-            NodeContent::Branch(n) => &n.id,
-            NodeContent::Step(n) => &n.id,
-            NodeContent::Act(n) => n.key(),
-        }
+    pub fn key(&self) -> String {
+        self.content.key()
     }
 
     pub fn name(&self) -> String {
@@ -189,34 +201,22 @@ impl Node {
 
     pub fn typ(&self) -> String {
         if let NodeContent::Act(act) = &self.content {
-            return act.kind().to_string();
+            return act.act.to_string();
         }
 
         self.kind().to_string()
     }
 
-    pub fn tag(&self) -> &str {
-        match &self.content {
-            NodeContent::Workflow(data) => &data.tag,
-            NodeContent::Branch(data) => &data.tag,
-            NodeContent::Step(data) => &data.tag,
-            NodeContent::Act(data) => data.tag(),
-        }
+    pub fn tag(&self) -> String {
+        self.content.tag()
     }
 
+    #[allow(clippy::inherent_to_string)]
     pub fn to_string(&self) -> String {
         let data = NodeData {
             id: self.id.clone(),
             content: self.content.clone(),
             level: self.level,
-            // parent: self.parent().map(|p| p.id.clone()),
-            // children: self
-            //     .children()
-            //     .iter()
-            //     .map(|it| it.id.clone())
-            //     .collect::<Vec<_>>(),
-            // prev: self.prev().upgrade().map(|n| n.id.clone()),
-            // next: self.next().upgrade().map(|n| n.id.clone()),
         };
         serde_json::to_string(&data).unwrap()
     }
@@ -268,26 +268,19 @@ impl std::fmt::Debug for Node {
 
 impl std::fmt::Display for NodeKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let s = self.clone().into();
-        f.write_str(s)
-    }
-}
-
-impl<'a> Into<&'a str> for NodeKind {
-    fn into(self) -> &'a str {
-        match self {
+        let s = match self {
             NodeKind::Workflow => "workflow",
             NodeKind::Branch => "branch",
             NodeKind::Step => "step",
             NodeKind::Act => "act",
-        }
+        };
+        f.write_str(s)
     }
 }
 
-impl Into<String> for NodeKind {
-    fn into(self) -> String {
-        let s: &str = self.into();
-        s.to_string()
+impl From<NodeKind> for String {
+    fn from(value: NodeKind) -> Self {
+        value.to_string()
     }
 }
 
@@ -300,14 +293,12 @@ impl From<String> for NodeKind {
 
 impl From<&str> for NodeKind {
     fn from(str: &str) -> Self {
-        let s = match str {
+        match str {
             "workflow" => NodeKind::Workflow,
             "branch" => NodeKind::Branch,
             "step" => NodeKind::Step,
             "act" => NodeKind::Act,
             _ => panic!("not found NodeKind: {}", str),
-        };
-
-        s
+        }
     }
 }

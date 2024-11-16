@@ -19,23 +19,23 @@ impl ActTask for Step {
         }
 
         // add catch hooks
-        if self.catches.len() > 0 {
+        if !self.catches.is_empty() {
             for c in &self.catches {
                 task.add_hook_catch(TaskLifeCycle::ErrorCatch, c);
             }
         }
 
         // add timeout hooks
-        if self.timeout.len() > 0 {
+        if !self.timeout.is_empty() {
             for s in &self.timeout {
                 task.add_hook_timeout(TaskLifeCycle::Timeout, s);
             }
         }
 
         // run setup
-        if self.setup.len() > 0 {
-            for s in &self.setup {
-                s.exec(ctx)?;
+        if !self.setup.is_empty() {
+            for act in &self.setup {
+                act.exec(ctx)?;
             }
         }
 
@@ -50,11 +50,11 @@ impl ActTask for Step {
 
         if let Some(pack_id) = &self.uses {
             let pack = ctx.runtime.cache().store().packages().find(pack_id)?;
-            let script: String = String::from_utf8(pack.file_data).map_err(ActError::from)?;
+            let script: String = String::from_utf8(pack.data).map_err(ActError::from)?;
             ctx.eval::<()>(&script)?;
         }
         let children = task.node.children();
-        if children.len() > 0 {
+        if !children.is_empty() {
             for child in &children {
                 if let NodeContent::Act(act) = &child.content {
                     if act.is_taskable() {
@@ -86,7 +86,7 @@ impl ActTask for Step {
                     // resume task
                     task.set_state(TaskState::Running);
                     ctx.runtime.scher().emit_task_event(task)?;
-                    task.exec(&ctx)?;
+                    task.exec(ctx)?;
                     is_next = true;
                 }
                 if task.state().is_completed() {
@@ -126,7 +126,7 @@ impl ActTask for Step {
                     // resume task
                     task.set_state(TaskState::Running);
                     ctx.runtime.scher().emit_task_event(task)?;
-                    task.exec(&ctx)?;
+                    task.exec(ctx)?;
                     return Ok(false);
                 }
                 if task.state().is_completed() {
@@ -154,6 +154,6 @@ impl ActTask for Step {
             return Ok(true);
         }
 
-        return Ok(false);
+        Ok(false)
     }
 }

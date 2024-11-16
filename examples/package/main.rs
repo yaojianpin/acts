@@ -12,29 +12,40 @@ async fn main() {
         id: "pack1".to_string(),
         name: "package 1".to_string(),
         size: data.len() as u32,
-        file_data: data.as_bytes().to_vec(),
+        data: data.as_bytes().to_vec(),
         ..Default::default()
     };
-    engine.manager().publish(&pack).expect("publish pack1");
+    engine
+        .executor()
+        .pack()
+        .publish(&pack)
+        .expect("publish pack1");
 
     let data = include_str!("./pack2.js");
     let pack = Package {
         id: "pack2".to_string(),
         name: "package 2".to_string(),
         size: data.len() as u32,
-        file_data: data.as_bytes().to_vec(),
+        data: data.as_bytes().to_vec(),
         ..Default::default()
     };
-    engine.manager().publish(&pack).expect("publish pack2");
+    engine
+        .executor()
+        .pack()
+        .publish(&pack)
+        .expect("publish pack2");
 
     let mut vars = Vars::new();
     vars.insert("input".into(), 10.into());
 
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text).unwrap();
-    engine.manager().deploy(&workflow).unwrap();
+    engine.executor().model().deploy(&workflow).unwrap();
 
-    executor.start(&workflow.id, &vars).expect("start workflow");
+    executor
+        .proc()
+        .start(&workflow.id, &vars)
+        .expect("start workflow");
     let emitter = engine.channel();
     emitter.on_message(move |e| {
         println!("on_message: e={:?}", e);

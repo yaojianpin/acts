@@ -16,7 +16,7 @@ fn model_step_yml_simple() {
     "#;
     let m = Workflow::from_yml(text).unwrap();
     assert_eq!(m.steps.len(), 1);
-    assert_eq!(m.steps.get(0).unwrap().id, "act1");
+    assert_eq!(m.steps.first().unwrap().id, "act1");
 }
 
 #[test]
@@ -31,9 +31,9 @@ fn model_step_yml_inputs() {
     "#;
     let m = Workflow::from_yml(text).unwrap();
     assert_eq!(m.steps.len(), 1);
-    assert_eq!(m.steps.get(0).unwrap().id, "act1");
+    assert_eq!(m.steps.first().unwrap().id, "act1");
 
-    let step = m.steps.get(0).unwrap();
+    let step = m.steps.first().unwrap();
     assert_eq!(step.inputs.len(), 1);
     assert_eq!(step.inputs.get_value("p1"), Some(&json!(5)));
 }
@@ -50,9 +50,9 @@ fn model_step_yml_outputs() {
     "#;
     let m = Workflow::from_yml(text).unwrap();
     assert_eq!(m.steps.len(), 1);
-    assert_eq!(m.steps.get(0).unwrap().id, "act1");
+    assert_eq!(m.steps.first().unwrap().id, "act1");
 
-    let step = m.steps.get(0).unwrap();
+    let step = m.steps.first().unwrap();
     assert_eq!(step.outputs.len(), 1);
     assert_eq!(step.outputs.get_value("p1"), Some(&json!(null)));
 }
@@ -121,8 +121,8 @@ fn model_step_acts() {
     assert_eq!(step.acts.len(), 0);
 
     step = step
-        .with_act(Act::req(|act| act.with_id("act1")))
-        .with_act(Act::req(|act| act.with_id("act2")));
+        .with_act(Act::irq(|act| act.with_key("act1")))
+        .with_act(Act::irq(|act| act.with_key("act2")));
     assert_eq!(step.acts.len(), 2);
 }
 

@@ -134,6 +134,12 @@ impl Cond {
     }
 }
 
+impl Default for Query {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Query {
     pub fn new() -> Self {
         Query {
@@ -154,7 +160,7 @@ impl Query {
     pub fn calc(&self) -> HashSet<Box<[u8]>> {
         let mut result = HashSet::new();
         for cond in self.conds.iter() {
-            if result.len() == 0 {
+            if result.is_empty() {
                 result = cond.result.clone();
             } else {
                 result = result
@@ -197,7 +203,7 @@ impl Query {
     }
 
     pub fn is_cond(&self) -> bool {
-        self.conds.len() > 0
+        !self.conds.is_empty()
     }
 }
 

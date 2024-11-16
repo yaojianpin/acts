@@ -4,24 +4,24 @@ steps:
   - name: prepare
     id: prepare
     acts:
-      - !req
-        id: init
+      - act: irq
+        key: init
   - name: step1
     id: step1
     acts:
-      - !req
-        id: act1
+      - act: irq
+        key: act1
     catches:
-      - err: err1
+      - on: err1
         then:
-          - !msg
-            id: abc
+          - act: msg
+            key: abc
       - id: catch1
-        err: err1
+        on: err1
       - id: catch2
-        err: err2
+        on: err2
       - then:
-          - !msg
-            id: aaa
+          - act: msg
+            key: aaa
   - name: final
     id: final

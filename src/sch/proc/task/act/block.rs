@@ -1,4 +1,4 @@
-use crate::{sch::Context, Act, ActTask, Block, Result, TaskState};
+use crate::{sch::Context, ActTask, Block, Result, TaskState};
 use async_trait::async_trait;
 
 #[async_trait]
@@ -10,9 +10,9 @@ impl ActTask for Block {
 
     fn run(&self, ctx: &Context) -> Result<()> {
         for (key, value) in &self.inputs {
-            ctx.set_var(key, value);
+            ctx.set_var(&key, value);
         }
-        for s in self.acts.iter() {
+        for s in self.then.iter() {
             s.exec(ctx)?;
         }
         Ok(())
@@ -34,7 +34,7 @@ impl ActTask for Block {
                     task.set_state(TaskState::Running);
                     ctx.runtime.scher().emit_task_event(task)?;
 
-                    task.exec(&ctx)?;
+                    task.exec(ctx)?;
                     is_next = true;
                 }
                 if task.state().is_completed() {
@@ -48,13 +48,13 @@ impl ActTask for Block {
                 }
 
                 if let Some(next) = &self.next {
-                    ctx.append_act(&Act::Block(*next.clone()))?;
+                    ctx.append_act(next)?;
                     return Ok(true);
                 }
             }
         } else if state.is_skip() {
             if let Some(next) = &self.next {
-                ctx.append_act(&Act::Block(*next.clone()))?;
+                ctx.append_act(next)?;
                 return Ok(true);
             }
         }
@@ -88,12 +88,12 @@ impl ActTask for Block {
                 }
 
                 if let Some(next) = &self.next {
-                    ctx.append_act(&Act::Block(*next.clone()))?;
+                    ctx.append_act(next)?;
                     return Ok(false);
                 }
             }
         }
 
-        return Ok(true);
+        Ok(true)
     }
 }

@@ -35,7 +35,7 @@ impl DbSchema for Package {
             },
         ));
         map.push((
-            "file_data".to_string(),
+            "data".to_string(),
             DbColumn {
                 db_type: DbType::Binary,
                 is_not_null: true,
@@ -85,7 +85,7 @@ impl DbRow for Package {
             id: row.get::<usize, String>(0).unwrap(),
             name: row.get::<usize, String>(1).unwrap(),
             size: row.get::<usize, u32>(2).unwrap(),
-            file_data: row.get::<usize, Vec<u8>>(3).unwrap(),
+            data: row.get::<usize, Vec<u8>>(3).unwrap(),
             create_time: row.get::<usize, i64>(4).unwrap(),
             update_time: row.get::<usize, i64>(5).unwrap(),
             timestamp: row.get::<usize, i64>(6).unwrap(),
@@ -98,7 +98,7 @@ impl DbRow for Package {
         ret.push(("id".to_string(), Value::Text(self.id.clone())));
         ret.push(("name".to_string(), Value::Text(self.name.clone())));
         ret.push(("size".to_string(), Value::Integer(self.size as i64)));
-        ret.push(("file_data".to_string(), Value::Blob(self.file_data.clone())));
+        ret.push(("data".to_string(), Value::Blob(self.data.clone())));
         ret.push(("create_time".to_string(), Value::Integer(self.create_time)));
         ret.push(("update_time".to_string(), Value::Integer(self.update_time)));
         ret.push(("timestamp".to_string(), Value::Integer(self.timestamp)));

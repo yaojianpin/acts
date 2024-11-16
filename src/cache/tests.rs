@@ -35,7 +35,7 @@ async fn cache_push_get() {
     assert_eq!(cache.count(), 1);
 
     let proc = cache.proc(&pid, &engine.runtime());
-    assert_eq!(proc.is_some(), true);
+    assert!(proc.is_some());
 }
 
 #[tokio::test]
@@ -55,7 +55,7 @@ async fn cache_push_to_store() {
     assert_eq!(cache.count(), 1);
     for pid in pids.iter() {
         let exists = cache.store().base().procs().exists(pid).unwrap();
-        assert_eq!(exists, true);
+        assert!(exists);
     }
 }
 
@@ -76,13 +76,13 @@ async fn cache_remove() {
     assert_eq!(cache.count(), 5);
     for pid in pids.iter() {
         let exists = cache.store().base().procs().exists(pid).unwrap();
-        assert_eq!(exists, true);
+        assert!(exists);
 
         cache.remove(pid).unwrap();
-        assert_eq!(cache.proc(pid, &engine.runtime()).is_none(), true);
+        assert!(cache.proc(pid, &engine.runtime()).is_none());
 
         let exists = cache.store().base().procs().exists(pid).unwrap();
-        assert_eq!(exists, false);
+        assert!(!exists);
     }
     assert_eq!(cache.count(), 0);
 }

@@ -50,38 +50,32 @@ impl TaskState {
     }
 
     pub fn is_created(&self) -> bool {
-        match self {
-            TaskState::Ready | TaskState::Interrupt | TaskState::Pending => true,
-            _ => false,
-        }
+        matches!(
+            self,
+            TaskState::Ready | TaskState::Interrupt | TaskState::Pending
+        )
     }
 
     pub fn is_completed(&self) -> bool {
-        match self {
+        matches!(
+            self,
             TaskState::Completed
-            | TaskState::Cancelled
-            | TaskState::Submitted
-            | TaskState::Backed
-            | TaskState::Error
-            | TaskState::Skipped
-            | TaskState::Aborted
-            | TaskState::Removed => true,
-            _ => false,
-        }
+                | TaskState::Cancelled
+                | TaskState::Submitted
+                | TaskState::Backed
+                | TaskState::Error
+                | TaskState::Skipped
+                | TaskState::Aborted
+                | TaskState::Removed
+        )
     }
 
     pub fn is_abort(&self) -> bool {
-        match self {
-            TaskState::Aborted => true,
-            _ => false,
-        }
+        matches!(self, TaskState::Aborted)
     }
 
     pub fn is_error(&self) -> bool {
-        match self {
-            TaskState::Error => true,
-            _ => false,
-        }
+        matches!(self, TaskState::Error)
     }
 
     pub fn is_removed(&self) -> bool {

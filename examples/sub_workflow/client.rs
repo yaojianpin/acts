@@ -1,7 +1,6 @@
-use std::collections::HashMap;
-
 use acts::{Executor, Message, Result, Vars};
 use serde_json::json;
+use std::collections::HashMap;
 
 type Action = fn(&Vars) -> Vars;
 pub struct Client {
@@ -22,11 +21,13 @@ impl Client {
 
     pub fn process(&self, executor: &Executor, message: &Message) -> Result<()> {
         // println!("process: {:?}", message);
-        if message.is_type("req") && message.is_state("created") {
+        if message.is_type("irq") && message.is_state("created") {
             match self.actions.get(&message.key) {
                 Some(action) => {
                     let outputs = action(&message.inputs);
-                    executor.complete(&message.pid, &message.tid, &outputs)?;
+                    executor
+                        .act()
+                        .complete(&message.pid, &message.tid, &outputs)?;
                     println!("action state: key={}", &message.key);
                     println!("inputs:{:?}", &message.inputs);
                     println!("outputs:{:?}", &outputs);

@@ -99,7 +99,7 @@ async fn store_model_deploy_ok() {
     let store = store().await;
     let workflow = create_workflow();
     let ok = store.deploy(&workflow).unwrap();
-    assert_eq!(ok, true);
+    assert!(ok);
 }
 
 #[tokio::test]
@@ -154,11 +154,11 @@ async fn store_model_remove() {
     store.deploy(&workflow).unwrap();
 
     let model = store.models().find(&id);
-    assert_eq!(model.is_ok(), true);
+    assert!(model.is_ok());
 
     store.models().delete(&id).unwrap();
     let model = store.models().find(&id);
-    assert_eq!(model.is_err(), true);
+    assert!(model.is_err());
 }
 
 #[tokio::test]
@@ -168,7 +168,7 @@ async fn store_model_deploy_id_error() {
     workflow.id = "".to_string();
     let result = store.deploy(&workflow);
 
-    assert_eq!(result.is_err(), true);
+    assert!(result.is_err());
 }
 
 #[tokio::test]
@@ -226,11 +226,11 @@ async fn store_proc_remove() {
     store.procs().create(&proc).expect("create proc");
 
     let proc = store.procs().find(&id);
-    assert_eq!(proc.is_ok(), true);
+    assert!(proc.is_ok());
 
     store.procs().delete(&id).unwrap();
     let proc = store.procs().find(&id);
-    assert_eq!(proc.is_ok(), false);
+    assert!(proc.is_err());
 }
 
 #[tokio::test]
@@ -341,6 +341,7 @@ async fn store_message_create() {
         name: "test".to_string(),
         pid: pid.clone(),
         tid: tid.clone(),
+        nid: utils::shortid(),
         state: "created".to_string(),
         start_time: 0,
         end_time: 0,
@@ -378,6 +379,7 @@ async fn store_message_query() {
         name: "test".to_string(),
         pid: pid.clone(),
         tid: tid.clone(),
+        nid: utils::shortid(),
         state: "created".to_string(),
         start_time: 0,
         end_time: 0,
@@ -416,6 +418,7 @@ async fn store_message_update() {
         name: "test".to_string(),
         pid: pid.clone(),
         tid: tid.clone(),
+        nid: utils::shortid(),
         state: "created".to_string(),
         start_time: 0,
         end_time: 0,
@@ -461,6 +464,7 @@ async fn store_message_remove() {
         name: "test".to_string(),
         pid: pid.clone(),
         tid: tid.clone(),
+        nid: utils::shortid(),
         state: "created".to_string(),
         start_time: 0,
         end_time: 0,
@@ -496,7 +500,7 @@ async fn store_package_create() {
         id,
         name: "test package".to_string(),
         size: 100,
-        file_data: vec![0x01, 0x02],
+        data: vec![0x01, 0x02],
         create_time: 0,
         update_time: 0,
         timestamp: 0,
@@ -516,7 +520,7 @@ async fn store_package_query() {
         id,
         name: "test package".to_string(),
         size: 100,
-        file_data: vec![0x01, 0x02],
+        data: vec![0x01, 0x02],
         create_time: 0,
         update_time: 0,
         timestamp: 0,
@@ -536,7 +540,7 @@ async fn store_package_update() {
         id,
         name: "test package".to_string(),
         size: 100,
-        file_data: vec![0x01, 0x02],
+        data: vec![0x01, 0x02],
         create_time: 0,
         update_time: 0,
         timestamp: 0,
@@ -545,13 +549,13 @@ async fn store_package_update() {
     let mut p = store.packages().find(&package.id).unwrap();
     p.name = "my name".to_string();
     p.size = 200;
-    p.file_data = vec![0x02, 0x03];
+    p.data = vec![0x02, 0x03];
     store.packages().update(&p).unwrap();
 
     let p2 = store.packages().find(&package.id).unwrap();
     assert_eq!(p2.name, "my name");
     assert_eq!(p2.size, 200);
-    assert_eq!(p2.file_data, vec![0x02, 0x03]);
+    assert_eq!(p2.data, vec![0x02, 0x03]);
 }
 
 #[tokio::test]
@@ -563,7 +567,7 @@ async fn store_package_remove() {
         id,
         name: "test package".to_string(),
         size: 100,
-        file_data: vec![0x01, 0x02],
+        data: vec![0x01, 0x02],
         create_time: 0,
         update_time: 0,
         timestamp: 0,

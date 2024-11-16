@@ -7,8 +7,8 @@ outputs:
 steps:
   - name: t1
     acts:
-      - !req
-        id: action1
+      - act: irq
+        key: action1
         outputs:
           v:
   - name: t2

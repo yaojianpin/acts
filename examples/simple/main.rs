@@ -8,11 +8,18 @@ async fn main() {
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text).unwrap();
     workflow.print();
-    engine.manager().deploy(&workflow).expect("deploy model");
+    engine
+        .executor()
+        .model()
+        .deploy(&workflow)
+        .expect("deploy model");
 
     let mut vars = Vars::new();
     vars.insert("input".into(), 10.into());
-    executor.start(&workflow.id, &vars).expect("start workflow");
+    executor
+        .proc()
+        .start(&workflow.id, &vars)
+        .expect("start workflow");
     engine.channel().on_error(move |e| {
         print!("on_error: {e:?}");
         s1.close();

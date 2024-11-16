@@ -6,11 +6,11 @@ use crate::{
 use serde_json::json;
 
 #[tokio::test]
-async fn sch_act_catch_by_any_error() {
+async fn sch_step_catch_by_any_error() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(|c| c.with_then(|stmts| stmts.add(Act::req(|act| act.with_id("catch1")))))
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_catch(|c| c.with_then(|stmts| stmts.add(Act::irq(|act| act.with_key("catch1")))))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
     workflow.print();
     let (proc, scher, emitter, tx, rx) =
@@ -21,7 +21,7 @@ async fn sch_act_catch_by_any_error() {
         if e.is_key("act1") && e.is_state("created") {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            options.set(consts::ACT_ERR_KEY, json!({ "ecode": "aaaaaaaaa"}));
+            options.set(consts::ACT_ERR_CODE, "aaaaaaaaa");
             let action = Action::new(&e.pid, &e.tid, "error", &options);
             s.do_action(&action).unwrap();
         }
@@ -38,11 +38,11 @@ async fn sch_act_catch_by_any_error() {
 }
 
 #[tokio::test]
-async fn sch_act_catch_by_msg() {
+async fn sch_step_catch_by_msg() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(|c| c.with_then(|stmts| stmts.add(Act::msg(|msg| msg.with_id("msg1")))))
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_catch(|c| c.with_then(|stmts| stmts.add(Act::msg(|msg| msg.with_key("msg1")))))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
     workflow.print();
     let (proc, scher, emitter, tx, rx) = create_proc_signal(&mut workflow, &utils::longid());
@@ -52,7 +52,7 @@ async fn sch_act_catch_by_msg() {
         if e.is_key("act1") && e.is_state("created") {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            options.set(consts::ACT_ERR_KEY, json!({ "ecode": "aaaaaaaa"}));
+            options.set(consts::ACT_ERR_CODE, "aaaaaaaa");
             let action = Action::new(&e.pid, &e.tid, "error", &options);
             s.do_action(&action).unwrap();
         }
@@ -70,11 +70,11 @@ async fn sch_act_catch_by_msg() {
 }
 
 #[tokio::test]
-async fn sch_act_catch_empty_then() {
+async fn sch_step_catch_empty_then() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_catch(|c| c.with_then(|_| Vec::new()))
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
     workflow.print();
     let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
@@ -83,7 +83,7 @@ async fn sch_act_catch_empty_then() {
     emitter.on_message(move |e| {
         if e.is_key("act1") && e.is_state("created") {
             let mut options = Vars::new();
-            options.set(consts::ACT_ERR_KEY, json!({ "ecode": "err1"}));
+            options.set(consts::ACT_ERR_CODE, "err1");
             let action = Action::new(&e.pid, &e.tid, "error", &options);
             s.do_action(&action).unwrap();
         }
@@ -96,14 +96,14 @@ async fn sch_act_catch_empty_then() {
 }
 
 #[tokio::test]
-async fn sch_act_catch_by_err_code() {
+async fn sch_step_catch_by_err_code() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_catch(|c| {
-                c.with_err("123")
-                    .with_then(|stmts| stmts.add(Act::req(|act| act.with_id("catch1"))))
+                c.with_on("123")
+                    .with_then(|stmts| stmts.add(Act::irq(|act| act.with_key("catch1"))))
             })
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
     workflow.print();
     let (proc, scher, emitter, tx, rx) = create_proc_signal(&mut workflow, &utils::longid());
@@ -113,10 +113,8 @@ async fn sch_act_catch_by_err_code() {
         if e.is_key("act1") && e.is_state("created") {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            options.set(
-                consts::ACT_ERR_KEY,
-                json!({ "ecode": "123", "message": "biz error"}),
-            );
+            options.set(consts::ACT_ERR_CODE, "123");
+            options.set(consts::ACT_ERR_MESSAGE, "biz error");
 
             let action = Action::new(&e.pid, &e.tid, "error", &options);
             s.do_action(&action).unwrap();
@@ -134,14 +132,15 @@ async fn sch_act_catch_by_err_code() {
 }
 
 #[tokio::test]
-async fn sch_act_catch_by_wrong_code() {
+async fn sch_step_catch_by_wrong_code() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_catch(|c| {
-                c.with_err("wrong_code")
-                    .with_then(|stmts| stmts.add(Act::req(|act| act.with_id("catch1"))))
+                c.with_on("wrong_code").with_then(|stmts| {
+                    stmts.add(Act::irq(|act| act.with_key("catch1")).with_id("catch1"))
+                })
             })
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_act(Act::irq(|act| act.with_key("act1")).with_id("act1"))
     });
     workflow.print();
     let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
@@ -151,10 +150,9 @@ async fn sch_act_catch_by_wrong_code() {
         if e.is_key("act1") && e.is_state("created") {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            options.set(
-                consts::ACT_ERR_KEY,
-                json!({ "ecode": "123", "message": "biz error"}),
-            );
+
+            options.set(consts::ACT_ERR_CODE, "123");
+            options.set(consts::ACT_ERR_MESSAGE, "biz error");
 
             let action = Action::new(&e.pid, &e.tid, "error", &options);
             s.do_action(&action).unwrap();
@@ -168,11 +166,11 @@ async fn sch_act_catch_by_wrong_code() {
 }
 
 #[tokio::test]
-async fn sch_act_catch_by_no_err_code() {
+async fn sch_step_catch_by_no_err_code() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(|c| c.with_then(|stmts| stmts.add(Act::req(|act| act.with_id("catch1")))))
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_catch(|c| c.with_then(|stmts| stmts.add(Act::irq(|act| act.with_key("catch1")))))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
     workflow.print();
     let (proc, scher, emitter, tx, rx) =
@@ -196,11 +194,11 @@ async fn sch_act_catch_by_no_err_code() {
 }
 
 #[tokio::test]
-async fn sch_act_catch_as_complete() {
+async fn sch_step_catch_as_complete() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(|c| c.with_then(|stmts| stmts.add(Act::req(|act| act.with_id("catch1")))))
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_catch(|c| c.with_then(|stmts| stmts.add(Act::irq(|act| act.with_key("catch1")))))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
     workflow.print();
     let (proc, scher, emitter, tx, rx) =
@@ -215,10 +213,8 @@ async fn sch_act_catch_as_complete() {
         if e.is_key("act1") && e.is_state("created") {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            options.set(
-                consts::ACT_ERR_KEY,
-                json!({ "ecode": "123", "message": "biz error"}),
-            );
+            options.set(consts::ACT_ERR_CODE, "123");
+            options.set(consts::ACT_ERR_MESSAGE, "biz error");
 
             let action = Action::new(&e.pid, &e.tid, "error", &options);
             s.do_action(&action).unwrap();
@@ -245,11 +241,11 @@ async fn sch_act_catch_as_complete() {
 }
 
 #[tokio::test]
-async fn sch_act_catch_as_error() {
+async fn sch_step_catch_as_error() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(|c| c.with_then(|stmts| stmts.add(Act::req(|act| act.with_id("catch1")))))
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_catch(|c| c.with_then(|stmts| stmts.add(Act::irq(|act| act.with_key("catch1")))))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
     workflow.print();
     let (proc, scher, emitter, tx, rx) =
@@ -262,10 +258,8 @@ async fn sch_act_catch_as_error() {
         if e.is_key("act1") && e.is_state("created") {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            options.set(
-                consts::ACT_ERR_KEY,
-                json!({ "ecode": "1", "message": "biz error"}),
-            );
+            options.set(consts::ACT_ERR_CODE, "1");
+            options.set(consts::ACT_ERR_MESSAGE, "biz error");
 
             let action = Action::new(&e.pid, &e.tid, "error", &options);
             s.do_action(&action).unwrap();
@@ -274,11 +268,8 @@ async fn sch_act_catch_as_error() {
         if e.is_key("catch1") && e.is_state("created") {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            options.set(
-                consts::ACT_ERR_KEY,
-                json!({ "ecode": "2", "message": "biz error"}),
-            );
-
+            options.set(consts::ACT_ERR_CODE, "2");
+            options.set(consts::ACT_ERR_MESSAGE, "biz error");
             let action = Action::new(&e.pid, &e.tid, "error", &options);
             s.do_action(&action).unwrap();
 
@@ -297,14 +288,16 @@ async fn sch_act_catch_as_error() {
 }
 
 #[tokio::test]
-async fn sch_act_catch_as_skip() {
+async fn sch_step_catch_as_skip() {
     let mut workflow = Workflow::new()
         .with_step(|step| {
             step.with_id("step1")
                 .with_catch(|c| {
-                    c.with_then(|stmts| stmts.add(Act::req(|act| act.with_id("catch1"))))
+                    c.with_then(|stmts| {
+                        stmts.add(Act::irq(|act| act.with_key("catch1")).with_id("catch1"))
+                    })
                 })
-                .with_act(Act::req(|act| act.with_id("act1")))
+                .with_act(Act::irq(|act| act.with_key("act1")).with_id("act1"))
         })
         .with_step(|step| step.with_id("step2"));
     workflow.print();
@@ -315,10 +308,8 @@ async fn sch_act_catch_as_skip() {
         if e.is_key("act1") && e.is_state("created") {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            options.set(
-                consts::ACT_ERR_KEY,
-                json!({ "ecode": "1", "message": "biz error"}),
-            );
+            options.set(consts::ACT_ERR_CODE, "1");
+            options.set(consts::ACT_ERR_MESSAGE, "biz error");
 
             let action = Action::new(&e.pid, &e.tid, "error", &options);
             s.do_action(&action).unwrap();
@@ -337,26 +328,26 @@ async fn sch_act_catch_as_skip() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("catch1").get(0).unwrap().state(),
+        proc.task_by_nid("catch1").first().unwrap().state(),
         TaskState::Skipped
     );
-    assert!(proc.task_by_nid("act1").get(0).unwrap().state().is_error());
+    assert!(proc.task_by_nid("act1").first().unwrap().state().is_error());
     assert_eq!(
-        proc.task_by_nid("step1").get(0).unwrap().state(),
+        proc.task_by_nid("step1").first().unwrap().state(),
         TaskState::Completed
     );
     assert_eq!(
-        proc.task_by_nid("step2").get(0).unwrap().state(),
+        proc.task_by_nid("step2").first().unwrap().state(),
         TaskState::Completed
     );
 }
 
 #[tokio::test]
-async fn sch_act_catch_as_abort() {
+async fn sch_step_catch_as_abort() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(|c| c.with_then(|stmts| stmts.add(Act::req(|act| act.with_id("catch1")))))
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_catch(|c| c.with_then(|stmts| stmts.add(Act::irq(|act| act.with_key("catch1")))))
+            .with_act(Act::irq(|act| act.with_key("act1")))
     });
     workflow.print();
     let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
@@ -366,10 +357,8 @@ async fn sch_act_catch_as_abort() {
         if e.is_key("act1") && e.is_state("created") {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            options.set(
-                consts::ACT_ERR_KEY,
-                json!({ "ecode": "1", "message": "biz error"}),
-            );
+            options.set(consts::ACT_ERR_CODE, "1");
+            options.set(consts::ACT_ERR_MESSAGE, "biz error");
 
             let action = Action::new(&e.pid, &e.tid, "error", &options);
             s.do_action(&action).unwrap();
@@ -391,11 +380,15 @@ async fn sch_act_catch_as_abort() {
 }
 
 #[tokio::test]
-async fn sch_act_catch_as_submit() {
+async fn sch_step_catch_as_submit() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(|c| c.with_then(|stmts| stmts.add(Act::req(|act| act.with_id("catch1")))))
-            .with_act(Act::req(|act| act.with_id("act1")))
+            .with_catch(|c| {
+                c.with_then(|stmts| {
+                    stmts.add(Act::irq(|act| act.with_key("catch1")).with_id("catch1"))
+                })
+            })
+            .with_act(Act::irq(|act| act.with_key("act1")).with_id("act1"))
     });
     workflow.print();
     let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
@@ -405,10 +398,8 @@ async fn sch_act_catch_as_submit() {
         if e.is_key("act1") && e.is_state("created") {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            options.set(
-                consts::ACT_ERR_KEY,
-                json!({ "ecode": "1", "message": "biz error"}),
-            );
+            options.set(consts::ACT_ERR_CODE, "1");
+            options.set(consts::ACT_ERR_MESSAGE, "biz error");
 
             let action = Action::new(&e.pid, &e.tid, "error", &options);
             s.do_action(&action).unwrap();
@@ -427,29 +418,31 @@ async fn sch_act_catch_as_submit() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("catch1").get(0).unwrap().state(),
+        proc.task_by_nid("catch1").first().unwrap().state(),
         TaskState::Submitted
     );
-    assert!(proc.task_by_nid("act1").get(0).unwrap().state().is_error(),);
+    assert!(proc.task_by_nid("act1").first().unwrap().state().is_error(),);
     assert_eq!(
-        proc.task_by_nid("step1").get(0).unwrap().state(),
+        proc.task_by_nid("step1").first().unwrap().state(),
         TaskState::Completed
     );
 }
 
 #[tokio::test]
-async fn sch_act_catch_as_back() {
+async fn sch_step_catch_as_back() {
     let mut workflow = Workflow::new()
         .with_step(|step| {
             step.with_id("step1")
-                .with_act(Act::req(|act| act.with_id("act1")))
+                .with_act(Act::irq(|act| act.with_key("act1")).with_id("act1"))
         })
         .with_step(|step| {
             step.with_id("step2")
                 .with_catch(|c| {
-                    c.with_then(|stmts| stmts.add(Act::req(|act| act.with_id("catch2"))))
+                    c.with_then(|stmts| {
+                        stmts.add(Act::irq(|act| act.with_key("catch2")).with_id("catch2"))
+                    })
                 })
-                .with_act(Act::req(|act| act.with_id("act2")))
+                .with_act(Act::irq(|act| act.with_key("act2")).with_id("act2"))
         });
     workflow.print();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<i32>(&mut workflow, &utils::longid());
@@ -474,10 +467,8 @@ async fn sch_act_catch_as_back() {
         if e.is_key("act2") && e.is_state("created") {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            options.set(
-                consts::ACT_ERR_KEY,
-                json!({ "ecode": "1", "message": "biz error"}),
-            );
+            options.set(consts::ACT_ERR_CODE, "1");
+            options.set(consts::ACT_ERR_MESSAGE, "biz error");
 
             let action = Action::new(&e.pid, &e.tid, "error", &options);
             s.do_action(&action).unwrap();
@@ -497,10 +488,10 @@ async fn sch_act_catch_as_back() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("catch2").get(0).unwrap().state(),
+        proc.task_by_nid("catch2").first().unwrap().state(),
         TaskState::Backed
     );
-    assert!(proc.task_by_nid("act2").get(0).unwrap().state().is_error());
+    assert!(proc.task_by_nid("act2").first().unwrap().state().is_error());
     assert_eq!(
         proc.task_by_nid("step1").get(1).unwrap().state(),
         TaskState::Running
@@ -508,16 +499,18 @@ async fn sch_act_catch_as_back() {
 }
 
 #[tokio::test]
-async fn sch_act_catch_and_continue() {
+async fn sch_step_catch_and_continue() {
     let mut workflow = Workflow::new()
         .with_step(|step| {
             step.with_id("step1")
-                .with_catch(|c| c.with_then(|stmts| stmts.add(Act::msg(|msg| msg.with_id("msg1")))))
-                .with_act(Act::req(|act| act.with_id("act1")))
+                .with_catch(|c| {
+                    c.with_then(|stmts| stmts.add(Act::msg(|msg| msg.with_key("msg1"))))
+                })
+                .with_act(Act::irq(|act| act.with_key("act1")))
         })
         .with_step(|step| {
             step.with_id("step2")
-                .with_act(Act::req(|act| act.with_id("act2")))
+                .with_act(Act::irq(|act| act.with_key("act2")))
         });
     workflow.print();
     let (proc, scher, emitter, tx, rx) = create_proc_signal(&mut workflow, &utils::longid());
@@ -527,7 +520,7 @@ async fn sch_act_catch_and_continue() {
         if e.is_key("act1") && e.is_state("created") {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            options.set(consts::ACT_ERR_KEY, json!({ "ecode": "aaaaaaaaaa"}));
+            options.set(consts::ACT_ERR_CODE, "aaaaaaaaaa");
 
             let action = Action::new(&e.pid, &e.tid, "error", &options);
             s.do_action(&action).unwrap();

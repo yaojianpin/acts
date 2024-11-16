@@ -79,12 +79,12 @@ async fn sch_task_step_if_false() {
     proc.print();
 
     assert_eq!(
-        proc.task_by_nid("step1").get(0).unwrap().state(),
+        proc.task_by_nid("step1").first().unwrap().state(),
         TaskState::Skipped
     );
 
     assert_eq!(
-        proc.task_by_nid("step2").get(0).unwrap().state(),
+        proc.task_by_nid("step2").first().unwrap().state(),
         TaskState::Completed
     );
 }
@@ -101,11 +101,11 @@ async fn sch_task_step_if_true() {
 
     proc.print();
     assert_eq!(
-        proc.task_by_nid("step1").get(0).unwrap().state(),
+        proc.task_by_nid("step1").first().unwrap().state(),
         TaskState::Completed
     );
     assert_eq!(
-        proc.task_by_nid("step2").get(0).unwrap().state(),
+        proc.task_by_nid("step2").first().unwrap().state(),
         TaskState::Completed
     );
 }
@@ -155,10 +155,10 @@ async fn sch_task_branch_skip() {
     tx.recv().await;
 
     assert_eq!(
-        proc.task_by_nid("b1").get(0).unwrap().state(),
+        proc.task_by_nid("b1").first().unwrap().state(),
         TaskState::Skipped
     );
-    assert_eq!(proc.task_by_nid("step11").get(0).is_none(), true);
+    assert!(proc.task_by_nid("step11").first().is_none());
 }
 
 #[tokio::test]
@@ -180,7 +180,7 @@ async fn sch_task_branch_empty_if() {
     tx.recv().await;
 
     assert_eq!(
-        proc.task_by_nid("b1").get(0).unwrap().state(),
+        proc.task_by_nid("b1").first().unwrap().state(),
         TaskState::Skipped
     );
 }
@@ -213,7 +213,7 @@ async fn sch_task_branch_if_false_else_success() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("b1").get(0).unwrap().state(),
+        proc.task_by_nid("b1").first().unwrap().state(),
         TaskState::Completed
     );
 }
@@ -229,7 +229,7 @@ async fn sch_task_branch_if_false_else_running() {
                     .with_name("branch 1")
                     .with_step(|step| {
                         step.with_name("step11")
-                            .with_act(Act::req(|act| act.with_id("act1")))
+                            .with_act(Act::irq(|act| act.with_key("act1")))
                     })
             })
             .with_branch(|branch| {
@@ -254,12 +254,12 @@ async fn sch_task_branch_if_false_else_running() {
     tx.recv().await;
 
     assert_eq!(
-        proc.task_by_nid("b1").get(0).unwrap().state(),
+        proc.task_by_nid("b1").first().unwrap().state(),
         TaskState::Running
     );
 
     // check the branch state is updated to store
-    let task = proc.task_by_nid("b1").get(0).unwrap().clone();
+    let task = proc.task_by_nid("b1").first().unwrap().clone();
     let task_id = utils::Id::new(&task.pid, &task.id);
     assert_eq!(
         scher
@@ -302,11 +302,11 @@ async fn sch_task_branch_if_true_else() {
     tx.recv().await;
 
     assert_eq!(
-        proc.task_by_nid("b1").get(0).unwrap().state(),
+        proc.task_by_nid("b1").first().unwrap().state(),
         TaskState::Completed
     );
     assert_eq!(
-        proc.task_by_nid("b2").get(0).unwrap().state(),
+        proc.task_by_nid("b2").first().unwrap().state(),
         TaskState::Skipped
     );
 }
@@ -339,11 +339,11 @@ async fn sch_task_branch_if_two_no_else() {
     tx.recv().await;
 
     assert_eq!(
-        proc.task_by_nid("b1").get(0).unwrap().state(),
+        proc.task_by_nid("b1").first().unwrap().state(),
         TaskState::Completed
     );
     assert_eq!(
-        proc.task_by_nid("b2").get(0).unwrap().state(),
+        proc.task_by_nid("b2").first().unwrap().state(),
         TaskState::Skipped
     );
 }
@@ -383,15 +383,15 @@ async fn sch_task_branch_if_mutli_true() {
     tx.recv().await;
 
     assert_eq!(
-        proc.task_by_nid("b1").get(0).unwrap().state(),
+        proc.task_by_nid("b1").first().unwrap().state(),
         TaskState::Completed
     );
     assert_eq!(
-        proc.task_by_nid("b3").get(0).unwrap().state(),
+        proc.task_by_nid("b3").first().unwrap().state(),
         TaskState::Completed
     );
     assert_eq!(
-        proc.task_by_nid("b2").get(0).unwrap().state(),
+        proc.task_by_nid("b2").first().unwrap().state(),
         TaskState::Skipped
     );
 }
@@ -407,7 +407,7 @@ async fn sch_task_branch_needs_state() {
                     .with_name("branch 1")
                     .with_step(|step| {
                         step.with_id("step11")
-                            .with_act(Act::req(|act| act.with_id("act1")))
+                            .with_act(Act::irq(|act| act.with_key("act1")))
                     })
             })
             .with_branch(|branch| {
@@ -433,11 +433,11 @@ async fn sch_task_branch_needs_state() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("b1").get(0).unwrap().state(),
+        proc.task_by_nid("b1").first().unwrap().state(),
         TaskState::Running
     );
     assert_eq!(
-        proc.task_by_nid("b2").get(0).unwrap().state(),
+        proc.task_by_nid("b2").first().unwrap().state(),
         TaskState::Pending
     );
 }

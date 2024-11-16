@@ -1,48 +1,53 @@
 name: approve
 id: approve
 setup:
-  - !on_completed
-      - !msg
-        id: final
+  - act: on_completed
+    then:
+      - act: msg
+        key: final
 steps:
   - name: prepare
     id: prepare
     acts:
-      - !req
-        id: init
+      - act: irq
+        key: init
   - name: pm approval
     id: pm_approval
     acts:
-      - !req
-        id: pm
+      - act: irq
+        key: pm
         inputs:
           role_id: pm
-        outputs:
+        rets:
           pm:
-        on_completed:
-          - !each
-            in: $("pm")
-            run:
-              - !req
-                id: pm_act
-              - !msg
-                id: pm_act_msg
+        setup:
+          - act: on_completed
+            then:
+              - act: each
+                in: $("pm")
+                then:
+                  - act: irq
+                    key: pm_act
+                  - act: msg
+                    key: pm_act_msg
   - name: gm approval
     id: gm_approval
     acts:
-      - !req
-        id: gm
+      - act: irq
+        key: gm
         inputs:
           role_id: gm
-        outputs:
+        rets:
           gm:
-        on_completed:
-          - !req
-            id: gm_act
-            inputs:
-              v: ${ $("gm") }
-          - !each
-            in: $("gm")
-            run:
-              - !msg
-                id: gm_act_msg
+        setup:
+          - act: on_completed
+            then:
+              - act: irq
+                key: gm_act
+                inputs:
+                  v: ${ $("gm") }
+              - act: each
+                in: $("gm")
+                then:
+                  - act: msg
+                    key: gm_act_msg

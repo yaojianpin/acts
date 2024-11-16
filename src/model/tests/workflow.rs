@@ -29,14 +29,14 @@ fn model_workflow_from_json_str() {
 fn model_workflow_to_yml_str() {
     let model = Workflow::new().with_step(|step| step.with_id("step1"));
     let m = model.to_yml();
-    assert_eq!(m.is_ok(), true);
+    assert!(m.is_ok());
 }
 
 #[test]
 fn model_workflow_to_json_str() {
     let model = Workflow::new().with_step(|step| step.with_id("step1"));
     let m = model.to_json();
-    assert_eq!(m.is_ok(), true);
+    assert!(m.is_ok());
 }
 
 #[test]
@@ -88,7 +88,7 @@ fn model_workflow_tag() {
 fn model_workflow_setup_build() {
     let m = Workflow::new().with_setup(|stmts| {
         stmts
-            .add(Act::msg(|msg| msg.with_id("msg1")))
+            .add(Act::msg(|msg| msg.with_key("msg1")))
             .add(Act::set(Vars::new().with("a", 5)))
     });
     assert_eq!(m.setup.len(), 2);
@@ -100,30 +100,44 @@ fn model_workflow_setup_parse() {
     name: workflow
     id: m1
     setup:
-       - !msg
-         id: msg1
-       - !set
+       - act: msg
+         inputs:
+           key: msg1
+       - act: set
          a: 6
-       - !on_created
-         - !msg
-           id: msg2
-       - !on_completed
-           - !msg
-             id: msg3
-       - !on_step
-           - !msg
-             id: msg3
-       - !on_before_update
-           - !msg
-             id: msg3
-       - !on_updated
-           - !msg
-             id: msg3
-       - !on_step
-           - !msg
-             id: msg3
-       - !expose
-         out:
+       - act: on_created
+         then:
+            - act: msg
+              inputs:
+                key: msg2
+       - act: on_completed
+         then:
+           - act: msg
+             inputs:
+               key: msg3
+       - act: on_step
+         then:
+           - act: msg
+             inputs:
+               key: msg3
+       - act: on_before_update
+         then:
+           - act: msg
+             inputs:
+               key: msg3
+       - act: on_updated
+         then:
+           - act: msg
+             inputs:
+               key: msg3
+       - act: on_step
+         then:
+           - act: msg
+             inputs:
+               key: msg3
+       - act: expose
+         inputs:
+           out:
     "#;
     let m = Workflow::from_yml(text).unwrap();
     assert_eq!(m.setup.len(), 9);
