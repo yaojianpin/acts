@@ -34,9 +34,7 @@ async fn sch_step_acts_msg() {
 async fn sch_step_acts_req() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|req: crate::Irq| {
-                req.with_key("act1")
-            }))
+            .with_act(Act::irq(|req: crate::Irq| req.with_key("act1")))
     });
 
     workflow.print();
@@ -93,7 +91,15 @@ async fn sch_step_acts_expose() {
     scher.launch(&proc);
     tx.recv().await;
     proc.print();
-    assert_eq!(proc.data().get::<i32>("a").unwrap(), 10);
+    assert_eq!(
+        proc.task_by_nid("step1")
+            .first()
+            .unwrap()
+            .outputs()
+            .get::<i32>("a")
+            .unwrap(),
+        10
+    );
 }
 
 #[tokio::test]

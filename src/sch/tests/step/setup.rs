@@ -91,7 +91,15 @@ async fn sch_step_setup_expose() {
     scher.launch(&proc);
     tx.recv().await;
     proc.print();
-    assert_eq!(proc.data().get::<i32>("a").unwrap(), 10);
+    assert_eq!(
+        proc.task_by_nid("step1")
+            .first()
+            .unwrap()
+            .outputs()
+            .get::<i32>("a")
+            .unwrap(),
+        10
+    );
 }
 
 #[tokio::test]

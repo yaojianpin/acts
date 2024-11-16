@@ -2,7 +2,7 @@ use crate::{
     data,
     sch::{tests::create_proc_signal2, Proc},
     utils::{self, consts},
-    Act, Event, Message, Signal, StmtBuild, TaskState, Vars, Workflow,
+    Act, Event, Message, Signal, StmtBuild, TaskState, Workflow,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -196,7 +196,7 @@ async fn sch_act_pack_push() {
 }
 
 #[tokio::test]
-async fn sch_act_pack_set_output() {
+async fn sch_act_pack_expose() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::pack(|p| p.with_key("pack1")).with_id("pack1"))
@@ -205,7 +205,7 @@ async fn sch_act_pack_set_output() {
         id: "pack1".to_string(),
         name: "package 1".to_string(),
         data: br#"
-        act.set_output("a", 100);
+        act.expose("a", 100);
         "#
         .to_vec(),
         ..Default::default()
@@ -384,34 +384,6 @@ async fn sch_act_pack_complete() {
 }
 
 #[tokio::test]
-async fn sch_act_pack_expose() {
-    let workflow = Workflow::new()
-        .with_step(|step| step.with_id("step1"))
-        .with_step(|step| {
-            step.with_id("step2")
-                .with_output("v", json!(null))
-                .with_act(Act::pack(|p| p.with_key("pack1")))
-        });
-    let pack = data::Package {
-        id: "pack1".to_string(),
-        name: "package 1".to_string(),
-        data: br#"
-        act.expose("v", 123);
-        act.complete();
-        "#
-        .to_vec(),
-        ..Default::default()
-    };
-    let ret: Vars = run_test(&workflow, &pack, |e, s| {
-        if e.is_key("step2") && e.is_state("completed") {
-            s.send(e.outputs.clone());
-        }
-    })
-    .await;
-    assert_eq!(ret.get::<i32>("v").unwrap(), 123);
-}
-
-#[tokio::test]
 async fn sch_act_pack_state() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -422,7 +394,7 @@ async fn sch_act_pack_state() {
         name: "package 1".to_string(),
         data: br#"
         let state = act.state();
-        act.set_output("state", state);
+        act.expose("state", state);
         "#
         .to_vec(),
         ..Default::default()

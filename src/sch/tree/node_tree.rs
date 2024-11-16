@@ -59,36 +59,28 @@ impl NodeTree {
     #[allow(unused)]
     pub fn print(&self) {
         if let Some(ref root) = self.root.clone() {
-            VisitRoot::walk(root, &move |node| {
+            VisitRoot::walk(root, &move |n| {
                 // print single line
-                for index in 0..node.level {
-                    if index == 0 {
-                        print!("│   ");
-                        // write!(f, "    ")?;
+                if n.level > 0 {
+                    for index in 1..n.level {
+                        if n.path[&index] {
+                            print!("│   ");
+                        } else {
+                            print!("    ");
+                        }
+                    }
+                    if n.is_last {
+                        print!("└── ");
                     } else {
-                        print!("    ");
-                        // write!(f, "│   ")?;
+                        print!("├── ");
                     }
                 }
-                if node.is_last {
-                    print!("└── ");
-                    // writeln!(f, "└── {}", leaf.0)?;
-                } else {
-                    print!("├── ");
-                    // writeln!(f, "├── {}", leaf.0)?;
-                }
-                let next = match node.next().upgrade() {
+                let next = match n.next().upgrade() {
                     Some(n) => n.id().to_string(),
                     None => "nil".to_string(),
                 };
 
-                println!(
-                    "{} id:{} name={}  next={}",
-                    node.typ(),
-                    node.id(),
-                    node.name(),
-                    next,
-                );
+                println!("{} id:{} name={}  next={}", n.typ(), n.id(), n.name(), next,);
             });
         }
     }
@@ -99,41 +91,20 @@ impl NodeTree {
         if let Some(ref root) = self.root.clone() {
             VisitRoot::walk(root, &move |n| {
                 // print single line
-                for index in 0..n.level {
-                    if n.path[&index] {
-                        s.borrow_mut().push_str("│   ");
-                        // write!(f, "    ")?;
+                if n.level > 0 {
+                    for index in 1..n.level {
+                        if n.path[&index] {
+                            s.borrow_mut().push_str("│   ");
+                        } else {
+                            s.borrow_mut().push_str("    ");
+                        }
+                    }
+                    if n.is_last {
+                        s.borrow_mut().push_str("└── ");
                     } else {
-                        s.borrow_mut().push_str("    ");
-                        // write!(f, "│   ")?;
+                        s.borrow_mut().push_str("├── ");
                     }
                 }
-                if n.is_last {
-                    s.borrow_mut().push_str("└── ");
-                    // writeln!(f, "└── {}", leaf.0)?;
-                } else {
-                    s.borrow_mut().push_str("├── ");
-                    // writeln!(f, "├── {}", leaf.0)?;
-                }
-
-                // if n.level > 1 {
-                //     let mut level = 0;
-                //     while level < n.level {
-                //         if n.is_sibling(&level) {
-                //             s.borrow_mut().push_str("│ ");
-                //         } else {
-                //             s.borrow_mut().push_str("  ");
-                //         }
-
-                //         level += 1;
-                //     }
-                // }
-
-                // if n.is_next_sibling() {
-                //     s.borrow_mut().push_str("├─");
-                // } else if n.level != 0 {
-                //     s.borrow_mut().push_str("└─");
-                // }
 
                 let next = match n.next().upgrade() {
                     Some(n) => n.id().to_string(),

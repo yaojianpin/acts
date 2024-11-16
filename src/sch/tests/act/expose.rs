@@ -15,7 +15,8 @@ async fn sch_step_setup_expose_one() {
     scher.launch(&proc);
     tx.recv().await;
     proc.print();
-    assert_eq!(proc.data().get::<i64>("a").unwrap(), 5);
+    let outputs = proc.task_by_nid("step1").first().unwrap().outputs();
+    assert_eq!(outputs.get::<i64>("a").unwrap(), 5);
 }
 
 #[tokio::test]
@@ -31,9 +32,9 @@ async fn sch_step_setup_expose_many() {
     scher.launch(&proc);
     tx.recv().await;
     proc.print();
-    assert_eq!(proc.data().get::<i64>("a").unwrap(), 5);
-
-    assert_eq!(proc.data().get::<String>("b").unwrap(), "bb");
+    let outputs = proc.task_by_nid("step1").first().unwrap().outputs();
+    assert_eq!(outputs.get::<i64>("a").unwrap(), 5);
+    assert_eq!(outputs.get::<String>("b").unwrap(), "bb");
 }
 
 #[tokio::test]
@@ -49,8 +50,9 @@ async fn sch_step_setup_expose_null() {
     scher.launch(&proc);
     tx.recv().await;
     proc.print();
-    assert_eq!(proc.data().get::<()>("a").unwrap(), ());
-    assert_eq!(proc.data().get::<()>("b").unwrap(), ());
+    let outputs = proc.task_by_nid("step1").first().unwrap().outputs();
+    assert_eq!(outputs.get::<()>("a").unwrap(), ());
+    assert_eq!(outputs.get::<()>("b").unwrap(), ());
 }
 
 #[tokio::test]
@@ -68,8 +70,9 @@ async fn sch_step_setup_expose_local() {
     scher.launch(&proc);
     tx.recv().await;
     proc.print();
-    assert_eq!(proc.data().get::<String>("a").unwrap(), "abc");
-    assert_eq!(proc.data().get::<i32>("b").unwrap(), 5);
+    let outputs = proc.task_by_nid("step1").first().unwrap().outputs();
+    assert_eq!(outputs.get::<String>("a").unwrap(), "abc");
+    assert_eq!(outputs.get::<i32>("b").unwrap(), 5);
 }
 
 #[tokio::test]
@@ -87,5 +90,13 @@ async fn sch_step_setup_expose_update() {
     scher.launch(&proc);
     tx.recv().await;
     proc.print();
-    assert_eq!(proc.data().get::<String>("a").unwrap(), "123");
+    assert_eq!(
+        proc.task_by_nid("step1")
+            .first()
+            .unwrap()
+            .outputs()
+            .get::<String>("a")
+            .unwrap(),
+        "123"
+    );
 }

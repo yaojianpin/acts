@@ -28,8 +28,6 @@ pub struct Proc {
     timestamp: i64,
     env_local: ShareLock<Vars>,
     runtime: Arc<Runtime>,
-    // cache: Arc<Cache>,
-    // sync: Arc<std::sync::Mutex<usize>>,
 }
 
 impl std::fmt::Debug for Proc {
@@ -53,7 +51,6 @@ impl Proc {
 
     pub fn new_with_timestamp(pid: &str, timestamp: i64, rt: &Arc<Runtime>) -> Arc<Self> {
         let tree = NodeTree::new();
-        // let cache = r.scher().cache();
         Arc::new(Proc {
             id: pid.to_string(),
             tree: Arc::new(RwLock::new(tree)),
@@ -66,7 +63,6 @@ impl Proc {
             env_local: Arc::new(RwLock::new(Vars::new())),
             err: Arc::new(RwLock::new(None)),
             runtime: rt.clone(),
-            // cache: cache.clone(),
         })
     }
 

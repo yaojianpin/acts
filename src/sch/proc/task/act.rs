@@ -91,11 +91,8 @@ impl Act {
             }
             ActFn::Expose(vars) => {
                 let outputs = utils::fill_outputs(&vars, ctx);
-                if let Some(task) = task.parent() {
-                    task.update_data(&outputs);
-                } else {
-                    task.set_data_with(move |data| data.set(consts::ACT_OUTPUTS, &outputs));
-                }
+                // expose the vars to outputs
+                task.set_data_with(move |data| data.set(consts::ACT_OUTPUTS, &outputs));
             }
             ActFn::Irq(_) => {
                 let mut req = self.clone();

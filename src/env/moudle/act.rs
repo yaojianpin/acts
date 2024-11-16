@@ -45,21 +45,6 @@ mod act {
         Context::with(|ctx| {
             let key = key.clone();
             let v = value.clone();
-            let task = ctx.task();
-            if let Some(parent) = task.parent() {
-                parent.set_data_with(move |data| data.set(&key, v.clone()));
-            } else {
-                task.set_data_with(move |data| data.set(&key, v.clone()));
-            }
-        })
-    }
-
-    #[rquickjs::function]
-    pub fn set_output(key: String, value: ActValue) {
-        let value: serde_json::Value = value.into();
-        Context::with(|ctx| {
-            let key = key.clone();
-            let v = value.clone();
             ctx.task().set_data_with(|data| {
                 let outputs = data.get::<Vars>(consts::ACT_OUTPUTS).unwrap_or_default();
                 data.set(consts::ACT_OUTPUTS, outputs.with(&key, &v));
@@ -204,7 +189,7 @@ impl ActModule for ActPackage {
     fn init(&self, ctx: &rquickjs::Ctx<'_>) -> Result<()> {
         JsModule::declare_def::<js_act, _>(ctx.clone(), "@acts/act").unwrap();
         let source = r#"
-        import { get, set, inputs, expose, set_output, state, complete, fail, skip, back, abort, push, irq, msg, chain, each, block, call } from '@acts/act';
+        import { get, set, inputs, expose, state, complete, fail, skip, back, abort, push, irq, msg, chain, each, block, call } from '@acts/act';
         globalThis.$ = (name, value) => {
             if(value === undefined) {
                 return get(name);
@@ -213,7 +198,7 @@ impl ActModule for ActPackage {
         }
         
         globalThis.act = {
-            get, set, state, inputs, expose, set_output, complete, fail, skip, back, abort, push, irq, msg, chain, each, block, call
+            get, set, state, inputs, expose, complete, fail, skip, back, abort, push, irq, msg, chain, each, block, call
         };
         "#;
         let _ = JsModule::evaluate(ctx.clone(), "@acts/act", source)

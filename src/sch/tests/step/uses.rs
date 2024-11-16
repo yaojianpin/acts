@@ -225,13 +225,13 @@ async fn sch_step_uses_push() {
 }
 
 #[tokio::test]
-async fn sch_step_uses_set_output() {
+async fn sch_step_uses_expose() {
     let workflow = Workflow::new().with_step(|step| step.with_id("step1").with_uses("pack1"));
     let pack = data::Package {
         id: "pack1".to_string(),
         name: "package 1".to_string(),
         data: br#"
-        act.set_output("a", 100);
+        act.expose("a", 100);
         "#
         .to_vec(),
         ..Default::default()
@@ -339,7 +339,7 @@ async fn sch_step_uses_state() {
         name: "package 1".to_string(),
         data: br#"
         let state = act.state();
-        act.set_output("state", state);
+        act.expose("state", state);
         "#
         .to_vec(),
         ..Default::default()

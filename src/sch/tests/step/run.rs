@@ -146,11 +146,9 @@ async fn sch_step_run_push() {
 }
 
 #[tokio::test]
-async fn sch_step_run_set_output() {
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_run(r#" act.set_output("a", 100);"#)
-    });
+async fn sch_step_run_expose() {
+    let workflow = Workflow::new()
+        .with_step(|step| step.with_id("step1").with_run(r#" act.expose("a", 100);"#));
     let ret = run_test(&workflow, |e, s| {
         if e.is_key("step1") && e.is_state("completed") {
             s.send(e.outputs.get::<i32>("a").unwrap() == 100);
@@ -222,7 +220,7 @@ async fn sch_step_run_state() {
         step.with_id("step1").with_run(
             r#"
     let state = act.state();
-    act.set_output("state", state);
+    act.expose("state", state);
     "#,
         )
     });

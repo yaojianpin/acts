@@ -62,8 +62,6 @@ impl Visitor {
             index,
             is_last,
             path,
-            // is_next_sibling: next_sibling,
-            // path,
         })
     }
 
@@ -106,17 +104,7 @@ impl Visitor {
         None
     }
 
-    /// if there is next sibling node
-    // pub fn is_next_sibling(&self) -> bool {
-    //     self.is_next_sibling
-    // }
-
-    // pub fn is_sibling(&self, level: &usize) -> bool {
-    //     *self.path.get(level).unwrap_or(&false)
-    // }
-
     pub fn visit(&mut self) {
-        // self.path.insert(self.node.level, self.is_next_sibling);
         self.root
             .visits
             .entry(self.node.id().to_string())

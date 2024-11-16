@@ -54,3 +54,9 @@
 - add nid for Message
 - use 'do' act instead of 'cmd'
 - expands executor with msg(), pack(), proc(), task(), act() and mode() instead of manager
+
+# 0.12.1
+
+- update act.set_output to act.expose
+- keep act.expose only expose the vars to outputs
+- fix the model tree output issue

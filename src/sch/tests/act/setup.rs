@@ -37,17 +37,12 @@ async fn sch_act_setup_msg() {
 #[tokio::test]
 async fn sch_act_setup_req() {
     let mut workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_act(
-                Act::new()
-                    .with_act("irq")
-                    .with_key("act2")
-                    .with_setup(|stmts| {
-                        stmts.add(Act::irq(|req: crate::Irq| {
-                            req.with_key("act1")
-                        }))
-                    }),
-            )
+        step.with_id("step1").with_act(
+            Act::new()
+                .with_act("irq")
+                .with_key("act2")
+                .with_setup(|stmts| stmts.add(Act::irq(|req: crate::Irq| req.with_key("act1")))),
+        )
     });
 
     workflow.print();
@@ -125,10 +120,10 @@ async fn sch_act_setup_expose() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("step1")
+        proc.task_by_nid("act1")
             .first()
             .unwrap()
-            .data()
+            .outputs()
             .get::<i32>("a")
             .unwrap(),
         10
