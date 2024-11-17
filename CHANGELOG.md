@@ -64,3 +64,7 @@
 # 0.12.3
 
 - fix the test error with feature store
+
+# 0.12.4
+
+- fix test error for act each result check issue

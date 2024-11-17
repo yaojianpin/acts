@@ -222,28 +222,19 @@ async fn sch_act_setup_each() {
     scher.launch(&proc);
     tx.recv().await;
     proc.print();
-    assert_eq!(
-        proc.task_by_nid("act1").first().unwrap().state(),
-        TaskState::Interrupt
-    );
-    assert_eq!(
-        proc.task_by_nid("act1")
-            .first()
-            .unwrap()
-            .inputs()
-            .get_value(consts::ACT_VALUE)
-            .unwrap(),
-        &json!("u1")
-    );
-    assert_eq!(
-        proc.task_by_nid("act1")
-            .get(1)
-            .unwrap()
-            .inputs()
-            .get_value(consts::ACT_VALUE)
-            .unwrap(),
-        &json!("u2")
-    );
+
+    let tasks = proc.task_by_nid("act1");
+    assert_eq!(tasks.first().unwrap().state(), TaskState::Interrupt);
+    assert!(tasks.iter().any(|t| {
+        let inputs = t.inputs();
+        inputs.get::<String>(consts::ACT_VALUE).unwrap() == "u1"
+            && inputs.get::<i32>(consts::ACT_INDEX).unwrap() == 0
+    }));
+    assert!(tasks.iter().any(|t| {
+        let inputs = t.inputs();
+        inputs.get::<String>(consts::ACT_VALUE).unwrap() == "u2"
+            && inputs.get::<i32>(consts::ACT_INDEX).unwrap() == 1
+    }));
 }
 
 #[tokio::test]
