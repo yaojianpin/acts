@@ -60,3 +60,7 @@
 - update act.set_output to act.expose
 - keep act.expose only expose the vars to outputs
 - fix the model tree output issue
+
+# 0.12.3
+
+- fix the test error with feature store
