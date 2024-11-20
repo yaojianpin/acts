@@ -96,7 +96,7 @@ Please see [`examples`](https://github.com/yaojianpin/acts/tree/main/examples)
 
 ## Model Usage
 
-The model is a yaml format file. where there are different type of node, including [`Workflow`], [`Branch`], [`Step`] and [`Act`]. Every workflow can have more steps, a step can have more branches. In a step, it consists of many acts to complete the step task, such as 'req', 'msg', 'each', 'chain', 'set', 'expose' and so on. these acts are responsible to act with client or do a single task simplely.
+The model is a yaml format file. where there are different type of node, including [`Workflow`], [`Branch`], [`Step`] and [`Act`]. Every workflow can have more steps, a step can have more branches. In a step, it consists of many acts to complete the step task, such as 'irq', 'msg', 'each', 'chain', 'set', 'expose' and so on. these acts are responsible to act with client or do a single task simplely.
 
 The `run` property is the script based on `javascript`
 The `inputs` property can be set the initialzed vars in each node.
@@ -136,7 +136,7 @@ inputs:
 steps:
   - name: step1
     run: |
-      env.set("output_key", "output value");
+      $("output_key", "output value");
 ```
 
 The inputs can also be set by starting the workflow.
@@ -168,7 +168,7 @@ outputs:
 steps:
   - name: step1
     run: |
-      env.set("output_key", "output value");
+      $("output_key", "output value");
 ```
 
 ### Setup
@@ -251,7 +251,7 @@ steps:
 
 Use the `setup` to setup some acts when the step is creating.
 
-The acts are 'req', 'msg', 'set', 'expose', 'chain', 'each' and 'if', it also includes some hooks, such as 'on_created', 'on_completed', 'on_before_update', 'on_updated', 'on_timeout' and 'on_error_catch'.
+The acts are 'irq', 'msg', 'set', 'expose', 'chain', 'each' and 'if', it also includes some hooks, such as 'on_created', 'on_completed', 'on_before_update', 'on_updated', 'on_timeout' and 'on_error_catch'.
 
 ```yml
 name: a setup example
@@ -403,13 +403,13 @@ steps:
       # triggers act2 when timeout
       - on: 1d
         then:
-          - !req
+          - act: irq
             id: act2
       # 2h means two hours
       # triggers act3 when timeout
       - on: 2h
         then:
-          - !req
+          - act: irq
             id: act3
 
   - name: final
@@ -457,7 +457,7 @@ steps:
         inputs:
           a: 1
 
-      # req is a act to send a request from acts server
+      # irq is an act to send a request from acts server
       # the client can complete the act and pass data to serever
       - act: irq
         key: init
