@@ -244,6 +244,30 @@ async fn event_message_default() {
     assert!(ret);
 }
 
+#[tokio::test]
+async fn event_message_dup_key() {
+    let mut workflow = Workflow::new()
+        .with_id("m1")
+        .with_step(|step| step.with_id("step1"));
+    let workflow_id = workflow.id.clone();
+    let (proc, engine) = create_proc2(&mut workflow, &utils::longid());
+
+    let (s1, s2) = engine.signal(false).double();
+    let evt = Emitter::new();
+    evt.on_message("k1", move |_| {});
+    evt.on_message("k1", move |e| {
+        s1.send(e.model.id == workflow_id);
+    });
+
+    proc.start();
+    if let Some(root) = proc.root() {
+        let message = root.create_message();
+        evt.emit_message(&message);
+    }
+    let ret = s2.recv().await;
+    assert!(ret);
+}
+
 fn create_proc(workflow: &mut Workflow, id: &str) -> (Arc<Proc>, Arc<Runtime>) {
     let engine = Engine::new();
     let rt = engine.runtime();

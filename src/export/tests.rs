@@ -1156,6 +1156,40 @@ async fn export_emitter_key_not_match() {
 }
 
 #[tokio::test]
+async fn export_emitter_on_message_with_dup_id() {
+    let engine = Engine::new();
+    let emitter = engine.channel_with_options(&ChannelOptions {
+        id: "dup_id".to_string(),
+        ..Default::default()
+    });
+    let sig = engine.signal::<Vec<Message>>(Vec::new());
+    let s = sig.clone();
+    emitter.on_message(move |e| {
+        s.update(|data| data.push(e.inner().clone()));
+        s.close();
+    });
+    let s2 = sig.clone();
+    // engine.runtime().emitter().remove("dup_id");
+    let emitter2 = engine.channel_with_options(&ChannelOptions {
+        id: "dup_id".to_string(),
+        ..Default::default()
+    });
+    emitter2.on_message(move |e| {
+        println!("message: {e:?}");
+        s2.update(|data| data.push(e.inner().clone()));
+        s2.close();
+    });
+
+    let msg = Message {
+        key: "aaaa".to_string(),
+        ..Message::default()
+    };
+    engine.runtime().emitter().emit_message(&msg);
+    let ret = sig.recv().await;
+    assert_eq!(ret.len(), 1);
+}
+
+#[tokio::test]
 async fn export_message_store_with_emit_id() {
     let engine = Engine::new();
     let emitter = engine.channel_with_options(&ChannelOptions {
@@ -1219,7 +1253,7 @@ async fn export_message_store_with_emit_id_and_options() {
 }
 
 #[tokio::test]
-async fn export_message_not_store_without_emit_id() {
+async fn export_message_not_store_without_match() {
     let engine = Engine::new();
     let emitter = engine.channel_with_options(&ChannelOptions {
         id: "my_emit_id".to_string(),

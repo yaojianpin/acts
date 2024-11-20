@@ -260,7 +260,7 @@ impl Runtime {
                     }
                 }
 
-                // re-send the messages if it is neither acked or nor completed
+                // re-send the messages if it is neither acked nor completed
                 cache.store().with_no_response_messages(
                     default_interval_millis,
                     max_message_retry_times,

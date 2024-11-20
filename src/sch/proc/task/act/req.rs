@@ -14,23 +14,6 @@ impl ActTask for Irq {
                 task.node.id
             )));
         }
-        // for s in self.on_created.iter() {
-        //     task.add_hook_stmts(TaskLifeCycle::Created, s);
-        // }
-        // for s in self.on_completed.iter() {
-        //     task.add_hook_stmts(TaskLifeCycle::Completed, s);
-        // }
-
-        // for s in self.catches.iter() {
-        //     task.add_hook_catch(TaskLifeCycle::ErrorCatch, s);
-        // }
-
-        // if self.timeout.len() > 0 {
-        //     for s in &self.timeout {
-        //         task.add_hook_timeout(TaskLifeCycle::Timeout, s);
-        //     }
-        // }
-
         task.set_state(TaskState::Interrupt);
         Ok(())
     }

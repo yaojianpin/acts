@@ -544,7 +544,7 @@ async fn run_test_result<T: Clone + Send + 'static + Default>(
         }
     });
     engine.channel().on_message(move |e| exit_if(e, s2.clone()));
-
+    proc.print();
     sig1.recv().await;
     let task = proc.root().unwrap();
     let context = task.create_context();

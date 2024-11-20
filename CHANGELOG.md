@@ -68,3 +68,8 @@
 # 0.12.4
 
 - fix test error for act each result check issue
+
+# 0.12.5
+
+- add export.msg unsub to support unsubscribe the messages by client
+- fix the deadlock issue by subscribing with same client id by many times

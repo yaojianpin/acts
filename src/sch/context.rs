@@ -368,7 +368,7 @@ impl Context {
     }
 
     pub fn emit_message(&self, msg: &Act) -> Result<()> {
-        debug!("emit_message: {:?}", msg);
+        println!("emit_message: {:?}", msg);
         let workflow = self.proc.model();
         let mut inputs = utils::fill_inputs(&msg.inputs, self);
 

@@ -62,4 +62,10 @@ impl MessageExecutor {
         self.runtime.cache().store().resend_error_messages()?;
         Ok(())
     }
+
+    /// unsubscribe the channel messages
+    pub fn unsub(&self, chan_id: &str) -> Result<()> {
+        self.runtime.emitter().remove(chan_id);
+        Ok(())
+    }
 }

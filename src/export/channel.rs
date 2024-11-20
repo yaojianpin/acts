@@ -2,6 +2,40 @@ use crate::{sch::Runtime, utils, Event, Message};
 use std::sync::Arc;
 use tracing::{debug, error, info};
 
+fn store_if(runtime: &Arc<Runtime>, ack: bool, chan_id: &str, pattern: &str, message: &Message) {
+    if ack && !chan_id.is_empty() && message.retry_times == 0 {
+        println!("store: {message:?}");
+        let msg = message.into(chan_id, pattern);
+        runtime
+            .cache()
+            .store()
+            .base()
+            .messages()
+            .create(&msg)
+            .unwrap_or_else(|err| {
+                error!("channel.store_if_emit_id: {}", err.to_string());
+                eprintln!("channel.store_if_emit_id: {}", err);
+                false
+            });
+    }
+}
+
+fn is_match(
+    glob: &(
+        globset::GlobMatcher,
+        globset::GlobMatcher,
+        globset::GlobMatcher,
+        globset::GlobMatcher,
+    ),
+    e: &Event<Message>,
+) -> bool {
+    let (pat_type, pat_state, pat_tag, pat_key) = glob;
+    pat_type.is_match(&e.r#type)
+        && pat_state.is_match(e.state.to_string())
+        && (pat_tag.is_match(&e.tag) || pat_tag.is_match(&e.model.tag))
+        && pat_key.is_match(&e.key)
+}
+
 #[derive(Debug, Clone)]
 pub struct ChannelOptions {
     pub id: String,
@@ -114,41 +148,57 @@ impl Channel {
     /// }
     /// ```
     pub fn on_message(self: &Arc<Self>, f: impl Fn(&Event<Message>) + Send + Sync + 'static) {
-        let chan = self.clone();
+        let glob = self.glob.clone();
+        let runtime = self.runtime.clone();
+        let ack = self.ack;
+        let chan_id = self.chan_id.clone();
+        let pattern = self.pattern.clone();
         self.runtime.emitter().on_message(&self.chan_id, move |e| {
-            info!("on_message: chan={} {e:?}", chan.chan_id);
-            if chan.matches(e) {
-                chan.store_if(e);
+            info!("on_message: chan={} {e:?}", chan_id);
+            if is_match(&glob, e) {
+                store_if(&runtime, ack, &chan_id, &pattern, e);
                 f(e);
             }
         });
     }
 
     pub fn on_start(self: &Arc<Self>, f: impl Fn(&Event<Message>) + Send + Sync + 'static) {
-        let chan = self.clone();
+        let glob = self.glob.clone();
+        let runtime = self.runtime.clone();
+        let ack = self.ack;
+        let chan_id = self.chan_id.clone();
+        let pattern = self.pattern.clone();
         self.runtime.emitter().on_start(&self.chan_id, move |e| {
-            if chan.matches(e) {
-                chan.store_if(e);
+            if is_match(&glob, e) {
+                store_if(&runtime, ack, &chan_id, &pattern, e);
                 f(e);
             }
         });
     }
 
     pub fn on_complete(self: &Arc<Self>, f: impl Fn(&Event<Message>) + Send + Sync + 'static) {
-        let chan = self.clone();
+        let glob = self.glob.clone();
+        let runtime = self.runtime.clone();
+        let ack = self.ack;
+        let chan_id = self.chan_id.clone();
+        let pattern = self.pattern.clone();
         self.runtime.emitter().on_complete(&self.chan_id, move |e| {
-            if chan.matches(e) {
-                chan.store_if(e);
+            if is_match(&glob, e) {
+                store_if(&runtime, ack, &chan_id, &pattern, e);
                 f(e);
             }
         });
     }
 
     pub fn on_error(self: &Arc<Self>, f: impl Fn(&Event<Message>) + Send + Sync + 'static) {
-        let chan = self.clone();
+        let glob = self.glob.clone();
+        let runtime = self.runtime.clone();
+        let ack = self.ack;
+        let chan_id = self.chan_id.clone();
+        let pattern = self.pattern.clone();
         self.runtime.emitter().on_error(&self.chan_id, move |e| {
-            if chan.matches(e) {
-                chan.store_if(e);
+            if is_match(&glob, e) {
+                store_if(&runtime, ack, &chan_id, &pattern, e);
                 f(e);
             }
         });
@@ -156,37 +206,5 @@ impl Channel {
 
     pub fn close(&self) {
         self.runtime.emitter().remove(&self.chan_id);
-    }
-
-    fn matches(&self, message: &Message) -> bool {
-        let (pat_type, pat_state, pat_tag, pat_key) = &self.glob;
-        pat_type.is_match(&message.r#type)
-            && pat_state.is_match(message.state.to_string())
-            && (pat_tag.is_match(&message.tag) || pat_tag.is_match(&message.model.tag))
-            && pat_key.is_match(&message.key)
-    }
-
-    fn store_if(&self, message: &Message) {
-        if self.ack && !self.chan_id.is_empty() && message.retry_times == 0 {
-            println!("store: {message:?}");
-            let msg = message.into(&self.chan_id, &self.pattern);
-            self.runtime
-                .cache()
-                .store()
-                .base()
-                .messages()
-                .create(&msg)
-                .unwrap_or_else(|err| {
-                    error!("channel.store_if_emit_id: {}", err.to_string());
-                    eprintln!("channel.store_if_emit_id: {}", err);
-                    false
-                });
-        }
-    }
-}
-
-impl Drop for Channel {
-    fn drop(&mut self) {
-        self.close();
     }
 }
