@@ -1,6 +1,9 @@
+use super::ExecutorQuery;
 use crate::{
-    sch::Runtime, store::StoreAdapter, utils::consts, ModelInfo, ProcInfo, Query, Result, TaskInfo,
-    Vars,
+    sch::Runtime,
+    store::{PageData, StoreAdapter},
+    utils::consts,
+    ModelInfo, ProcInfo, Result, TaskInfo, Vars,
 };
 use std::sync::Arc;
 use tracing::instrument;
@@ -31,18 +34,16 @@ impl ProcExecutor {
     }
 
     #[instrument(skip(self))]
-    pub fn list(&self, cap: usize) -> Result<Vec<ProcInfo>> {
-        let query = Query::new().set_limit(cap);
+    pub fn list(&self, q: &ExecutorQuery) -> Result<PageData<ProcInfo>> {
+        let query = q.into_query();
         match self.runtime.cache().store().procs().query(&query) {
-            Ok(mut procs) => {
-                procs.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-                let mut ret = Vec::new();
-                for t in &procs {
-                    ret.push(t.into());
-                }
-
-                Ok(ret)
-            }
+            Ok(procs) => Ok(PageData {
+                count: procs.count,
+                page_size: procs.page_size,
+                page_count: procs.page_count,
+                page_num: procs.page_num,
+                rows: procs.rows.iter().map(|m| m.into()).collect(),
+            }),
             Err(err) => Err(err),
         }
     }

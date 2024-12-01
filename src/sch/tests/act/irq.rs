@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 
 #[tokio::test]
-async fn sch_act_req_one() {
+async fn sch_act_irq_one() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_setup(|setup| setup.add(Act::irq(|act| act.with_key("act1")).with_id("act1")))
@@ -33,7 +33,7 @@ async fn sch_act_req_one() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
-async fn sch_act_req_multi_threads() {
+async fn sch_act_irq_multi_threads() {
     let workflow = Workflow::new().with_id("m1").with_step(|step| {
         step.with_id("step1")
             .with_setup(|setup| setup.add(Act::irq(|act| act.with_key("act1"))))
@@ -75,7 +75,7 @@ async fn sch_act_req_multi_threads() {
 }
 
 #[tokio::test]
-async fn sch_act_req_many() {
+async fn sch_act_irq_many() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_setup(|setup| {
             setup
@@ -111,7 +111,7 @@ async fn sch_act_req_many() {
 }
 
 #[tokio::test]
-async fn sch_act_req_with_inputs_value() {
+async fn sch_act_irq_with_inputs_value() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_setup(|setup| {
             setup.add(Act::irq(|act| act.with_key("act1").with_input("a", 5)).with_id("act1"))
@@ -138,7 +138,7 @@ async fn sch_act_req_with_inputs_value() {
 }
 
 #[tokio::test]
-async fn sch_act_req_with_inputs_var() {
+async fn sch_act_irq_with_inputs_var() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_input("a", json!(5)).with_act(
             Act::irq(|act| act.with_key("act1").with_input("a", r#"${ $("a") }"#)).with_id("act1"),
@@ -165,7 +165,7 @@ async fn sch_act_req_with_inputs_var() {
 }
 
 #[tokio::test]
-async fn sch_act_req_complete() {
+async fn sch_act_irq_complete() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_name("step1").with_act(Act::irq(|act| {
             act.with_key("fn1").with_input("uid", json!("u1"))
@@ -200,7 +200,7 @@ async fn sch_act_req_complete() {
 }
 
 #[tokio::test]
-async fn sch_act_req_cancel_normal() {
+async fn sch_act_irq_cancel_normal() {
     let count = Arc::new(Mutex::new(0));
     let mut workflow = Workflow::new()
         .with_id(&utils::longid())
@@ -226,7 +226,7 @@ async fn sch_act_req_cancel_normal() {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
             let tid = &e.tid;
 
-            if uid == "a" && e.state == MessageState::Created {
+            if uid == "a" && e.state() == MessageState::Created {
                 if *count == 0 {
                     *act_req_id.lock().unwrap() = Some(tid.to_string());
 
@@ -239,7 +239,7 @@ async fn sch_act_req_cancel_normal() {
                     rx.send(true);
                 }
                 *count += 1;
-            } else if uid == "b" && e.state == MessageState::Created {
+            } else if uid == "b" && e.state() == MessageState::Created {
                 // cancel the b's task by a
                 let mut options = Vars::new();
                 options.insert("uid".to_string(), json!("a".to_string()));
@@ -260,7 +260,7 @@ async fn sch_act_req_cancel_normal() {
 }
 
 #[tokio::test]
-async fn sch_act_req_back() {
+async fn sch_act_irq_back() {
     let count = Arc::new(Mutex::new(0));
     let mut workflow = Workflow::new()
         .with_id(&utils::longid())
@@ -315,7 +315,7 @@ async fn sch_act_req_back() {
 }
 
 #[tokio::test]
-async fn sch_act_req_abort() {
+async fn sch_act_irq_abort() {
     let mut workflow = Workflow::new()
         .with_id(&utils::longid())
         .with_step(|step| {
@@ -349,7 +349,7 @@ async fn sch_act_req_abort() {
 }
 
 #[tokio::test]
-async fn sch_act_req_submit() {
+async fn sch_act_irq_submit() {
     let mut workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
         step.with_id("step1").with_act(
             Act::irq(|act| act.with_key("fn1").with_input("uid", json!("a"))).with_id("fn1"),
@@ -386,7 +386,7 @@ async fn sch_act_req_submit() {
 }
 
 #[tokio::test]
-async fn sch_act_req_skip() {
+async fn sch_act_irq_skip() {
     let mut workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
         step.with_id("step1").with_act(
             Act::irq(|act| act.with_key("fn1").with_input("uid", json!("a"))).with_id("fn1"),
@@ -422,7 +422,7 @@ async fn sch_act_req_skip() {
 }
 
 #[tokio::test]
-async fn sch_act_req_skip_next() {
+async fn sch_act_irq_skip_next() {
     let mut workflow = Workflow::new()
         .with_id(&utils::longid())
         .with_step(|step| {
@@ -465,7 +465,7 @@ async fn sch_act_req_skip_next() {
 }
 
 #[tokio::test]
-async fn sch_act_req_error_action() {
+async fn sch_act_irq_error_action() {
     let mut workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
         step.with_id("step1").with_act(
             Act::irq(|act| act.with_key("fn1").with_input("uid", json!("a"))).with_id("fn1"),
@@ -503,7 +503,7 @@ async fn sch_act_req_error_action() {
 }
 
 #[tokio::test]
-async fn sch_act_req_error_action_without_err_code() {
+async fn sch_act_irq_error_action_without_err_code() {
     let mut workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
         step.with_id("step1").with_act(Act::irq(|act| {
             act.with_key("fn1").with_input("uid", json!("a"))
@@ -534,7 +534,7 @@ async fn sch_act_req_error_action_without_err_code() {
 }
 
 #[tokio::test]
-async fn sch_act_req_not_support_action() {
+async fn sch_act_irq_not_support_action() {
     let count = Arc::new(Mutex::new(0));
     let mut workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
         step.with_id("step1")
@@ -570,7 +570,7 @@ async fn sch_act_req_not_support_action() {
 }
 
 #[tokio::test]
-async fn sch_act_req_next_by_complete_state() {
+async fn sch_act_irq_next_by_complete_state() {
     let mut workflow = Workflow::new()
         .with_id(&utils::longid())
         .with_step(|step| {
@@ -611,7 +611,7 @@ async fn sch_act_req_next_by_complete_state() {
 }
 
 #[tokio::test]
-async fn sch_act_req_cancel_by_running_state() {
+async fn sch_act_irq_cancel_by_running_state() {
     let mut workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
         step.with_id("step1")
             .with_name("step1")
@@ -641,7 +641,7 @@ async fn sch_act_req_cancel_by_running_state() {
 }
 
 #[tokio::test]
-async fn sch_act_req_do_action_complete() {
+async fn sch_act_irq_do_action_complete() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_name("step1")
@@ -674,7 +674,7 @@ async fn sch_act_req_do_action_complete() {
 }
 
 #[tokio::test]
-async fn sch_act_req_do_action_remove() {
+async fn sch_act_irq_do_action_remove() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_name("step1")
@@ -705,7 +705,7 @@ async fn sch_act_req_do_action_remove() {
 }
 
 #[tokio::test]
-async fn sch_act_req_do_action_outputs() {
+async fn sch_act_irq_do_action_outputs() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_name("step1").with_act(
             Act::irq(|act| {
@@ -778,7 +778,7 @@ async fn sch_act_req_do_action_outputs() {
 }
 
 #[tokio::test]
-async fn sch_act_req_do_action_rets() {
+async fn sch_act_irq_do_action_rets() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_name("step1").with_act(
             Act::irq(|act| {
@@ -854,7 +854,7 @@ async fn sch_act_req_do_action_rets() {
 }
 
 #[tokio::test]
-async fn sch_act_req_do_action_no_rets() {
+async fn sch_act_irq_do_action_no_rets() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_name("step1")
@@ -888,7 +888,7 @@ async fn sch_act_req_do_action_no_rets() {
 }
 
 #[tokio::test]
-async fn sch_act_req_do_action_ret_key_check() {
+async fn sch_act_irq_do_action_ret_key_check() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_name("step1")
@@ -919,7 +919,7 @@ async fn sch_act_req_do_action_ret_key_check() {
 }
 
 #[tokio::test]
-async fn sch_act_req_do_action_proc_id_error() {
+async fn sch_act_irq_do_action_proc_id_error() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_name("step1")
@@ -948,7 +948,7 @@ async fn sch_act_req_do_action_proc_id_error() {
 }
 
 #[tokio::test]
-async fn sch_act_req_do_action_msg_id_error() {
+async fn sch_act_irq_do_action_msg_id_error() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_name("step1")
@@ -977,7 +977,7 @@ async fn sch_act_req_do_action_msg_id_error() {
 }
 
 #[tokio::test]
-async fn sch_act_req_do_action_not_act_req_task() {
+async fn sch_act_irq_do_action_not_act_req_task() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_act(Act::irq(|act| {
             act.with_key("fn1").with_input("uid", json!("a"))
@@ -1004,7 +1004,7 @@ async fn sch_act_req_do_action_not_act_req_task() {
 }
 
 #[tokio::test]
-async fn sch_act_req_on_created_msg() {
+async fn sch_act_irq_on_created_msg() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_name("step1")
             .with_act(Act::irq(|act| act.with_key("act1")).with_setup(|stmts| {
@@ -1030,7 +1030,7 @@ async fn sch_act_req_on_created_msg() {
 }
 
 #[tokio::test]
-async fn sch_act_req_on_created_act() {
+async fn sch_act_irq_on_created_act() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_name("step1")
             .with_act(Act::irq(|act| act.with_key("act1")).with_setup(|stmts| {
@@ -1060,7 +1060,7 @@ async fn sch_act_req_on_created_act() {
 }
 
 #[tokio::test]
-async fn sch_act_req_on_completed_msg() {
+async fn sch_act_irq_on_completed_msg() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_name("step1")
             .with_act(Act::irq(|act| act.with_key("act1")).with_setup(|stmts| {
@@ -1092,7 +1092,7 @@ async fn sch_act_req_on_completed_msg() {
 }
 
 #[tokio::test]
-async fn sch_act_req_on_completed_act() {
+async fn sch_act_irq_on_completed_act() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_name("step1").with_act(
             Act::irq(|act| act.with_key("act1"))
@@ -1128,7 +1128,7 @@ async fn sch_act_req_on_completed_act() {
 }
 
 #[tokio::test]
-async fn sch_act_req_on_catch() {
+async fn sch_act_irq_on_catch() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_name("step1").with_act(
             Act::irq(|act| act.with_key("act1"))
@@ -1172,7 +1172,7 @@ async fn sch_act_req_on_catch() {
 }
 
 #[tokio::test]
-async fn sch_act_req_on_catch_as_error() {
+async fn sch_act_irq_on_catch_as_error() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_name("step1").with_act(
             Act::irq(|act| act.with_key("act1"))
@@ -1228,7 +1228,7 @@ async fn sch_act_req_on_catch_as_error() {
 }
 
 #[tokio::test]
-async fn sch_act_req_on_catch_as_skip() {
+async fn sch_act_irq_on_catch_as_skip() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_name("step1").with_act(
             Act::irq(|act| act.with_key("act1"))
@@ -1277,7 +1277,7 @@ async fn sch_act_req_on_catch_as_skip() {
 }
 
 #[tokio::test]
-async fn sch_act_req_on_catch_no_match() {
+async fn sch_act_irq_on_catch_no_match() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_name("step1").with_act(
             Act::irq(|act| act.with_key("act1"))
@@ -1316,7 +1316,7 @@ async fn sch_act_req_on_catch_no_match() {
 }
 
 #[tokio::test]
-async fn sch_act_req_on_catch_match_any() {
+async fn sch_act_irq_on_catch_match_any() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_name("step1").with_act(
             Act::irq(|act| act.with_key("act1"))
@@ -1367,7 +1367,7 @@ async fn sch_act_req_on_catch_match_any() {
 }
 
 #[tokio::test]
-async fn sch_act_req_on_catch_as_complete() {
+async fn sch_act_irq_on_catch_as_complete() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_name("step1").with_act(
             Act::irq(|act| act.with_key("act1"))
@@ -1417,7 +1417,7 @@ async fn sch_act_req_on_catch_as_complete() {
 }
 
 #[tokio::test]
-async fn sch_act_req_chain() {
+async fn sch_act_irq_chain() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_name("step1").with_act(
             Act::irq(|act| act.with_key("act1"))
@@ -1463,7 +1463,7 @@ async fn sch_act_req_chain() {
 }
 
 #[tokio::test]
-async fn sch_act_req_with_key() {
+async fn sch_act_irq_with_key() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_setup(|setup| setup.add(Act::irq(|act| act.with_key("key1")).with_id("act1")))
@@ -1491,7 +1491,7 @@ async fn sch_act_req_with_key() {
 }
 
 #[tokio::test]
-async fn sch_act_req_on_timeout() {
+async fn sch_act_irq_on_timeout() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_name("step1").with_act(
             Act::irq(|act| act.with_key("act1"))

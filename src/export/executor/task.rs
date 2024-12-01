@@ -1,8 +1,9 @@
+use super::ExecutorQuery;
 use crate::{
     sch::Runtime,
-    store::{Cond, Expr, StoreAdapter},
+    store::{PageData, StoreAdapter},
     utils::Id,
-    Query, Result, TaskInfo,
+    Result, TaskInfo,
 };
 use std::sync::Arc;
 use tracing::instrument;
@@ -20,20 +21,16 @@ impl TaskExecutor {
     }
 
     #[instrument(skip(self))]
-    pub fn list(&self, pid: &str, count: usize) -> Result<Vec<TaskInfo>> {
-        let query = Query::new()
-            .push(Cond::and().push(Expr::eq("pid", pid.to_string())))
-            .set_limit(10000);
+    pub fn list(&self, q: &ExecutorQuery) -> Result<PageData<TaskInfo>> {
+        let query = q.into_query();
         match self.runtime.cache().store().tasks().query(&query) {
-            Ok(mut tasks) => {
-                let mut ret = Vec::new();
-                tasks.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-                for t in tasks.into_iter().take(count) {
-                    ret.push(t.into());
-                }
-
-                Ok(ret)
-            }
+            Ok(tasks) => Ok(PageData {
+                count: tasks.count,
+                page_size: tasks.page_size,
+                page_count: tasks.page_count,
+                page_num: tasks.page_num,
+                rows: tasks.rows.iter().map(|m| m.into()).collect(),
+            }),
             Err(err) => Err(err),
         }
     }

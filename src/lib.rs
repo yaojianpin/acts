@@ -30,7 +30,7 @@ pub use engine::Engine;
 pub use env::ActModule;
 pub use error::{ActError, Error};
 pub use event::{Action, Event, Message, MessageState};
-pub use export::{Channel, ChannelOptions, Executor, Extender};
+pub use export::{Channel, ChannelOptions, Executor, ExecutorQuery, Extender};
 pub use model::*;
 pub use plugin::ActPlugin;
 pub use signal::Signal;

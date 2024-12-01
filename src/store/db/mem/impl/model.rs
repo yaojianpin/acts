@@ -16,8 +16,10 @@ impl DbDocument for Model {
         map.insert("name".to_string(), json!(self.name.clone()));
         map.insert("ver".to_string(), json!(self.ver));
         map.insert("size".to_string(), json!(self.size));
-        map.insert("time".to_string(), json!(self.time));
+        map.insert("create_time".to_string(), json!(self.create_time));
+        map.insert("update_time".to_string(), json!(self.update_time));
         map.insert("data".to_string(), json!(self.data.clone()));
+        map.insert("timestamp".to_string(), json!(self.timestamp));
         Ok(map)
     }
 }

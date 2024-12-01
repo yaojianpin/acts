@@ -2,9 +2,10 @@ use serde::de::DeserializeOwned;
 use tracing::debug;
 
 use crate::store::query::CondType;
-use crate::store::{map_db_err, Cond, Expr, ExprOp};
+use crate::store::{map_db_err, Cond, Expr, ExprOp, PageData};
 use crate::{ActError, DbSet, Query, Result, ShareLock};
 use serde_json::Value as JsonValue;
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Debug;
 use std::marker::PhantomData;
@@ -53,16 +54,24 @@ where
             )))
     }
 
-    fn query(&self, q: &Query) -> crate::Result<Vec<Self::Item>> {
+    fn query(&self, q: &Query) -> crate::Result<PageData<Self::Item>> {
         debug!("mem::{}.query({:?})", self.name, q);
         let db = self.db.read().unwrap();
-        if q.is_cond() {
+        #[allow(unused_assignments)]
+        let mut rows = vec![];
+        if !q.is_cond() {
+            rows = db.iter().map(|(_, v)| v).collect::<Vec<_>>();
+        } else {
             let mut q = q.clone();
             for cond in q.queries_mut() {
                 let mut result = HashSet::new();
                 for expr in cond.conds().iter() {
                     for (k, v) in db.iter() {
-                        let prop_value = v.get(expr.key()).unwrap();
+                        let prop_value = v.get(expr.key()).ok_or(ActError::Store(format!(
+                            "cannot find key `{}` in {}",
+                            expr.key(),
+                            self.name
+                        )))?;
                         let cond_value = expr.value();
 
                         if expr.op(prop_value, cond_value) {
@@ -73,30 +82,64 @@ where
                 cond.calc(&result);
             }
 
-            let keys = q
-                .calc()
-                .into_iter()
+            let items = q.calc();
+
+            #[allow(unused_assignments)]
+            {
+                rows = db
+                    .iter()
+                    .filter_map(|(k, v)| {
+                        if items.contains(&k.as_bytes().to_vec().into_boxed_slice()) {
+                            return Some(v);
+                        }
+                        None
+                    })
+                    .collect::<Vec<_>>();
+            }
+        }
+
+        // order the rows
+        if !q.order_by().is_empty() {
+            rows.sort_by(|a, b| {
+                let mut ret = Ordering::Equal;
+                for (order, rev) in q.order_by() {
+                    if *rev {
+                        ret = ret.then(
+                            b.get(order)
+                                .unwrap()
+                                .to_string()
+                                .cmp(&a.get(order).unwrap().to_string()),
+                        );
+                    } else {
+                        ret = ret.then(
+                            a.get(order)
+                                .unwrap()
+                                .to_string()
+                                .cmp(&b.get(order).unwrap().to_string()),
+                        );
+                    }
+                }
+
+                ret
+            });
+        }
+
+        let count = rows.len();
+        let page_count = (count + q.limit() - 1) / q.limit();
+        let page_num = q.offset() / q.limit() + 1;
+        let data = PageData {
+            count,
+            page_size: q.limit(),
+            page_num,
+            page_count,
+            rows: rows
+                .iter()
                 .skip(q.offset())
                 .take(q.limit())
-                .collect::<Vec<_>>();
-            let ret = db
-                .iter()
-                .filter_map(|(k, v)| {
-                    if keys.contains(&k.as_bytes().to_vec().into_boxed_slice()) {
-                        return Some(map_to_model(v).unwrap());
-                    }
-                    None
-                })
-                .collect::<Vec<_>>();
-
-            return Ok(ret);
-        }
-        Ok(db
-            .values()
-            .map(|v| map_to_model::<Self::Item>(v).unwrap())
-            .skip(q.offset())
-            .take(q.limit())
-            .collect::<Vec<_>>())
+                .map(|row| map_to_model::<Self::Item>(row).unwrap())
+                .collect::<Vec<_>>(),
+        };
+        Ok(data)
     }
 
     fn create(&self, data: &Self::Item) -> Result<bool> {

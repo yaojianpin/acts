@@ -137,7 +137,9 @@ impl Store {
                     data: text.clone(),
                     ver: m.ver + 1,
                     size: text.len() as u32,
-                    time: utils::time::time_millis(),
+                    create_time: m.create_time,
+                    update_time: utils::time::time_millis(),
+                    timestamp: utils::time::timestamp(),
                 };
                 models.update(&data)
             }
@@ -149,7 +151,9 @@ impl Store {
                     data: text.clone(),
                     ver: 1,
                     size: text.len() as u32,
-                    time: utils::time::time_millis(),
+                    create_time: utils::time::time_millis(),
+                    update_time: 0,
+                    timestamp: utils::time::timestamp(),
                 };
                 models.create(&data)
             }

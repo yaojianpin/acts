@@ -1,4 +1,10 @@
-use crate::{data::Package, sch::Runtime, store::StoreAdapter, PackageInfo, Query, Result};
+use super::ExecutorQuery;
+use crate::{
+    data::Package,
+    sch::Runtime,
+    store::{PageData, StoreAdapter},
+    PackageInfo, Result,
+};
 use std::sync::Arc;
 use tracing::instrument;
 
@@ -21,18 +27,16 @@ impl PackageExecutor {
     }
 
     #[instrument(skip(self))]
-    pub fn list(&self, limit: usize) -> Result<Vec<PackageInfo>> {
-        let query = Query::new().set_limit(limit);
+    pub fn list(&self, q: &ExecutorQuery) -> Result<PageData<PackageInfo>> {
+        let query = q.into_query();
         match self.runtime.cache().store().packages().query(&query) {
-            Ok(mut packages) => {
-                packages.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-                let mut ret = Vec::new();
-                for t in &packages {
-                    ret.push(t.into());
-                }
-
-                Ok(ret)
-            }
+            Ok(packages) => Ok(PageData {
+                count: packages.count,
+                page_size: packages.page_size,
+                page_count: packages.page_count,
+                page_num: packages.page_num,
+                rows: packages.rows.iter().map(|m| m.into()).collect(),
+            }),
             Err(err) => Err(err),
         }
     }

@@ -12,7 +12,8 @@ use crate::{
         Context, Proc, Runtime, TaskState,
     },
     utils::{self, consts},
-    Act, ActError, ActTask, Catch, Error, Message, NodeKind, Result, ShareLock, Timeout, Vars,
+    Act, ActError, ActTask, Catch, Error, Message, MessageState, NodeKind, Result, ShareLock,
+    Timeout, Vars,
 };
 use async_trait::async_trait;
 pub use hook::{StatementBatch, TaskLifeCycle};
@@ -168,15 +169,17 @@ impl Task {
         if key.is_empty() {
             key = self.node.id().to_string();
         }
+        let state: MessageState = self.state().into();
         Message {
             id: utils::longid(),
             tid: self.id.clone(),
             name: self.node.content.name(),
             r#type: self.node.typ(),
             source: self.node.kind().to_string(),
-            state: self.state().into(),
+            state: state.to_string(),
             pid: self.pid.clone(),
             nid: self.node.id().to_string(),
+            mid: workflow.id.clone(),
             key,
             tag: self.node.tag().to_string(),
 
@@ -926,7 +929,7 @@ impl Task {
 
     pub fn find<T>(&self, name: &str) -> Option<T>
     where
-        T: DeserializeOwned + Clone,
+        T: DeserializeOwned + std::fmt::Debug + Clone,
     {
         let result = self.with_data(move |data| data.get(name));
         if result.is_some() {

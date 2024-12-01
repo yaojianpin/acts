@@ -1,10 +1,12 @@
 use crate::{
     sch::Runtime,
-    store::{Cond, Expr, StoreAdapter},
-    MessageInfo, Query, Result,
+    store::{PageData, StoreAdapter},
+    MessageInfo, Result,
 };
 use std::sync::Arc;
 use tracing::instrument;
+
+use super::ExecutorQuery;
 
 #[derive(Clone)]
 pub struct MessageExecutor {
@@ -18,20 +20,16 @@ impl MessageExecutor {
         }
     }
     #[instrument(skip(self))]
-    pub fn list(&self, pid: &str, count: usize) -> Result<Vec<MessageInfo>> {
-        let query = Query::new()
-            .push(Cond::and().push(Expr::eq("pid", pid.to_string())))
-            .set_limit(10000);
+    pub fn list(&self, q: &ExecutorQuery) -> Result<PageData<MessageInfo>> {
+        let query = q.into_query();
         match self.runtime.cache().store().messages().query(&query) {
-            Ok(mut messages) => {
-                let mut ret = Vec::new();
-                messages.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
-                for t in messages.iter().take(count) {
-                    ret.push(t.into());
-                }
-
-                Ok(ret)
-            }
+            Ok(messages) => Ok(PageData {
+                count: messages.count,
+                page_size: messages.page_size,
+                page_count: messages.page_count,
+                page_num: messages.page_num,
+                rows: messages.rows.iter().map(|m| m.into()).collect(),
+            }),
             Err(err) => Err(err),
         }
     }
@@ -52,8 +50,8 @@ impl MessageExecutor {
     }
 
     /// clear error messages
-    pub fn clear(&self) -> Result<()> {
-        self.runtime.cache().store().clear_error_messages()?;
+    pub fn clear(&self, pid: Option<String>) -> Result<()> {
+        self.runtime.cache().store().clear_error_messages(pid)?;
         Ok(())
     }
 

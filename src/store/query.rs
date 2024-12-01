@@ -7,6 +7,7 @@ pub struct Query {
     offset: usize,
     limit: usize,
     conds: Vec<Cond>,
+    order_by: Vec<(String, bool)>,
 }
 
 #[derive(Debug, Clone)]
@@ -145,6 +146,7 @@ impl Query {
         Query {
             offset: 0,
             limit: 100000, // default to a big number
+            order_by: Vec::new(),
             conds: Vec::new(),
         }
     }
@@ -190,9 +192,21 @@ impl Query {
         self
     }
 
+    pub fn set_order(mut self, order_by: &[(String, bool)]) -> Self {
+        self.order_by = order_by.to_vec();
+
+        self
+    }
+
+    pub fn push_order(mut self, order: &str, is_rev: bool) -> Self {
+        self.order_by.push((order.to_string(), is_rev));
+
+        self
+    }
+
     pub fn limit(&self) -> usize {
         if self.limit == 0 {
-            return 10000;
+            return 50;
         }
 
         self.limit
@@ -204,6 +218,10 @@ impl Query {
 
     pub fn is_cond(&self) -> bool {
         !self.conds.is_empty()
+    }
+
+    pub fn order_by(&self) -> &Vec<(String, bool)> {
+        &self.order_by
     }
 }
 

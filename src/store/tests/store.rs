@@ -1,4 +1,5 @@
 use crate::{
+    data::Model,
     sch::NodeKind,
     store::{data, query::Expr, Cond, Store, StoreKind},
     utils, Query, StoreAdapter, TaskState, Workflow,
@@ -47,6 +48,7 @@ async fn store_load_by_limit() {
     let q = Query::new().set_limit(10000);
     let procs = store.procs().query(&q).unwrap();
     let procs = procs
+        .rows
         .iter()
         .filter(|it| it.id.starts_with(&prefix))
         .collect::<Vec<_>>();
@@ -88,6 +90,7 @@ async fn store_load_by_state() {
         .set_limit(10000);
     let procs = store.procs().query(&q).unwrap();
     let procs = procs
+        .rows
         .iter()
         .filter(|it| it.id.starts_with(&prefix))
         .collect::<Vec<_>>();
@@ -130,7 +133,7 @@ async fn store_models() {
     let q = Query::new().set_limit(2);
     let models = store.models().query(&q).unwrap();
 
-    assert_eq!(models.len(), 2);
+    assert_eq!(models.rows.len(), 2);
 }
 
 #[tokio::test]
@@ -142,6 +145,174 @@ async fn store_model_get() {
 
     let model = store.models().find(&workflow.id).unwrap();
     assert_eq!(model.id, workflow.id);
+}
+
+#[tokio::test]
+async fn store_model_query_by_id() {
+    let store = store().await;
+    let model = Model {
+        id: utils::longid(),
+        name: "test".to_string(),
+        ver: 1,
+        size: 1245,
+        create_time: 3333,
+        update_time: 0,
+        data: "{}".to_string(),
+        timestamp: 0,
+    };
+    store.models().create(&model).expect("create model");
+    let q = Query::new().push(Cond::and().push(Expr::eq("id", model.id)));
+    let ret = store.messages().query(&q);
+    assert!(ret.is_ok());
+}
+
+#[tokio::test]
+async fn store_model_query_by_offset_count() {
+    let store = store().await;
+    let create_time = 100;
+    for i in 0..10 {
+        let model = Model {
+            id: utils::longid(),
+            name: format!("test-{}", i + 1),
+            ver: 1,
+            size: 1245,
+            create_time,
+            update_time: 0,
+            data: "{}".to_string(),
+            timestamp: utils::time::timestamp(),
+        };
+        store.models().create(&model).expect("create model");
+    }
+
+    let q = Query::new()
+        .push(Cond::and().push(Expr::eq("create_time", create_time)))
+        .set_offset(0)
+        .set_limit(5);
+    let ret = store.models().query(&q).unwrap();
+    assert_eq!(ret.count, 10);
+    assert_eq!(ret.rows.len(), 5);
+
+    let q = Query::new()
+        .push(Cond::and().push(Expr::eq("create_time", create_time)))
+        .set_offset(9)
+        .set_limit(5);
+    let ret = store.models().query(&q).unwrap();
+    assert_eq!(ret.count, 10);
+    assert_eq!(ret.rows.len(), 1);
+}
+
+#[tokio::test]
+async fn store_model_query_by_cond_and() {
+    let store = store().await;
+    let create_time = 200;
+    for i in 0..10 {
+        let model = Model {
+            id: utils::longid(),
+            name: format!("test-{}", i + 1),
+            ver: 1,
+            size: 1234,
+            create_time,
+            update_time: 0,
+            data: "{}".to_string(),
+            timestamp: utils::time::timestamp(),
+        };
+        store.models().create(&model).expect("create model");
+    }
+
+    let q = Query::new().set_offset(0).set_limit(10).push(
+        Cond::and()
+            .push(Expr::eq("create_time", create_time))
+            .push(Expr::eq("size", 1234)),
+    );
+    let ret = store.models().query(&q).unwrap();
+    assert_eq!(ret.count, 10);
+
+    let q = Query::new().set_offset(0).set_limit(10).push(
+        Cond::and()
+            .push(Expr::eq("create_time", create_time))
+            .push(Expr::eq("size", 1000)),
+    );
+    let ret = store.models().query(&q).unwrap();
+    assert_eq!(ret.count, 0);
+}
+
+#[tokio::test]
+async fn store_model_query_by_cond_or() {
+    let store = store().await;
+    let create_time = 300;
+    for i in 0..10 {
+        let model = Model {
+            id: utils::longid(),
+            name: format!("test-{}", i + 1),
+            ver: 1,
+            size: 1234,
+            create_time,
+            update_time: 0,
+            data: "{}".to_string(),
+            timestamp: utils::time::timestamp(),
+        };
+        store.models().create(&model).expect("create model");
+    }
+    for i in 0..10 {
+        let model = Model {
+            id: utils::longid(),
+            name: format!("test-{}", i + 1),
+            ver: 1,
+            size: 2000,
+            create_time,
+            update_time: 0,
+            data: "{}".to_string(),
+            timestamp: utils::time::timestamp(),
+        };
+        store.models().create(&model).expect("create model");
+    }
+
+    let q = Query::new()
+        .set_offset(0)
+        .set_limit(100)
+        .push(Cond::and().push(Expr::eq("create_time", create_time)))
+        .push(
+            Cond::or()
+                .push(Expr::eq("size", 1234))
+                .push(Expr::eq("size", 2000)),
+        );
+    let ret = store.models().query(&q).unwrap();
+    assert_eq!(ret.count, 20);
+}
+
+#[tokio::test]
+async fn store_model_query_by_order() {
+    let store = store().await;
+    let create_time = 400;
+    for i in 0..10 {
+        let model = Model {
+            id: utils::longid(),
+            name: format!("test-{}", i + 1),
+            ver: 1,
+            size: 2000,
+            create_time,
+            update_time: 0,
+            data: "{}".to_string(),
+            timestamp: utils::time::timestamp(),
+        };
+        store.models().create(&model).expect("create model");
+    }
+
+    let q = Query::new()
+        .set_offset(0)
+        .set_limit(100)
+        .push(Cond::and().push(Expr::eq("create_time", create_time)))
+        .push_order("timestamp", false);
+    let ret = store.models().query(&q).unwrap();
+    assert_eq!(ret.rows.last().unwrap().name, "test-10");
+
+    let q = Query::new()
+        .set_offset(0)
+        .set_limit(100)
+        .push(Cond::and().push(Expr::eq("create_time", create_time)))
+        .push_order("timestamp", true);
+    let ret = store.models().query(&q).unwrap();
+    assert_eq!(ret.rows.last().unwrap().name, "test-1");
 }
 
 #[tokio::test]
@@ -172,7 +343,7 @@ async fn store_model_deploy_id_error() {
 }
 
 #[tokio::test]
-async fn store_procs() {
+async fn store_proc_create() {
     let store = store().await;
     let id = utils::longid();
     let workflow = create_workflow();
@@ -182,11 +353,11 @@ async fn store_procs() {
 
     let q = Query::new().set_limit(1);
     let procs = store.procs().query(&q).unwrap();
-    assert_eq!(procs.len(), 1);
+    assert_eq!(procs.rows.len(), 1);
 }
 
 #[tokio::test]
-async fn store_proc() {
+async fn store_proc_find() {
     let store = store().await;
 
     let id = utils::longid();
@@ -195,6 +366,190 @@ async fn store_proc() {
     store.procs().create(&proc).expect("create proc");
     let info = store.procs().find(&id).unwrap();
     assert_eq!(proc.id, info.id);
+}
+
+#[tokio::test]
+async fn store_proc_query_by_id() {
+    let store = store().await;
+
+    let mid = utils::longid();
+    let proc = Proc {
+        id: utils::shortid(),
+        name: format!("test"),
+        mid: mid.clone(),
+        state: "running".to_string(),
+        start_time: 0,
+        end_time: 0,
+        timestamp: utils::time::timestamp(),
+        model: "{}".to_string(),
+        env_local: "{}".to_string(),
+        err: None,
+    };
+
+    store.procs().create(&proc).expect("create proc");
+    let q = Query::new().push(Cond::and().push(Expr::eq("id", proc.id)));
+    let ret = store.procs().query(&q);
+    assert!(ret.is_ok());
+}
+
+#[tokio::test]
+async fn store_proc_query_by_offset_count() {
+    let store = store().await;
+    let mid = utils::longid();
+    for i in 0..10 {
+        let proc = Proc {
+            id: utils::shortid(),
+            name: format!("test-{}", i + 1),
+            mid: mid.clone(),
+            state: "running".to_string(),
+            start_time: 0,
+            end_time: 0,
+            timestamp: utils::time::timestamp(),
+            model: "{}".to_string(),
+            env_local: "{}".to_string(),
+            err: None,
+        };
+        store.procs().create(&proc).expect("create proc");
+    }
+
+    let q = Query::new()
+        .push(Cond::and().push(Expr::eq("mid", mid.clone())))
+        .set_offset(0)
+        .set_limit(5);
+    let ret = store.procs().query(&q).unwrap();
+    assert_eq!(ret.count, 10);
+    assert_eq!(ret.rows.len(), 5);
+
+    let q = Query::new()
+        .push(Cond::and().push(Expr::eq("mid", mid.clone())))
+        .set_offset(9)
+        .set_limit(5);
+    let ret = store.procs().query(&q).unwrap();
+    assert_eq!(ret.count, 10);
+    assert_eq!(ret.rows.len(), 1);
+}
+
+#[tokio::test]
+async fn store_proc_query_by_cond_and() {
+    let store = store().await;
+    let mid = utils::longid();
+    for i in 0..10 {
+        let proc = Proc {
+            id: utils::shortid(),
+            name: format!("test-{}", i + 1),
+            mid: mid.clone(),
+            state: "running".to_string(),
+            start_time: 0,
+            end_time: 0,
+            timestamp: utils::time::timestamp(),
+            model: "{}".to_string(),
+            env_local: "{}".to_string(),
+            err: None,
+        };
+        store.procs().create(&proc).expect("create proc");
+    }
+
+    let q = Query::new().set_offset(0).set_limit(10).push(
+        Cond::and()
+            .push(Expr::eq("mid", mid.clone()))
+            .push(Expr::eq("state", "running")),
+    );
+    let ret = store.procs().query(&q).unwrap();
+    assert_eq!(ret.count, 10);
+
+    let q = Query::new().set_offset(0).set_limit(10).push(
+        Cond::and()
+            .push(Expr::eq("mid", mid.clone()))
+            .push(Expr::eq("state", "created")),
+    );
+    let ret = store.procs().query(&q).unwrap();
+    assert_eq!(ret.count, 0);
+}
+
+#[tokio::test]
+async fn store_proc_query_by_cond_or() {
+    let store = store().await;
+    let mid = utils::longid();
+    for i in 0..10 {
+        let proc = Proc {
+            id: utils::shortid(),
+            name: format!("test-{}", i + 1),
+            mid: mid.clone(),
+            state: "running".to_string(),
+            start_time: 0,
+            end_time: 0,
+            timestamp: utils::time::timestamp(),
+            model: "{}".to_string(),
+            env_local: "{}".to_string(),
+            err: None,
+        };
+        store.procs().create(&proc).expect("create proc");
+    }
+
+    for i in 0..10 {
+        let proc = Proc {
+            id: utils::shortid(),
+            name: format!("test-{}", i + 1),
+            mid: mid.clone(),
+            state: "completed".to_string(),
+            start_time: 0,
+            end_time: 0,
+            timestamp: utils::time::timestamp(),
+            model: "{}".to_string(),
+            env_local: "{}".to_string(),
+            err: None,
+        };
+        store.procs().create(&proc).expect("create proc");
+    }
+
+    let q = Query::new()
+        .set_offset(0)
+        .set_limit(100)
+        .push(Cond::and().push(Expr::eq("mid", mid.clone())))
+        .push(
+            Cond::or()
+                .push(Expr::eq("state", "running"))
+                .push(Expr::eq("state", "completed")),
+        );
+    let ret = store.procs().query(&q).unwrap();
+    assert_eq!(ret.count, 20);
+}
+
+#[tokio::test]
+async fn store_proc_query_by_order() {
+    let store = store().await;
+    let mid = utils::longid();
+    for i in 0..10 {
+        let proc = Proc {
+            id: utils::shortid(),
+            name: format!("test-{}", i + 1),
+            mid: mid.clone(),
+            state: "completed".to_string(),
+            start_time: 0,
+            end_time: 0,
+            timestamp: utils::time::timestamp(),
+            model: "{}".to_string(),
+            env_local: "{}".to_string(),
+            err: None,
+        };
+        store.procs().create(&proc).expect("create proc");
+    }
+
+    let q = Query::new()
+        .set_offset(0)
+        .set_limit(100)
+        .push(Cond::and().push(Expr::eq("mid", mid.clone())))
+        .push_order("timestamp", false);
+    let ret = store.procs().query(&q).unwrap();
+    assert_eq!(ret.rows.last().unwrap().name, "test-10");
+
+    let q = Query::new()
+        .set_offset(0)
+        .set_limit(100)
+        .push(Cond::and().push(Expr::eq("mid", mid.clone())))
+        .push_order("timestamp", true);
+    let ret = store.procs().query(&q).unwrap();
+    assert_eq!(ret.rows.last().unwrap().name, "test-1");
 }
 
 #[tokio::test]
@@ -262,6 +617,222 @@ async fn store_task_create() {
     let id = utils::Id::new(&pid, &tid);
     let ret = store.tasks().find(&id.id());
     assert!(ret.is_ok());
+}
+
+#[tokio::test]
+async fn store_task_query_by_id() {
+    let store = store().await;
+
+    let pid = utils::longid();
+    let tid = utils::shortid();
+    let task = Task {
+        id: format!("{pid}:{tid}"),
+        name: "test".to_string(),
+        prev: None,
+        kind: NodeKind::Step.to_string(),
+        pid: pid.clone(),
+        tid: tid.clone(),
+        node_data: "{}".to_string(),
+        state: TaskState::None.to_string(),
+        start_time: 0,
+        end_time: 0,
+        hooks: "{}".to_string(),
+        timestamp: 0,
+        data: "{}".to_string(),
+        err: None,
+    };
+
+    store.tasks().create(&task).expect("create task");
+
+    let id = utils::Id::new(&pid, &tid);
+    let q = Query::new().push(Cond::and().push(Expr::eq("id", id.id())));
+    let ret = store.messages().query(&q);
+    assert!(ret.is_ok());
+}
+
+#[tokio::test]
+async fn store_task_query_by_offset_count() {
+    let store = store().await;
+    let pid = utils::longid();
+    for i in 0..10 {
+        let tid = utils::shortid();
+        let task = Task {
+            id: utils::shortid(),
+            name: format!("test-{}", i + 1),
+            prev: None,
+            kind: NodeKind::Step.to_string(),
+            pid: pid.clone(),
+            tid: tid.clone(),
+            node_data: "{}".to_string(),
+            state: TaskState::None.to_string(),
+            start_time: 0,
+            end_time: 0,
+            hooks: "{}".to_string(),
+            timestamp: 0,
+            data: "{}".to_string(),
+            err: None,
+        };
+        store.tasks().create(&task).expect("create task");
+    }
+
+    let q = Query::new()
+        .push(Cond::and().push(Expr::eq("pid", pid.clone())))
+        .set_offset(0)
+        .set_limit(5);
+    let ret = store.tasks().query(&q).unwrap();
+    assert_eq!(ret.count, 10);
+    assert_eq!(ret.rows.len(), 5);
+
+    let q = Query::new()
+        .push(Cond::and().push(Expr::eq("pid", pid.clone())))
+        .set_offset(9)
+        .set_limit(5);
+    let ret = store.tasks().query(&q).unwrap();
+    assert_eq!(ret.count, 10);
+    assert_eq!(ret.rows.len(), 1);
+}
+
+#[tokio::test]
+async fn store_task_query_by_cond_and() {
+    let store = store().await;
+    let pid = utils::longid();
+    for i in 0..10 {
+        let tid = utils::shortid();
+        let task = Task {
+            id: utils::shortid(),
+            name: format!("test-{}", i + 1),
+            prev: None,
+            kind: NodeKind::Step.to_string(),
+            pid: pid.clone(),
+            tid: tid.clone(),
+            node_data: "{}".to_string(),
+            state: TaskState::None.to_string(),
+            start_time: 0,
+            end_time: 0,
+            hooks: "{}".to_string(),
+            timestamp: 0,
+            data: "{}".to_string(),
+            err: None,
+        };
+        store.tasks().create(&task).expect("create task");
+    }
+
+    let q = Query::new().set_offset(0).set_limit(10).push(
+        Cond::and()
+            .push(Expr::eq("pid", pid.clone()))
+            .push(Expr::eq("state", "none")),
+    );
+    let ret = store.tasks().query(&q).unwrap();
+    assert_eq!(ret.count, 10);
+
+    let q = Query::new().set_offset(0).set_limit(10).push(
+        Cond::and()
+            .push(Expr::eq("pid", pid.clone()))
+            .push(Expr::eq("state", "created")),
+    );
+    let ret = store.tasks().query(&q).unwrap();
+    assert_eq!(ret.count, 0);
+}
+
+#[tokio::test]
+async fn store_task_query_by_cond_or() {
+    let store = store().await;
+    let pid = utils::longid();
+    for i in 0..10 {
+        let tid = utils::shortid();
+        let task = Task {
+            id: utils::shortid(),
+            name: format!("test-{}", i + 1),
+            prev: None,
+            kind: NodeKind::Step.to_string(),
+            pid: pid.clone(),
+            tid: tid.clone(),
+            node_data: "{}".to_string(),
+            state: TaskState::None.to_string(),
+            start_time: 0,
+            end_time: 0,
+            hooks: "{}".to_string(),
+            timestamp: 0,
+            data: "{}".to_string(),
+            err: None,
+        };
+        store.tasks().create(&task).expect("create task");
+    }
+
+    for i in 0..10 {
+        let tid = utils::shortid();
+        let task = Task {
+            id: utils::shortid(),
+            name: format!("test-{}", i + 1),
+            prev: None,
+            kind: NodeKind::Step.to_string(),
+            pid: pid.clone(),
+            tid: tid.clone(),
+            node_data: "{}".to_string(),
+            state: TaskState::Interrupt.to_string(),
+            start_time: 0,
+            end_time: 0,
+            hooks: "{}".to_string(),
+            timestamp: 0,
+            data: "{}".to_string(),
+            err: None,
+        };
+        store.tasks().create(&task).expect("create task");
+    }
+
+    let q = Query::new()
+        .set_offset(0)
+        .set_limit(100)
+        .push(Cond::and().push(Expr::eq("pid", pid.clone())))
+        .push(
+            Cond::or()
+                .push(Expr::eq("state", TaskState::Interrupt.to_string()))
+                .push(Expr::eq("state", TaskState::None.to_string())),
+        );
+    let ret = store.tasks().query(&q).unwrap();
+    assert_eq!(ret.count, 20);
+}
+
+#[tokio::test]
+async fn store_task_query_by_order() {
+    let store = store().await;
+    let pid = utils::longid();
+    for i in 0..10 {
+        let tid = utils::shortid();
+        let task = Task {
+            id: utils::shortid(),
+            name: format!("test-{}", i + 1),
+            prev: None,
+            kind: NodeKind::Step.to_string(),
+            pid: pid.clone(),
+            tid: tid.clone(),
+            node_data: "{}".to_string(),
+            state: TaskState::None.to_string(),
+            start_time: 0,
+            end_time: 0,
+            hooks: "{}".to_string(),
+            timestamp: utils::time::timestamp(),
+            data: "{}".to_string(),
+            err: None,
+        };
+        store.tasks().create(&task).expect("create task");
+    }
+
+    let q = Query::new()
+        .set_offset(0)
+        .set_limit(100)
+        .push(Cond::and().push(Expr::eq("pid", pid.clone())))
+        .push_order("timestamp", false);
+    let ret = store.tasks().query(&q).unwrap();
+    assert_eq!(ret.rows.last().unwrap().name, "test-10");
+
+    let q = Query::new()
+        .set_offset(0)
+        .set_limit(100)
+        .push(Cond::and().push(Expr::eq("pid", pid.clone())))
+        .push_order("timestamp", true);
+    let ret = store.tasks().query(&q).unwrap();
+    assert_eq!(ret.rows.last().unwrap().name, "test-1");
 }
 
 #[tokio::test]
@@ -342,6 +913,7 @@ async fn store_message_create() {
         pid: pid.clone(),
         tid: tid.clone(),
         nid: utils::shortid(),
+        mid: utils::shortid(),
         state: "created".to_string(),
         start_time: 0,
         end_time: 0,
@@ -369,7 +941,7 @@ async fn store_message_create() {
 }
 
 #[tokio::test]
-async fn store_message_query() {
+async fn store_message_query_by_id() {
     let store = store().await;
 
     let pid = utils::longid();
@@ -380,6 +952,7 @@ async fn store_message_query() {
         pid: pid.clone(),
         tid: tid.clone(),
         nid: utils::shortid(),
+        mid: utils::shortid(),
         state: "created".to_string(),
         start_time: 0,
         end_time: 0,
@@ -408,6 +981,243 @@ async fn store_message_query() {
 }
 
 #[tokio::test]
+async fn store_message_query_by_offset_count() {
+    let store = store().await;
+
+    let pid = utils::longid();
+    let tid = utils::shortid();
+
+    for _ in 0..100 {
+        let msg = Message {
+            id: utils::shortid(),
+            name: "test".to_string(),
+            pid: pid.clone(),
+            tid: tid.clone(),
+            nid: utils::shortid(),
+            mid: utils::shortid(),
+            state: "created".to_string(),
+            start_time: 0,
+            end_time: 0,
+            r#type: "step".to_string(),
+            source: "step".to_string(),
+            model: json!({ "id": "m1"}).to_string(),
+            key: "test".to_string(),
+            inputs: json!({}).to_string(),
+            outputs: json!({}).to_string(),
+            tag: "tag1".to_string(),
+            chan_id: "test1".to_string(),
+            chan_pattern: "*:*:*:*".to_string(),
+            create_time: 0,
+            update_time: 0,
+            retry_times: 0,
+            timestamp: 0,
+            status: MessageStatus::Created,
+        };
+        store.messages().create(&msg).unwrap();
+    }
+
+    let q = Query::new()
+        .set_offset(0)
+        .set_limit(10)
+        .push(Cond::and().push(Expr::eq("pid", pid.clone())));
+    let ret = store.messages().query(&q).unwrap();
+    assert_eq!(ret.count, 100);
+    assert_eq!(ret.rows.len(), 10);
+
+    let q = Query::new()
+        .set_offset(95)
+        .set_limit(10)
+        .push(Cond::and().push(Expr::eq("pid", pid.clone())));
+    let ret = store.messages().query(&q).unwrap();
+    assert_eq!(ret.count, 100);
+    assert_eq!(ret.rows.len(), 5);
+}
+
+#[tokio::test]
+async fn store_message_query_by_cond_and() {
+    let store = store().await;
+
+    let pid = utils::longid();
+    let tid = utils::shortid();
+
+    for _ in 0..100 {
+        let msg = Message {
+            id: utils::shortid(),
+            name: "test".to_string(),
+            pid: pid.clone(),
+            tid: tid.clone(),
+            nid: utils::shortid(),
+            mid: utils::shortid(),
+            state: "created".to_string(),
+            start_time: 0,
+            end_time: 0,
+            r#type: "step".to_string(),
+            source: "step".to_string(),
+            model: json!({ "id": "m1"}).to_string(),
+            key: "test".to_string(),
+            inputs: json!({}).to_string(),
+            outputs: json!({}).to_string(),
+            tag: "tag1".to_string(),
+            chan_id: "test1".to_string(),
+            chan_pattern: "*:*:*:*".to_string(),
+            create_time: 0,
+            update_time: 0,
+            retry_times: 0,
+            timestamp: 0,
+            status: MessageStatus::Created,
+        };
+        store.messages().create(&msg).unwrap();
+    }
+
+    let q = Query::new().set_offset(0).set_limit(10).push(
+        Cond::and()
+            .push(Expr::eq("pid", pid.clone()))
+            .push(Expr::eq("type", "step")),
+    );
+    let ret = store.messages().query(&q).unwrap();
+    assert_eq!(ret.count, 100);
+
+    let q = Query::new().set_offset(0).set_limit(10).push(
+        Cond::and()
+            .push(Expr::eq("pid", pid.clone()))
+            .push(Expr::eq("type", "workflow")),
+    );
+    let ret = store.messages().query(&q).unwrap();
+    assert_eq!(ret.count, 0);
+}
+
+#[tokio::test]
+async fn store_message_query_by_cond_or() {
+    let store = store().await;
+
+    let pid = utils::longid();
+    let tid = utils::shortid();
+
+    for _ in 0..10 {
+        let msg = Message {
+            id: utils::shortid(),
+            name: "test".to_string(),
+            pid: pid.clone(),
+            tid: tid.clone(),
+            nid: utils::shortid(),
+            mid: utils::shortid(),
+            state: "created".to_string(),
+            start_time: 0,
+            end_time: 0,
+            r#type: "step".to_string(),
+            source: "step".to_string(),
+            model: json!({ "id": "m1"}).to_string(),
+            key: "test".to_string(),
+            inputs: json!({}).to_string(),
+            outputs: json!({}).to_string(),
+            tag: "tag1".to_string(),
+            chan_id: "test1".to_string(),
+            chan_pattern: "*:*:*:*".to_string(),
+            create_time: 0,
+            update_time: 0,
+            retry_times: 0,
+            timestamp: 0,
+            status: MessageStatus::Created,
+        };
+        store.messages().create(&msg).unwrap();
+    }
+
+    for _ in 0..10 {
+        let msg = Message {
+            id: utils::shortid(),
+            name: "test".to_string(),
+            pid: pid.clone(),
+            tid: tid.clone(),
+            nid: utils::shortid(),
+            mid: utils::shortid(),
+            state: "completed".to_string(),
+            start_time: 0,
+            end_time: 0,
+            r#type: "step".to_string(),
+            source: "step".to_string(),
+            model: json!({ "id": "m1"}).to_string(),
+            key: "test".to_string(),
+            inputs: json!({}).to_string(),
+            outputs: json!({}).to_string(),
+            tag: "tag1".to_string(),
+            chan_id: "test1".to_string(),
+            chan_pattern: "*:*:*:*".to_string(),
+            create_time: 0,
+            update_time: 0,
+            retry_times: 0,
+            timestamp: 0,
+            status: MessageStatus::Created,
+        };
+        store.messages().create(&msg).unwrap();
+    }
+
+    let q = Query::new()
+        .set_offset(0)
+        .set_limit(100)
+        .push(Cond::and().push(Expr::eq("pid", pid.clone())))
+        .push(
+            Cond::or()
+                .push(Expr::eq("state", "created"))
+                .push(Expr::eq("state", "completed")),
+        );
+    let ret = store.messages().query(&q).unwrap();
+    assert_eq!(ret.count, 20);
+}
+
+#[tokio::test]
+async fn store_message_query_by_order() {
+    let store = store().await;
+
+    let pid = utils::longid();
+    let tid = utils::shortid();
+
+    for i in 0..100 {
+        let msg = Message {
+            id: utils::shortid(),
+            name: format!("test-{}", i + 1),
+            pid: pid.clone(),
+            tid: tid.clone(),
+            nid: utils::shortid(),
+            mid: utils::shortid(),
+            state: "created".to_string(),
+            start_time: 0,
+            end_time: 0,
+            r#type: "step".to_string(),
+            source: "step".to_string(),
+            model: json!({ "id": "m1"}).to_string(),
+            key: "test".to_string(),
+            inputs: json!({}).to_string(),
+            outputs: json!({}).to_string(),
+            tag: "tag1".to_string(),
+            chan_id: "test1".to_string(),
+            chan_pattern: "*:*:*:*".to_string(),
+            create_time: 0,
+            update_time: 0,
+            retry_times: 0,
+            timestamp: utils::time::timestamp(),
+            status: MessageStatus::Created,
+        };
+        store.messages().create(&msg).unwrap();
+    }
+
+    let q = Query::new()
+        .set_offset(0)
+        .set_limit(100)
+        .push(Cond::and().push(Expr::eq("pid", pid.clone())))
+        .push_order("timestamp", false);
+    let ret = store.messages().query(&q).unwrap();
+    assert_eq!(ret.rows.last().unwrap().name, "test-100");
+
+    let q = Query::new()
+        .set_offset(0)
+        .set_limit(100)
+        .push(Cond::and().push(Expr::eq("pid", pid.clone())))
+        .push_order("timestamp", true);
+    let ret = store.messages().query(&q).unwrap();
+    assert_eq!(ret.rows.last().unwrap().name, "test-1");
+}
+
+#[tokio::test]
 async fn store_message_update() {
     let store = store().await;
 
@@ -419,6 +1229,7 @@ async fn store_message_update() {
         pid: pid.clone(),
         tid: tid.clone(),
         nid: utils::shortid(),
+        mid: utils::shortid(),
         state: "created".to_string(),
         start_time: 0,
         end_time: 0,
@@ -465,6 +1276,7 @@ async fn store_message_remove() {
         pid: pid.clone(),
         tid: tid.clone(),
         nid: utils::shortid(),
+        mid: utils::shortid(),
         state: "created".to_string(),
         start_time: 0,
         end_time: 0,
@@ -512,7 +1324,7 @@ async fn store_package_create() {
 }
 
 #[tokio::test]
-async fn store_package_query() {
+async fn store_package_query_by_id() {
     let store = store().await;
 
     let id = utils::longid();
@@ -529,6 +1341,147 @@ async fn store_package_query() {
     let q = Query::new().push(Cond::and().push(Expr::eq("id", package.id)));
     let ret = store.packages().query(&q);
     assert!(ret.is_ok());
+}
+
+#[tokio::test]
+async fn store_package_query_by_offset_count() {
+    let store = store().await;
+    for i in 0..10 {
+        let package = Package {
+            id: utils::shortid(),
+            name: format!("test-{}", i + 1),
+            size: 100,
+            data: vec![0x01, 0x02],
+            create_time: 100,
+            update_time: 0,
+            timestamp: 0,
+        };
+        store.packages().create(&package).unwrap();
+    }
+
+    let q = Query::new()
+        .push(Cond::and().push(Expr::eq("create_time", 100)))
+        .set_offset(0)
+        .set_limit(5);
+    let ret = store.packages().query(&q).unwrap();
+    assert_eq!(ret.count, 10);
+    assert_eq!(ret.rows.len(), 5);
+
+    let q = Query::new()
+        .push(Cond::and().push(Expr::eq("create_time", 100)))
+        .set_offset(9)
+        .set_limit(5);
+    let ret = store.packages().query(&q).unwrap();
+    assert_eq!(ret.count, 10);
+    assert_eq!(ret.rows.len(), 1);
+}
+
+#[tokio::test]
+async fn store_package_query_by_cond_and() {
+    let store = store().await;
+    for i in 0..10 {
+        let package = Package {
+            id: utils::shortid(),
+            name: format!("test-{}", i + 1),
+            size: 100,
+            data: vec![0x01, 0x02],
+            create_time: 200,
+            update_time: 0,
+            timestamp: 0,
+        };
+        store.packages().create(&package).unwrap();
+    }
+
+    let q = Query::new().set_offset(0).set_limit(10).push(
+        Cond::and()
+            .push(Expr::eq("create_time", 200))
+            .push(Expr::eq("size", 100)),
+    );
+    let ret = store.packages().query(&q).unwrap();
+    assert_eq!(ret.count, 10);
+
+    let q = Query::new().set_offset(0).set_limit(10).push(
+        Cond::and()
+            .push(Expr::eq("create_time", 200))
+            .push(Expr::eq("size", 200)),
+    );
+    let ret = store.packages().query(&q).unwrap();
+    assert_eq!(ret.count, 0);
+}
+
+#[tokio::test]
+async fn store_package_query_by_cond_or() {
+    let store = store().await;
+    for i in 0..10 {
+        let package = Package {
+            id: utils::shortid(),
+            name: format!("test-{}", i + 1),
+            size: 100,
+            data: vec![0x01, 0x02],
+            create_time: 300,
+            update_time: 0,
+            timestamp: 0,
+        };
+        store.packages().create(&package).unwrap();
+    }
+
+    for i in 0..10 {
+        let package = Package {
+            id: utils::shortid(),
+            name: format!("test-{}", i + 1),
+            size: 200,
+            data: vec![0x01, 0x02],
+            create_time: 300,
+            update_time: 0,
+            timestamp: 0,
+        };
+        store.packages().create(&package).unwrap();
+    }
+
+    let q = Query::new()
+        .set_offset(0)
+        .set_limit(100)
+        .push(Cond::and().push(Expr::eq("create_time", 300)))
+        .push(
+            Cond::or()
+                .push(Expr::eq("size", 100))
+                .push(Expr::eq("size", 200)),
+        );
+    let ret = store.packages().query(&q).unwrap();
+    assert_eq!(ret.count, 20);
+}
+
+#[tokio::test]
+async fn store_package_query_by_order() {
+    let store = store().await;
+    for i in 0..10 {
+        let package = Package {
+            id: utils::shortid(),
+            name: format!("test-{}", i + 1),
+            size: 100,
+            data: vec![0x01, 0x02],
+            create_time: 400,
+            update_time: 0,
+            timestamp: utils::time::timestamp(),
+        };
+        store.packages().create(&package).unwrap();
+    }
+
+    let q = Query::new()
+        .set_offset(0)
+        .set_limit(100)
+        .push(Cond::and().push(Expr::eq("create_time", 400)))
+        .push_order("timestamp", false);
+    let ret = store.packages().query(&q).unwrap();
+    assert_eq!(ret.rows.last().unwrap().name, "test-10");
+
+    let q = Query::new()
+        .set_offset(0)
+        .set_limit(100)
+        .push(Cond::and().push(Expr::eq("create_time", 400)))
+        .push_order("timestamp", true);
+    let ret = store.packages().query(&q).unwrap();
+    assert_eq!(ret.rows.last().unwrap().name, "test-1");
 }
 
 #[tokio::test]

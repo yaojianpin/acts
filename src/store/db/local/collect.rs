@@ -1,7 +1,7 @@
 use super::{database::Database, DbRow, DbSchema};
 use crate::{
-    store::{map_db_err, query::CondType, DbSet, Expr, ExprOp, Query},
-    Result, ShareLock,
+    store::{map_db_err, query::CondType, DbSet, Expr, ExprOp, PageData, Query},
+    ActError, Result, ShareLock,
 };
 use rusqlite::{params, params_from_iter};
 use std::{fmt::Debug, marker::PhantomData};
@@ -64,10 +64,12 @@ where
         Ok(model)
     }
 
-    fn query(&self, q: &Query) -> Result<Vec<T>> {
+    fn query(&self, q: &Query) -> Result<PageData<T>> {
         debug!("local::{}.query({:?})", self.name, q);
         let db = self.db.read().unwrap();
         let conn = db.pool().get().unwrap();
+        let schema = T::schema()?;
+        let keys: Vec<&str> = schema.iter().map(|(k, _)| k.as_str()).collect();
         let mut filter = String::new();
         if q.is_cond() {
             let mut q = q.clone();
@@ -80,6 +82,14 @@ where
                 };
                 filter.push_str("(");
                 for (index, expr) in cond.conds().iter().enumerate() {
+                    if !keys.contains(&expr.key()) {
+                        return Err(ActError::Store(format!(
+                            "cannot find key `{}` in {}, the avaliable keys should be `{}`",
+                            expr.key(),
+                            self.name,
+                            keys.join(",")
+                        )));
+                    }
                     filter.push_str(&expr.sql()?);
                     if index != cond.conds().len() - 1 {
                         filter.push_str(&format!(" {typ} "));
@@ -93,36 +103,64 @@ where
             }
         }
 
-        debug!("filter: {filter}");
-        let schema = T::schema()?;
-        let keys: Vec<&str> = schema.iter().map(|(k, _)| k.as_str()).collect();
-        let mut sql = format!(
-            "select {} from {} limit {} offset {}",
-            keys.join(","),
-            self.name,
-            q.limit(),
-            q.offset(),
-        );
+        let mut count_sql = format!("select count(id) from {} ", self.name);
+        let mut sql = format!("select {} from {} ", keys.join(","), self.name);
+
         if !filter.is_empty() {
-            sql = format!(
-                "select {} from {} where {} limit {} offset {}",
-                keys.join(","),
-                self.name,
-                filter,
-                q.limit(),
-                q.offset(),
-            );
+            count_sql.push_str(&format!(" where {} ", filter));
+            sql.push_str(&format!(" where {} ", filter));
         }
 
-        let ret = conn
-            .prepare(&sql)
-            .map_err(map_db_err)?
-            .query_map([], |row| T::from_row(row))
-            .map_err(map_db_err)?
-            .map(|v| v.unwrap())
-            .collect::<Vec<_>>();
+        if !q.order_by().is_empty() {
+            let len = q.order_by().len();
+            sql.push_str(" order by ");
+            for (index, (order, rev)) in q.order_by().iter().enumerate() {
+                if !keys.contains(&order.as_str()) {
+                    return Err(ActError::Store(format!(
+                        "cannot find key `{order}` in {}, the avaliable keys should be `{}`",
+                        self.name,
+                        keys.join(",")
+                    )));
+                }
+                if index == len - 1 {
+                    sql.push_str(&format!(
+                        " {} {} ",
+                        order,
+                        if *rev { "desc" } else { "asc" }
+                    ));
+                } else {
+                    sql.push_str(&format!(
+                        " {} {},",
+                        order,
+                        if *rev { "desc" } else { "asc" }
+                    ));
+                }
+            }
+        }
+        sql.push_str(&format!(" limit {} offset {} ", q.limit(), q.offset()));
 
-        Ok(ret)
+        debug!("sql: {sql}");
+        let count = conn
+            .prepare(&count_sql)
+            .map_err(map_db_err)?
+            .query_row::<usize, _, _>([], |row| row.get(0))
+            .map_err(map_db_err)?;
+        let page_count = (count + q.limit() - 1) / q.limit();
+        let page_num = q.offset() / q.limit() + 1;
+        let data = PageData {
+            count,
+            page_size: q.limit(),
+            page_num,
+            page_count,
+            rows: conn
+                .prepare(&sql)
+                .map_err(map_db_err)?
+                .query_map([], |row| T::from_row(row))
+                .map_err(map_db_err)?
+                .map(|v| v.unwrap())
+                .collect::<Vec<_>>(),
+        };
+        Ok(data)
     }
 
     fn create(&self, model: &T) -> Result<bool> {

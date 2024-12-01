@@ -837,7 +837,7 @@ async fn sch_messages_not_removed_when_completed_in_store() {
         .messages()
         .query(&q)
         .unwrap();
-    assert_eq!(messages.len(), 1);
+    assert_eq!(messages.count, 1);
 }
 
 #[tokio::test]

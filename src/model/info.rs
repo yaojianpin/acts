@@ -52,7 +52,8 @@ pub struct ModelInfo {
     pub name: String,
     pub ver: u32,
     pub size: u32,
-    pub time: i64,
+    pub create_time: i64,
+    pub update_time: i64,
     pub data: String,
 }
 
@@ -110,9 +111,16 @@ impl From<data::Model> for ModelInfo {
             name: m.name,
             ver: m.ver,
             size: m.size,
-            time: m.time,
+            create_time: m.create_time,
+            update_time: m.update_time,
             data: m.data,
         }
+    }
+}
+
+impl From<&data::Model> for ModelInfo {
+    fn from(m: &data::Model) -> Self {
+        m.clone().into()
     }
 }
 
@@ -149,6 +157,12 @@ impl From<data::Task> for TaskInfo {
             key: node_data.content.key(),
             tag: node_data.content.tag(),
         }
+    }
+}
+
+impl From<&data::Task> for TaskInfo {
+    fn from(t: &data::Task) -> Self {
+        t.clone().into()
     }
 }
 

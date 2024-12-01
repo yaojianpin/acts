@@ -236,12 +236,12 @@ async fn sch_step_acts_pack() {
         println!("message: {:?}", e.inner());
         if e.is_type("msg") && e.is_state("created") {
             rx.update(|data| data.push(e.key.clone()));
-            e.do_action(&e.pid, &e.tid, consts::EVT_NEXT, &Vars::new())
-                .unwrap();
+            // e.do_action(&e.pid, &e.tid, consts::EVT_NEXT, &Vars::new())
+            //     .unwrap();
         }
     });
     scher.launch(&proc);
-    let ret = tx.recv().await;
+    let ret = tx.timeout(100).await;
     proc.print();
     assert_eq!(ret, ["msg1", "msg2"]);
 }

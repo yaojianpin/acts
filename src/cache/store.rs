@@ -23,7 +23,7 @@ impl Store {
                 )
                 .set_limit(cap);
             let procs = self.procs().query(&query)?;
-            for p in procs {
+            for p in procs.rows {
                 let model = Workflow::from_json(&p.model)?;
                 let env_local: serde_json::Value = serde_json::from_str(&p.env_local)
                     .map_err(|err| ActError::Store(err.to_string()))?;
@@ -79,7 +79,7 @@ impl Store {
         debug!("remove_proc pid={}", pid);
         let q = Query::new().push(Cond::and().push(Expr::eq("pid", pid.to_string())));
         let tasks = self.tasks().query(&q)?;
-        for task in tasks {
+        for task in tasks.rows {
             self.tasks().delete(&task.id)?;
         }
         self.procs().delete(pid)?;
@@ -106,7 +106,7 @@ impl Store {
                 .push(Expr::eq("tid", tid.to_string())),
         );
         if let Ok(messages) = self.messages().query(&q) {
-            for m in messages.iter() {
+            for m in messages.rows.iter() {
                 let mut m = m.clone();
                 m.status = status;
                 m.update_time = utils::time::time_millis();
@@ -135,7 +135,7 @@ impl Store {
                 )),
         );
         if let Ok(messages) = self.messages().query(&q) {
-            for m in messages.iter() {
+            for m in messages.rows.iter() {
                 let mut message = m.clone();
                 message.update_time = utils::time::time_millis();
                 if message.retry_times < max_message_retry_times {
@@ -155,7 +155,7 @@ impl Store {
     pub fn resend_error_messages(&self) -> Result<()> {
         let q = Query::new().push(Cond::and().push(Expr::eq("status", MessageStatus::Error)));
         if let Ok(messages) = self.messages().query(&q) {
-            for m in messages.iter() {
+            for m in messages.rows.iter() {
                 let mut message = m.clone();
                 message.status = MessageStatus::Created;
                 message.retry_times = 0;
@@ -167,10 +167,15 @@ impl Store {
         Ok(())
     }
 
-    pub fn clear_error_messages(&self) -> Result<()> {
-        let q = Query::new().push(Cond::and().push(Expr::eq("status", MessageStatus::Error)));
+    pub fn clear_error_messages(&self, pid: Option<String>) -> Result<()> {
+        let mut cond = Cond::and().push(Expr::eq("status", MessageStatus::Error));
+        if let Some(pid) = &pid {
+            cond = cond.push(Expr::eq("pid", pid));
+        }
+
+        let q = Query::new().push(cond);
         if let Ok(messages) = self.messages().query(&q) {
-            for m in messages.iter() {
+            for m in messages.rows.iter() {
                 self.messages().delete(&m.id)?;
             }
         }
@@ -214,7 +219,7 @@ impl Store {
         let tree = &proc.tree();
         let query = Query::new().push(Cond::and().push(Expr::eq("pid", proc.id())));
         let tasks = self.tasks().query(&query)?;
-        for t in tasks {
+        for t in tasks.rows {
             let state: TaskState = t.state.into();
             let node = Node::from_str(&t.node_data, tree);
             let mut task = sch::Task::new(proc, &t.tid, node, rt);

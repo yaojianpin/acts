@@ -3,7 +3,7 @@ use crate::{
     event::{Action, Model},
     sch::{tree::NodeContent, Node, Proc, Task},
     utils::{self, consts, shortid},
-    Act, ActError, Message, NodeKind, Result, TaskState, Vars,
+    Act, ActError, Message, MessageState, NodeKind, Result, TaskState, Vars,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{cell::RefCell, sync::Arc};
@@ -368,7 +368,7 @@ impl Context {
     }
 
     pub fn emit_message(&self, msg: &Act) -> Result<()> {
-        println!("emit_message: {:?}", msg);
+        debug!("emit_message: {:?}", msg);
         let workflow = self.proc.model();
         let mut inputs = utils::fill_inputs(&msg.inputs, self);
 
@@ -378,11 +378,12 @@ impl Context {
             inputs.set(consts::ACT_ERR_CODE, err.ecode);
         }
 
+        let state: MessageState = task.state().into();
         let msg = Message {
             id: utils::longid(),
             r#type: consts::ACT_TYPE_MSG.to_string(),
             source: task.node().kind().to_string(),
-            state: task.state().into(),
+            state: state.to_string(),
             pid: task.pid.clone(),
             tid: task.id.clone(),
             key: msg.key.to_string(),

@@ -40,7 +40,7 @@ pub struct Message {
     pub name: String,
 
     /// task action state
-    pub state: MessageState,
+    pub state: String,
 
     /// message type
     /// workflow | step | branch | msg | irq
@@ -56,6 +56,9 @@ pub struct Message {
 
     /// node id
     pub nid: String,
+
+    /// model id
+    pub mid: String,
 
     /// node id or act key
     /// if the key is empty, just using nid as the key
@@ -83,7 +86,7 @@ pub struct Message {
 
 impl Message {
     pub fn state(&self) -> MessageState {
-        self.state.clone()
+        self.state.as_str().into()
     }
 
     pub fn is_key(&self, key: &str) -> bool {
@@ -91,7 +94,7 @@ impl Message {
     }
 
     pub fn is_state(&self, state: &str) -> bool {
-        self.state == state.into()
+        self.state == state
     }
 
     pub fn is_type(&self, t: &str) -> bool {
@@ -131,7 +134,7 @@ impl Message {
 
     /// workflow cost in million seconds
     pub fn cost(&self) -> i64 {
-        if self.state.is_completed() {
+        if self.state().is_completed() {
             return self.end_time - self.start_time;
         }
 
@@ -144,12 +147,13 @@ impl Message {
             id: value.id,
             tid: value.tid,
             name: value.name,
-            state: value.state.to_string(),
+            state: value.state,
             r#type: value.r#type,
             source: value.source,
             model: serde_json::to_string(&value.model).unwrap(),
             pid: value.pid,
             nid: value.nid,
+            mid: value.mid,
             key: value.key,
             inputs: value.inputs.to_string(),
             outputs: value.outputs.to_string(),
@@ -227,6 +231,7 @@ impl From<data::Message> for Message {
             model: serde_json::from_str(&v.model).unwrap_or_default(),
             pid: v.pid,
             nid: v.nid,
+            mid: v.mid,
             key: v.key,
             inputs: serde_json::from_str(&v.inputs).unwrap_or_default(),
             outputs: serde_json::from_str(&v.outputs).unwrap_or_default(),

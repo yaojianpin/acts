@@ -1,5 +1,5 @@
 use crate::{
-    store::{data, DbSet, Query, StoreAdapter, StoreKind},
+    store::{data, DbSet, PageData, Query, StoreAdapter, StoreKind},
     Builder, Result,
 };
 use std::sync::Arc;
@@ -7,7 +7,6 @@ use tokio::sync::OnceCell;
 
 static STORE: OnceCell<TestStore> = OnceCell::const_new();
 async fn init() -> TestStore {
-    
     TestStore::new()
 }
 
@@ -97,8 +96,14 @@ where
         )))
     }
 
-    fn query(&self, _q: &Query) -> Result<Vec<Self::Item>> {
-        Ok(vec![])
+    fn query(&self, _q: &Query) -> Result<PageData<Self::Item>> {
+        Ok(PageData {
+            count: 0,
+            page_size: 50,
+            page_num: 1,
+            page_count: 0,
+            rows: vec![],
+        })
     }
 
     fn create(&self, _data: &Self::Item) -> Result<bool> {

@@ -23,8 +23,10 @@ async fn store_mem_model_create() {
         name: "test".to_string(),
         ver: 1,
         size: 1245,
-        time: 3333,
+        create_time: 3333,
+        update_time: 0,
         data: "{}".to_string(),
+        timestamp: 0,
     };
     store.models().create(&model).unwrap();
     assert!(store.models().exists(&model.id).unwrap());
@@ -39,8 +41,10 @@ async fn store_mem_model_find() {
         name: "test".to_string(),
         ver: 1,
         size: 1245,
-        time: 3333,
+        create_time: 3333,
         data: "{}".to_string(),
+        update_time: 0,
+        timestamp: 0,
     };
     store.models().create(&model).unwrap();
     assert_eq!(store.models().find(&mid).unwrap().id, mid);
@@ -56,8 +60,10 @@ async fn store_mem_model_query() {
             name: "test_model".to_string(),
             ver: 1,
             size: 1245,
-            time: 3333,
+            create_time: 3333,
+            update_time: 0,
             data: "{}".to_string(),
+            timestamp: 0,
         };
         models.create(&model).unwrap();
     }
@@ -66,7 +72,7 @@ async fn store_mem_model_query() {
         .push(Cond::and().push(Expr::eq("name", "test_model")))
         .set_limit(5);
     let items = models.query(&q).unwrap();
-    assert_eq!(items.len(), 5);
+    assert_eq!(items.count, 5);
 }
 
 #[tokio::test]
@@ -78,16 +84,20 @@ async fn store_mem_model_update() {
         name: "test".to_string(),
         ver: 1,
         size: 1245,
-        time: 3333,
+        create_time: 3333,
+        update_time: 0,
         data: "{}".to_string(),
+        timestamp: 0,
     };
     store.models().create(&model).unwrap();
 
     model.ver = 3;
+    model.update_time = 1;
     store.models().update(&model).unwrap();
 
     let p = store.models().find(&model.id).unwrap();
     assert_eq!(p.ver, model.ver);
+    assert!(p.update_time > 0);
 }
 
 #[tokio::test]
@@ -98,8 +108,10 @@ async fn store_mem_model_delete() {
         name: "test".to_string(),
         ver: 1,
         size: 1245,
-        time: 3333,
+        create_time: 3333,
+        update_time: 0,
         data: "{}".to_string(),
+        timestamp: 0,
     };
     store.models().create(&model).unwrap();
     store.models().delete(&model.id).unwrap();
@@ -171,7 +183,7 @@ async fn store_mem_proc_query() {
         .push(Cond::and().push(Expr::eq("mid", mid)))
         .set_limit(5);
     let items = procs.query(&q).unwrap();
-    assert_eq!(items.len(), 5);
+    assert_eq!(items.count, 5);
 }
 
 #[tokio::test]
@@ -301,7 +313,7 @@ async fn store_mem_task_query() {
         .push(Cond::and().push(Expr::eq("pid", pid)))
         .set_limit(5);
     let items = tasks.query(&q).unwrap();
-    assert_eq!(items.len(), 5);
+    assert_eq!(items.count, 5);
 }
 
 #[tokio::test]
@@ -373,6 +385,7 @@ async fn store_mem_message_create() {
         pid: pid.clone(),
         tid: tid.clone(),
         nid: utils::shortid(),
+        mid: utils::shortid(),
         state: "created".to_string(),
         start_time: 0,
         end_time: 0,
@@ -411,6 +424,7 @@ async fn store_mem_message_query() {
         pid: pid.clone(),
         tid: tid.clone(),
         nid: utils::shortid(),
+        mid: utils::shortid(),
         state: "created".to_string(),
         start_time: 0,
         end_time: 0,
@@ -450,6 +464,7 @@ async fn store_mem_message_update() {
         pid: pid.clone(),
         tid: tid.clone(),
         nid: utils::shortid(),
+        mid: utils::shortid(),
         state: "created".to_string(),
         start_time: 0,
         end_time: 0,
@@ -496,6 +511,7 @@ async fn store_mem_message_remove() {
         pid: pid.clone(),
         tid: tid.clone(),
         nid: utils::shortid(),
+        mid: utils::shortid(),
         state: "created".to_string(),
         start_time: 0,
         end_time: 0,

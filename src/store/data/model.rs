@@ -6,6 +6,8 @@ pub struct Model {
     pub name: String,
     pub ver: u32,
     pub size: u32,
-    pub time: i64,
+    pub create_time: i64,
+    pub update_time: i64,
     pub data: String,
+    pub timestamp: i64,
 }

@@ -1,8 +1,8 @@
 mod block;
 mod call;
 mod cmd;
+mod irq;
 mod pack;
-mod req;
 
 use super::TaskLifeCycle;
 use crate::{
@@ -37,7 +37,7 @@ impl ActTask for Act {
 
         let func: ActFn = self.into();
         match func {
-            ActFn::Irq(req) => req.init(ctx),
+            ActFn::Irq(irq) => irq.init(ctx),
             ActFn::Call(u) => u.init(ctx),
             ActFn::Block(b) => b.init(ctx),
             ActFn::Pack(p) => p.init(ctx),

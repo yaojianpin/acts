@@ -92,15 +92,18 @@ fn model_info_model() {
         name: "test_model".to_string(),
         ver: 1,
         size: 1245,
-        time: 3333,
+        create_time: 3333,
+        update_time: 0,
         data: "{}".to_string(),
+        timestamp: 0,
     };
     let info: ModelInfo = model.clone().into();
     assert_eq!(info.id, model.id);
     assert_eq!(info.name, model.name);
     assert_eq!(info.ver, model.ver);
     assert_eq!(info.size, model.size);
-    assert_eq!(info.time, model.time);
+    assert_eq!(info.create_time, model.create_time);
+    assert_eq!(info.update_time, model.update_time);
     assert_eq!(info.data, model.data);
 }
 
@@ -240,8 +243,10 @@ fn model_info_model_arr_to_value() {
         name: "test_model".to_string(),
         ver: 1,
         size: 1245,
-        time: 3333,
+        create_time: 3333,
+        update_time: 0,
         data: "{}".to_string(),
+        timestamp: 0,
     };
 
     let mut arr: Vec<ModelInfo> = Vec::new();
@@ -255,6 +260,13 @@ fn model_info_model_arr_to_value() {
     assert_eq!(v.get("name").unwrap().as_str().unwrap(), model.name);
     assert_eq!(v.get("ver").unwrap().as_u64().unwrap(), model.ver as u64);
     assert_eq!(v.get("size").unwrap().as_u64().unwrap(), model.size as u64);
-    assert_eq!(v.get("time").unwrap().as_i64().unwrap(), model.time as i64);
+    assert_eq!(
+        v.get("create_time").unwrap().as_i64().unwrap(),
+        model.create_time as i64
+    );
+    assert_eq!(
+        v.get("update_time").unwrap().as_i64().unwrap(),
+        model.update_time as i64
+    );
     assert_eq!(v.get("data").unwrap().as_str().unwrap(), model.data);
 }

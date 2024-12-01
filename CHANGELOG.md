@@ -73,3 +73,10 @@
 
 - add export.msg unsub to support unsubscribe the messages by client
 - fix the deadlock issue by subscribing with same client id by many times
+
+# 0.13.0
+
+- change the the query function to return PageData in trait DbSet for store collection
+- add query_by and order_by to query fn
+- add `mid` to message collection
+- add ExecutorQuery to export list fn for msg, pack, proc, task, message

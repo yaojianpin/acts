@@ -1,6 +1,12 @@
-use crate::{sch::Runtime, store::StoreAdapter, ModelInfo, Query, Result, Workflow};
+use crate::{
+    sch::Runtime,
+    store::{PageData, StoreAdapter},
+    ModelInfo, Result, Workflow,
+};
 use std::sync::Arc;
 use tracing::instrument;
+
+use super::ExecutorQuery;
 
 #[derive(Clone)]
 pub struct ModelExecutor {
@@ -22,17 +28,16 @@ impl ModelExecutor {
     }
 
     #[instrument(skip(self))]
-    pub fn list(&self, limit: usize) -> Result<Vec<ModelInfo>> {
-        let query = Query::new().set_limit(limit);
+    pub fn list(&self, q: &ExecutorQuery) -> Result<PageData<ModelInfo>> {
+        let query = q.into_query();
         match self.runtime.cache().store().models().query(&query) {
-            Ok(models) => {
-                let mut ret = Vec::new();
-                for m in models {
-                    ret.push(m.into());
-                }
-
-                Ok(ret)
-            }
+            Ok(models) => Ok(PageData {
+                count: models.count,
+                page_size: models.page_size,
+                page_count: models.page_count,
+                page_num: models.page_num,
+                rows: models.rows.iter().map(|m| m.into()).collect(),
+            }),
             Err(err) => Err(err),
         }
     }

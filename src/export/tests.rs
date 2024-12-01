@@ -1,8 +1,10 @@
 use crate::{
     data::{self, Package},
     event::{MessageState, Model},
+    export::ExecutorQuery,
     sch::TaskState,
-    utils, Act, ActPlugin, ChannelOptions, Engine, Message, StoreAdapter, Vars, Workflow,
+    store::{Cond, Expr},
+    utils, Act, ActPlugin, ChannelOptions, Engine, Message, Query, StoreAdapter, Vars, Workflow,
 };
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -164,7 +166,7 @@ async fn export_executor_start_dup_pid_error() {
 }
 
 #[tokio::test]
-async fn export_manager_models_get() {
+async fn export_manager_models_get_count() {
     let engine = Engine::new();
     let manager = engine.executor();
     let mut model = Workflow::new().with_step(|step| step.with_id("step1"));
@@ -174,8 +176,68 @@ async fn export_manager_models_get() {
         manager.model().deploy(&model).unwrap();
     }
 
-    let result = manager.model().list(10).unwrap();
-    assert_eq!(result.len(), 5);
+    let result = manager
+        .model()
+        .list(&ExecutorQuery::new().with_offset(0).with_count(10))
+        .unwrap();
+    assert_eq!(result.count, 5);
+}
+
+#[tokio::test]
+async fn export_manager_models_order() {
+    let engine = Engine::new();
+    let manager = engine.executor();
+    let mut model = Workflow::new().with_step(|step| step.with_id("step1"));
+
+    for i in 0..5 {
+        model.set_id(&utils::longid());
+        model.name = format!("model-{}", i + 1);
+        manager.model().deploy(&model).unwrap();
+    }
+
+    let result = manager
+        .model()
+        .list(&ExecutorQuery::new().with_order("timestamp", true))
+        .unwrap();
+    assert_eq!(result.rows.first().unwrap().name, "model-5");
+}
+
+#[tokio::test]
+async fn export_manager_models_get_rows() {
+    let engine = Engine::new();
+    let manager = engine.executor();
+    let mut model = Workflow::new().with_step(|step| step.with_id("step1"));
+
+    for _ in 0..5 {
+        model.set_id(&utils::longid());
+        manager.model().deploy(&model).unwrap();
+    }
+
+    let result = manager
+        .model()
+        .list(&ExecutorQuery::new().with_offset(4).with_count(10))
+        .unwrap();
+    assert_eq!(result.rows.len(), 1);
+}
+
+#[tokio::test]
+async fn export_manager_models_query() {
+    let engine = Engine::new();
+    let manager = engine.executor();
+    let mut model = Workflow::new().with_step(|step| step.with_id("step1"));
+
+    for i in 0..5 {
+        model.set_id(&utils::longid());
+        model.name = format!("model-{}", i + 1);
+        manager.model().deploy(&model).unwrap();
+    }
+
+    let result = manager
+        .model()
+        .list(&ExecutorQuery::new().with_query("name", "model-3"))
+        .unwrap();
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(result.rows.first().unwrap().name, "model-3");
 }
 
 #[tokio::test]
@@ -216,11 +278,18 @@ async fn export_manager_model_remove() {
     manager.model().deploy(&model).unwrap();
 
     manager.model().rm(&model.id).unwrap();
-    assert_eq!(manager.model().list(10).unwrap().len(), 0);
+    assert_eq!(
+        manager
+            .model()
+            .list(&ExecutorQuery::new().with_offset(0).with_count(10))
+            .unwrap()
+            .count,
+        0
+    );
 }
 
 #[tokio::test]
-async fn export_manager_procs_get_one() {
+async fn export_manager_procs_one() {
     let engine = Engine::new();
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
@@ -236,11 +305,18 @@ async fn export_manager_procs_get_one() {
     rt.launch(&proc);
     sig.recv().await;
 
-    assert_eq!(manager.proc().list(10).unwrap().len(), 1);
+    assert_eq!(
+        manager
+            .proc()
+            .list(&ExecutorQuery::new().with_offset(0).with_count(10))
+            .unwrap()
+            .count,
+        1
+    );
 }
 
 #[tokio::test]
-async fn export_manager_procs_get_many() {
+async fn export_manager_procs_count() {
     let engine = Engine::new();
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
@@ -266,7 +342,165 @@ async fn export_manager_procs_get_many() {
         rt.launch(&proc);
     }
     sig.recv().await;
-    assert_eq!(manager.proc().list(10).unwrap().len(), 5);
+    assert_eq!(
+        manager
+            .proc()
+            .list(&ExecutorQuery::new().with_offset(0).with_count(10))
+            .unwrap()
+            .count,
+        5
+    );
+}
+
+#[tokio::test]
+async fn export_manager_procs_offset_in_range() {
+    let engine = Engine::new();
+    let manager = engine.executor();
+    let model = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::irq(|act| act.with_key("act1")))
+    });
+
+    let rt = engine.runtime();
+    let sig = engine.signal(());
+    let s1 = sig.clone();
+    let count = Arc::new(Mutex::new(0));
+    engine.channel().on_start(move |_e| {
+        println!("message:{_e:?}");
+        let mut count = count.lock().unwrap();
+        *count += 1;
+
+        if *count == 5 {
+            s1.close();
+        }
+    });
+    for _ in 0..5 {
+        let proc = rt.create_proc(&utils::longid(), &model);
+        rt.launch(&proc);
+    }
+    sig.recv().await;
+    assert_eq!(
+        manager
+            .proc()
+            .list(&ExecutorQuery::new().with_offset(4).with_count(10))
+            .unwrap()
+            .rows
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn export_manager_procs_offset_out_range() {
+    let engine = Engine::new();
+    let manager = engine.executor();
+    let model = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::irq(|act| act.with_key("act1")))
+    });
+
+    let rt = engine.runtime();
+    let sig = engine.signal(());
+    let s1 = sig.clone();
+    let count = Arc::new(Mutex::new(0));
+    engine.channel().on_start(move |_e| {
+        println!("message:{_e:?}");
+        let mut count = count.lock().unwrap();
+        *count += 1;
+
+        if *count == 5 {
+            s1.close();
+        }
+    });
+    for _ in 0..5 {
+        let proc = rt.create_proc(&utils::longid(), &model);
+        rt.launch(&proc);
+    }
+    sig.recv().await;
+    assert_eq!(
+        manager
+            .proc()
+            .list(&ExecutorQuery::new().with_offset(1000).with_count(10))
+            .unwrap()
+            .rows
+            .len(),
+        0
+    );
+}
+
+#[tokio::test]
+async fn export_manager_procs_query() {
+    let engine = Engine::new();
+    let manager = engine.executor();
+    let model = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::irq(|act| act.with_key("act1")))
+    });
+
+    let rt = engine.runtime();
+    let sig = engine.signal(());
+    let s1 = sig.clone();
+    let count = Arc::new(Mutex::new(0));
+    engine.channel().on_start(move |_e| {
+        println!("message:{_e:?}");
+        let mut count = count.lock().unwrap();
+        *count += 1;
+
+        if *count == 5 {
+            s1.close();
+        }
+    });
+    let pid = utils::longid();
+    for i in 0..5 {
+        let proc = rt.create_proc(&format!("{pid}-{}", i + 1), &model);
+        rt.launch(&proc);
+    }
+    sig.recv().await;
+
+    let rows = manager
+        .proc()
+        .list(&ExecutorQuery::new().with_query("id", &format!("{pid}-3")))
+        .unwrap()
+        .rows;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows.first().unwrap().id, format!("{pid}-3"));
+}
+
+#[tokio::test]
+async fn export_manager_procs_order() {
+    let engine = Engine::new();
+    let manager = engine.executor();
+    let model = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::irq(|act| act.with_key("act1")))
+    });
+
+    let rt = engine.runtime();
+    let sig = engine.signal(());
+    let s1 = sig.clone();
+    let count = Arc::new(Mutex::new(0));
+    engine.channel().on_start(move |_e| {
+        println!("message:{_e:?}");
+        let mut count = count.lock().unwrap();
+        *count += 1;
+
+        if *count == 5 {
+            s1.close();
+        }
+    });
+    let pid = utils::longid();
+    for i in 0..5 {
+        let proc = rt.create_proc(&format!("{pid}-{}", i + 1), &model);
+        rt.launch(&proc);
+    }
+    sig.recv().await;
+
+    let rows = manager
+        .proc()
+        .list(&ExecutorQuery::new().with_order("timestamp", true))
+        .unwrap()
+        .rows;
+    assert_eq!(rows.first().unwrap().id, format!("{pid}-5"));
 }
 
 #[tokio::test]
@@ -293,7 +527,7 @@ async fn export_manager_proc_get() {
 }
 
 #[tokio::test]
-async fn export_manager_tasks() {
+async fn export_manager_tasks_count() {
     let engine = Engine::new();
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
@@ -317,8 +551,163 @@ async fn export_manager_tasks() {
     rt.start(&model, &vars).unwrap();
     sig.recv().await;
 
-    let tasks = manager.task().list(&pid, 10).unwrap();
-    assert_eq!(tasks.len(), 3); // 3 means the tasks with workflow step act
+    let tasks = manager
+        .task()
+        .list(
+            &&ExecutorQuery::new()
+                .with_query("pid", &pid)
+                .with_offset(0)
+                .with_count(10),
+        )
+        .unwrap();
+    assert_eq!(tasks.count, 3); // 3 means the tasks with workflow step act
+}
+
+#[tokio::test]
+async fn export_manager_tasks_offset_in_range() {
+    let engine = Engine::new();
+    let manager = engine.executor();
+    let model = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::irq(|act| act.with_key("act1")))
+    });
+
+    let rt = engine.runtime();
+    let sig = engine.signal(());
+    let s1 = sig.clone();
+    engine.channel().on_message(move |e| {
+        if e.is_key("act1") {
+            s1.close()
+        }
+    });
+    let pid = utils::longid();
+    let mut vars = Vars::new();
+    vars.insert("uid".to_string(), json!("u1"));
+    vars.insert("pid".to_string(), json!(pid));
+
+    rt.start(&model, &vars).unwrap();
+    sig.recv().await;
+
+    let tasks = manager
+        .task()
+        .list(
+            &ExecutorQuery::new()
+                .with_query("pid", &pid)
+                .with_offset(2)
+                .with_count(10),
+        )
+        .unwrap();
+    assert_eq!(tasks.rows.len(), 1); // 3 means the tasks with workflow step act
+}
+
+#[tokio::test]
+async fn export_manager_tasks_offset_out_range() {
+    let engine = Engine::new();
+    let manager = engine.executor();
+    let model = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::irq(|act| act.with_key("act1")))
+    });
+
+    let rt = engine.runtime();
+    let sig = engine.signal(());
+    let s1 = sig.clone();
+    engine.channel().on_message(move |e| {
+        if e.is_key("act1") {
+            s1.close()
+        }
+    });
+    let pid = utils::longid();
+    let mut vars = Vars::new();
+    vars.insert("uid".to_string(), json!("u1"));
+    vars.insert("pid".to_string(), json!(pid));
+
+    rt.start(&model, &vars).unwrap();
+    sig.recv().await;
+
+    let tasks = manager
+        .task()
+        .list(
+            &ExecutorQuery::new()
+                .with_query("pid", &pid)
+                .with_offset(1000)
+                .with_count(10),
+        )
+        .unwrap();
+    assert_eq!(tasks.rows.len(), 0); // 3 means the tasks with workflow step act
+}
+
+#[tokio::test]
+async fn export_manager_tasks_query() {
+    let engine = Engine::new();
+    let manager = engine.executor();
+    let model = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::irq(|act| act.with_key("act1")))
+    });
+
+    let rt = engine.runtime();
+    let sig = engine.signal(());
+    let s1 = sig.clone();
+    engine.channel().on_message(move |e| {
+        if e.is_key("act1") {
+            s1.close()
+        }
+    });
+    let pid = utils::longid();
+    let mut vars = Vars::new();
+    vars.insert("uid".to_string(), json!("u1"));
+    vars.insert("pid".to_string(), json!(pid));
+
+    rt.start(&model, &vars).unwrap();
+    sig.recv().await;
+
+    let tasks = manager
+        .task()
+        .list(
+            &&&ExecutorQuery::new()
+                .with_query("pid", &pid)
+                .with_query("state", "interrupted"),
+        )
+        .unwrap();
+    assert_eq!(tasks.rows.first().unwrap().r#type, "irq");
+    assert_eq!(tasks.rows.first().unwrap().key, "act1");
+}
+
+#[tokio::test]
+async fn export_manager_tasks_order() {
+    let engine = Engine::new();
+    let manager = engine.executor();
+    let model = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::irq(|act| act.with_key("act1")))
+    });
+
+    let rt = engine.runtime();
+    let sig = engine.signal(());
+    let s1 = sig.clone();
+    engine.channel().on_message(move |e| {
+        if e.is_key("act1") {
+            s1.close()
+        }
+    });
+    let pid = utils::longid();
+    let mut vars = Vars::new();
+    vars.insert("uid".to_string(), json!("u1"));
+    vars.insert("pid".to_string(), json!(pid));
+
+    rt.start(&model, &vars).unwrap();
+    sig.recv().await;
+
+    let tasks = manager
+        .task()
+        .list(
+            &&&ExecutorQuery::new()
+                .with_query("pid", &pid)
+                .with_order("timestamp", true),
+        )
+        .unwrap();
+    assert_eq!(tasks.rows.first().unwrap().r#type, "irq");
 }
 
 #[tokio::test]
@@ -345,16 +734,24 @@ async fn export_manager_task_get() {
 
     rt.start(&model, &vars).unwrap();
     sig.recv().await;
-    let tasks = manager.task().list(&pid, 10).unwrap();
+    let tasks = manager
+        .task()
+        .list(
+            &ExecutorQuery::new()
+                .with_query("pid", &pid)
+                .with_offset(0)
+                .with_count(10),
+        )
+        .unwrap();
     let mut result = true;
-    for task in tasks {
+    for task in tasks.rows.iter() {
         result &= manager.task().get(&pid, &task.id).is_ok();
     }
     assert!(result);
 }
 
 #[tokio::test]
-async fn export_manager_messages() {
+async fn export_manager_messages_all() {
     let engine = Engine::new();
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
@@ -382,7 +779,235 @@ async fn export_manager_messages() {
     let proc = rt.create_proc(&pid, &model);
     rt.launch(&proc);
     let count = sig.recv().await;
-    assert_eq!(manager.msg().list(&pid, 1000).unwrap().len(), count);
+    assert_eq!(
+        manager
+            .msg()
+            .list(&ExecutorQuery::default().with_offset(0).with_count(1000))
+            .unwrap()
+            .count,
+        count
+    );
+}
+
+#[tokio::test]
+async fn export_manager_messages_query() {
+    let engine = Engine::new();
+    let manager = engine.executor();
+    let model = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::irq(|act| act.with_key("act1")))
+    });
+
+    let rt = engine.runtime();
+    let (sig, s1) = engine.signal(0).double();
+    let count = Arc::new(Mutex::new(0));
+    let chan = engine.channel_with_options(&ChannelOptions {
+        ack: true,
+        ..Default::default()
+    });
+    chan.on_message(move |e| {
+        println!("message:{e:?}");
+        let mut count = count.lock().unwrap();
+        *count += 1;
+
+        if e.is_key("act1") && e.is_state("created") {
+            s1.send(*count);
+        }
+    });
+    let pid = utils::longid();
+    let proc = rt.create_proc(&pid, &model);
+    rt.launch(&proc);
+    let count = sig.recv().await;
+    assert_eq!(
+        manager
+            .msg()
+            .list(
+                &ExecutorQuery::new()
+                    .with_query("pid", &pid)
+                    .with_offset(0)
+                    .with_count(1000)
+            )
+            .unwrap()
+            .count,
+        count
+    );
+}
+
+#[tokio::test]
+async fn export_manager_messages_order() {
+    let engine = Engine::new();
+    let manager = engine.executor();
+    let model = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::irq(|act| act.with_key("act1")))
+    });
+
+    let rt = engine.runtime();
+    let (sig, s1) = engine.signal(0).double();
+    let chan = engine.channel_with_options(&ChannelOptions {
+        ack: true,
+        ..Default::default()
+    });
+    chan.on_message(move |e| {
+        println!("message:{e:?}");
+        if e.is_key("act1") && e.is_state("created") {
+            s1.close();
+        }
+    });
+    let pid = utils::longid();
+    let proc = rt.create_proc(&pid, &model);
+    rt.launch(&proc);
+    sig.recv().await;
+    assert_eq!(
+        manager
+            .msg()
+            .list(
+                &ExecutorQuery::new()
+                    .with_query("pid", &pid)
+                    .with_order("timestamp", true)
+            )
+            .unwrap()
+            .rows
+            .first()
+            .unwrap()
+            .r#type,
+        "irq"
+    );
+}
+
+#[tokio::test]
+async fn export_manager_messages_count() {
+    let engine = Engine::new();
+    let manager = engine.executor();
+    let model = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::irq(|act| act.with_key("act1")))
+    });
+
+    let rt = engine.runtime();
+    let (sig, s1) = engine.signal(0).double();
+    let count = Arc::new(Mutex::new(0));
+    let chan = engine.channel_with_options(&ChannelOptions {
+        ack: true,
+        ..Default::default()
+    });
+    chan.on_message(move |e| {
+        println!("message:{e:?}");
+        let mut count = count.lock().unwrap();
+        *count += 1;
+
+        if e.is_key("act1") && e.is_state("created") {
+            s1.send(*count);
+        }
+    });
+    let pid = utils::longid();
+    let proc = rt.create_proc(&pid, &model);
+    rt.launch(&proc);
+    let _ = sig.recv().await;
+    assert_eq!(
+        manager
+            .msg()
+            .list(
+                &ExecutorQuery::new()
+                    .with_query("pid", &pid)
+                    .with_offset(0)
+                    .with_count(1)
+            )
+            .unwrap()
+            .rows
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn export_manager_messages_offset_in_range() {
+    let engine = Engine::new();
+    let manager = engine.executor();
+    let model = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::irq(|act| act.with_key("act1")))
+    });
+
+    let rt = engine.runtime();
+    let (sig, s1) = engine.signal(0).double();
+    let count = Arc::new(Mutex::new(0));
+    let chan = engine.channel_with_options(&ChannelOptions {
+        ack: true,
+        ..Default::default()
+    });
+    chan.on_message(move |e| {
+        println!("message:{e:?}");
+        let mut count = count.lock().unwrap();
+        *count += 1;
+
+        if e.is_key("act1") && e.is_state("created") {
+            s1.send(*count);
+        }
+    });
+    let pid = utils::longid();
+    let proc = rt.create_proc(&pid, &model);
+    rt.launch(&proc);
+    let _ = sig.recv().await;
+    assert_eq!(
+        manager
+            .msg()
+            .list(
+                &ExecutorQuery::new()
+                    .with_query("pid", &pid)
+                    .with_offset(1)
+                    .with_count(2)
+            )
+            .unwrap()
+            .rows
+            .len(),
+        2
+    );
+}
+
+#[tokio::test]
+async fn export_manager_messages_offset_out_range() {
+    let engine = Engine::new();
+    let manager = engine.executor();
+    let model = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::irq(|act| act.with_key("act1")))
+    });
+
+    let rt = engine.runtime();
+    let (sig, s1) = engine.signal(0).double();
+    let count = Arc::new(Mutex::new(0));
+    let chan = engine.channel_with_options(&ChannelOptions {
+        ack: true,
+        ..Default::default()
+    });
+    chan.on_message(move |e| {
+        println!("message:{e:?}");
+        let mut count = count.lock().unwrap();
+        *count += 1;
+
+        if e.is_key("act1") && e.is_state("created") {
+            s1.send(*count);
+        }
+    });
+    let pid = utils::longid();
+    let proc = rt.create_proc(&pid, &model);
+    rt.launch(&proc);
+    let _ = sig.recv().await;
+    assert_eq!(
+        manager
+            .msg()
+            .list(
+                &ExecutorQuery::new()
+                    .with_query("pid", &pid)
+                    .with_offset(1000)
+                    .with_count(100)
+            )
+            .unwrap()
+            .rows
+            .len(),
+        0
+    );
 }
 
 #[tokio::test]
@@ -415,8 +1040,16 @@ async fn export_manager_message_get() {
     rt.launch(&proc);
     sig.recv().await;
 
-    let messages = manager.msg().list(&pid, 1000).unwrap();
-    let message = messages[0].clone();
+    let messages = manager
+        .msg()
+        .list(
+            &ExecutorQuery::new()
+                .with_query("pid", &pid)
+                .with_offset(0)
+                .with_count(1000),
+        )
+        .unwrap();
+    let message = messages.rows[0].clone();
 
     let m = manager.msg().get(&message.id).unwrap();
     assert_eq!(m.id, message.id);
@@ -453,15 +1086,23 @@ async fn export_manager_message_rm() {
     rt.launch(&proc);
     sig.recv().await;
 
-    let messages = manager.msg().list(&pid, 1000).unwrap();
-    let message = messages[0].clone();
+    let messages = manager
+        .msg()
+        .list(
+            &ExecutorQuery::new()
+                .with_query("pid", &pid)
+                .with_offset(0)
+                .with_count(1),
+        )
+        .unwrap();
+    let message = messages.rows[0].clone();
 
     let ret = manager.msg().rm(&message.id).unwrap();
     assert!(ret);
 }
 
 #[tokio::test]
-async fn export_manager_packages() {
+async fn export_manager_packages_count() {
     let engine = Engine::new();
     let manager = engine.executor();
 
@@ -478,7 +1119,130 @@ async fn export_manager_packages() {
         };
         manager.pack().publish(&package).unwrap();
     }
-    assert_eq!(manager.pack().list(1000).unwrap().len(), count);
+    assert_eq!(
+        manager
+            .pack()
+            .list(&ExecutorQuery::new().with_offset(0).with_count(1000))
+            .unwrap()
+            .count,
+        count
+    );
+}
+
+#[tokio::test]
+async fn export_manager_packages_order() {
+    let engine = Engine::new();
+    let manager = engine.executor();
+
+    let count = 5;
+    for i in 0..count {
+        let package = Package {
+            id: utils::longid(),
+            name: format!("test-{}", i + 1),
+            size: i as u32,
+            data: [0x0, 0x1].to_vec(),
+            create_time: utils::time::time_millis(),
+            update_time: 0,
+            timestamp: utils::time::timestamp(),
+        };
+        manager.pack().publish(&package).unwrap();
+    }
+    assert_eq!(
+        manager
+            .pack()
+            .list(&ExecutorQuery::new().with_order("timestamp", true))
+            .unwrap()
+            .rows
+            .first()
+            .unwrap()
+            .name,
+        "test-5"
+    );
+}
+
+#[tokio::test]
+async fn export_manager_packages_query() {
+    let engine = Engine::new();
+    let manager = engine.executor();
+
+    let count = 5;
+    for i in 0..count {
+        let package = Package {
+            id: utils::longid(),
+            name: format!("test-{}", i + 1),
+            size: i as u32,
+            data: [0x0, 0x1].to_vec(),
+            create_time: utils::time::time_millis(),
+            update_time: 0,
+            timestamp: utils::time::timestamp(),
+        };
+        manager.pack().publish(&package).unwrap();
+    }
+    let rows = manager
+        .pack()
+        .list(&ExecutorQuery::new().with_query("name", "test-3"))
+        .unwrap()
+        .rows;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows.first().unwrap().name, "test-3");
+}
+
+#[tokio::test]
+async fn export_manager_packages_offset_in_range() {
+    let engine = Engine::new();
+    let manager = engine.executor();
+
+    let count = 5;
+    for i in 0..count {
+        let package = Package {
+            id: utils::longid(),
+            name: i.to_string(),
+            size: i as u32,
+            data: [0x0, 0x1].to_vec(),
+            create_time: utils::time::time_millis(),
+            update_time: 0,
+            timestamp: utils::time::timestamp(),
+        };
+        manager.pack().publish(&package).unwrap();
+    }
+    assert_eq!(
+        manager
+            .pack()
+            .list(&ExecutorQuery::new().with_offset(4).with_count(1000))
+            .unwrap()
+            .rows
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn export_manager_packages_offset_out_range() {
+    let engine = Engine::new();
+    let manager = engine.executor();
+
+    let count = 5;
+    for i in 0..count {
+        let package = Package {
+            id: utils::longid(),
+            name: i.to_string(),
+            size: i as u32,
+            data: [0x0, 0x1].to_vec(),
+            create_time: utils::time::time_millis(),
+            update_time: 0,
+            timestamp: utils::time::timestamp(),
+        };
+        manager.pack().publish(&package).unwrap();
+    }
+    assert_eq!(
+        manager
+            .pack()
+            .list(&ExecutorQuery::new().with_offset(1000).with_count(1000))
+            .unwrap()
+            .rows
+            .len(),
+        0
+    );
 }
 
 #[tokio::test]
@@ -1022,7 +1786,7 @@ async fn export_emitter_state_match() {
     });
 
     let msg = Message {
-        state: MessageState::Completed,
+        state: MessageState::Completed.to_string(),
         ..Message::default()
     };
     engine.runtime().emitter().emit_message(&msg);
@@ -1045,7 +1809,7 @@ async fn export_emitter_state_not_match() {
     });
 
     let msg = Message {
-        state: MessageState::Completed,
+        state: MessageState::Completed.to_string(),
         ..Message::default()
     };
     engine.runtime().emitter().emit_message(&msg);
@@ -1309,7 +2073,7 @@ async fn export_message_not_store_with_empty_emit_id_and_not_match_option() {
 }
 
 #[tokio::test]
-async fn export_message_clear_error_messages() {
+async fn export_message_clear_error_messages_by_none() {
     let engine = Engine::new();
     let msg = data::Message {
         id: utils::longid(),
@@ -1331,7 +2095,7 @@ async fn export_message_clear_error_messages() {
         .find(&msg.id)
         .unwrap();
     assert_eq!(message.status, data::MessageStatus::Error);
-    engine.executor().msg().clear().unwrap();
+    engine.executor().msg().clear(None).unwrap();
     assert!(!engine
         .runtime()
         .cache()
@@ -1339,6 +2103,53 @@ async fn export_message_clear_error_messages() {
         .messages()
         .exists(&msg.id)
         .unwrap());
+}
+
+#[tokio::test]
+async fn export_message_clear_error_messages_by_pid() {
+    let engine = Engine::new();
+    let pid = utils::longid();
+    engine
+        .runtime()
+        .cache()
+        .store()
+        .messages()
+        .create(&data::Message {
+            id: utils::longid(),
+            status: data::MessageStatus::Error,
+            pid: pid.clone(),
+            ..data::Message::default()
+        })
+        .unwrap();
+
+    engine
+        .runtime()
+        .cache()
+        .store()
+        .messages()
+        .create(&data::Message {
+            id: utils::longid(),
+            status: data::MessageStatus::Error,
+            pid: pid.clone(),
+            ..data::Message::default()
+        })
+        .unwrap();
+    engine.executor().msg().clear(Some(pid.clone())).unwrap();
+    let messages = engine
+        .runtime()
+        .cache()
+        .store()
+        .messages()
+        .query(
+            &Query::new().push(
+                Cond::and()
+                    .push(Expr::eq("pid", pid))
+                    .push(Expr::eq("status", data::MessageStatus::Error)),
+            ),
+        )
+        .unwrap();
+
+    assert_eq!(messages.rows.len(), 0);
 }
 
 #[tokio::test]

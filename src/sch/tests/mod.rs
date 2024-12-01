@@ -23,7 +23,7 @@ fn create_proc(workflow: &mut Workflow, pid: &str) -> (Arc<Proc>, Arc<Runtime>, 
     let s1 = sig.clone();
     let s2 = sig.clone();
     emitter.on_complete(move |p| {
-        if p.inner().state.is_completed() {
+        if p.inner().state().is_completed() {
             s1.close();
         }
     });
@@ -57,7 +57,7 @@ fn create_proc_signal<R: Clone + Default + Sync + Send + 'static>(
     let rx3 = sig.clone();
     emitter.on_complete(move |p| {
         println!("message: {p:?}");
-        if p.state.is_completed() {
+        if p.state().is_completed() {
             rx2.close();
         }
     });
@@ -85,7 +85,7 @@ fn create_proc_signal2<R: Clone + Default + Send + 'static>(
     let rx2 = sig.clone();
     let rx3 = sig.clone();
     emitter.on_complete(move |p| {
-        if p.inner().state.is_completed() {
+        if p.inner().state().is_completed() {
             rx2.close();
         }
     });
@@ -113,7 +113,7 @@ fn create_proc_signal_config<R: Clone + Default + Send + 'static>(
     let emitter = engine.channel().clone();
     let (s1, s2, sig) = engine.signal(R::default()).triple();
     emitter.on_complete(move |p| {
-        if p.inner().state.is_completed() {
+        if p.inner().state().is_completed() {
             s1.close();
         }
     });

@@ -45,7 +45,16 @@ impl DbSchema for Model {
             },
         ));
         map.push((
-            "time".to_string(),
+            "create_time".to_string(),
+            DbColumn {
+                db_type: DbType::Int64,
+                is_not_null: false,
+                is_primary_key: false,
+                ..Default::default()
+            },
+        ));
+        map.push((
+            "update_time".to_string(),
             DbColumn {
                 db_type: DbType::Int64,
                 is_not_null: false,
@@ -59,6 +68,13 @@ impl DbSchema for Model {
                 db_type: DbType::Text,
                 is_not_null: false,
                 is_primary_key: false,
+                ..Default::default()
+            },
+        ));
+        map.push((
+            "timestamp".to_string(),
+            DbColumn {
+                db_type: DbType::Int64,
                 ..Default::default()
             },
         ));
@@ -76,8 +92,10 @@ impl DbRow for Model {
             name: row.get::<usize, String>(1).unwrap(),
             ver: row.get::<usize, u32>(2).unwrap(),
             size: row.get::<usize, u32>(3).unwrap(),
-            time: row.get::<usize, i64>(4).unwrap(),
-            data: row.get::<usize, String>(5).unwrap(),
+            create_time: row.get::<usize, i64>(4).unwrap(),
+            update_time: row.get::<usize, i64>(5).unwrap(),
+            data: row.get::<usize, String>(6).unwrap(),
+            timestamp: row.get::<usize, i64>(7).unwrap(),
         })
     }
 
@@ -88,8 +106,13 @@ impl DbRow for Model {
         ret.push(("name".to_string(), Value::Text(self.name.clone())));
         ret.push(("ver".to_string(), Value::Integer(self.ver as i64)));
         ret.push(("size".to_string(), Value::Integer(self.size as i64)));
-        ret.push(("time".to_string(), Value::Integer(self.time)));
+        ret.push(("create_time".to_string(), Value::Integer(self.create_time)));
+        ret.push(("update_time".to_string(), Value::Integer(self.update_time)));
         ret.push(("data".to_string(), Value::Text(self.data.clone())));
+        ret.push((
+            "timestamp".to_string(),
+            Value::Integer(self.timestamp as i64),
+        ));
 
         Ok(ret)
     }

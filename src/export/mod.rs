@@ -6,5 +6,5 @@ mod extender;
 mod tests;
 
 pub use channel::{Channel, ChannelOptions};
-pub use executor::Executor;
+pub use executor::{Executor, ExecutorQuery};
 pub use extender::Extender;
