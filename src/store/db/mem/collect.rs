@@ -64,8 +64,8 @@ where
         } else {
             let mut q = q.clone();
             for cond in q.queries_mut() {
-                let mut result = HashSet::new();
-                for expr in cond.conds().iter() {
+                for expr in cond.conds().clone().iter() {
+                    let mut result = HashSet::new();
                     for (k, v) in db.iter() {
                         let prop_value = v.get(expr.key()).ok_or(ActError::Store(format!(
                             "cannot find key `{}` in {}",
@@ -78,12 +78,11 @@ where
                             result.insert(k.as_bytes().to_vec().into_boxed_slice());
                         }
                     }
+                    cond.calc(&result);
                 }
-                cond.calc(&result);
             }
 
             let items = q.calc();
-
             #[allow(unused_assignments)]
             {
                 rows = db
@@ -191,6 +190,7 @@ impl Cond {
 
 impl Expr {
     pub fn op(&self, l: &serde_json::Value, r: &serde_json::Value) -> bool {
+        debug!("Expr.op op={:?}, l={l}, r={r}", self.op);
         match &self.op {
             ExprOp::EQ => l == r,
             ExprOp::NE => l != r,

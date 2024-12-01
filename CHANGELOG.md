@@ -80,3 +80,7 @@
 - add query_by and order_by to query fn
 - add `mid` to message collection
 - add ExecutorQuery to export list fn for msg, pack, proc, task, message
+
+# 0.13.1
+
+- fix: fix the memory store query error
