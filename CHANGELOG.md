@@ -84,3 +84,7 @@
 # 0.13.1
 
 - fix: fix the memory store query error
+
+# 0.13.2
+
+- upgrate rquickjs to 0.8.1

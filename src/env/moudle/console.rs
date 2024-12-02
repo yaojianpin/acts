@@ -1,7 +1,7 @@
 use crate::{env::ActModule, Result};
-use rquickjs::class::Trace;
+use rquickjs::{class::Trace, JsLifetime};
 
-#[derive(Trace, Clone)]
+#[derive(Trace, Clone, JsLifetime)]
 #[rquickjs::class]
 pub struct Console {}
 
