@@ -536,8 +536,8 @@ for more information please see the example [`package`](https://github.com/yaoji
 Create a acts-server to interact with clients based on grpc.
 please see more from [`acts-server`](https://github.com/yaojianpin/acts-server)
 
-## Acts-Channel
+## Client channels
 
-The channel is used to interact with the server. the actions includes 'deploy', 'start', 'push', 'remove', 'complete', 'back', 'cancel', 'skip', 'abort' and 'error'.
-
-please see more from [`acts-channel`](https://github.com/yaojianpin/acts-channel)
+- rust https://github.com/yaojianpin/acts-channel
+- python https://github.com/yaojianpin/acts-channel-py
+- go https://github.com/yaojianpin/acts-channel-go
