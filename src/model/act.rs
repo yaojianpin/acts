@@ -52,7 +52,7 @@ pub struct Act {
     #[serde(default)]
     pub on: String,
 
-    /// act arguments for act fnction, such as 'set', 'req'
+    /// act arguments for act function, such as 'set', 'req'
     #[serde(default)]
     pub inputs: Vars,
 
