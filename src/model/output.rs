@@ -4,7 +4,7 @@ use serde::{de, Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Default, Clone, Serialize, Deserialize, strum::AsRefStr)]
 pub enum OutputType {
     #[default]
     String,
@@ -41,13 +41,7 @@ where
 
 impl fmt::Display for OutputType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            OutputType::String => "String",
-            OutputType::Bool => "Bool",
-            OutputType::Number => "Number",
-            OutputType::Array => "Array",
-            OutputType::Object => "Object",
-        })
+        f.write_str(self.as_ref())
     }
 }
 
