@@ -1,7 +1,5 @@
-use crate::{
-    utils::{self, consts},
-    Act, Action, Engine, TaskState, Vars, Workflow,
-};
+use crate::event::EventAction;
+use crate::{utils, Act, Action, Engine, TaskState, Vars, Workflow};
 use serde_json::json;
 
 #[tokio::test]
@@ -83,7 +81,7 @@ async fn sch_scher_do_action() {
         if e.is_key("act1") && e.is_state("created") {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            let action = Action::new(&e.pid, &e.tid, consts::EVT_NEXT, &options);
+            let action = Action::new(&e.pid, &e.tid, EventAction::Next, &options);
             s.do_action(&action).unwrap();
         }
     });

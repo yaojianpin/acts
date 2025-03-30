@@ -1,6 +1,7 @@
+use crate::event::EventAction;
 use crate::{
     utils::{self, consts},
-    ActError, ActTask, Do, Context, Error, Result, TaskState,
+    ActError, ActTask, Context, Do, Error, Result, TaskState,
 };
 
 impl Do {
@@ -18,28 +19,29 @@ impl Do {
                 task.update_data(&inputs);
             }
         };
-        let key: &str = &self.key;
+
+        let key = EventAction::parse(&self.key)?;
         match key {
-            consts::EVT_SUBMIT => {
+            EventAction::Submit => {
                 set_inputs();
                 task.set_state(TaskState::Submitted);
                 task.next(ctx)?;
             }
-            consts::EVT_NEXT => {
+            EventAction::Next => {
                 set_inputs();
                 task.set_state(TaskState::Completed);
                 task.next(ctx)?;
             }
-            consts::EVT_SKIP => {
+            EventAction::Skip => {
                 set_inputs();
                 task.set_state(TaskState::Skipped);
                 task.next(ctx)?;
             }
-            consts::EVT_ABORT => {
+            EventAction::Abort => {
                 set_inputs();
                 ctx.abort_task(&task)?;
             }
-            consts::EVT_ERR => {
+            EventAction::Error => {
                 let ecode =
                     self.inputs
                         .get::<String>(consts::ACT_ERR_CODE)

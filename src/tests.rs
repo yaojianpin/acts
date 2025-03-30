@@ -1,3 +1,4 @@
+use crate::event::EventAction;
 use crate::{utils, Act, Builder, Engine, Vars, Workflow};
 use serde_json::json;
 
@@ -104,7 +105,8 @@ async fn engine_event_on_error() {
         options.set("ecode", "err1");
 
         if e.is_key("act1") && e.is_state("created") {
-            e.do_action(&e.pid, &e.tid, "error", &options).unwrap();
+            e.do_action(&e.pid, &e.tid, EventAction::Error, &options)
+                .unwrap();
         }
     });
 

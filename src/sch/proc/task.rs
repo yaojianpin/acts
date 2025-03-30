@@ -347,8 +347,7 @@ impl Task {
             "cannot find action in context".to_string(),
         ))?;
 
-        let event = EventAction::parse(&action.event)?;
-        match event {
+        match action.event {
             EventAction::Push => {
                 let act_name = ctx.get_var::<String>("act").unwrap_or("irq".to_string());
                 let key = ctx.get_var::<String>("key").unwrap_or_default();
@@ -537,7 +536,7 @@ impl Task {
             }
         };
 
-        if event != EventAction::Push {
+        if action.event != EventAction::Push {
             // update the message status after doing action
             ctx.runtime.cache().store().set_message_with(
                 &action.pid,

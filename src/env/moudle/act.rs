@@ -10,6 +10,7 @@ impl ActPackage {
 
 #[rquickjs::module(rename_vars = "camelCase")]
 mod act {
+    use crate::event::EventAction;
     use crate::{
         env::value::ActValue, utils::consts, Act, ActError, Action, Block, Call, Chain, Context,
         Each, Irq, Msg, Vars,
@@ -68,7 +69,7 @@ mod act {
             ctx.set_action(&Action::new(
                 &task.pid,
                 &task.id,
-                consts::EVT_NEXT,
+                EventAction::Next,
                 &Vars::new(),
             ))?;
             task.update_no_lock(ctx)?;
@@ -84,7 +85,7 @@ mod act {
             ctx.set_action(&Action::new(
                 &task.pid,
                 &task.id,
-                consts::EVT_ABORT,
+                EventAction::Abort,
                 &Vars::new(),
             ))?;
             task.update_no_lock(ctx)?;
@@ -99,7 +100,7 @@ mod act {
         let vars = Vars::new().with(consts::ACT_TO, nid);
         Context::with(|ctx| {
             let task = ctx.task();
-            ctx.set_action(&Action::new(&task.pid, &task.id, consts::EVT_BACK, &vars))?;
+            ctx.set_action(&Action::new(&task.pid, &task.id, EventAction::Back, &vars))?;
             task.update_no_lock(ctx)?;
             Ok(())
         })
@@ -113,7 +114,7 @@ mod act {
             ctx.set_action(&Action::new(
                 &task.pid,
                 &task.id,
-                consts::EVT_SKIP,
+                EventAction::Skip,
                 &Vars::new(),
             ))?;
             task.update_no_lock(ctx)?;
@@ -129,7 +130,7 @@ mod act {
             .with(consts::ACT_ERR_MESSAGE, message);
         Context::with(|ctx| {
             let task = ctx.task();
-            ctx.set_action(&Action::new(&task.pid, &task.id, consts::EVT_ERR, &vars))?;
+            ctx.set_action(&Action::new(&task.pid, &task.id, EventAction::Error, &vars))?;
             task.update_no_lock(ctx)?;
             Ok(())
         })

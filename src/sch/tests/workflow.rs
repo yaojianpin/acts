@@ -1,3 +1,4 @@
+use crate::event::EventAction;
 use crate::{
     sch::tests::create_proc_signal,
     utils::{self, consts},
@@ -184,7 +185,7 @@ async fn sch_workflow_setup_on_before_update() {
     let s2 = sig.clone();
     emitter.on_message(move |e| {
         if e.is_type("irq") && e.is_state("created") {
-            e.do_action(&e.pid, &e.tid, consts::EVT_NEXT, &Vars::new())
+            e.do_action(&e.pid, &e.tid, EventAction::Next, &Vars::new())
                 .unwrap();
         }
 
@@ -228,7 +229,7 @@ async fn sch_workflow_setup_on_updated() {
     let s2 = sig.clone();
     emitter.on_message(move |e| {
         if e.is_type("irq") && e.is_state("created") {
-            e.do_action(&e.pid, &e.tid, consts::EVT_NEXT, &Vars::new())
+            e.do_action(&e.pid, &e.tid, EventAction::Next, &Vars::new())
                 .unwrap();
         }
 
@@ -271,7 +272,7 @@ async fn sch_workflow_setup_on_catch() {
             let options = Vars::new()
                 .with(consts::ACT_ERR_CODE, "err1")
                 .with(consts::ACT_ERR_MESSAGE, "");
-            e.do_action(&e.pid, &e.tid, consts::EVT_ERR, &options)
+            e.do_action(&e.pid, &e.tid, EventAction::Error, &options)
                 .unwrap();
         }
     });

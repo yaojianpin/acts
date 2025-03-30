@@ -132,8 +132,8 @@ impl Timeout {
         Self::default()
     }
     pub fn with_on(mut self, v: &str) -> Self {
-        self.on =
-            TimeoutLimit::parse(v).unwrap_or_else(|_| panic!("failed with error format '{v}' for 'on' "));
+        self.on = TimeoutLimit::parse(v)
+            .unwrap_or_else(|_| panic!("failed with error format '{v}' for 'on' "));
         self
     }
 

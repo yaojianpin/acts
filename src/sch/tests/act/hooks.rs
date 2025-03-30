@@ -1,3 +1,4 @@
+use crate::event::EventAction;
 use crate::{
     sch::{tests::create_proc_signal, TaskState},
     utils::{self, consts},
@@ -65,7 +66,7 @@ async fn sch_act_hooks_completed() {
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
         if e.is_key("req1") {
-            e.do_action(&e.pid, &e.tid, consts::EVT_NEXT, &Vars::new())
+            e.do_action(&e.pid, &e.tid, EventAction::Next, &Vars::new())
                 .unwrap();
         }
 
@@ -103,7 +104,7 @@ async fn sch_act_hooks_before_update() {
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
         if e.is_key("req1") && e.is_state("created") {
-            e.do_action(&e.pid, &e.tid, consts::EVT_NEXT, &Vars::new())
+            e.do_action(&e.pid, &e.tid, EventAction::Next, &Vars::new())
                 .unwrap();
         }
 
@@ -145,7 +146,7 @@ async fn sch_act_hooks_updated() {
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
         if e.is_source("act") && e.is_state("created") {
-            e.do_action(&e.pid, &e.tid, consts::EVT_NEXT, &Vars::new())
+            e.do_action(&e.pid, &e.tid, EventAction::Next, &Vars::new())
                 .unwrap();
         }
 
@@ -186,7 +187,7 @@ async fn sch_act_hooks_on_step() {
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
         if e.is_source("act") && e.is_state("created") {
-            e.do_action(&e.pid, &e.tid, consts::EVT_NEXT, &Vars::new())
+            e.do_action(&e.pid, &e.tid, EventAction::Next, &Vars::new())
                 .unwrap();
         }
         if e.is_type("msg") {
@@ -229,7 +230,8 @@ async fn sch_act_hooks_error() {
         if e.is_type("irq") {
             let mut vars = Vars::new();
             vars.set(consts::ACT_ERR_CODE, "100");
-            e.do_action(&e.pid, &e.tid, "error", &vars).unwrap();
+            e.do_action(&e.pid, &e.tid, EventAction::Error, &vars)
+                .unwrap();
         }
 
         if e.is_type("msg") {

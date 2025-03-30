@@ -2,6 +2,7 @@ use tokio::{runtime::Handle, time};
 use tracing::{debug, error};
 
 use super::{Proc, Scheduler, Task};
+use crate::event::EventAction;
 use crate::{
     cache::Cache,
     data,
@@ -287,13 +288,13 @@ impl Runtime {
         // proc.print();
         let mut vars = proc.outputs();
         debug!("sub outputs: {vars}");
-        let mut event = consts::EVT_NEXT;
+        let mut event = EventAction::Next;
         if state.is_abort() {
-            event = consts::EVT_ABORT;
+            event = EventAction::Abort;
         } else if state.is_skip() {
-            event = consts::EVT_SKIP;
+            event = EventAction::Skip;
         } else if state.is_error() {
-            event = consts::EVT_ERR;
+            event = EventAction::Error;
             if let Some(err) = proc.err() {
                 vars.set(consts::ACT_ERR_CODE, err.ecode);
                 vars.set(consts::ACT_ERR_MESSAGE, err.message);

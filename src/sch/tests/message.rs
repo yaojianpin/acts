@@ -1,3 +1,4 @@
+use crate::event::EventAction;
 use crate::{
     data::MessageStatus,
     event::MessageState,
@@ -231,7 +232,8 @@ async fn sch_message_act_created_by_push_action() {
                 .with("act", "irq")
                 .with("key", "act2")
                 .with("tag", "tag2");
-            e.do_action(&e.pid, &e.tid, "push", &options).unwrap();
+            e.do_action(&e.pid, &e.tid, EventAction::Push, &options)
+                .unwrap();
         }
 
         if e.is_key("act2") && e.is_state("created") {
@@ -256,7 +258,8 @@ async fn sch_message_act_tag_by_push_action() {
         println!("message: {e:?}");
         if e.r#type == "step" && e.state() == MessageState::Created {
             let options = Vars::new().with("key", "act2").with("tag", "tag2");
-            e.do_action(&e.pid, &e.tid, "push", &options).unwrap();
+            e.do_action(&e.pid, &e.tid, EventAction::Push, &options)
+                .unwrap();
         }
 
         if e.is_key("act2") && e.is_state("created") {
@@ -283,7 +286,8 @@ async fn sch_message_act_inputs_by_push_action() {
             let options = Vars::new()
                 .with("key", "act2")
                 .with("with", Vars::new().with("a", 5));
-            e.do_action(&e.pid, &e.tid, "push", &options).unwrap();
+            e.do_action(&e.pid, &e.tid, EventAction::Push, &options)
+                .unwrap();
         }
 
         if e.is_key("act2") && e.is_state("created") {
@@ -310,7 +314,8 @@ async fn sch_message_act_outputs_by_push_action() {
             let options = Vars::new()
                 .with("key", "act2")
                 .with("outputs", Vars::new().with("a", 5));
-            e.do_action(&e.pid, &e.tid, "push", &options).unwrap();
+            e.do_action(&e.pid, &e.tid, EventAction::Push, &options)
+                .unwrap();
         }
 
         if e.is_key("act2") && e.is_state("created") {
@@ -337,12 +342,13 @@ async fn sch_message_act_rets_by_push_action() {
             let options = Vars::new()
                 .with("key", "act2")
                 .with("rets", Vars::new().with("a", json!(null)));
-            e.do_action(&e.pid, &e.tid, "push", &options).unwrap();
+            e.do_action(&e.pid, &e.tid, EventAction::Push, &options)
+                .unwrap();
         }
 
         if e.is_key("act2") && e.is_state("created") {
             rx.send(
-                e.do_action(&e.pid, &e.tid, consts::EVT_NEXT, &Vars::new())
+                e.do_action(&e.pid, &e.tid, EventAction::Next, &Vars::new())
                     .is_err(),
             );
         }
@@ -387,7 +393,7 @@ async fn sch_message_act_completed() {
         if msg.r#type == "irq" && msg.state() == MessageState::Created {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            let action = Action::new(&msg.pid, &msg.tid, consts::EVT_NEXT, &options);
+            let action = Action::new(&msg.pid, &msg.tid, EventAction::Next, &options);
             s.do_action(&action).unwrap();
         }
         if msg.r#type == "irq" && msg.state() == MessageState::Completed {
@@ -412,7 +418,7 @@ async fn sch_message_act_sumitted() {
         if msg.is_key("act1") && msg.state() == MessageState::Created {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            let action = Action::new(&msg.pid, &msg.tid, "submit", &options);
+            let action = Action::new(&msg.pid, &msg.tid, EventAction::Submit, &options);
             s.do_action(&action).unwrap();
         }
         if msg.is_key("act1") && msg.state() == MessageState::Submitted {
@@ -437,7 +443,7 @@ async fn sch_message_act_skip() {
         if msg.is_key("act1") && msg.state() == MessageState::Created {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            let action = Action::new(&msg.pid, &msg.tid, "skip", &options);
+            let action = Action::new(&msg.pid, &msg.tid, EventAction::Skip, &options);
             s.do_action(&action).unwrap();
         }
         if msg.is_key("act1") && msg.state() == MessageState::Skipped {
@@ -467,7 +473,7 @@ async fn sch_message_act_back() {
         if msg.is_key("act1") && msg.is_state("created") {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            let action = Action::new(&msg.pid, &msg.tid, consts::EVT_NEXT, &options);
+            let action = Action::new(&msg.pid, &msg.tid, EventAction::Next, &options);
             s.do_action(&action).unwrap();
         }
 
@@ -475,7 +481,7 @@ async fn sch_message_act_back() {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.insert("to".to_string(), json!("step1"));
-            let action = Action::new(&msg.pid, &msg.tid, "back", &options);
+            let action = Action::new(&msg.pid, &msg.tid, EventAction::Back, &options);
             s.do_action(&action).unwrap();
         }
 
@@ -508,7 +514,7 @@ async fn sch_message_act_cancel() {
         if msg.is_key("act1") && msg.is_state("created") {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            let action = Action::new(&msg.pid, &msg.tid, consts::EVT_NEXT, &options);
+            let action = Action::new(&msg.pid, &msg.tid, EventAction::Next, &options);
             s.do_action(&action).unwrap();
         }
 
@@ -517,7 +523,7 @@ async fn sch_message_act_cancel() {
             options.insert("uid".to_string(), json!("u1"));
 
             *act_req_id.lock().unwrap() = Some(msg.tid.to_string());
-            let action = Action::new(&msg.pid, &msg.tid, "cancel", &options);
+            let action = Action::new(&msg.pid, &msg.tid, EventAction::Cancel, &options);
             s.do_action(&action).unwrap();
         }
 
@@ -526,7 +532,12 @@ async fn sch_message_act_cancel() {
             options.insert("uid".to_string(), json!("u1"));
 
             let act_req_id = &*act_req_id.lock().unwrap();
-            let action = Action::new(&msg.pid, act_req_id.as_deref().unwrap(), "cancel", &options);
+            let action = Action::new(
+                &msg.pid,
+                act_req_id.as_deref().unwrap(),
+                EventAction::Cancel,
+                &options,
+            );
             s.do_action(&action).unwrap();
         }
 
@@ -553,7 +564,12 @@ async fn sch_message_act_remove() {
         if msg.is_key("act1") && msg.inner().state() == MessageState::Created {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            let action = Action::new(&msg.inner().pid, &msg.inner().tid, "remove", &options);
+            let action = Action::new(
+                &msg.inner().pid,
+                &msg.inner().tid,
+                EventAction::Remove,
+                &options,
+            );
             s.do_action(&action).unwrap();
         }
         if msg.is_key("act1") && msg.state() == MessageState::Removed {
@@ -578,7 +594,7 @@ async fn sch_message_act_abort() {
         if msg.is_key("act1") && msg.is_state("created") {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            let action = Action::new(&msg.pid, &msg.tid, "abort", &options);
+            let action = Action::new(&msg.pid, &msg.tid, EventAction::Abort, &options);
             s.do_action(&action).unwrap();
         }
 
@@ -607,7 +623,7 @@ async fn sch_message_act_error() {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "err1");
-            let action = Action::new(&e.pid, &e.tid, "error", &options);
+            let action = Action::new(&e.pid, &e.tid, EventAction::Error, &options);
             s.do_action(&action).unwrap();
         }
 
@@ -638,7 +654,7 @@ async fn sch_message_act_inputs_with_err() {
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "err1");
             options.set(consts::ACT_ERR_MESSAGE, "abc");
-            e.do_action(&e.pid, &e.tid, consts::EVT_ERR, &options)
+            e.do_action(&e.pid, &e.tid, EventAction::Error, &options)
                 .unwrap();
         }
 

@@ -1,5 +1,6 @@
 use serde_json::json;
 
+use crate::event::EventAction;
 use crate::{
     sch::{tests::create_proc_signal, TaskState},
     utils::{self, consts},
@@ -208,7 +209,7 @@ async fn sch_step_acts_chain() {
         println!("message: {:?}", e.inner());
         if e.is_key("act1") && e.is_state("created") {
             rx.update(|data| data.push(e.inputs.get::<String>(consts::ACT_VALUE).unwrap()));
-            e.do_action(&e.pid, &e.tid, consts::EVT_NEXT, &Vars::new())
+            e.do_action(&e.pid, &e.tid, EventAction::Next, &Vars::new())
                 .unwrap();
         }
     });
@@ -236,7 +237,7 @@ async fn sch_step_acts_pack() {
         println!("message: {:?}", e.inner());
         if e.is_type("msg") && e.is_state("created") {
             rx.update(|data| data.push(e.key.clone()));
-            // e.do_action(&e.pid, &e.tid, consts::EVT_NEXT, &Vars::new())
+            // e.do_action(&e.pid, &e.tid, EventAction::Next.as_ref(), &Vars::new())
             //     .unwrap();
         }
     });
@@ -251,7 +252,7 @@ async fn sch_step_acts_cmd() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_input("a", json!(10))
             .with_id("step1")
-            .with_act(Act::cmd(|act| act.with_key(consts::EVT_NEXT)))
+            .with_act(Act::cmd(|act| act.with_key(EventAction::Next.as_ref())))
     });
 
     workflow.print();

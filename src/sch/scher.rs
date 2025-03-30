@@ -29,8 +29,6 @@ impl Scheduler {
     }
 
     pub fn new_with(_options: &Config) -> Arc<Self> {
-        
-
         Arc::new(Self {
             queue: Queue::new(),
             emitter: Arc::new(Emitter::new()),

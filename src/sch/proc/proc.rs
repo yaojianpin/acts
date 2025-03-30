@@ -1,3 +1,4 @@
+use crate::event::EventAction;
 use crate::{
     data,
     event::Action,
@@ -276,7 +277,7 @@ impl Proc {
             self.tasks()
         )))?;
 
-        if action.event == consts::EVT_PUSH {
+        if action.event == EventAction::Push {
             if !task.is_kind(NodeKind::Step) {
                 return Err(ActError::Action(format!(
                     "The task '{}' is not an Step task",

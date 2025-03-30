@@ -1,8 +1,5 @@
-use crate::{
-    sch::tests::create_proc_signal,
-    utils::{self, consts},
-    Act, StmtBuild, TaskState, Workflow,
-};
+use crate::event::EventAction;
+use crate::{sch::tests::create_proc_signal, utils, Act, StmtBuild, TaskState, Workflow};
 
 #[tokio::test]
 async fn sch_act_cmd_submit_on_step() {
@@ -118,7 +115,7 @@ async fn sch_act_cmd_complete_on_step() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::irq(|req| req.with_key("act1")))
-            .with_act(Act::cmd(|cmd| cmd.with_key(consts::EVT_NEXT)))
+            .with_act(Act::cmd(|cmd| cmd.with_key(EventAction::Next.as_ref())))
     });
 
     workflow.print();
@@ -139,7 +136,7 @@ async fn sch_act_cmd_complete_on_step_with_inputs() {
         step.with_id("step1")
             .with_act(Act::irq(|req| req.with_key("act1")))
             .with_act(Act::cmd(|cmd| {
-                cmd.with_key(consts::EVT_NEXT).with_input("a", 5)
+                cmd.with_key(EventAction::Next.as_ref()).with_input("a", 5)
             }))
     });
 
@@ -172,7 +169,9 @@ async fn sch_act_cmd_complete_on_act() {
                 .with_act("irq")
                 .with_id("act1")
                 .with_key("act1")
-                .with_setup(|stmts| stmts.add(Act::cmd(|cmd| cmd.with_key(consts::EVT_NEXT)))),
+                .with_setup(|stmts| {
+                    stmts.add(Act::cmd(|cmd| cmd.with_key(EventAction::Next.as_ref())))
+                }),
         )
     });
 
@@ -322,7 +321,9 @@ async fn sch_act_cmd_error_on_step_with_no_err_code() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::irq(|req| req.with_key("act1")))
-            .with_act(Act::cmd(|cmd| cmd.with_key("error").with_input("a", 5)))
+            .with_act(Act::cmd(|cmd| {
+                cmd.with_key(EventAction::Error.as_ref()).with_input("a", 5)
+            }))
     });
 
     workflow.print();

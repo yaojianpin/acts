@@ -1,3 +1,4 @@
+use crate::event::EventAction;
 use crate::{
     event::{Action, MessageState},
     sch::{tests::*, TaskState},
@@ -182,7 +183,7 @@ async fn sch_act_irq_complete() {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!(uid.to_string()));
 
-            let action = Action::new(&e.pid, &e.tid, consts::EVT_NEXT, &options);
+            let action = Action::new(&e.pid, &e.tid, EventAction::Next, &options);
             if let Err(err) = s.do_action(&action) {
                 println!("error: {}", err);
                 rx.send(false);
@@ -233,7 +234,7 @@ async fn sch_act_irq_cancel_normal() {
                     let mut options = Vars::new();
                     options.insert("uid".to_string(), json!(uid.to_string()));
 
-                    let action = Action::new(&e.pid, tid, consts::EVT_NEXT, &options);
+                    let action = Action::new(&e.pid, tid, EventAction::Next, &options);
                     s.do_action(&action).unwrap();
                 } else {
                     rx.send(true);
@@ -247,7 +248,7 @@ async fn sch_act_irq_cancel_normal() {
                 // get the completed act id in previous step
                 let act_req_id = &*act_req_id.lock().unwrap();
                 let aid = act_req_id.as_deref().unwrap();
-                let action = Action::new(&e.pid, aid, "cancel", &options);
+                let action = Action::new(&e.pid, aid, EventAction::Cancel, &options);
                 s.do_action(&action).unwrap();
             }
         }
@@ -290,14 +291,14 @@ async fn sch_act_irq_back() {
                 let mut options = Vars::new();
                 options.insert("uid".to_string(), json!(uid.to_string()));
 
-                let action = Action::new(&msg.pid, tid, consts::EVT_NEXT, &options);
+                let action = Action::new(&msg.pid, tid, EventAction::Next, &options);
                 s.do_action(&action).unwrap();
             } else if uid == "b" {
                 if msg.state() == MessageState::Created {
                     let mut options = Vars::new();
                     options.insert("uid".to_string(), json!("b".to_string()));
                     options.insert("to".to_string(), json!("step1".to_string()));
-                    let action = Action::new(&msg.pid, tid, "back", &options);
+                    let action = Action::new(&msg.pid, tid, EventAction::Back, &options);
                     s.do_action(&action).unwrap();
                 }
             } else if msg.state() == MessageState::Created && uid == "a" && *count > 0 {
@@ -338,7 +339,7 @@ async fn sch_act_irq_abort() {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
 
-            let message = Action::new(&e.pid, &e.tid, "abort", &options);
+            let message = Action::new(&e.pid, &e.tid, EventAction::Abort, &options);
             s.do_action(&message).unwrap();
         }
     });
@@ -367,7 +368,7 @@ async fn sch_act_irq_submit() {
                 let mut options = Vars::new();
                 options.insert("uid".to_string(), json!(uid.to_string()));
 
-                let action = Action::new(&e.pid, &e.tid, "submit", &options);
+                let action = Action::new(&e.pid, &e.tid, EventAction::Submit, &options);
                 s.do_action(&action).unwrap();
             }
         }
@@ -403,7 +404,7 @@ async fn sch_act_irq_skip() {
                 let mut options = Vars::new();
                 options.insert("uid".to_string(), json!(uid.to_string()));
 
-                let action = Action::new(&e.pid, &e.tid, "skip", &options);
+                let action = Action::new(&e.pid, &e.tid, EventAction::Skip, &options);
                 s.do_action(&action).unwrap();
             }
         }
@@ -442,7 +443,7 @@ async fn sch_act_irq_skip_next() {
                 let mut options = Vars::new();
                 options.insert("uid".to_string(), json!(uid.to_string()));
 
-                let action = Action::new(&e.pid, &e.tid, "skip", &options);
+                let action = Action::new(&e.pid, &e.tid, EventAction::Skip, &options);
                 s.do_action(&action).unwrap();
             }
         }
@@ -484,7 +485,7 @@ async fn sch_act_irq_error_action() {
                 options.set("ecode", "1");
                 options.set("error", "biz error");
 
-                let action = Action::new(&e.pid, &e.tid, "error", &options);
+                let action = Action::new(&e.pid, &e.tid, EventAction::Error, &options);
                 s.do_action(&action).unwrap();
             }
         }
@@ -520,7 +521,7 @@ async fn sch_act_irq_error_action_without_err_code() {
                 let mut options = Vars::new();
                 options.insert("uid".to_string(), json!(uid.to_string()));
 
-                let action = Action::new(&e.pid, &e.tid, "error", &options);
+                let action = Action::new(&e.pid, &e.tid, EventAction::Error, &options);
                 let result = s.do_action(&action);
                 rx.update(|data| *data = result.is_err());
                 rx.close();
@@ -533,6 +534,7 @@ async fn sch_act_irq_error_action_without_err_code() {
     assert!(ret);
 }
 
+/*
 #[tokio::test]
 async fn sch_act_irq_not_support_action() {
     let count = Arc::new(Mutex::new(0));
@@ -567,7 +569,7 @@ async fn sch_act_irq_not_support_action() {
     scher.launch(&proc);
     let ret = tx.recv().await;
     assert!(ret);
-}
+}*/
 
 #[tokio::test]
 async fn sch_act_irq_next_by_complete_state() {
@@ -596,7 +598,7 @@ async fn sch_act_irq_next_by_complete_state() {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!(uid.to_string()));
 
-            let action = Action::new(&e.pid, tid, consts::EVT_NEXT, &options);
+            let action = Action::new(&e.pid, tid, EventAction::Next, &options);
             s.do_action(&action).unwrap();
 
             // action again
@@ -629,7 +631,7 @@ async fn sch_act_irq_cancel_by_running_state() {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!(uid.to_string()));
 
-            let action = Action::new(&e.pid, tid, "cancel", &options);
+            let action = Action::new(&e.pid, tid, EventAction::Cancel, &options);
             let ret = s.do_action(&action).is_err();
             rx.send(ret);
         }
@@ -661,7 +663,7 @@ async fn sch_act_irq_do_action_complete() {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!(uid.to_string()));
 
-            let action = Action::new(&e.pid, &e.tid, consts::EVT_NEXT, &options);
+            let action = Action::new(&e.pid, &e.tid, EventAction::Next, &options);
             let ret = s.do_action(&action).is_ok();
 
             rx.send(ret);
@@ -688,7 +690,7 @@ async fn sch_act_irq_do_action_remove() {
     emitter.on_message(move |e| {
         println!("message: {e:?}");
         if e.state() == MessageState::Created && e.r#type == "irq" {
-            let action = Action::new(&e.pid, &e.tid, "remove", &Vars::new());
+            let action = Action::new(&e.pid, &e.tid, EventAction::Remove, &Vars::new());
             s.do_action(&action).unwrap();
 
             rx.close();
@@ -732,7 +734,7 @@ async fn sch_act_irq_do_action_outputs() {
             options.insert("b".to_string(), json!(5));
             options.insert("c".to_string(), json!(["u1", "u2"]));
 
-            let action = Action::new(&e.pid, &e.tid, consts::EVT_NEXT, &options);
+            let action = Action::new(&e.pid, &e.tid, EventAction::Next, &options);
             s.do_action(&action).unwrap();
             rx.close();
         }
@@ -807,7 +809,7 @@ async fn sch_act_irq_do_action_rets() {
             options.insert("c".to_string(), json!(["u1", "u2"]));
             options.insert("d".to_string(), json!({ "value": "test" } ));
 
-            let action = Action::new(&e.pid, &e.tid, consts::EVT_NEXT, &options);
+            let action = Action::new(&e.pid, &e.tid, EventAction::Next, &options);
             s.do_action(&action).unwrap();
             rx.close();
         }
@@ -876,7 +878,7 @@ async fn sch_act_irq_do_action_no_rets() {
             options.insert("uid".to_string(), json!(uid.to_string()));
             options.insert("any".to_string(), json!(100));
 
-            let action = Action::new(&e.pid, &e.tid, consts::EVT_NEXT, &options);
+            let action = Action::new(&e.pid, &e.tid, EventAction::Next, &options);
             let ret = s.do_action(&action).is_ok();
             rx.send(ret);
         }
@@ -907,7 +909,7 @@ async fn sch_act_irq_do_action_ret_key_check() {
         if e.state() == MessageState::Created && e.r#type == "irq" {
             // create options that not contains uid key
             let options = Vars::new();
-            let action = Action::new(&e.pid, &e.tid, consts::EVT_NEXT, &options);
+            let action = Action::new(&e.pid, &e.tid, EventAction::Next, &options);
             let ret = s.do_action(&action).is_err();
             rx.send(ret);
         }
@@ -936,7 +938,7 @@ async fn sch_act_irq_do_action_proc_id_error() {
         if e.state() == MessageState::Created && e.r#type == "irq" {
             // create options that not contains uid key
             let options = Vars::new();
-            let action = Action::new("no_exist_proc_id", &e.tid, consts::EVT_NEXT, &options);
+            let action = Action::new("no_exist_proc_id", &e.tid, EventAction::Next, &options);
             let ret = s.do_action(&action).is_err();
             rx.send(ret);
         }
@@ -965,7 +967,7 @@ async fn sch_act_irq_do_action_msg_id_error() {
         if e.state() == MessageState::Created && e.r#type == "irq" {
             // create options that not contains uid key
             let options = Vars::new();
-            let action = Action::new(&e.pid, "no_exist_msg_id", consts::EVT_NEXT, &options);
+            let action = Action::new(&e.pid, "no_exist_msg_id", EventAction::Next, &options);
             let ret = s.do_action(&action).is_err();
             rx.send(ret);
         }
@@ -992,7 +994,7 @@ async fn sch_act_irq_do_action_not_act_req_task() {
         if e.state() == MessageState::Created && e.r#type == "step" {
             // create options that not contains uid key
             let options = Vars::new();
-            let action = Action::new(&e.pid, &e.tid, consts::EVT_NEXT, &options);
+            let action = Action::new(&e.pid, &e.tid, EventAction::Next, &options);
             let ret = s.do_action(&action).is_err();
             rx.send(ret);
         }
@@ -1075,7 +1077,7 @@ async fn sch_act_irq_on_completed_msg() {
     emitter.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_key("act1") && e.is_state("created") {
-            e.do_action(&e.pid, &e.tid, consts::EVT_NEXT, &Vars::new())
+            e.do_action(&e.pid, &e.tid, EventAction::Next, &Vars::new())
                 .unwrap();
         }
 
@@ -1109,7 +1111,7 @@ async fn sch_act_irq_on_completed_act() {
     emitter.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_key("act1") && e.is_state("created") {
-            e.do_action(&e.pid, &e.tid, consts::EVT_NEXT, &Vars::new())
+            e.do_action(&e.pid, &e.tid, EventAction::Next, &Vars::new())
                 .unwrap();
         }
 
@@ -1152,7 +1154,7 @@ async fn sch_act_irq_on_catch() {
             e.do_action(
                 &e.pid,
                 &e.tid,
-                consts::EVT_ERR,
+                EventAction::Error,
                 &Vars::new().with(consts::ACT_ERR_CODE, "err1"),
             )
             .unwrap();
@@ -1196,7 +1198,7 @@ async fn sch_act_irq_on_catch_as_error() {
             e.do_action(
                 &e.pid,
                 &e.tid,
-                "error",
+                EventAction::Error,
                 &Vars::new().with(consts::ACT_ERR_CODE, "err1"),
             )
             .unwrap();
@@ -1206,7 +1208,7 @@ async fn sch_act_irq_on_catch_as_error() {
             e.do_action(
                 &e.pid,
                 &e.tid,
-                "error",
+                EventAction::Error,
                 &Vars::new().with(consts::ACT_ERR_CODE, "err2"),
             )
             .unwrap();
@@ -1252,14 +1254,15 @@ async fn sch_act_irq_on_catch_as_skip() {
             e.do_action(
                 &e.pid,
                 &e.tid,
-                "error",
+                EventAction::Error,
                 &Vars::new().with(consts::ACT_ERR_CODE, "err1"),
             )
             .unwrap();
         }
 
         if e.is_key("act2") {
-            e.do_action(&e.pid, &e.tid, "skip", &Vars::new()).unwrap();
+            e.do_action(&e.pid, &e.tid, EventAction::Skip, &Vars::new())
+                .unwrap();
         }
     });
 
@@ -1301,7 +1304,7 @@ async fn sch_act_irq_on_catch_no_match() {
             e.do_action(
                 &e.pid,
                 &e.tid,
-                "error",
+                EventAction::Error,
                 &Vars::new().with(consts::ACT_ERR_CODE, "err2"),
             )
             .unwrap();
@@ -1340,7 +1343,7 @@ async fn sch_act_irq_on_catch_match_any() {
             e.do_action(
                 &e.pid,
                 &e.tid,
-                "error",
+                EventAction::Error,
                 &Vars::new().with(consts::ACT_ERR_CODE, "err2"),
             )
             .unwrap();
@@ -1391,14 +1394,14 @@ async fn sch_act_irq_on_catch_as_complete() {
             e.do_action(
                 &e.pid,
                 &e.tid,
-                "error",
+                EventAction::Error,
                 &Vars::new().with(consts::ACT_ERR_CODE, "err1"),
             )
             .unwrap();
         }
 
         if e.is_key("act2") {
-            e.do_action(&e.pid, &e.tid, consts::EVT_NEXT, &Vars::new())
+            e.do_action(&e.pid, &e.tid, EventAction::Next, &Vars::new())
                 .unwrap();
         }
     });
@@ -1440,7 +1443,7 @@ async fn sch_act_irq_chain() {
                 TaskState::Interrupt
             );
             assert!(p.task_by_nid("act2").first().is_none());
-            e.do_action(&e.pid, &e.tid, consts::EVT_NEXT, &Vars::new())
+            e.do_action(&e.pid, &e.tid, EventAction::Next, &Vars::new())
                 .unwrap();
         }
 

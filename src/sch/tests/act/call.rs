@@ -1,3 +1,4 @@
+use crate::event::EventAction;
 use crate::{
     sch::{tests::create_proc_signal, TaskState},
     utils::{self, consts},
@@ -103,7 +104,7 @@ async fn sch_act_call_act_complete() {
     emitter.on_message(move |e| {
         if e.is_key("act1") && e.is_state("created") {
             let options = Vars::new();
-            e.do_action(&e.pid, &e.tid, consts::EVT_NEXT, &options)
+            e.do_action(&e.pid, &e.tid, EventAction::Next, &options)
                 .unwrap();
         }
     });
@@ -138,7 +139,7 @@ async fn sch_act_call_act_skip() {
     emitter.on_message(move |e| {
         if e.is_key("act1") && e.is_state("created") {
             let options = Vars::new();
-            e.do_action(&e.pid, &e.tid, consts::EVT_SKIP, &options)
+            e.do_action(&e.pid, &e.tid, EventAction::Skip, &options)
                 .unwrap();
         }
     });
@@ -176,7 +177,7 @@ async fn sch_act_call_act_abort() {
         println!("message: {:?}", e.inner());
         if e.is_key("act1") && e.is_state("created") {
             let options = Vars::new();
-            e.do_action(&e.pid, &e.tid, consts::EVT_ABORT, &options)
+            e.do_action(&e.pid, &e.tid, EventAction::Abort, &options)
                 .unwrap();
         }
     });
@@ -219,7 +220,7 @@ async fn sch_act_call_act_error() {
             let mut options = Vars::new();
             options.set(consts::ACT_ERR_CODE, "err1");
             options.set(consts::ACT_ERR_MESSAGE, "sub workflow error");
-            e.do_action(&e.pid, &e.tid, consts::EVT_ERR, &options)
+            e.do_action(&e.pid, &e.tid, EventAction::Error, &options)
                 .unwrap();
         }
     });

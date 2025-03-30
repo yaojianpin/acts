@@ -1,13 +1,3 @@
-pub const EVT_NEXT: &str = "next";
-pub const EVT_ABORT: &str = "abort";
-pub const EVT_BACK: &str = "back";
-pub const EVT_CANCEL: &str = "cancel";
-pub const EVT_SUBMIT: &str = "submit";
-pub const EVT_SKIP: &str = "skip";
-pub const EVT_ERR: &str = "error";
-pub const EVT_PUSH: &str = "push";
-pub const EVT_REMOVE: &str = "remove";
-
 pub const INITIATOR: &str = "initiator";
 
 pub const ACT_USE_PARENT_PROC_ID: &str = "use_parent_pid";

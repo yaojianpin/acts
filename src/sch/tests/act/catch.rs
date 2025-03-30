@@ -1,3 +1,4 @@
+use crate::event::EventAction;
 use crate::{
     sch::{tests::create_proc_signal, TaskState},
     utils::{self, consts},
@@ -24,7 +25,7 @@ async fn sch_act_catch_by_any_error() {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "aaaaaaaaa");
-            let action = Action::new(&e.pid, &e.tid, "error", &options);
+            let action = Action::new(&e.pid, &e.tid, EventAction::Error, &options);
             s.do_action(&action).unwrap();
         }
 
@@ -57,7 +58,7 @@ async fn sch_act_catch_by_msg() {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "aaaaaaaa");
-            let action = Action::new(&e.pid, &e.tid, "error", &options);
+            let action = Action::new(&e.pid, &e.tid, EventAction::Error, &options);
             s.do_action(&action).unwrap();
         }
 
@@ -91,7 +92,7 @@ async fn sch_act_catch_empty_then() {
         if e.is_key("act1") && e.is_state("created") {
             let mut options = Vars::new();
             options.set(consts::ACT_ERR_CODE, "err1");
-            let action = Action::new(&e.pid, &e.tid, "error", &options);
+            let action = Action::new(&e.pid, &e.tid, EventAction::Error, &options);
             s.do_action(&action).unwrap();
         }
     });
@@ -122,7 +123,7 @@ async fn sch_act_catch_by_err_code() {
             options.set(consts::ACT_ERR_CODE, "123");
             options.set(consts::ACT_ERR_MESSAGE, "biz error");
 
-            let action = Action::new(&e.pid, &e.tid, "error", &options);
+            let action = Action::new(&e.pid, &e.tid, EventAction::Error, &options);
             s.do_action(&action).unwrap();
         }
 
@@ -158,7 +159,7 @@ async fn sch_act_catch_by_wrong_code() {
             options.set(consts::ACT_ERR_CODE, json!("123"));
             options.set(consts::ACT_ERR_MESSAGE, json!("biz error"));
 
-            let action = Action::new(&e.pid, &e.tid, "error", &options);
+            let action = Action::new(&e.pid, &e.tid, EventAction::Error, &options);
             s.do_action(&action).unwrap();
         }
     });
@@ -187,7 +188,7 @@ async fn sch_act_catch_by_no_err_code() {
         if e.is_key("act1") && e.is_state("created") {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            let action = Action::new(&e.pid, &e.tid, "error", &options);
+            let action = Action::new(&e.pid, &e.tid, EventAction::Error, &options);
             let state = s.do_action(&action);
             rx.send(state.is_err());
         }
@@ -224,7 +225,7 @@ async fn sch_act_catch_as_complete() {
             options.set(consts::ACT_ERR_CODE, "123");
             options.set(consts::ACT_ERR_MESSAGE, "biz error");
 
-            let action = Action::new(&e.pid, &e.tid, "error", &options);
+            let action = Action::new(&e.pid, &e.tid, EventAction::Error, &options);
             s.do_action(&action).unwrap();
         }
 
@@ -232,7 +233,7 @@ async fn sch_act_catch_as_complete() {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
 
-            let action = Action::new(&e.pid, &e.tid, consts::EVT_NEXT, &options);
+            let action = Action::new(&e.pid, &e.tid, EventAction::Next, &options);
             s.do_action(&action).unwrap();
             p.print();
         }
@@ -271,7 +272,7 @@ async fn sch_act_catch_as_error() {
             options.set(consts::ACT_ERR_CODE, "1");
             options.set(consts::ACT_ERR_MESSAGE, "biz error");
 
-            let action = Action::new(&e.pid, &e.tid, "error", &options);
+            let action = Action::new(&e.pid, &e.tid, EventAction::Error, &options);
             s.do_action(&action).unwrap();
         }
 
@@ -281,7 +282,7 @@ async fn sch_act_catch_as_error() {
             options.set(consts::ACT_ERR_CODE, "2");
             options.set(consts::ACT_ERR_MESSAGE, "biz error");
 
-            let action = Action::new(&e.pid, &e.tid, "error", &options);
+            let action = Action::new(&e.pid, &e.tid, EventAction::Error, &options);
             s.do_action(&action).unwrap();
 
             p.print();
@@ -326,7 +327,7 @@ async fn sch_act_catch_as_skip() {
             options.set(consts::ACT_ERR_CODE, "1");
             options.set(consts::ACT_ERR_MESSAGE, "biz error");
 
-            let action = Action::new(&e.pid, &e.tid, "error", &options);
+            let action = Action::new(&e.pid, &e.tid, EventAction::Error, &options);
             s.do_action(&action).unwrap();
         }
 
@@ -334,7 +335,7 @@ async fn sch_act_catch_as_skip() {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
 
-            let action = Action::new(&e.pid, &e.tid, "skip", &options);
+            let action = Action::new(&e.pid, &e.tid, EventAction::Skip, &options);
             s.do_action(&action).unwrap();
         }
     });
@@ -380,7 +381,7 @@ async fn sch_act_catch_as_abort() {
             options.set(consts::ACT_ERR_CODE, "1");
             options.set(consts::ACT_ERR_MESSAGE, "biz error");
 
-            let action = Action::new(&e.pid, &e.tid, "error", &options);
+            let action = Action::new(&e.pid, &e.tid, EventAction::Error, &options);
             s.do_action(&action).unwrap();
         }
 
@@ -388,7 +389,7 @@ async fn sch_act_catch_as_abort() {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
 
-            let action = Action::new(&e.pid, &e.tid, "abort", &options);
+            let action = Action::new(&e.pid, &e.tid, EventAction::Abort, &options);
             s.do_action(&action).unwrap();
         }
     });
@@ -425,7 +426,7 @@ async fn sch_act_catch_as_submit() {
             options.set(consts::ACT_ERR_CODE, "1");
             options.set(consts::ACT_ERR_MESSAGE, "biz error");
 
-            let action = Action::new(&e.pid, &e.tid, "error", &options);
+            let action = Action::new(&e.pid, &e.tid, EventAction::Error, &options);
             s.do_action(&action).unwrap();
         }
 
@@ -433,7 +434,7 @@ async fn sch_act_catch_as_submit() {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
 
-            let action = Action::new(&e.pid, &e.tid, "submit", &options);
+            let action = Action::new(&e.pid, &e.tid, EventAction::Submit, &options);
             s.do_action(&action).unwrap();
         }
     });
@@ -486,7 +487,7 @@ async fn sch_act_catch_as_back() {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
 
-            let action = Action::new(&e.pid, &e.tid, consts::EVT_NEXT, &options);
+            let action = Action::new(&e.pid, &e.tid, EventAction::Next, &options);
             s.do_action(&action).unwrap();
             rx.update(|data| *data += 1);
         }
@@ -497,7 +498,7 @@ async fn sch_act_catch_as_back() {
             options.set(consts::ACT_ERR_CODE, "1");
             options.set(consts::ACT_ERR_MESSAGE, "biz error");
 
-            let action = Action::new(&e.pid, &e.tid, "error", &options);
+            let action = Action::new(&e.pid, &e.tid, EventAction::Error, &options);
             s.do_action(&action).unwrap();
         }
 
@@ -506,7 +507,7 @@ async fn sch_act_catch_as_back() {
             options.insert("uid".to_string(), json!("u1"));
             options.insert("to".to_string(), json!("step1"));
 
-            let action = Action::new(&e.pid, &e.tid, "back", &options);
+            let action = Action::new(&e.pid, &e.tid, EventAction::Back, &options);
             s.do_action(&action).unwrap();
         }
     });
@@ -551,7 +552,7 @@ async fn sch_act_catch_and_continue() {
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "aaaaaaaaaa");
 
-            let action = Action::new(&e.pid, &e.tid, "error", &options);
+            let action = Action::new(&e.pid, &e.tid, EventAction::Error, &options);
             s.do_action(&action).unwrap();
         }
 
