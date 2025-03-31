@@ -2,7 +2,7 @@ use crate::event::EventAction;
 use crate::{
     sch::{tests::create_proc_signal, TaskState},
     utils::{self, consts},
-    Act, Catch, Message, StmtBuild, Timeout, Vars, Workflow,
+    Act, Catch, Message, MessageState, StmtBuild, Timeout, Vars, Workflow,
 };
 
 #[tokio::test]
@@ -125,7 +125,7 @@ async fn sch_step_hooks_updated() {
 
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
-        if e.is_source("act") && e.is_state("created") {
+        if e.is_source("act") && e.is_state(MessageState::Created) {
             e.do_action(&e.pid, &e.tid, EventAction::Next, &Vars::new())
                 .unwrap();
         }
@@ -251,7 +251,7 @@ async fn sch_step_hooks_store() {
     let rt2 = rt.clone();
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
-        if e.is_type("irq") && e.is_state("created") {
+        if e.is_type("irq") && e.is_state(MessageState::Created) {
             cache.uncache(&pid);
             cache
                 .restore(&rt2, |proc| {

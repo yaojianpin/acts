@@ -1,5 +1,5 @@
 use crate::event::EventAction;
-use crate::{utils, Act, Builder, Engine, Vars, Workflow};
+use crate::{utils, Act, Builder, Engine, MessageState, Vars, Workflow};
 use serde_json::json;
 
 #[tokio::test]
@@ -104,7 +104,7 @@ async fn engine_event_on_error() {
         options.insert("uid".to_string(), json!("u1"));
         options.set("ecode", "err1");
 
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             e.do_action(&e.pid, &e.tid, EventAction::Error, &options)
                 .unwrap();
         }

@@ -2,7 +2,7 @@ use crate::event::EventAction;
 use crate::{
     sch::tests::create_proc_signal,
     utils::{self, consts},
-    Act, Catch, Message, StmtBuild, TaskState, Timeout, Vars, Workflow,
+    Act, Catch, Message, MessageState, StmtBuild, TaskState, Timeout, Vars, Workflow,
 };
 use serde_json::json;
 
@@ -184,7 +184,7 @@ async fn sch_workflow_setup_on_before_update() {
         create_proc_signal::<Vec<Message>>(&mut workflow, &utils::longid());
     let s2 = sig.clone();
     emitter.on_message(move |e| {
-        if e.is_type("irq") && e.is_state("created") {
+        if e.is_type("irq") && e.is_state(MessageState::Created) {
             e.do_action(&e.pid, &e.tid, EventAction::Next, &Vars::new())
                 .unwrap();
         }
@@ -228,7 +228,7 @@ async fn sch_workflow_setup_on_updated() {
         create_proc_signal::<Vec<Message>>(&mut workflow, &utils::longid());
     let s2 = sig.clone();
     emitter.on_message(move |e| {
-        if e.is_type("irq") && e.is_state("created") {
+        if e.is_type("irq") && e.is_state(MessageState::Created) {
             e.do_action(&e.pid, &e.tid, EventAction::Next, &Vars::new())
                 .unwrap();
         }
@@ -268,7 +268,7 @@ async fn sch_workflow_setup_on_catch() {
     let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
-        if e.is_type("irq") && e.is_state("created") {
+        if e.is_type("irq") && e.is_state(MessageState::Created) {
             let options = Vars::new()
                 .with(consts::ACT_ERR_CODE, "err1")
                 .with(consts::ACT_ERR_MESSAGE, "");
@@ -354,7 +354,7 @@ async fn sch_workflow_hooks_store() {
     let rt2 = rt.clone();
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
-        if e.is_type("irq") && e.is_state("created") {
+        if e.is_type("irq") && e.is_state(MessageState::Created) {
             cache.uncache(&pid);
             cache
                 .restore(&rt2, |proc| {

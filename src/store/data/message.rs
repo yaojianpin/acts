@@ -1,5 +1,5 @@
+use crate::MessageState;
 use core::fmt;
-
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
 
@@ -18,7 +18,7 @@ pub struct Message {
     pub id: String,
     pub tid: String,
     pub name: String,
-    pub state: String,
+    pub state: MessageState,
     pub r#type: String,
     pub source: String,
     pub model: String,

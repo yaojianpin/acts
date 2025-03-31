@@ -2,7 +2,7 @@ use crate::event::EventAction;
 use crate::{
     sch::tests::create_proc_signal,
     utils::{self, consts},
-    Act, Action, Vars, Workflow,
+    Act, Action, MessageState, Vars, Workflow,
 };
 use serde_json::json;
 
@@ -349,7 +349,7 @@ async fn sch_vars_act_inputs() {
     });
     let (proc, scher, emitter, tx, rx) = create_proc_signal(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
-        if e.inner().is_source("act") && e.inner().is_state("created") {
+        if e.inner().is_source("act") && e.inner().is_state(MessageState::Created) {
             rx.update(|data| *data = e.inner().inputs.get_value("var1").unwrap() == &json!(10));
             rx.close();
         }
@@ -370,7 +370,7 @@ async fn sch_vars_act_outputs() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.inner().is_source("act") && e.inner().is_state("created") {
+        if e.inner().is_source("act") && e.inner().is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.insert("var1".to_string(), 10.into());
@@ -403,7 +403,7 @@ async fn sch_vars_act_default_outputs() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.inner().is_source("act") && e.inner().is_state("created") {
+        if e.inner().is_source("act") && e.inner().is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("var1".to_string(), 10.into());
             let action = Action::new(&e.inner().pid, &e.inner().tid, EventAction::Next, &options);
@@ -434,7 +434,7 @@ async fn sch_vars_act_options() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.is_key("act1") && e.inner().is_state("created") {
+        if e.is_key("act1") && e.inner().is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.insert("var1".to_string(), 10.into());
@@ -468,7 +468,7 @@ async fn sch_vars_get_global_vars() {
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {e:?}");
-        if e.inner().is_source("act") && e.inner().is_state("created") {
+        if e.inner().is_source("act") && e.inner().is_state(MessageState::Created) {
             rx.close();
         }
     });
@@ -497,7 +497,7 @@ async fn sch_vars_get_global_vars() {
 //     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 //     emitter.on_message(move |e| {
 //         println!("message: {e:?}");
-//         if e.inner().is_source("act") && e.inner().is_state("created") {
+//         if e.inner().is_source("act") && e.inner().is_state(MessageState::Created") {
 //             rx.close();
 //         }
 //     });
@@ -531,7 +531,7 @@ async fn sch_vars_act_inputs_from_step() {
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {e:?}");
-        if e.inner().is_source("act") && e.inner().is_state("created") {
+        if e.inner().is_source("act") && e.inner().is_state(MessageState::Created) {
             rx.close();
         }
     });
@@ -560,7 +560,7 @@ async fn sch_vars_override_global_vars() {
         });
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
-        if e.inner().is_source("act") && e.inner().is_state("created") {
+        if e.inner().is_source("act") && e.inner().is_state(MessageState::Created) {
             rx.close();
         }
     });
@@ -586,7 +586,7 @@ async fn sch_vars_override_step_vars() {
     });
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
-        if e.inner().is_source("act") && e.inner().is_state("created") {
+        if e.inner().is_source("act") && e.inner().is_state(MessageState::Created) {
             rx.close();
         }
     });

@@ -48,7 +48,7 @@ async fn sch_act_irq_multi_threads() {
     let len = 1000;
     let e2 = engine.clone();
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let ret = engine
                 .executor()
                 .act()
@@ -124,7 +124,7 @@ async fn sch_act_irq_with_inputs_value() {
         create_proc_signal::<Vars>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
-        if e.is_type("irq") && e.is_state("created") {
+        if e.is_type("irq") && e.is_state(MessageState::Created) {
             rx.send(e.inputs.clone());
         }
     });
@@ -151,7 +151,7 @@ async fn sch_act_irq_with_inputs_var() {
         create_proc_signal::<Vars>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
-        if e.is_type("irq") && e.is_state("created") {
+        if e.is_type("irq") && e.is_state(MessageState::Created) {
             rx.send(e.inputs.clone());
         }
     });
@@ -335,7 +335,7 @@ async fn sch_act_irq_abort() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.is_key("fn1") && e.is_state("created") {
+        if e.is_key("fn1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
 
@@ -362,7 +362,7 @@ async fn sch_act_irq_submit() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.is_source("act") && e.is_state("created") {
+        if e.is_source("act") && e.is_state(MessageState::Created) {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
             if uid == "a" && e.state() == MessageState::Created {
                 let mut options = Vars::new();
@@ -437,7 +437,7 @@ async fn sch_act_irq_skip_next() {
     let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &pid);
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
             if uid == "a" && e.state() == MessageState::Created {
                 let mut options = Vars::new();
@@ -477,7 +477,7 @@ async fn sch_act_irq_error_action() {
     let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &pid);
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.is_key("fn1") && e.is_state("created") {
+        if e.is_key("fn1") && e.is_state(MessageState::Created) {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
             if uid == "a" && e.state() == MessageState::Created {
                 let mut options = Vars::new();
@@ -515,7 +515,7 @@ async fn sch_act_irq_error_action_without_err_code() {
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &pid);
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.is_key("fn1") && e.is_state("created") {
+        if e.is_key("fn1") && e.is_state(MessageState::Created) {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
             if uid == "a" && e.state() == MessageState::Created {
                 let mut options = Vars::new();
@@ -1076,7 +1076,7 @@ async fn sch_act_irq_on_completed_msg() {
         create_proc_signal::<Vec<Message>>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             e.do_action(&e.pid, &e.tid, EventAction::Next, &Vars::new())
                 .unwrap();
         }
@@ -1110,7 +1110,7 @@ async fn sch_act_irq_on_completed_act() {
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             e.do_action(&e.pid, &e.tid, EventAction::Next, &Vars::new())
                 .unwrap();
         }
@@ -1150,7 +1150,7 @@ async fn sch_act_irq_on_catch() {
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             e.do_action(
                 &e.pid,
                 &e.tid,
@@ -1194,7 +1194,7 @@ async fn sch_act_irq_on_catch_as_error() {
     let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             e.do_action(
                 &e.pid,
                 &e.tid,
@@ -1250,7 +1250,7 @@ async fn sch_act_irq_on_catch_as_skip() {
     let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             e.do_action(
                 &e.pid,
                 &e.tid,
@@ -1300,7 +1300,7 @@ async fn sch_act_irq_on_catch_no_match() {
     let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             e.do_action(
                 &e.pid,
                 &e.tid,
@@ -1339,7 +1339,7 @@ async fn sch_act_irq_on_catch_match_any() {
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             e.do_action(
                 &e.pid,
                 &e.tid,
@@ -1349,7 +1349,7 @@ async fn sch_act_irq_on_catch_match_any() {
             .unwrap();
         }
 
-        if e.is_key("act2") && e.is_state("created") {
+        if e.is_key("act2") && e.is_state(MessageState::Created) {
             rx.close();
         }
     });
@@ -1390,7 +1390,7 @@ async fn sch_act_irq_on_catch_as_complete() {
     let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             e.do_action(
                 &e.pid,
                 &e.tid,
@@ -1477,7 +1477,7 @@ async fn sch_act_irq_with_key() {
         create_proc_signal::<Vec<Message>>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
-        if e.is_type("irq") && e.is_state("created") {
+        if e.is_type("irq") && e.is_state(MessageState::Created) {
             rx.update(|data| data.push(e.inner().clone()));
             rx.close();
         }

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use acts::{Event, Executor, Message, Result, Vars};
+use acts::{Event, Executor, Message, MessageState, Result, Vars};
 use serde_json::json;
 
 type ReqAction = fn(&Executor, &Event<Message>) -> Result<()>;
@@ -31,7 +31,7 @@ impl Client {
     }
 
     pub fn process(&self, executor: &Executor, e: &Event<Message>) -> Result<()> {
-        if e.is_type("irq") && e.is_state("created") {
+        if e.is_type("irq") && e.is_state(MessageState::Created) {
             match self.actions.get(&e.key) {
                 Some(action) => {
                     action(executor, e)?;

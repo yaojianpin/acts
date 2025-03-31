@@ -1,7 +1,7 @@
 use crate::{
     sch::tests::create_proc_signal2,
     utils::{self, consts},
-    Act, Event, Message, Signal, StmtBuild, Workflow,
+    Act, Event, Message, MessageState, Signal, StmtBuild, Workflow,
 };
 use serde_json::json;
 
@@ -150,7 +150,7 @@ async fn sch_step_run_expose() {
     let workflow = Workflow::new()
         .with_step(|step| step.with_id("step1").with_run(r#" act.expose("a", 100);"#));
     let ret = run_test(&workflow, |e, s| {
-        if e.is_key("step1") && e.is_state("completed") {
+        if e.is_key("step1") && e.is_state(MessageState::Completed) {
             s.send(e.outputs.get::<i32>("a").unwrap() == 100);
         }
     })
@@ -163,7 +163,7 @@ async fn sch_step_run_abort() {
     let workflow =
         Workflow::new().with_step(|step| step.with_id("step1").with_run(r#"act.abort();"#));
     let ret: bool = run_test(&workflow, |e, s| {
-        if e.is_key("step1") && e.is_state("aborted") {
+        if e.is_key("step1") && e.is_state(MessageState::Aborted) {
             s.send(true);
         }
     })
@@ -178,7 +178,7 @@ async fn sch_step_run_fail() {
             .with_run(r#"act.fail("err1", "error message");"#)
     });
     let ret: bool = run_test(&workflow, |e, s| {
-        if e.is_key("step1") && e.is_state("error") {
+        if e.is_key("step1") && e.is_state(MessageState::Error) {
             s.send(true);
         }
     })
@@ -192,7 +192,7 @@ async fn sch_step_run_skip() {
         Workflow::new().with_step(|step| step.with_id("step1").with_run(r#"act.skip();"#));
 
     let ret: bool = run_test(&workflow, |e, s| {
-        if e.is_key("step1") && e.is_state("skipped") {
+        if e.is_key("step1") && e.is_state(MessageState::Skipped) {
             s.send(true);
         }
     })
@@ -206,7 +206,7 @@ async fn sch_step_run_back() {
         .with_step(|step| step.with_id("step1"))
         .with_step(|step| step.with_id("step2").with_run(r#"act.back("step1");"#));
     let ret: bool = run_test(&workflow, |e, s| {
-        if e.is_key("step2") && e.is_state("backed") {
+        if e.is_key("step2") && e.is_state(MessageState::Backed) {
             s.send(true);
         }
     })
@@ -225,7 +225,7 @@ async fn sch_step_run_state() {
         )
     });
     let ret = run_test(&workflow, |e, s| {
-        if e.is_key("step1") && e.is_state("completed") {
+        if e.is_key("step1") && e.is_state(MessageState::Completed) {
             s.send(e.outputs.get::<String>("state").unwrap() == "running");
         }
     })
@@ -241,7 +241,7 @@ async fn sch_step_run_set_value() {
             .with_run(r#"act.set("my_data", "abc");"#)
     });
     let ret = run_test(&workflow, |e, s| {
-        if e.is_key("step1") && e.is_state("completed") {
+        if e.is_key("step1") && e.is_state(MessageState::Completed) {
             s.send(e.outputs.get::<String>("my_data").unwrap() == "abc");
         }
     })
@@ -257,7 +257,7 @@ async fn sch_step_run_throw_error() {
             .with_run(r#" throw new Error("test error");"#)
     });
     let ret = run_test(&workflow, |e, s| {
-        if e.is_key("step1") && e.is_state("error") {
+        if e.is_key("step1") && e.is_state(MessageState::Error) {
             s.send(true);
         }
     })
@@ -274,7 +274,7 @@ async fn sch_step_run_catch_error() {
             .with_catch(|c| c.with_then(|stmts| stmts.add(Act::msg(|act| act.with_key("msg1")))))
     });
     let ret = run_test(&workflow, |e, s| {
-        if e.is_key("step1") && e.is_state("completed") {
+        if e.is_key("step1") && e.is_state(MessageState::Completed) {
             s.send(true);
         }
     })

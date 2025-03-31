@@ -1,4 +1,4 @@
-use acts::{Executor, Message, Result, Vars};
+use acts::{Executor, Message, MessageState, Result, Vars};
 use serde_json::json;
 use std::collections::HashMap;
 
@@ -52,7 +52,7 @@ impl<'a> Client<'a> {
     }
 
     pub fn process(&self, executor: &Executor, message: &Message) -> Result<()> {
-        if message.is_key("init") && message.is_state("created") {
+        if message.is_key("init") && message.is_state(MessageState::Created) {
             // init the workflow
             println!("do init work");
             let mut options = Vars::new();
@@ -65,7 +65,7 @@ impl<'a> Client<'a> {
                 "action state: id={} key={} inputs={}",
                 &message.tid, &message.key, &message.inputs,
             );
-        } else if message.is_key("pm_act") && message.is_state("created") {
+        } else if message.is_key("pm_act") && message.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
 
@@ -76,7 +76,7 @@ impl<'a> Client<'a> {
                 "action state: id={} key={} inputs={}",
                 &message.tid, &message.key, &message.inputs,
             );
-        } else if message.is_key("gm_act") && message.is_state("created") {
+        } else if message.is_key("gm_act") && message.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u2"));
 
@@ -87,7 +87,7 @@ impl<'a> Client<'a> {
                 "action state: id={} key={} inputs={}",
                 &message.tid, &message.key, &message.inputs,
             );
-        } else if message.is_key("pm") && message.is_state("created") {
+        } else if message.is_key("pm") && message.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".into(), "admin".into());
             options.insert(
@@ -101,7 +101,7 @@ impl<'a> Client<'a> {
                 "action state: id={} key={} inputs={}",
                 &message.tid, &message.key, &message.inputs,
             );
-        } else if message.is_key("gm") && message.is_state("created") {
+        } else if message.is_key("gm") && message.is_state(MessageState::Created) {
             let mut options = Vars::new();
 
             options.insert("uid".into(), "admin".into());

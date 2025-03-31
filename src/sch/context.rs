@@ -383,7 +383,7 @@ impl Context {
             id: utils::longid(),
             r#type: consts::ACT_TYPE_MSG.to_string(),
             source: task.node().kind().to_string(),
-            state: state.to_string(),
+            state,
             pid: task.pid.clone(),
             tid: task.id.clone(),
             key: msg.key.to_string(),

@@ -26,6 +26,7 @@ pub struct Event<T, E = ()> {
 #[derive(
     Serialize, Deserialize, Debug, Clone, Default, PartialEq, strum::AsRefStr, strum::EnumString,
 )]
+#[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum EventAction {
     #[default]

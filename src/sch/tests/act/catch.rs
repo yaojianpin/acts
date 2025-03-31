@@ -2,7 +2,7 @@ use crate::event::EventAction;
 use crate::{
     sch::{tests::create_proc_signal, TaskState},
     utils::{self, consts},
-    Act, Action, StmtBuild, Vars, Workflow,
+    Act, Action, MessageState, StmtBuild, Vars, Workflow,
 };
 use serde_json::json;
 
@@ -21,7 +21,7 @@ async fn sch_act_catch_by_any_error() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "aaaaaaaaa");
@@ -29,7 +29,7 @@ async fn sch_act_catch_by_any_error() {
             s.do_action(&action).unwrap();
         }
 
-        if e.is_key("catch1") && e.is_state("created") {
+        if e.is_key("catch1") && e.is_state(MessageState::Created) {
             rx.send(true);
         }
     });
@@ -54,7 +54,7 @@ async fn sch_act_catch_by_msg() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "aaaaaaaa");
@@ -89,7 +89,7 @@ async fn sch_act_catch_empty_then() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.set(consts::ACT_ERR_CODE, "err1");
             let action = Action::new(&e.pid, &e.tid, EventAction::Error, &options);
@@ -117,7 +117,7 @@ async fn sch_act_catch_by_err_code() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "123");
@@ -127,7 +127,7 @@ async fn sch_act_catch_by_err_code() {
             s.do_action(&action).unwrap();
         }
 
-        if e.is_key("catch1") && e.is_state("created") {
+        if e.is_key("catch1") && e.is_state(MessageState::Created) {
             rx.send(true);
         }
     });
@@ -153,7 +153,7 @@ async fn sch_act_catch_by_wrong_code() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, json!("123"));
@@ -185,7 +185,7 @@ async fn sch_act_catch_by_no_err_code() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             let action = Action::new(&e.pid, &e.tid, EventAction::Error, &options);
@@ -219,7 +219,7 @@ async fn sch_act_catch_as_complete() {
     // emitter.reset();
     emitter.on_message(move |e| {
         println!("message: {:?}", e.inner());
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "123");
@@ -229,7 +229,7 @@ async fn sch_act_catch_as_complete() {
             s.do_action(&action).unwrap();
         }
 
-        if e.is_key("catch1") && e.is_state("created") {
+        if e.is_key("catch1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
 
@@ -266,7 +266,7 @@ async fn sch_act_catch_as_error() {
     let p = proc.clone();
     // emitter.reset();
     emitter.on_message(move |e| {
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "1");
@@ -276,7 +276,7 @@ async fn sch_act_catch_as_error() {
             s.do_action(&action).unwrap();
         }
 
-        if e.is_key("catch1") && e.is_state("created") {
+        if e.is_key("catch1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "2");
@@ -321,7 +321,7 @@ async fn sch_act_catch_as_skip() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "1");
@@ -331,7 +331,7 @@ async fn sch_act_catch_as_skip() {
             s.do_action(&action).unwrap();
         }
 
-        if e.is_key("catch1") && e.is_state("created") {
+        if e.is_key("catch1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
 
@@ -375,7 +375,7 @@ async fn sch_act_catch_as_abort() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "1");
@@ -385,7 +385,7 @@ async fn sch_act_catch_as_abort() {
             s.do_action(&action).unwrap();
         }
 
-        if e.is_key("catch1") && e.is_state("created") {
+        if e.is_key("catch1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
 
@@ -420,7 +420,7 @@ async fn sch_act_catch_as_submit() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "1");
@@ -430,7 +430,7 @@ async fn sch_act_catch_as_submit() {
             s.do_action(&action).unwrap();
         }
 
-        if e.is_key("catch1") && e.is_state("created") {
+        if e.is_key("catch1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
 
@@ -477,7 +477,7 @@ async fn sch_act_catch_as_back() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let count = rx.data();
             if count == 1 {
                 rx.close();
@@ -492,7 +492,7 @@ async fn sch_act_catch_as_back() {
             rx.update(|data| *data += 1);
         }
 
-        if e.is_key("act2") && e.is_state("created") {
+        if e.is_key("act2") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "1");
@@ -502,7 +502,7 @@ async fn sch_act_catch_as_back() {
             s.do_action(&action).unwrap();
         }
 
-        if e.is_key("catch2") && e.is_state("created") {
+        if e.is_key("catch2") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.insert("to".to_string(), json!("step1"));
@@ -547,7 +547,7 @@ async fn sch_act_catch_and_continue() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "aaaaaaaaaa");
@@ -556,7 +556,7 @@ async fn sch_act_catch_and_continue() {
             s.do_action(&action).unwrap();
         }
 
-        if e.is_key("act2") && e.is_state("created") {
+        if e.is_key("act2") && e.is_state(MessageState::Created) {
             rx.send(true);
         }
     });

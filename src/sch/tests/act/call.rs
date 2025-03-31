@@ -2,7 +2,7 @@ use crate::event::EventAction;
 use crate::{
     sch::{tests::create_proc_signal, TaskState},
     utils::{self, consts},
-    Act, Executor, Vars, Workflow,
+    Act, Executor, MessageState, Vars, Workflow,
 };
 use serde_json::json;
 
@@ -102,7 +102,7 @@ async fn sch_act_call_act_complete() {
 
     Executor::new(&scher).model().deploy(&w2).unwrap();
     emitter.on_message(move |e| {
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let options = Vars::new();
             e.do_action(&e.pid, &e.tid, EventAction::Next, &options)
                 .unwrap();
@@ -137,7 +137,7 @@ async fn sch_act_call_act_skip() {
 
     Executor::new(&scher).model().deploy(&w2).unwrap();
     emitter.on_message(move |e| {
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let options = Vars::new();
             e.do_action(&e.pid, &e.tid, EventAction::Skip, &options)
                 .unwrap();
@@ -175,7 +175,7 @@ async fn sch_act_call_act_abort() {
     Executor::new(&scher).model().deploy(&w2).unwrap();
     emitter.on_message(move |e| {
         println!("message: {:?}", e.inner());
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let options = Vars::new();
             e.do_action(&e.pid, &e.tid, EventAction::Abort, &options)
                 .unwrap();
@@ -216,7 +216,7 @@ async fn sch_act_call_act_error() {
     });
     emitter.on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.set(consts::ACT_ERR_CODE, "err1");
             options.set(consts::ACT_ERR_MESSAGE, "sub workflow error");
