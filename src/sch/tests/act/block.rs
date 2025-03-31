@@ -1,6 +1,6 @@
 use crate::{
     sch::{tests::create_proc_signal, TaskState},
-    utils, Act, StmtBuild, Workflow,
+    utils, Act, MessageState, StmtBuild, Workflow,
 };
 
 #[tokio::test]
@@ -69,7 +69,7 @@ async fn sch_act_block_acts() {
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             rx.close();
         }
     });

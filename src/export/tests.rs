@@ -771,7 +771,7 @@ async fn export_manager_messages_all() {
         let mut count = count.lock().unwrap();
         *count += 1;
 
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             s1.send(*count);
         }
     });
@@ -810,7 +810,7 @@ async fn export_manager_messages_query() {
         let mut count = count.lock().unwrap();
         *count += 1;
 
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             s1.send(*count);
         }
     });
@@ -850,7 +850,7 @@ async fn export_manager_messages_order() {
     });
     chan.on_message(move |e| {
         println!("message:{e:?}");
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             s1.close();
         }
     });
@@ -896,7 +896,7 @@ async fn export_manager_messages_count() {
         let mut count = count.lock().unwrap();
         *count += 1;
 
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             s1.send(*count);
         }
     });
@@ -941,7 +941,7 @@ async fn export_manager_messages_offset_in_range() {
         let mut count = count.lock().unwrap();
         *count += 1;
 
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             s1.send(*count);
         }
     });
@@ -986,7 +986,7 @@ async fn export_manager_messages_offset_out_range() {
         let mut count = count.lock().unwrap();
         *count += 1;
 
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             s1.send(*count);
         }
     });
@@ -1031,7 +1031,7 @@ async fn export_manager_message_get() {
         let mut count = count.lock().unwrap();
         *count += 1;
 
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             s1.send(*count);
         }
     });
@@ -1077,7 +1077,7 @@ async fn export_manager_message_rm() {
         let mut count = count.lock().unwrap();
         *count += 1;
 
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             s1.send(*count);
         }
     });
@@ -1314,7 +1314,7 @@ async fn export_executeor_complete() {
     let sig = engine.signal(false);
     let s1 = sig.clone();
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             let ret = engine.executor().act().complete(&e.pid, &e.tid, &vars);
@@ -1342,7 +1342,7 @@ async fn export_executeor_complete_no_uid() {
     // scher.emitter().on_complete(|e| rx.close());
 
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let vars = Vars::new();
             let ret = engine.executor().act().complete(&e.pid, &e.tid, &vars);
 
@@ -1369,7 +1369,7 @@ async fn export_executeor_submit() {
     // scher.emitter().on_complete(|e| e.close());
 
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             let ret = engine.executor().act().submit(&e.pid, &e.tid, &vars);
@@ -1396,7 +1396,7 @@ async fn export_executeor_skip() {
     let s1 = sig.clone();
     // scher.emitter().on_complete(|e| e.close());
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             let ret = engine.executor().act().skip(&e.pid, &e.tid, &vars);
@@ -1422,7 +1422,7 @@ async fn export_executeor_error() {
     let sig = engine.signal(false);
     let s1 = sig.clone();
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             vars.insert("ecode".to_string(), json!("code_1"));
@@ -1451,7 +1451,7 @@ async fn export_executeor_abort() {
     // scher.emitter().on_complete(|e| e.close());
     engine.channel().on_message(move |e| {
         println!("message: {:?}", e.inner());
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             let ret = engine.executor().act().abort(&e.pid, &e.tid, &vars);
@@ -1485,7 +1485,7 @@ async fn export_executeor_back() {
 
     let count = Arc::new(Mutex::new(0));
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut count = count.lock().unwrap();
             if *count == 1 {
                 s1.close();
@@ -1501,7 +1501,7 @@ async fn export_executeor_back() {
             *count += 1;
         }
 
-        if e.is_key("act2") && e.is_state("created") {
+        if e.is_key("act2") && e.is_state(MessageState::Created) {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             vars.insert("to".to_string(), json!("step1"));
@@ -1536,7 +1536,7 @@ async fn export_executeor_cancel() {
     let count = Arc::new(Mutex::new(0));
     let tid = Arc::new(Mutex::new("".to_string()));
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut count = count.lock().unwrap();
             if *count == 1 {
                 s1.close();
@@ -1553,7 +1553,7 @@ async fn export_executeor_cancel() {
             *count += 1;
         }
 
-        if e.is_key("act2") && e.is_state("created") {
+        if e.is_key("act2") && e.is_state(MessageState::Created) {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             let ret = engine
@@ -1584,12 +1584,12 @@ async fn export_executeor_push() {
     // scher.emitter().on_complete(|e| e.close());
     engine.channel().on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_key("step1") && e.is_state("created") {
+        if e.is_key("step1") && e.is_state(MessageState::Created) {
             let vars = Vars::new().with("key", "act2");
             engine.executor().act().push(&e.pid, &e.tid, &vars).unwrap();
         }
 
-        if e.is_key("act2") && e.is_state("created") {
+        if e.is_key("act2") && e.is_state(MessageState::Created) {
             s1.send(true);
         }
     });
@@ -1614,7 +1614,7 @@ async fn export_executeor_push_no_key_error() {
     // scher.emitter().on_complete(|e| e.close());
     engine.channel().on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_key("step1") && e.is_state("created") {
+        if e.is_key("step1") && e.is_state(MessageState::Created) {
             s1.send(
                 engine
                     .executor()
@@ -1645,7 +1645,7 @@ async fn export_executeor_push_not_step_id_error() {
     // scher.emitter().on_complete(|e| e.close());
     engine.channel().on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let vars = Vars::new();
             s1.send(engine.executor().act().push(&e.pid, &e.tid, &vars).is_err());
         }
@@ -1670,7 +1670,7 @@ async fn export_executeor_remove() {
     let s1 = sig.clone();
     engine.channel().on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             s1.send(
                 engine
                     .executor()
@@ -1786,7 +1786,7 @@ async fn export_emitter_state_match() {
     });
 
     let msg = Message {
-        state: MessageState::Completed.to_string(),
+        state: MessageState::Completed,
         ..Message::default()
     };
     engine.runtime().emitter().emit_message(&msg);
@@ -1809,7 +1809,7 @@ async fn export_emitter_state_not_match() {
     });
 
     let msg = Message {
-        state: MessageState::Completed.to_string(),
+        state: MessageState::Completed,
         ..Message::default()
     };
     engine.runtime().emitter().emit_message(&msg);

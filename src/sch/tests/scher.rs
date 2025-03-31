@@ -1,5 +1,5 @@
 use crate::event::EventAction;
-use crate::{utils, Act, Action, Engine, TaskState, Vars, Workflow};
+use crate::{utils, Act, Action, Engine, MessageState, TaskState, Vars, Workflow};
 use serde_json::json;
 
 #[tokio::test]
@@ -78,7 +78,7 @@ async fn sch_scher_do_action() {
     let s = rt.clone();
     engine.channel().on_complete(move |_| rx.close());
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             let action = Action::new(&e.pid, &e.tid, EventAction::Next, &options);

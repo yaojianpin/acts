@@ -4,7 +4,7 @@ use crate::event::EventAction;
 use crate::{
     sch::{tests::create_proc_signal, TaskState},
     utils::{self, consts},
-    Act, Message, StmtBuild, Vars, Workflow,
+    Act, Message, MessageState, StmtBuild, Vars, Workflow,
 };
 
 #[tokio::test]
@@ -225,7 +225,7 @@ async fn sch_step_setup_chain() {
         create_proc_signal::<Vec<String>>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {:?}", e.inner());
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             rx.update(|data| data.push(e.inputs.get::<String>(consts::ACT_VALUE).unwrap()));
             e.do_action(&e.pid, &e.tid, EventAction::Next, &Vars::new())
                 .unwrap();
@@ -255,7 +255,7 @@ async fn sch_step_setup_pack() {
         create_proc_signal::<Vec<String>>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {:?}", e.inner());
-        if e.is_type("msg") && e.is_state("created") {
+        if e.is_type("msg") && e.is_state(MessageState::Created) {
             rx.update(|data| data.push(e.key.clone()));
             e.do_action(&e.pid, &e.tid, EventAction::Next, &Vars::new())
                 .unwrap();

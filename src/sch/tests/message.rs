@@ -236,7 +236,7 @@ async fn sch_message_act_created_by_push_action() {
                 .unwrap();
         }
 
-        if e.is_key("act2") && e.is_state("created") {
+        if e.is_key("act2") && e.is_state(MessageState::Created) {
             rx.send(true);
         }
     });
@@ -262,7 +262,7 @@ async fn sch_message_act_tag_by_push_action() {
                 .unwrap();
         }
 
-        if e.is_key("act2") && e.is_state("created") {
+        if e.is_key("act2") && e.is_state(MessageState::Created) {
             rx.send(e.tag == "tag2");
         }
     });
@@ -290,7 +290,7 @@ async fn sch_message_act_inputs_by_push_action() {
                 .unwrap();
         }
 
-        if e.is_key("act2") && e.is_state("created") {
+        if e.is_key("act2") && e.is_state(MessageState::Created) {
             rx.send(e.inputs.get::<i32>("a").unwrap() == 5);
         }
     });
@@ -318,7 +318,7 @@ async fn sch_message_act_outputs_by_push_action() {
                 .unwrap();
         }
 
-        if e.is_key("act2") && e.is_state("created") {
+        if e.is_key("act2") && e.is_state(MessageState::Created) {
             rx.send(e.outputs.get::<i32>("a").unwrap() == 5);
         }
     });
@@ -346,7 +346,7 @@ async fn sch_message_act_rets_by_push_action() {
                 .unwrap();
         }
 
-        if e.is_key("act2") && e.is_state("created") {
+        if e.is_key("act2") && e.is_state(MessageState::Created) {
             rx.send(
                 e.do_action(&e.pid, &e.tid, EventAction::Next, &Vars::new())
                     .is_err(),
@@ -470,14 +470,14 @@ async fn sch_message_act_back() {
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
     let s = scher.clone();
     emitter.on_message(move |msg| {
-        if msg.is_key("act1") && msg.is_state("created") {
+        if msg.is_key("act1") && msg.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             let action = Action::new(&msg.pid, &msg.tid, EventAction::Next, &options);
             s.do_action(&action).unwrap();
         }
 
-        if msg.is_key("act2") && msg.is_state("created") {
+        if msg.is_key("act2") && msg.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.insert("to".to_string(), json!("step1"));
@@ -511,14 +511,14 @@ async fn sch_message_act_cancel() {
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
     let s = scher.clone();
     emitter.on_message(move |msg| {
-        if msg.is_key("act1") && msg.is_state("created") {
+        if msg.is_key("act1") && msg.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             let action = Action::new(&msg.pid, &msg.tid, EventAction::Next, &options);
             s.do_action(&action).unwrap();
         }
 
-        if msg.is_key("act1") && msg.is_state("completed") {
+        if msg.is_key("act1") && msg.is_state(MessageState::Completed) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
 
@@ -527,7 +527,7 @@ async fn sch_message_act_cancel() {
             s.do_action(&action).unwrap();
         }
 
-        if msg.is_key("act2") && msg.is_state("created") {
+        if msg.is_key("act2") && msg.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
 
@@ -591,7 +591,7 @@ async fn sch_message_act_abort() {
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
     let s = scher.clone();
     emitter.on_message(move |msg| {
-        if msg.is_key("act1") && msg.is_state("created") {
+        if msg.is_key("act1") && msg.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             let action = Action::new(&msg.pid, &msg.tid, EventAction::Abort, &options);
@@ -619,7 +619,7 @@ async fn sch_message_act_error() {
     let s = scher.clone();
     emitter.on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "err1");
@@ -649,7 +649,7 @@ async fn sch_message_act_inputs_with_err() {
 
     emitter.on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "err1");
@@ -687,7 +687,7 @@ async fn sch_message_act_inputs_with_step_id() {
         if e.is_key("step1") {
             *tid.lock().unwrap() = e.tid.to_string();
         }
-        if e.is_source("act") && e.is_state("created") {
+        if e.is_source("act") && e.is_state(MessageState::Created) {
             rx.send(e.inputs.clone());
         }
     });
@@ -780,7 +780,7 @@ async fn sch_message_ack_exist_message_in_store() {
         .unwrap();
     assert_eq!(message.r#type, "workflow");
     assert_eq!(message.pid, id);
-    assert_eq!(message.state, "created");
+    assert_eq!(message.state, MessageState::Created);
     assert_eq!(message.status, MessageStatus::Acked);
     assert!(message.start_time > 0);
 }
@@ -820,7 +820,7 @@ async fn sch_message_complete_message_in_store() {
     let message = e2.runtime().cache().store().messages().find(&ret).unwrap();
     assert_eq!(message.r#type, "irq");
     assert_eq!(message.pid, id);
-    assert_eq!(message.state, "created");
+    assert_eq!(message.state, MessageState::Created);
     assert_eq!(message.status, MessageStatus::Completed);
     assert!(message.create_time > 0);
     assert!(message.update_time > 0);
@@ -892,7 +892,7 @@ async fn sch_message_re_sent_if_not_ack() {
         .unwrap();
     assert_eq!(message.r#type, "workflow");
     assert_eq!(message.pid, id);
-    assert_eq!(message.state, "created");
+    assert_eq!(message.state, MessageState::Created);
     assert_eq!(message.status, MessageStatus::Created);
     assert!(message.create_time > 0);
     assert!(message.update_time > 0);
@@ -933,7 +933,7 @@ async fn sch_message_error_if_not_ack_and_exceed_max_reties() {
     let message = e2.runtime().cache().store().messages().find(&m.id).unwrap();
     assert_eq!(message.r#type, "workflow");
     assert_eq!(message.pid, id);
-    assert_eq!(message.state, "created");
+    assert_eq!(message.state, MessageState::Created);
     assert_eq!(message.status, MessageStatus::Error);
     assert!(message.create_time > 0);
     assert!(message.update_time > 0);

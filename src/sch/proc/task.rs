@@ -170,13 +170,14 @@ impl Task {
             key = self.node.id().to_string();
         }
         let state: MessageState = self.state().into();
+
         Message {
             id: utils::longid(),
             tid: self.id.clone(),
             name: self.node.content.name(),
             r#type: self.node.typ(),
             source: self.node.kind().to_string(),
-            state: state.to_string(),
+            state,
             pid: self.pid.clone(),
             nid: self.node.id().to_string(),
             mid: workflow.id.clone(),

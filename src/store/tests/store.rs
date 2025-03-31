@@ -2,7 +2,7 @@ use crate::{
     data::Model,
     sch::NodeKind,
     store::{data, query::Expr, Cond, Store, StoreKind},
-    utils, Query, StoreAdapter, TaskState, Workflow,
+    utils, MessageState, Query, StoreAdapter, TaskState, Workflow,
 };
 use data::{Message, MessageStatus, Package, Proc, Task};
 use serde_json::json;
@@ -914,7 +914,7 @@ async fn store_message_create() {
         tid: tid.clone(),
         nid: utils::shortid(),
         mid: utils::shortid(),
-        state: "created".to_string(),
+        state: MessageState::Created,
         start_time: 0,
         end_time: 0,
         r#type: "step".to_string(),
@@ -953,7 +953,7 @@ async fn store_message_query_by_id() {
         tid: tid.clone(),
         nid: utils::shortid(),
         mid: utils::shortid(),
-        state: "created".to_string(),
+        state: MessageState::Created,
         start_time: 0,
         end_time: 0,
         r#type: "step".to_string(),
@@ -995,7 +995,7 @@ async fn store_message_query_by_offset_count() {
             tid: tid.clone(),
             nid: utils::shortid(),
             mid: utils::shortid(),
-            state: "created".to_string(),
+            state: MessageState::Created,
             start_time: 0,
             end_time: 0,
             r#type: "step".to_string(),
@@ -1048,7 +1048,7 @@ async fn store_message_query_by_cond_and() {
             tid: tid.clone(),
             nid: utils::shortid(),
             mid: utils::shortid(),
-            state: "created".to_string(),
+            state: MessageState::Created,
             start_time: 0,
             end_time: 0,
             r#type: "step".to_string(),
@@ -1101,7 +1101,7 @@ async fn store_message_query_by_cond_or() {
             tid: tid.clone(),
             nid: utils::shortid(),
             mid: utils::shortid(),
-            state: "created".to_string(),
+            state: MessageState::Created,
             start_time: 0,
             end_time: 0,
             r#type: "step".to_string(),
@@ -1130,7 +1130,7 @@ async fn store_message_query_by_cond_or() {
             tid: tid.clone(),
             nid: utils::shortid(),
             mid: utils::shortid(),
-            state: "completed".to_string(),
+            state: MessageState::Completed,
             start_time: 0,
             end_time: 0,
             r#type: "step".to_string(),
@@ -1179,7 +1179,7 @@ async fn store_message_query_by_order() {
             tid: tid.clone(),
             nid: utils::shortid(),
             mid: utils::shortid(),
-            state: "created".to_string(),
+            state: MessageState::Created,
             start_time: 0,
             end_time: 0,
             r#type: "step".to_string(),
@@ -1230,7 +1230,7 @@ async fn store_message_update() {
         tid: tid.clone(),
         nid: utils::shortid(),
         mid: utils::shortid(),
-        state: "created".to_string(),
+        state: MessageState::Created,
         start_time: 0,
         end_time: 0,
         r#type: "step".to_string(),
@@ -1253,13 +1253,13 @@ async fn store_message_update() {
 
     let id = utils::Id::new(&pid, &tid);
     let mut msg = store.messages().find(&id.id()).unwrap();
-    msg.state = "completed".to_string();
+    msg.state = MessageState::Completed;
     msg.retry_times = 1;
     msg.status = MessageStatus::Completed;
     store.messages().update(&msg).unwrap();
 
     let msg2 = store.messages().find(&id.id()).unwrap();
-    assert_eq!(msg2.state, "completed");
+    assert_eq!(msg2.state, MessageState::Completed);
     assert_eq!(msg2.retry_times, 1);
     assert_eq!(msg2.status, MessageStatus::Completed);
 }
@@ -1277,7 +1277,7 @@ async fn store_message_remove() {
         tid: tid.clone(),
         nid: utils::shortid(),
         mid: utils::shortid(),
-        state: "created".to_string(),
+        state: MessageState::Created,
         start_time: 0,
         end_time: 0,
         r#type: "step".to_string(),

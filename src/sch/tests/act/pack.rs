@@ -2,7 +2,7 @@ use crate::{
     data,
     sch::{tests::create_proc_signal2, Proc},
     utils::{self, consts},
-    Act, Event, Message, Signal, StmtBuild, TaskState, Workflow,
+    Act, Event, Message, MessageState, Signal, StmtBuild, TaskState, Workflow,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -211,7 +211,7 @@ async fn sch_act_pack_expose() {
         ..Default::default()
     };
     let (_, proc) = run_test_proc::<()>(&workflow, &pack, |e, s| {
-        if e.is_key("step1") && e.is_state("completed") {
+        if e.is_key("step1") && e.is_state(MessageState::Completed) {
             s.close();
         }
     })
@@ -244,7 +244,7 @@ async fn sch_act_pack_abort() {
         ..Default::default()
     };
     let ret: bool = run_test(&workflow, &pack, |e, s| {
-        if e.is_key("step1") && e.is_state("aborted") {
+        if e.is_key("step1") && e.is_state(MessageState::Aborted) {
             s.send(true);
         }
     })
@@ -268,7 +268,7 @@ async fn sch_act_pack_fail() {
         ..Default::default()
     };
     let ret: bool = run_test(&workflow, &pack, |e, s| {
-        if e.is_key("step1") && e.is_state("error") {
+        if e.is_key("step1") && e.is_state(MessageState::Error) {
             s.send(true);
         }
     })
@@ -296,7 +296,7 @@ async fn sch_act_pack_fail_catch() {
         ..Default::default()
     };
     let ret: bool = run_test(&workflow, &pack, |e, s| {
-        if e.is_key("step1") && e.is_state("completed") {
+        if e.is_key("step1") && e.is_state(MessageState::Completed) {
             s.send(true);
         }
     })
@@ -320,7 +320,7 @@ async fn sch_act_pack_skip() {
         ..Default::default()
     };
     let (_, proc) = run_test_proc::<()>(&workflow, &pack, |e, s| {
-        if e.is_key("step1") && e.is_state("completed") {
+        if e.is_key("step1") && e.is_state(MessageState::Completed) {
             s.close();
         }
     })
@@ -349,7 +349,7 @@ async fn sch_act_pack_back() {
         ..Default::default()
     };
     let ret: bool = run_test(&workflow, &pack, |e, s| {
-        if e.is_key("step2") && e.is_state("backed") {
+        if e.is_key("step2") && e.is_state(MessageState::Backed) {
             s.send(true);
         }
     })
@@ -375,7 +375,7 @@ async fn sch_act_pack_complete() {
         ..Default::default()
     };
     let ret: bool = run_test(&workflow, &pack, |e, s| {
-        if e.is_key("step2") && e.is_state("completed") {
+        if e.is_key("step2") && e.is_state(MessageState::Completed) {
             s.send(true);
         }
     })
@@ -400,7 +400,7 @@ async fn sch_act_pack_state() {
         ..Default::default()
     };
     let (_, proc) = run_test_proc::<()>(&workflow, &pack, |e, s| {
-        if e.is_key("step1") && e.is_state("completed") {
+        if e.is_key("step1") && e.is_state(MessageState::Completed) {
             s.close();
         }
     })
@@ -432,7 +432,7 @@ async fn sch_act_pack_throw_error() {
         ..Default::default()
     };
     let ret: bool = run_test(&workflow, &pack, |e, s| {
-        if e.is_key("step1") && e.is_state("error") {
+        if e.is_key("step1") && e.is_state(MessageState::Error) {
             s.send(true);
         }
     })
@@ -457,7 +457,7 @@ async fn sch_act_pack_catch_error() {
         ..Default::default()
     };
     let ret: bool = run_test(&workflow, &pack, |e, s| {
-        if e.is_key("step1") && e.is_state("completed") {
+        if e.is_key("step1") && e.is_state(MessageState::Completed) {
             s.send(true);
         }
     })

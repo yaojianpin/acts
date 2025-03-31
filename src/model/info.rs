@@ -1,7 +1,7 @@
 use crate::{
     sch::{self, NodeData},
     store::data,
-    ActError, Result, Workflow,
+    ActError, MessageState, Result, Workflow,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -62,7 +62,7 @@ pub struct MessageInfo {
     pub id: String,
     pub tid: String,
     pub name: String,
-    pub state: String,
+    pub state: MessageState,
     pub r#type: String,
     pub pid: String,
     pub nid: String,
@@ -197,7 +197,7 @@ impl From<&data::Message> for MessageInfo {
             timestamp: m.timestamp,
             create_time: m.create_time,
             update_time: m.update_time,
-            state: m.state.clone(),
+            state: m.state,
             r#type: m.r#type.clone(),
             key: m.key.clone(),
             tag: m.tag.clone(),

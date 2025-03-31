@@ -4,7 +4,7 @@ use crate::{
     data,
     sch::tests::create_proc_signal2,
     utils::{self, consts},
-    Act, Event, Message, Signal, StmtBuild, Workflow,
+    Act, Event, Message, MessageState, Signal, StmtBuild, Workflow,
 };
 
 #[tokio::test]
@@ -237,7 +237,7 @@ async fn sch_step_uses_expose() {
         ..Default::default()
     };
     let ret = run_test(&workflow, &pack, |e, s| {
-        if e.is_key("step1") && e.is_state("completed") {
+        if e.is_key("step1") && e.is_state(MessageState::Completed) {
             s.send(e.outputs.get::<i32>("a").unwrap() == 100);
         }
     })
@@ -258,7 +258,7 @@ async fn sch_step_uses_abort() {
         ..Default::default()
     };
     let ret: bool = run_test(&workflow, &pack, |e, s| {
-        if e.is_key("step1") && e.is_state("aborted") {
+        if e.is_key("step1") && e.is_state(MessageState::Aborted) {
             s.send(true);
         }
     })
@@ -279,7 +279,7 @@ async fn sch_step_uses_fail() {
         ..Default::default()
     };
     let ret: bool = run_test(&workflow, &pack, |e, s| {
-        if e.is_key("step1") && e.is_state("error") {
+        if e.is_key("step1") && e.is_state(MessageState::Error) {
             s.send(true);
         }
     })
@@ -300,7 +300,7 @@ async fn sch_step_uses_skip() {
         ..Default::default()
     };
     let ret: bool = run_test(&workflow, &pack, |e, s| {
-        if e.is_key("step1") && e.is_state("skipped") {
+        if e.is_key("step1") && e.is_state(MessageState::Skipped) {
             s.send(true);
         }
     })
@@ -323,7 +323,7 @@ async fn sch_step_uses_back() {
         ..Default::default()
     };
     let ret: bool = run_test(&workflow, &pack, |e, s| {
-        if e.is_key("step2") && e.is_state("backed") {
+        if e.is_key("step2") && e.is_state(MessageState::Backed) {
             s.send(true);
         }
     })
@@ -345,7 +345,7 @@ async fn sch_step_uses_state() {
         ..Default::default()
     };
     let ret = run_test(&workflow, &pack, |e, s| {
-        if e.is_key("step1") && e.is_state("completed") {
+        if e.is_key("step1") && e.is_state(MessageState::Completed) {
             s.send(e.outputs.get::<String>("state").unwrap() == "running");
         }
     })
@@ -370,7 +370,7 @@ async fn sch_step_uses_set_value() {
         ..Default::default()
     };
     let ret = run_test(&workflow, &pack, |e, s| {
-        if e.is_key("step1") && e.is_state("completed") {
+        if e.is_key("step1") && e.is_state(MessageState::Completed) {
             s.send(e.outputs.get::<String>("my_data").unwrap() == "abc");
         }
     })
@@ -395,7 +395,7 @@ async fn sch_step_uses_throw_error() {
         ..Default::default()
     };
     let ret = run_test(&workflow, &pack, |e, s| {
-        if e.is_key("step1") && e.is_state("error") {
+        if e.is_key("step1") && e.is_state(MessageState::Error) {
             s.send(true);
         }
     })
@@ -421,7 +421,7 @@ async fn sch_step_uses_catch_error() {
         ..Default::default()
     };
     let ret = run_test(&workflow, &pack, |e, s| {
-        if e.is_key("step1") && e.is_state("completed") {
+        if e.is_key("step1") && e.is_state(MessageState::Completed) {
             s.send(true);
         }
     })
