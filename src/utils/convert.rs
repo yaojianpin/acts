@@ -76,7 +76,7 @@ pub fn fill_proc_vars(task: &Arc<Task>, values: &Vars, ctx: &Context) -> Vars {
             if let Some(expr) = get_expr(string) {
                 let result =
                     Context::scope(ctx.clone(), || ctx.runtime.env().eval::<JsonValue>(&expr));
-                let new_value = result.unwrap_or_else(|_err| JsonValue::Null);
+                let new_value = result.unwrap_or(JsonValue::Null);
 
                 // satisfies the rule 1
                 ret.insert(k.to_string(), new_value);

@@ -124,7 +124,7 @@ where
         }
 
         let count = rows.len();
-        let page_count = (count + q.limit() - 1) / q.limit();
+        let page_count = count.div_ceil(q.limit());
         let page_num = q.offset() / q.limit() + 1;
         let data = PageData {
             count,

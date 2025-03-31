@@ -51,11 +51,11 @@ impl Database {
         &self.pool
     }
 
-    pub fn init(&mut self, name: &str, schema: &Vec<(String, DbColumn)>) {
+    pub fn init(&mut self, name: &str, schema: &[(String, DbColumn)]) {
         let mut conn = self.pool().get().unwrap();
         let mut sql = String::new();
         sql.push_str(&format!("create table IF NOT EXISTS {} ", name));
-        sql.push_str("(");
+        sql.push('(');
 
         let len = schema.len();
         let mut idx_sqls = Vec::new();
@@ -93,7 +93,7 @@ impl Database {
             }
 
             if index < len - 1 {
-                sql.push_str(",");
+                sql.push(',');
             }
 
             if col.is_index {

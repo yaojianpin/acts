@@ -13,7 +13,7 @@ static STORE: OnceCell<Arc<Store>> = OnceCell::const_new();
 async fn init() -> Arc<Store> {
     #[cfg(feature = "store")]
     {
-        return Arc::new(Store::local("test_data", "test.db"));
+        Arc::new(Store::local("test_data", "test.db"))
     }
 
     #[cfg(not(feature = "store"))]
@@ -375,7 +375,7 @@ async fn store_proc_query_by_id() {
     let mid = utils::longid();
     let proc = Proc {
         id: utils::shortid(),
-        name: format!("test"),
+        name: "test".to_string(),
         mid: mid.clone(),
         state: "running".to_string(),
         start_time: 0,

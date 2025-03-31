@@ -177,9 +177,9 @@ mod act {
     pub fn push(act: ActValue) -> rquickjs::Result<()> {
         let act = act.to::<Act>().unwrap();
         if act.act.is_empty() {
-            return Err(ActError::Action(format!(
-                "'act' property is not set when pushing a new act"
-            ))
+            return Err(ActError::Action(
+                "'act' property is not set when pushing a new act".to_string(),
+            )
             .into());
         }
         Context::with(|ctx| act.exec(ctx)).map_err(|err| err.into())

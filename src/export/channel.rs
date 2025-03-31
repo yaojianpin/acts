@@ -31,7 +31,7 @@ fn is_match(
 ) -> bool {
     let (pat_type, pat_state, pat_tag, pat_key) = glob;
     pat_type.is_match(&e.r#type)
-        && pat_state.is_match(e.state.to_string())
+        && pat_state.is_match(&e.state)
         && (pat_tag.is_match(&e.tag) || pat_tag.is_match(&e.model.tag))
         && pat_key.is_match(&e.key)
 }

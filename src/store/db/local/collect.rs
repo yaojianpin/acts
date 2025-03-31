@@ -23,12 +23,12 @@ where
         Self {
             db: db.clone(),
             name: name.to_string(),
-            _t: PhantomData::default(),
+            _t: PhantomData,
         }
     }
 }
 
-impl<'a, T> DbSet for Collect<T>
+impl<T> DbSet for Collect<T>
 where
     T: DbSchema + DbRow + Debug + Send + Sync + Clone,
 {
@@ -44,7 +44,7 @@ where
         let result = stmt
             .query_row(params![id], |row| row.get::<usize, i64>(0))
             .map_err(map_db_err)?;
-        return Ok(result > 0);
+        Ok(result > 0)
     }
 
     fn find(&self, id: &str) -> Result<T> {
@@ -80,7 +80,7 @@ where
                     CondType::And => "and",
                     CondType::Or => "or",
                 };
-                filter.push_str("(");
+                filter.push('(');
                 for (index, expr) in cond.conds().iter().enumerate() {
                     if !keys.contains(&expr.key()) {
                         return Err(ActError::Store(format!(
@@ -95,10 +95,10 @@ where
                         filter.push_str(&format!(" {typ} "));
                     }
                 }
-                filter.push_str(")");
+                filter.push(')');
 
                 if index != queries.len() - 1 {
-                    filter.push_str(&format!(" and "));
+                    filter.push_str(" and ");
                 }
             }
         }
@@ -145,7 +145,7 @@ where
             .map_err(map_db_err)?
             .query_row::<usize, _, _>([], |row| row.get(0))
             .map_err(map_db_err)?;
-        let page_count = (count + q.limit() - 1) / q.limit();
+        let page_count = count.div_ceil(q.limit());
         let page_num = q.offset() / q.limit() + 1;
         let data = PageData {
             count,
@@ -279,7 +279,7 @@ impl Expr {
                     "the operation({op}) is not support for string"
                 )))
             }
-            v @ _ => Err(crate::ActError::Store(format!(
+            v => Err(crate::ActError::Store(format!(
                 "not support sql value for '{v}'"
             ))),
         }

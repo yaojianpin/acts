@@ -120,8 +120,7 @@ fn model_info_package_arr_to_value() {
     };
     let info: PackageInfo = package.into();
 
-    let mut arr: Vec<PackageInfo> = Vec::new();
-    arr.push(info.clone());
+    let arr: Vec<PackageInfo> = vec![info.clone()];
 
     let v: Value = arr.into();
     assert!(v.is_array());
@@ -160,8 +159,7 @@ fn model_info_proc_arr_to_value() {
     };
     let info: ProcInfo = proc.into();
 
-    let mut arr: Vec<ProcInfo> = Vec::new();
-    arr.push(info.clone());
+    let arr: Vec<ProcInfo> = vec![info.clone()];
 
     let v: Value = arr.into();
     assert!(v.is_array());
@@ -211,8 +209,7 @@ fn model_info_task_arr_to_value() {
     };
     let info: TaskInfo = task.clone().into();
 
-    let mut arr: Vec<TaskInfo> = Vec::new();
-    arr.push(info.clone());
+    let arr: Vec<TaskInfo> = vec![info.clone()];
 
     let v: Value = arr.into();
     assert!(v.is_array());
@@ -249,8 +246,7 @@ fn model_info_model_arr_to_value() {
         timestamp: 0,
     };
 
-    let mut arr: Vec<ModelInfo> = Vec::new();
-    arr.push(model.clone().into());
+    let arr: Vec<ModelInfo> = vec![model.clone().into()];
 
     let v: Value = arr.into();
 

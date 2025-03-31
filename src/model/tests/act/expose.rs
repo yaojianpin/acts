@@ -12,7 +12,7 @@ fn model_act_parse_expose() {
         assert_eq!(stmt.get::<i32>("a").unwrap(), 1);
         assert_eq!(stmt.get::<String>("b").unwrap(), "abc");
     } else {
-        assert!(false);
+        panic!();
     }
 }
 
@@ -24,10 +24,10 @@ fn model_act_parse_expose_null() {
     b:
     "#;
     if let ActFn::Expose(stmt) = serde_yaml::from_str(text).unwrap() {
-        assert_eq!(stmt.get::<()>("a").unwrap(), ());
-        assert_eq!(stmt.get::<()>("b").unwrap(), ());
+        assert!(stmt.get::<()>("a").is_some());
+        assert!(stmt.get::<()>("b").is_some());
     } else {
-        assert!(false);
+        panic!();
     }
 }
 
@@ -53,6 +53,6 @@ fn model_act_parse_expose_obj() {
             }
         );
     } else {
-        assert!(false);
+        panic!();
     }
 }

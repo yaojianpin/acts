@@ -8,8 +8,7 @@ use tokio::sync::OnceCell;
 
 static STORE: OnceCell<LocalStore> = OnceCell::const_new();
 async fn init() -> LocalStore {
-    let s = LocalStore::new("test_data", "test.db");
-    s
+    LocalStore::new("test_data", "test.db")
 }
 
 async fn store() -> &'static LocalStore {
@@ -30,7 +29,7 @@ async fn store_mem_model_create() {
         timestamp: 0,
     };
     store.models().create(&model).unwrap();
-    assert_eq!(store.models().exists(&model.id).unwrap(), true);
+    assert!(store.models().exists(&model.id).unwrap());
 }
 
 #[tokio::test]
@@ -117,7 +116,7 @@ async fn store_mem_model_delete() {
     store.models().create(&model).unwrap();
     store.models().delete(&model.id).unwrap();
 
-    assert_eq!(store.procs().exists(&model.id).unwrap(), false);
+    assert!(!store.procs().exists(&model.id).unwrap());
 }
 
 #[tokio::test]
@@ -136,7 +135,7 @@ async fn store_local_proc_create() {
         err: None,
     };
     store.procs().create(&proc).unwrap();
-    assert_eq!(store.procs().exists(&proc.id).unwrap(), true);
+    assert!(store.procs().exists(&proc.id).unwrap());
 }
 
 #[tokio::test]
@@ -235,7 +234,7 @@ async fn store_local_proc_delete() {
     store.procs().create(&proc).unwrap();
     store.procs().delete(&proc.id).unwrap();
 
-    assert_eq!(store.procs().exists(&proc.id).unwrap(), false);
+    assert!(!store.procs().exists(&proc.id).unwrap());
 }
 
 #[tokio::test]
@@ -259,7 +258,7 @@ async fn store_local_task_create() {
         err: None,
     };
     tasks.create(&task).unwrap();
-    assert_eq!(tasks.exists(&task.id).unwrap(), true);
+    assert!(tasks.exists(&task.id).unwrap());
 }
 
 #[tokio::test]
@@ -373,7 +372,7 @@ async fn store_local_task_delete() {
     table.create(&task).unwrap();
     table.delete(&task.id).unwrap();
 
-    assert_eq!(table.exists(&task.id).unwrap(), false);
+    assert!(!table.exists(&task.id).unwrap());
 }
 
 #[tokio::test]

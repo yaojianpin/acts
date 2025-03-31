@@ -13,7 +13,7 @@ fn model_act_set_parse_primary() {
         assert_eq!(stmt.get::<i32>("a").unwrap(), 1);
         assert_eq!(stmt.get::<String>("b").unwrap(), "abc");
     } else {
-        assert!(false);
+        panic!();
     }
 }
 
@@ -26,7 +26,7 @@ fn model_act_set_parse_arr() {
     if let ActFn::Set(stmt) = serde_yaml::from_str(text).unwrap() {
         assert_eq!(stmt.get::<Vec<String>>("a").unwrap(), ["a", "b"]);
     } else {
-        assert!(false);
+        panic!();
     }
 }
 
@@ -53,6 +53,6 @@ fn model_act_set_parse_obj() {
             }
         );
     } else {
-        assert!(false);
+        panic!();
     }
 }

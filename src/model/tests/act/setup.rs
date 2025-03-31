@@ -36,7 +36,7 @@ fn model_act_setup_set() {
         assert_eq!(inputs.get::<i32>("a").unwrap(), 5);
         assert_eq!(inputs.get::<String>("b").unwrap(), "str");
     } else {
-        assert!(false);
+        panic!();
     }
 }
 
@@ -49,7 +49,7 @@ fn model_act_setup_expose() {
         assert_eq!(inputs.get::<i32>("a").unwrap(), 5);
         assert_eq!(inputs.get::<String>("b").unwrap(), "str");
     } else {
-        assert!(false);
+        panic!();
     }
 }
 
@@ -67,7 +67,7 @@ fn model_act_setup_if() {
         assert_eq!(on, "cond");
         assert_eq!(then.len(), 1);
     } else {
-        assert!(false);
+        panic!();
     }
 }
 
@@ -78,7 +78,7 @@ fn model_act_setup_msg() {
     if let Some(Act { key, .. }) = act.setup.first() {
         assert_eq!(key, "msg1");
     } else {
-        assert!(false);
+        panic!();
     }
 }
 
@@ -90,7 +90,7 @@ fn model_act_setup_act() {
         assert_eq!(act, "irq");
         assert_eq!(key, "act1");
     } else {
-        assert!(false);
+        panic!();
     }
 }
 
@@ -111,7 +111,7 @@ fn model_act_setup_each() {
         assert_eq!(r#in, r#"["a", "b"]"#);
         assert_eq!(then.len(), 1);
     } else {
-        assert!(false);
+        panic!();
     }
 }
 
@@ -126,7 +126,7 @@ fn model_act_setup_on_created() {
     if let Some(Act { then, .. }) = act.setup.first() {
         assert_eq!(then.len(), 1);
     } else {
-        assert!(false);
+        panic!();
     }
 }
 
@@ -141,7 +141,7 @@ fn model_act_setup_on_completed() {
     if let Some(Act { then, .. }) = act.setup.first() {
         assert_eq!(then.len(), 1);
     } else {
-        assert!(false);
+        panic!();
     }
 }
 
@@ -157,7 +157,7 @@ fn model_act_setup_on_updated() {
         assert_eq!(act, "on_updated");
         assert_eq!(then.len(), 1);
     } else {
-        assert!(false);
+        panic!();
     }
 }
 
@@ -174,7 +174,7 @@ fn model_act_setup_on_error_catch() {
         assert_eq!(catches.len(), 1);
         assert_eq!(catches[0].on.as_ref().unwrap(), "err1");
     } else {
-        assert!(false);
+        panic!();
     }
 }
 
@@ -193,7 +193,7 @@ fn model_act_setup_on_timeout() {
         let timeout = timeout.first().unwrap();
         assert_eq!(timeout.on.value, 2);
     } else {
-        assert!(false);
+        panic!();
     }
 }
 

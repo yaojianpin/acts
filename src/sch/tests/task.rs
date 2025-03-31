@@ -158,7 +158,7 @@ async fn sch_task_branch_skip() {
         proc.task_by_nid("b1").first().unwrap().state(),
         TaskState::Skipped
     );
-    assert!(proc.task_by_nid("step11").first().is_none());
+    assert!(proc.task_by_nid("step11").is_empty());
 }
 
 #[tokio::test]

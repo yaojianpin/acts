@@ -168,12 +168,12 @@ async fn cache_restore_working_state() {
         TaskState::Pending,
         TaskState::Pending,
     ];
-    for i in 0..10 {
+    for state in &states {
         let proc = data::Proc {
             id: utils::longid(),
             name: "test".to_string(),
             mid: "m1".to_string(),
-            state: states[i].to_string(),
+            state: state.to_string(),
             start_time: 0,
             end_time: 0,
             timestamp: 0,
@@ -215,12 +215,12 @@ async fn cache_restore_completed_state() {
         TaskState::Completed,
         TaskState::Completed,
     ];
-    for i in 0..10 {
+    for state in &states {
         let proc = data::Proc {
             id: utils::longid(),
             name: "test".to_string(),
             mid: "m1".to_string(),
-            state: states[i].to_string(),
+            state: state.to_string(),
             start_time: 0,
             end_time: 0,
             timestamp: 0,
@@ -251,12 +251,12 @@ async fn cache_restore_less_cap() {
     assert_eq!(cache.count(), 0);
 
     let states = [TaskState::Running, TaskState::None, TaskState::Pending];
-    for i in 0..3 {
+    for state in &states {
         let proc = data::Proc {
             id: utils::longid(),
             name: "test".to_string(),
             mid: "m1".to_string(),
-            state: states[i].to_string(),
+            state: state.to_string(),
             start_time: 0,
             end_time: 0,
             timestamp: 0,

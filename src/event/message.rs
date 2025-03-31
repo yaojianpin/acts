@@ -110,14 +110,14 @@ impl Message {
     }
 
     pub fn type_of(&self, mtype: &str) -> Option<&Self> {
-        if &self.r#type == mtype {
+        if self.r#type == mtype {
             return Some(self);
         }
         None
     }
 
     pub fn tag_of(&self, tag: &str) -> Option<&Self> {
-        if tag == &self.tag {
+        if tag == self.tag {
             return Some(self);
         }
 
@@ -125,7 +125,7 @@ impl Message {
     }
 
     pub fn key_of(&self, key: &str) -> Option<&Self> {
-        if key == &self.key {
+        if key == self.key {
             return Some(self);
         }
 
@@ -173,17 +173,17 @@ impl Message {
 
 impl MessageState {
     pub fn is_completed(&self) -> bool {
-        match self {
+        matches!(
+            self,
             MessageState::Completed
-            | MessageState::Cancelled
-            | MessageState::Submitted
-            | MessageState::Backed
-            | MessageState::Error
-            | MessageState::Skipped
-            | MessageState::Aborted
-            | MessageState::Removed => true,
-            _ => false,
-        }
+                | MessageState::Cancelled
+                | MessageState::Submitted
+                | MessageState::Backed
+                | MessageState::Error
+                | MessageState::Skipped
+                | MessageState::Aborted
+                | MessageState::Removed
+        )
     }
 }
 
@@ -225,7 +225,7 @@ impl From<data::Message> for Message {
             id: v.id,
             tid: v.tid,
             name: v.name,
-            state: v.state.into(),
+            state: v.state,
             r#type: v.r#type,
             source: v.source,
             model: serde_json::from_str(&v.model).unwrap_or_default(),

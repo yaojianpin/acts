@@ -51,8 +51,8 @@ async fn sch_step_setup_expose_null() {
     tx.recv().await;
     proc.print();
     let outputs = proc.task_by_nid("step1").first().unwrap().outputs();
-    assert_eq!(outputs.get::<()>("a").unwrap(), ());
-    assert_eq!(outputs.get::<()>("b").unwrap(), ());
+    assert!(outputs.get::<()>("a").is_some());
+    assert!(outputs.get::<()>("b").is_some());
 }
 
 #[tokio::test]
@@ -71,8 +71,8 @@ async fn sch_step_setup_expose_local() {
     tx.recv().await;
     proc.print();
     let outputs = proc.task_by_nid("step1").first().unwrap().outputs();
-    assert_eq!(outputs.get::<String>("a").unwrap(), "abc");
-    assert_eq!(outputs.get::<i32>("b").unwrap(), 5);
+    assert_eq!(outputs.get::<String>("a"), Some("abc".to_owned()));
+    assert_eq!(outputs.get::<i32>("b"), Some(5));
 }
 
 #[tokio::test]

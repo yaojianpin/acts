@@ -49,7 +49,7 @@ trait DbSchema {
 
 trait DbRow {
     fn id(&self) -> &str;
-    fn from_row<'a>(row: &Row<'a>) -> DbResult<Self, DbError>
+    fn from_row(row: &Row<'_>) -> DbResult<Self, DbError>
     where
         Self: Sized;
     fn to_values(&self) -> Result<Vec<(String, Value)>>;

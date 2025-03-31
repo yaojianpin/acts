@@ -176,10 +176,7 @@ impl Emitter {
         let e = &Event::new_with_extra(
             &self.runtime.read().unwrap(),
             task,
-            &TaskExtra {
-                emit_message,
-                ..Default::default()
-            },
+            &TaskExtra { emit_message },
         );
         for handle in handlers.iter() {
             (handle)(e);

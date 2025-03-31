@@ -21,7 +21,7 @@ fn model_act_do_parse() {
         assert_eq!(err.ecode, "err1");
         assert_eq!(err.message, "abc");
     } else {
-        assert!(false);
+        panic!();
     }
 }
 

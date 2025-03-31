@@ -16,7 +16,7 @@ fn model_act_if_parse() {
         assert_eq!(inputs.get::<String>("on").unwrap(), r#"$("a") > 0"#);
         assert_eq!(inputs.get::<Vec<Act>>("then").unwrap().len(), 1);
     } else {
-        assert!(false);
+        panic!();
     }
 }
 

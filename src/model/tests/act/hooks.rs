@@ -12,7 +12,7 @@ fn model_act_parse_on_created() {
         assert_eq!(act, "on_created");
         assert_eq!(then.len(), 1);
     } else {
-        assert!(false);
+        panic!();
     }
 }
 
@@ -28,7 +28,7 @@ fn model_act_parse_on_completed() {
         assert_eq!(act, "on_completed");
         assert_eq!(then.len(), 1);
     } else {
-        assert!(false);
+        panic!();
     }
 }
 
@@ -44,7 +44,7 @@ fn model_act_parse_on_updated() {
         assert_eq!(act, "on_updated");
         assert_eq!(then.len(), 1);
     } else {
-        assert!(false);
+        panic!();
     }
 }
 
@@ -60,7 +60,7 @@ fn model_act_parse_on_before_update() {
         assert_eq!(act, "on_before_update");
         assert_eq!(then.len(), 1);
     } else {
-        assert!(false);
+        panic!();
     }
 }
 
@@ -76,7 +76,7 @@ fn model_act_parse_on_step() {
         assert_eq!(act, "on_step");
         assert_eq!(then.len(), 1);
     } else {
-        assert!(false);
+        panic!();
     }
 }
 
@@ -96,7 +96,7 @@ fn model_act_parse_on_timeout() {
         assert_eq!(timeout.on.value, 2);
         assert_eq!(timeout.then.len(), 1);
     } else {
-        assert!(false);
+        panic!();
     }
 }
 
@@ -117,6 +117,6 @@ fn model_act_parse_on_error_catch() {
         assert_eq!(catch.on.as_ref().unwrap(), "err1");
         assert_eq!(catch.then.len(), 1);
     } else {
-        assert!(false);
+        panic!();
     }
 }

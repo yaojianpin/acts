@@ -554,7 +554,7 @@ async fn export_manager_tasks_count() {
     let tasks = manager
         .task()
         .list(
-            &&ExecutorQuery::new()
+            &ExecutorQuery::new()
                 .with_query("pid", &pid)
                 .with_offset(0)
                 .with_count(10),
@@ -665,7 +665,7 @@ async fn export_manager_tasks_query() {
     let tasks = manager
         .task()
         .list(
-            &&&ExecutorQuery::new()
+            &ExecutorQuery::new()
                 .with_query("pid", &pid)
                 .with_query("state", "interrupted"),
         )
@@ -702,7 +702,7 @@ async fn export_manager_tasks_order() {
     let tasks = manager
         .task()
         .list(
-            &&&ExecutorQuery::new()
+            &ExecutorQuery::new()
                 .with_query("pid", &pid)
                 .with_order("timestamp", true),
         )

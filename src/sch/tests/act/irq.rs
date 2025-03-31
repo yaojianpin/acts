@@ -1315,7 +1315,7 @@ async fn sch_act_irq_on_catch_no_match() {
     tx.recv().await;
     proc.print();
     assert!(proc.task_by_nid("act1").first().unwrap().state().is_error());
-    assert!(proc.task_by_nid("act2").first().is_none());
+    assert!(proc.task_by_nid("act2").is_empty());
 }
 
 #[tokio::test]
@@ -1442,7 +1442,7 @@ async fn sch_act_irq_chain() {
                 p.task_by_nid("act1").first().unwrap().state(),
                 TaskState::Interrupt
             );
-            assert!(p.task_by_nid("act2").first().is_none());
+            assert!(p.task_by_nid("act2").is_empty());
             e.do_action(&e.pid, &e.tid, EventAction::Next, &Vars::new())
                 .unwrap();
         }

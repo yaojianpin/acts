@@ -9,8 +9,8 @@ fn env_eval_void() {
     let env = Enviroment::new();
 
     let script = r#"
-    let v = 5;
-    console.log(`v=${v}`);
+        let v = 5;
+        console.log(`v=${v}`);
     "#;
 
     let result = env.eval::<()>(script);
@@ -21,8 +21,8 @@ fn env_eval_void() {
 fn env_eval_number() {
     let env = Enviroment::new();
     let script = r#"
-    let v = 5;
-    v
+        let v = 5;
+        v
     "#;
 
     let result = env.eval::<i64>(script);
@@ -34,7 +34,7 @@ fn env_eval_throw_error() {
     let env = Enviroment::new();
 
     let script = r#"
-    throw new Error("err1");
+        throw new Error("err1");
     "#;
 
     let result = env.eval::<()>(script);
@@ -52,8 +52,8 @@ fn env_eval_expr() {
     let env = Enviroment::new();
 
     let script = r#"
-    let ret =  10;
-    ret > 0
+        let ret =  10;
+        ret > 0
     "#;
     let result = env.eval::<bool>(script);
     assert!(result.unwrap());
@@ -64,7 +64,7 @@ fn env_eval_array() {
     let env = Enviroment::new();
 
     let script = r#"
-    ["u1", "u2"]
+        ["u1", "u2"]
     "#;
 
     let result = env.eval::<Vec<String>>(script);
@@ -76,8 +76,8 @@ fn env_eval_object() {
     let env = Enviroment::new();
 
     let script = r#"
-    let ret =  { "a": 1, "b": "abc" };
-    ret
+        let ret =  { "a": 1, "b": "abc" };
+        ret
     "#;
 
     #[derive(Debug, Deserialize, Serialize, PartialEq, Clone)]
@@ -99,11 +99,11 @@ fn env_eval_object() {
 async fn env_console_module() {
     let env = Enviroment::new();
     let script = r#"
-    let v = 5;
-    console.log(`v=${v}`);
-    console.info(`v=${v}`);
-    console.wran(`v=${v}`);
-    console.error(`v=${v}`);
+        let v = 5;
+        console.log(`v=${v}`);
+        console.info(`v=${v}`);
+        console.warn(`v=${v}`);
+        console.error(`v=${v}`);
     "#;
     let result = env.eval::<()>(script);
     assert!(result.is_ok());
@@ -163,7 +163,7 @@ async fn env_task_get() {
     sig.recv().await;
     let task = proc.root().unwrap();
     let script = r#"
-    $("a")
+        $("a")
     "#;
 
     let context = task.create_context();
@@ -188,7 +188,7 @@ async fn env_task_set() {
     sig.recv().await;
     let task = proc.root().unwrap();
     let script = r#"
-    $("a", 100);
+        $("a", 100);
     "#;
     let context = task.create_context();
     Context::scope(context, || {
