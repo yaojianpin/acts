@@ -542,6 +542,8 @@ impl Task {
                         self.pid, self.id
                     )));
                 }
+
+                self.proc.set_data(&ctx.vars());
             }
         };
 
