@@ -535,6 +535,14 @@ impl Task {
                 task.set_err(&err);
                 task.error(ctx)?;
             }
+            EventAction::Update => {
+                if self.state().is_completed() {
+                    return Err(ActError::Action(format!(
+                        "task '{}:{}' is already completed",
+                        self.pid, self.id
+                    )));
+                }
+            }
         };
 
         if action.event != EventAction::Push {

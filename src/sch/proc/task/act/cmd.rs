@@ -41,6 +41,9 @@ impl Do {
                 set_inputs();
                 ctx.abort_task(&task)?;
             }
+            EventAction::Update => {
+                set_inputs();
+            }
             EventAction::Error => {
                 let ecode =
                     self.inputs

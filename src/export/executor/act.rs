@@ -50,6 +50,10 @@ impl ActExecutor {
         self.do_action(pid, EventAction::Remove, tid, options)
     }
 
+    pub fn update(&self, pid: &str, tid: &str, options: &Vars) -> Result<()> {
+        self.do_action(pid, EventAction::Update, tid, options)
+    }
+
     fn do_action(&self, pid: &str, action: EventAction, tid: &str, options: &Vars) -> Result<()> {
         self.runtime
             .do_action(&Action::new(pid, tid, action, options))
