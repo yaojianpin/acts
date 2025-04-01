@@ -31,7 +31,7 @@ pub struct Proc {
     runtime: Arc<Runtime>,
 }
 
-impl std::fmt::Debug for Proc {
+impl fmt::Debug for Proc {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Proc")
             .field("pid", &self.id)
@@ -395,7 +395,7 @@ impl Proc {
         println!("Proc({})  state={}", self.id, self.state());
         println!("data={}", self.data());
         if let Some(root) = ttree.root() {
-            self.visit(&root, |task| {
+            visit(&root, |task| {
                 let mut level = task.node().level;
                 while level > 0 {
                     print!("  ");
@@ -428,7 +428,7 @@ impl Proc {
         s.borrow_mut()
             .push_str(&format!("Proc({})  state={}\n", self.id, self.state()));
         if let Some(root) = ttree.root() {
-            self.visit(&root, move |task| {
+            visit(&root, move |task| {
                 let mut level = task.node().level;
                 while level > 0 {
                     s.borrow_mut().push_str("  ");
@@ -451,16 +451,6 @@ impl Proc {
 
         s.clone().into_inner()
     }
-    #[allow(unused)]
-    pub fn visit<F: Fn(&Arc<Task>) + Clone>(&self, task: &Arc<Task>, f: F) {
-        f(task);
-
-        let tasks = task.children();
-        for child in tasks {
-            #[allow(clippy::only_used_in_recursion)]
-            self.visit(&child, f.clone());
-        }
-    }
 
     pub fn into_data(self: &Arc<Self>) -> Result<data::Proc> {
         let model = self.model();
@@ -476,5 +466,14 @@ impl Proc {
             env_local: self.env_local().to_string(),
             err: self.err().map(|err| err.to_string()),
         })
+    }
+}
+
+pub fn visit<F: Fn(&Arc<Task>) + Clone>(task: &Arc<Task>, f: F) {
+    f(task);
+
+    let tasks = task.children();
+    for child in tasks {
+        visit(&child, f.clone());
     }
 }

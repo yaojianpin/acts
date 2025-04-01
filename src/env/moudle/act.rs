@@ -8,6 +8,7 @@ impl ActPackage {
     }
 }
 
+#[allow(clippy::module_inception)]
 #[rquickjs::module(rename_vars = "camelCase")]
 mod act {
     use crate::event::EventAction;

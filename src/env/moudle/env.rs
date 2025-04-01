@@ -8,6 +8,7 @@ impl Env {
     }
 }
 
+#[allow(clippy::module_inception)]
 #[rquickjs::module(rename_vars = "camelCase")]
 mod env {
     use crate::{env::value::ActValue, Context};
