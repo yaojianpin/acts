@@ -39,6 +39,7 @@ pub enum EventAction {
     Error,
     Push,
     Remove,
+    Update,
 }
 
 impl EventAction {
