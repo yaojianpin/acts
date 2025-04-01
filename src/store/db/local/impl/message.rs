@@ -3,9 +3,10 @@ use crate::{
         db::local::{DbColumn, DbRow, DbSchema, DbType},
         Message,
     },
-    Result,
+    MessageState, Result,
 };
 use rusqlite::{types::Value, Error as DbError, Result as DbResult, Row};
+use std::str::FromStr;
 impl DbSchema for Message {
     fn schema() -> Result<Vec<(String, DbColumn)>> {
         let map = vec![
@@ -203,7 +204,7 @@ impl DbRow for Message {
             id: row.get::<usize, String>(0).unwrap(),
             name: row.get::<usize, String>(1).unwrap(),
             tid: row.get::<usize, String>(2).unwrap(),
-            state: row.get::<usize, String>(3).unwrap(),
+            state: MessageState::from_str(&row.get::<usize, String>(3).unwrap()).unwrap(),
             r#type: row.get::<usize, String>(4).unwrap(),
             source: row.get::<usize, String>(5).unwrap(),
             model: row.get::<usize, String>(6).unwrap(),
@@ -231,7 +232,10 @@ impl DbRow for Message {
             ("id".to_string(), Value::Text(self.id.clone())),
             ("name".to_string(), Value::Text(self.name.clone())),
             ("tid".to_string(), Value::Text(self.tid.clone())),
-            ("state".to_string(), Value::Text(self.state.clone())),
+            (
+                "state".to_string(),
+                Value::Text(self.state.as_ref().to_string()),
+            ),
             ("type".to_string(), Value::Text(self.r#type.clone())),
             ("source".to_string(), Value::Text(self.source.clone())),
             ("model".to_string(), Value::Text(self.model.clone())),

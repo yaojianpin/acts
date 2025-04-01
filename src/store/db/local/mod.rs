@@ -1,6 +1,8 @@
 mod collect;
 mod database;
 mod r#impl;
+
+#[allow(clippy::module_inception)]
 mod local;
 
 #[allow(dead_code)]

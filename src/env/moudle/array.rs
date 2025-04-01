@@ -4,6 +4,7 @@ use rquickjs::{CatchResultExt, Module as JsModule};
 #[derive(Clone)]
 pub struct Array {}
 
+#[allow(clippy::module_inception)]
 #[rquickjs::module(rename_vars = "camelCase")]
 mod array {
     use std::collections::BTreeSet;

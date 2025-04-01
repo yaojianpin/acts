@@ -1,6 +1,8 @@
 pub mod data;
 mod db;
 mod query;
+
+#[allow(clippy::module_inception)]
 mod store;
 
 #[cfg(test)]
