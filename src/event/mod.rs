@@ -39,7 +39,7 @@ pub enum EventAction {
     Error,
     Push,
     Remove,
-    Update,
+    SetProcessVars,
 }
 
 impl EventAction {

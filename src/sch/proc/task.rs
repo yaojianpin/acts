@@ -535,7 +535,7 @@ impl Task {
                 task.set_err(&err);
                 task.error(ctx)?;
             }
-            EventAction::Update => {
+            EventAction::SetProcessVars => {
                 if self.state().is_completed() {
                     return Err(ActError::Action(format!(
                         "task '{}:{}' is already completed",
