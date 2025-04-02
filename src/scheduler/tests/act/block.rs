@@ -1,6 +1,6 @@
 use crate::{
-  scheduler::{tests::create_proc_signal, TaskState},
-  utils, Act, MessageState, StmtBuild, Workflow,
+    scheduler::{tests::create_proc_signal, TaskState},
+    utils, Act, MessageState, StmtBuild, Workflow,
 };
 
 #[tokio::test]

@@ -1,8 +1,8 @@
 use crate::event::EventAction;
 use crate::{
-  scheduler::tests::create_proc_signal,
-  utils::{self, consts},
-  Act, Action, MessageState, Vars, Workflow,
+    scheduler::tests::create_proc_signal,
+    utils::{self, consts},
+    Act, Action, MessageState, Vars, Workflow,
 };
 use serde_json::json;
 

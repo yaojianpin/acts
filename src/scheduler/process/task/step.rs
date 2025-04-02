@@ -1,8 +1,8 @@
 use super::hook::TaskLifeCycle;
 use crate::{
-  model::Step,
-  scheduler::{Context, NodeContent, TaskState},
-  ActError, ActTask, Result, StoreAdapter,
+    model::Step,
+    scheduler::{Context, NodeContent, TaskState},
+    ActError, ActTask, Result, StoreAdapter,
 };
 use async_trait::async_trait;
 

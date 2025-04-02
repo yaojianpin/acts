@@ -40,11 +40,11 @@ fn create_proc_signal<R: Clone + Default + Sync + Send + 'static>(
     workflow: &mut Workflow,
     pid: &str,
 ) -> (
-  Arc<Process>,
-  Arc<Runtime>,
-  Arc<crate::export::Channel>,
-  Signal<R>,
-  Signal<R>,
+    Arc<Process>,
+    Arc<Runtime>,
+    Arc<crate::export::Channel>,
+    Signal<R>,
+    Signal<R>,
 ) {
     let engine = Engine::new();
     let rt = engine.runtime();

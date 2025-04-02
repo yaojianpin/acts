@@ -1,8 +1,8 @@
 use crate::event::EventAction;
 use crate::{
-  scheduler::{tests::create_proc_signal, TaskState},
-  utils::{self, consts},
-  Act, Catch, Message, MessageState, StmtBuild, Timeout, Vars, Workflow,
+    scheduler::{tests::create_proc_signal, TaskState},
+    utils::{self, consts},
+    Act, Catch, Message, MessageState, StmtBuild, Timeout, Vars, Workflow,
 };
 
 #[tokio::test]

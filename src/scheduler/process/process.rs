@@ -351,7 +351,11 @@ impl Process {
         }
     }
 
-    pub fn create_task(self: &Arc<Process>, node: &Arc<Node>, prev: Option<Arc<Task>>) -> Arc<Task> {
+    pub fn create_task(
+        self: &Arc<Process>,
+        node: &Arc<Node>,
+        prev: Option<Arc<Task>>,
+    ) -> Arc<Task> {
         let mut tid = utils::shortid();
         if node.kind() == NodeKind::Workflow {
             // set $ for the root task id

@@ -1,10 +1,10 @@
 use crate::{
-  adapter::{self, Adapter},
-  config::Config,
-  export::{Channel, Executor, Extender},
-  plugin,
-  scheduler::Runtime,
-  ActPlugin, ChannelOptions, Signal, StoreAdapter,
+    adapter::{self, Adapter},
+    config::Config,
+    export::{Channel, Executor, Extender},
+    plugin,
+    scheduler::Runtime,
+    ActPlugin, ChannelOptions, Signal, StoreAdapter,
 };
 
 use std::sync::{Arc, Mutex};

@@ -1,10 +1,10 @@
 use serde_json::json;
 
 use crate::{
-  data,
-  scheduler::tests::create_proc_signal2,
-  utils::{self, consts},
-  Act, Event, Message, MessageState, Signal, StmtBuild, Workflow,
+    data,
+    scheduler::tests::create_proc_signal2,
+    utils::{self, consts},
+    Act, Event, Message, MessageState, Signal, StmtBuild, Workflow,
 };
 
 #[tokio::test]

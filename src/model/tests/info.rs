@@ -1,8 +1,8 @@
 use serde_json::Value;
 
 use crate::{
-  data, scheduler::NodeData, utils, ModelInfo, NodeKind, PackageInfo, ProcInfo, TaskInfo, TaskState,
-  Workflow,
+    data, scheduler::NodeData, utils, ModelInfo, NodeKind, PackageInfo, ProcInfo, TaskInfo,
+    TaskState, Workflow,
 };
 
 #[test]

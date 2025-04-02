@@ -1,7 +1,7 @@
 use crate::{
-  scheduler::tests::create_proc_signal2,
-  utils::{self, consts},
-  Act, Event, Message, MessageState, Signal, StmtBuild, Workflow,
+    scheduler::tests::create_proc_signal2,
+    utils::{self, consts},
+    Act, Event, Message, MessageState, Signal, StmtBuild, Workflow,
 };
 use serde_json::json;
 

@@ -1,9 +1,9 @@
 use crate::{
-  scheduler::{
+    scheduler::{
         tests::{create_proc, create_proc_signal},
         NodeTree, TaskState,
     },
-  utils, Workflow,
+    utils, Workflow,
 };
 
 #[tokio::test]

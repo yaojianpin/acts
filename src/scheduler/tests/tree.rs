@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use crate::{
-  scheduler::{
+    scheduler::{
         tree::{NodeContent, NodeTree},
         Node,
     },
-  Act, NodeKind, Workflow,
+    Act, NodeKind, Workflow,
 };
 
 const SIMPLE_WORKFLOW: &str = r#"

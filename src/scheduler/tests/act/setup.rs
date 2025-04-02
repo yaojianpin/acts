@@ -2,9 +2,9 @@ use serde_json::json;
 
 use crate::event::EventAction;
 use crate::{
-  scheduler::{tests::create_proc_signal, TaskState},
-  utils::{self, consts},
-  Act, Message, MessageState, StmtBuild, Vars, Workflow,
+    scheduler::{tests::create_proc_signal, TaskState},
+    utils::{self, consts},
+    Act, Message, MessageState, StmtBuild, Vars, Workflow,
 };
 
 #[tokio::test]

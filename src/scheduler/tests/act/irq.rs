@@ -1,9 +1,9 @@
 use crate::event::EventAction;
 use crate::{
-  event::{Action, MessageState},
-  scheduler::{tests::*, TaskState},
-  utils::{self, consts},
-  Act, Message, StmtBuild, Vars, Workflow,
+    event::{Action, MessageState},
+    scheduler::{tests::*, TaskState},
+    utils::{self, consts},
+    Act, Message, StmtBuild, Vars, Workflow,
 };
 use serde_json::{json, Value};
 use std::sync::Arc;

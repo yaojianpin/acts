@@ -1,9 +1,9 @@
 use super::ExecutorQuery;
 use crate::{
-  data::Package,
-  scheduler::Runtime,
-  store::{PageData, StoreAdapter},
-  PackageInfo, Result,
+    data::Package,
+    scheduler::Runtime,
+    store::{PageData, StoreAdapter},
+    PackageInfo, Result,
 };
 use std::sync::Arc;
 use tracing::instrument;

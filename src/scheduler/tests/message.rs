@@ -1,11 +1,11 @@
 use crate::event::EventAction;
 use crate::{
-  data::MessageStatus,
-  event::MessageState,
-  scheduler::tests::{create_proc_signal, create_proc_signal2, create_proc_signal_config},
-  store::{Cond, Expr},
-  utils::{self, consts},
-  Act, Action, ChannelOptions, Config, Message, Query, StoreAdapter, Vars, Workflow,
+    data::MessageStatus,
+    event::MessageState,
+    scheduler::tests::{create_proc_signal, create_proc_signal2, create_proc_signal_config},
+    store::{Cond, Expr},
+    utils::{self, consts},
+    Act, Action, ChannelOptions, Config, Message, Query, StoreAdapter, Vars, Workflow,
 };
 use serde_json::json;
 use std::sync::{Arc, Mutex};

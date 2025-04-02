@@ -1,9 +1,9 @@
 use crate::{
-  data::{self, MessageStatus},
-  scheduler::{self, Node, Runtime, StatementBatch, TaskLifeCycle, TaskState},
-  store::{Cond, Expr, Query, Store},
-  utils::{self, Id},
-  ActError, Error, Message, Result, StoreAdapter, Workflow,
+    data::{self, MessageStatus},
+    scheduler::{self, Node, Runtime, StatementBatch, TaskLifeCycle, TaskState},
+    store::{Cond, Expr, Query, Store},
+    utils::{self, Id},
+    ActError, Error, Message, Result, StoreAdapter, Workflow,
 };
 use std::{collections::HashMap, sync::Arc};
 use tracing::debug;
@@ -49,7 +49,11 @@ impl Store {
         Ok(ret)
     }
 
-    pub fn load_proc(&self, pid: &str, rt: &Arc<Runtime>) -> Result<Option<Arc<scheduler::Process>>> {
+    pub fn load_proc(
+        &self,
+        pid: &str,
+        rt: &Arc<Runtime>,
+    ) -> Result<Option<Arc<scheduler::Process>>> {
         debug!("load process pid={}", pid);
         match self.procs().find(pid) {
             Ok(p) => {

@@ -1,6 +1,6 @@
 use crate::{
-  scheduler::{Context, TaskState},
-  ActTask, Irq, Result,
+    scheduler::{Context, TaskState},
+    ActTask, Irq, Result,
 };
 use async_trait::async_trait;
 

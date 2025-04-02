@@ -1,11 +1,11 @@
 use crate::{
-  config::Config,
-  event::{Emitter, TaskExtra},
-  scheduler::{
-      queue::{Queue, Signal},
-      Process, Task,
+    config::Config,
+    event::{Emitter, TaskExtra},
+    scheduler::{
+        queue::{Queue, Signal},
+        Process, Task,
     },
-  Engine, Event, Result,
+    Engine, Event, Result,
 };
 use std::sync::{Arc, Mutex};
 use tracing::debug;

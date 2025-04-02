@@ -1,7 +1,7 @@
 use crate::{
-  scheduler::{self, NodeData},
-  store::data,
-  ActError, MessageState, Result, Workflow,
+    scheduler::{self, NodeData},
+    store::data,
+    ActError, MessageState, Result, Workflow,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;

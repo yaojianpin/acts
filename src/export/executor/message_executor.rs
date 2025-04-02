@@ -1,7 +1,7 @@
 use crate::{
-  scheduler::Runtime,
-  store::{PageData, StoreAdapter},
-  MessageInfo, Result,
+    scheduler::Runtime,
+    store::{PageData, StoreAdapter},
+    MessageInfo, Result,
 };
 use std::sync::Arc;
 use tracing::instrument;
