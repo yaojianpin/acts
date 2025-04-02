@@ -18,7 +18,7 @@ use std::{
 use tracing::{debug, error, instrument};
 
 #[derive(Clone)]
-pub struct Proc {
+pub struct Process {
     id: String,
     tree: ShareLock<NodeTree>,
     tasks: ShareLock<TaskTree>,
@@ -31,7 +31,7 @@ pub struct Proc {
     runtime: Arc<Runtime>,
 }
 
-impl fmt::Debug for Proc {
+impl fmt::Debug for Process {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Proc")
             .field("pid", &self.id)
@@ -45,14 +45,14 @@ impl fmt::Debug for Proc {
     }
 }
 
-impl Proc {
+impl Process {
     pub fn new(pid: &str, rt: &Arc<Runtime>) -> Arc<Self> {
         Self::new_with_timestamp(pid, utils::time::timestamp(), rt)
     }
 
     pub fn new_with_timestamp(pid: &str, timestamp: i64, rt: &Arc<Runtime>) -> Arc<Self> {
         let tree = NodeTree::new();
-        Arc::new(Proc {
+        Arc::new(Process {
             id: pid.to_string(),
             tree: Arc::new(RwLock::new(tree)),
             state: Arc::new(RwLock::new(TaskState::None)),
@@ -351,11 +351,11 @@ impl Proc {
         }
     }
 
-    pub fn create_task(self: &Arc<Proc>, node: &Arc<Node>, prev: Option<Arc<Task>>) -> Arc<Task> {
+    pub fn create_task(self: &Arc<Process>, node: &Arc<Node>, prev: Option<Arc<Task>>) -> Arc<Task> {
         let mut tid = utils::shortid();
         if node.kind() == NodeKind::Workflow {
             // set $ for the root task id
-            // a proc only has one root task
+            // a process only has one root task
             tid = consts::TASK_ROOT_TID.to_string();
         }
         let task = Arc::new(Task::new(self, &tid, node.clone(), &self.runtime));

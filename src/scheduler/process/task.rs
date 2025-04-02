@@ -9,7 +9,7 @@ use crate::{
     event::{EventAction, Model},
     scheduler::{
         tree::{Node, NodeContent},
-        Context, Proc, Runtime, TaskState,
+        Context, Process, Runtime, TaskState,
     },
     utils::{self, consts},
     Act, ActError, ActTask, Catch, Error, Message, MessageState, NodeKind, Result, ShareLock,
@@ -27,7 +27,7 @@ use tracing::{debug, info};
 
 #[derive(Clone)]
 pub struct Task {
-    /// proc id
+    /// process id
     pub pid: String,
 
     /// task id
@@ -50,7 +50,7 @@ pub struct Task {
     // previous tid
     prev: ShareLock<Option<String>>,
 
-    proc: Arc<Proc>,
+    proc: Arc<Process>,
 
     node: Arc<Node>,
 
@@ -62,7 +62,7 @@ pub struct Task {
 }
 
 impl Task {
-    pub fn new(proc: &Arc<Proc>, tid: &str, node: Arc<Node>, rt: &Arc<Runtime>) -> Self {
+    pub fn new(proc: &Arc<Process>, tid: &str, node: Arc<Node>, rt: &Arc<Runtime>) -> Self {
         let task = Self {
             pid: proc.id().to_string(),
             id: tid.to_string(),
@@ -88,7 +88,7 @@ impl Task {
         format!("{}:{}", self.pid, self.id)
     }
 
-    pub fn proc(&self) -> &Arc<Proc> {
+    pub fn proc(&self) -> &Arc<Process> {
         &self.proc
     }
 

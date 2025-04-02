@@ -153,7 +153,7 @@ async fn export_executor_start_dup_pid_error() {
         env_local: "{}".to_string(),
         err: None,
     };
-    store.procs().create(&proc).expect("create proc");
+    store.procs().create(&proc).expect("create process");
     engine
         .executor()
         .model()

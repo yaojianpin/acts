@@ -545,7 +545,7 @@ async fn sch_act_irq_not_support_action() {
                 act.with_key("fn1").with_input("uid", json!("a"))
             }))
     });
-    let (proc, scher, emitter, tx, rx) =
+    let (process, scher, emitter, tx, rx) =
         create_proc_signal::<bool>(&mut workflow, &utils::longid());
 
     let s = scher.clone();
@@ -566,7 +566,7 @@ async fn sch_act_irq_not_support_action() {
         }
     });
 
-    scher.launch(&proc);
+    scher.launch(&process);
     let ret = tx.recv().await;
     assert!(ret);
 }*/

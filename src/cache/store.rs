@@ -9,7 +9,7 @@ use std::{collections::HashMap, sync::Arc};
 use tracing::debug;
 
 impl Store {
-    pub fn load(&self, cap: usize, rt: &Arc<Runtime>) -> Result<Vec<Arc<scheduler::Proc>>> {
+    pub fn load(&self, cap: usize, rt: &Arc<Runtime>) -> Result<Vec<Arc<scheduler::Process>>> {
         debug!("load cap={}", cap);
         let mut ret = Vec::new();
         if cap > 0 {
@@ -28,7 +28,7 @@ impl Store {
                 let env_local: serde_json::Value = serde_json::from_str(&p.env_local)
                     .map_err(|err| ActError::Store(err.to_string()))?;
                 let state = p.state.clone();
-                let proc = scheduler::Proc::new_with_timestamp(&p.id, p.timestamp, rt);
+                let proc = scheduler::Process::new_with_timestamp(&p.id, p.timestamp, rt);
 
                 proc.load(&model)?;
                 proc.set_pure_state(state.into());
@@ -49,13 +49,13 @@ impl Store {
         Ok(ret)
     }
 
-    pub fn load_proc(&self, pid: &str, rt: &Arc<Runtime>) -> Result<Option<Arc<scheduler::Proc>>> {
-        debug!("load proc pid={}", pid);
+    pub fn load_proc(&self, pid: &str, rt: &Arc<Runtime>) -> Result<Option<Arc<scheduler::Process>>> {
+        debug!("load process pid={}", pid);
         match self.procs().find(pid) {
             Ok(p) => {
-                // println!("proc model={}", p.model);
+                // println!("process model={}", p.model);
                 let model = Workflow::from_json(&p.model)?;
-                let proc = scheduler::Proc::new(pid, rt);
+                let proc = scheduler::Process::new(pid, rt);
                 let env_local: serde_json::Value = serde_json::from_str(&p.env_local)
                     .map_err(|err| ActError::Store(err.to_string()))?;
 
@@ -199,8 +199,8 @@ impl Store {
         Ok(())
     }
 
-    pub fn upsert_proc(&self, proc: &Arc<scheduler::Proc>) -> Result<()> {
-        debug!("upsert proc: {}", proc.id());
+    pub fn upsert_proc(&self, proc: &Arc<scheduler::Process>) -> Result<()> {
+        debug!("upsert process: {}", proc.id());
         let data: data::Proc = proc.into_data()?;
         match self.procs().find(proc.id()) {
             Ok(_) => {
@@ -214,7 +214,7 @@ impl Store {
         Ok(())
     }
 
-    fn load_tasks(&self, proc: &Arc<scheduler::Proc>, rt: &Arc<Runtime>) -> Result<()> {
+    fn load_tasks(&self, proc: &Arc<scheduler::Process>, rt: &Arc<Runtime>) -> Result<()> {
         debug!("load_tasks pid={}", proc.id());
         let tree = &proc.tree();
         let query = Query::new().push(Cond::and().push(Expr::eq("pid", proc.id())));
@@ -242,7 +242,7 @@ impl Store {
                     serde_json::from_str(&err).map_err(|err| ActError::Store(err.to_string()))?;
                 task.set_pure_err(&err)
             }
-            // cache.push(proc)
+            // cache.push(process)
             // cache.push_task_pri(&Arc::new(task), false)?;
             proc.push_task(Arc::new(task));
         }

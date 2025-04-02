@@ -1,6 +1,6 @@
 #[allow(clippy::module_inception)]
-mod proc;
+mod process;
 mod task;
 
-pub use proc::Proc;
+pub use process::Process;
 pub use task::{StatementBatch, Task, TaskLifeCycle};

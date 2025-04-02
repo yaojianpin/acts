@@ -1,8 +1,8 @@
 use super::EventAction;
 use crate::{
-  event::{Emitter, MessageState},
-  scheduler::{Proc, Runtime, TaskState},
-  utils, Engine, Workflow,
+    event::{Emitter, MessageState},
+    scheduler::{Process, Runtime, TaskState},
+    utils, Engine, Workflow,
 };
 use std::str::FromStr;
 use std::sync::Arc;
@@ -269,14 +269,14 @@ async fn event_message_dup_key() {
     assert!(ret);
 }
 
-fn create_proc(workflow: &mut Workflow, id: &str) -> (Arc<Proc>, Arc<Runtime>) {
+fn create_proc(workflow: &mut Workflow, id: &str) -> (Arc<Process>, Arc<Runtime>) {
     let engine = Engine::new();
     let rt = engine.runtime();
     let proc = rt.create_proc(id, workflow);
     (proc, rt)
 }
 
-fn create_proc2(workflow: &mut Workflow, id: &str) -> (Arc<Proc>, Engine) {
+fn create_proc2(workflow: &mut Workflow, id: &str) -> (Arc<Process>, Engine) {
     let engine = Engine::new();
     let rt = engine.runtime();
     let proc = rt.create_proc(id, workflow);

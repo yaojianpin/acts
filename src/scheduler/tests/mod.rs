@@ -9,11 +9,11 @@ mod tree;
 mod vars;
 mod workflow;
 
-use super::{Proc, Runtime};
+use super::{Process, Runtime};
 use crate::{export::Channel, Builder, Config, Engine, Signal, Workflow};
 use std::sync::Arc;
 
-fn create_proc(workflow: &mut Workflow, pid: &str) -> (Arc<Proc>, Arc<Runtime>, Arc<Channel>) {
+fn create_proc(workflow: &mut Workflow, pid: &str) -> (Arc<Process>, Arc<Runtime>, Arc<Channel>) {
     let engine = Engine::new();
     let rt = engine.runtime();
 
@@ -40,11 +40,11 @@ fn create_proc_signal<R: Clone + Default + Sync + Send + 'static>(
     workflow: &mut Workflow,
     pid: &str,
 ) -> (
-    Arc<Proc>,
-    Arc<Runtime>,
-    Arc<crate::export::Channel>,
-    Signal<R>,
-    Signal<R>,
+  Arc<Process>,
+  Arc<Runtime>,
+  Arc<crate::export::Channel>,
+  Signal<R>,
+  Signal<R>,
 ) {
     let engine = Engine::new();
     let rt = engine.runtime();
@@ -74,7 +74,7 @@ fn create_proc_signal<R: Clone + Default + Sync + Send + 'static>(
 fn create_proc_signal2<R: Clone + Default + Send + 'static>(
     workflow: &Workflow,
     pid: &str,
-) -> (Engine, Arc<Proc>, Signal<R>, Signal<R>) {
+) -> (Engine, Arc<Process>, Signal<R>, Signal<R>) {
     let engine = Engine::new();
     let rt = engine.runtime();
 
@@ -102,7 +102,7 @@ fn create_proc_signal_config<R: Clone + Default + Send + 'static>(
     config: &Config,
     workflow: &Workflow,
     pid: &str,
-) -> (Engine, Arc<Proc>, Signal<R>) {
+) -> (Engine, Arc<Process>, Signal<R>) {
     let mut builder = Builder::new();
     builder.set_config(config);
     let engine = builder.build();

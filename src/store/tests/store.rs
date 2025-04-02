@@ -42,7 +42,7 @@ async fn store_load_by_limit() {
         let id = format!("{}_{}", prefix, utils::longid());
         let workflow = create_workflow();
         let proc = create_proc(&id, TaskState::None, &workflow);
-        store.procs().create(&proc).expect("create proc");
+        store.procs().create(&proc).expect("create process");
     }
 
     let q = Query::new().set_limit(10000);
@@ -64,21 +64,21 @@ async fn store_load_by_state() {
         let id = format!("{}_{}", prefix, utils::longid());
         let workflow = create_workflow();
         let proc = create_proc(&id, TaskState::Running, &workflow);
-        store.procs().create(&proc).expect("create proc");
+        store.procs().create(&proc).expect("create process");
     }
 
     for _ in 0..100 {
         let id = format!("{}_{}", prefix, utils::longid());
         let workflow = create_workflow();
         let proc = create_proc(&id, TaskState::Pending, &workflow);
-        store.procs().create(&proc).expect("create proc");
+        store.procs().create(&proc).expect("create process");
     }
 
     for _ in 0..100 {
         let id = format!("{}_{}", prefix, utils::longid());
         let workflow = create_workflow();
         let proc = create_proc(&id, TaskState::Completed, &workflow);
-        store.procs().create(&proc).expect("create proc");
+        store.procs().create(&proc).expect("create process");
     }
 
     let q = Query::new()
@@ -349,7 +349,7 @@ async fn store_proc_create() {
     let workflow = create_workflow();
     let proc = create_proc(&id, TaskState::None, &workflow);
 
-    store.procs().create(&proc).expect("create proc");
+    store.procs().create(&proc).expect("create process");
 
     let q = Query::new().set_limit(1);
     let procs = store.procs().query(&q).unwrap();
@@ -363,7 +363,7 @@ async fn store_proc_find() {
     let id = utils::longid();
     let workflow = create_workflow();
     let proc = create_proc(&id, TaskState::None, &workflow);
-    store.procs().create(&proc).expect("create proc");
+    store.procs().create(&proc).expect("create process");
     let info = store.procs().find(&id).unwrap();
     assert_eq!(proc.id, info.id);
 }
@@ -386,7 +386,7 @@ async fn store_proc_query_by_id() {
         err: None,
     };
 
-    store.procs().create(&proc).expect("create proc");
+    store.procs().create(&proc).expect("create process");
     let q = Query::new().push(Cond::and().push(Expr::eq("id", proc.id)));
     let ret = store.procs().query(&q);
     assert!(ret.is_ok());
@@ -409,7 +409,7 @@ async fn store_proc_query_by_offset_count() {
             env_local: "{}".to_string(),
             err: None,
         };
-        store.procs().create(&proc).expect("create proc");
+        store.procs().create(&proc).expect("create process");
     }
 
     let q = Query::new()
@@ -446,7 +446,7 @@ async fn store_proc_query_by_cond_and() {
             env_local: "{}".to_string(),
             err: None,
         };
-        store.procs().create(&proc).expect("create proc");
+        store.procs().create(&proc).expect("create process");
     }
 
     let q = Query::new().set_offset(0).set_limit(10).push(
@@ -483,7 +483,7 @@ async fn store_proc_query_by_cond_or() {
             env_local: "{}".to_string(),
             err: None,
         };
-        store.procs().create(&proc).expect("create proc");
+        store.procs().create(&proc).expect("create process");
     }
 
     for i in 0..10 {
@@ -499,7 +499,7 @@ async fn store_proc_query_by_cond_or() {
             env_local: "{}".to_string(),
             err: None,
         };
-        store.procs().create(&proc).expect("create proc");
+        store.procs().create(&proc).expect("create process");
     }
 
     let q = Query::new()
@@ -532,7 +532,7 @@ async fn store_proc_query_by_order() {
             env_local: "{}".to_string(),
             err: None,
         };
-        store.procs().create(&proc).expect("create proc");
+        store.procs().create(&proc).expect("create process");
     }
 
     let q = Query::new()
@@ -560,10 +560,10 @@ async fn store_proc_update() {
     let workflow = create_workflow();
     let mut proc = create_proc(&id, TaskState::None, &workflow);
 
-    store.procs().create(&proc).expect("create proc");
+    store.procs().create(&proc).expect("create process");
 
     proc.state = TaskState::Running.to_string();
-    store.procs().update(&proc).expect("update proc");
+    store.procs().update(&proc).expect("update process");
 
     let p = store.procs().find(&proc.id).unwrap();
     assert_eq!(p.id, proc.id);
@@ -578,7 +578,7 @@ async fn store_proc_remove() {
     let workflow = create_workflow();
     let proc = create_proc(&id, TaskState::None, &workflow);
 
-    store.procs().create(&proc).expect("create proc");
+    store.procs().create(&proc).expect("create process");
 
     let proc = store.procs().find(&id);
     assert!(proc.is_ok());
@@ -895,7 +895,7 @@ async fn store_task_remove() {
     };
 
     store.tasks().create(&task).expect("create task");
-    store.tasks().delete(&task.id).expect("remove proc");
+    store.tasks().delete(&task.id).expect("remove process");
 
     let ret = store.tasks().find(&task.id);
     assert!(ret.is_err());

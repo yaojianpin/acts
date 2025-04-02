@@ -105,7 +105,7 @@ impl Executor {
         &self.model
     }
 
-    /// executor for related proc functions
+    /// executor for related process functions
     pub fn proc(&self) -> &proc::ProcExecutor {
         &self.proc
     }

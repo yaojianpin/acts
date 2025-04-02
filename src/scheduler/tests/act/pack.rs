@@ -1,8 +1,8 @@
 use crate::{
-  data,
-  scheduler::{tests::create_proc_signal2, Proc},
-  utils::{self, consts},
-  Act, Event, Message, MessageState, Signal, StmtBuild, TaskState, Workflow,
+    data,
+    scheduler::{tests::create_proc_signal2, Process},
+    utils::{self, consts},
+    Act, Event, Message, MessageState, Signal, StmtBuild, TaskState, Workflow,
 };
 use serde_json::json;
 use std::sync::Arc;
@@ -486,7 +486,7 @@ async fn run_test_proc<T: Clone + Send + 'static + Default>(
     workflow: &Workflow,
     package: &data::Package,
     exit_if: fn(&Event<Message>, sig: Signal<T>),
-) -> (T, Arc<Proc>) {
+) -> (T, Arc<Process>) {
     let (engine, proc, tx, rx) = create_proc_signal2::<T>(workflow, &utils::longid());
     engine.executor().pack().publish(package).unwrap();
     engine.channel().on_message(move |e| {

@@ -1,9 +1,9 @@
 use super::{ActTask, Runtime};
 use crate::{
-  event::{Action, Model},
-  scheduler::{tree::NodeContent, Node, Proc, Task},
-  utils::{self, consts, shortid},
-  Act, ActError, Message, MessageState, NodeKind, Result, TaskState, Vars,
+    event::{Action, Model},
+    scheduler::{tree::NodeContent, Node, Process, Task},
+    utils::{self, consts, shortid},
+    Act, ActError, Message, MessageState, NodeKind, Result, TaskState, Vars,
 };
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::{cell::RefCell, sync::Arc};
@@ -18,7 +18,7 @@ pub struct Context {
     // pub scher: Arc<Scheduler>,
     // pub env: Arc<Enviroment>,
     pub runtime: Arc<Runtime>,
-    pub proc: Arc<Proc>,
+    pub proc: Arc<Process>,
     task: RefCell<Arc<Task>>,
     action: RefCell<Option<Action>>,
     vars: RefCell<Vars>,
@@ -45,7 +45,7 @@ impl Context {
         });
     }
 
-    pub fn new(proc: &Arc<Proc>, task: &Arc<Task>) -> Self {
+    pub fn new(proc: &Arc<Process>, task: &Arc<Task>) -> Self {
         let ctx = Context {
             runtime: task.runtime().clone(),
             proc: proc.clone(),
@@ -112,7 +112,7 @@ impl Context {
         T: Serialize + Clone,
     {
         // in context, the global env is not writable
-        // just set the value to local env of the proc
+        // just set the value to local env of the process
         self.proc.with_env_local_mut(|data| {
             data.set(name, value);
         });

@@ -2,8 +2,8 @@ use crate::{
   config::Config,
   event::{Emitter, TaskExtra},
   scheduler::{
-        queue::{Queue, Signal},
-        Proc, Task,
+      queue::{Queue, Signal},
+      Process, Task,
     },
   Engine, Event, Result,
 };
@@ -76,7 +76,7 @@ impl Scheduler {
         *self.closed.lock().unwrap()
     }
 
-    pub fn on_proc(&self, f: impl Fn(&Event<Arc<Proc>>) + Send + Sync + 'static) {
+    pub fn on_proc(&self, f: impl Fn(&Event<Arc<Process>>) + Send + Sync + 'static) {
         self.emitter.on_proc(f)
     }
 
@@ -84,7 +84,7 @@ impl Scheduler {
         self.emitter.on_task(f)
     }
 
-    pub fn emit_proc_event(&self, proc: &Arc<Proc>) {
+    pub fn emit_proc_event(&self, proc: &Arc<Process>) {
         self.emitter.emit_proc_event(proc)
     }
 

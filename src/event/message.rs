@@ -65,7 +65,7 @@ pub struct Message {
 
     pub model: Model,
 
-    /// proc id
+    /// process id
     pub pid: String,
 
     /// node id

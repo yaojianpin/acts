@@ -494,18 +494,18 @@ async fn sch_vars_get_global_vars() {
 //                 Act::irq(|act| act.with_key("act1").with_ret("a", json!(null))).with_id("act1"),
 //             )
 //     });
-//     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
+//     let (process, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
 //     emitter.on_message(move |e| {
 //         println!("message: {e:?}");
 //         if e.inner().is_source("act") && e.inner().is_state(MessageState::Created") {
 //             rx.close();
 //         }
 //     });
-//     scher.launch(&proc);
+//     scher.launch(&process);
 //     tx.recv().await;
-//     proc.print();
+//     process.print();
 //     assert_eq!(
-//         proc.task_by_nid("act1")
+//         process.task_by_nid("act1")
 //             .first()
 //             .unwrap()
 //             .outputs()

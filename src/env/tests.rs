@@ -283,7 +283,7 @@ async fn env_env_set_from_global() {
     sig.recv().await;
     let task = proc.root().unwrap();
 
-    // set the env value only change the proc local env in context
+    // set the env value only change the process local env in context
     let script = r#"
     $env("a", 100);
     "#;
@@ -313,7 +313,7 @@ async fn env_env_set_both_local_global() {
     sig.recv().await;
     let task = proc.root().unwrap();
 
-    // set the env value only change the proc local env in context
+    // set the env value only change the process local env in context
     let script = r#"
     $env("a", 200);
     "#;

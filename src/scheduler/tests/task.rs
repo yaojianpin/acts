@@ -243,7 +243,7 @@ async fn sch_task_branch_if_false_else_running() {
 
     let id = utils::longid();
     let (proc, scher, emitter, rx, tx) = create_proc_signal::<()>(&mut workflow, &id);
-    // proc.tree().print();
+    // process.tree().print();
     emitter.on_message(move |e| {
         if e.is_key("act1") {
             rx.close();
@@ -296,7 +296,7 @@ async fn sch_task_branch_if_true_else() {
 
     let id = utils::longid();
     let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &id);
-    // proc.tree().print();
+    // process.tree().print();
 
     scher.launch(&proc);
     tx.recv().await;
@@ -333,7 +333,7 @@ async fn sch_task_branch_if_two_no_else() {
 
     let id = utils::longid();
     let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &id);
-    // proc.tree().print();
+    // process.tree().print();
 
     scher.launch(&proc);
     tx.recv().await;
@@ -377,7 +377,7 @@ async fn sch_task_branch_if_mutli_true() {
 
     let id = utils::longid();
     let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &id);
-    // proc.tree().print();
+    // process.tree().print();
 
     scher.launch(&proc);
     tx.recv().await;

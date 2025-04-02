@@ -1,5 +1,5 @@
 use crate::{
-    scheduler::{Proc, Runtime, Task},
+    scheduler::{Process, Runtime, Task},
     store::Store,
     Engine, Result, ShareLock, StoreAdapter,
 };
@@ -10,7 +10,7 @@ use tracing::{debug, error, instrument};
 #[derive(Clone)]
 pub struct Cache {
     cap: usize,
-    procs: MokaCache<String, Arc<Proc>>,
+    procs: MokaCache<String, Arc<Process>>,
     store: ShareLock<Arc<Store>>,
 }
 
@@ -63,11 +63,11 @@ impl Cache {
     }
 
     #[instrument]
-    pub fn push_proc(&self, proc: &Arc<Proc>) {
+    pub fn push_proc(&self, proc: &Arc<Process>) {
         self.push_proc_pri(proc, true);
     }
 
-    pub fn procs(&self) -> Vec<Arc<Proc>> {
+    pub fn procs(&self) -> Vec<Arc<Process>> {
         let mut procs = Vec::new();
         for (_, proc) in self.procs.iter() {
             procs.push(proc.clone());
@@ -76,15 +76,15 @@ impl Cache {
     }
 
     #[instrument]
-    pub fn proc(&self, pid: &str, rt: &Arc<Runtime>) -> Option<Arc<Proc>> {
-        debug!("proc: pid={pid}");
+    pub fn proc(&self, pid: &str, rt: &Arc<Runtime>) -> Option<Arc<Process>> {
+        debug!("process: pid={pid}");
         match self.get_proc(pid) {
             Some(proc) => Some(proc.clone()),
             None => {
                 let store = self.store.read().unwrap();
                 if let Some(proc) = store.load_proc(pid, rt).unwrap_or_else(|err| {
-                    error!("cache.proc store.loadproc={}", err);
-                    eprintln!("cache.proc store.loadproc={}", err);
+                    error!("cache.process store.loadproc={}", err);
+                    eprintln!("cache.process store.loadproc={}", err);
                     None
                 }) {
                     debug!("loaded: {:?}", proc);
@@ -107,7 +107,7 @@ impl Cache {
     }
 
     #[instrument(skip(on_load))]
-    pub fn restore<F: Fn(&Arc<Proc>)>(&self, rt: &Arc<Runtime>, on_load: F) -> Result<()> {
+    pub fn restore<F: Fn(&Arc<Process>)>(&self, rt: &Arc<Runtime>, on_load: F) -> Result<()> {
         debug!("restore");
         let store = self.store.read().unwrap();
         let cap = self.cap();
@@ -138,15 +138,15 @@ impl Cache {
         self.procs.remove(pid);
     }
 
-    fn get_proc(&self, pid: &str) -> Option<Arc<Proc>> {
+    fn get_proc(&self, pid: &str) -> Option<Arc<Process>> {
         self.procs.get(pid)
     }
 
-    pub(super) fn push_proc_pri(&self, proc: &Arc<Proc>, save: bool) {
-        debug!("push proc pid={}", proc.id());
+    pub(super) fn push_proc_pri(&self, proc: &Arc<Process>, save: bool) {
+        debug!("push process pid={}", proc.id());
         if save {
             let store = self.store.read().unwrap();
-            store.upsert_proc(proc).expect("fail to upsert proc");
+            store.upsert_proc(proc).expect("fail to upsert process");
         }
         self.procs.insert(proc.id().to_string(), proc.clone());
     }
@@ -155,7 +155,7 @@ impl Cache {
         let p = task.proc();
         if save {
             let store = self.store.read().unwrap();
-            // update proc when updating the task
+            // update process when updating the task
             let mut proc = store.procs().find(&task.pid)?;
             proc.end_time = p.end_time();
             proc.state = p.state().into();

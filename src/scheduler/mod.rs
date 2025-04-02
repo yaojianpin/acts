@@ -1,5 +1,5 @@
 mod context;
-mod proc;
+mod process;
 mod queue;
 mod runtime;
 #[allow(clippy::module_inception)]
@@ -14,7 +14,7 @@ use async_trait::async_trait;
 
 pub use crate::Result;
 pub use context::Context;
-pub use proc::{Proc, StatementBatch, Task, TaskLifeCycle};
+pub use process::{Process, StatementBatch, Task, TaskLifeCycle};
 pub use runtime::Runtime;
 pub use scheduler::Scheduler;
 pub use state::TaskState;

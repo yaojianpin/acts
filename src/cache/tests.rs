@@ -1,9 +1,9 @@
 use crate::{
-  cache::Cache,
-  data,
-  scheduler::{NodeTree, Proc, TaskState},
-  store::StoreKind,
-  utils, Engine, Workflow,
+    cache::Cache,
+    data,
+    scheduler::{NodeTree, Process, TaskState},
+    store::StoreKind,
+    utils, Engine, Workflow,
 };
 
 #[tokio::test]
@@ -19,7 +19,7 @@ async fn cache_count() {
     let rt = engine.runtime();
     let cache = Cache::new(10);
 
-    let proc = Proc::new(&utils::longid(), &rt);
+    let proc = Process::new(&utils::longid(), &rt);
     cache.push_proc(&proc);
     assert_eq!(cache.count(), 1);
 }
@@ -30,7 +30,7 @@ async fn cache_push_get() {
     let rt = engine.runtime();
     let cache = Cache::new(10);
     let pid = utils::longid();
-    let proc = Proc::new(&pid, &rt);
+    let proc = Process::new(&pid, &rt);
     cache.push_proc(&proc);
     assert_eq!(cache.count(), 1);
 
@@ -47,7 +47,7 @@ async fn cache_push_to_store() {
     let mut pids = Vec::new();
     for _ in 0..5 {
         let pid = utils::longid();
-        let proc = Proc::new(&pid, &rt);
+        let proc = Process::new(&pid, &rt);
         cache.push_proc(&proc);
         pids.push(pid);
     }
@@ -68,7 +68,7 @@ async fn cache_remove() {
     let mut pids = Vec::new();
     for _ in 0..5 {
         let pid = utils::longid();
-        let proc = Proc::new(&pid, &rt);
+        let proc = Process::new(&pid, &rt);
         cache.push_proc(&proc);
         pids.push(pid);
     }
@@ -97,7 +97,7 @@ async fn cache_upsert() {
     let tree = NodeTree::build(&mut workflow).unwrap();
 
     let cache = Cache::new(10);
-    let proc = Proc::new(&pid, &rt);
+    let proc = Process::new(&pid, &rt);
     cache.push_proc(&proc);
     assert_eq!(cache.count(), 1);
 

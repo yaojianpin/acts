@@ -1,7 +1,7 @@
 use tokio::{runtime::Handle, time};
 use tracing::{debug, error};
 
-use super::{Proc, Scheduler, Task};
+use super::{Process, Scheduler, Task};
 use crate::event::EventAction;
 use crate::{
     cache::Cache,
@@ -64,7 +64,7 @@ impl Runtime {
         self.emitter.init(&engine.runtime());
     }
 
-    pub fn start(self: &Arc<Self>, model: &Workflow, options: &Vars) -> Result<Arc<Proc>> {
+    pub fn start(self: &Arc<Self>, model: &Workflow, options: &Vars) -> Result<Arc<Process>> {
         debug!("scheduler::start({})", model.id);
 
         let mut proc_id = utils::longid();
@@ -75,25 +75,25 @@ impl Runtime {
         let proc = self.cache.proc(&proc_id, self);
         if proc.is_some() {
             return Err(ActError::Action(format!(
-                "proc_id({proc_id}) is duplicated in running proc list"
+                "proc_id({proc_id}) is duplicated in running process list"
             )));
         }
 
         let mut w = model.clone();
         w.set_inputs(options);
 
-        let proc = Proc::new(&proc_id, self);
+        let proc = Process::new(&proc_id, self);
         proc.load(&w)?;
         self.launch(&proc);
 
         Ok(proc)
     }
 
-    pub fn proc(self: &Arc<Self>, pid: &str) -> Option<Arc<Proc>> {
+    pub fn proc(self: &Arc<Self>, pid: &str) -> Option<Arc<Process>> {
         self.cache.proc(pid, self)
     }
 
-    pub fn launch(self: &Arc<Self>, proc: &Arc<Proc>) {
+    pub fn launch(self: &Arc<Self>, proc: &Arc<Process>) {
         debug!("scheduler::launch");
         let proc = proc.clone();
         tokio::spawn(async move {
@@ -102,8 +102,8 @@ impl Runtime {
     }
 
     #[allow(unused)]
-    pub(crate) fn create_proc(self: &Arc<Self>, pid: &str, model: &Workflow) -> Arc<Proc> {
-        let proc = Proc::new(pid, self);
+    pub(crate) fn create_proc(self: &Arc<Self>, pid: &str, model: &Workflow) -> Arc<Process> {
+        let proc = Process::new(pid, self);
         proc.load(model);
         proc
     }
@@ -121,7 +121,7 @@ impl Runtime {
         match self.cache.proc(&action.pid, self) {
             Some(proc) => proc.do_action(action),
             None => Err(ActError::Runtime(format!(
-                "cannot find proc '{}' when do_action({:?})",
+                "cannot find process '{}' when do_action({:?})",
                 action.pid, action
             ))),
         }
@@ -182,13 +182,13 @@ impl Runtime {
                             rt.emitter().emit_complete_event(&message);
                         }
 
-                        // if the proc is a sub proc
+                        // if the process is a sub process
                         // call the parent act
                         if let Some((ppid, ptid)) = proc.parent() {
                             rt.return_to_act(&ppid, &ptid, proc);
                         }
 
-                        // proc.print();
+                        // process.print();
                         debug!("remove: {:?}", proc.tasks());
                         cache.remove(proc.id()).unwrap_or_else(|err| {
                             error!("scher.initialize remove={}", err);
@@ -196,7 +196,7 @@ impl Runtime {
                         });
                         cache
                             .restore(&rt, |proc| {
-                                // println!("re-start proc={proc:?} tasks:{:?}", proc.tasks());
+                                // println!("re-start process={process:?} tasks:{:?}", process.tasks());
                                 if proc.state().is_none() {
                                     proc.start();
                                 }
@@ -254,7 +254,7 @@ impl Runtime {
             let evt = self.emitter().clone();
             let cache = self.cache.clone();
             self.emitter().on_tick(move |_| {
-                // do the proc tick works
+                // do the process tick works
                 for proc in cache.procs().iter() {
                     if proc.state().is_running() {
                         proc.do_tick();
@@ -282,10 +282,10 @@ impl Runtime {
         }
     }
 
-    fn return_to_act(self: &Arc<Self>, pid: &str, tid: &str, proc: &Proc) {
+    fn return_to_act(self: &Arc<Self>, pid: &str, tid: &str, proc: &Process) {
         debug!("scher.return_to_act");
         let state = proc.state();
-        // proc.print();
+        // process.print();
         let mut vars = proc.outputs();
         debug!("sub outputs: {vars}");
         let mut event = EventAction::Next;
