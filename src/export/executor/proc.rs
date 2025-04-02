@@ -1,9 +1,9 @@
 use super::ExecutorQuery;
 use crate::{
-    sch::Runtime,
-    store::{PageData, StoreAdapter},
-    utils::consts,
-    ModelInfo, ProcInfo, Result, TaskInfo, Vars,
+  scheduler::Runtime,
+  store::{PageData, StoreAdapter},
+  utils::consts,
+  ModelInfo, ProcInfo, Result, TaskInfo, Vars,
 };
 use std::sync::Arc;
 use tracing::instrument;

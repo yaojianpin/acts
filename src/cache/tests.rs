@@ -1,9 +1,9 @@
 use crate::{
-    cache::Cache,
-    data,
-    sch::{NodeTree, Proc, TaskState},
-    store::StoreKind,
-    utils, Engine, Workflow,
+  cache::Cache,
+  data,
+  scheduler::{NodeTree, Proc, TaskState},
+  store::StoreKind,
+  utils, Engine, Workflow,
 };
 
 #[tokio::test]

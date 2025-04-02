@@ -1,8 +1,8 @@
 use super::EventAction;
 use crate::{
-    event::{Emitter, MessageState},
-    sch::{Proc, Runtime, TaskState},
-    utils, Engine, Workflow,
+  event::{Emitter, MessageState},
+  scheduler::{Proc, Runtime, TaskState},
+  utils, Engine, Workflow,
 };
 use std::str::FromStr;
 use std::sync::Arc;

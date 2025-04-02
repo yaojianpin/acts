@@ -1,7 +1,7 @@
 use core::fmt;
 use std::sync::{Arc, Mutex};
 
-use crate::{sch::Runtime, ActModule, ActPlugin};
+use crate::{scheduler::Runtime, ActModule, ActPlugin};
 
 #[derive(Clone)]
 pub struct Extender {

@@ -6,7 +6,7 @@ mod message;
 #[cfg(test)]
 mod tests;
 
-use crate::{sch::Runtime, ActError, Result};
+use crate::{scheduler::Runtime, ActError, Result};
 pub use action::Action;
 pub use emitter::Emitter;
 pub use extra::TaskExtra;

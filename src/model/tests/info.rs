@@ -1,8 +1,8 @@
 use serde_json::Value;
 
 use crate::{
-    data, sch::NodeData, utils, ModelInfo, NodeKind, PackageInfo, ProcInfo, TaskInfo, TaskState,
-    Workflow,
+  data, scheduler::NodeData, utils, ModelInfo, NodeKind, PackageInfo, ProcInfo, TaskInfo, TaskState,
+  Workflow,
 };
 
 #[test]
@@ -53,7 +53,7 @@ fn model_info_task() {
     let workflow = Workflow::new();
     let node_data = NodeData {
         id: "nid".to_string(),
-        content: crate::sch::NodeContent::Workflow(workflow),
+        content: crate::scheduler::NodeContent::Workflow(workflow),
         level: 0,
     };
     let task = data::Task {
@@ -188,7 +188,7 @@ fn model_info_task_arr_to_value() {
     let workflow = Workflow::new();
     let node_data = NodeData {
         id: "nid".to_string(),
-        content: crate::sch::NodeContent::Workflow(workflow),
+        content: crate::scheduler::NodeContent::Workflow(workflow),
         level: 0,
     };
     let task = data::Task {

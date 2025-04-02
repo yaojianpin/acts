@@ -1,6 +1,6 @@
 use crate::{
     event::Message,
-    sch::{Proc, Runtime, Task},
+    scheduler::{Proc, Runtime, Task},
     utils, Event, Result, ShareLock,
 };
 use std::{

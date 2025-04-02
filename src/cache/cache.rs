@@ -1,5 +1,5 @@
 use crate::{
-    sch::{Proc, Runtime, Task},
+    scheduler::{Proc, Runtime, Task},
     store::Store,
     Engine, Result, ShareLock, StoreAdapter,
 };

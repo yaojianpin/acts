@@ -1,7 +1,7 @@
 use crate::{
-    sch::{self, NodeData},
-    store::data,
-    ActError, MessageState, Result, Workflow,
+  scheduler::{self, NodeData},
+  store::data,
+  ActError, MessageState, Result, Workflow,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -166,8 +166,8 @@ impl From<&data::Task> for TaskInfo {
     }
 }
 
-impl From<&Arc<sch::Task>> for TaskInfo {
-    fn from(t: &Arc<sch::Task>) -> Self {
+impl From<&Arc<scheduler::Task>> for TaskInfo {
+    fn from(t: &Arc<scheduler::Task>) -> Self {
         Self {
             id: t.id.clone(),
             prev: t.prev(),

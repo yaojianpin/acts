@@ -13,7 +13,7 @@ mod event;
 mod export;
 mod model;
 mod plugin;
-mod sch;
+mod scheduler;
 mod signal;
 mod store;
 mod utils;
@@ -37,6 +37,6 @@ pub use signal::Signal;
 pub use store::{data, DbSet, Query, StoreAdapter};
 pub type Result<T> = std::result::Result<T, ActError>;
 
-pub(crate) use sch::{Context, NodeKind};
+pub(crate) use scheduler::{Context, NodeKind};
 pub(crate) type ShareLock<T> = Arc<RwLock<T>>;
-pub(crate) use sch::{ActTask, TaskState};
+pub(crate) use scheduler::{ActTask, TaskState};

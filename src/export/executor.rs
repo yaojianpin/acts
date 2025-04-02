@@ -6,9 +6,9 @@ mod proc;
 mod task;
 
 use crate::{
-    sch::Runtime,
-    store::{Cond, Expr},
-    Query,
+  scheduler::Runtime,
+  store::{Cond, Expr},
+  Query,
 };
 use std::sync::Arc;
 

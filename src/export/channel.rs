@@ -1,4 +1,4 @@
-use crate::{sch::Runtime, utils, Event, Message};
+use crate::{scheduler::Runtime, utils, Event, Message};
 use std::sync::Arc;
 use tracing::{debug, error, info};
 

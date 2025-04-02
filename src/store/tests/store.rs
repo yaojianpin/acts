@@ -1,6 +1,6 @@
 use crate::{
     data::Model,
-    sch::NodeKind,
+    scheduler::NodeKind,
     store::{data, query::Expr, Cond, Store, StoreKind},
     utils, MessageState, Query, StoreAdapter, TaskState, Workflow,
 };
