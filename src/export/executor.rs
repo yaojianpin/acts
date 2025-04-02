@@ -1,9 +1,9 @@
-mod act;
-mod model;
-mod msg;
-mod pack;
-mod proc;
-mod task;
+mod act_executor;
+mod model_executor;
+mod message_executor;
+mod package_executor;
+mod process_executor;
+mod task_executor;
 
 use crate::{
   scheduler::Runtime,
@@ -23,12 +23,12 @@ pub struct ExecutorQuery {
 
 #[derive(Clone)]
 pub struct Executor {
-    msg: msg::MessageExecutor,
-    act: act::ActExecutor,
-    model: model::ModelExecutor,
-    proc: proc::ProcExecutor,
-    task: task::TaskExecutor,
-    pack: pack::PackageExecutor,
+    msg: message_executor::MessageExecutor,
+    act: act_executor::ActExecutor,
+    model: model_executor::ModelExecutor,
+    proc: process_executor::ProcessExecutor,
+    task: task_executor::TaskExecutor,
+    pack: package_executor::PackageExecutor,
 }
 
 impl ExecutorQuery {
@@ -80,43 +80,43 @@ impl ExecutorQuery {
 impl Executor {
     pub(crate) fn new(rt: &Arc<Runtime>) -> Self {
         Self {
-            msg: msg::MessageExecutor::new(rt),
-            act: act::ActExecutor::new(rt),
-            model: model::ModelExecutor::new(rt),
-            proc: proc::ProcExecutor::new(rt),
-            task: task::TaskExecutor::new(rt),
-            pack: pack::PackageExecutor::new(rt),
+            msg: message_executor::MessageExecutor::new(rt),
+            act: act_executor::ActExecutor::new(rt),
+            model: model_executor::ModelExecutor::new(rt),
+            proc: process_executor::ProcessExecutor::new(rt),
+            task: task_executor::TaskExecutor::new(rt),
+            pack: package_executor::PackageExecutor::new(rt),
         }
     }
 
     /// executor for related message functions
-    pub fn msg(&self) -> &msg::MessageExecutor {
+    pub fn msg(&self) -> &message_executor::MessageExecutor {
         &self.msg
     }
 
     /// executor for related act operations
     /// such as 'complete', 'back', 'cancel' ..
-    pub fn act(&self) -> &act::ActExecutor {
+    pub fn act(&self) -> &act_executor::ActExecutor {
         &self.act
     }
 
     /// executor for related model functions
-    pub fn model(&self) -> &model::ModelExecutor {
+    pub fn model(&self) -> &model_executor::ModelExecutor {
         &self.model
     }
 
     /// executor for related process functions
-    pub fn proc(&self) -> &proc::ProcExecutor {
+    pub fn proc(&self) -> &process_executor::ProcessExecutor {
         &self.proc
     }
 
     /// executor for related task functions
-    pub fn task(&self) -> &task::TaskExecutor {
+    pub fn task(&self) -> &task_executor::TaskExecutor {
         &self.task
     }
 
     /// executor for related package functions
-    pub fn pack(&self) -> &pack::PackageExecutor {
+    pub fn pack(&self) -> &package_executor::PackageExecutor {
         &self.pack
     }
 }

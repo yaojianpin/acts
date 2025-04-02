@@ -9,11 +9,11 @@ use std::sync::Arc;
 use tracing::instrument;
 
 #[derive(Clone)]
-pub struct ProcExecutor {
+pub struct ProcessExecutor {
     runtime: Arc<Runtime>,
 }
 
-impl ProcExecutor {
+impl ProcessExecutor {
     pub fn new(rt: &Arc<Runtime>) -> Self {
         Self {
             runtime: rt.clone(),
