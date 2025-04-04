@@ -1264,7 +1264,7 @@ async fn export_manager_package_rm() {
 }
 
 #[tokio::test]
-async fn export_executeor_start() {
+async fn export_executor_start() {
     let engine = Engine::new();
     let model = Workflow::new()
         .with_id(&utils::longid())
@@ -1287,7 +1287,7 @@ async fn export_executeor_start() {
 }
 
 #[tokio::test]
-async fn export_executeor_start_not_found_model() {
+async fn export_executor_start_not_found_model() {
     let engine = Engine::new();
     let sig = engine.signal(());
     let s1 = sig.clone();
@@ -1303,7 +1303,7 @@ async fn export_executeor_start_not_found_model() {
 }
 
 #[tokio::test]
-async fn export_executeor_complete() {
+async fn export_executor_complete() {
     let engine = Engine::new();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -1329,7 +1329,7 @@ async fn export_executeor_complete() {
 }
 
 #[tokio::test]
-async fn export_executeor_complete_no_uid() {
+async fn export_executor_complete_no_uid() {
     let engine = Engine::new();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -1356,7 +1356,7 @@ async fn export_executeor_complete_no_uid() {
 }
 
 #[tokio::test]
-async fn export_executeor_submit() {
+async fn export_executor_submit() {
     let engine = Engine::new();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -1384,7 +1384,7 @@ async fn export_executeor_submit() {
 }
 
 #[tokio::test]
-async fn export_executeor_skip() {
+async fn export_executor_skip() {
     let engine = Engine::new();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -1411,7 +1411,7 @@ async fn export_executeor_skip() {
 }
 
 #[tokio::test]
-async fn export_executeor_error() {
+async fn export_executor_error() {
     let engine = Engine::new();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -1438,7 +1438,7 @@ async fn export_executeor_error() {
 }
 
 #[tokio::test]
-async fn export_executeor_abort() {
+async fn export_executor_abort() {
     let engine = Engine::new();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -1466,7 +1466,7 @@ async fn export_executeor_abort() {
 }
 
 #[tokio::test]
-async fn export_executeor_back() {
+async fn export_executor_back() {
     let engine = Engine::new();
     let model = Workflow::new()
         .with_step(|step| {
@@ -1517,7 +1517,7 @@ async fn export_executeor_back() {
 }
 
 #[tokio::test]
-async fn export_executeor_cancel() {
+async fn export_executor_cancel() {
     let engine = Engine::new();
     let model = Workflow::new()
         .with_step(|step| {
@@ -1571,7 +1571,7 @@ async fn export_executeor_cancel() {
 }
 
 #[tokio::test]
-async fn export_executeor_push() {
+async fn export_executor_push() {
     let engine = Engine::new();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -1601,7 +1601,7 @@ async fn export_executeor_push() {
 }
 
 #[tokio::test]
-async fn export_executeor_push_no_key_error() {
+async fn export_executor_push_no_key_error() {
     let engine = Engine::new();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -1632,7 +1632,7 @@ async fn export_executeor_push_no_key_error() {
 }
 
 #[tokio::test]
-async fn export_executeor_push_not_step_id_error() {
+async fn export_executor_push_not_step_id_error() {
     let engine = Engine::new();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -1658,7 +1658,7 @@ async fn export_executeor_push_not_step_id_error() {
 }
 
 #[tokio::test]
-async fn export_executeor_remove() {
+async fn export_executor_remove() {
     let engine = Engine::new();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
