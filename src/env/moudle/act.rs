@@ -37,6 +37,14 @@ mod act {
     }
 
     #[rquickjs::function]
+    pub fn set_process_var(name: String, value: ActValue) {
+        Context::with(|ctx| {
+            let vars = Vars::new().with(&name, value.inner());
+            ctx.proc.set_data(&vars);
+        })
+    }
+
+    #[rquickjs::function]
     pub fn inputs() -> ActValue {
         Context::with(|ctx| ctx.task().inputs().into())
     }
@@ -191,7 +199,7 @@ impl ActModule for ActPackage {
     fn init(&self, ctx: &rquickjs::Ctx<'_>) -> Result<()> {
         JsModule::declare_def::<js_act, _>(ctx.clone(), "@acts/act").unwrap();
         let source = r#"
-        import { get, set, inputs, expose, state, complete, fail, skip, back, abort, push, irq, msg, chain, each, block, call } from '@acts/act';
+        import { get, set, set_process_var, inputs, expose, state, complete, fail, skip, back, abort, push, irq, msg, chain, each, block, call } from '@acts/act';
         globalThis.$ = (name, value) => {
             if(value === undefined) {
                 return get(name);
@@ -200,7 +208,7 @@ impl ActModule for ActPackage {
         }
         
         globalThis.act = {
-            get, set, state, inputs, expose, complete, fail, skip, back, abort, push, irq, msg, chain, each, block, call
+            get, set, set_process_var, state, inputs, expose, complete, fail, skip, back, abort, push, irq, msg, chain, each, block, call
         };
         "#;
         let _ = JsModule::evaluate(ctx.clone(), "@acts/act", source)
