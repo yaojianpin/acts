@@ -34,7 +34,7 @@ pub use export::{Channel, ChannelOptions, Executor, ExecutorQuery, Extender};
 pub use model::*;
 pub use plugin::ActPlugin;
 pub use signal::Signal;
-pub use store::{data, DbSet, Query, StoreAdapter};
+pub use store::{data, DbSet, PageData, Query, StoreAdapter};
 pub type Result<T> = std::result::Result<T, ActError>;
 
 pub(crate) use scheduler::{Context, NodeKind};
