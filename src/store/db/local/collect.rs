@@ -84,7 +84,7 @@ where
                 for (index, expr) in cond.conds().iter().enumerate() {
                     if !keys.contains(&expr.key()) {
                         return Err(ActError::Store(format!(
-                            "cannot find key `{}` in {}, the avaliable keys should be `{}`",
+                            "cannot find key `{}` in {}, the available keys should be `{}`",
                             expr.key(),
                             self.name,
                             keys.join(",")
@@ -117,7 +117,7 @@ where
             for (index, (order, rev)) in q.order_by().iter().enumerate() {
                 if !keys.contains(&order.as_str()) {
                     return Err(ActError::Store(format!(
-                        "cannot find key `{order}` in {}, the avaliable keys should be `{}`",
+                        "cannot find key `{order}` in {}, the available keys should be `{}`",
                         self.name,
                         keys.join(",")
                     )));
