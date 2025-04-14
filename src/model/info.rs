@@ -1,7 +1,7 @@
 use crate::{
-    sch::{self, NodeData},
+    scheduler::{self, NodeData},
     store::data,
-    ActError, Result, Workflow,
+    ActError, MessageState, Result, Workflow,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -62,7 +62,7 @@ pub struct MessageInfo {
     pub id: String,
     pub tid: String,
     pub name: String,
-    pub state: String,
+    pub state: MessageState,
     pub r#type: String,
     pub pid: String,
     pub nid: String,
@@ -166,8 +166,8 @@ impl From<&data::Task> for TaskInfo {
     }
 }
 
-impl From<&Arc<sch::Task>> for TaskInfo {
-    fn from(t: &Arc<sch::Task>) -> Self {
+impl From<&Arc<scheduler::Task>> for TaskInfo {
+    fn from(t: &Arc<scheduler::Task>) -> Self {
         Self {
             id: t.id.clone(),
             prev: t.prev(),
@@ -197,7 +197,7 @@ impl From<&data::Message> for MessageInfo {
             timestamp: m.timestamp,
             create_time: m.create_time,
             update_time: m.update_time,
-            state: m.state.clone(),
+            state: m.state,
             r#type: m.r#type.clone(),
             key: m.key.clone(),
             tag: m.tag.clone(),

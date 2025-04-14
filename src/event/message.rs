@@ -1,8 +1,21 @@
 use crate::{data, utils, TaskState, Vars};
 use core::fmt;
 use serde::{Deserialize, Serialize};
+use std::str::FromStr;
 
-#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq)]
+#[derive(
+    Serialize,
+    Deserialize,
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    strum::AsRefStr,
+    strum::EnumString,
+)]
+#[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case")]
 pub enum MessageState {
     #[default]
     None,
@@ -28,6 +41,7 @@ pub struct Model {
     /// workflow name
     pub name: String,
 }
+
 #[derive(Default, Serialize, Deserialize, Clone, Debug)]
 pub struct Message {
     /// message id
@@ -40,7 +54,7 @@ pub struct Message {
     pub name: String,
 
     /// task action state
-    pub state: String,
+    pub state: MessageState,
 
     /// message type
     /// workflow | step | branch | msg | irq
@@ -51,7 +65,7 @@ pub struct Message {
 
     pub model: Model,
 
-    /// proc id
+    /// process id
     pub pid: String,
 
     /// node id
@@ -86,14 +100,14 @@ pub struct Message {
 
 impl Message {
     pub fn state(&self) -> MessageState {
-        self.state.as_str().into()
+        self.state
     }
 
     pub fn is_key(&self, key: &str) -> bool {
         self.key == key
     }
 
-    pub fn is_state(&self, state: &str) -> bool {
+    pub fn is_state(&self, state: MessageState) -> bool {
         self.state == state
     }
 
@@ -110,14 +124,14 @@ impl Message {
     }
 
     pub fn type_of(&self, mtype: &str) -> Option<&Self> {
-        if &self.r#type == mtype {
+        if self.r#type == mtype {
             return Some(self);
         }
         None
     }
 
     pub fn tag_of(&self, tag: &str) -> Option<&Self> {
-        if tag == &self.tag {
+        if tag == self.tag {
             return Some(self);
         }
 
@@ -125,7 +139,7 @@ impl Message {
     }
 
     pub fn key_of(&self, key: &str) -> Option<&Self> {
-        if key == &self.key {
+        if key == self.key {
             return Some(self);
         }
 
@@ -173,17 +187,17 @@ impl Message {
 
 impl MessageState {
     pub fn is_completed(&self) -> bool {
-        match self {
+        matches!(
+            self,
             MessageState::Completed
-            | MessageState::Cancelled
-            | MessageState::Submitted
-            | MessageState::Backed
-            | MessageState::Error
-            | MessageState::Skipped
-            | MessageState::Aborted
-            | MessageState::Removed => true,
-            _ => false,
-        }
+                | MessageState::Cancelled
+                | MessageState::Submitted
+                | MessageState::Backed
+                | MessageState::Error
+                | MessageState::Skipped
+                | MessageState::Aborted
+                | MessageState::Removed
+        )
     }
 }
 
@@ -215,7 +229,7 @@ impl From<TaskState> for MessageState {
 
 impl From<MessageState> for String {
     fn from(state: MessageState) -> Self {
-        message_state_to_str(state)
+        state.as_ref().to_string()
     }
 }
 
@@ -225,7 +239,7 @@ impl From<data::Message> for Message {
             id: v.id,
             tid: v.tid,
             name: v.name,
-            state: v.state.into(),
+            state: v.state,
             r#type: v.r#type,
             source: v.source,
             model: serde_json::from_str(&v.model).unwrap_or_default(),
@@ -243,50 +257,14 @@ impl From<data::Message> for Message {
     }
 }
 
-impl From<&str> for MessageState {
-    fn from(str: &str) -> Self {
-        str_to_message_state(str)
-    }
-}
-
 impl From<String> for MessageState {
     fn from(str: String) -> Self {
-        str_to_message_state(&str)
+        Self::from_str(str.as_ref()).unwrap_or_default()
     }
 }
 
 impl From<&MessageState> for String {
     fn from(state: &MessageState) -> Self {
-        message_state_to_str(state.clone())
-    }
-}
-
-fn message_state_to_str(state: MessageState) -> String {
-    match state {
-        MessageState::None => "none".to_string(),
-        MessageState::Aborted => "aborted".to_string(),
-        MessageState::Backed => "backed".to_string(),
-        MessageState::Cancelled => "cancelled".to_string(),
-        MessageState::Completed => "completed".to_string(),
-        MessageState::Created => "created".to_string(),
-        MessageState::Skipped => "skipped".to_string(),
-        MessageState::Submitted => "submitted".to_string(),
-        MessageState::Error => "error".to_string(),
-        MessageState::Removed => "removed".to_string(),
-    }
-}
-
-fn str_to_message_state(s: &str) -> MessageState {
-    match s {
-        "aborted" => MessageState::Aborted,
-        "backed" => MessageState::Backed,
-        "cancelled" => MessageState::Cancelled,
-        "completed" => MessageState::Completed,
-        "created" => MessageState::Created,
-        "skipped" => MessageState::Skipped,
-        "submitted" => MessageState::Submitted,
-        "error" => MessageState::Error,
-        "removed" => MessageState::Removed,
-        "none" | _ => MessageState::None,
+        state.as_ref().to_string()
     }
 }

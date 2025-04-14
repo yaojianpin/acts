@@ -8,8 +8,10 @@ impl ActPackage {
     }
 }
 
+#[allow(clippy::module_inception)]
 #[rquickjs::module(rename_vars = "camelCase")]
 mod act {
+    use crate::event::EventAction;
     use crate::{
         env::value::ActValue, utils::consts, Act, ActError, Action, Block, Call, Chain, Context,
         Each, Irq, Msg, Vars,
@@ -31,6 +33,14 @@ mod act {
         Context::with(|ctx| {
             let vars = Vars::new().with(&name, value.inner());
             ctx.task().update_data(&vars);
+        })
+    }
+
+    #[rquickjs::function]
+    pub fn set_process_var(name: String, value: ActValue) {
+        Context::with(|ctx| {
+            let vars = Vars::new().with(&name, value.inner());
+            ctx.proc.set_data(&vars);
         })
     }
 
@@ -68,7 +78,7 @@ mod act {
             ctx.set_action(&Action::new(
                 &task.pid,
                 &task.id,
-                consts::EVT_NEXT,
+                EventAction::Next,
                 &Vars::new(),
             ))?;
             task.update_no_lock(ctx)?;
@@ -84,7 +94,7 @@ mod act {
             ctx.set_action(&Action::new(
                 &task.pid,
                 &task.id,
-                consts::EVT_ABORT,
+                EventAction::Abort,
                 &Vars::new(),
             ))?;
             task.update_no_lock(ctx)?;
@@ -99,7 +109,7 @@ mod act {
         let vars = Vars::new().with(consts::ACT_TO, nid);
         Context::with(|ctx| {
             let task = ctx.task();
-            ctx.set_action(&Action::new(&task.pid, &task.id, consts::EVT_BACK, &vars))?;
+            ctx.set_action(&Action::new(&task.pid, &task.id, EventAction::Back, &vars))?;
             task.update_no_lock(ctx)?;
             Ok(())
         })
@@ -113,7 +123,7 @@ mod act {
             ctx.set_action(&Action::new(
                 &task.pid,
                 &task.id,
-                consts::EVT_SKIP,
+                EventAction::Skip,
                 &Vars::new(),
             ))?;
             task.update_no_lock(ctx)?;
@@ -129,7 +139,7 @@ mod act {
             .with(consts::ACT_ERR_MESSAGE, message);
         Context::with(|ctx| {
             let task = ctx.task();
-            ctx.set_action(&Action::new(&task.pid, &task.id, consts::EVT_ERR, &vars))?;
+            ctx.set_action(&Action::new(&task.pid, &task.id, EventAction::Error, &vars))?;
             task.update_no_lock(ctx)?;
             Ok(())
         })
@@ -176,9 +186,9 @@ mod act {
     pub fn push(act: ActValue) -> rquickjs::Result<()> {
         let act = act.to::<Act>().unwrap();
         if act.act.is_empty() {
-            return Err(ActError::Action(format!(
-                "'act' property is not set when pushing a new act"
-            ))
+            return Err(ActError::Action(
+                "'act' property is not set when pushing a new act".to_string(),
+            )
             .into());
         }
         Context::with(|ctx| act.exec(ctx)).map_err(|err| err.into())
@@ -189,7 +199,7 @@ impl ActModule for ActPackage {
     fn init(&self, ctx: &rquickjs::Ctx<'_>) -> Result<()> {
         JsModule::declare_def::<js_act, _>(ctx.clone(), "@acts/act").unwrap();
         let source = r#"
-        import { get, set, inputs, expose, state, complete, fail, skip, back, abort, push, irq, msg, chain, each, block, call } from '@acts/act';
+        import { get, set, set_process_var, inputs, expose, state, complete, fail, skip, back, abort, push, irq, msg, chain, each, block, call } from '@acts/act';
         globalThis.$ = (name, value) => {
             if(value === undefined) {
                 return get(name);
@@ -198,7 +208,7 @@ impl ActModule for ActPackage {
         }
         
         globalThis.act = {
-            get, set, state, inputs, expose, complete, fail, skip, back, abort, push, irq, msg, chain, each, block, call
+            get, set, set_process_var, state, inputs, expose, complete, fail, skip, back, abort, push, irq, msg, chain, each, block, call
         };
         "#;
         let _ = JsModule::evaluate(ctx.clone(), "@acts/act", source)

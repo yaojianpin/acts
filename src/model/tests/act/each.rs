@@ -17,7 +17,7 @@ fn model_act_each_parse() {
         assert_eq!(r#in, r#"["a", "b"]"#);
         assert_eq!(then.len(), 1);
     } else {
-        assert!(false);
+        panic!();
     }
 }
 

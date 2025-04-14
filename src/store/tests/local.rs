@@ -1,15 +1,14 @@
 use crate::{
-    sch::NodeKind,
+    scheduler::NodeKind,
     store::{data::*, db::LocalStore, query::Expr, Cond, Query},
-    utils, StoreAdapter, TaskState, Vars,
+    utils, MessageState, StoreAdapter, TaskState, Vars,
 };
 use serde_json::json;
 use tokio::sync::OnceCell;
 
 static STORE: OnceCell<LocalStore> = OnceCell::const_new();
 async fn init() -> LocalStore {
-    let s = LocalStore::new("test_data", "test.db");
-    s
+    LocalStore::new("test_data", "test.db")
 }
 
 async fn store() -> &'static LocalStore {
@@ -30,7 +29,7 @@ async fn store_mem_model_create() {
         timestamp: 0,
     };
     store.models().create(&model).unwrap();
-    assert_eq!(store.models().exists(&model.id).unwrap(), true);
+    assert!(store.models().exists(&model.id).unwrap());
 }
 
 #[tokio::test]
@@ -117,7 +116,7 @@ async fn store_mem_model_delete() {
     store.models().create(&model).unwrap();
     store.models().delete(&model.id).unwrap();
 
-    assert_eq!(store.procs().exists(&model.id).unwrap(), false);
+    assert!(!store.procs().exists(&model.id).unwrap());
 }
 
 #[tokio::test]
@@ -136,7 +135,7 @@ async fn store_local_proc_create() {
         err: None,
     };
     store.procs().create(&proc).unwrap();
-    assert_eq!(store.procs().exists(&proc.id).unwrap(), true);
+    assert!(store.procs().exists(&proc.id).unwrap());
 }
 
 #[tokio::test]
@@ -235,7 +234,7 @@ async fn store_local_proc_delete() {
     store.procs().create(&proc).unwrap();
     store.procs().delete(&proc.id).unwrap();
 
-    assert_eq!(store.procs().exists(&proc.id).unwrap(), false);
+    assert!(!store.procs().exists(&proc.id).unwrap());
 }
 
 #[tokio::test]
@@ -259,7 +258,7 @@ async fn store_local_task_create() {
         err: None,
     };
     tasks.create(&task).unwrap();
-    assert_eq!(tasks.exists(&task.id).unwrap(), true);
+    assert!(tasks.exists(&task.id).unwrap());
 }
 
 #[tokio::test]
@@ -373,7 +372,7 @@ async fn store_local_task_delete() {
     table.create(&task).unwrap();
     table.delete(&task.id).unwrap();
 
-    assert_eq!(table.exists(&task.id).unwrap(), false);
+    assert!(!table.exists(&task.id).unwrap());
 }
 
 #[tokio::test]
@@ -389,7 +388,7 @@ async fn store_local_message_create() {
         tid: tid.clone(),
         nid: utils::shortid(),
         mid: utils::shortid(),
-        state: "created".to_string(),
+        state: MessageState::Created,
         start_time: 0,
         end_time: 0,
         r#type: "step".to_string(),
@@ -428,7 +427,7 @@ async fn store_local_message_query() {
         tid: tid.clone(),
         nid: utils::shortid(),
         mid: utils::shortid(),
-        state: "created".to_string(),
+        state: MessageState::Created,
         start_time: 0,
         end_time: 0,
         r#type: "step".to_string(),
@@ -468,7 +467,7 @@ async fn store_local_message_update() {
         tid: tid.clone(),
         nid: utils::shortid(),
         mid: utils::shortid(),
-        state: "created".to_string(),
+        state: MessageState::Created,
         start_time: 0,
         end_time: 0,
         r#type: "step".to_string(),
@@ -491,13 +490,13 @@ async fn store_local_message_update() {
 
     let id = utils::Id::new(&pid, &tid);
     let mut msg = store.messages().find(&id.id()).unwrap();
-    msg.state = "completed".to_string();
+    msg.state = MessageState::Completed;
     msg.retry_times = 1;
     msg.status = MessageStatus::Acked;
     store.messages().update(&msg).unwrap();
 
     let msg2 = store.messages().find(&id.id()).unwrap();
-    assert_eq!(msg2.state, "completed");
+    assert_eq!(msg2.state, MessageState::Completed);
     assert_eq!(msg2.retry_times, 1);
     assert_eq!(msg2.status, MessageStatus::Acked);
 }
@@ -515,7 +514,7 @@ async fn store_local_message_remove() {
         tid: tid.clone(),
         nid: utils::shortid(),
         mid: utils::shortid(),
-        state: "created".to_string(),
+        state: MessageState::Created,
         start_time: 0,
         end_time: 0,
         r#type: "step".to_string(),

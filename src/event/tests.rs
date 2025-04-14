@@ -1,9 +1,10 @@
 use super::EventAction;
 use crate::{
     event::{Emitter, MessageState},
-    sch::{Proc, Runtime, TaskState},
+    scheduler::{Process, Runtime, TaskState},
     utils, Engine, Workflow,
 };
+use std::str::FromStr;
 use std::sync::Arc;
 
 #[test]
@@ -38,31 +39,31 @@ fn event_message_state_to_string() {
 
 #[test]
 fn event_message_state_from_string() {
-    let state: MessageState = "none".into();
+    let state = MessageState::from_str("none").unwrap();
     assert_eq!(state, MessageState::None);
 
-    let state: MessageState = "error".into();
+    let state = MessageState::from_str("error").unwrap();
     assert_eq!(state, MessageState::Error);
 
-    let state: MessageState = "aborted".into();
+    let state = MessageState::from_str("aborted").unwrap();
     assert_eq!(state, MessageState::Aborted);
 
-    let state: MessageState = "submitted".into();
+    let state = MessageState::from_str("submitted").unwrap();
     assert_eq!(state, MessageState::Submitted);
 
-    let state: MessageState = "cancelled".into();
+    let state = MessageState::from_str("cancelled").unwrap();
     assert_eq!(state, MessageState::Cancelled);
 
-    let state: MessageState = "backed".into();
+    let state = MessageState::from_str("backed").unwrap();
     assert_eq!(state, MessageState::Backed);
 
-    let state: MessageState = "created".into();
+    let state = MessageState::from_str("created").unwrap();
     assert_eq!(state, MessageState::Created);
 
-    let state: MessageState = "skipped".into();
+    let state = MessageState::from_str("skipped").unwrap();
     assert_eq!(state, MessageState::Skipped);
 
-    let state: MessageState = "removed".into();
+    let state = MessageState::from_str("removed").unwrap();
     assert_eq!(state, MessageState::Removed);
 }
 
@@ -268,14 +269,14 @@ async fn event_message_dup_key() {
     assert!(ret);
 }
 
-fn create_proc(workflow: &mut Workflow, id: &str) -> (Arc<Proc>, Arc<Runtime>) {
+fn create_proc(workflow: &mut Workflow, id: &str) -> (Arc<Process>, Arc<Runtime>) {
     let engine = Engine::new();
     let rt = engine.runtime();
     let proc = rt.create_proc(id, workflow);
     (proc, rt)
 }
 
-fn create_proc2(workflow: &mut Workflow, id: &str) -> (Arc<Proc>, Engine) {
+fn create_proc2(workflow: &mut Workflow, id: &str) -> (Arc<Process>, Engine) {
     let engine = Engine::new();
     let rt = engine.runtime();
     let proc = rt.create_proc(id, workflow);

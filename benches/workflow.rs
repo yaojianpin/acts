@@ -1,4 +1,4 @@
-use acts::{Engine, Vars, Workflow};
+use acts::{Engine, MessageState, Vars, Workflow};
 use criterion::*;
 use std::sync::{Arc, Mutex};
 use tokio::{
@@ -70,7 +70,7 @@ fn act(c: &mut Criterion) {
             let e2 = engine.clone();
             let chan = engine.channel();
             chan.on_message(move |e| {
-                if e.is_key("act1") && e.is_state("created") {
+                if e.is_key("act1") && e.is_state(MessageState::Created) {
                     let start = Instant::now();
                     engine
                         .executor()

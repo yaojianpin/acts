@@ -31,7 +31,7 @@ pub enum ExprOp {
     /// not equal
     NE,
 
-    /// less then
+    /// less than
     LT,
 
     /// less and equal

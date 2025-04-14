@@ -2,7 +2,7 @@ use crate::{
     data::{self, Package},
     event::{MessageState, Model},
     export::ExecutorQuery,
-    sch::TaskState,
+    scheduler::TaskState,
     store::{Cond, Expr},
     utils, Act, ActPlugin, ChannelOptions, Engine, Message, Query, StoreAdapter, Vars, Workflow,
 };
@@ -153,7 +153,7 @@ async fn export_executor_start_dup_pid_error() {
         env_local: "{}".to_string(),
         err: None,
     };
-    store.procs().create(&proc).expect("create proc");
+    store.procs().create(&proc).expect("create process");
     engine
         .executor()
         .model()
@@ -554,7 +554,7 @@ async fn export_manager_tasks_count() {
     let tasks = manager
         .task()
         .list(
-            &&ExecutorQuery::new()
+            &ExecutorQuery::new()
                 .with_query("pid", &pid)
                 .with_offset(0)
                 .with_count(10),
@@ -665,7 +665,7 @@ async fn export_manager_tasks_query() {
     let tasks = manager
         .task()
         .list(
-            &&&ExecutorQuery::new()
+            &ExecutorQuery::new()
                 .with_query("pid", &pid)
                 .with_query("state", "interrupted"),
         )
@@ -702,7 +702,7 @@ async fn export_manager_tasks_order() {
     let tasks = manager
         .task()
         .list(
-            &&&ExecutorQuery::new()
+            &ExecutorQuery::new()
                 .with_query("pid", &pid)
                 .with_order("timestamp", true),
         )
@@ -771,7 +771,7 @@ async fn export_manager_messages_all() {
         let mut count = count.lock().unwrap();
         *count += 1;
 
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             s1.send(*count);
         }
     });
@@ -810,7 +810,7 @@ async fn export_manager_messages_query() {
         let mut count = count.lock().unwrap();
         *count += 1;
 
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             s1.send(*count);
         }
     });
@@ -850,7 +850,7 @@ async fn export_manager_messages_order() {
     });
     chan.on_message(move |e| {
         println!("message:{e:?}");
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             s1.close();
         }
     });
@@ -896,7 +896,7 @@ async fn export_manager_messages_count() {
         let mut count = count.lock().unwrap();
         *count += 1;
 
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             s1.send(*count);
         }
     });
@@ -941,7 +941,7 @@ async fn export_manager_messages_offset_in_range() {
         let mut count = count.lock().unwrap();
         *count += 1;
 
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             s1.send(*count);
         }
     });
@@ -986,7 +986,7 @@ async fn export_manager_messages_offset_out_range() {
         let mut count = count.lock().unwrap();
         *count += 1;
 
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             s1.send(*count);
         }
     });
@@ -1031,7 +1031,7 @@ async fn export_manager_message_get() {
         let mut count = count.lock().unwrap();
         *count += 1;
 
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             s1.send(*count);
         }
     });
@@ -1077,7 +1077,7 @@ async fn export_manager_message_rm() {
         let mut count = count.lock().unwrap();
         *count += 1;
 
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             s1.send(*count);
         }
     });
@@ -1264,7 +1264,7 @@ async fn export_manager_package_rm() {
 }
 
 #[tokio::test]
-async fn export_executeor_start() {
+async fn export_executor_start() {
     let engine = Engine::new();
     let model = Workflow::new()
         .with_id(&utils::longid())
@@ -1287,7 +1287,7 @@ async fn export_executeor_start() {
 }
 
 #[tokio::test]
-async fn export_executeor_start_not_found_model() {
+async fn export_executor_start_not_found_model() {
     let engine = Engine::new();
     let sig = engine.signal(());
     let s1 = sig.clone();
@@ -1303,7 +1303,7 @@ async fn export_executeor_start_not_found_model() {
 }
 
 #[tokio::test]
-async fn export_executeor_complete() {
+async fn export_executor_complete() {
     let engine = Engine::new();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -1314,7 +1314,7 @@ async fn export_executeor_complete() {
     let sig = engine.signal(false);
     let s1 = sig.clone();
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             let ret = engine.executor().act().complete(&e.pid, &e.tid, &vars);
@@ -1329,7 +1329,7 @@ async fn export_executeor_complete() {
 }
 
 #[tokio::test]
-async fn export_executeor_complete_no_uid() {
+async fn export_executor_complete_no_uid() {
     let engine = Engine::new();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -1342,7 +1342,7 @@ async fn export_executeor_complete_no_uid() {
     // scher.emitter().on_complete(|e| rx.close());
 
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let vars = Vars::new();
             let ret = engine.executor().act().complete(&e.pid, &e.tid, &vars);
 
@@ -1356,7 +1356,7 @@ async fn export_executeor_complete_no_uid() {
 }
 
 #[tokio::test]
-async fn export_executeor_submit() {
+async fn export_executor_submit() {
     let engine = Engine::new();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -1369,7 +1369,7 @@ async fn export_executeor_submit() {
     // scher.emitter().on_complete(|e| e.close());
 
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             let ret = engine.executor().act().submit(&e.pid, &e.tid, &vars);
@@ -1384,7 +1384,7 @@ async fn export_executeor_submit() {
 }
 
 #[tokio::test]
-async fn export_executeor_skip() {
+async fn export_executor_skip() {
     let engine = Engine::new();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -1396,7 +1396,7 @@ async fn export_executeor_skip() {
     let s1 = sig.clone();
     // scher.emitter().on_complete(|e| e.close());
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             let ret = engine.executor().act().skip(&e.pid, &e.tid, &vars);
@@ -1411,7 +1411,7 @@ async fn export_executeor_skip() {
 }
 
 #[tokio::test]
-async fn export_executeor_error() {
+async fn export_executor_error() {
     let engine = Engine::new();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -1422,7 +1422,7 @@ async fn export_executeor_error() {
     let sig = engine.signal(false);
     let s1 = sig.clone();
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             vars.insert("ecode".to_string(), json!("code_1"));
@@ -1438,7 +1438,7 @@ async fn export_executeor_error() {
 }
 
 #[tokio::test]
-async fn export_executeor_abort() {
+async fn export_executor_abort() {
     let engine = Engine::new();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -1451,7 +1451,7 @@ async fn export_executeor_abort() {
     // scher.emitter().on_complete(|e| e.close());
     engine.channel().on_message(move |e| {
         println!("message: {:?}", e.inner());
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             let ret = engine.executor().act().abort(&e.pid, &e.tid, &vars);
@@ -1466,7 +1466,7 @@ async fn export_executeor_abort() {
 }
 
 #[tokio::test]
-async fn export_executeor_back() {
+async fn export_executor_back() {
     let engine = Engine::new();
     let model = Workflow::new()
         .with_step(|step| {
@@ -1485,7 +1485,7 @@ async fn export_executeor_back() {
 
     let count = Arc::new(Mutex::new(0));
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut count = count.lock().unwrap();
             if *count == 1 {
                 s1.close();
@@ -1501,7 +1501,7 @@ async fn export_executeor_back() {
             *count += 1;
         }
 
-        if e.is_key("act2") && e.is_state("created") {
+        if e.is_key("act2") && e.is_state(MessageState::Created) {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             vars.insert("to".to_string(), json!("step1"));
@@ -1517,7 +1517,7 @@ async fn export_executeor_back() {
 }
 
 #[tokio::test]
-async fn export_executeor_cancel() {
+async fn export_executor_cancel() {
     let engine = Engine::new();
     let model = Workflow::new()
         .with_step(|step| {
@@ -1536,7 +1536,7 @@ async fn export_executeor_cancel() {
     let count = Arc::new(Mutex::new(0));
     let tid = Arc::new(Mutex::new("".to_string()));
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut count = count.lock().unwrap();
             if *count == 1 {
                 s1.close();
@@ -1553,7 +1553,7 @@ async fn export_executeor_cancel() {
             *count += 1;
         }
 
-        if e.is_key("act2") && e.is_state("created") {
+        if e.is_key("act2") && e.is_state(MessageState::Created) {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             let ret = engine
@@ -1571,7 +1571,7 @@ async fn export_executeor_cancel() {
 }
 
 #[tokio::test]
-async fn export_executeor_push() {
+async fn export_executor_push() {
     let engine = Engine::new();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -1584,12 +1584,12 @@ async fn export_executeor_push() {
     // scher.emitter().on_complete(|e| e.close());
     engine.channel().on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_key("step1") && e.is_state("created") {
+        if e.is_key("step1") && e.is_state(MessageState::Created) {
             let vars = Vars::new().with("key", "act2");
             engine.executor().act().push(&e.pid, &e.tid, &vars).unwrap();
         }
 
-        if e.is_key("act2") && e.is_state("created") {
+        if e.is_key("act2") && e.is_state(MessageState::Created) {
             s1.send(true);
         }
     });
@@ -1601,7 +1601,7 @@ async fn export_executeor_push() {
 }
 
 #[tokio::test]
-async fn export_executeor_push_no_key_error() {
+async fn export_executor_push_no_key_error() {
     let engine = Engine::new();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -1614,7 +1614,7 @@ async fn export_executeor_push_no_key_error() {
     // scher.emitter().on_complete(|e| e.close());
     engine.channel().on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_key("step1") && e.is_state("created") {
+        if e.is_key("step1") && e.is_state(MessageState::Created) {
             s1.send(
                 engine
                     .executor()
@@ -1632,7 +1632,7 @@ async fn export_executeor_push_no_key_error() {
 }
 
 #[tokio::test]
-async fn export_executeor_push_not_step_id_error() {
+async fn export_executor_push_not_step_id_error() {
     let engine = Engine::new();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -1645,7 +1645,7 @@ async fn export_executeor_push_not_step_id_error() {
     // scher.emitter().on_complete(|e| e.close());
     engine.channel().on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             let vars = Vars::new();
             s1.send(engine.executor().act().push(&e.pid, &e.tid, &vars).is_err());
         }
@@ -1658,7 +1658,7 @@ async fn export_executeor_push_not_step_id_error() {
 }
 
 #[tokio::test]
-async fn export_executeor_remove() {
+async fn export_executor_remove() {
     let engine = Engine::new();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -1670,7 +1670,7 @@ async fn export_executeor_remove() {
     let s1 = sig.clone();
     engine.channel().on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_key("act1") && e.is_state("created") {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
             s1.send(
                 engine
                     .executor()
@@ -1786,7 +1786,7 @@ async fn export_emitter_state_match() {
     });
 
     let msg = Message {
-        state: MessageState::Completed.to_string(),
+        state: MessageState::Completed,
         ..Message::default()
     };
     engine.runtime().emitter().emit_message(&msg);
@@ -1809,7 +1809,7 @@ async fn export_emitter_state_not_match() {
     });
 
     let msg = Message {
-        state: MessageState::Completed.to_string(),
+        state: MessageState::Completed,
         ..Message::default()
     };
     engine.runtime().emitter().emit_message(&msg);

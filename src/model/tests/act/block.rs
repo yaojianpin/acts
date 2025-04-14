@@ -27,7 +27,7 @@ fn model_act_block_parse() {
         assert_eq!(inputs.get::<i32>("a").unwrap(), 5);
         assert_eq!(next.unwrap().id, "pack2");
     } else {
-        assert!(false);
+        panic!();
     }
 }
 

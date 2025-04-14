@@ -18,7 +18,7 @@ fn model_act_msg_parse() {
         assert_eq!(tag, "tag1");
         assert_eq!(inputs.get::<i32>("a").unwrap(), 1);
     } else {
-        assert!(false);
+        panic!();
     }
 }
 

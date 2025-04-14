@@ -3,7 +3,7 @@ use crate::{
     config::Config,
     export::{Channel, Executor, Extender},
     plugin,
-    sch::Runtime,
+    scheduler::Runtime,
     ActPlugin, ChannelOptions, Signal, StoreAdapter,
 };
 

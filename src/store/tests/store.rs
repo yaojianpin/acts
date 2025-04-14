@@ -1,8 +1,8 @@
 use crate::{
     data::Model,
-    sch::NodeKind,
+    scheduler::NodeKind,
     store::{data, query::Expr, Cond, Store, StoreKind},
-    utils, Query, StoreAdapter, TaskState, Workflow,
+    utils, MessageState, Query, StoreAdapter, TaskState, Workflow,
 };
 use data::{Message, MessageStatus, Package, Proc, Task};
 use serde_json::json;
@@ -13,7 +13,7 @@ static STORE: OnceCell<Arc<Store>> = OnceCell::const_new();
 async fn init() -> Arc<Store> {
     #[cfg(feature = "store")]
     {
-        return Arc::new(Store::local("test_data", "test.db"));
+        Arc::new(Store::local("test_data", "test.db"))
     }
 
     #[cfg(not(feature = "store"))]
@@ -42,7 +42,7 @@ async fn store_load_by_limit() {
         let id = format!("{}_{}", prefix, utils::longid());
         let workflow = create_workflow();
         let proc = create_proc(&id, TaskState::None, &workflow);
-        store.procs().create(&proc).expect("create proc");
+        store.procs().create(&proc).expect("create process");
     }
 
     let q = Query::new().set_limit(10000);
@@ -64,21 +64,21 @@ async fn store_load_by_state() {
         let id = format!("{}_{}", prefix, utils::longid());
         let workflow = create_workflow();
         let proc = create_proc(&id, TaskState::Running, &workflow);
-        store.procs().create(&proc).expect("create proc");
+        store.procs().create(&proc).expect("create process");
     }
 
     for _ in 0..100 {
         let id = format!("{}_{}", prefix, utils::longid());
         let workflow = create_workflow();
         let proc = create_proc(&id, TaskState::Pending, &workflow);
-        store.procs().create(&proc).expect("create proc");
+        store.procs().create(&proc).expect("create process");
     }
 
     for _ in 0..100 {
         let id = format!("{}_{}", prefix, utils::longid());
         let workflow = create_workflow();
         let proc = create_proc(&id, TaskState::Completed, &workflow);
-        store.procs().create(&proc).expect("create proc");
+        store.procs().create(&proc).expect("create process");
     }
 
     let q = Query::new()
@@ -349,7 +349,7 @@ async fn store_proc_create() {
     let workflow = create_workflow();
     let proc = create_proc(&id, TaskState::None, &workflow);
 
-    store.procs().create(&proc).expect("create proc");
+    store.procs().create(&proc).expect("create process");
 
     let q = Query::new().set_limit(1);
     let procs = store.procs().query(&q).unwrap();
@@ -363,7 +363,7 @@ async fn store_proc_find() {
     let id = utils::longid();
     let workflow = create_workflow();
     let proc = create_proc(&id, TaskState::None, &workflow);
-    store.procs().create(&proc).expect("create proc");
+    store.procs().create(&proc).expect("create process");
     let info = store.procs().find(&id).unwrap();
     assert_eq!(proc.id, info.id);
 }
@@ -375,7 +375,7 @@ async fn store_proc_query_by_id() {
     let mid = utils::longid();
     let proc = Proc {
         id: utils::shortid(),
-        name: format!("test"),
+        name: "test".to_string(),
         mid: mid.clone(),
         state: "running".to_string(),
         start_time: 0,
@@ -386,7 +386,7 @@ async fn store_proc_query_by_id() {
         err: None,
     };
 
-    store.procs().create(&proc).expect("create proc");
+    store.procs().create(&proc).expect("create process");
     let q = Query::new().push(Cond::and().push(Expr::eq("id", proc.id)));
     let ret = store.procs().query(&q);
     assert!(ret.is_ok());
@@ -409,7 +409,7 @@ async fn store_proc_query_by_offset_count() {
             env_local: "{}".to_string(),
             err: None,
         };
-        store.procs().create(&proc).expect("create proc");
+        store.procs().create(&proc).expect("create process");
     }
 
     let q = Query::new()
@@ -446,7 +446,7 @@ async fn store_proc_query_by_cond_and() {
             env_local: "{}".to_string(),
             err: None,
         };
-        store.procs().create(&proc).expect("create proc");
+        store.procs().create(&proc).expect("create process");
     }
 
     let q = Query::new().set_offset(0).set_limit(10).push(
@@ -483,7 +483,7 @@ async fn store_proc_query_by_cond_or() {
             env_local: "{}".to_string(),
             err: None,
         };
-        store.procs().create(&proc).expect("create proc");
+        store.procs().create(&proc).expect("create process");
     }
 
     for i in 0..10 {
@@ -499,7 +499,7 @@ async fn store_proc_query_by_cond_or() {
             env_local: "{}".to_string(),
             err: None,
         };
-        store.procs().create(&proc).expect("create proc");
+        store.procs().create(&proc).expect("create process");
     }
 
     let q = Query::new()
@@ -532,7 +532,7 @@ async fn store_proc_query_by_order() {
             env_local: "{}".to_string(),
             err: None,
         };
-        store.procs().create(&proc).expect("create proc");
+        store.procs().create(&proc).expect("create process");
     }
 
     let q = Query::new()
@@ -560,10 +560,10 @@ async fn store_proc_update() {
     let workflow = create_workflow();
     let mut proc = create_proc(&id, TaskState::None, &workflow);
 
-    store.procs().create(&proc).expect("create proc");
+    store.procs().create(&proc).expect("create process");
 
     proc.state = TaskState::Running.to_string();
-    store.procs().update(&proc).expect("update proc");
+    store.procs().update(&proc).expect("update process");
 
     let p = store.procs().find(&proc.id).unwrap();
     assert_eq!(p.id, proc.id);
@@ -578,7 +578,7 @@ async fn store_proc_remove() {
     let workflow = create_workflow();
     let proc = create_proc(&id, TaskState::None, &workflow);
 
-    store.procs().create(&proc).expect("create proc");
+    store.procs().create(&proc).expect("create process");
 
     let proc = store.procs().find(&id);
     assert!(proc.is_ok());
@@ -895,7 +895,7 @@ async fn store_task_remove() {
     };
 
     store.tasks().create(&task).expect("create task");
-    store.tasks().delete(&task.id).expect("remove proc");
+    store.tasks().delete(&task.id).expect("remove process");
 
     let ret = store.tasks().find(&task.id);
     assert!(ret.is_err());
@@ -914,7 +914,7 @@ async fn store_message_create() {
         tid: tid.clone(),
         nid: utils::shortid(),
         mid: utils::shortid(),
-        state: "created".to_string(),
+        state: MessageState::Created,
         start_time: 0,
         end_time: 0,
         r#type: "step".to_string(),
@@ -953,7 +953,7 @@ async fn store_message_query_by_id() {
         tid: tid.clone(),
         nid: utils::shortid(),
         mid: utils::shortid(),
-        state: "created".to_string(),
+        state: MessageState::Created,
         start_time: 0,
         end_time: 0,
         r#type: "step".to_string(),
@@ -995,7 +995,7 @@ async fn store_message_query_by_offset_count() {
             tid: tid.clone(),
             nid: utils::shortid(),
             mid: utils::shortid(),
-            state: "created".to_string(),
+            state: MessageState::Created,
             start_time: 0,
             end_time: 0,
             r#type: "step".to_string(),
@@ -1048,7 +1048,7 @@ async fn store_message_query_by_cond_and() {
             tid: tid.clone(),
             nid: utils::shortid(),
             mid: utils::shortid(),
-            state: "created".to_string(),
+            state: MessageState::Created,
             start_time: 0,
             end_time: 0,
             r#type: "step".to_string(),
@@ -1101,7 +1101,7 @@ async fn store_message_query_by_cond_or() {
             tid: tid.clone(),
             nid: utils::shortid(),
             mid: utils::shortid(),
-            state: "created".to_string(),
+            state: MessageState::Created,
             start_time: 0,
             end_time: 0,
             r#type: "step".to_string(),
@@ -1130,7 +1130,7 @@ async fn store_message_query_by_cond_or() {
             tid: tid.clone(),
             nid: utils::shortid(),
             mid: utils::shortid(),
-            state: "completed".to_string(),
+            state: MessageState::Completed,
             start_time: 0,
             end_time: 0,
             r#type: "step".to_string(),
@@ -1179,7 +1179,7 @@ async fn store_message_query_by_order() {
             tid: tid.clone(),
             nid: utils::shortid(),
             mid: utils::shortid(),
-            state: "created".to_string(),
+            state: MessageState::Created,
             start_time: 0,
             end_time: 0,
             r#type: "step".to_string(),
@@ -1230,7 +1230,7 @@ async fn store_message_update() {
         tid: tid.clone(),
         nid: utils::shortid(),
         mid: utils::shortid(),
-        state: "created".to_string(),
+        state: MessageState::Created,
         start_time: 0,
         end_time: 0,
         r#type: "step".to_string(),
@@ -1253,13 +1253,13 @@ async fn store_message_update() {
 
     let id = utils::Id::new(&pid, &tid);
     let mut msg = store.messages().find(&id.id()).unwrap();
-    msg.state = "completed".to_string();
+    msg.state = MessageState::Completed;
     msg.retry_times = 1;
     msg.status = MessageStatus::Completed;
     store.messages().update(&msg).unwrap();
 
     let msg2 = store.messages().find(&id.id()).unwrap();
-    assert_eq!(msg2.state, "completed");
+    assert_eq!(msg2.state, MessageState::Completed);
     assert_eq!(msg2.retry_times, 1);
     assert_eq!(msg2.status, MessageStatus::Completed);
 }
@@ -1277,7 +1277,7 @@ async fn store_message_remove() {
         tid: tid.clone(),
         nid: utils::shortid(),
         mid: utils::shortid(),
-        state: "created".to_string(),
+        state: MessageState::Created,
         start_time: 0,
         end_time: 0,
         r#type: "step".to_string(),

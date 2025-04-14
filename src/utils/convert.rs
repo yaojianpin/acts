@@ -1,4 +1,4 @@
-use crate::{sch::Task, Context, Vars};
+use crate::{scheduler::Task, Context, Vars};
 use regex::Regex;
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
@@ -14,13 +14,10 @@ pub fn fill_inputs(inputs: &Vars, ctx: &Context) -> Vars {
                 let result = Context::scope(ctx.clone(), move || {
                     ctx.runtime.env().eval::<JsonValue>(&expr)
                 });
-                let new_value = match result {
-                    Ok(v) => v,
-                    Err(err) => {
-                        eprintln!("fill_inputs: expr:{string}, err={err}");
-                        JsonValue::Null
-                    }
-                };
+                let new_value = result.unwrap_or_else(|err| {
+                    eprintln!("fill_inputs: expr:{string}, err={err}");
+                    JsonValue::Null
+                });
 
                 // satisfies the rule 1
                 ret.insert(k.to_string(), new_value);
@@ -45,13 +42,10 @@ pub fn fill_outputs(outputs: &Vars, ctx: &Context) -> Vars {
                 let result = Context::scope(ctx.clone(), move || {
                     ctx.runtime.env().eval::<JsonValue>(&expr)
                 });
-                let new_value = match result {
-                    Ok(v) => v,
-                    Err(err) => {
-                        eprintln!("fill_outputs: expr:{string}, err={err}");
-                        JsonValue::Null
-                    }
-                };
+                let new_value = result.unwrap_or_else(|err| {
+                    eprintln!("fill_outputs: expr:{string}, err={err}");
+                    JsonValue::Null
+                });
 
                 // satisfies the rule 1
                 ret.insert(k.to_string(), new_value);
@@ -82,10 +76,7 @@ pub fn fill_proc_vars(task: &Arc<Task>, values: &Vars, ctx: &Context) -> Vars {
             if let Some(expr) = get_expr(string) {
                 let result =
                     Context::scope(ctx.clone(), || ctx.runtime.env().eval::<JsonValue>(&expr));
-                let new_value = match result {
-                    Ok(v) => v,
-                    Err(_err) => JsonValue::Null,
-                };
+                let new_value = result.unwrap_or(JsonValue::Null);
 
                 // satisfies the rule 1
                 ret.insert(k.to_string(), new_value);

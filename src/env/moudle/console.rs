@@ -22,15 +22,15 @@ impl Console {
     }
 
     fn info(&self, message: String) {
-        println!("{}", format!("[info] {}", message));
+        println!("[info] {}", message);
     }
 
-    fn wran(&self, message: String) {
-        println!("{}", format!("[wran] {}", message));
+    fn warn(&self, message: String) {
+        println!("[warn] {}", message);
     }
 
     fn error(&self, message: String) {
-        println!("{}", format!("[error] {}", message));
+        println!("[error] {}", message);
     }
 }
 

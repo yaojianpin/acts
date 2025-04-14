@@ -1,7 +1,7 @@
 use crate::{
     cache::Cache,
     data,
-    sch::{NodeTree, Proc, TaskState},
+    scheduler::{NodeTree, Process, TaskState},
     store::StoreKind,
     utils, Engine, Workflow,
 };
@@ -19,7 +19,7 @@ async fn cache_count() {
     let rt = engine.runtime();
     let cache = Cache::new(10);
 
-    let proc = Proc::new(&utils::longid(), &rt);
+    let proc = Process::new(&utils::longid(), &rt);
     cache.push_proc(&proc);
     assert_eq!(cache.count(), 1);
 }
@@ -30,7 +30,7 @@ async fn cache_push_get() {
     let rt = engine.runtime();
     let cache = Cache::new(10);
     let pid = utils::longid();
-    let proc = Proc::new(&pid, &rt);
+    let proc = Process::new(&pid, &rt);
     cache.push_proc(&proc);
     assert_eq!(cache.count(), 1);
 
@@ -47,7 +47,7 @@ async fn cache_push_to_store() {
     let mut pids = Vec::new();
     for _ in 0..5 {
         let pid = utils::longid();
-        let proc = Proc::new(&pid, &rt);
+        let proc = Process::new(&pid, &rt);
         cache.push_proc(&proc);
         pids.push(pid);
     }
@@ -68,7 +68,7 @@ async fn cache_remove() {
     let mut pids = Vec::new();
     for _ in 0..5 {
         let pid = utils::longid();
-        let proc = Proc::new(&pid, &rt);
+        let proc = Process::new(&pid, &rt);
         cache.push_proc(&proc);
         pids.push(pid);
     }
@@ -97,7 +97,7 @@ async fn cache_upsert() {
     let tree = NodeTree::build(&mut workflow).unwrap();
 
     let cache = Cache::new(10);
-    let proc = Proc::new(&pid, &rt);
+    let proc = Process::new(&pid, &rt);
     cache.push_proc(&proc);
     assert_eq!(cache.count(), 1);
 
@@ -168,12 +168,12 @@ async fn cache_restore_working_state() {
         TaskState::Pending,
         TaskState::Pending,
     ];
-    for i in 0..10 {
+    for state in &states {
         let proc = data::Proc {
             id: utils::longid(),
             name: "test".to_string(),
             mid: "m1".to_string(),
-            state: states[i].to_string(),
+            state: state.to_string(),
             start_time: 0,
             end_time: 0,
             timestamp: 0,
@@ -215,12 +215,12 @@ async fn cache_restore_completed_state() {
         TaskState::Completed,
         TaskState::Completed,
     ];
-    for i in 0..10 {
+    for state in &states {
         let proc = data::Proc {
             id: utils::longid(),
             name: "test".to_string(),
             mid: "m1".to_string(),
-            state: states[i].to_string(),
+            state: state.to_string(),
             start_time: 0,
             end_time: 0,
             timestamp: 0,
@@ -251,12 +251,12 @@ async fn cache_restore_less_cap() {
     assert_eq!(cache.count(), 0);
 
     let states = [TaskState::Running, TaskState::None, TaskState::Pending];
-    for i in 0..3 {
+    for state in &states {
         let proc = data::Proc {
             id: utils::longid(),
             name: "test".to_string(),
             mid: "m1".to_string(),
-            state: states[i].to_string(),
+            state: state.to_string(),
             start_time: 0,
             end_time: 0,
             timestamp: 0,

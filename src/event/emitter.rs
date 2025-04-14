@@ -1,6 +1,6 @@
 use crate::{
     event::Message,
-    sch::{Proc, Runtime, Task},
+    scheduler::{Process, Runtime, Task},
     utils, Event, Result, ShareLock,
 };
 use std::{
@@ -36,7 +36,7 @@ macro_rules! dispatch_key_event {
 }
 
 pub type ActWorkflowMessageHandle = Arc<dyn Fn(&Event<Message>) + Send + Sync>;
-pub type ProcHandle = Arc<dyn Fn(&Event<Arc<Proc>>) + Send + Sync>;
+pub type ProcHandle = Arc<dyn Fn(&Event<Arc<Process>>) + Send + Sync>;
 pub type TaskHandle = Arc<dyn Fn(&Event<Arc<Task>, TaskExtra>) + Send + Sync>;
 pub type TickHandle = Arc<dyn Fn(&i64) + Send + Sync>;
 
@@ -134,7 +134,7 @@ impl Emitter {
             .or_insert(f);
     }
 
-    pub fn on_proc(&self, f: impl Fn(&Event<Arc<Proc>>) + Send + Sync + 'static) {
+    pub fn on_proc(&self, f: impl Fn(&Event<Arc<Process>>) + Send + Sync + 'static) {
         self.procs.write().unwrap().push(Arc::new(f));
     }
 
@@ -146,7 +146,7 @@ impl Emitter {
         self.ticks.write().unwrap().push(Arc::new(f));
     }
 
-    pub fn emit_proc_event(&self, proc: &Arc<Proc>) {
+    pub fn emit_proc_event(&self, proc: &Arc<Process>) {
         debug!("emit_proc_event: {}", proc.id());
         let handlers = self.procs.read().unwrap();
         let e = &Event::new(&self.runtime.read().unwrap(), proc);
@@ -176,10 +176,7 @@ impl Emitter {
         let e = &Event::new_with_extra(
             &self.runtime.read().unwrap(),
             task,
-            &TaskExtra {
-                emit_message,
-                ..Default::default()
-            },
+            &TaskExtra { emit_message },
         );
         for handle in handlers.iter() {
             (handle)(e);

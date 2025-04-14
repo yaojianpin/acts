@@ -10,8 +10,10 @@ async fn main() {
     let workflow = Workflow::from_yml(text).unwrap();
     workflow.print();
     engine
-    .executor()
-    .model().deploy(&workflow).expect("deploy model");
+        .executor()
+        .model()
+        .deploy(&workflow)
+        .expect("deploy model");
     executor
         .proc()
         .start(&workflow.id, &Vars::new())

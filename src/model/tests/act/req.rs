@@ -27,7 +27,7 @@ fn model_act_parse_req() {
         assert_eq!(inputs.get::<i32>("a").unwrap(), 1);
         assert_eq!(rets.get_value("b").unwrap(), &json!(null));
     } else {
-        assert!(false);
+        panic!();
     }
 }
 

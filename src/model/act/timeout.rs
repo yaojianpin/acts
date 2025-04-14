@@ -55,7 +55,7 @@ impl<'de> Deserialize<'de> for TimeoutLimit {
         D: serde::Deserializer<'de>,
     {
         struct TimeoutVisitor;
-        impl<'de> de::Visitor<'de> for TimeoutVisitor {
+        impl de::Visitor<'_> for TimeoutVisitor {
             type Value = TimeoutLimit;
             fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
                 formatter.write_str("step timeout")
@@ -132,8 +132,8 @@ impl Timeout {
         Self::default()
     }
     pub fn with_on(mut self, v: &str) -> Self {
-        self.on =
-            TimeoutLimit::parse(v).unwrap_or_else(|_| panic!("failed with error format '{v}' for 'on' "));
+        self.on = TimeoutLimit::parse(v)
+            .unwrap_or_else(|_| panic!("failed with error format '{v}' for 'on' "));
         self
     }
 

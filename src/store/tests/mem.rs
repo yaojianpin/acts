@@ -1,7 +1,7 @@
 use crate::{
-    sch::NodeKind,
+    scheduler::NodeKind,
     store::{data::*, db::MemStore, query::Expr, Cond, Query},
-    utils, StoreAdapter, TaskState, Vars,
+    utils, MessageState, StoreAdapter, TaskState, Vars,
 };
 use serde_json::json;
 use tokio::sync::OnceCell;
@@ -386,7 +386,7 @@ async fn store_mem_message_create() {
         tid: tid.clone(),
         nid: utils::shortid(),
         mid: utils::shortid(),
-        state: "created".to_string(),
+        state: MessageState::Created,
         start_time: 0,
         end_time: 0,
         r#type: "step".to_string(),
@@ -425,7 +425,7 @@ async fn store_mem_message_query() {
         tid: tid.clone(),
         nid: utils::shortid(),
         mid: utils::shortid(),
-        state: "created".to_string(),
+        state: MessageState::Created,
         start_time: 0,
         end_time: 0,
         r#type: "step".to_string(),
@@ -465,7 +465,7 @@ async fn store_mem_message_update() {
         tid: tid.clone(),
         nid: utils::shortid(),
         mid: utils::shortid(),
-        state: "created".to_string(),
+        state: MessageState::Created,
         start_time: 0,
         end_time: 0,
         r#type: "step".to_string(),
@@ -488,13 +488,13 @@ async fn store_mem_message_update() {
 
     let id = utils::Id::new(&pid, &tid);
     let mut msg = store.messages().find(&id.id()).unwrap();
-    msg.state = "completed".to_string();
+    msg.state = MessageState::Completed;
     msg.retry_times = 1;
     msg.status = MessageStatus::Acked;
     store.messages().update(&msg).unwrap();
 
     let msg2 = store.messages().find(&id.id()).unwrap();
-    assert_eq!(msg2.state, "completed");
+    assert_eq!(msg2.state, MessageState::Completed);
     assert_eq!(msg2.retry_times, 1);
     assert_eq!(msg2.status, MessageStatus::Acked);
 }
@@ -512,7 +512,7 @@ async fn store_mem_message_remove() {
         tid: tid.clone(),
         nid: utils::shortid(),
         mid: utils::shortid(),
-        state: "created".to_string(),
+        state: MessageState::Created,
         start_time: 0,
         end_time: 0,
         r#type: "step".to_string(),
