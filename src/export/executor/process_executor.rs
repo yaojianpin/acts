@@ -1,4 +1,5 @@
 use super::ExecutorQuery;
+use crate::scheduler::Process;
 use crate::{
     scheduler::Runtime,
     store::{PageData, StoreAdapter},
@@ -55,7 +56,8 @@ impl ProcessExecutor {
                 let mut info: ProcInfo = proc.into();
 
                 if let Some(proc) = self.runtime.cache().proc(pid, &self.runtime) {
-                    let mut tasks: Vec<TaskInfo> = proc.tasks().iter().map(TaskInfo::from).collect();
+                    let mut tasks: Vec<TaskInfo> =
+                        proc.tasks().iter().map(TaskInfo::from).collect();
 
                     tasks.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
                     info.tasks = tasks;
@@ -65,5 +67,10 @@ impl ProcessExecutor {
             }
             Err(err) => Err(err),
         }
+    }
+
+    #[instrument(skip(self))]
+    pub fn get_process(&self, pid: &str) -> Option<Arc<Process>> {
+        self.runtime.cache().proc(pid, &self.runtime)
     }
 }
