@@ -295,7 +295,8 @@ impl Process {
         task.outputs();
         // check act return
         let rets = task.node().content.rets();
-        if rets.len() > 0 {
+
+        if !rets.is_empty() {
             let mut options = Vars::new();
             for (ref key, _) in &rets {
                 if !action.options.contains_key(key) {
