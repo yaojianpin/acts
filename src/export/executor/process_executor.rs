@@ -55,10 +55,7 @@ impl ProcessExecutor {
                 let mut info: ProcInfo = proc.into();
 
                 if let Some(proc) = self.runtime.cache().proc(pid, &self.runtime) {
-                    let mut tasks: Vec<TaskInfo> = Vec::new();
-                    for task in proc.tasks().iter() {
-                        tasks.push(task.into());
-                    }
+                    let mut tasks: Vec<TaskInfo> = proc.tasks().iter().map(TaskInfo::from).collect();
 
                     tasks.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
                     info.tasks = tasks;
