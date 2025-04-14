@@ -14,7 +14,7 @@ impl Do {
             )));
         }
         let set_inputs = || {
-            if self.inputs.len() > 0 {
+            if !self.inputs.is_empty() {
                 let inputs = utils::fill_inputs(&self.inputs, ctx);
                 task.update_data(&inputs);
             }

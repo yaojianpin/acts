@@ -5,7 +5,7 @@ use async_trait::async_trait;
 impl ActTask for Workflow {
     fn init(&self, ctx: &Context) -> Result<()> {
         // set the env to process env local
-        if self.env.len() > 0 {
+        if !self.env.is_empty() {
             ctx.proc.with_env_local_mut(|data| {
                 for (k, v) in self.env.iter() {
                     data.set(k, v.clone());

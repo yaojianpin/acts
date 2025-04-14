@@ -88,3 +88,8 @@
 # 0.13.2
 
 - upgrate rquickjs to 0.8.1
+
+# 0.13.3
+
+- merge Luminvent's change
+- fix: fix the clippy error
