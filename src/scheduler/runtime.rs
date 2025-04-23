@@ -188,20 +188,21 @@ impl Runtime {
                             rt.return_to_act(&ppid, &ptid, proc);
                         }
 
-                        // process.print();
-                        debug!("remove: {:?}", proc.tasks());
-                        cache.remove(proc.id()).unwrap_or_else(|err| {
-                            error!("scher.initialize remove={}", err);
-                            false
-                        });
-                        cache
-                            .restore(&rt, |proc| {
-                                // println!("re-start process={process:?} tasks:{:?}", process.tasks());
-                                if proc.state().is_none() {
-                                    proc.start();
-                                }
-                            })
-                            .unwrap_or_else(|err| error!("scher.initialize restore={}", err));
+                        if !rt.config.keep_processes {
+                            debug!("remove: {:?}", proc.tasks());
+                            cache.remove(proc.id()).unwrap_or_else(|err| {
+                                error!("scher.initialize remove={}", err);
+                                false
+                            });
+                            cache
+                                .restore(&rt, |proc| {
+                                    // println!("re-start process={process:?} tasks:{:?}", process.tasks());
+                                    if proc.state().is_none() {
+                                        proc.start();
+                                    }
+                                })
+                                .unwrap_or_else(|err| error!("scher.initialize restore={}", err));
+                        }
                     }
                 } else {
                     error!("cannot find root pid={}", proc.id());
