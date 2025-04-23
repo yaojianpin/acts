@@ -1,7 +1,7 @@
 use tokio::{runtime::Handle, time};
 use tracing::{debug, error};
 
-use super::{Process, Scheduler, Task};
+use super::{Process, Scheduler, Task, TaskState};
 use crate::event::EventAction;
 use crate::{
     cache::Cache,
@@ -289,18 +289,21 @@ impl Runtime {
         // process.print();
         let mut vars = proc.outputs();
         debug!("sub outputs: {vars}");
-        let mut event = EventAction::Next;
-        if state.is_abort() {
-            event = EventAction::Abort;
-        } else if state.is_skip() {
-            event = EventAction::Skip;
-        } else if state.is_error() {
-            event = EventAction::Error;
-            if let Some(err) = proc.err() {
-                vars.set(consts::ACT_ERR_CODE, err.ecode);
-                vars.set(consts::ACT_ERR_MESSAGE, err.message);
+
+        let event = match state {
+            TaskState::Aborted => EventAction::Abort,
+            TaskState::Skipped => EventAction::Skip,
+            TaskState::Error => {
+                if let Some(err) = proc.err() {
+                    vars.set(consts::ACT_ERR_CODE, err.ecode);
+                    vars.set(consts::ACT_ERR_MESSAGE, err.message);
+                }
+
+                EventAction::Error
             }
-        }
+            _ => EventAction::Next,
+        };
+
         let action = Action::new(pid, tid, event, &vars);
         let scher = self.clone();
         tokio::spawn(async move {
