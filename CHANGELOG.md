@@ -95,5 +95,11 @@
 - fix: fix the clippy error
 
 # 0.14.0
+
 - improve the code quality
 - add set_process_var for act_execution
+
+# 0.15.0
+
+- feat: allow to keep processes after completion
+- fix: set process state if task is completed and is root task [#12](https://github.com/yaojianpin/acts/issues/12)
