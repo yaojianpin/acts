@@ -43,7 +43,7 @@ impl ProcessExecutor {
                 page_size: procs.page_size,
                 page_count: procs.page_count,
                 page_num: procs.page_num,
-                rows: procs.rows.iter().map(|m| m.into()).collect(),
+                rows: procs.rows.iter().map(ProcInfo::from).collect(),
             }),
             Err(err) => Err(err),
         }

@@ -4,6 +4,7 @@ mod hook;
 mod step;
 mod workflow;
 
+use crate::utils::consts::TASK_ROOT_TID;
 use crate::{
     data::{self, MessageStatus},
     event::{EventAction, Model},
@@ -276,6 +277,10 @@ impl Task {
     pub fn set_state(&self, state: TaskState) {
         if state.is_completed() {
             self.set_end_time(utils::time::time_millis());
+
+            if self.id == TASK_ROOT_TID {
+                self.proc().set_state(state.clone());
+            }
         } else if state.is_created() {
             self.set_start_time(utils::time::time_millis());
         }

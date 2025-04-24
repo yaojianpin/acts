@@ -10,6 +10,8 @@ pub struct Config {
     // will delete message after the max retries
     // cancel the settings by setting to 0
     pub max_message_retry_times: i32,
+    // do not remove process and tasks on complete
+    pub keep_processes: bool,
 }
 
 impl Default for Config {
@@ -24,6 +26,7 @@ impl Default for Config {
             // default to 15s
             tick_interval_secs: 15,
             max_message_retry_times: 20,
+            keep_processes: false,
         }
     }
 }
