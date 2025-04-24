@@ -194,15 +194,16 @@ impl Runtime {
                                 error!("scher.initialize remove={}", err);
                                 false
                             });
-                            cache
-                                .restore(&rt, |proc| {
-                                    // println!("re-start process={process:?} tasks:{:?}", process.tasks());
-                                    if proc.state().is_none() {
-                                        proc.start();
-                                    }
-                                })
-                                .unwrap_or_else(|err| error!("scher.initialize restore={}", err));
                         }
+
+                        cache
+                            .restore(&rt, |proc| {
+                                // println!("re-start process={process:?} tasks:{:?}", process.tasks());
+                                if proc.state().is_none() {
+                                    proc.start();
+                                }
+                            })
+                            .unwrap_or_else(|err| error!("scher.initialize restore={}", err));
                     }
                 } else {
                     error!("cannot find root pid={}", proc.id());
