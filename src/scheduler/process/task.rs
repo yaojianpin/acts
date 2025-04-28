@@ -537,8 +537,21 @@ impl Task {
                     sub.set_state(TaskState::Skipped);
                     ctx.emit_task(sub)?;
                 }
+
+                self.proc.set_data(&ctx.vars());
+
                 task.set_err(&err);
                 task.error(ctx)?;
+            }
+            EventAction::SetVars => {
+                if self.state().is_completed() {
+                    return Err(ActError::Action(format!(
+                        "task '{}:{}' is already completed",
+                        self.pid, self.id
+                    )));
+                }
+
+                self.set_data(&ctx.vars());
             }
             EventAction::SetProcessVars => {
                 if self.state().is_completed() {

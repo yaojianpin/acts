@@ -41,6 +41,7 @@ impl Do {
                 set_inputs();
                 ctx.abort_task(&task)?;
             }
+            EventAction::SetVars |
             EventAction::SetProcessVars => {
                 set_inputs();
             }
