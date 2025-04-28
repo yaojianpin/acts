@@ -537,6 +537,9 @@ impl Task {
                     sub.set_state(TaskState::Skipped);
                     ctx.emit_task(sub)?;
                 }
+
+                self.proc.set_data(&ctx.vars());
+
                 task.set_err(&err);
                 task.error(ctx)?;
             }
