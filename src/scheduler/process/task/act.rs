@@ -140,7 +140,6 @@ impl ActTask for Act {
         let state = task.state();
         if state.is_running() {
             let tasks = task.children();
-
             let mut count = 0;
             for t in tasks.iter() {
                 if t.state().is_error() {
@@ -166,10 +165,11 @@ impl ActTask for Act {
                     ctx.sched_task(next);
                     return Ok(false);
                 }
+                return Ok(true);
             }
         }
 
-        Ok(true)
+        Ok(false)
     }
 }
 

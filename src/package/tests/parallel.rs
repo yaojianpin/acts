@@ -59,16 +59,6 @@ async fn pack_parallel_var_exist() {
                     Act::irq(|act| act.with_key("act1").with_id("act1"))
                 ]
             })))
-        // .with_setup(|stmts| {
-        //     stmts
-        //         .add(Act::set(Vars::new().with("a", ["u1", "u2"])))
-        //         .add(Act::parallel(json!({
-        //             "in": r#"$("a")"#,
-        //             "acts": vec![
-        //                 Act::irq(|act| act.with_key("act1").with_id("act1"))
-        //             ]
-        //         })))
-        // })
     });
 
     workflow.print();
