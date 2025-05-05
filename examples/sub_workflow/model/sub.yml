@@ -7,7 +7,7 @@ outputs:
 steps:
   - name: t1
     acts:
-      - act: irq
+      - uses: acts.core.irq
         key: action1
         outputs:
           v:

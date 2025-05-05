@@ -1,5 +1,5 @@
 use super::{collect::Collect, database::Database};
-use crate::store::{data::*, DbSet, StoreAdapter};
+use crate::store::{DbSet, StoreAdapter, data::*};
 use std::sync::{Arc, RwLock};
 
 #[derive(Debug, Clone)]
@@ -10,6 +10,7 @@ pub struct LocalStore {
     tasks: Arc<Collect<Task>>,
     packages: Arc<Collect<Package>>,
     messages: Arc<Collect<Message>>,
+    events: Arc<Collect<Event>>,
 }
 
 impl LocalStore {
@@ -20,6 +21,7 @@ impl LocalStore {
         let tasks = Collect::new(&db, "tasks");
         let packages = Collect::new(&db, "packages");
         let messages = Collect::new(&db, "messages");
+        let events = Collect::new(&db, "events");
         let store = Self {
             db: db.clone(),
             models: Arc::new(models),
@@ -27,6 +29,7 @@ impl LocalStore {
             tasks: Arc::new(tasks),
             packages: Arc::new(packages),
             messages: Arc::new(messages),
+            events: Arc::new(events),
         };
 
         store.init();
@@ -59,5 +62,9 @@ impl StoreAdapter for LocalStore {
 
     fn messages(&self) -> Arc<dyn DbSet<Item = Message>> {
         self.messages.clone()
+    }
+
+    fn events(&self) -> Arc<dyn DbSet<Item = Event>> {
+        self.events.clone()
     }
 }

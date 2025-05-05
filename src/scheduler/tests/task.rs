@@ -1,6 +1,7 @@
 use crate::{
+    Act, MessageState, TaskState, Workflow,
     scheduler::tests::{create_proc, create_proc_signal},
-    utils, Act, MessageState, TaskState, Workflow,
+    utils,
 };
 
 #[tokio::test]
@@ -425,7 +426,7 @@ async fn sch_task_branch_needs_state() {
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &id);
     emitter.on_message(move |e| {
         println!("message: {:?}", e.inner());
-        if e.inner().is_source("act") {
+        if e.inner().is_type("act") {
             rx.close();
         }
     });

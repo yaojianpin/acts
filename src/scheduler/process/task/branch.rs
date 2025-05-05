@@ -1,7 +1,7 @@
 use crate::{
+    ActTask, Result,
     model::Branch,
     scheduler::{Context, TaskState},
-    ActTask, Result,
 };
 use async_trait::async_trait;
 use tracing::debug;

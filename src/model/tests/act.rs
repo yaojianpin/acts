@@ -1,16 +1,5 @@
-mod block;
-mod call;
 mod catch;
-mod chain;
-mod r#do;
-mod each;
-mod expose;
 mod hooks;
-mod r#if;
-mod msg;
-mod pack;
-mod req;
-mod set;
 mod setup;
 mod timeout;
 
@@ -19,25 +8,24 @@ use crate::Act;
 #[test]
 fn model_act_parse_nest() {
     let text = r#"
-    act: each
+    uses: acts.transform.parallel
     in: "[\"a\", \"b\"]"
-    then:
-        - act: msg
+    acts:
+        - uses: acts.core.msg
           key: msg1
-        - act: set
+        - uses: acts.core.set
           inputs:
             a: 10
-        - act: each
+        - act: acts.transform.parallel
           in: "[\"a\", \"b\"]"
-          then:
-            - act: msg
+          acts:
+            - uses: acts.core.msg
               inputs:
                 key: msg2
-            - act: if
-              on: $("a") > 0
-              then:
-                - act: msg
-                  key: msg3
+            - uses: acts.core.msg
+              if: $("a") > 0
+              key: msg3
+
     "#;
     assert!(serde_yaml::from_str::<Act>(text).is_ok());
 }
@@ -45,17 +33,17 @@ fn model_act_parse_nest() {
 #[test]
 fn model_act_to_json() {
     let text = r#"
-    - act: each
+    - uses: acts.transform.parallel
       in: "[\"a\", \"b\"]"
-      then:
-          - act: msg
+      acts:
+          - uses: acts.core.msg
             key: msg1
-          - act: each
+          - uses: acts.transform.parallel
             in: "[\"a\", \"b\"]"
-            then:
-              - act: msg
+            acts:
+              - uses: acts.core.msg
                 key: msg2
-    - act: msg
+    - uses: acts.core.msg
       key: msg2
     "#;
 

@@ -1,11 +1,11 @@
 use crate::event::EventAction;
 use crate::{
-    event::{Action, MessageState},
-    scheduler::{tests::*, TaskState},
-    utils::{self, consts},
     Act, Message, StmtBuild, Vars, Workflow,
+    event::{Action, MessageState},
+    scheduler::{TaskState, tests::*},
+    utils::{self, consts},
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -41,7 +41,7 @@ async fn sch_act_irq_multi_threads() {
     });
 
     workflow.print();
-    let engine = Builder::new().cache_size(10).build();
+    let engine = Builder::new().cache_size(10).build().start();
     engine.executor().model().deploy(&workflow).unwrap();
     let (s1, s2) = engine.signal(false).double();
     let count = Arc::new(Mutex::new(0));
@@ -494,12 +494,13 @@ async fn sch_act_irq_error_action() {
     scher.launch(&proc);
     tx.recv().await;
     assert!(proc.task_by_nid("fn1").first().unwrap().state().is_error());
-    assert!(proc
-        .task_by_nid("step1")
-        .first()
-        .unwrap()
-        .state()
-        .is_error());
+    assert!(
+        proc.task_by_nid("step1")
+            .first()
+            .unwrap()
+            .state()
+            .is_error()
+    );
     assert!(proc.state().is_error());
 }
 
@@ -1361,12 +1362,13 @@ async fn sch_act_irq_on_catch_match_any() {
         proc.task_by_nid("act1").first().unwrap().state(),
         TaskState::Completed
     );
-    assert!(proc
-        .task_by_nid("act2")
-        .first()
-        .unwrap()
-        .state()
-        .is_interrupted());
+    assert!(
+        proc.task_by_nid("act2")
+            .first()
+            .unwrap()
+            .state()
+            .is_interrupted()
+    );
 }
 
 #[tokio::test]

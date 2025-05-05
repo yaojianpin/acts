@@ -59,29 +59,7 @@ impl NodeTree {
     #[allow(unused)]
     pub fn print(&self) {
         if let Some(ref root) = self.root.clone() {
-            VisitRoot::walk(root, &move |n| {
-                // print single line
-                if n.level > 0 {
-                    for index in 1..n.level {
-                        if n.path[&index] {
-                            print!("│   ");
-                        } else {
-                            print!("    ");
-                        }
-                    }
-                    if n.is_last {
-                        print!("└── ");
-                    } else {
-                        print!("├── ");
-                    }
-                }
-                let next = match n.next().upgrade() {
-                    Some(n) => n.id().to_string(),
-                    None => "nil".to_string(),
-                };
-
-                println!("{} id:{} name={}  next={}", n.typ(), n.id(), n.name(), next,);
-            });
+            root.print();
         }
     }
 

@@ -1,42 +1,21 @@
-use acts::{data::Package, Engine, Vars, Workflow};
+mod plugin;
+
+use acts::{EngineBuilder, Vars, Workflow};
 
 #[tokio::main]
 async fn main() {
-    let engine = Engine::new();
+    let engine = EngineBuilder::new()
+        .add_plugin(&plugin::MyPackagePlugin)
+        .build()
+        .start();
 
     let (s1, s2, sig) = engine.signal(()).triple();
     let executor = engine.executor();
 
-    let data = include_str!("./pack1.js");
-    let pack = Package {
-        id: "pack1".to_string(),
-        name: "package 1".to_string(),
-        size: data.len() as u32,
-        data: data.as_bytes().to_vec(),
-        ..Default::default()
-    };
-    engine
-        .executor()
-        .pack()
-        .publish(&pack)
-        .expect("publish pack1");
-
-    let data = include_str!("./pack2.js");
-    let pack = Package {
-        id: "pack2".to_string(),
-        name: "package 2".to_string(),
-        size: data.len() as u32,
-        data: data.as_bytes().to_vec(),
-        ..Default::default()
-    };
-    engine
-        .executor()
-        .pack()
-        .publish(&pack)
-        .expect("publish pack2");
-
     let mut vars = Vars::new();
-    vars.insert("input".into(), 10.into());
+    vars.set("input", 10);
+
+    println!("inputs: {:?}", vars);
 
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text).unwrap();
@@ -48,7 +27,26 @@ async fn main() {
         .expect("start workflow");
     let emitter = engine.channel();
     emitter.on_message(move |e| {
-        println!("on_message: e={:?}", e);
+        // println!("on_message: e={:?}", e);
+
+        if e.is_uses("pack3") && e.is_state(acts::MessageState::Created) {
+            let params = serde_json::from_value::<plugin::Pack3>(
+                e.inputs.get::<serde_json::Value>("params").unwrap(),
+            )
+            .unwrap();
+            println!("func: {}", params.func);
+            println!("options.a: {}", params.options.a);
+            println!("options.b: {}", params.options.b);
+
+            executor
+                .act()
+                .complete(
+                    &e.pid,
+                    &e.tid,
+                    &Vars::new().with("input", params.options.a + 10),
+                )
+                .expect("failed to complete task");
+        }
     });
     emitter.on_complete(move |e| {
         println!(

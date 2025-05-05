@@ -1,6 +1,4 @@
-use crate::{
-    env::Enviroment, Act, ActError, Context, Engine, Event, Message, Signal, Vars, Workflow,
-};
+use crate::{ActError, Context, Engine, Vars, Workflow, env::Enviroment};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -150,7 +148,7 @@ fn env_collection_difference() {
 
 #[tokio::test]
 async fn env_task_get() {
-    let engine = Engine::new();
+    let engine = Engine::new().start();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -175,7 +173,7 @@ async fn env_task_get() {
 
 #[tokio::test]
 async fn env_task_set() {
-    let engine = Engine::new();
+    let engine = Engine::new().start();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -199,7 +197,7 @@ async fn env_task_set() {
 
 #[tokio::test]
 async fn env_task_multi_line() {
-    let engine = Engine::new();
+    let engine = Engine::new().start();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -221,7 +219,7 @@ async fn env_task_multi_line() {
 
 #[tokio::test]
 async fn env_env_get_local() {
-    let engine = Engine::new();
+    let engine = Engine::new().start();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -246,7 +244,7 @@ async fn env_env_get_local() {
 
 #[tokio::test]
 async fn env_env_get_global() {
-    let engine = Engine::new();
+    let engine = Engine::new().start();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -271,7 +269,7 @@ async fn env_env_get_global() {
 
 #[tokio::test]
 async fn env_env_set_from_global() {
-    let engine = Engine::new();
+    let engine = Engine::new().start();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -299,7 +297,7 @@ async fn env_env_set_from_global() {
 
 #[tokio::test]
 async fn env_env_set_both_local_global() {
-    let engine = Engine::new();
+    let engine = Engine::new().start();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -329,7 +327,7 @@ async fn env_env_set_both_local_global() {
 
 #[tokio::test]
 async fn env_env_multi_line() {
-    let engine = Engine::new();
+    let engine = Engine::new().start();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -383,171 +381,4 @@ fn env_vars_update() {
     });
     assert_eq!(env.get::<i32>("a").unwrap(), 2);
     assert_eq!(env.get::<String>("b").unwrap(), "def");
-}
-
-#[tokio::test]
-async fn env_act_req() {
-    let script = r#"
-    let req = { key: "act2"}
-    act.irq(req);
-    "#;
-    let ret = run_test(script, |e, s| {
-        if e.is_key("act2") {
-            s.send(true);
-        }
-    })
-    .await;
-    assert!(ret);
-}
-
-#[tokio::test]
-async fn env_act_msg() {
-    let script = r#"
-    act.msg({ key: "msg1"});
-    "#;
-    let ret = run_test(script, |e, s| {
-        if e.is_key("msg1") {
-            s.send(true);
-        }
-    })
-    .await;
-    assert!(ret);
-}
-
-#[tokio::test]
-async fn env_act_chain() {
-    let script = r#"
-    act.chain({ in: "[ \"u1\", \"u2\" ]", then: [{ act: "msg", key: "msg1" }] });
-    "#;
-
-    let ret: i32 = run_test(script, |e, s| {
-        if e.is_key("msg1") {
-            s.update(|data| *data += 1);
-        }
-        if s.data() == 2 {
-            s.close();
-        }
-    })
-    .await;
-    assert_eq!(ret, 2);
-}
-
-#[tokio::test]
-async fn env_act_each() {
-    let script = r#"
-    act.each({ in: "[ \"u1\", \"u2\" ]", then: [{ act: "msg", key: "msg1" }] });
-    "#;
-
-    let ret: i32 = run_test(script, |e, s| {
-        if e.is_key("msg1") {
-            s.update(|data| *data += 1);
-        }
-        if s.data() == 2 {
-            s.close();
-        }
-    })
-    .await;
-    assert_eq!(ret, 2);
-}
-
-#[tokio::test]
-async fn env_act_block() {
-    let script = r#"
-    act.block({ then: [{ act: "msg", key: "msg1" }] });
-    "#;
-
-    let ret = run_test(script, |e, s| {
-        if e.is_key("msg1") {
-            s.send(true);
-        }
-    })
-    .await;
-    assert!(ret);
-}
-
-#[tokio::test]
-async fn env_act_call() {
-    let script = r#"
-    act.call({ key: "m1" });
-    "#;
-
-    let ret = run_test(script, |e, s| {
-        if e.nid == "m1" && e.r#type == "workflow" {
-            s.send(true);
-        }
-    })
-    .await;
-    assert!(ret);
-}
-
-#[tokio::test]
-async fn env_act_push() {
-    let script = r#"
-    act.push({ act: "irq", key: "act1" });
-    "#;
-
-    let ret = run_test(script, |e, s| {
-        if e.is_key("act1") {
-            s.send(true);
-        }
-    })
-    .await;
-    assert!(ret);
-}
-
-#[tokio::test]
-async fn env_act_push_no_act_error() {
-    let script = r#"
-    act.push({ key: "act1" });
-    "#;
-
-    let ret = run_test_result(script, |e, s| {
-        if e.is_key("act1") && e.is_type("irq") {
-            s.send(true);
-        }
-    })
-    .await;
-    assert!(ret.is_err());
-}
-
-async fn run_test<T: Clone + Send + 'static + Default>(
-    script: &str,
-    exit_if: fn(&Event<Message>, sig: Signal<T>),
-) -> T {
-    run_test_result(script, exit_if).await.unwrap()
-}
-
-async fn run_test_result<T: Clone + Send + 'static + Default>(
-    script: &str,
-    exit_if: fn(&Event<Message>, sig: Signal<T>),
-) -> Result<T, ActError> {
-    let engine = Engine::new();
-    let sig1 = engine.signal(());
-    let sig2 = engine.signal(T::default());
-    let s1 = sig1.clone();
-    let s2 = sig2.clone();
-
-    let m1 = Workflow::new()
-        .with_id("m1")
-        .with_step(|step| step.with_id("step1"));
-    engine.executor().model().deploy(&m1).unwrap();
-
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("rust_test")))
-    });
-    let proc = engine.runtime().start(&workflow, &Vars::new()).unwrap();
-    engine.channel().on_message(move |e| {
-        println!("message: {e:?}");
-        if e.is_key("rust_test") {
-            s1.close();
-        }
-    });
-    engine.channel().on_message(move |e| exit_if(e, s2.clone()));
-    proc.print();
-    sig1.recv().await;
-    let task = proc.root().unwrap();
-    let context = task.create_context();
-    context.eval::<()>(script)?;
-    Ok(sig2.recv().await)
 }

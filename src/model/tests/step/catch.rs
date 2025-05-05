@@ -22,8 +22,8 @@ fn model_step_yml_catches_err() {
           catches:
             - on: err1
             - on: err2
-              then:
-                - act: irq
+              steps:
+                - act: acts.core.irq
                   key: act2
 
     "#;
@@ -33,7 +33,7 @@ fn model_step_yml_catches_err() {
 
     let catch = step.catches.get(1).unwrap();
     assert_eq!(catch.on.as_ref().unwrap(), "err2");
-    assert_eq!(catch.then.len(), 1);
+    assert_eq!(catch.steps.len(), 1);
 }
 
 #[test]
@@ -45,10 +45,10 @@ fn model_step_yml_catches_all() {
         - id: act1
           catches:
             - on: err1
-            - then:
-                - act: irq
+            - steps:
+                - uses: acts.core.irq
                   key: act2
-                - act: msg
+                - uses: acts.core.msg
                   key: msg1
     "#;
     let m = Workflow::from_yml(text).unwrap();
@@ -57,9 +57,9 @@ fn model_step_yml_catches_all() {
 
     let catch = step.catches.first().unwrap();
     assert_eq!(catch.on.as_ref().unwrap(), "err1");
-    assert_eq!(catch.then.len(), 0);
+    assert_eq!(catch.steps.len(), 0);
 
     let catch = step.catches.get(1).unwrap();
     assert_eq!(catch.on, None);
-    assert_eq!(catch.then.len(), 2);
+    assert_eq!(catch.steps.len(), 2);
 }

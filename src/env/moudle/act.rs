@@ -12,10 +12,7 @@ impl ActPackage {
 #[rquickjs::module(rename_vars = "camelCase")]
 mod act {
     use crate::event::EventAction;
-    use crate::{
-        env::value::ActValue, utils::consts, Act, ActError, Action, Block, Call, Chain, Context,
-        Each, Irq, Msg, Vars,
-    };
+    use crate::{ActError, Action, Context, Vars, env::value::ActValue, utils::consts};
 
     #[rquickjs::function]
     pub fn get(name: String) -> Option<ActValue> {
@@ -106,7 +103,7 @@ mod act {
 
     #[rquickjs::function]
     pub fn back(nid: String) -> rquickjs::Result<()> {
-        let vars = Vars::new().with(consts::ACT_TO, nid);
+        let vars = Vars::new().with(consts::ACT_SUBFLOW_TO, nid);
         Context::with(|ctx| {
             let task = ctx.task();
             ctx.set_action(&Action::new(&task.pid, &task.id, EventAction::Back, &vars))?;
@@ -146,60 +143,60 @@ mod act {
         .map_err(|err: ActError| err.into())
     }
 
-    #[rquickjs::function]
-    pub fn irq(req: ActValue) -> rquickjs::Result<()> {
-        let act = Act::irq(|_| req.to::<Irq>().unwrap());
-        Context::with(|ctx| act.exec(ctx)).map_err(|err| err.into())
-    }
+    // #[rquickjs::function]
+    // pub fn irq(req: ActValue) -> rquickjs::Result<()> {
+    //     let act = Act::irq(|_| req.to::<Irq>().unwrap());
+    //     Context::with(|ctx| act.exec(ctx)).map_err(|err| err.into())
+    // }
 
-    #[rquickjs::function]
-    pub fn each(req: ActValue) -> rquickjs::Result<()> {
-        let act = Act::each(move |_| req.to::<Each>().unwrap());
-        Context::with(|ctx| act.exec(ctx)).map_err(|err| err.into())
-    }
+    // #[rquickjs::function]
+    // pub fn each(req: ActValue) -> rquickjs::Result<()> {
+    //     let act = Act::each(move |_| req.to::<Each>().unwrap());
+    //     Context::with(|ctx| act.exec(ctx)).map_err(|err| err.into())
+    // }
 
-    #[rquickjs::function]
-    pub fn chain(req: ActValue) -> rquickjs::Result<()> {
-        let act = Act::chain(|_c| req.to::<Chain>().unwrap());
-        Context::with(|ctx| act.exec(ctx)).map_err(|err| err.into())
-    }
+    // #[rquickjs::function]
+    // pub fn chain(req: ActValue) -> rquickjs::Result<()> {
+    //     let act = Act::chain(|_c| req.to::<Chain>().unwrap());
+    //     Context::with(|ctx| act.exec(ctx)).map_err(|err| err.into())
+    // }
 
-    #[rquickjs::function]
-    pub fn msg(req: ActValue) -> rquickjs::Result<()> {
-        let act = Act::msg(|_| req.to::<Msg>().unwrap());
-        Context::with(|ctx| act.exec(ctx)).map_err(|err| err.into())
-    }
+    // #[rquickjs::function]
+    // pub fn msg(req: ActValue) -> rquickjs::Result<()> {
+    //     let act = Act::msg(|_| req.to::<Msg>().unwrap());
+    //     Context::with(|ctx| act.exec(ctx)).map_err(|err| err.into())
+    // }
 
-    #[rquickjs::function]
-    pub fn block(req: ActValue) -> rquickjs::Result<()> {
-        let act = Act::block(|_| req.to::<Block>().unwrap());
-        Context::with(|ctx| act.exec(ctx)).map_err(|err| err.into())
-    }
+    // #[rquickjs::function]
+    // pub fn block(req: ActValue) -> rquickjs::Result<()> {
+    //     let act = Act::block(|_| req.to::<Block>().unwrap());
+    //     Context::with(|ctx| act.exec(ctx)).map_err(|err| err.into())
+    // }
 
-    #[rquickjs::function]
-    pub fn call(req: ActValue) -> rquickjs::Result<()> {
-        let act = Act::call(|_| req.to::<Call>().unwrap());
-        Context::with(|ctx| act.exec(ctx)).map_err(|err| err.into())
-    }
+    // #[rquickjs::function]
+    // pub fn call(req: ActValue) -> rquickjs::Result<()> {
+    //     let act = Act::call(|_| req.to::<Call>().unwrap());
+    //     Context::with(|ctx| act.exec(ctx)).map_err(|err| err.into())
+    // }
 
-    #[rquickjs::function]
-    pub fn push(act: ActValue) -> rquickjs::Result<()> {
-        let act = act.to::<Act>().unwrap();
-        if act.act.is_empty() {
-            return Err(ActError::Action(
-                "'act' property is not set when pushing a new act".to_string(),
-            )
-            .into());
-        }
-        Context::with(|ctx| act.exec(ctx)).map_err(|err| err.into())
-    }
+    // #[rquickjs::function]
+    // pub fn push(act: ActValue) -> rquickjs::Result<()> {
+    //     let act = act.to::<Act>().unwrap();
+    //     if act.uses.is_empty() {
+    //         return Err(ActError::Action(
+    //             "'act' property is not set when pushing a new act".to_string(),
+    //         )
+    //         .into());
+    //     }
+    //     Context::with(|ctx| act.exec(ctx)).map_err(|err| err.into())
+    // }
 }
 
 impl ActModule for ActPackage {
     fn init(&self, ctx: &rquickjs::Ctx<'_>) -> Result<()> {
         JsModule::declare_def::<js_act, _>(ctx.clone(), "@acts/act").unwrap();
         let source = r#"
-        import { get, set, set_process_var, inputs, expose, state, complete, fail, skip, back, abort, push, irq, msg, chain, each, block, call } from '@acts/act';
+        import { get, set, set_process_var, inputs, expose, state, complete, fail, skip, back, abort } from '@acts/act';
         globalThis.$ = (name, value) => {
             if(value === undefined) {
                 return get(name);
@@ -208,7 +205,7 @@ impl ActModule for ActPackage {
         }
         
         globalThis.act = {
-            get, set, set_process_var, state, inputs, expose, complete, fail, skip, back, abort, push, irq, msg, chain, each, block, call
+            get, set, set_process_var, state, inputs, expose, complete, fail, skip, back, abort
         };
         "#;
         let _ = JsModule::evaluate(ctx.clone(), "@acts/act", source)

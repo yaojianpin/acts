@@ -103,7 +103,7 @@ impl TaskState {
     }
 
     pub fn is_next(&self) -> bool {
-        self.is_skip() || self.is_running() || self.is_removed()
+        self.is_skip() || self.is_running() || self.is_removed() || self.is_success()
     }
 
     pub fn is_interrupted(&self) -> bool {

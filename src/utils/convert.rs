@@ -1,7 +1,40 @@
-use crate::{scheduler::Task, Context, Vars};
+use crate::{Context, Vars, scheduler::Task};
 use regex::Regex;
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
+
+pub fn fill_params(params: &JsonValue, ctx: &Context) -> JsonValue {
+    match params {
+        JsonValue::String(value) => {
+            if let Some(expr) = get_expr(value) {
+                let result = Context::scope(ctx.clone(), move || {
+                    ctx.runtime.env().eval::<JsonValue>(&expr)
+                });
+                let new_value = result.unwrap_or_else(|err| {
+                    eprintln!("fill_inputs: expr:{value}, err={err}");
+                    JsonValue::Null
+                });
+                return new_value;
+            }
+            params.clone()
+        }
+        JsonValue::Array(values) => {
+            let mut arr = Vec::new();
+            for value in values {
+                arr.push(fill_params(value, ctx));
+            }
+            JsonValue::Array(arr)
+        }
+        JsonValue::Object(map) => {
+            let mut obj = serde_json::Map::new();
+            for (k, value) in map {
+                obj.insert(k.clone(), fill_params(value, ctx));
+            }
+            JsonValue::Object(obj)
+        }
+        v => v.clone(),
+    }
+}
 
 /// fill the vars
 /// 1. if the inputs is an expression, just calculate it
@@ -23,6 +56,9 @@ pub fn fill_inputs(inputs: &Vars, ctx: &Context) -> Vars {
                 ret.insert(k.to_string(), new_value);
                 continue;
             }
+        } else if let JsonValue::Object(obj) = v {
+            ret.insert(k.to_string(), fill_inputs(&obj.clone().into(), ctx).into());
+            continue;
         }
         ret.insert(k.to_string(), v.clone());
     }

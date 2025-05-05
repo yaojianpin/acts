@@ -1,13 +1,12 @@
 use crate::event::EventAction;
 use crate::{
-    data,
+    ActError, Error, NodeKind, ProcInfo, Result, ShareLock, Vars, Workflow, data,
     event::Action,
     scheduler::{
-        tree::{Node, NodeTree, TaskTree},
         Context, Runtime, Task, TaskLifeCycle, TaskState,
+        tree::{Node, NodeTree, TaskTree},
     },
     utils::{self, consts},
-    ActError, Error, NodeKind, ProcInfo, Result, ShareLock, Vars, Workflow,
 };
 use serde::Deserialize;
 use std::{
@@ -292,16 +291,13 @@ impl Process {
         }
 
         // check the outputs
-        task.outputs();
-        // check act return
-        let rets = task.node().content.rets();
-
+        let rets = task.node().outputs();
         if !rets.is_empty() {
             let mut options = Vars::new();
             for (ref key, _) in &rets {
                 if !action.options.contains_key(key) {
                     return Err(ActError::Action(format!(
-                        "the options is not satisfied with act's rets '{}' in task({})",
+                        "the options is not satisfied with act's outputs '{}' in task({})",
                         key, action.tid
                     )));
                 }
@@ -408,9 +404,14 @@ impl Process {
                 }
 
                 println!(
-                    "Task({}) {}  nid={} name={} tag={} prev={} state={}  data={} err={:?}",
+                    "Task({}) {}{} nid={} name={} tag={} prev={} state={} err={:?} inputs={}  outputs={}",
                     task.id,
-                    task.node().typ(),
+                    task.node().kind(),
+                    if task.node().kind() == NodeKind::Act {
+                        format!("({})", task.node().uses())
+                    } else {
+                        "".to_string()
+                    },
                     task.node().id(),
                     task.node().name(),
                     task.node().tag(),
@@ -419,8 +420,9 @@ impl Process {
                         None => "nil".to_string(),
                     },
                     task.state(),
-                    task.data(),
                     task.err(),
+                    task.inputs(),
+                    task.outputs(),
                 );
             })
         }

@@ -2,7 +2,7 @@ use acts::{Engine, Vars, Workflow};
 
 #[tokio::main]
 async fn main() {
-    let engine = Engine::new();
+    let engine = Engine::new().start();
     let (s1, s2, sig) = engine.signal(()).triple();
     let executor = engine.executor();
     let text = include_str!("./model.yml");

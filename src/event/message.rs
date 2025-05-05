@@ -1,4 +1,4 @@
-use crate::{data, utils, TaskState, Vars};
+use crate::{TaskState, Vars, data, utils};
 use core::fmt;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -57,11 +57,8 @@ pub struct Message {
     pub state: MessageState,
 
     /// message type
-    /// workflow | step | branch | msg | irq
+    /// workflow | step | branch | act
     pub r#type: String,
-
-    // node kind
-    pub source: String,
 
     pub model: Model,
 
@@ -74,9 +71,12 @@ pub struct Message {
     /// model id
     pub mid: String,
 
-    /// node id or act key
+    /// node id or act
     /// if the key is empty, just using nid as the key
     pub key: String,
+
+    /// used package name
+    pub uses: String,
 
     /// from the task inputs
     pub inputs: Vars,
@@ -107,16 +107,24 @@ impl Message {
         self.key == key
     }
 
+    pub fn is_uses(&self, uses: &str) -> bool {
+        self.uses == uses
+    }
+
+    pub fn is_irq(&self) -> bool {
+        self.uses == "acts.core.irq"
+    }
+
+    pub fn is_msg(&self) -> bool {
+        self.uses == "acts.core.msg"
+    }
+
     pub fn is_state(&self, state: MessageState) -> bool {
         self.state == state
     }
 
     pub fn is_type(&self, t: &str) -> bool {
         self.r#type == t
-    }
-
-    pub fn is_source(&self, t: &str) -> bool {
-        self.source == t
     }
 
     pub fn is_tag(&self, tag: &str) -> bool {
@@ -163,12 +171,12 @@ impl Message {
             name: value.name,
             state: value.state,
             r#type: value.r#type,
-            source: value.source,
             model: serde_json::to_string(&value.model).unwrap(),
             pid: value.pid,
             nid: value.nid,
             mid: value.mid,
             key: value.key,
+            uses: value.uses,
             inputs: value.inputs.to_string(),
             outputs: value.outputs.to_string(),
             tag: value.tag,
@@ -241,12 +249,12 @@ impl From<data::Message> for Message {
             name: v.name,
             state: v.state,
             r#type: v.r#type,
-            source: v.source,
             model: serde_json::from_str(&v.model).unwrap_or_default(),
             pid: v.pid,
             nid: v.nid,
             mid: v.mid,
             key: v.key,
+            uses: v.uses,
             inputs: serde_json::from_str(&v.inputs).unwrap_or_default(),
             outputs: serde_json::from_str(&v.outputs).unwrap_or_default(),
             tag: v.tag,

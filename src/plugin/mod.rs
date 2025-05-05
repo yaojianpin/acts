@@ -1,5 +1,4 @@
 use crate::Engine;
-use tracing::debug;
 
 #[cfg(test)]
 mod tests;
@@ -31,13 +30,4 @@ mod tests;
 /// ```
 pub trait ActPlugin: Send + Sync {
     fn on_init(&self, engine: &Engine);
-}
-
-pub fn init(engine: &Engine) {
-    debug!("plugin::init");
-    let plugins = engine.plugins();
-    let plugins = plugins.lock().unwrap();
-    for plugin in plugins.iter() {
-        plugin.on_init(engine);
-    }
 }

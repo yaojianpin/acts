@@ -1,7 +1,7 @@
-use super::{database::Database, DbRow, DbSchema};
+use super::{DbRow, DbSchema, database::Database};
 use crate::{
-    store::{map_db_err, query::CondType, DbSet, Expr, ExprOp, PageData, Query},
     ActError, Result, ShareLock,
+    store::{DbSet, Expr, ExprOp, PageData, Query, map_db_err, query::CondType},
 };
 use rusqlite::{params, params_from_iter};
 use std::{fmt::Debug, marker::PhantomData};
@@ -55,6 +55,7 @@ where
         let schema = T::schema()?;
         let keys: Vec<&str> = schema.iter().map(|(k, _)| k.as_str()).collect();
         let sql = format!("select {} from {} where id = ?", keys.join(","), self.name);
+
         let row = conn
             .prepare(&sql)
             .map_err(map_db_err)?

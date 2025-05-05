@@ -1,9 +1,10 @@
 use crate::{
+    Engine, Workflow,
     cache::Cache,
     data,
     scheduler::{NodeTree, Process, TaskState},
     store::StoreKind,
-    utils, Engine, Workflow,
+    utils,
 };
 
 #[tokio::test]
@@ -15,7 +16,7 @@ async fn cache_new() {
 
 #[tokio::test]
 async fn cache_count() {
-    let engine = Engine::new();
+    let engine = Engine::new().start();
     let rt = engine.runtime();
     let cache = Cache::new(10);
 
@@ -26,7 +27,7 @@ async fn cache_count() {
 
 #[tokio::test]
 async fn cache_push_get() {
-    let engine = Engine::new();
+    let engine = Engine::new().start();
     let rt = engine.runtime();
     let cache = Cache::new(10);
     let pid = utils::longid();
@@ -40,7 +41,7 @@ async fn cache_push_get() {
 
 #[tokio::test]
 async fn cache_push_to_store() {
-    let engine = Engine::new();
+    let engine = Engine::new().start();
     let rt = engine.runtime();
     let cache = Cache::new(1);
 
@@ -61,7 +62,7 @@ async fn cache_push_to_store() {
 
 #[tokio::test]
 async fn cache_remove() {
-    let engine = Engine::new();
+    let engine = Engine::new().start();
     let rt = engine.runtime();
     let cache = Cache::new(10);
 
@@ -89,7 +90,7 @@ async fn cache_remove() {
 
 #[tokio::test]
 async fn cache_upsert() {
-    let engine = Engine::new();
+    let engine = Engine::new().start();
     let rt = engine.runtime();
     let mut workflow = Workflow::new().with_step(|step| step.with_name("step1"));
 
@@ -113,7 +114,7 @@ async fn cache_upsert() {
 
 #[tokio::test]
 async fn cache_restore_count() {
-    let engine = Engine::new();
+    let engine = Engine::new().start();
     let model = Workflow::new()
         .with_id("m1")
         .with_step(|step| step.with_name("step1"));
@@ -147,7 +148,7 @@ async fn cache_restore_count() {
 
 #[tokio::test]
 async fn cache_restore_working_state() {
-    let engine = Engine::new();
+    let engine = Engine::new().start();
     let model = Workflow::new()
         .with_id("m1")
         .with_step(|step| step.with_name("step1"));
@@ -194,7 +195,7 @@ async fn cache_restore_working_state() {
 
 #[tokio::test]
 async fn cache_restore_completed_state() {
-    let engine = Engine::new();
+    let engine = Engine::new().start();
     let model = Workflow::new()
         .with_id("m1")
         .with_step(|step| step.with_name("step1"));
@@ -241,7 +242,7 @@ async fn cache_restore_completed_state() {
 
 #[tokio::test]
 async fn cache_restore_less_cap() {
-    let engine = Engine::new();
+    let engine = Engine::new().start();
     let model = Workflow::new()
         .with_id("m1")
         .with_step(|step| step.with_name("step1"));

@@ -4,24 +4,24 @@ steps:
   - name: prepare
     id: prepare
     acts:
-      - act: irq
+      - uses: acts.core.irq
         key: init
   - name: step1
     id: step1
     acts:
-      - act: irq
+      - uses: acts.core.irq
         key: act1
     catches:
       - on: err1
-        then:
-          - act: msg
+        steps:
+          - uses: acts.core.msg
             key: abc
       - id: catch1
         on: err1
       - id: catch2
         on: err2
-      - then:
-          - act: msg
+      - steps:
+          - uses: acts.core.msg
             key: aaa
   - name: final
     id: final

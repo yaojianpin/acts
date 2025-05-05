@@ -2,11 +2,11 @@ mod collect;
 mod r#impl;
 
 use crate::{
-    store::{data::*, DbSet, StoreAdapter},
     Result,
+    store::{DbSet, StoreAdapter, data::*},
 };
 use collect::Collect;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value as JsonValue;
 use std::{collections::HashMap, sync::Arc};
 
@@ -17,6 +17,7 @@ pub struct MemStore {
     tasks: Arc<Collect<Task>>,
     packages: Arc<Collect<Package>>,
     messages: Arc<Collect<Message>>,
+    events: Arc<Collect<Event>>,
 }
 
 trait DbDocument: Serialize + DeserializeOwned {
@@ -31,12 +32,14 @@ impl MemStore {
         let tasks = Collect::new("tasks");
         let packages = Collect::new("packages");
         let messages = Collect::new("messages");
+        let events = Collect::new("events");
         let store = Self {
             models: Arc::new(models),
             procs: Arc::new(procs),
             tasks: Arc::new(tasks),
             packages: Arc::new(packages),
             messages: Arc::new(messages),
+            events: Arc::new(events),
         };
 
         store.init();
@@ -67,5 +70,9 @@ impl StoreAdapter for MemStore {
 
     fn messages(&self) -> Arc<dyn DbSet<Item = Message>> {
         self.messages.clone()
+    }
+
+    fn events(&self) -> Arc<dyn DbSet<Item = Event>> {
+        self.events.clone()
     }
 }

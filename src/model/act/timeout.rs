@@ -1,14 +1,14 @@
-use crate::{Act, ActError, Result};
+use crate::{ActError, Result, Step};
 use regex::Regex;
-use serde::{de, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de};
 use std::str::FromStr;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Timeout {
     #[serde(default)]
-    pub on: TimeoutLimit,
+    pub on: String,
     #[serde(default)]
-    pub then: Vec<Act>,
+    pub steps: Vec<Step>,
 }
 
 #[derive(Debug, Default, PartialEq, Eq, Serialize, Deserialize, Clone)]
@@ -132,21 +132,15 @@ impl Timeout {
         Self::default()
     }
     pub fn with_on(mut self, v: &str) -> Self {
-        self.on = TimeoutLimit::parse(v)
-            .unwrap_or_else(|_| panic!("failed with error format '{v}' for 'on' "));
+        // self.on = TimeoutLimit::parse(v)
+        //     .unwrap_or_else(|_| panic!("failed with error format '{v}' for 'on' "));
+        self.on = v.to_string();
         self
     }
 
-    pub fn with_then(mut self, build: fn(Vec<Act>) -> Vec<Act>) -> Self {
-        let stmts = Vec::new();
-        self.then = build(stmts);
+    pub fn with_step(mut self, build: fn(Step) -> Step) -> Self {
+        self.steps.push(build(Step::default()));
 
         self
-    }
-}
-
-impl From<Timeout> for Act {
-    fn from(val: Timeout) -> Self {
-        Act::timeout(|_| val.clone())
     }
 }

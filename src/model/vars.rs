@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use std::ops::{Deref, DerefMut};
 
 #[derive(Default, Clone)]
@@ -170,9 +170,17 @@ impl Vars {
         self.inner.get(name)
     }
 
+    pub fn pop(&mut self, name: &str) -> Option<Value> {
+        self.inner.remove(name)
+    }
+
     pub fn extend(mut self, vars: Vars) -> Self {
         self.inner.extend(&vars);
         self
+    }
+
+    pub fn append(&mut self, vars: &mut Vars) {
+        self.inner.append(&mut vars.inner);
     }
 }
 

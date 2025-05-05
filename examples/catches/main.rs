@@ -6,7 +6,7 @@ mod client;
 async fn main() {
     let client = client::Client::new();
 
-    let engine = Engine::new();
+    let engine = Engine::new().start();
     let (s, sig) = engine.signal(()).double();
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text).unwrap();

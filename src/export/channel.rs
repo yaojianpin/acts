@@ -1,4 +1,4 @@
-use crate::{scheduler::Runtime, utils, Event, Message};
+use crate::{Event, Message, scheduler::Runtime, utils};
 use std::sync::Arc;
 use tracing::{debug, error, info};
 
@@ -93,13 +93,13 @@ impl Channel {
     ///
     /// #[tokio::main]
     /// async fn main() {
-    ///     let engine = Engine::new();
+    ///     let engine = Engine::new().start();
     ///     let workflow = Workflow::new().with_id("m1").with_step(|step| {
-    ///             step.with_id("step1").with_act(Act::new().with_act("irq").with_key("act1"))
+    ///             step.with_id("step1").with_act(Act::irq(|act| act.with_key("act1")))
     ///     });
     ///
     ///     engine.channel().on_message(move |e| {
-    ///         if e.r#type == "irq" {
+    ///         if e.is_irq() {
     ///             println!("act message: state={} inputs={:?} outputs={:?}", e.state, e.inputs, e.outputs);
     ///         }
     ///     });

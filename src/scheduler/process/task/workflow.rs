@@ -1,4 +1,4 @@
-use crate::{scheduler::Context, ActTask, Result, TaskState, Workflow};
+use crate::{ActTask, Result, TaskState, Workflow, scheduler::Context};
 use async_trait::async_trait;
 
 #[async_trait]
@@ -15,9 +15,10 @@ impl ActTask for Workflow {
 
         // run setup
         if !self.setup.is_empty() {
-            for s in &self.setup {
-                s.exec(ctx)?;
-            }
+            ctx.dispatch_acts(self.setup.clone(), true)?;
+            // for s in &self.setup {
+            //     s.exec(ctx)?;
+            // }
         }
         Ok(())
     }

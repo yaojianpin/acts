@@ -1,12 +1,17 @@
 use core::fmt;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
-use crate::{scheduler::Runtime, ActModule, ActPlugin};
+use serde::de::DeserializeOwned;
+
+use crate::{
+    ActModule, ActPackage, Result, StoreAdapter,
+    package::{ActPackageFn, ActPackageRegister},
+    scheduler::Runtime,
+};
 
 #[derive(Clone)]
 pub struct Extender {
     runtime: Arc<Runtime>,
-    plugins: Arc<Mutex<Vec<Box<dyn ActPlugin>>>>,
 }
 
 impl fmt::Debug for Extender {
@@ -19,7 +24,6 @@ impl Extender {
     pub(crate) fn new(runtime: &Arc<Runtime>) -> Self {
         Self {
             runtime: runtime.clone(),
-            plugins: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -38,7 +42,7 @@ impl Extender {
     ///     }
     ///   }
     /// }
-    /// let engine = Engine::new();
+    /// let engine = Engine::new().start();
     /// let module = test_module::TestModule;
     /// engine.extender().register_module(&module);
     /// ```
@@ -46,37 +50,32 @@ impl Extender {
         self.runtime.env().register_module(module)
     }
 
-    /// register plugin
-    ///
-    /// ## Example
-    ///
-    /// ```no_run
-    /// use acts::{ActPlugin, Message, Engine, Workflow};
-    ///
-    /// #[derive(Clone)]
-    /// struct TestPlugin;
-    /// impl TestPlugin {
-    ///     fn new() -> Self {
-    ///         Self
-    ///     }
-    /// }
-    /// impl ActPlugin for TestPlugin {
-    ///     fn on_init(&self, engine: &Engine) {
-    ///         println!("TestPlugin");
-    ///         engine.channel().on_start(|e| {});
-    ///         engine.channel().on_complete(|e| {});
-    ///         engine.channel().on_message(|e| {});
-    ///     }
-    /// }
-    /// let engine = Engine::new();
-    /// engine.extender().register_plugin(&TestPlugin::new());
-    /// ```
-    pub fn register_plugin<T: ActPlugin + 'static + Clone>(&self, plugin: &T) {
-        let mut plugins = self.plugins.lock().unwrap();
-        plugins.push(Box::new(plugin.clone()));
+    pub fn register_package<T>(&self) -> Result<()>
+    where
+        T: ActPackage + ActPackageFn + ActPackage + 'static + Clone,
+        T: DeserializeOwned,
+    {
+        let meta = T::meta();
+        let package = meta.into_data()?;
+        self.runtime.cache().store().publish(&package)?;
+        println!("register_package: {}", meta.name);
+
+        self.runtime
+            .package()
+            .register(meta.name, &ActPackageRegister::new::<T>());
+
+        Ok(())
     }
 
-    pub fn plugins(&self) -> Arc<Mutex<Vec<Box<dyn ActPlugin>>>> {
-        self.plugins.clone()
+    pub fn register_store<T>(&self, store: T) -> Result<()>
+    where
+        T: StoreAdapter + 'static + Clone,
+    {
+        self.runtime.adapter().set_store(Arc::new(store));
+        Ok(())
     }
+
+    // pub fn plugins(&self) -> Arc<Mutex<Vec<Box<dyn ActPlugin>>>> {
+    //     self.plugins.clone()
+    // }
 }

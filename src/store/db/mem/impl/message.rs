@@ -1,8 +1,8 @@
 use crate::{
-    store::{db::mem::DbDocument, Message},
     Result,
+    store::{Message, db::mem::DbDocument},
 };
-use serde_json::{json, Value as JsonValue};
+use serde_json::{Value as JsonValue, json};
 use std::collections::HashMap;
 
 impl DbDocument for Message {
@@ -17,12 +17,12 @@ impl DbDocument for Message {
         map.insert("tid".to_string(), json!(self.tid.clone()));
         map.insert("state".to_string(), json!(self.state.clone()));
         map.insert("type".to_string(), json!(self.r#type.clone()));
-        map.insert("source".to_string(), json!(self.source.clone()));
         map.insert("model".to_string(), json!(self.model.clone()));
         map.insert("pid".to_string(), json!(self.pid.clone()));
         map.insert("nid".to_string(), json!(self.nid.clone()));
         map.insert("mid".to_string(), json!(self.mid.clone()));
         map.insert("key".to_string(), json!(self.key.clone()));
+        map.insert("uses".to_string(), json!(self.uses.clone()));
         map.insert("inputs".to_string(), json!(self.inputs.clone()));
         map.insert("outputs".to_string(), json!(self.outputs.clone()));
         map.insert("tag".to_string(), json!(self.tag.clone()));

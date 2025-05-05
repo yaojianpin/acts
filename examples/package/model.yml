@@ -4,30 +4,26 @@ outputs:
 steps:
   - name: step 1
     id: step1
-    setup:
-      - act: on_created
-        then:
-          - act: set
-            # set step custom data
-            inputs:
-              my_data: null
-      - act: on_completed
-        then:
-          - act: msg
-            key: msg1
-            inputs:
-              # got the my_data value and send with the msg
-              my_data: ${ $("my_data") }
     acts:
-      - act: pack
-        # use package in pack act
-        key: pack1
-        inputs:
+      - uses: pack1
+        params:
           # set the inputs variable from global 'input'
-          a: ${ $("input") }
+          # the input variable will be set when the process is starting
+          v1: ${ $("input") }
   - name: step 2
-    # use package in step
-    uses: pack2
+    id: step2
+    acts:
+        # use pack2
+      - uses: pack2
+        params:
+          a: ${ $("input") }
+          b: [ "a", "b" ]
+      - uses: pack3
+        params:
+          func: call_from_client
+          options:
+            a: ${ $("input") }
+            b: "this package will call from client"
 
 
 

@@ -1,6 +1,6 @@
 use crate::{
+    Act, Step, Workflow,
     model::act::{TimeoutLimit, TimeoutUnit},
-    Act, Step, StmtBuild, Workflow,
 };
 
 #[test]
@@ -109,19 +109,21 @@ fn model_step_timeout() {
 
     step = step
         .with_timeout(|t| {
-            t.with_on("1h")
-                .with_then(|stmts| stmts.add(Act::msg(|msg| msg.with_key("msg1"))))
+            t.with_on("1h").with_step(|step| {
+                step.with_id("step1")
+                    .with_act(Act::msg(|msg| msg.with_key("msg1")))
+            })
         })
         .with_timeout(|t| {
-            t.with_on("2d")
-                .with_then(|stmts| stmts.add(Act::msg(|msg| msg.with_key("msg2"))))
+            t.with_on("2d").with_step(|step| {
+                step.with_id("step2")
+                    .with_act(Act::msg(|msg| msg.with_key("msg2")))
+            })
         });
 
     assert_eq!(step.timeout.len(), 2);
-    assert_eq!(step.timeout.first().unwrap().on.value, 1);
-    assert_eq!(step.timeout.first().unwrap().on.unit, TimeoutUnit::Hour);
-    assert_eq!(step.timeout.get(1).unwrap().on.value, 2);
-    assert_eq!(step.timeout.get(1).unwrap().on.unit, TimeoutUnit::Day);
+    assert_eq!(step.timeout.first().unwrap().on, "1h");
+    assert_eq!(step.timeout.get(1).unwrap().on, "2d");
 }
 
 #[test]
@@ -134,8 +136,8 @@ fn model_step_yml_timeout() {
           timeout:
             - on: 2d
             - on: 3m
-              then:
-                - act: irq
+              steps:
+                - uses: acts.core.irq
                   key: act2
     "#;
     let m = Workflow::from_yml(text).unwrap();
@@ -143,11 +145,14 @@ fn model_step_yml_timeout() {
     assert_eq!(step.timeout.len(), 2);
 
     let timeout = step.timeout.first().unwrap();
-    assert_eq!(timeout.on.value, 2);
-    assert_eq!(timeout.on.as_secs(), 2 * 24 * 60 * 60);
+    assert_eq!(timeout.on, "2d");
+    assert_eq!(
+        TimeoutLimit::parse(&timeout.on).unwrap().as_secs(),
+        2 * 24 * 60 * 60
+    );
 
     let timeout = step.timeout.get(1).unwrap();
-    assert_eq!(timeout.on.value, 3);
-    assert_eq!(timeout.on.as_secs(), 3 * 60);
-    assert_eq!(timeout.then.len(), 1);
+    assert_eq!(timeout.on, "3m");
+    assert_eq!(TimeoutLimit::parse(&timeout.on).unwrap().as_secs(), 3 * 60);
+    assert_eq!(timeout.steps.len(), 1);
 }

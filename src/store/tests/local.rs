@@ -1,7 +1,8 @@
 use crate::{
+    MessageState, StoreAdapter, TaskState, Vars,
     scheduler::NodeKind,
-    store::{data::*, db::LocalStore, query::Expr, Cond, Query},
-    utils, MessageState, StoreAdapter, TaskState, Vars,
+    store::{Cond, Query, data::*, db::LocalStore, query::Expr},
+    utils,
 };
 use serde_json::json;
 use tokio::sync::OnceCell;
@@ -381,7 +382,7 @@ async fn store_local_message_create() {
 
     let pid = utils::longid();
     let tid = utils::shortid();
-    let msg = Message {
+    let msg: Message = Message {
         id: format!("{pid}:{tid}"),
         name: "test".to_string(),
         pid: pid.clone(),
@@ -391,8 +392,8 @@ async fn store_local_message_create() {
         state: MessageState::Created,
         start_time: 0,
         end_time: 0,
+        uses: "pack1".to_string(),
         r#type: "step".to_string(),
-        source: "step".to_string(),
         model: json!({ "id": "m1"}).to_string(),
         key: "test".to_string(),
         inputs: json!({}).to_string(),
@@ -430,8 +431,8 @@ async fn store_local_message_query() {
         state: MessageState::Created,
         start_time: 0,
         end_time: 0,
+        uses: "pack1".to_string(),
         r#type: "step".to_string(),
-        source: "step".to_string(),
         model: json!({ "id": "m1"}).to_string(),
         key: "test".to_string(),
         inputs: json!({}).to_string(),
@@ -471,7 +472,7 @@ async fn store_local_message_update() {
         start_time: 0,
         end_time: 0,
         r#type: "step".to_string(),
-        source: "step".to_string(),
+        uses: "pack1".to_string(),
         model: json!({ "id": "m1"}).to_string(),
         key: "test".to_string(),
         inputs: json!({}).to_string(),
@@ -518,7 +519,7 @@ async fn store_local_message_remove() {
         start_time: 0,
         end_time: 0,
         r#type: "step".to_string(),
-        source: "step".to_string(),
+        uses: "pack1".to_string(),
         model: json!({ "id": "m1"}).to_string(),
         key: "test".to_string(),
         inputs: json!({}).to_string(),
@@ -547,12 +548,18 @@ async fn store_local_package_create() {
     let id = utils::longid();
     let package = Package {
         id,
-        name: "test package".to_string(),
-        size: 100,
-        data: vec![0x01, 0x02],
+        desc: "desc".to_string(),
+        icon: "icon".to_string(),
+        doc: "doc".to_string(),
+        version: "0.1.0".to_string(),
+        schema: "{}".to_string(),
+        run_as: crate::ActRunAs::Func,
+        groups: "[]".to_string(),
+        catalog: crate::package::ActPackageCatalog::Core,
         create_time: 0,
         update_time: 0,
         timestamp: 0,
+        built_in: false,
     };
 
     store.packages().create(&package).unwrap();
@@ -567,12 +574,18 @@ async fn store_local_package_query() {
     let id = utils::longid();
     let package = Package {
         id,
-        name: "test package".to_string(),
-        size: 100,
-        data: vec![0x01, 0x02],
+        desc: "desc".to_string(),
+        icon: "icon".to_string(),
+        doc: "doc".to_string(),
+        version: "0.1.0".to_string(),
+        schema: "{}".to_string(),
+        run_as: crate::ActRunAs::Func,
+        groups: "[]".to_string(),
+        catalog: crate::package::ActPackageCatalog::Core,
         create_time: 0,
         update_time: 0,
         timestamp: 0,
+        built_in: false,
     };
     store.packages().create(&package).unwrap();
     let q = Query::new().push(Cond::and().push(Expr::eq("id", package.id)));
@@ -587,24 +600,30 @@ async fn store_local_package_update() {
     let id = utils::longid();
     let package = Package {
         id,
-        name: "test package".to_string(),
-        size: 100,
-        data: vec![0x01, 0x02],
+        desc: "desc".to_string(),
+        icon: "icon".to_string(),
+        doc: "doc".to_string(),
+        version: "0.1.0".to_string(),
+        schema: "{}".to_string(),
+        run_as: crate::ActRunAs::Func,
+        groups: "[]".to_string(),
+        catalog: crate::package::ActPackageCatalog::Core,
         create_time: 0,
         update_time: 0,
         timestamp: 0,
+        built_in: false,
     };
     store.packages().create(&package).unwrap();
     let mut p = store.packages().find(&package.id).unwrap();
-    p.name = "my name".to_string();
-    p.size = 200;
-    p.data = vec![0x02, 0x03];
+    p.desc = "my name".to_string();
+    p.update_time = 200;
+    p.schema = "{\"a\": 0 }".to_string();
     store.packages().update(&p).unwrap();
 
     let p2 = store.packages().find(&package.id).unwrap();
-    assert_eq!(p2.name, "my name");
-    assert_eq!(p2.size, 200);
-    assert_eq!(p2.data, vec![0x02, 0x03]);
+    assert_eq!(p2.desc, "my name");
+    assert_eq!(p2.update_time, 200);
+    assert_eq!(p2.schema, "{\"a\": 0 }");
 }
 
 #[tokio::test]
@@ -614,12 +633,18 @@ async fn store_local_package_remove() {
     let id = utils::longid();
     let package = Package {
         id,
-        name: "test package".to_string(),
-        size: 100,
-        data: vec![0x01, 0x02],
+        desc: "desc".to_string(),
+        icon: "icon".to_string(),
+        doc: "doc".to_string(),
+        version: "0.1.0".to_string(),
+        schema: "{}".to_string(),
+        run_as: crate::ActRunAs::Func,
+        groups: "[]".to_string(),
+        catalog: crate::package::ActPackageCatalog::Core,
         create_time: 0,
         update_time: 0,
         timestamp: 0,
+        built_in: false,
     };
     store.packages().create(&package).unwrap();
     store.packages().delete(&package.id).unwrap();

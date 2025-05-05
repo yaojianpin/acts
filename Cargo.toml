@@ -3,18 +3,19 @@
 authors = ["Yao <yaojianpin@sohu.com>"]
 description = "a fast, tiny, extensiable workflow engine"
 keywords = ["workflow"]
-edition = "2021"
+edition = "2024"
 license = "Apache-2.0"
 name = "acts"
 homepage = "https://docs.rs/acts"
 repository = "https://github.com/yaojianpin/acts.git"
-version = "0.15.0"
+version = "0.16.0"
 
 [dependencies]
 async-trait = "0.1"
 chrono = "0.4"
 globset = "0.4"
-hex = { version = "0.4", features = ["serde"] }
+inventory = "0.3.20"
+jsonschema = "0.30.0"
 moka = { version = "0.12", features = ["sync"] }
 nanoid = "0.4"
 r2d2 = { version = "0.8", optional = true }

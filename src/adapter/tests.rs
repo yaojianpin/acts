@@ -1,6 +1,6 @@
 use crate::{
-    store::{data, DbSet, PageData, Query, StoreAdapter, StoreKind},
-    Builder, Result,
+    EngineBuilder, Result,
+    store::{DbSet, PageData, Query, StoreAdapter, StoreKind, data},
 };
 use std::sync::Arc;
 use tokio::sync::OnceCell;
@@ -17,7 +17,7 @@ async fn store() -> &'static TestStore {
 #[tokio::test]
 async fn adapter_set_extern_store_test() {
     let store = store().await;
-    let engine = Builder::new().store(store).build();
+    let engine = EngineBuilder::new().set_store(store).build().start();
     let store = engine.runtime().cache().store();
     assert_eq!(store.kind(), StoreKind::Extern);
     store.reset();
@@ -30,6 +30,7 @@ pub struct TestStore {
     tasks: Collect<data::Task>,
     packages: Collect<data::Package>,
     messages: Collect<data::Message>,
+    events: Collect<data::Event>,
 }
 
 impl TestStore {
@@ -40,6 +41,7 @@ impl TestStore {
             tasks: Collect::new(),
             packages: Collect::new(),
             messages: Collect::new(),
+            events: Collect::new(),
         }
     }
 }
@@ -66,6 +68,10 @@ impl StoreAdapter for TestStore {
 
     fn messages(&self) -> Arc<dyn DbSet<Item = data::Message>> {
         Arc::new(self.messages.clone())
+    }
+
+    fn events(&self) -> Arc<dyn DbSet<Item = data::Event>> {
+        Arc::new(self.events.clone())
     }
 }
 

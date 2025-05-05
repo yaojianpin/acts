@@ -1,12 +1,10 @@
-use crate::{store::StoreAdapter, Engine, ShareLock};
+use crate::{ShareLock, store::StoreAdapter};
 use core::fmt;
 use std::sync::{Arc, RwLock};
 use tracing::info;
 
 #[cfg(test)]
 mod tests;
-
-pub fn init(_engine: &Engine) {}
 
 #[derive(Clone)]
 pub struct Adapter {

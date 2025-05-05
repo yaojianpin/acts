@@ -2,14 +2,14 @@ use tokio::{runtime::Handle, time};
 use tracing::{debug, error};
 
 use super::{Process, Scheduler, Task, TaskState};
-use crate::event::EventAction;
 use crate::{
+    ActError, Action, Config, Engine, Package, Result, Vars, Workflow,
+    adapter::Adapter,
     cache::Cache,
     data,
     env::Enviroment,
-    event::Emitter,
+    event::{Emitter, EventAction},
     utils::{self, consts},
-    ActError, Action, Config, Engine, Result, Vars, Workflow,
 };
 use std::{sync::Arc, time::Duration};
 
@@ -20,6 +20,8 @@ pub struct Runtime {
     env: Arc<Enviroment>,
     cache: Arc<Cache>,
     emitter: Arc<Emitter>,
+    package: Arc<Package>,
+    adapter: Arc<Adapter>,
 }
 
 impl Runtime {
@@ -46,6 +48,14 @@ impl Runtime {
 
     pub fn emitter(&self) -> &Arc<Emitter> {
         &self.emitter
+    }
+
+    pub fn package(&self) -> &Arc<Package> {
+        &self.package
+    }
+
+    pub fn adapter(&self) -> &Arc<Adapter> {
+        &self.adapter
     }
 
     #[allow(unused)]
@@ -112,7 +122,7 @@ impl Runtime {
         debug!("scheduler::push  task={:?}", task);
         self.cache
             .upsert(task)
-            .unwrap_or_else(|_| panic!("fail to upsert task({})", task.id));
+            .unwrap_or_else(|err| panic!("fail to upsert task({}): {}", task.id, err));
         self.scher.push(task);
     }
 
@@ -152,12 +162,16 @@ impl Runtime {
         let env = Arc::new(Enviroment::new());
         let cache = Arc::new(Cache::new(config.cache_cap));
         let emitter = Arc::new(Emitter::new());
+        let package = Arc::new(Package::new());
+        let adapter = Arc::new(Adapter::new());
         let runtime = Arc::new(Runtime {
             config: Arc::new(config.clone()),
             emitter,
             scher,
             env,
             cache,
+            package,
+            adapter,
         });
 
         runtime.initialize(config);
@@ -226,11 +240,7 @@ impl Runtime {
                     .unwrap_or_else(|err| error!("scher.initialize hooks={}", err));
 
                 // check task is allowed to emit message to client
-                if e.extra().emit_message
-                    && !e.state().is_pending()
-                    && !e.state().is_running()
-                    && !e.is_emit_disabled()
-                {
+                if !e.state().is_pending() && !e.state().is_running() && !e.is_emit_disabled() {
                     let msg = e.create_message();
                     debug!("emit_message:{msg:?}");
                     rt.emitter().emit_message(&msg);

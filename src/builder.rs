@@ -1,22 +1,24 @@
 use std::sync::Arc;
 
-use crate::{Config, Engine, StoreAdapter};
+use crate::{ActPlugin, Config, Engine, StoreAdapter};
 
-pub struct Builder {
+pub struct EngineBuilder {
     config: Config,
     store: Option<Arc<dyn StoreAdapter>>,
+    plugins: Vec<Box<dyn ActPlugin>>,
 }
 
-impl Default for Builder {
+impl Default for EngineBuilder {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Builder {
+impl EngineBuilder {
     pub fn new() -> Self {
         Self {
             config: Config::default(),
+            plugins: Vec::new(),
             store: None,
         }
     }
@@ -60,12 +62,55 @@ impl Builder {
         self
     }
 
-    pub fn store<STORE: StoreAdapter + Clone + 'static>(mut self, store: &STORE) -> Self {
+    pub fn set_store<STORE: StoreAdapter + Clone + 'static>(mut self, store: &STORE) -> Self {
         self.store = Some(Arc::new(store.clone()));
         self
     }
 
+    /// register plugin
+    ///
+    /// ## Example
+    ///
+    /// ```no_run
+    /// use acts::{ActPlugin, Message, Engine, EngineBuilder, Workflow};
+    ///
+    /// #[derive(Clone)]
+    /// struct TestPlugin;
+    /// impl TestPlugin {
+    ///     fn new() -> Self {
+    ///         Self
+    ///     }
+    /// }
+    /// impl ActPlugin for TestPlugin {
+    ///     fn on_init(&self, engine: &Engine) {
+    ///         println!("TestPlugin");
+    ///         engine.channel().on_start(|e| {});
+    ///         engine.channel().on_complete(|e| {});
+    ///         engine.channel().on_message(|e| {});
+    ///     }
+    /// }
+    /// let engine = EngineBuilder::new().add_plugin(&TestPlugin::new()).build().start();
+    /// ```
+    pub fn add_plugin<T>(mut self, plugin: &T) -> Self
+    where
+        T: ActPlugin + Clone + 'static,
+    {
+        self.plugins.push(Box::new(plugin.clone()));
+        self
+    }
+
     pub fn build(&self) -> Engine {
-        Engine::new_with_config(&self.config, self.store.clone())
+        let engine = Engine::new_with_config(&self.config);
+
+        // init plugins
+        for plugin in self.plugins.iter() {
+            plugin.on_init(&engine);
+        }
+
+        if let Some(store) = &self.store {
+            engine.runtime().adapter().set_store(store.clone());
+        }
+
+        engine
     }
 }

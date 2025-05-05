@@ -1,12 +1,15 @@
 use super::{ActTask, Runtime};
 use crate::{
+    Act, ActError, Executor, Message, MessageState, NodeKind, Result, TaskState, Vars,
     event::{Action, Model},
-    scheduler::{tree::NodeContent, Node, Process, Task},
+    scheduler::{
+        Node, Process, Task,
+        tree::{NodeContent, dyn_build_act},
+    },
     utils::{self, consts, shortid},
-    Act, ActError, Message, MessageState, NodeKind, Result, TaskState, Vars,
 };
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
-use std::{cell::RefCell, sync::Arc};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use std::{cell::RefCell, sync::Arc, vec};
 use tracing::debug;
 
 tokio::task_local! {
@@ -18,6 +21,7 @@ pub struct Context {
     // pub scher: Arc<Scheduler>,
     // pub env: Arc<Enviroment>,
     pub runtime: Arc<Runtime>,
+    pub executor: Arc<Executor>,
     pub proc: Arc<Process>,
     task: RefCell<Arc<Task>>,
     action: RefCell<Option<Action>>,
@@ -36,8 +40,11 @@ impl std::fmt::Debug for Context {
 
 impl Context {
     fn init_vars(&self, task: &Arc<Task>) {
+        // calculate previous task's outputs
         let inputs = task.inputs();
         debug!("init_vars: {inputs}");
+
+        // set the inputs to task's data
         self.task().set_data_with(|data| {
             for (ref k, v) in &inputs {
                 data.set(k, v.clone());
@@ -48,6 +55,7 @@ impl Context {
     pub fn new(proc: &Arc<Process>, task: &Arc<Task>) -> Self {
         let ctx = Context {
             runtime: task.runtime().clone(),
+            executor: Arc::new(Executor::new(task.runtime())),
             proc: proc.clone(),
             action: RefCell::new(None),
             task: RefCell::new(task.clone()),
@@ -163,24 +171,24 @@ impl Context {
         self.runtime.push(&task);
     }
 
-    pub fn append_act(&self, act: &Act) -> Result<Arc<Node>> {
-        debug!("append_act: {act:?}  {:?}", self.task);
-        let mut task = self.task();
-        if task.is_kind(NodeKind::Act) {
-            let is_package_act = task.is_act(consts::ACT_TYPE_BLOCK);
+    pub fn dispatch_act(&self, act: &Act, is_hook_event: bool) -> Result<()> {
+        debug!("dispatch_act: {act:?}  {:?}", self.task);
+        let task = self.task();
+        // if task.is_kind(NodeKind::Act) {
+        //     let is_block_backage = task.is_uses(consts::ACT_TYPE_BLOCK);
 
-            // not package act or completed package
-            if !is_package_act || task.state().is_completed() {
-                // find its parent to append task
-                while let Some(parent) = task.parent() {
-                    if parent.is_kind(NodeKind::Step) || parent.is_act(consts::ACT_TYPE_BLOCK) {
-                        task = parent;
-                        break;
-                    }
-                    task = parent;
-                }
-            }
-        }
+        //     // not package act or completed package
+        //     if !is_block_backage || task.state().is_completed() {
+        //         // find its parent to append task
+        //         while let Some(parent) = task.parent() {
+        //             if parent.is_kind(NodeKind::Step) || parent.is_uses(consts::ACT_TYPE_BLOCK) {
+        //                 task = parent;
+        //                 break;
+        //             }
+        //             task = parent;
+        //         }
+        //     }
+        // }
 
         let mut id = act.id.to_string();
         if id.is_empty() {
@@ -192,13 +200,75 @@ impl Context {
             NodeContent::Act(act.clone()),
             task.node().level + 1,
         ));
-        // node.set_parent(task.node());
-        if task.state().is_ready() || task.state().is_running() {
+
+        // let task = self.proc.create_task(&node, Some(task));
+        // if is_hook_event {
+        //     // set the tag on task to avoid the repetitive hook execution
+        //     task.set_data_with(|data| data.set(consts::IS_EVENT_PROCESSED, true));
+        // }
+
+        // self.runtime.push(&task);
+
+        if !task.state().is_none() {
             let task = self.proc.create_task(&node, Some(task));
+
+            // set the tag on task to avoid the repetitive hook execution
+            if is_hook_event {
+                task.set_data_with(|data| data.set(consts::IS_EVENT_PROCESSED, true));
+            }
             self.runtime.push(&task);
         }
 
-        Ok(node)
+        Ok(())
+    }
+
+    pub fn build_acts(&self, acts: &[Act], is_sequence: bool) -> Result<()> {
+        let task = self.task();
+
+        let mut prev = task.node().clone();
+        let parent = task.node().clone();
+        let mut acts = acts.to_owned();
+        for (index, act) in acts.iter_mut().enumerate() {
+            dyn_build_act(
+                act,
+                &parent,
+                &mut prev,
+                parent.level + 1,
+                index,
+                is_sequence,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    pub fn dispatch_acts(&self, acts: Vec<Act>, is_sequence: bool) -> Result<()> {
+        let task = self.task();
+        let mut normal_acts = vec![];
+        acts.iter().for_each(|act| {
+            // if the act is setting the 'on' event, it will be added to the task's hook
+            if let Some(on) = act.on.as_ref() {
+                match on {
+                    crate::ActEvent::Created => {
+                        task.add_hook_stmts(super::TaskLifeCycle::Created, act)
+                    }
+                    crate::ActEvent::Completed => {
+                        task.add_hook_stmts(super::TaskLifeCycle::Completed, act)
+                    }
+                    crate::ActEvent::BeforeUpdate => {
+                        task.add_hook_stmts(super::TaskLifeCycle::BeforeUpdate, act)
+                    }
+                    crate::ActEvent::Updated => {
+                        task.add_hook_stmts(super::TaskLifeCycle::Updated, act)
+                    }
+                    crate::ActEvent::Step => task.add_hook_stmts(super::TaskLifeCycle::Step, act),
+                }
+            } else {
+                normal_acts.push(act.clone());
+            }
+        });
+        self.build_acts(&normal_acts, is_sequence)?;
+        Ok(())
     }
 
     /// redo the task and dispatch directly
@@ -263,6 +333,7 @@ impl Context {
         }
 
         task.set_state(TaskState::Aborted);
+        task.set_data(&self.vars());
         self.emit_task(task)?;
 
         // abort all running task
@@ -371,6 +442,12 @@ impl Context {
         debug!("emit_message: {:?}", msg);
         let workflow = self.proc.model();
         let mut inputs = utils::fill_inputs(&msg.inputs, self);
+        // append act.optins to inputs
+        inputs.set(consts::ACT_OPTIONS_KEY, msg.options.clone());
+
+        // append act.params to inputs
+        let params = utils::fill_params(&msg.params, self);
+        inputs.set(consts::ACT_PARAMS_KEY, params);
 
         let task = self.task();
         if let Some(err) = task.err() {
@@ -378,17 +455,16 @@ impl Context {
             inputs.set(consts::ACT_ERR_CODE, err.ecode);
         }
 
-        let state: MessageState = task.state().into();
+        let state: MessageState = MessageState::Completed;
         let msg = Message {
             id: utils::longid(),
-            r#type: consts::ACT_TYPE_MSG.to_string(),
-            source: task.node().kind().to_string(),
+            r#type: "act".to_string(),
             state,
             pid: task.pid.clone(),
             tid: task.id.clone(),
-            key: msg.key.to_string(),
+            key: msg.key.clone(),
             name: task.node().name(),
-
+            uses: msg.uses.clone(),
             model: Model {
                 id: workflow.id.clone(),
                 name: workflow.name.to_string(),

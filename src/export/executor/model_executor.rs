@@ -1,7 +1,7 @@
 use crate::{
+    ModelInfo, Result, Workflow,
     scheduler::Runtime,
     store::{PageData, StoreAdapter},
-    ModelInfo, Result, Workflow,
 };
 use std::sync::Arc;
 use tracing::instrument;
@@ -24,6 +24,10 @@ impl ModelExecutor {
     pub fn deploy(&self, model: &Workflow) -> Result<bool> {
         model.valid()?;
         let ret = self.runtime.cache().store().deploy(model)?;
+
+        // get the model triggers
+        // for trigger in &model.on {}
+
         Ok(ret)
     }
 

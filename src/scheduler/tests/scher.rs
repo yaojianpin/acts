@@ -1,10 +1,10 @@
 use crate::event::EventAction;
-use crate::{utils, Act, Action, Engine, MessageState, TaskState, Vars, Workflow};
+use crate::{Act, Action, Engine, MessageState, TaskState, Vars, Workflow, utils};
 use serde_json::json;
 
 #[tokio::test]
 async fn sch_scher_next() {
-    let engine = Engine::new();
+    let engine = Engine::new().start();
 
     let rt = engine.runtime();
     let store = rt.cache().store();
@@ -24,7 +24,7 @@ async fn sch_scher_next() {
 
 #[tokio::test]
 async fn sch_scher_task() {
-    let engine = Engine::new();
+    let engine = Engine::new().start();
     let rt = engine.runtime();
     let workflow = Workflow::new();
     let pid = utils::longid();
@@ -41,7 +41,7 @@ async fn sch_scher_task() {
 
 #[tokio::test]
 async fn sch_scher_start_default() {
-    let engine = Engine::new();
+    let engine = Engine::new().start();
     let rt = engine.runtime();
     let workflow = Workflow::new();
     let result = rt.start(&workflow, &Vars::new());
@@ -50,7 +50,7 @@ async fn sch_scher_start_default() {
 
 #[tokio::test]
 async fn sch_scher_start_with_vars() {
-    let engine = Engine::new();
+    let engine = Engine::new().start();
     let rt = engine.runtime();
     let workflow = Workflow::new();
     let mut vars = Vars::new();
@@ -66,13 +66,13 @@ async fn sch_scher_start_with_vars() {
 
 #[tokio::test]
 async fn sch_scher_do_action() {
-    let engine = Engine::new();
+    let engine = Engine::new().start();
     let rt = engine.runtime();
     let sig = engine.signal(());
     let rx = sig.clone();
     let workflow = Workflow::new().with_step(|step| {
         step.with_name("step1").with_act(Act::irq(|act| {
-            act.with_key("act1").with_ret("uid", json!("u1"))
+            act.with_key("act1").with_output("uid", json!(null))
         }))
     });
     let s = rt.clone();

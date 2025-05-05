@@ -1,13 +1,12 @@
 use crate::{
-    adapter::{self, Adapter},
+    ChannelOptions, Signal,
     config::Config,
     export::{Channel, Executor, Extender},
-    plugin,
+    package,
     scheduler::Runtime,
-    ActPlugin, ChannelOptions, Signal, StoreAdapter,
 };
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tracing::info;
 
 /// Workflow Engine
@@ -20,7 +19,7 @@ use tracing::info;
 ///
 /// #[tokio::main]
 /// async fn main() {
-///     let engine = Engine::new();
+///     let engine = Engine::new().start();
 ///
 ///     let model = include_str!("../examples/simple/model.yml");
 ///     let workflow = Workflow::from_yml(model).unwrap();
@@ -42,7 +41,6 @@ use tracing::info;
 #[derive(Clone)]
 pub struct Engine {
     runtime: Arc<Runtime>,
-    adapter: Arc<Adapter>,
     extender: Arc<Extender>,
 }
 
@@ -54,16 +52,11 @@ impl Default for Engine {
 
 impl Engine {
     pub fn new() -> Self {
-        Self::new_with_config(&Config::default(), None)
+        Self::new_with_config(&Config::default())
     }
 
     pub fn config(&self) -> Arc<Config> {
         self.runtime.config().clone()
-    }
-
-    /// engine executor
-    pub fn adapter(&self) -> Arc<Adapter> {
-        self.adapter.clone()
     }
 
     /// engine executor
@@ -82,7 +75,7 @@ impl Engine {
     /// ```no_run
     /// use acts::{ Engine, ChannelOptions };
     ///
-    /// let engine = Engine::new();
+    /// let engine = Engine::new().start();
     /// let chan = engine.channel_with_options(&ChannelOptions {  id: "chan1".to_string(),  ack: true,  r#type: "step".to_string(), key: "my_key*".to_string(), state: "{created, completed}".to_string(), tag: "*".to_string()  });
     /// chan.on_message(|e| {
     ///     // do something
@@ -101,10 +94,6 @@ impl Engine {
         self.runtime.clone()
     }
 
-    pub(crate) fn plugins(&self) -> Arc<Mutex<Vec<Box<dyn ActPlugin>>>> {
-        self.extender.plugins()
-    }
-
     /// close engine
     ///
     /// ## Example
@@ -113,7 +102,7 @@ impl Engine {
     /// use acts::{Engine, Workflow, Vars};
     /// #[tokio::main]
     /// async fn main() {
-    ///     let engine = Engine::new();
+    ///     let engine = Engine::new().start();
     ///     engine.close();
     /// }
     /// ```
@@ -132,26 +121,20 @@ impl Engine {
 
     fn init(&self) {
         info!("init");
-        plugin::init(self);
-        adapter::init(self);
         self.runtime.init(self);
+        package::init(self);
     }
 
-    pub(crate) fn new_with_config(config: &Config, store: Option<Arc<dyn StoreAdapter>>) -> Self {
+    pub(crate) fn new_with_config(config: &Config) -> Self {
         info!("config: {:?}", config);
         let runtime = Runtime::new(config);
 
         let extender = Arc::new(Extender::new(&runtime));
-        let adapter = Arc::new(Adapter::new());
-        if let Some(store) = &store {
-            adapter.set_store(store.clone());
-        }
-        let engine = Self {
-            runtime,
-            extender,
-            adapter,
-        };
-        engine.init();
-        engine
+        Self { runtime, extender }
+    }
+
+    pub fn start(self) -> Self {
+        self.init();
+        self
     }
 }

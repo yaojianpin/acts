@@ -1,7 +1,7 @@
 use crate::{
+    Act, Event, Message, MessageState, Signal, StmtBuild, Workflow,
     scheduler::tests::create_proc_signal2,
     utils::{self, consts},
-    Act, Event, Message, MessageState, Signal, StmtBuild, Workflow,
 };
 use serde_json::json;
 
@@ -271,7 +271,12 @@ async fn sch_step_run_catch_error() {
         step.with_id("step1")
             .with_output("my_data", json!(null))
             .with_run(r#" throw new Error("test error");"#)
-            .with_catch(|c| c.with_then(|stmts| stmts.add(Act::msg(|act| act.with_key("msg1")))))
+            .with_catch(|c| {
+                c.with_step(|step| {
+                    step.with_id("step2")
+                        .with_act(Act::msg(|act| act.with_key("msg1")))
+                })
+            })
     });
     let ret = run_test(&workflow, |e, s| {
         if e.is_key("step1") && e.is_state(MessageState::Completed) {

@@ -7,7 +7,7 @@ async fn main() {
     let mut store = client::Client::new();
     store.init();
 
-    let engine = Engine::new();
+    let engine = Engine::new().start();
     let (s, sig) = engine.signal(()).double();
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text).unwrap();

@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use crate::{
-    scheduler::{
-        tree::{NodeContent, NodeTree},
-        Node,
-    },
     Act, NodeKind, Workflow,
+    scheduler::{
+        Node,
+        tree::{NodeContent, NodeTree},
+    },
 };
 
 const SIMPLE_WORKFLOW: &str = r#"
@@ -198,9 +198,12 @@ async fn sch_tree_acts() {
     let step = tree.node("step1").unwrap();
     let act1 = tree.node("act1").unwrap();
     let act2 = tree.node("act2").unwrap();
-    assert_eq!(step.children().len(), 2);
+
+    // act1 and act2 will run in order
+    assert_eq!(step.children().len(), 1);
     assert_eq!(act1.parent().unwrap().id(), "step1");
     assert_eq!(act2.parent().unwrap().id(), "step1");
+    assert_eq!(act2.prev().upgrade().unwrap().id(), "act1");
 }
 
 #[tokio::test]

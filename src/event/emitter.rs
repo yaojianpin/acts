@@ -1,7 +1,8 @@
 use crate::{
+    Event, Result, ShareLock,
     event::Message,
     scheduler::{Process, Runtime, Task},
-    utils, Event, Result, ShareLock,
+    utils,
 };
 use std::{
     collections::HashMap,
@@ -156,21 +157,10 @@ impl Emitter {
     }
 
     pub fn emit_task_event(&self, task: &Arc<Task>) -> Result<()> {
-        debug!("emit_task_event: task={:?}", task);
-        let handlers = self.tasks.read().unwrap();
-        let e = &Event::new_with_extra(
-            &self.runtime.read().unwrap(),
-            task,
-            &TaskExtra { emit_message: true },
-        );
-        for handle in handlers.iter() {
-            (handle)(e);
-        }
-
-        Ok(())
+        self.emit_task_event_with_extra(task, true)
     }
 
-    pub fn emit_task_event_with_extra(&self, task: &Arc<Task>, emit_message: bool) {
+    pub fn emit_task_event_with_extra(&self, task: &Arc<Task>, emit_message: bool) -> Result<()> {
         debug!("emit_task_event: task={:?}", task);
         let handlers = self.tasks.read().unwrap();
         let e = &Event::new_with_extra(
@@ -181,6 +171,8 @@ impl Emitter {
         for handle in handlers.iter() {
             (handle)(e);
         }
+
+        Ok(())
     }
 
     pub fn emit_start_event(&self, state: &Message) {

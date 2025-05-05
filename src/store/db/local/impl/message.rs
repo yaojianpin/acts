@@ -1,11 +1,11 @@
 use crate::{
-    store::{
-        db::local::{DbColumn, DbRow, DbSchema, DbType},
-        Message,
-    },
     MessageState, Result,
+    store::{
+        Message,
+        db::local::{DbColumn, DbRow, DbSchema, DbType},
+    },
 };
-use rusqlite::{types::Value, Error as DbError, Result as DbResult, Row};
+use rusqlite::{Error as DbError, Result as DbResult, Row, types::Value};
 use std::str::FromStr;
 impl DbSchema for Message {
     fn schema() -> Result<Vec<(String, DbColumn)>> {
@@ -53,14 +53,6 @@ impl DbSchema for Message {
                 },
             ),
             (
-                "source".to_string(),
-                DbColumn {
-                    db_type: DbType::Text,
-                    is_not_null: true,
-                    ..Default::default()
-                },
-            ),
-            (
                 "model".to_string(),
                 DbColumn {
                     db_type: DbType::Text,
@@ -98,6 +90,15 @@ impl DbSchema for Message {
                 "key".to_string(),
                 DbColumn {
                     db_type: DbType::Text,
+                    ..Default::default()
+                },
+            ),
+            (
+                "uses".to_string(),
+                DbColumn {
+                    db_type: DbType::Text,
+                    is_not_null: true,
+                    is_index: true,
                     ..Default::default()
                 },
             ),
@@ -206,17 +207,17 @@ impl DbRow for Message {
             tid: row.get::<usize, String>(2).unwrap(),
             state: MessageState::from_str(&row.get::<usize, String>(3).unwrap()).unwrap(),
             r#type: row.get::<usize, String>(4).unwrap(),
-            source: row.get::<usize, String>(5).unwrap(),
-            model: row.get::<usize, String>(6).unwrap(),
-            pid: row.get::<usize, String>(7).unwrap(),
-            nid: row.get::<usize, String>(8).unwrap(),
-            mid: row.get::<usize, String>(9).unwrap(),
-            key: row.get::<usize, String>(10).unwrap(),
+            model: row.get::<usize, String>(5).unwrap(),
+            pid: row.get::<usize, String>(6).unwrap(),
+            nid: row.get::<usize, String>(7).unwrap(),
+            mid: row.get::<usize, String>(8).unwrap(),
+            key: row.get::<usize, String>(9).unwrap(),
+            uses: row.get::<usize, String>(10).unwrap(),
             inputs: row.get::<usize, String>(11).unwrap(),
             outputs: row.get::<usize, String>(12).unwrap(),
             tag: row.get::<usize, String>(13).unwrap(),
             start_time: row.get::<usize, i64>(14).unwrap(),
-            end_time: row.get::<usize, i64>(14).unwrap(),
+            end_time: row.get::<usize, i64>(15).unwrap(),
             chan_id: row.get::<usize, String>(16).unwrap(),
             chan_pattern: row.get::<usize, String>(17).unwrap(),
             create_time: row.get::<usize, i64>(18).unwrap(),
@@ -237,7 +238,7 @@ impl DbRow for Message {
                 Value::Text(self.state.as_ref().to_string()),
             ),
             ("type".to_string(), Value::Text(self.r#type.clone())),
-            ("source".to_string(), Value::Text(self.source.clone())),
+            ("uses".to_string(), Value::Text(self.uses.clone())),
             ("model".to_string(), Value::Text(self.model.clone())),
             ("pid".to_string(), Value::Text(self.pid.clone())),
             ("nid".to_string(), Value::Text(self.nid.clone())),

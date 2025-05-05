@@ -1,8 +1,8 @@
 use super::hook::TaskLifeCycle;
 use crate::{
+    ActTask, Result,
     model::Step,
-    scheduler::{Context, NodeContent, TaskState},
-    ActError, ActTask, Result, StoreAdapter,
+    scheduler::{Context, TaskState},
 };
 use async_trait::async_trait;
 
@@ -34,9 +34,7 @@ impl ActTask for Step {
 
         // run setup
         if !self.setup.is_empty() {
-            for act in &self.setup {
-                act.exec(ctx)?;
-            }
+            ctx.dispatch_acts(self.setup.clone(), true)?;
         }
 
         Ok(())
@@ -48,23 +46,10 @@ impl ActTask for Step {
             ctx.eval::<()>(script)?;
         }
 
-        if let Some(pack_id) = &self.uses {
-            let pack = ctx.runtime.cache().store().packages().find(pack_id)?;
-            let script: String = String::from_utf8(pack.data).map_err(ActError::from)?;
-            ctx.eval::<()>(&script)?;
-        }
         let children = task.node.children();
         if !children.is_empty() {
             for child in &children {
-                if let NodeContent::Act(act) = &child.content {
-                    if act.is_taskable() {
-                        ctx.sched_task(child);
-                    } else {
-                        act.exec(ctx)?;
-                    }
-                } else {
-                    ctx.sched_task(child);
-                }
+                ctx.sched_task(child);
             }
         }
 

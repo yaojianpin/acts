@@ -45,7 +45,7 @@ pub trait DbSet: Send + Sync {
 ///
 /// # Example
 /// ```no_run
-/// use acts::{data::{Model, Proc, Task, Package, Message}, DbSet, StoreAdapter};
+/// use acts::{data::{Model, Proc, Task, Package, Message, Event}, DbSet, StoreAdapter};
 /// use std::sync::Arc;
 /// struct TestStore;
 /// impl StoreAdapter for TestStore {
@@ -65,6 +65,9 @@ pub trait DbSet: Send + Sync {
 ///     fn messages(&self) -> Arc<dyn DbSet<Item =Message>> {
 ///         todo!()
 ///     }
+///     fn events(&self) -> Arc<dyn DbSet<Item =Event>> {
+///         todo!()
+///     }
 ///     fn init(&self) {}
 ///     fn close(&self) {}
 /// }
@@ -77,5 +80,6 @@ pub trait StoreAdapter: Send + Sync {
     fn tasks(&self) -> Arc<dyn DbSet<Item = Task>>;
     fn packages(&self) -> Arc<dyn DbSet<Item = Package>>;
     fn messages(&self) -> Arc<dyn DbSet<Item = Message>>;
+    fn events(&self) -> Arc<dyn DbSet<Item = Event>>;
     fn close(&self);
 }

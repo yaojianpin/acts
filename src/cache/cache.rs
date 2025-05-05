@@ -1,7 +1,7 @@
 use crate::{
+    Engine, Result, ShareLock, StoreAdapter,
     scheduler::{Process, Runtime, Task},
     store::Store,
-    Engine, Result, ShareLock, StoreAdapter,
 };
 use moka::sync::Cache as MokaCache;
 use std::sync::{Arc, RwLock};
@@ -53,7 +53,7 @@ impl Cache {
             *self.store.write().unwrap() =
                 Arc::new(Store::local(&config.data_dir, &config.db_name));
         }
-        if let Some(store) = engine.adapter().store() {
+        if let Some(store) = engine.runtime().adapter().store() {
             *self.store.write().unwrap() = Arc::new(Store::create(store));
         }
     }
@@ -159,8 +159,8 @@ impl Cache {
             let mut proc = store.procs().find(&task.pid)?;
             proc.end_time = p.end_time();
             proc.state = p.state().into();
-            store.procs().update(&proc)?;
 
+            store.procs().update(&proc)?;
             store.upsert_task(task)?;
         }
 

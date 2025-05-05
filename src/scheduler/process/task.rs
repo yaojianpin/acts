@@ -6,14 +6,15 @@ mod workflow;
 
 use crate::utils::consts::TASK_ROOT_TID;
 use crate::{
+    Act, ActError, ActTask, Catch, Error, Message, MessageState, NodeKind, Result, ShareLock,
+    Timeout, Vars,
     data::{self, MessageStatus},
     event::{EventAction, Model},
     scheduler::{
         Context, Process, Runtime, TaskState,
+        tree::{Node, NodeContent},
     },
     utils::{self, consts},
-    Act, ActError, ActTask, Catch, Error, Message, MessageState, NodeKind, Result, ShareLock,
-    Timeout, Vars,
 };
 use async_trait::async_trait;
 pub use hook::{StatementBatch, TaskLifeCycle};
@@ -131,6 +132,22 @@ impl Task {
         });
     }
 
+    pub fn is_auto_complete(&self) -> bool {
+        self.with_data(|data| data.get::<bool>(consts::TASK_AUOT_COMPLETE))
+            .unwrap_or(true)
+    }
+
+    pub fn is_event_processed(&self) -> bool {
+        self.with_data(|data| data.get::<bool>(consts::IS_EVENT_PROCESSED))
+            .unwrap_or(false)
+    }
+
+    pub fn set_auto_complete(&self, v: bool) {
+        self.set_data_with(move |data| {
+            data.set(consts::TASK_AUOT_COMPLETE, v);
+        });
+    }
+
     pub fn create_context(self: &Arc<Self>) -> Context {
         self.proc.create_context(self)
     }
@@ -157,6 +174,12 @@ impl Task {
                 }
                 parent = task.parent();
             }
+
+            // append act.optins to inputs
+            inputs.set(consts::ACT_OPTIONS_KEY, self.options());
+
+            // append act.params to inputs
+            inputs.set(consts::ACT_PARAMS_KEY, self.params());
         }
 
         // add error to inputs
@@ -165,23 +188,18 @@ impl Task {
             inputs.set(consts::ACT_ERR_MESSAGE, err.message);
         }
 
-        let mut key = self.node.key();
-        if key.is_empty() {
-            key = self.node.id().to_string();
-        }
         let state: MessageState = self.state().into();
-
         Message {
             id: utils::longid(),
             tid: self.id.clone(),
             name: self.node.content.name(),
-            r#type: self.node.typ(),
-            source: self.node.kind().to_string(),
+            r#type: self.node.kind().to_string(),
             state,
             pid: self.pid.clone(),
             nid: self.node.id().to_string(),
             mid: workflow.id.clone(),
-            key,
+            key: self.node.key(),
+            uses: self.node.uses(),
             tag: self.node.tag().to_string(),
 
             model: Model {
@@ -239,11 +257,41 @@ impl Task {
     }
 
     pub fn inputs(self: &Arc<Self>) -> Vars {
+        // if self.data().contains_key(consts::ACT_INPUTS_CACHE) {
+        //     return self
+        //         .data()
+        //         .get::<Vars>(consts::ACT_INPUTS_CACHE)
+        //         .unwrap_or_default();
+        // }
+
         let ctx = self.create_context();
-        utils::fill_inputs(&self.node.content.inputs(), &ctx)
+        let mut vars = Vars::new();
+        if let Some(prev) = self.prev() {
+            if let Some(prev_task) = self.proc.task(&prev) {
+                // set the prev task's outputs as current inputs
+                for (ref k, v) in &prev_task.outputs() {
+                    vars.set(k, v.clone());
+                }
+            }
+        }
+
+        // merge the inputs
+        let inputs = utils::fill_inputs(&self.node.content.inputs(), &ctx);
+
+        // write the inputs to cache
+        // to avoid the dup calculation
+        // self.set_data_with(|data| data.set(consts::ACT_INPUTS_CACHE, inputs.clone()));
+
+        vars.extend(inputs)
     }
 
     pub fn outputs(self: &Arc<Self>) -> Vars {
+        // if self.data().contains_key(consts::ACT_OUTPUTS_CACHE) {
+        //     return self
+        //         .data()
+        //         .get::<Vars>(consts::ACT_OUTPUTS_CACHE)
+        //         .unwrap_or_default();
+        // }
         let ctx = self.create_context();
 
         let mut outputs = self.node.content.outputs();
@@ -266,7 +314,26 @@ impl Task {
             }
         }
 
+        // write the outputs to cache
+        // to avoid the dup calculation
+        // self.set_data_with(|data| data.set(consts::ACT_OUTPUTS_CACHE, outputs.clone()));
+
         outputs
+    }
+
+    pub fn options(self: &Arc<Self>) -> Vars {
+        self.node.content.options()
+    }
+
+    pub fn params(self: &Arc<Self>) -> serde_json::Value {
+        if self.data().contains_key(consts::ACT_PARAMS_CACHE) {
+            return self
+                .data()
+                .get::<serde_json::Value>(consts::ACT_PARAMS_CACHE)
+                .unwrap_or_default();
+        }
+        let ctx = self.create_context();
+        utils::fill_params(&self.node.content.params(), &ctx)
     }
 
     pub fn set_prev(&self, prev: Option<String>) {
@@ -319,9 +386,9 @@ impl Task {
         self.node.kind() == kind
     }
 
-    pub fn is_act(&self, v: &str) -> bool {
+    pub fn is_uses(&self, v: &str) -> bool {
         if self.node.kind() == NodeKind::Act {
-            return self.node.typ() == v;
+            return self.node.uses() == v;
         }
         false
     }
@@ -354,34 +421,27 @@ impl Task {
 
         match action.event {
             EventAction::Push => {
-                let act_name = ctx.get_var::<String>("act").unwrap_or("irq".to_string());
+                let package = ctx.get_var::<String>("uses").unwrap_or_default();
                 let key = ctx.get_var::<String>("key").unwrap_or_default();
                 let act = Act {
                     id: ctx.get_var::<String>("id").unwrap_or_default(),
                     name: ctx.get_var::<String>("name").unwrap_or_default(),
                     tag: ctx.get_var::<String>("tag").unwrap_or_default(),
                     key: key.clone(),
-                    act: act_name.clone(),
-                    inputs: ctx.get_var("with").unwrap_or_default(),
-                    rets: ctx.get_var("rets").unwrap_or_default(),
+                    uses: package.clone(),
+                    params: ctx.get_var("params").unwrap_or_default(),
                     outputs: ctx.get_var("outputs").unwrap_or_default(),
                     ..Default::default()
                 };
 
                 // check key property
-                if (act_name == "irq"
-                    || act_name == "pack"
-                    || act_name == "call"
-                    || act_name == "cmd"
-                    || act_name == "msg")
-                    && key.is_empty()
-                {
+                if package.is_empty() {
                     return Err(crate::ActError::Action(
-                        "cannot find 'key' in act".to_string(),
+                        "cannot find 'uses' in act".to_string(),
                     ));
                 }
 
-                ctx.append_act(&act)?;
+                ctx.dispatch_act(&act, false)?;
             }
             EventAction::Remove => {
                 self.set_state(TaskState::Removed);
@@ -409,7 +469,7 @@ impl Task {
                     )));
                 }
                 let nid = ctx
-                    .get_var::<String>(consts::ACT_TO)
+                    .get_var::<String>(consts::ACT_SUBFLOW_TO)
                     .ok_or(ActError::Action(
                         "cannot find 'to' value in options".to_string(),
                     ))?;
@@ -508,7 +568,7 @@ impl Task {
                     .get_var::<String>(consts::ACT_ERR_CODE)
                     .ok_or(ActError::Action(format!(
                         "cannot find '{}' in options",
-                        consts::ACT_ERR_MESSAGE
+                        consts::ACT_ERR_CODE
                     )))?;
 
                 let error = ctx
@@ -516,7 +576,7 @@ impl Task {
                     .unwrap_or("".to_string());
 
                 let err = Error::new(&error, &ecode);
-                println!("error: {err:?}");
+                debug!("error: {err:?}");
                 let task = &ctx.task();
                 if task.state().is_completed() {
                     return Err(ActError::Action(format!(
@@ -537,6 +597,7 @@ impl Task {
                     ctx.emit_task(sub)?;
                 }
                 task.set_err(&err);
+                task.set_data(&ctx.vars());
                 task.error(ctx)?;
             }
             EventAction::SetProcessVars => {
@@ -644,24 +705,40 @@ impl Task {
     }
 
     pub fn run_hooks(&self, ctx: &Context) -> Result<()> {
+        // check if the task is from hook itself
+        let is_event_processed = ctx
+            .task()
+            .with_data(|data| data.get::<bool>(consts::IS_EVENT_PROCESSED))
+            .unwrap_or_default();
+        if is_event_processed {
+            return Ok(());
+        }
+
         let state = self.state();
         match state {
             TaskState::None | TaskState::Running => {}
             TaskState::Ready | TaskState::Pending | TaskState::Interrupt => {
                 self.run_hooks_by(TaskLifeCycle::Created, ctx)?;
                 if self.is_kind(NodeKind::Act) {
-                    if let Some(task) = self.parent() {
-                        task.run_hooks_by(TaskLifeCycle::BeforeUpdate, ctx)?;
+                    let mut parent = self.parent();
+                    while let Some(task) = parent {
+                        if task.is_kind(NodeKind::Step) {
+                            task.run_hooks_by(TaskLifeCycle::BeforeUpdate, ctx)?;
+                            break;
+                        }
+                        parent = task.parent();
                     }
+
                     if let Some(root) = ctx.proc.root() {
                         root.run_hooks_by(TaskLifeCycle::BeforeUpdate, ctx)?
                     }
-                } else if self.is_kind(NodeKind::Step) {
-                    ctx.task().run_hooks_by(TaskLifeCycle::Step, ctx)?;
-                    if let Some(root) = ctx.proc.root() {
-                        root.run_hooks_by(TaskLifeCycle::Step, ctx)?
-                    }
                 }
+                // else if self.is_kind(NodeKind::Step) {
+                //     ctx.task().run_hooks_by(TaskLifeCycle::Step, ctx)?;
+                //     if let Some(root) = ctx.proc.root() {
+                //         root.run_hooks_by(TaskLifeCycle::Step, ctx)?
+                //     }
+                // }
             }
             TaskState::Completed
             | TaskState::Backed
@@ -673,8 +750,13 @@ impl Task {
                 self.run_hooks_by(TaskLifeCycle::Completed, ctx)?;
                 if self.is_kind(NodeKind::Act) {
                     // triggers step updated hook when the act is completed
-                    if let Some(task) = self.parent() {
-                        task.run_hooks_by(TaskLifeCycle::Updated, ctx)?;
+                    let mut parent = self.parent();
+                    while let Some(task) = parent {
+                        if task.is_kind(NodeKind::Step) {
+                            task.run_hooks_by(TaskLifeCycle::Updated, ctx)?;
+                            break;
+                        }
+                        parent = task.parent();
                     }
                     if let Some(root) = ctx.proc.root() {
                         root.run_hooks_by(TaskLifeCycle::Updated, ctx)?
@@ -721,7 +803,7 @@ impl Task {
             id: id.id(),
             prev: self.prev(),
             name: self.node.content.name(),
-            kind: self.node.typ(),
+            kind: self.node.kind().to_string(),
             pid: self.pid.clone(),
             tid: self.id.clone(),
             node_data: self.node.to_string(),
@@ -811,7 +893,10 @@ impl ActTask for Arc<Task> {
                 NodeContent::Step(step) => step.init(ctx)?,
                 NodeContent::Act(act) => act.init(ctx)?,
             }
-            ctx.emit_task(&ctx.task())?;
+
+            if !self.state().is_completed() {
+                ctx.emit_task(&ctx.task())?;
+            }
         }
 
         Ok(())
@@ -844,17 +929,16 @@ impl ActTask for Arc<Task> {
                 NodeContent::Act(data) => data.next(ctx)?,
             };
         }
-
         debug!("is_next:{} task={:?}", is_next, ctx.task());
-        self.update_data(&ctx.vars());
         if self.state().is_completed() {
+            self.update_data(&ctx.vars());
             ctx.emit_task(self)?;
-        }
 
-        if !is_next {
-            let parent = ctx.task().parent();
-            if let Some(task) = &parent.clone() {
-                task.review(ctx)?;
+            if !is_next && !ctx.task().is_event_processed() {
+                let parent = ctx.task().parent();
+                if let Some(task) = &parent.clone() {
+                    task.review(ctx)?;
+                }
             }
         }
 
@@ -862,7 +946,17 @@ impl ActTask for Arc<Task> {
     }
 
     fn review(&self, ctx: &Context) -> Result<bool> {
+        if ctx.task().is_event_processed() {
+            return Ok(false);
+        }
+        // last task's outputs
+        // update prev outputs to current task
+        let outputs = ctx.task().outputs();
+        self.update_data(&outputs);
+
         ctx.set_task(self);
+
+        let before_state = self.state();
         let is_review = match &self.node.content {
             NodeContent::Workflow(data) => data.review(ctx)?,
             NodeContent::Step(data) => data.review(ctx)?,
@@ -871,7 +965,7 @@ impl ActTask for Arc<Task> {
         };
 
         debug!("is_review:{} task={:?}", is_review, ctx.task());
-        if self.state().is_completed() {
+        if self.state().is_completed() && before_state != self.state() {
             ctx.emit_task(self)?;
         }
 
@@ -969,9 +1063,7 @@ impl Task {
             parent = task.parent();
         }
 
-        let mut locals = Vars::new();
         for (ref name, ref value) in vars {
-            let mut is_shared_var = false;
             for t in refs.iter().rev() {
                 let is_updated = t.update_data_if_exists(|v| {
                     if v.contains_key(name) {
@@ -982,15 +1074,12 @@ impl Task {
                 });
 
                 if is_updated {
-                    is_shared_var = true;
                     break;
                 }
             }
-
-            if !is_shared_var {
-                locals.set(name, value);
-            }
         }
-        self.set_data(&locals);
+
+        // also set the to current task
+        self.set_data(vars);
     }
 }

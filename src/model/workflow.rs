@@ -1,4 +1,4 @@
-use crate::{scheduler::NodeTree, Act, ActError, ModelBase, Result, Step, Vars};
+use crate::{Act, ActError, ModelBase, Result, Step, Vars, scheduler::NodeTree};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
@@ -9,6 +9,9 @@ pub struct Workflow {
 
     #[serde(default)]
     pub name: String,
+
+    #[serde(default)]
+    pub desc: String,
 
     #[serde(default)]
     pub tag: String,

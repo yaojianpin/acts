@@ -1,4 +1,4 @@
-use crate::{Act, Vars};
+use crate::Step;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -6,9 +6,7 @@ pub struct Catch {
     #[serde(default)]
     pub on: Option<String>,
     #[serde(default)]
-    pub inputs: Vars,
-    #[serde(default)]
-    pub then: Vec<Act>,
+    pub steps: Vec<Step>,
 }
 
 impl Catch {
@@ -21,21 +19,10 @@ impl Catch {
         self
     }
 
-    pub fn with_error(mut self, err: &str) -> Self {
-        self.inputs.set("error", err.to_string());
-        self
-    }
-
-    pub fn with_then(mut self, build: fn(Vec<Act>) -> Vec<Act>) -> Self {
-        let stmts = Vec::new();
-        self.then = build(stmts);
+    pub fn with_step(mut self, build: fn(Step) -> Step) -> Self {
+        let step = build(Step::default());
+        self.steps.push(step);
 
         self
-    }
-}
-
-impl From<Catch> for Act {
-    fn from(val: Catch) -> Self {
-        Act::catch(|_| val.clone())
     }
 }

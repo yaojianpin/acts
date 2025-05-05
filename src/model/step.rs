@@ -1,5 +1,5 @@
 #[allow(unused_imports)]
-use crate::{model::Branch, Act, Catch, ModelBase, Timeout, Vars};
+use crate::{Act, Catch, ModelBase, Timeout, Vars, model::Branch};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
@@ -7,6 +7,9 @@ use serde_json::Value as JsonValue;
 pub struct Step {
     #[serde(default)]
     pub name: String,
+
+    #[serde(default)]
+    pub desc: String,
 
     #[serde(default)]
     pub id: String,
@@ -22,9 +25,6 @@ pub struct Step {
 
     #[serde(default)]
     pub run: Option<String>,
-
-    #[serde(default)]
-    pub uses: Option<String>,
 
     #[serde(default)]
     pub r#if: Option<String>,
@@ -93,10 +93,10 @@ impl Step {
         self
     }
 
-    pub fn with_uses(mut self, uses: &str) -> Self {
-        self.uses = Some(uses.to_string());
-        self
-    }
+    // pub fn with_uses(mut self, uses: &str) -> Self {
+    //     self.uses = Some(uses.to_string());
+    //     self
+    // }
 
     pub fn with_input(mut self, name: &str, value: JsonValue) -> Self {
         self.inputs.insert(name.to_string(), value);

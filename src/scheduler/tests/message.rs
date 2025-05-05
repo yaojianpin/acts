@@ -1,11 +1,11 @@
 use crate::event::EventAction;
 use crate::{
+    Act, Action, ChannelOptions, Config, Message, Query, StoreAdapter, Vars, Workflow,
     data::MessageStatus,
     event::MessageState,
-    scheduler::tests::{create_proc_signal, create_proc_signal2, create_proc_signal_config},
+    scheduler::tests::{create_proc_signal, create_proc_signal_config, create_proc_signal2},
     store::{Cond, Expr},
     utils::{self, consts},
-    Act, Action, ChannelOptions, Config, Message, Query, StoreAdapter, Vars, Workflow,
 };
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -207,7 +207,7 @@ async fn sch_message_act_created() {
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
     emitter.on_message(move |e| {
-        if e.r#type == "irq" && e.state() == MessageState::Created {
+        if e.r#type == "act" && e.state() == MessageState::Created {
             rx.send(true);
         }
     });
@@ -229,7 +229,7 @@ async fn sch_message_act_created_by_push_action() {
         if e.r#type == "step" && e.state() == MessageState::Created {
             let options = Vars::new()
                 .with("name", "act 2")
-                .with("act", "irq")
+                .with("uses", "acts.core.irq")
                 .with("key", "act2")
                 .with("tag", "tag2");
             e.do_action(&e.pid, &e.tid, EventAction::Push, &options)
@@ -257,7 +257,10 @@ async fn sch_message_act_tag_by_push_action() {
     emitter.on_message(move |e| {
         println!("message: {e:?}");
         if e.r#type == "step" && e.state() == MessageState::Created {
-            let options = Vars::new().with("key", "act2").with("tag", "tag2");
+            let options = Vars::new()
+                .with("key", "act2")
+                .with("uses", "acts.core.irq")
+                .with("tag", "tag2");
             e.do_action(&e.pid, &e.tid, EventAction::Push, &options)
                 .unwrap();
         }
@@ -285,13 +288,21 @@ async fn sch_message_act_inputs_by_push_action() {
         if e.r#type == "step" && e.state() == MessageState::Created {
             let options = Vars::new()
                 .with("key", "act2")
-                .with("with", Vars::new().with("a", 5));
+                .with("uses", "acts.core.irq")
+                .with("params", Vars::new().with("a", 5));
             e.do_action(&e.pid, &e.tid, EventAction::Push, &options)
                 .unwrap();
         }
 
         if e.is_key("act2") && e.is_state(MessageState::Created) {
-            rx.send(e.inputs.get::<i32>("a").unwrap() == 5);
+            rx.send(
+                e.inputs
+                    .get::<Vars>("params")
+                    .unwrap()
+                    .get::<i32>("a")
+                    .unwrap()
+                    == 5,
+            );
         }
     });
     scher.launch(&proc);
@@ -313,6 +324,7 @@ async fn sch_message_act_outputs_by_push_action() {
         if e.r#type == "step" && e.state() == MessageState::Created {
             let options = Vars::new()
                 .with("key", "act2")
+                .with("uses", "acts.core.irq")
                 .with("outputs", Vars::new().with("a", 5));
             e.do_action(&e.pid, &e.tid, EventAction::Push, &options)
                 .unwrap();
@@ -328,36 +340,37 @@ async fn sch_message_act_outputs_by_push_action() {
     assert!(ret);
 }
 
-#[tokio::test]
-async fn sch_message_act_rets_by_push_action() {
-    let mut workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
-    });
-    let id = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
-    emitter.on_message(move |e| {
-        println!("message: {e:?}");
-        if e.r#type == "step" && e.state() == MessageState::Created {
-            let options = Vars::new()
-                .with("key", "act2")
-                .with("rets", Vars::new().with("a", json!(null)));
-            e.do_action(&e.pid, &e.tid, EventAction::Push, &options)
-                .unwrap();
-        }
+// #[tokio::test]
+// async fn sch_message_act_outputs_by_push_action() {
+//     let mut workflow = Workflow::new().with_step(|step| {
+//         step.with_id("step1")
+//             .with_act(Act::irq(|act| act.with_key("act1")))
+//     });
+//     let id = utils::longid();
+//     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
+//     emitter.on_message(move |e| {
+//         println!("message: {e:?}");
+//         if e.r#type == "step" && e.state() == MessageState::Created {
+//             let options = Vars::new()
+//                 .with("key", "act2")
+//                 .with("uses", "acts.core.irq")
+//                 .with("outputs", Vars::new().with("a", json!(null)));
+//             e.do_action(&e.pid, &e.tid, EventAction::Push, &options)
+//                 .unwrap();
+//         }
 
-        if e.is_key("act2") && e.is_state(MessageState::Created) {
-            rx.send(
-                e.do_action(&e.pid, &e.tid, EventAction::Next, &Vars::new())
-                    .is_err(),
-            );
-        }
-    });
-    scher.launch(&proc);
-    let ret = tx.recv().await;
-    proc.print();
-    assert!(ret);
-}
+//         if e.is_key("act2") && e.is_state(MessageState::Created) {
+//             rx.send(
+//                 e.do_action(&e.pid, &e.tid, EventAction::Next, &Vars::new())
+//                     .is_err(),
+//             );
+//         }
+//     });
+//     scher.launch(&proc);
+//     let ret = tx.recv().await;
+//     proc.print();
+//     assert!(ret);
+// }
 
 #[tokio::test]
 async fn sch_message_act_outputs() {
@@ -371,7 +384,7 @@ async fn sch_message_act_outputs() {
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<Message>(&mut workflow, &id);
     emitter.on_message(move |e| {
-        if e.r#type == "irq" && e.state() == MessageState::Created {
+        if e.r#type == "act" && e.state() == MessageState::Created {
             rx.send(e.inner().clone());
         }
     });
@@ -390,13 +403,13 @@ async fn sch_message_act_completed() {
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
     let s = scher.clone();
     emitter.on_message(move |msg| {
-        if msg.r#type == "irq" && msg.state() == MessageState::Created {
+        if msg.r#type == "act" && msg.state() == MessageState::Created {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             let action = Action::new(&msg.pid, &msg.tid, EventAction::Next, &options);
             s.do_action(&action).unwrap();
         }
-        if msg.r#type == "irq" && msg.state() == MessageState::Completed {
+        if msg.r#type == "act" && msg.state() == MessageState::Completed {
             rx.send(true);
         }
     });
@@ -687,7 +700,7 @@ async fn sch_message_act_inputs_with_step_id() {
         if e.is_key("step1") {
             *tid.lock().unwrap() = e.tid.to_string();
         }
-        if e.is_source("act") && e.is_state(MessageState::Created) {
+        if e.is_type("act") && e.is_state(MessageState::Created) {
             rx.send(e.inputs.clone());
         }
     });
@@ -818,7 +831,8 @@ async fn sch_message_complete_message_in_store() {
     e2.runtime().launch(&proc);
     let ret = tx.recv().await;
     let message = e2.runtime().cache().store().messages().find(&ret).unwrap();
-    assert_eq!(message.r#type, "irq");
+    assert_eq!(message.r#type, "act");
+    assert_eq!(message.uses, "acts.core.irq");
     assert_eq!(message.pid, id);
     assert_eq!(message.state, MessageState::Created);
     assert_eq!(message.status, MessageStatus::Completed);

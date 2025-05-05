@@ -1,6 +1,5 @@
 use crate::{
-    scheduler::{tests::create_proc_signal, TaskState},
-    utils, Act, StmtBuild, Vars, Workflow,
+    Act, StmtBuild, TaskState, Vars, Workflow, scheduler::tests::create_proc_signal, utils,
 };
 
 #[tokio::test]
@@ -9,11 +8,12 @@ async fn sch_act_if_true() {
         step.with_id("step1").with_setup(|setup| {
             setup
                 .add(Act::set(Vars::new().with("a", 10)))
-                .add(Act::r#if(|cond| {
-                    cond.with_on(r#"$("a") > 0"#).with_then(|stmts| {
-                        stmts.add(Act::irq(|act| act.with_key("act1")).with_id("act1"))
-                    })
+                .add(Act::msg(|act| {
+                    act.with_if(r#"$("a") > 0"#)
+                        .with_key("msg1")
+                        .with_id("msg1")
                 }))
+                .add(Act::irq(|act| act.with_key("act1")))
         })
     });
 
@@ -21,7 +21,7 @@ async fn sch_act_if_true() {
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
-        if e.is_source("act") {
+        if e.is_msg() {
             rx.close();
         }
     });
@@ -29,8 +29,8 @@ async fn sch_act_if_true() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act1").first().unwrap().state(),
-        TaskState::Interrupt
+        proc.task_by_nid("msg1").first().unwrap().state(),
+        TaskState::Completed
     );
 }
 
@@ -40,35 +40,33 @@ async fn sch_act_if_false() {
         step.with_id("step1").with_setup(|setup| {
             setup
                 .add(Act::set(Vars::new().with("a", 10)))
-                .add(Act::r#if(|cond| {
-                    cond.with_on(r#"$("a") < 0"#)
-                        .with_then(|stmts| stmts.add(Act::irq(|act| act.with_key("act1"))))
+                .add(Act::msg(|act| {
+                    act.with_if(r#"$("a") < 0"#)
+                        .with_key("msg1")
+                        .with_id("msg1")
                 }))
         })
     });
 
     workflow.print();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
-        println!("message: {:?}", e);
-        if e.is_source("act") {
-            rx.close();
-        }
-    });
+    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     scher.launch(&proc);
     tx.recv().await;
     proc.print();
-    assert_eq!(proc.task_by_nid("act1").len(), 0);
+    assert_eq!(
+        proc.task_by_nid("msg1").first().unwrap().state(),
+        TaskState::Skipped
+    );
 }
 
 #[tokio::test]
 async fn sch_act_if_null_value() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_setup(|setup| {
-            setup.add(Act::r#if(|cond| {
-                cond.with_on(r#"$("a") == null"#).with_then(|stmts| {
-                    stmts.add(Act::irq(|act| act.with_key("act1")).with_id("act1"))
-                })
+            setup.add(Act::msg(|act| {
+                act.with_if(r#""$("a") == null"#)
+                    .with_key("msg1")
+                    .with_id("msg1")
             }))
         })
     });
@@ -77,7 +75,7 @@ async fn sch_act_if_null_value() {
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
-        if e.is_source("act") {
+        if e.is_msg() {
             rx.close();
         }
     });
@@ -85,35 +83,7 @@ async fn sch_act_if_null_value() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act1").first().unwrap().state(),
-        TaskState::Interrupt
+        proc.task_by_nid("msg1").first().unwrap().node().key(),
+        "msg1"
     );
-}
-
-#[tokio::test]
-async fn sch_act_if_else() {
-    let mut workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_setup(|setup| {
-            setup
-                .add(Act::set(Vars::new().with("a", 10)))
-                .add(Act::r#if(|cond| {
-                    cond.with_on(r#"$("a") < 0"#).with_else(|stmts| {
-                        stmts.add(Act::irq(|act| act.with_key("act1")).with_id("act1"))
-                    })
-                }))
-        })
-    });
-
-    workflow.print();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
-        println!("message: {:?}", e);
-        if e.is_source("act") {
-            rx.close();
-        }
-    });
-    scher.launch(&proc);
-    tx.recv().await;
-    proc.print();
-    assert_eq!(proc.task_by_nid("act1").len(), 1);
 }

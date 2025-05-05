@@ -2,7 +2,7 @@ use acts::{Engine, Vars, Workflow};
 use nanoid::nanoid;
 #[tokio::main]
 async fn main() {
-    let engine = Engine::new();
+    let engine = Engine::new().start();
     let (s, sig) = engine.signal(()).double();
     let workflow = Workflow::new()
         .with_id("m1")

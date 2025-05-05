@@ -6,13 +6,13 @@ fn model_step_yml_acts() {
     name: workflow
     id: m1
     steps:
-        - id: act1
+        - id: step1
           acts:
-            - !set
-              a: 5
-            - !req
-              id: act1
-              inputs:
+            - uses: acts.core.irq
+              params:
+                a: 5
+            - uses: acts.core.msg
+              params:
                 b: ${ $("5") }
     "#;
     let m = Workflow::from_yml(text).unwrap();

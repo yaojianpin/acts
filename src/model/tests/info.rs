@@ -1,25 +1,37 @@
 use serde_json::Value;
 
 use crate::{
-    data, scheduler::NodeData, utils, ModelInfo, NodeKind, PackageInfo, ProcInfo, TaskInfo,
-    TaskState, Workflow,
+    ActRunAs, ModelInfo, NodeKind, PackageInfo, ProcInfo, TaskInfo, TaskState, Workflow, data,
+    package::ActPackageCatalog, scheduler::NodeData, utils,
 };
 
 #[test]
 fn model_info_package() {
     let package = &data::Package {
         id: utils::shortid(),
-        name: "test package".to_string(),
-        size: 100,
-        data: vec![0x01, 0x02],
         create_time: 0,
         update_time: 0,
         timestamp: 0,
+        desc: "desc".to_string(),
+        icon: "icon".to_string(),
+        doc: "doc".to_string(),
+        version: "0.1.0".to_string(),
+        schema: "{}".to_string(),
+        run_as: crate::ActRunAs::Func,
+        groups: "[]".to_string(),
+        catalog: crate::package::ActPackageCatalog::Core,
+        built_in: false,
     };
     let info: PackageInfo = package.into();
     assert_eq!(info.id, package.id);
-    assert_eq!(info.name, package.name);
-    assert_eq!(info.size, package.size);
+    assert_eq!(info.desc, package.desc);
+    assert_eq!(info.icon, package.icon);
+    assert_eq!(info.doc, package.doc);
+    assert_eq!(info.version, package.version);
+    assert_eq!(info.schema, package.schema);
+    assert_eq!(info.run_as, package.run_as);
+    assert_eq!(info.groups, package.groups);
+    assert_eq!(info.catalog, package.catalog);
     assert_eq!(info.create_time, package.create_time);
     assert_eq!(info.update_time, package.update_time);
     assert_eq!(info.timestamp, package.timestamp);
@@ -111,12 +123,18 @@ fn model_info_model() {
 fn model_info_package_arr_to_value() {
     let package = &data::Package {
         id: utils::shortid(),
-        name: "test package".to_string(),
-        size: 100,
-        data: vec![0x01, 0x02],
+        desc: "desc".to_string(),
+        icon: "icon".to_string(),
+        doc: "doc".to_string(),
+        version: "0.1.0".to_string(),
+        schema: "{}".to_string(),
+        run_as: crate::ActRunAs::Func,
+        groups: "[]".to_string(),
+        catalog: crate::package::ActPackageCatalog::Core,
         create_time: 0,
         update_time: 0,
         timestamp: 0,
+        built_in: false,
     };
     let info: PackageInfo = package.into();
 
@@ -127,8 +145,20 @@ fn model_info_package_arr_to_value() {
 
     let v = &v[0];
     assert_eq!(v.get("id").unwrap().as_str().unwrap(), info.id);
-    assert_eq!(v.get("name").unwrap().as_str().unwrap(), info.name);
-    assert_eq!(v.get("size").unwrap().as_u64().unwrap(), info.size as u64);
+    assert_eq!(v.get("desc").unwrap().as_str().unwrap(), info.desc);
+    assert_eq!(v.get("icon").unwrap().as_str().unwrap(), info.icon);
+    assert_eq!(v.get("doc").unwrap().as_str().unwrap(), info.doc);
+    assert_eq!(v.get("version").unwrap().as_str().unwrap(), info.version);
+    assert_eq!(v.get("schema").unwrap().as_str().unwrap(), info.schema);
+    assert_eq!(
+        serde_json::from_value::<ActRunAs>(v.get("run_as").unwrap().clone()).unwrap(),
+        info.run_as
+    );
+    assert_eq!(v.get("groups").unwrap().as_str().unwrap(), info.groups);
+    assert_eq!(
+        serde_json::from_value::<ActPackageCatalog>(v.get("catalog").unwrap().clone()).unwrap(),
+        info.catalog
+    );
     assert_eq!(
         v.get("create_time").unwrap().as_i64().unwrap(),
         info.create_time as i64

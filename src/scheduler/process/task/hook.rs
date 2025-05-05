@@ -1,8 +1,11 @@
 use crate::{
-    utils::{self, consts},
     Act, ActTask, Catch, Context, Result, TaskState, Timeout,
+    model::TimeoutLimit,
+    scheduler::tree::NodeOutputKind,
+    utils::{self, consts},
 };
 use serde::{Deserialize, Serialize};
+use tracing::debug;
 
 #[derive(Debug, Clone, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub enum TaskLifeCycle {
@@ -26,10 +29,11 @@ impl StatementBatch {
     pub fn run(&self, ctx: &Context) -> Result<()> {
         match self {
             StatementBatch::Statement(s) => {
-                s.exec(ctx)?;
+                s.dispatch(ctx, true)?;
             }
             StatementBatch::Catch(c) => {
                 let task = ctx.task();
+                debug!("run catch: {:?}", c);
                 if let Some(err) = task.err() {
                     let is_catch_processed = task
                         .with_data(|data| data.get::<bool>(consts::IS_CATCH_PROCESSED))
@@ -42,12 +46,20 @@ impl StatementBatch {
                     if c.on.is_none() || &err.ecode == c.on.as_ref().unwrap() {
                         task.set_data_with(|data| data.set(consts::IS_CATCH_PROCESSED, true));
                         task.set_state(TaskState::Running);
-                        for s in &c.then {
-                            s.exec(ctx)?;
-                        }
 
-                        // review and run the next task
-                        task.review(ctx)?;
+                        let children = task.node().children_in(NodeOutputKind::Catch, c.on.clone());
+
+                        if !children.is_empty() {
+                            for node in
+                                &task.node().children_in(NodeOutputKind::Catch, c.on.clone())
+                            {
+                                ctx.sched_task(node);
+                            }
+                        } else {
+                            // review and run the next task
+                            // no catched children means to ignore the error
+                            task.review(ctx)?;
+                        }
                     }
                 }
             }
@@ -62,10 +74,14 @@ impl StatementBatch {
                 }
 
                 let millis = utils::time::time_millis() - task.start_time();
-                if millis >= t.on.as_secs() * 1000 {
+                let on = TimeoutLimit::parse(&t.on)?;
+                if millis >= on.as_secs() * 1000 {
                     task.set_data_with(|data| data.set(&key, true));
-                    for s in &t.then {
-                        s.exec(ctx)?;
+                    for node in &task
+                        .node()
+                        .children_in(NodeOutputKind::Timeout, Some(t.on.clone()))
+                    {
+                        ctx.sched_task(node);
                     }
                 }
             }

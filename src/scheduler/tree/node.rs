@@ -2,7 +2,7 @@ use crate::{Act, Branch, Step, Vars, Workflow};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, RwLock, Weak};
 
-use super::node_tree;
+use super::{node_tree, visit::VisitRoot};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NodeContent {
@@ -21,15 +21,33 @@ pub enum NodeKind {
     Act,
 }
 
+#[derive(PartialEq, Default, Debug, Clone, Serialize, Deserialize)]
+pub enum NodeOutputKind {
+    #[default]
+    Normal,
+    Catch,
+    Timeout,
+}
+
+#[derive(Debug, Clone)]
+pub struct NodeOutput {
+    pub typ: NodeOutputKind,
+    pub on: Option<String>,
+    pub node: Arc<Node>,
+}
+
 #[derive(Clone)]
 pub struct Node {
     pub id: String,
     pub content: NodeContent,
     pub level: usize,
     pub parent: Arc<RwLock<Weak<Node>>>,
-    pub children: Arc<RwLock<Vec<Arc<Node>>>>,
+    pub children: Arc<RwLock<Vec<NodeOutput>>>,
     pub prev: Arc<RwLock<Weak<Node>>>,
     pub next: Arc<RwLock<Weak<Node>>>,
+
+    // nodes created dynamically
+    pub nodes: Arc<RwLock<Vec<Arc<Node>>>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,10 +98,17 @@ impl NodeContent {
         }
     }
 
-    pub fn rets(&self) -> Vars {
+    pub fn options(&self) -> Vars {
         match self {
-            NodeContent::Act(node) => node.rets.clone(),
+            NodeContent::Act(node) => node.options.clone(),
             _ => Vars::new(),
+        }
+    }
+
+    pub fn params(&self) -> serde_json::Value {
+        match self {
+            NodeContent::Act(node) => node.params.clone(),
+            _ => serde_json::Value::Null,
         }
     }
 
@@ -115,6 +140,7 @@ impl Node {
             children: Arc::new(RwLock::new(Vec::new())),
             prev: Arc::new(RwLock::new(Weak::new())),
             next: Arc::new(RwLock::new(Weak::new())),
+            nodes: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -131,18 +157,27 @@ impl Node {
         None
     }
 
-    pub fn push_child(&self, child: &Arc<Node>) {
+    pub fn push_child(&self, typ: NodeOutputKind, on: Option<String>, child: &Arc<Node>) {
         let mut children = self.children.write().unwrap();
-        children.push(child.clone());
+        children.push(NodeOutput {
+            typ,
+            on,
+            node: child.clone(),
+        });
     }
 
     pub fn set_parent(&self, parent: &Arc<Node>) {
+        self.set_parent_in(NodeOutputKind::Normal, None, parent);
+    }
+
+    /// set parent in the node tree with the given type
+    pub fn set_parent_in(&self, typ: NodeOutputKind, on: Option<String>, parent: &Arc<Node>) {
         *self.parent.write().unwrap() = Arc::downgrade(parent);
-        parent
-            .children
-            .write()
-            .unwrap()
-            .push(Arc::new(self.clone()));
+        parent.children.write().unwrap().push(NodeOutput {
+            typ,
+            on,
+            node: Arc::new(self.clone()),
+        });
     }
 
     pub fn set_next(self: &Arc<Node>, node: &Arc<Node>, is_prev: bool) {
@@ -152,6 +187,23 @@ impl Node {
         }
     }
 
+    pub fn append_node(self: &Arc<Node>, id: &str, data: NodeContent, level: usize) -> Arc<Node> {
+        let node = Arc::new(Node::new(id, data.clone(), level));
+        self.nodes.write().unwrap().push(node.clone());
+        node
+    }
+
+    // pub fn insert_node(
+    //     self: &Arc<Node>,
+    //     index: usize,
+    //     node: NodeContent,
+    //     level: usize,
+    // ) -> Arc<Node> {
+    //     let id = node.id();
+    //     self.nodes.write().unwrap().insert(index, node.clone());
+    //     Arc::new(Node::new(&id, node, level))
+    // }
+
     // fn set_prev(self: &Arc<Node>, node: &Arc<Node>, is_next: bool) {
     //     *self.prev.write().unwrap() = Arc::downgrade(node);
     //     if is_next {
@@ -160,8 +212,15 @@ impl Node {
     // }
 
     pub fn children(&self) -> Vec<Arc<Node>> {
+        self.children_in(NodeOutputKind::Normal, None)
+    }
+
+    pub fn children_in(&self, typ: NodeOutputKind, on: Option<String>) -> Vec<Arc<Node>> {
         let node = self.children.read().unwrap();
-        node.clone()
+        node.iter()
+            .filter(|n| n.typ == typ && n.on == on)
+            .map(|n| n.node.clone())
+            .collect::<Vec<_>>()
     }
 
     pub fn next(&self) -> Weak<Node> {
@@ -179,7 +238,21 @@ impl Node {
     }
 
     pub fn key(&self) -> String {
-        self.content.key()
+        let key = self.content.key();
+        if key.is_empty() {
+            // if the key is empty, use the id as key
+            return self.id.clone();
+        }
+
+        key
+    }
+
+    pub fn uses(&self) -> String {
+        if let NodeContent::Act(act) = &self.content {
+            act.uses.to_string()
+        } else {
+            "".to_string()
+        }
     }
 
     pub fn name(&self) -> String {
@@ -197,14 +270,6 @@ impl Node {
             NodeContent::Step(_) => NodeKind::Step,
             NodeContent::Act(_) => NodeKind::Act,
         }
-    }
-
-    pub fn typ(&self) -> String {
-        if let NodeContent::Act(act) = &self.content {
-            return act.act.to_string();
-        }
-
-        self.kind().to_string()
     }
 
     pub fn tag(&self) -> String {
@@ -251,6 +316,54 @@ impl Node {
         // }
 
         ret
+    }
+
+    #[allow(unused)]
+    pub fn print(self: &Arc<Self>) {
+        VisitRoot::walk(self, &move |n| {
+            // print single line
+            if n.level > 0 {
+                for index in 1..n.level {
+                    if n.path.contains_key(&index) {
+                        if n.path[&index] {
+                            print!("│   ");
+                        } else {
+                            print!("    ");
+                        }
+                    }
+                }
+                if n.is_last {
+                    print!("└── ");
+                } else {
+                    print!("├── ");
+                }
+            }
+            let next = match n.next().upgrade() {
+                Some(n) => n.id().to_string(),
+                None => "nil".to_string(),
+            };
+
+            if n.kind() == NodeKind::Act {
+                println!(
+                    "{}:{} key={} uses={} name={}  next={}",
+                    n.kind(),
+                    n.id(),
+                    n.content.key(),
+                    n.uses(),
+                    n.name(),
+                    next,
+                );
+            } else {
+                println!(
+                    "{}:{} key={} name={}  next={}",
+                    n.kind(),
+                    n.id(),
+                    n.content.key(),
+                    n.name(),
+                    next,
+                );
+            }
+        });
     }
 }
 

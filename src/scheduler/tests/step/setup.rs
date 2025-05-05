@@ -2,9 +2,9 @@ use serde_json::json;
 
 use crate::event::EventAction;
 use crate::{
-    scheduler::{tests::create_proc_signal, TaskState},
-    utils::{self, consts},
-    Act, Message, MessageState, StmtBuild, Vars, Workflow,
+    Act, Message, StmtBuild, Vars, Workflow,
+    scheduler::{TaskState, tests::create_proc_signal},
+    utils::{self},
 };
 
 #[tokio::test]
@@ -19,7 +19,7 @@ async fn sch_step_setup_msg() {
         create_proc_signal::<Vec<Message>>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
-        if e.is_type("msg") {
+        if e.is_msg() {
             rx.update(|data| data.push(e.inner().clone()));
             rx.close();
         }
@@ -35,7 +35,7 @@ async fn sch_step_setup_msg() {
 async fn sch_step_setup_req() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_setup(|stmts| stmts.add(Act::irq(|req: crate::Irq| req.with_key("act1"))))
+            .with_setup(|stmts| stmts.add(Act::irq(|req| req.with_key("act1"))))
     });
 
     workflow.print();
@@ -43,7 +43,7 @@ async fn sch_step_setup_req() {
         create_proc_signal::<Vec<Message>>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
-        if e.is_type("irq") {
+        if e.is_type("act") {
             rx.update(|data| data.push(e.inner().clone()));
             rx.close();
         }
@@ -80,40 +80,14 @@ async fn sch_step_setup_set() {
 }
 
 #[tokio::test]
-async fn sch_step_setup_expose() {
-    let mut workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_setup(|stmts| stmts.add(Act::expose(Vars::new().with("a", 10))))
-    });
-
-    workflow.print();
-    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
-
-    scher.launch(&proc);
-    tx.recv().await;
-    proc.print();
-    assert_eq!(
-        proc.task_by_nid("step1")
-            .first()
-            .unwrap()
-            .outputs()
-            .get::<i32>("a")
-            .unwrap(),
-        10
-    );
-}
-
-#[tokio::test]
 async fn sch_step_setup_if_true() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_input("a", json!(10))
             .with_id("step1")
             .with_setup(|stmts| {
-                stmts.add(Act::r#if(|c| {
-                    c.with_on(r#"$("a") > 0"#).with_then(|stmts| {
-                        stmts.add(Act::irq(|act| act.with_key("act1")).with_id("act1"))
-                    })
-                }))
+                stmts.add(
+                    Act::irq(|act| act.with_if(r#"$("a") > 0"#).with_key("act1")).with_id("act1"),
+                )
             })
     });
 
@@ -121,7 +95,7 @@ async fn sch_step_setup_if_true() {
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
-        if e.is_source("act") {
+        if e.is_type("act") {
             rx.close();
         }
     });
@@ -137,9 +111,8 @@ async fn sch_step_setup_if_false() {
         step.with_input("a", json!(10))
             .with_id("step1")
             .with_setup(|stmts| {
-                stmts.add(Act::r#if(|c| {
-                    c.with_on(r#"$("a") < 0"#)
-                        .with_then(|stmts| stmts.add(Act::irq(|act| act.with_key("act1"))))
+                stmts.add(Act::irq(|act| {
+                    act.with_if(r#"$("a") < 0"#).with_key("act1")
                 }))
             })
     });
@@ -148,7 +121,7 @@ async fn sch_step_setup_if_false() {
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
         println!("message: {:?}", e);
-        if e.is_source("act") {
+        if e.is_type("act") {
             rx.close();
         }
     });
@@ -159,119 +132,11 @@ async fn sch_step_setup_if_false() {
 }
 
 #[tokio::test]
-async fn sch_step_setup_each() {
+async fn sch_step_setup_action() {
     let mut workflow = Workflow::new().with_step(|step| {
-        step.with_input("a", json!(10))
-            .with_id("step1")
-            .with_setup(|stmts| {
-                stmts.add(Act::each(|each| {
-                    each.with_in(r#"["u1", "u2"]"#).with_then(|stmts| {
-                        stmts.add(Act::irq(|act| act.with_key("act1")).with_id("act1"))
-                    })
-                }))
-            })
-    });
-
-    workflow.print();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
-        println!("message: {:?}", e);
-        if e.is_source("act") {
-            rx.close();
-        }
-    });
-    scher.launch(&proc);
-    tx.recv().await;
-    proc.print();
-    assert_eq!(
-        proc.task_by_nid("act1").first().unwrap().state(),
-        TaskState::Interrupt
-    );
-    assert_eq!(
-        proc.task_by_nid("act1")
-            .first()
-            .unwrap()
-            .inputs()
-            .get_value(consts::ACT_VALUE)
-            .unwrap(),
-        &json!("u1")
-    );
-    assert_eq!(
-        proc.task_by_nid("act1")
-            .get(1)
-            .unwrap()
-            .inputs()
-            .get_value(consts::ACT_VALUE)
-            .unwrap(),
-        &json!("u2")
-    );
-}
-
-#[tokio::test]
-async fn sch_step_setup_chain() {
-    let mut workflow = Workflow::new().with_step(|step| {
-        step.with_input("a", json!(10))
-            .with_id("step1")
-            .with_setup(|stmts| {
-                stmts.add(Act::chain(|act| {
-                    act.with_in(r#"["u1", "u2"]"#)
-                        .with_then(|stmts| stmts.add(Act::irq(|act| act.with_key("act1"))))
-                }))
-            })
-    });
-
-    workflow.print();
-    let (proc, scher, emitter, tx, rx) =
-        create_proc_signal::<Vec<String>>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
-        println!("message: {:?}", e.inner());
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
-            rx.update(|data| data.push(e.inputs.get::<String>(consts::ACT_VALUE).unwrap()));
-            e.do_action(&e.pid, &e.tid, EventAction::Next, &Vars::new())
-                .unwrap();
-        }
-    });
-    scher.launch(&proc);
-    let ret = tx.recv().await;
-    proc.print();
-    assert_eq!(ret, ["u1", "u2"]);
-}
-
-#[tokio::test]
-async fn sch_step_setup_pack() {
-    let mut workflow = Workflow::new().with_step(|step| {
-        step.with_input("a", json!(10))
-            .with_id("step1")
-            .with_setup(|stmts| {
-                stmts.add(Act::block(|act| {
-                    act.with_then(|stmts| stmts.add(Act::msg(|msg| msg.with_key("msg1"))))
-                        .with_next(|act| act.with_act("msg").with_key("msg2"))
-                }))
-            })
-    });
-
-    workflow.print();
-    let (proc, scher, emitter, tx, rx) =
-        create_proc_signal::<Vec<String>>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
-        println!("message: {:?}", e.inner());
-        if e.is_type("msg") && e.is_state(MessageState::Created) {
-            rx.update(|data| data.push(e.key.clone()));
-            e.do_action(&e.pid, &e.tid, EventAction::Next, &Vars::new())
-                .unwrap();
-        }
-    });
-    scher.launch(&proc);
-    let ret = tx.recv().await;
-    proc.print();
-    assert_eq!(ret, ["msg1", "msg2"]);
-}
-
-#[tokio::test]
-async fn sch_step_setup_cmd() {
-    let mut workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_setup(|stmts| stmts.add(Act::cmd(|act| act.with_key(EventAction::Next.as_ref()))))
+        step.with_id("step1").with_setup(|stmts| {
+            stmts.add(Act::action(Vars::new().with("action", EventAction::Next)))
+        })
     });
 
     workflow.print();

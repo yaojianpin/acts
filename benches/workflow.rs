@@ -22,7 +22,7 @@ fn deploy(c: &mut Criterion) {
     c.bench_function("deploy", |b| {
         let rt = Runtime::new().unwrap();
         rt.block_on(async move {
-            let engine = Engine::new();
+            let engine = Engine::new().start();
             let text = include_str!("./start.yml");
             let workflow = Workflow::from_yml(text).unwrap();
             b.iter(move || {
@@ -36,7 +36,7 @@ fn start(c: &mut Criterion) {
     c.bench_function("start", |b| {
         let rt = Runtime::new().unwrap();
         rt.block_on(async move {
-            let engine = Engine::new();
+            let engine = Engine::new().start();
             let text = include_str!("./start.yml");
             let workflow = Workflow::from_yml(text).unwrap();
             engine.executor().model().deploy(&workflow).unwrap();
@@ -57,7 +57,7 @@ fn act(c: &mut Criterion) {
 
         b.to_async(rt).iter_custom(|iters| async move {
             // println!("act: iters={iters}");
-            let engine = Engine::new();
+            let engine = Engine::new().start();
 
             let (s, sig) = engine.signal(()).double();
             let text = include_str!("./act.yml");

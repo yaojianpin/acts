@@ -33,6 +33,9 @@ pub enum ActError {
 
     #[error("{0}")]
     IoError(String),
+
+    #[error("{0}")]
+    ValidationError(String),
 }
 
 #[derive(Default, Debug, Clone, Deserialize, Serialize)]

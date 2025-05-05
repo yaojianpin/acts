@@ -270,14 +270,14 @@ async fn event_message_dup_key() {
 }
 
 fn create_proc(workflow: &mut Workflow, id: &str) -> (Arc<Process>, Arc<Runtime>) {
-    let engine = Engine::new();
+    let engine = Engine::new().start();
     let rt = engine.runtime();
     let proc = rt.create_proc(id, workflow);
     (proc, rt)
 }
 
 fn create_proc2(workflow: &mut Workflow, id: &str) -> (Arc<Process>, Engine) {
-    let engine = Engine::new();
+    let engine = Engine::new().start();
     let rt = engine.runtime();
     let proc = rt.create_proc(id, workflow);
     (proc, engine)

@@ -58,7 +58,7 @@ use acts::{Engine, Vars, Workflow};
 
 #[tokio::main]
 async fn main() {
-    let engine = Engine::new();
+    let engine = Engine::new().start();
 
     let text = include_str!("../examples/simple/model.yml");
     let workflow = Workflow::from_yml(text).unwrap();
@@ -146,7 +146,7 @@ use acts::{Engine, Vars, Workflow};
 
 #[tokio::main]
 async fn main() {
-  let engine = Engine::new();
+  let engine = Engine::new().start();
   let executor = engine.executor();
 
   let mut vars = Vars::new();
@@ -492,7 +492,7 @@ acts = { version = "*", features = ["store"] }
 For external store:
 
 ```rust,no_run
-use acts::{Engine, Builder, data::{Model, Proc, Task, Package, Message}, DbSet, StoreAdapter};
+use acts::{Engine, EngineBuilder, data::{Model, Proc, Task, Package, Message, Event}, DbSet, StoreAdapter};
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -514,6 +514,10 @@ impl StoreAdapter for TestStore {
     fn messages(&self) -> Arc<dyn DbSet<Item =Message>> {
         todo!()
     }
+
+    fn events(&self) -> Arc<dyn DbSet<Item =Event>> {
+        todo!()
+    }
     fn init(&self) {}
     fn close(&self) {}
 }
@@ -522,7 +526,7 @@ impl StoreAdapter for TestStore {
 async fn main() {
    // set custom store
  let store = TestStore;
- let engine = Builder::new().store(&store).build();
+ let engine = EngineBuilder::new().set_store(&store).build().start();
 }
 ```
 

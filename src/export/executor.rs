@@ -1,20 +1,24 @@
 mod act_executor;
+// mod event_executor;
 mod message_executor;
 mod model_executor;
 mod package_executor;
 mod process_executor;
 mod task_executor;
 
+use serde::Serialize;
+use serde_json::json;
+
 use crate::{
+    Query,
     scheduler::Runtime,
     store::{Cond, Expr},
-    Query,
 };
 use std::sync::Arc;
 
 #[derive(Default, Debug)]
 pub struct ExecutorQuery {
-    pub query_by: Vec<(String, String)>,
+    pub query_by: Vec<(String, serde_json::Value)>,
     pub order_by: Vec<(String, bool)>,
 
     pub offset: usize,
@@ -51,8 +55,8 @@ impl ExecutorQuery {
         self
     }
 
-    pub fn with_query(mut self, key: &str, value: &str) -> Self {
-        self.query_by.push((key.to_string(), value.to_string()));
+    pub fn with_query<T: Serialize>(mut self, key: &str, value: T) -> Self {
+        self.query_by.push((key.to_string(), json!(value)));
         self
     }
 

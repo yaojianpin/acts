@@ -23,11 +23,11 @@ impl Client {
     }
 
     pub fn process(&self, executor: &Executor, e: &Event<Message>) -> Result<()> {
-        if e.is_source("act") && e.is_state(MessageState::Created) {
+        if e.is_type("act") && e.is_state(MessageState::Created) {
             match self.actions.get(&e.key) {
                 Some(action) => {
+                    println!("action:{} inputs={:?}", &e.key, e.inputs);
                     action(executor, e)?;
-                    println!("action state: key={}", &e.key);
                 }
                 None => eprintln!("cannot find action '{}'", e.key),
             }

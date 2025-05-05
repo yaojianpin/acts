@@ -1,4 +1,4 @@
-use crate::{model::Step, ModelBase, Vars};
+use crate::{ModelBase, Vars, model::Step};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
@@ -6,6 +6,9 @@ use serde_json::Value as JsonValue;
 pub struct Branch {
     #[serde(default)]
     pub name: String,
+
+    #[serde(default)]
+    pub desc: String,
 
     #[serde(default)]
     pub id: String,

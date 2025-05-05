@@ -1,18 +1,13 @@
-use crate::{scheduler::tests::create_proc_signal, utils, Act, Message, StmtBuild, Workflow};
+use crate::{Act, Message, Workflow, scheduler::tests::create_proc_signal, utils};
 
 #[tokio::test]
 async fn sch_act_timeout_one() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(
-                Act::new()
-                    .with_act("irq")
-                    .with_key("act1")
-                    .with_timeout(|t| {
-                        t.with_on("1s")
-                            .with_then(|stmts| stmts.add(Act::msg(|msg| msg.with_key("msg1"))))
-                    }),
-            )
+            .with_act(Act::irq(|act| act.with_key("act1")).with_timeout(|t| {
+                t.with_on("1s")
+                    .with_step(|step| step.with_act(Act::msg(|msg| msg.with_key("msg1"))))
+            }))
     });
     workflow.print();
     let (proc, scher, emitter, tx, rx) =
@@ -33,16 +28,14 @@ async fn sch_act_timeout_one() {
 async fn sch_act_timeout_many() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_act(
-            Act::new()
-                .with_act("irq")
-                .with_key("act1")
+            Act::irq(|act| act.with_key("act1"))
                 .with_timeout(|t| {
                     t.with_on("1s")
-                        .with_then(|stmts| stmts.add(Act::msg(|msg| msg.with_key("msg1"))))
+                        .with_step(|step| step.with_act(Act::msg(|msg| msg.with_key("msg1"))))
                 })
                 .with_timeout(|t| {
                     t.with_on("2s")
-                        .with_then(|stmts| stmts.add(Act::msg(|msg| msg.with_key("msg2"))))
+                        .with_step(|step| step.with_act(Act::msg(|msg| msg.with_key("msg2"))))
                 }),
         )
     });

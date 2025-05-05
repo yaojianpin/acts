@@ -1,8 +1,8 @@
 use crate::event::EventAction;
 use crate::{
-    scheduler::{tests::create_proc_signal, TaskState},
+    Act, Action, MessageState, Vars, Workflow,
+    scheduler::{TaskState, tests::create_proc_signal},
     utils::{self, consts},
-    Act, Action, MessageState, StmtBuild, Vars, Workflow,
 };
 use serde_json::json;
 
@@ -10,7 +10,12 @@ use serde_json::json;
 async fn sch_step_catch_by_any_error() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(|c| c.with_then(|stmts| stmts.add(Act::irq(|act| act.with_key("catch1")))))
+            .with_catch(|c| {
+                c.with_step(|step| {
+                    step.with_id("step2")
+                        .with_act(Act::irq(|act| act.with_key("catch1")))
+                })
+            })
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
     workflow.print();
@@ -42,7 +47,12 @@ async fn sch_step_catch_by_any_error() {
 async fn sch_step_catch_by_msg() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(|c| c.with_then(|stmts| stmts.add(Act::msg(|msg| msg.with_key("msg1")))))
+            .with_catch(|c| {
+                c.with_step(|step| {
+                    step.with_id("step2")
+                        .with_act(Act::msg(|msg| msg.with_key("msg1")))
+                })
+            })
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
     workflow.print();
@@ -74,7 +84,7 @@ async fn sch_step_catch_by_msg() {
 async fn sch_step_catch_empty_then() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(|c| c.with_then(|_| Vec::new()))
+            .with_catch(|c| c)
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
     workflow.print();
@@ -101,8 +111,10 @@ async fn sch_step_catch_by_err_code() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_catch(|c| {
-                c.with_on("123")
-                    .with_then(|stmts| stmts.add(Act::irq(|act| act.with_key("catch1"))))
+                c.with_on("123").with_step(|step| {
+                    step.with_id("step2")
+                        .with_act(Act::irq(|act| act.with_key("catch1")))
+                })
             })
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
@@ -137,8 +149,9 @@ async fn sch_step_catch_by_wrong_code() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_catch(|c| {
-                c.with_on("wrong_code").with_then(|stmts| {
-                    stmts.add(Act::irq(|act| act.with_key("catch1")).with_id("catch1"))
+                c.with_on("wrong_code").with_step(|step| {
+                    step.with_id("step2")
+                        .with_act(Act::irq(|act| act.with_key("catch1")).with_id("catch1"))
                 })
             })
             .with_act(Act::irq(|act| act.with_key("act1")).with_id("act1"))
@@ -170,7 +183,12 @@ async fn sch_step_catch_by_wrong_code() {
 async fn sch_step_catch_by_no_err_code() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(|c| c.with_then(|stmts| stmts.add(Act::irq(|act| act.with_key("catch1")))))
+            .with_catch(|c| {
+                c.with_step(|step| {
+                    step.with_id("step2")
+                        .with_act(Act::irq(|act| act.with_key("catch1")))
+                })
+            })
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
     workflow.print();
@@ -198,7 +216,12 @@ async fn sch_step_catch_by_no_err_code() {
 async fn sch_step_catch_as_complete() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(|c| c.with_then(|stmts| stmts.add(Act::irq(|act| act.with_key("catch1")))))
+            .with_catch(|c| {
+                c.with_step(|step| {
+                    step.with_id("step2")
+                        .with_act(Act::irq(|act| act.with_key("catch1")))
+                })
+            })
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
     workflow.print();
@@ -245,7 +268,12 @@ async fn sch_step_catch_as_complete() {
 async fn sch_step_catch_as_error() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(|c| c.with_then(|stmts| stmts.add(Act::irq(|act| act.with_key("catch1")))))
+            .with_catch(|c| {
+                c.with_step(|step| {
+                    step.with_id("step2")
+                        .with_act(Act::irq(|act| act.with_key("catch1")))
+                })
+            })
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
     workflow.print();
@@ -294,8 +322,9 @@ async fn sch_step_catch_as_skip() {
         .with_step(|step| {
             step.with_id("step1")
                 .with_catch(|c| {
-                    c.with_then(|stmts| {
-                        stmts.add(Act::irq(|act| act.with_key("catch1")).with_id("catch1"))
+                    c.with_step(|step| {
+                        step.with_id("step3")
+                            .with_act(Act::irq(|act| act.with_key("catch1")).with_id("catch1"))
                     })
                 })
                 .with_act(Act::irq(|act| act.with_key("act1")).with_id("act1"))
@@ -347,7 +376,12 @@ async fn sch_step_catch_as_skip() {
 async fn sch_step_catch_as_abort() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(|c| c.with_then(|stmts| stmts.add(Act::irq(|act| act.with_key("catch1")))))
+            .with_catch(|c| {
+                c.with_step(|step| {
+                    step.with_id("step2")
+                        .with_act(Act::irq(|act| act.with_key("catch1")))
+                })
+            })
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
     workflow.print();
@@ -385,8 +419,9 @@ async fn sch_step_catch_as_submit() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_catch(|c| {
-                c.with_then(|stmts| {
-                    stmts.add(Act::irq(|act| act.with_key("catch1")).with_id("catch1"))
+                c.with_step(|step| {
+                    step.with_id("step2")
+                        .with_act(Act::irq(|act| act.with_key("catch1")).with_id("catch1"))
                 })
             })
             .with_act(Act::irq(|act| act.with_key("act1")).with_id("act1"))
@@ -439,8 +474,9 @@ async fn sch_step_catch_as_back() {
         .with_step(|step| {
             step.with_id("step2")
                 .with_catch(|c| {
-                    c.with_then(|stmts| {
-                        stmts.add(Act::irq(|act| act.with_key("catch2")).with_id("catch2"))
+                    c.with_step(|step| {
+                        step.with_id("step3")
+                            .with_act(Act::irq(|act| act.with_key("catch2")).with_id("catch2"))
                     })
                 })
                 .with_act(Act::irq(|act| act.with_key("act2")).with_id("act2"))
@@ -505,7 +541,10 @@ async fn sch_step_catch_and_continue() {
         .with_step(|step| {
             step.with_id("step1")
                 .with_catch(|c| {
-                    c.with_then(|stmts| stmts.add(Act::msg(|msg| msg.with_key("msg1"))))
+                    c.with_step(|step| {
+                        step.with_id("step3")
+                            .with_act(Act::msg(|msg| msg.with_key("msg1")))
+                    })
                 })
                 .with_act(Act::irq(|act| act.with_key("act1")))
         })
@@ -518,6 +557,7 @@ async fn sch_step_catch_and_continue() {
 
     let s = scher.clone();
     emitter.on_message(move |e| {
+        println!("message: {:?}", e.inner());
         if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));

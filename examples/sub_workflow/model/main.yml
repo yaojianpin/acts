@@ -8,18 +8,19 @@ steps:
   - name: prepare
     id: prepare
     acts:
-      - act: irq
+      - uses: acts.core.irq
         key: init
   - name: enter sub workflow
     acts:
-      - act: call
-        key: sub
+      - uses: acts.core.subflow
         inputs:
-            v: ${ $("v") }
+            to: sub
+            extra:
+              v: ${ $("v") }
   - name: final
     id: final
     acts:
-      - act: irq
+      - uses: acts.core.irq
         key: action2
         inputs:
           v: ${ $("v") }

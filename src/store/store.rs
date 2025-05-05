@@ -1,6 +1,7 @@
 use crate::{
-    store::{Message, Model, Package, Proc, StoreAdapter, Task},
-    utils, ActError, Result, ShareLock, Workflow,
+    ActError, Result, ShareLock, Workflow,
+    store::{Event, Message, Model, Package, Proc, StoreAdapter, Task},
+    utils,
 };
 use std::sync::{Arc, Mutex, RwLock};
 use tracing::trace;
@@ -45,6 +46,10 @@ impl StoreAdapter for Store {
 
     fn messages(&self) -> Arc<dyn super::DbSet<Item = Message>> {
         self.base.read().unwrap().messages()
+    }
+
+    fn events(&self) -> Arc<dyn super::DbSet<Item = Event>> {
+        self.base.read().unwrap().events()
     }
 
     fn close(&self) {
@@ -97,10 +102,6 @@ impl Store {
         trace!("store::publish({})", pack.id);
         if pack.id.is_empty() {
             return Err(ActError::Action("missing id in package".into()));
-        }
-
-        if pack.data.is_empty() {
-            return Err(ActError::Action("missing file in package".into()));
         }
 
         let packages = self.base().packages();

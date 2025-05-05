@@ -8,7 +8,7 @@ steps:
   - name: prepare
     id: prepare
     acts:
-      - act: irq
+      - uses: acts.core.irq
         key: init
   - name: condition
     id: condition
@@ -20,14 +20,14 @@ steps:
           - name: step1
             id: step1
             acts:
-              - act: irq
+              - uses: acts.core.irq
                 key: action1
                 inputs:
                   v: ${ $("v") }
           - name: step2
             id: step2
             acts:
-              - act: irq
+              - uses: acts.core.irq
                 key: action2
                 inputs:
                   v: ${ $("v") }        
@@ -38,12 +38,12 @@ steps:
           - id: step3
             name: step3
             acts:
-              - act: irq
+              - uses: acts.core.irq
                 key: action3
   - name: final
     id: final
     acts:
-      - act: irq
+      - uses: acts.core.irq
         key: action4
         inputs:
           v: ${ $("v") }

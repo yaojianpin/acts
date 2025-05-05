@@ -1,10 +1,9 @@
 use serde_json::json;
 
 use crate::{
-    data,
+    Act, Event, Message, MessageState, Signal, StmtBuild, Workflow, data,
     scheduler::tests::create_proc_signal2,
     utils::{self, consts},
-    Act, Event, Message, MessageState, Signal, StmtBuild, Workflow,
 };
 
 #[tokio::test]
@@ -409,8 +408,14 @@ async fn sch_step_uses_catch_error() {
         step.with_id("step1")
             .with_output("my_data", json!(null))
             .with_uses("pack1")
-            .with_catch(|c| c.with_then(|stmts| stmts.add(Act::msg(|act| act.with_key("msg1")))))
+            .with_catch(|c| {
+                c.with_step(|step| {
+                    step.with_id("step2")
+                        .with_act(Act::msg(|act| act.with_key("msg1")))
+                })
+            })
     });
+
     let pack = data::Package {
         id: "pack1".to_string(),
         name: "package 1".to_string(),

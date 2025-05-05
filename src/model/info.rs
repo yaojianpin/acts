@@ -1,7 +1,8 @@
 use crate::{
+    ActError, ActRunAs, MessageState, Result, Workflow,
+    package::ActPackageCatalog,
     scheduler::{self, NodeData},
     store::data,
-    ActError, MessageState, Result, Workflow,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -9,12 +10,19 @@ use std::sync::Arc;
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct PackageInfo {
     pub id: String,
-    pub name: String,
-    pub size: u32,
+
+    pub desc: String,
+    pub icon: String,
+    pub doc: String,
+    pub version: String,
+    pub schema: String,
+    pub run_as: ActRunAs,
+    pub groups: String,
+    pub catalog: ActPackageCatalog,
+
     pub create_time: i64,
     pub update_time: i64,
     pub timestamp: i64,
-    pub data: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -81,12 +89,18 @@ impl From<&data::Package> for PackageInfo {
     fn from(m: &data::Package) -> Self {
         Self {
             id: m.id.clone(),
-            name: m.name.clone(),
-            size: m.size,
+            desc: m.desc.clone(),
+            icon: m.icon.clone(),
+            doc: m.doc.clone(),
+            version: m.version.clone(),
+            schema: m.schema.clone(),
+            run_as: m.run_as,
+            groups: m.groups.clone(),
+            catalog: m.catalog,
+
             timestamp: m.timestamp,
             create_time: m.create_time,
             update_time: m.update_time,
-            data: String::from_utf8(m.data.clone()).unwrap(),
         }
     }
 }
@@ -174,7 +188,7 @@ impl From<&Arc<scheduler::Task>> for TaskInfo {
             name: t.node().content.name(),
             pid: t.pid.clone(),
             nid: t.node().id().to_string(),
-            r#type: t.node().typ(),
+            r#type: t.node().kind().to_string(),
             state: t.state().into(),
             data: t.data().to_string(),
             start_time: t.start_time(),
