@@ -9,7 +9,6 @@ use crate::{
     data::{self, MessageStatus},
     event::{EventAction, Model},
     scheduler::{
-        tree::{Node, NodeContent},
         Context, Process, Runtime, TaskState,
     },
     utils::{self, consts},
