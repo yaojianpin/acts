@@ -103,3 +103,8 @@
 
 - feat: allow to keep processes after completion
 - fix: set process state if task is completed and is root task [#12](https://github.com/yaojianpin/acts/issues/12)
+
+# 0.16.0
+
+- feat: reafactoring the act package to support act extension [#8]
+- feat: adding package meta struct to support package jsonschema definition [#9]
