@@ -1,8 +1,8 @@
 use crate::{
-    MessageState, Query, StoreAdapter, TaskState, Workflow,
+    MessageState, TaskState, Workflow,
     data::Model,
     scheduler::NodeKind,
-    store::{Cond, Store, StoreKind, data, query::Expr},
+    store::{Cond, Store, data, query::Expr, query::*},
     utils,
 };
 use data::{Message, MessageStatus, Package, Proc, Task};
@@ -12,26 +12,13 @@ use tokio::sync::OnceCell;
 
 static STORE: OnceCell<Arc<Store>> = OnceCell::const_new();
 async fn init() -> Arc<Store> {
-    #[cfg(feature = "store")]
-    {
-        Arc::new(Store::local("test_data", "test.db"))
-    }
-
-    #[cfg(not(feature = "store"))]
-    Store::default()
+    let store = Store::new();
+    store.init();
+    Arc::new(store)
 }
 
 async fn store() -> &'static Arc<Store> {
     STORE.get_or_init(init).await
-}
-
-#[tokio::test]
-async fn store_kind() {
-    let store = store().await;
-    #[cfg(feature = "store")]
-    assert_eq!(store.kind(), StoreKind::Local);
-    #[cfg(not(feature = "store"))]
-    assert_eq!(store.kind(), StoreKind::Memory);
 }
 
 #[tokio::test]

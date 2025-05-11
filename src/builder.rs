@@ -1,10 +1,8 @@
-use std::sync::Arc;
 
-use crate::{ActPlugin, Config, Engine, StoreAdapter};
+use crate::{ActPlugin, Config, Engine};
 
 pub struct EngineBuilder {
     config: Config,
-    store: Option<Arc<dyn StoreAdapter>>,
     plugins: Vec<Box<dyn ActPlugin>>,
 }
 
@@ -19,7 +17,7 @@ impl EngineBuilder {
         Self {
             config: Config::default(),
             plugins: Vec::new(),
-            store: None,
+            // store: None,
         }
     }
 
@@ -42,15 +40,20 @@ impl EngineBuilder {
         self
     }
 
-    pub fn data_dir(mut self, data_dir: &str) -> Self {
-        self.config.data_dir = data_dir.to_string();
+    pub fn database_url(mut self, url: &str) -> Self {
+        self.config.database_url = Some(url.to_string());
         self
     }
 
-    pub fn db_name(mut self, db_name: &str) -> Self {
-        self.config.db_name = db_name.to_string();
-        self
-    }
+    // pub fn data_dir(mut self, data_dir: &str) -> Self {
+    //     self.config.data_dir = data_dir.to_string();
+    //     self
+    // }
+
+    // pub fn db_name(mut self, db_name: &str) -> Self {
+    //     self.config.db_name = db_name.to_string();
+    //     self
+    // }
 
     pub fn tick_interval_secs(mut self, secs: u64) -> Self {
         self.config.tick_interval_secs = secs;
@@ -62,10 +65,10 @@ impl EngineBuilder {
         self
     }
 
-    pub fn set_store<STORE: StoreAdapter + Clone + 'static>(mut self, store: &STORE) -> Self {
-        self.store = Some(Arc::new(store.clone()));
-        self
-    }
+    // pub fn set_store<STORE: StoreAdapter + Clone + 'static>(mut self, store: &STORE) -> Self {
+    //     self.store = Some(Arc::new(store.clone()));
+    //     self
+    // }
 
     /// register plugin
     ///
@@ -105,10 +108,6 @@ impl EngineBuilder {
         // init plugins
         for plugin in self.plugins.iter() {
             plugin.on_init(&engine);
-        }
-
-        if let Some(store) = &self.store {
-            engine.runtime().adapter().set_store(store.clone());
         }
 
         engine

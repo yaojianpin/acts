@@ -1,8 +1,4 @@
-use crate::{
-    scheduler::Runtime,
-    store::{PageData, StoreAdapter},
-    MessageInfo, Result,
-};
+use crate::{MessageInfo, Result, scheduler::Runtime, store::PageData};
 use std::sync::Arc;
 use tracing::instrument;
 

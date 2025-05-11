@@ -182,7 +182,6 @@ fn store_if(runtime: &Arc<Runtime>, ack: bool, chan_id: &str, pattern: &str, mes
         runtime
             .cache()
             .store()
-            .base()
             .messages()
             .create(&msg)
             .unwrap_or_else(|err| {

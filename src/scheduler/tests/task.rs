@@ -266,7 +266,6 @@ async fn sch_task_branch_if_false_else_running() {
         scher
             .cache()
             .store()
-            .base()
             .tasks()
             .find(&task_id.id())
             .unwrap()

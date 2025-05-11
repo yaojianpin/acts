@@ -26,15 +26,15 @@ act                     time:   [601.40 µs 636.69 µs 674.49 µs]
 
 ### Tiny
 
-The lib size is only 3mb (no store), 4mb(embeded sqlite) you can also use Adapter to create external store.
+The lib size is only 5mb.
 
 ### Extensiable
 
-- store extension
-  support creating external store, please refer to the code under `src/store/db/local`.
+- store collection extension
+  support creating external store, please refer to the code under `store/sqlite`.
 
 - pakcage extension
-  support creteing creating custom package, please refer to the code under `example/pakcage`
+  support creteing creating custom package, please refer to the code under `example/pakcage`.
 
 ## Installation
 
@@ -417,60 +417,24 @@ For more acts example, please see [`examples`](https://github.com/yaojianpin/act
 
 ## Store
 
-You can enable the store feature using `store`, which uses [`rusqlite`](https://github.com/rusqlite/rusqlite) to build.
+You can add more store support by store plugins. The avaliable store plugins are as follow:
+- acts-sqlite
 
-To enable feature `store`
-
-```ignore
-[dependencies]
-acts = { version = "*", features = ["store"] }
-```
-
-For external store:
-
-```rust,no_run
-use acts::{Engine, EngineBuilder, data::{Model, Proc, Task, Package, Message, Event}, DbSet, StoreAdapter};
-use std::sync::Arc;
-
-#[derive(Clone)]
-struct TestStore;
-
-impl StoreAdapter for TestStore {
-    fn models(&self) -> Arc<dyn DbSet<Item = Model>> {
-        todo!()
-    }
-    fn procs(&self) -> Arc<dyn DbSet<Item =Proc>> {
-        todo!()
-    }
-    fn tasks(&self) -> Arc<dyn DbSet<Item =Task>> {
-        todo!()
-    }
-    fn packages(&self) -> Arc<dyn DbSet<Item =Package>> {
-        todo!()
-    }
-    fn messages(&self) -> Arc<dyn DbSet<Item =Message>> {
-        todo!()
-    }
-
-    fn events(&self) -> Arc<dyn DbSet<Item =Event>> {
-        todo!()
-    }
-    fn init(&self) {}
-    fn close(&self) {}
-}
+```rust,ignore
+use acts::EngineBuilder;
+use acts_sqlite::SqliteStore;
 
 #[tokio::main]
 async fn main() {
-   // set custom store
- let store = TestStore;
- let engine = EngineBuilder::new().set_store(&store).build().start();
+  let engine = EngineBuilder::new().add_plugin(&SqliteStore).build().start();
 }
 ```
 
+How to create custom store plugin, please see the code under `store/`
+
 ## Package
 
-`acts` engine intergrates the [`rquickjs`](https://github.com/delskayn/rquickjs) runtime to execute the package, which can extend the engine abilities.
-for more information please see the example [`package`](https://github.com/yaojianpin/acts/tree/main/examples/package)
+Please see the example `example/pakcage`.
 
 ## Acts-Server
 

@@ -1,6 +1,6 @@
 pub mod data;
 mod db;
-mod query;
+pub mod query;
 
 #[allow(clippy::module_inception)]
 mod store;
@@ -9,16 +9,33 @@ mod store;
 mod tests;
 
 use data::*;
-pub use query::*;
 use serde::{Deserialize, Serialize};
 #[allow(unused_imports)]
-pub use store::{Store, StoreKind};
+pub use store::Store;
 
 use crate::{ActError, Result};
-use std::{error::Error, sync::Arc};
+use query::*;
+use std::error::Error;
+use strum::{AsRefStr, EnumIter};
 
 fn map_db_err(err: impl Error) -> ActError {
     ActError::Store(err.to_string())
+}
+
+#[derive(Debug, Clone, AsRefStr, PartialEq, Hash, Eq, EnumIter)]
+pub enum StoreIden {
+    #[strum(serialize = "packages")]
+    Packages,
+    #[strum(serialize = "models")]
+    Models,
+    #[strum(serialize = "procs")]
+    Procs,
+    #[strum(serialize = "tasks")]
+    Tasks,
+    #[strum(serialize = "messages")]
+    Messages,
+    #[strum(serialize = "events")]
+    Events,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -30,7 +47,11 @@ pub struct PageData<T> {
     pub rows: Vec<T>,
 }
 
-pub trait DbSet: Send + Sync {
+pub trait DbCollectionIden {
+    fn iden() -> StoreIden;
+}
+
+pub trait DbCollection: Send + Sync {
     type Item;
     fn exists(&self, id: &str) -> Result<bool>;
     fn find(&self, id: &str) -> Result<Self::Item>;
@@ -38,48 +59,4 @@ pub trait DbSet: Send + Sync {
     fn create(&self, data: &Self::Item) -> Result<bool>;
     fn update(&self, data: &Self::Item) -> Result<bool>;
     fn delete(&self, id: &str) -> Result<bool>;
-}
-
-/// Store adapter trait
-/// Used to implement custom storage
-///
-/// # Example
-/// ```no_run
-/// use acts::{data::{Model, Proc, Task, Package, Message, Event}, DbSet, StoreAdapter};
-/// use std::sync::Arc;
-/// struct TestStore;
-/// impl StoreAdapter for TestStore {
-///
-///     fn models(&self) -> Arc<dyn DbSet<Item = Model>> {
-///         todo!()
-///     }
-///     fn procs(&self) -> Arc<dyn DbSet<Item =Proc>> {
-///         todo!()
-///     }
-///     fn tasks(&self) -> Arc<dyn DbSet<Item =Task>> {
-///         todo!()
-///     }
-///     fn packages(&self) -> Arc<dyn DbSet<Item =Package>> {
-///         todo!()
-///     }
-///     fn messages(&self) -> Arc<dyn DbSet<Item =Message>> {
-///         todo!()
-///     }
-///     fn events(&self) -> Arc<dyn DbSet<Item =Event>> {
-///         todo!()
-///     }
-///     fn init(&self) {}
-///     fn close(&self) {}
-/// }
-/// ```
-pub trait StoreAdapter: Send + Sync {
-    fn init(&self);
-
-    fn models(&self) -> Arc<dyn DbSet<Item = Model>>;
-    fn procs(&self) -> Arc<dyn DbSet<Item = Proc>>;
-    fn tasks(&self) -> Arc<dyn DbSet<Item = Task>>;
-    fn packages(&self) -> Arc<dyn DbSet<Item = Package>>;
-    fn messages(&self) -> Arc<dyn DbSet<Item = Message>>;
-    fn events(&self) -> Arc<dyn DbSet<Item = Event>>;
-    fn close(&self);
 }

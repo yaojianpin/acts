@@ -4,9 +4,10 @@ use std::sync::Arc;
 use serde::de::DeserializeOwned;
 
 use crate::{
-    ActModule, ActPackage, Result, StoreAdapter,
+    ActModule, ActPackage, DbCollection, Result,
     package::{ActPackageFn, ActPackageRegister},
     scheduler::Runtime,
+    store::DbCollectionIden,
 };
 
 #[derive(Clone)]
@@ -67,12 +68,22 @@ impl Extender {
         Ok(())
     }
 
-    pub fn register_store<T>(&self, store: T) -> Result<()>
-    where
-        T: StoreAdapter + 'static + Clone,
+    // pub fn register_store<T>(&self, store: T) -> Result<()>
+    // where
+    //     T: StoreAdapter + 'static + Clone,
+    // {
+    //     self.runtime.adapter().set_store(Arc::new(store));
+    //     Ok(())
+    // }
+
+    pub fn register_collection<DATA>(
+        &self,
+        collection: Arc<dyn DbCollection<Item = DATA> + Send + Sync + 'static>,
+    ) where
+        // T: DbSet<Item = DATA> + Send + Sync + Clone + 'static,
+        DATA: DbCollectionIden + 'static,
     {
-        self.runtime.adapter().set_store(Arc::new(store));
-        Ok(())
+        self.runtime.store().register(collection);
     }
 
     // pub fn plugins(&self) -> Arc<Mutex<Vec<Box<dyn ActPlugin>>>> {

@@ -2,10 +2,10 @@ mod collect;
 mod r#impl;
 
 use crate::{
-    Result,
-    store::{DbSet, StoreAdapter, data::*},
+    Result, data,
+    store::{DbCollection, data::*},
 };
-use collect::Collect;
+pub use collect::Collect;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value as JsonValue;
 use std::{collections::HashMap, sync::Arc};
@@ -33,6 +33,7 @@ impl MemStore {
         let packages = Collect::new("packages");
         let messages = Collect::new("messages");
         let events = Collect::new("events");
+
         let store = Self {
             models: Arc::new(models),
             procs: Arc::new(procs),
@@ -42,37 +43,30 @@ impl MemStore {
             events: Arc::new(events),
         };
 
-        store.init();
-
         store
     }
-}
 
-impl StoreAdapter for MemStore {
-    fn init(&self) {}
-    fn close(&self) {}
-
-    fn models(&self) -> Arc<dyn DbSet<Item = Model>> {
-        self.models.clone()
-    }
-
-    fn procs(&self) -> Arc<dyn DbSet<Item = Proc>> {
-        self.procs.clone()
-    }
-
-    fn tasks(&self) -> Arc<dyn DbSet<Item = Task>> {
+    pub fn tasks(&self) -> Arc<dyn DbCollection<Item = data::Task> + Send + Sync> {
         self.tasks.clone()
     }
 
-    fn packages(&self) -> Arc<dyn DbSet<Item = Package>> {
+    pub fn procs(&self) -> Arc<dyn DbCollection<Item = data::Proc> + Send + Sync> {
+        self.procs.clone()
+    }
+
+    pub fn packages(&self) -> Arc<dyn DbCollection<Item = data::Package> + Send + Sync> {
         self.packages.clone()
     }
 
-    fn messages(&self) -> Arc<dyn DbSet<Item = Message>> {
+    pub fn models(&self) -> Arc<dyn DbCollection<Item = data::Model> + Send + Sync> {
+        self.models.clone()
+    }
+
+    pub fn messages(&self) -> Arc<dyn DbCollection<Item = data::Message> + Send + Sync> {
         self.messages.clone()
     }
 
-    fn events(&self) -> Arc<dyn DbSet<Item = Event>> {
+    pub fn events(&self) -> Arc<dyn DbCollection<Item = data::Event> + Send + Sync> {
         self.events.clone()
     }
 }

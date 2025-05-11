@@ -3,7 +3,7 @@ use tracing::debug;
 
 use crate::store::query::CondType;
 use crate::store::{Cond, Expr, ExprOp, PageData, map_db_err};
-use crate::{ActError, DbSet, Query, Result, ShareLock};
+use crate::{ActError, DbCollection, Result, ShareLock, store::query::*};
 use serde_json::Value as JsonValue;
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -30,7 +30,7 @@ impl<T> Collect<T> {
     }
 }
 
-impl<T> DbSet for Collect<T>
+impl<T> DbCollection for Collect<T>
 where
     T: DbDocument + Send + Sync + Clone + Debug,
 {

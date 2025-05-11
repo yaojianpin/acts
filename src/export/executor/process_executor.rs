@@ -1,10 +1,7 @@
 use super::ExecutorQuery;
 use crate::scheduler::Process;
 use crate::{
-    scheduler::Runtime,
-    store::{PageData, StoreAdapter},
-    utils::consts,
-    ModelInfo, ProcInfo, Result, TaskInfo, Vars,
+    ModelInfo, ProcInfo, Result, TaskInfo, Vars, scheduler::Runtime, store::PageData, utils::consts,
 };
 use std::sync::Arc;
 use tracing::instrument;

@@ -1,101 +1,80 @@
+use super::{DbCollection, DbCollectionIden, StoreIden, data, db::MemStore};
 use crate::{
     ActError, Result, ShareLock, Workflow,
-    store::{Event, Message, Model, Package, Proc, StoreAdapter, Task},
+    store::{Model, Package},
     utils,
 };
-use std::sync::{Arc, Mutex, RwLock};
+use std::{
+    any::Any,
+    collections::HashMap,
+    convert::AsRef,
+    sync::{Arc, RwLock},
+};
+use strum::IntoEnumIterator;
 use tracing::trace;
 
-#[cfg(feature = "store")]
-use crate::store::db::LocalStore;
-
-use super::db::MemStore;
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum StoreKind {
-    Memory,
-    Local,
-    Extern,
-}
+#[derive(Clone)]
+pub struct DynDbSetRef<T>(Arc<dyn DbCollection<Item = T>>);
 
 pub struct Store {
-    kind: Arc<Mutex<StoreKind>>,
-    base: ShareLock<Arc<dyn StoreAdapter>>,
-}
-
-impl StoreAdapter for Store {
-    fn init(&self) {
-        self.base.read().unwrap().init()
-    }
-
-    fn models(&self) -> Arc<dyn super::DbSet<Item = Model>> {
-        self.base.read().unwrap().models()
-    }
-
-    fn procs(&self) -> Arc<dyn super::DbSet<Item = Proc>> {
-        self.base.read().unwrap().procs()
-    }
-
-    fn tasks(&self) -> Arc<dyn super::DbSet<Item = Task>> {
-        self.base.read().unwrap().tasks()
-    }
-
-    fn packages(&self) -> Arc<dyn super::DbSet<Item = Package>> {
-        self.base.read().unwrap().packages()
-    }
-
-    fn messages(&self) -> Arc<dyn super::DbSet<Item = Message>> {
-        self.base.read().unwrap().messages()
-    }
-
-    fn events(&self) -> Arc<dyn super::DbSet<Item = Event>> {
-        self.base.read().unwrap().events()
-    }
-
-    fn close(&self) {
-        self.base.read().unwrap().close()
-    }
+    collections: ShareLock<HashMap<StoreIden, Arc<dyn Any + Send + Sync + 'static>>>,
 }
 
 impl Store {
-    pub fn default() -> Arc<Self> {
-        let store = Arc::new(MemStore::new());
-        Arc::new(Self {
-            kind: Arc::new(Mutex::new(StoreKind::Memory)),
-            base: Arc::new(RwLock::new(store)),
-        })
-    }
-
-    pub fn create(store: Arc<dyn StoreAdapter + 'static>) -> Self {
+    pub fn new() -> Self {
         Self {
-            kind: Arc::new(Mutex::new(StoreKind::Extern)),
-            base: Arc::new(RwLock::new(store)),
+            collections: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
-    #[cfg(feature = "store")]
-    pub fn local(path: &str, name: &str) -> Self {
-        let store = Arc::new(LocalStore::new(path, name));
-        Self {
-            kind: Arc::new(Mutex::new(StoreKind::Local)),
-            base: Arc::new(RwLock::new(store)),
-        }
+    pub fn collection<DATA>(&self) -> Arc<dyn DbCollection<Item = DATA>>
+    where
+        DATA: DbCollectionIden + Send + Sync + 'static,
+    {
+        let collections = self.collections.read().unwrap();
+        let collection = collections.get(&DATA::iden()).unwrap();
+
+        collection
+            .downcast_ref::<DynDbSetRef<DATA>>()
+            .map(|v| v.0.clone())
+            .expect(&format!(
+                "fail to get collection: {}",
+                DATA::iden().as_ref()
+            ))
     }
 
-    #[cfg(test)]
-    pub fn reset(&self) {
-        #[cfg(not(feature = "store"))]
-        {
-            let store = Self::default();
-            *self.kind.lock().unwrap() = store.kind();
-            *self.base.write().unwrap() = store.base();
-        }
-        #[cfg(feature = "store")]
-        {
-            let store = Self::local("data", "acts.db");
-            *self.kind.lock().unwrap() = store.kind();
-            *self.base.write().unwrap() = store.base();
-        }
+    pub fn register<DATA>(
+        &self,
+        collection: Arc<dyn DbCollection<Item = DATA> + Send + Sync + 'static>,
+    ) where
+        DATA: DbCollectionIden + 'static,
+    {
+        let mut collections = self.collections.write().unwrap();
+        collections.insert(DATA::iden(), Arc::new(DynDbSetRef::<DATA>(collection)));
+    }
+
+    pub fn tasks(&self) -> Arc<dyn DbCollection<Item = data::Task>> {
+        self.collection()
+    }
+
+    pub fn procs(&self) -> Arc<dyn DbCollection<Item = data::Proc>> {
+        self.collection()
+    }
+
+    pub fn packages(&self) -> Arc<dyn DbCollection<Item = data::Package>> {
+        self.collection()
+    }
+
+    pub fn models(&self) -> Arc<dyn DbCollection<Item = data::Model>> {
+        self.collection()
+    }
+
+    pub fn messages(&self) -> Arc<dyn DbCollection<Item = data::Message>> {
+        self.collection()
+    }
+
+    pub fn events(&self) -> Arc<dyn DbCollection<Item = data::Event>> {
+        self.collection()
     }
 
     pub fn publish(&self, pack: &Package) -> Result<bool> {
@@ -104,7 +83,7 @@ impl Store {
             return Err(ActError::Action("missing id in package".into()));
         }
 
-        let packages = self.base().packages();
+        let packages = self.packages();
         match packages.find(&pack.id) {
             Ok(m) => {
                 let data = Package {
@@ -128,7 +107,7 @@ impl Store {
         if model.id.is_empty() {
             return Err(ActError::Action("missing id in model".into()));
         }
-        let models = self.base().models();
+        let models = self.models();
         match models.find(&model.id) {
             Ok(m) => {
                 let text = serde_yaml::to_string(model).unwrap();
@@ -161,11 +140,33 @@ impl Store {
         }
     }
 
-    pub(crate) fn base(&self) -> Arc<dyn StoreAdapter> {
-        self.base.read().unwrap().clone()
-    }
-
-    pub fn kind(&self) -> StoreKind {
-        self.kind.lock().unwrap().clone()
+    pub fn init(&self) {
+        let mem = MemStore::new();
+        let mut collections = self.collections.write().unwrap();
+        for item in StoreIden::iter() {
+            if !collections.contains_key(&item) {
+                // fill the mem store when there is no collection
+                match item {
+                    StoreIden::Packages => {
+                        collections.insert(item, Arc::new(DynDbSetRef(mem.packages())));
+                    }
+                    StoreIden::Models => {
+                        collections.insert(item, Arc::new(DynDbSetRef(mem.models())));
+                    }
+                    StoreIden::Procs => {
+                        collections.insert(item, Arc::new(DynDbSetRef(mem.procs())));
+                    }
+                    StoreIden::Tasks => {
+                        collections.insert(item, Arc::new(DynDbSetRef(mem.tasks())));
+                    }
+                    StoreIden::Messages => {
+                        collections.insert(item, Arc::new(DynDbSetRef(mem.messages())));
+                    }
+                    StoreIden::Events => {
+                        collections.insert(item, Arc::new(DynDbSetRef(mem.events())));
+                    }
+                };
+            }
+        }
     }
 }

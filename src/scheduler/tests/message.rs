@@ -1,10 +1,10 @@
 use crate::event::EventAction;
 use crate::{
-    Act, Action, ChannelOptions, Config, Message, Query, StoreAdapter, Vars, Workflow,
+    Act, Action, ChannelOptions, Config, Message, Vars, Workflow,
     data::MessageStatus,
     event::MessageState,
     scheduler::tests::{create_proc_signal, create_proc_signal_config, create_proc_signal2},
-    store::{Cond, Expr},
+    store::query::*,
     utils::{self, consts},
 };
 use serde_json::json;

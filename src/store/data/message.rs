@@ -1,4 +1,7 @@
-use crate::MessageState;
+use crate::{
+    MessageState,
+    store::{DbCollectionIden, StoreIden},
+};
 use core::fmt;
 use serde::{Deserialize, Serialize};
 use serde_repr::{Deserialize_repr, Serialize_repr};
@@ -39,6 +42,12 @@ pub struct Message {
     pub retry_times: i32,
     pub status: MessageStatus,
     pub timestamp: i64,
+}
+
+impl DbCollectionIden for Message {
+    fn iden() -> StoreIden {
+        StoreIden::Messages
+    }
 }
 
 impl fmt::Display for MessageStatus {

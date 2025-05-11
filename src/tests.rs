@@ -1,5 +1,5 @@
 use crate::event::EventAction;
-use crate::{Act, EngineBuilder, Engine, MessageState, Vars, Workflow, utils};
+use crate::{Act, Engine, EngineBuilder, MessageState, Vars, Workflow, utils};
 use serde_json::json;
 
 #[tokio::test]
@@ -155,15 +155,9 @@ async fn engine_build_cache_size() {
 }
 
 #[tokio::test]
-async fn engine_build_data_dir() {
-    let engine = EngineBuilder::new().data_dir("test").build().start();
-    assert_eq!(engine.config().data_dir, "test")
-}
-
-#[tokio::test]
-async fn engine_build_db_name() {
-    let engine = EngineBuilder::new().db_name("test.db").build().start();
-    assert_eq!(engine.config().db_name, "test.db")
+async fn engine_build_database_url() {
+    let engine = EngineBuilder::new().database_url("test").build().start();
+    assert_eq!(engine.config().database_url.as_ref().unwrap(), "test")
 }
 
 #[tokio::test]
@@ -186,7 +180,10 @@ async fn engine_build_tick_interval_secs() {
 
 #[tokio::test]
 async fn engine_build_max_message_retry_times() {
-    let engine = EngineBuilder::new().max_message_retry_times(100).build().start();
+    let engine = EngineBuilder::new()
+        .max_message_retry_times(100)
+        .build()
+        .start();
     assert_eq!(engine.config().max_message_retry_times, 100)
 }
 

@@ -2,7 +2,7 @@
 
 #![doc = include_str!("../README.md")]
 
-mod adapter;
+// mod adapter;
 mod builder;
 mod cache;
 mod config;
@@ -39,7 +39,7 @@ pub use package::{
 pub use plugin::ActPlugin;
 pub use scheduler::Context;
 pub use signal::Signal;
-pub use store::{DbSet, PageData, Query, StoreAdapter, data};
+pub use store::{DbCollection, PageData, data, query};
 pub type Result<T> = std::result::Result<T, ActError>;
 
 pub(crate) use scheduler::NodeKind;

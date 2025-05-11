@@ -4,11 +4,11 @@ use tracing::{debug, error};
 use super::{Process, Scheduler, Task, TaskState};
 use crate::{
     ActError, Action, Config, Engine, Package, Result, Vars, Workflow,
-    adapter::Adapter,
     cache::Cache,
     data,
     env::Enviroment,
     event::{Emitter, EventAction},
+    store::Store,
     utils::{self, consts},
 };
 use std::{sync::Arc, time::Duration};
@@ -21,7 +21,7 @@ pub struct Runtime {
     cache: Arc<Cache>,
     emitter: Arc<Emitter>,
     package: Arc<Package>,
-    adapter: Arc<Adapter>,
+    // adapter: Arc<Adapter>,
 }
 
 impl Runtime {
@@ -54,9 +54,13 @@ impl Runtime {
         &self.package
     }
 
-    pub fn adapter(&self) -> &Arc<Adapter> {
-        &self.adapter
+    pub fn store(&self) -> Arc<Store> {
+        self.cache.store().clone()
     }
+
+    // pub fn adapter(&self) -> &Arc<Adapter> {
+    //     &self.adapter
+    // }
 
     #[allow(unused)]
     pub fn config(&self) -> &Arc<Config> {
@@ -163,7 +167,6 @@ impl Runtime {
         let cache = Arc::new(Cache::new(config.cache_cap));
         let emitter = Arc::new(Emitter::new());
         let package = Arc::new(Package::new());
-        let adapter = Arc::new(Adapter::new());
         let runtime = Arc::new(Runtime {
             config: Arc::new(config.clone()),
             emitter,
@@ -171,7 +174,6 @@ impl Runtime {
             env,
             cache,
             package,
-            adapter,
         });
 
         runtime.initialize(config);
@@ -274,7 +276,7 @@ impl Runtime {
                 }
 
                 // re-send the messages if it is neither acked nor completed
-                cache.store().with_no_response_messages(
+                let _ = cache.store().with_no_response_messages(
                     default_interval_millis,
                     max_message_retry_times,
                     |m| {

@@ -1,23 +1,32 @@
-use crate::{
-    MessageState, TaskState, Vars,
-    scheduler::NodeKind,
-    store::{Cond, Query, data::*, db::MemStore, query::Expr},
-    utils,
-};
+use crate::database::Database;
+use acts::{MessageState, Vars, data::*, query::*};
 use serde_json::json;
 use tokio::sync::OnceCell;
 
-static STORE: OnceCell<MemStore> = OnceCell::const_new();
-async fn init() -> MemStore {
-    MemStore::new()
+static STORE: OnceCell<Database> = OnceCell::const_new();
+async fn init() -> Database {
+    let db = Database::new("sqlite://test_data/test.db");
+    db.init();
+    db
 }
 
-async fn store() -> &'static MemStore {
+async fn store() -> &'static Database {
     STORE.get_or_init(init).await
 }
 
+mod utils {
+    use nanoid::nanoid;
+    pub fn longid() -> String {
+        nanoid!(21)
+    }
+
+    pub fn shortid() -> String {
+        nanoid!(8)
+    }
+}
+
 #[tokio::test]
-async fn store_mem_model_create() {
+async fn store_model_create() {
     let store = store().await;
     let model = Model {
         id: utils::longid(),
@@ -34,7 +43,7 @@ async fn store_mem_model_create() {
 }
 
 #[tokio::test]
-async fn store_mem_model_find() {
+async fn store_model_find() {
     let store = store().await;
     let mid: String = utils::longid();
     let model = Model {
@@ -43,8 +52,8 @@ async fn store_mem_model_find() {
         ver: 1,
         size: 1245,
         create_time: 3333,
-        data: "{}".to_string(),
         update_time: 0,
+        data: "{}".to_string(),
         timestamp: 0,
     };
     store.models().create(&model).unwrap();
@@ -52,7 +61,7 @@ async fn store_mem_model_find() {
 }
 
 #[tokio::test]
-async fn store_mem_model_query() {
+async fn store_model_query() {
     let store = store().await;
     let models = store.models();
     for _ in 0..5 {
@@ -73,11 +82,11 @@ async fn store_mem_model_query() {
         .push(Cond::and().push(Expr::eq("name", "test_model")))
         .set_limit(5);
     let items = models.query(&q).unwrap();
-    assert_eq!(items.count, 5);
+    assert_eq!(items.rows.len(), 5);
 }
 
 #[tokio::test]
-async fn store_mem_model_update() {
+async fn store_model_update() {
     let store = store().await;
 
     let mut model = Model {
@@ -102,7 +111,7 @@ async fn store_mem_model_update() {
 }
 
 #[tokio::test]
-async fn store_mem_model_delete() {
+async fn store_model_delete() {
     let store = store().await;
     let model = Model {
         id: utils::longid(),
@@ -121,18 +130,18 @@ async fn store_mem_model_delete() {
 }
 
 #[tokio::test]
-async fn store_mem_proc_create() {
+async fn store_proc_create() {
     let store = store().await;
     let proc = Proc {
         id: utils::longid(),
         name: "name".to_string(),
         mid: "m1".to_string(),
-        state: TaskState::None.into(),
+        state: "none".to_string(),
         start_time: 0,
         end_time: 0,
         timestamp: 0,
         model: "".to_string(),
-        env_local: "".to_string(),
+        env_local: "{}".to_string(),
         err: None,
     };
     store.procs().create(&proc).unwrap();
@@ -140,19 +149,19 @@ async fn store_mem_proc_create() {
 }
 
 #[tokio::test]
-async fn store_mem_proc_find() {
+async fn store_proc_find() {
     let store = store().await;
     let pid = utils::longid();
     let proc = Proc {
         id: pid.clone(),
         name: "name".to_string(),
         mid: "m1".to_string(),
-        state: TaskState::None.into(),
+        state: "none".to_string(),
         start_time: 0,
         end_time: 0,
         timestamp: 0,
         model: "".to_string(),
-        env_local: "".to_string(),
+        env_local: "{}".to_string(),
         err: None,
     };
     store.procs().create(&proc).unwrap();
@@ -160,7 +169,7 @@ async fn store_mem_proc_find() {
 }
 
 #[tokio::test]
-async fn store_mem_proc_query() {
+async fn store_proc_query() {
     let store = store().await;
     let procs = store.procs();
     let mid = utils::longid();
@@ -169,12 +178,12 @@ async fn store_mem_proc_query() {
             id: utils::longid(),
             name: i.to_string(),
             mid: mid.to_string(),
-            state: TaskState::None.into(),
+            state: "none".to_string(),
             start_time: 0,
             end_time: 0,
             timestamp: 0,
             model: "".to_string(),
-            env_local: "".to_string(),
+            env_local: "{}".to_string(),
             err: None,
         };
         procs.create(&proc).unwrap();
@@ -184,11 +193,11 @@ async fn store_mem_proc_query() {
         .push(Cond::and().push(Expr::eq("mid", mid)))
         .set_limit(5);
     let items = procs.query(&q).unwrap();
-    assert_eq!(items.count, 5);
+    assert_eq!(items.rows.len(), 5);
 }
 
 #[tokio::test]
-async fn store_mem_proc_update() {
+async fn store_proc_update() {
     let store = store().await;
 
     let mut vars: Vars = Vars::new();
@@ -198,36 +207,38 @@ async fn store_mem_proc_update() {
         id: utils::shortid(),
         name: "test".to_string(),
         mid: "m1".to_string(),
-        state: TaskState::None.into(),
+        state: "none".to_string(),
         start_time: 0,
         end_time: 0,
         timestamp: 0,
         model: "".to_string(),
-        env_local: "".to_string(),
+        env_local: "{}".to_string(),
         err: None,
     };
     store.procs().create(&proc).unwrap();
 
-    proc.state = TaskState::Running.into();
+    proc.state = "running".to_string();
+    proc.err = None;
     store.procs().update(&proc).unwrap();
 
     let p = store.procs().find(&proc.id).unwrap();
     assert_eq!(p.state, proc.state);
+    assert_eq!(p.err, None);
 }
 
 #[tokio::test]
-async fn store_mem_proc_delete() {
+async fn store_proc_delete() {
     let store = store().await;
     let proc = Proc {
         id: utils::shortid(),
         name: "test".to_string(),
         mid: "m1".to_string(),
-        state: TaskState::None.into(),
+        state: "none".to_string(),
         start_time: 0,
         end_time: 0,
         timestamp: 0,
         model: "".to_string(),
-        env_local: "".to_string(),
+        env_local: "{}".to_string(),
         err: None,
     };
     store.procs().create(&proc).unwrap();
@@ -237,17 +248,17 @@ async fn store_mem_proc_delete() {
 }
 
 #[tokio::test]
-async fn store_mem_task_create() {
+async fn store_task_create() {
     let store = store().await;
     let tasks = store.tasks();
     let task = Task {
         id: utils::shortid(),
-        kind: NodeKind::Workflow.into(),
+        kind: "workflow".to_string(),
         name: "test".to_string(),
         pid: "pid".to_string(),
         tid: "tid".to_string(),
         node_data: "nid".to_string(),
-        state: TaskState::None.into(),
+        state: "none".to_string(),
         prev: None,
         start_time: 0,
         end_time: 0,
@@ -261,24 +272,24 @@ async fn store_mem_task_create() {
 }
 
 #[tokio::test]
-async fn store_mem_task_find() {
+async fn store_task_find() {
     let store = store().await;
     let tasks = store.tasks();
     let tid = utils::shortid();
     let task = Task {
         id: tid.clone(),
-        kind: NodeKind::Workflow.into(),
+        kind: "workflow".to_string(),
         name: "test".to_string(),
         pid: "pid".to_string(),
         tid: "tid".to_string(),
         node_data: "nid".to_string(),
-        state: TaskState::None.into(),
-        data: "{}".to_string(),
+        state: "none".to_string(),
         prev: None,
         start_time: 0,
         end_time: 0,
         hooks: "{}".to_string(),
         timestamp: 0,
+        data: "{}".to_string(),
         err: None,
     };
     tasks.create(&task).unwrap();
@@ -286,19 +297,19 @@ async fn store_mem_task_find() {
 }
 
 #[tokio::test]
-async fn store_mem_task_query() {
+async fn store_task_query() {
     let store = store().await;
     let tasks = store.tasks();
     let pid = utils::shortid();
     for _ in 0..5 {
         let task = Task {
-            kind: NodeKind::Workflow.into(),
+            kind: "workflow".to_string(),
             id: utils::shortid(),
             name: "test".to_string(),
             pid: pid.to_string(),
             tid: "tid".to_string(),
             node_data: "nid".to_string(),
-            state: TaskState::None.into(),
+            state: "none".to_string(),
             prev: None,
             start_time: 0,
             end_time: 0,
@@ -314,21 +325,21 @@ async fn store_mem_task_query() {
         .push(Cond::and().push(Expr::eq("pid", pid)))
         .set_limit(5);
     let items = tasks.query(&q).unwrap();
-    assert_eq!(items.count, 5);
+    assert_eq!(items.rows.len(), 5);
 }
 
 #[tokio::test]
-async fn store_mem_task_update() {
+async fn store_task_update() {
     let store = store().await;
     let table = store.tasks();
     let mut task = Task {
-        kind: NodeKind::Workflow.into(),
+        kind: "workflow".to_string(),
         id: utils::shortid(),
         name: "test".to_string(),
         pid: "pid".to_string(),
         tid: "tid".to_string(),
         node_data: "nid".to_string(),
-        state: TaskState::None.into(),
+        state: "none".to_string(),
         prev: None,
         start_time: 0,
         end_time: 0,
@@ -339,7 +350,7 @@ async fn store_mem_task_update() {
     };
     table.create(&task).unwrap();
 
-    task.state = TaskState::Completed.into();
+    task.state = "completed".to_string();
     task.prev = Some("tid1".to_string());
     table.update(&task).unwrap();
 
@@ -349,17 +360,17 @@ async fn store_mem_task_update() {
 }
 
 #[tokio::test]
-async fn store_mem_task_delete() {
+async fn store_local_task_delete() {
     let store = store().await;
     let table = store.tasks();
     let task = Task {
-        kind: NodeKind::Workflow.into(),
+        kind: "workflow".to_string(),
         id: utils::shortid(),
         name: "test".to_string(),
         pid: "pid".to_string(),
         tid: "tid".to_string(),
         node_data: "nid".to_string(),
-        state: TaskState::None.into(),
+        state: "none".to_string(),
         prev: None,
         start_time: 0,
         end_time: 0,
@@ -375,13 +386,15 @@ async fn store_mem_task_delete() {
 }
 
 #[tokio::test]
-async fn store_mem_message_create() {
+async fn store_message_create() {
     let store = store().await;
 
     let pid = utils::longid();
     let tid = utils::shortid();
-    let msg = Message {
-        id: format!("{pid}:{tid}"),
+
+    let id = format!("{pid}:{tid}");
+    let msg: Message = Message {
+        id: id.clone(),
         name: "test".to_string(),
         pid: pid.clone(),
         tid: tid.clone(),
@@ -390,10 +403,10 @@ async fn store_mem_message_create() {
         state: MessageState::Created,
         start_time: 0,
         end_time: 0,
+        uses: "pack1".to_string(),
         r#type: "step".to_string(),
         model: json!({ "id": "m1"}).to_string(),
         key: "test".to_string(),
-        uses: "package".to_string(),
         inputs: json!({}).to_string(),
         outputs: json!({}).to_string(),
         tag: "tag1".to_string(),
@@ -402,25 +415,25 @@ async fn store_mem_message_create() {
         create_time: 0,
         update_time: 0,
         retry_times: 0,
-        timestamp: 0,
         status: MessageStatus::Created,
+        timestamp: 0,
     };
 
     store.messages().create(&msg).expect("create message");
 
-    let id = utils::Id::new(&pid, &tid);
-    let ret = store.messages().find(&id.id());
+    let ret = store.messages().find(&id);
     assert!(ret.is_ok());
 }
 
 #[tokio::test]
-async fn store_mem_message_query() {
+async fn store_message_query() {
     let store = store().await;
 
     let pid = utils::longid();
     let tid = utils::shortid();
+    let id = format!("{pid}:{tid}");
     let msg = Message {
-        id: format!("{pid}:{tid}"),
+        id: id.clone(),
         name: "test".to_string(),
         pid: pid.clone(),
         tid: tid.clone(),
@@ -429,10 +442,10 @@ async fn store_mem_message_query() {
         state: MessageState::Created,
         start_time: 0,
         end_time: 0,
+        uses: "pack1".to_string(),
         r#type: "step".to_string(),
         model: json!({ "id": "m1"}).to_string(),
         key: "test".to_string(),
-        uses: "package".to_string(),
         inputs: json!({}).to_string(),
         outputs: json!({}).to_string(),
         tag: "tag1".to_string(),
@@ -441,26 +454,26 @@ async fn store_mem_message_query() {
         create_time: 0,
         update_time: 0,
         retry_times: 0,
-        timestamp: 0,
         status: MessageStatus::Created,
+        timestamp: 0,
     };
 
     store.messages().create(&msg).expect("create message");
 
-    let id = utils::Id::new(&pid, &tid);
-    let q = Query::new().push(Cond::and().push(Expr::eq("id", id.id())));
+    let q = Query::new().push(Cond::and().push(Expr::eq("id", id)));
     let ret = store.messages().query(&q);
     assert!(ret.is_ok());
 }
 
 #[tokio::test]
-async fn store_mem_message_update() {
+async fn store_message_update() {
     let store = store().await;
 
     let pid = utils::longid();
     let tid = utils::shortid();
+    let id = format!("{pid}:{tid}");
     let msg = Message {
-        id: format!("{pid}:{tid}"),
+        id: id.clone(),
         name: "test".to_string(),
         pid: pid.clone(),
         tid: tid.clone(),
@@ -470,9 +483,9 @@ async fn store_mem_message_update() {
         start_time: 0,
         end_time: 0,
         r#type: "step".to_string(),
+        uses: "pack1".to_string(),
         model: json!({ "id": "m1"}).to_string(),
         key: "test".to_string(),
-        uses: "package".to_string(),
         inputs: json!({}).to_string(),
         outputs: json!({}).to_string(),
         tag: "tag1".to_string(),
@@ -481,33 +494,33 @@ async fn store_mem_message_update() {
         create_time: 0,
         update_time: 0,
         retry_times: 0,
-        timestamp: 0,
         status: MessageStatus::Created,
+        timestamp: 0,
     };
 
     store.messages().create(&msg).unwrap();
 
-    let id = utils::Id::new(&pid, &tid);
-    let mut msg = store.messages().find(&id.id()).unwrap();
+    let mut msg = store.messages().find(&id).unwrap();
     msg.state = MessageState::Completed;
     msg.retry_times = 1;
     msg.status = MessageStatus::Acked;
     store.messages().update(&msg).unwrap();
 
-    let msg2 = store.messages().find(&id.id()).unwrap();
+    let msg2 = store.messages().find(&id).unwrap();
     assert_eq!(msg2.state, MessageState::Completed);
     assert_eq!(msg2.retry_times, 1);
     assert_eq!(msg2.status, MessageStatus::Acked);
 }
 
 #[tokio::test]
-async fn store_mem_message_remove() {
+async fn store_message_remove() {
     let store = store().await;
 
     let pid = utils::longid();
     let tid = utils::shortid();
+    let id = format!("{pid}:{tid}");
     let msg = Message {
-        id: format!("{pid}:{tid}"),
+        id,
         name: "test".to_string(),
         pid: pid.clone(),
         tid: tid.clone(),
@@ -517,9 +530,9 @@ async fn store_mem_message_remove() {
         start_time: 0,
         end_time: 0,
         r#type: "step".to_string(),
+        uses: "pack1".to_string(),
         model: json!({ "id": "m1"}).to_string(),
         key: "test".to_string(),
-        uses: "package".to_string(),
         inputs: json!({}).to_string(),
         outputs: json!({}).to_string(),
         tag: "tag1".to_string(),
@@ -528,8 +541,8 @@ async fn store_mem_message_remove() {
         create_time: 0,
         update_time: 0,
         retry_times: 0,
-        timestamp: 0,
         status: MessageStatus::Created,
+        timestamp: 0,
     };
 
     store.messages().create(&msg).unwrap();
@@ -540,7 +553,7 @@ async fn store_mem_message_remove() {
 }
 
 #[tokio::test]
-async fn store_mem_package_create() {
+async fn store_package_create() {
     let store = store().await;
 
     let id = utils::longid();
@@ -551,9 +564,9 @@ async fn store_mem_package_create() {
         doc: "doc".to_string(),
         version: "0.1.0".to_string(),
         schema: "{}".to_string(),
-        run_as: crate::ActRunAs::Func,
+        run_as: acts::ActRunAs::Func,
         groups: "[]".to_string(),
-        catalog: crate::package::ActPackageCatalog::Core,
+        catalog: acts::ActPackageCatalog::Core,
         create_time: 0,
         update_time: 0,
         timestamp: 0,
@@ -566,7 +579,7 @@ async fn store_mem_package_create() {
 }
 
 #[tokio::test]
-async fn store_mem_package_query() {
+async fn store_package_query() {
     let store = store().await;
 
     let id = utils::longid();
@@ -577,9 +590,9 @@ async fn store_mem_package_query() {
         doc: "doc".to_string(),
         version: "0.1.0".to_string(),
         schema: "{}".to_string(),
-        run_as: crate::ActRunAs::Func,
+        run_as: acts::ActRunAs::Func,
         groups: "[]".to_string(),
-        catalog: crate::package::ActPackageCatalog::Core,
+        catalog: acts::ActPackageCatalog::Core,
         create_time: 0,
         update_time: 0,
         timestamp: 0,
@@ -592,7 +605,7 @@ async fn store_mem_package_query() {
 }
 
 #[tokio::test]
-async fn store_mem_package_update() {
+async fn store_package_update() {
     let store = store().await;
 
     let id = utils::longid();
@@ -603,9 +616,9 @@ async fn store_mem_package_update() {
         doc: "doc".to_string(),
         version: "0.1.0".to_string(),
         schema: "{}".to_string(),
-        run_as: crate::ActRunAs::Func,
+        run_as: acts::ActRunAs::Func,
         groups: "[]".to_string(),
-        catalog: crate::package::ActPackageCatalog::Core,
+        catalog: acts::ActPackageCatalog::Core,
         create_time: 0,
         update_time: 0,
         timestamp: 0,
@@ -613,19 +626,19 @@ async fn store_mem_package_update() {
     };
     store.packages().create(&package).unwrap();
     let mut p = store.packages().find(&package.id).unwrap();
-    p.desc = "my desc".to_string();
-    p.version = "0.2.0".to_string();
-    p.schema = "{ 'b': 100 }".to_string();
+    p.desc = "my name".to_string();
+    p.update_time = 200;
+    p.schema = "{\"a\": 0 }".to_string();
     store.packages().update(&p).unwrap();
 
     let p2 = store.packages().find(&package.id).unwrap();
-    assert_eq!(p2.desc, "my desc");
-    assert_eq!(p2.version, "0.2.0");
-    assert_eq!(p2.schema, "{ 'b': 100 }");
+    assert_eq!(p2.desc, "my name");
+    assert_eq!(p2.update_time, 200);
+    assert_eq!(p2.schema, "{\"a\": 0 }");
 }
 
 #[tokio::test]
-async fn store_mem_package_remove() {
+async fn store_package_remove() {
     let store = store().await;
 
     let id = utils::longid();
@@ -636,9 +649,9 @@ async fn store_mem_package_remove() {
         doc: "doc".to_string(),
         version: "0.1.0".to_string(),
         schema: "{}".to_string(),
-        run_as: crate::ActRunAs::Func,
+        run_as: acts::ActRunAs::Func,
         groups: "[]".to_string(),
-        catalog: crate::package::ActPackageCatalog::Core,
+        catalog: acts::ActPackageCatalog::Core,
         create_time: 0,
         update_time: 0,
         timestamp: 0,
@@ -648,5 +661,86 @@ async fn store_mem_package_remove() {
     store.packages().delete(&package.id).unwrap();
 
     let ret = store.packages().find(&package.id);
+    assert!(ret.is_err());
+}
+
+#[tokio::test]
+async fn store_event_create() {
+    let store = store().await;
+
+    let id = utils::longid();
+    let evt = Event {
+        id,
+        name: "name".to_string(),
+        mid: "mid".to_string(),
+        create_time: 0,
+        timestamp: 0,
+    };
+
+    store.events().create(&evt).unwrap();
+    let ret = store.events().find(&evt.id);
+    assert!(ret.is_ok());
+}
+
+#[tokio::test]
+async fn store_event_query() {
+    let store = store().await;
+
+    let id = utils::longid();
+    let evt = Event {
+        id,
+        name: "name".to_string(),
+        mid: "mid".to_string(),
+        create_time: 0,
+        timestamp: 0,
+    };
+    store.events().create(&evt).unwrap();
+    let q = Query::new().push(Cond::and().push(Expr::eq("id", evt.id)));
+    let ret = store.events().query(&q);
+    assert!(ret.is_ok());
+}
+
+#[tokio::test]
+async fn store_event_update() {
+    let store = store().await;
+
+    let id = utils::longid();
+    let evt = Event {
+        id,
+        name: "name".to_string(),
+        mid: "mid".to_string(),
+        create_time: 0,
+        timestamp: 0,
+    };
+    store.events().create(&evt).unwrap();
+    let mut p = store.events().find(&evt.id).unwrap();
+    p.name = "my name".to_string();
+    p.timestamp = 200;
+    p.mid = "my mid".to_string();
+
+    store.events().update(&p).unwrap();
+
+    let p2 = store.events().find(&evt.id).unwrap();
+    assert_eq!(p2.name, "my name");
+    assert_eq!(p2.timestamp, 200);
+    assert_eq!(p2.mid, "my mid");
+}
+
+#[tokio::test]
+async fn store_event_remove() {
+    let store = store().await;
+
+    let id = utils::longid();
+    let evt = Event {
+        id,
+        name: "name".to_string(),
+        mid: "mid".to_string(),
+        create_time: 0,
+        timestamp: 0,
+    };
+    store.events().create(&evt).unwrap();
+    store.events().delete(&evt.id).unwrap();
+
+    let ret = store.events().find(&evt.id);
     assert!(ret.is_err());
 }

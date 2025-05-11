@@ -1,10 +1,5 @@
 use super::ExecutorQuery;
-use crate::{
-    scheduler::Runtime,
-    store::{PageData, StoreAdapter},
-    utils::Id,
-    Result, TaskInfo,
-};
+use crate::{Result, TaskInfo, scheduler::Runtime, store::PageData, utils::Id};
 use std::sync::Arc;
 use tracing::instrument;
 

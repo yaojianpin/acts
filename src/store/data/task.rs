@@ -1,4 +1,7 @@
-use crate::TaskState;
+use crate::{
+    TaskState,
+    store::{DbCollectionIden, StoreIden},
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -18,6 +21,12 @@ pub struct Task {
     pub end_time: i64,
     pub hooks: String,
     pub timestamp: i64,
+}
+
+impl DbCollectionIden for Task {
+    fn iden() -> StoreIden {
+        StoreIden::Tasks
+    }
 }
 
 impl Task {

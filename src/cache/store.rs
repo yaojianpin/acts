@@ -1,8 +1,8 @@
 use crate::{
-    ActError, Error, Message, Result, StoreAdapter, Workflow,
+    ActError, Error, Message, Result, Workflow,
     data::{self, MessageStatus},
     scheduler::{self, Node, Runtime, StatementBatch, TaskLifeCycle, TaskState},
-    store::{Cond, Expr, Query, Store},
+    store::{Store, query::*},
     utils::{self, Id},
 };
 use std::{collections::HashMap, sync::Arc};
@@ -109,12 +109,13 @@ impl Store {
                 .push(Expr::eq("pid", pid.to_string()))
                 .push(Expr::eq("tid", tid.to_string())),
         );
-        if let Ok(messages) = self.messages().query(&q) {
+        let collection = self.messages();
+        if let Ok(messages) = collection.query(&q) {
             for m in messages.rows.iter() {
                 let mut m = m.clone();
                 m.status = status;
                 m.update_time = utils::time::time_millis();
-                self.messages().update(&m)?;
+                collection.update(&m)?;
             }
         }
 
@@ -129,7 +130,7 @@ impl Store {
         timeout_millis: u64,
         max_message_retry_times: i32,
         f: F,
-    ) {
+    ) -> Result<()> {
         let q = Query::new().set_limit(300).push(
             Cond::and()
                 .push(Expr::eq("status", MessageStatus::Created))
@@ -138,33 +139,36 @@ impl Store {
                     utils::time::time_millis() as u64 - timeout_millis,
                 )),
         );
-        if let Ok(messages) = self.messages().query(&q) {
+        let collection = self.messages();
+        if let Ok(messages) = collection.query(&q) {
             for m in messages.rows.iter() {
                 let mut message = m.clone();
                 message.update_time = utils::time::time_millis();
                 if message.retry_times < max_message_retry_times {
                     message.retry_times += 1;
-                    let _ = self.messages().update(&message);
+                    let _ = collection.update(&message);
                     f(&message.into());
                 } else {
                     // mark the message as error
                     // the error messages will re-send by manual through the manager command
                     message.status = MessageStatus::Error;
-                    let _ = self.messages().update(&message);
+                    let _ = collection.update(&message);
                 }
             }
         }
+        Ok(())
     }
 
     pub fn resend_error_messages(&self) -> Result<()> {
+        let collection = self.messages();
         let q = Query::new().push(Cond::and().push(Expr::eq("status", MessageStatus::Error)));
-        if let Ok(messages) = self.messages().query(&q) {
+        if let Ok(messages) = collection.query(&q) {
             for m in messages.rows.iter() {
                 let mut message = m.clone();
                 message.status = MessageStatus::Created;
                 message.retry_times = 0;
                 message.update_time = utils::time::time_millis();
-                self.messages().update(&message)?;
+                collection.update(&message)?;
             }
         }
 
@@ -172,15 +176,16 @@ impl Store {
     }
 
     pub fn clear_error_messages(&self, pid: Option<String>) -> Result<()> {
+        let collection = self.messages();
         let mut cond = Cond::and().push(Expr::eq("status", MessageStatus::Error));
         if let Some(pid) = &pid {
             cond = cond.push(Expr::eq("pid", pid));
         }
 
         let q = Query::new().push(cond);
-        if let Ok(messages) = self.messages().query(&q) {
+        if let Ok(messages) = collection.query(&q) {
             for m in messages.rows.iter() {
-                self.messages().delete(&m.id)?;
+                collection.delete(&m.id)?;
             }
         }
 
@@ -189,14 +194,15 @@ impl Store {
 
     pub fn upsert_task(&self, task: &Arc<scheduler::Task>) -> Result<()> {
         debug!("upsert_task: {task:?}");
+        let collection = self.tasks();
         let data: data::Task = task.into_data()?;
         let id = Id::new(&task.pid, &task.id);
-        match self.tasks().find(&id.id()) {
+        match collection.find(&id.id()) {
             Ok(_) => {
-                self.tasks().update(&data)?;
+                collection.update(&data)?;
             }
             Err(_) => {
-                self.tasks().create(&data)?;
+                collection.create(&data)?;
             }
         }
 
@@ -205,13 +211,14 @@ impl Store {
 
     pub fn upsert_proc(&self, proc: &Arc<scheduler::Process>) -> Result<()> {
         debug!("upsert process: {}", proc.id());
+        let collection = self.procs();
         let data: data::Proc = proc.into_data()?;
-        match self.procs().find(proc.id()) {
+        match collection.find(proc.id()) {
             Ok(_) => {
-                self.procs().update(&data)?;
+                collection.update(&data)?;
             }
             Err(_) => {
-                self.procs().create(&data)?;
+                collection.create(&data)?;
             }
         }
 
@@ -220,9 +227,10 @@ impl Store {
 
     fn load_tasks(&self, proc: &Arc<scheduler::Process>, rt: &Arc<Runtime>) -> Result<()> {
         debug!("load_tasks pid={}", proc.id());
+        let collection = self.tasks();
         let tree = &proc.tree();
         let query = Query::new().push(Cond::and().push(Expr::eq("pid", proc.id())));
-        let tasks = self.tasks().query(&query)?;
+        let tasks = collection.query(&query)?;
         for t in tasks.rows {
             let state: TaskState = t.state.into();
             let node = Node::from_str(&t.node_data, tree);

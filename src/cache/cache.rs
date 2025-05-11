@@ -1,17 +1,17 @@
 use crate::{
-    Engine, Result, ShareLock, StoreAdapter,
+    Engine, Result,
     scheduler::{Process, Runtime, Task},
     store::Store,
 };
 use moka::sync::Cache as MokaCache;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tracing::{debug, error, instrument};
 
 #[derive(Clone)]
 pub struct Cache {
     cap: usize,
     procs: MokaCache<String, Arc<Process>>,
-    store: ShareLock<Arc<Store>>,
+    store: Arc<Store>,
 }
 
 impl std::fmt::Debug for Cache {
@@ -28,12 +28,12 @@ impl Cache {
         Self {
             cap,
             procs: MokaCache::new(cap as u64),
-            store: Arc::new(RwLock::new(Store::default())),
+            store: Arc::new(Store::new()),
         }
     }
 
     pub fn store(&self) -> Arc<Store> {
-        self.store.read().unwrap().clone()
+        self.store.clone()
     }
 
     pub fn cap(&self) -> usize {
@@ -45,21 +45,13 @@ impl Cache {
         self.procs.entry_count() as usize
     }
 
-    pub fn init(&self, engine: &Engine) {
+    pub fn init(&self, _engine: &Engine) {
         debug!("cache::init");
-        #[cfg(feature = "store")]
-        {
-            let config = engine.config();
-            *self.store.write().unwrap() =
-                Arc::new(Store::local(&config.data_dir, &config.db_name));
-        }
-        if let Some(store) = engine.runtime().adapter().store() {
-            *self.store.write().unwrap() = Arc::new(Store::create(store));
-        }
+        self.store.init();
     }
 
     pub fn close(&self) {
-        self.store.read().unwrap().close();
+        // self.store.read().unwrap().close();
     }
 
     #[instrument]
@@ -81,8 +73,7 @@ impl Cache {
         match self.get_proc(pid) {
             Some(proc) => Some(proc.clone()),
             None => {
-                let store = self.store.read().unwrap();
-                if let Some(proc) = store.load_proc(pid, rt).unwrap_or_else(|err| {
+                if let Some(proc) = self.store.load_proc(pid, rt).unwrap_or_else(|err| {
                     error!("cache.process store.loadproc={}", err);
                     eprintln!("cache.process store.loadproc={}", err);
                     None
@@ -102,14 +93,13 @@ impl Cache {
     pub fn remove(&self, pid: &str) -> Result<bool> {
         debug!("remove pid={pid}");
         self.procs.remove(pid);
-        self.store.read().unwrap().remove_proc(pid)?;
+        self.store.remove_proc(pid)?;
         Ok(true)
     }
 
     #[instrument(skip(on_load))]
     pub fn restore<F: Fn(&Arc<Process>)>(&self, rt: &Arc<Runtime>, on_load: F) -> Result<()> {
         debug!("restore");
-        let store = self.store.read().unwrap();
         let cap = self.cap();
         let count = self.count();
         let mut check_point = cap / 2;
@@ -118,7 +108,7 @@ impl Cache {
         }
         if count < check_point {
             let cap = cap - count;
-            for ref proc in store.load(cap, rt)? {
+            for ref proc in self.store.load(cap, rt)? {
                 if !self.procs.contains_key(proc.id()) {
                     self.push_proc_pri(proc, false);
                     on_load(proc);
@@ -145,8 +135,9 @@ impl Cache {
     pub(super) fn push_proc_pri(&self, proc: &Arc<Process>, save: bool) {
         debug!("push process pid={}", proc.id());
         if save {
-            let store = self.store.read().unwrap();
-            store.upsert_proc(proc).expect("fail to upsert process");
+            self.store
+                .upsert_proc(proc)
+                .expect("fail to upsert process");
         }
         self.procs.insert(proc.id().to_string(), proc.clone());
     }
@@ -154,14 +145,14 @@ impl Cache {
     pub(super) fn push_task_pri(&self, task: &Arc<Task>, save: bool) -> Result<()> {
         let p = task.proc();
         if save {
-            let store = self.store.read().unwrap();
             // update process when updating the task
-            let mut proc = store.procs().find(&task.pid)?;
+            let collection = self.store.procs();
+            let mut proc = collection.find(&task.pid)?;
             proc.end_time = p.end_time();
             proc.state = p.state().into();
 
-            store.procs().update(&proc)?;
-            store.upsert_task(task)?;
+            collection.update(&proc)?;
+            self.store.upsert_task(task)?;
         }
 
         if let Some(proc) = self.procs.get(&task.pid) {

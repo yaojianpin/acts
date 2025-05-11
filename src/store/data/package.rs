@@ -1,4 +1,8 @@
-use crate::{ActRunAs, package::ActPackageCatalog};
+use crate::{
+    ActRunAs,
+    package::ActPackageCatalog,
+    store::{DbCollectionIden, StoreIden},
+};
 use serde::{Deserialize, Serialize};
 
 #[derive(Default, Deserialize, Serialize, Debug, Clone)]
@@ -17,4 +21,10 @@ pub struct Package {
     pub create_time: i64,
     pub update_time: i64,
     pub timestamp: i64,
+}
+
+impl DbCollectionIden for Package {
+    fn iden() -> StoreIden {
+        StoreIden::Packages
+    }
 }

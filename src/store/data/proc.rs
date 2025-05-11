@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::store::{DbCollectionIden, StoreIden};
+
 #[derive(Deserialize, Serialize, Debug, Clone)]
 pub struct Proc {
     pub id: String,
@@ -12,4 +14,10 @@ pub struct Proc {
     pub model: String,
     pub env_local: String,
     pub err: Option<String>,
+}
+
+impl DbCollectionIden for Proc {
+    fn iden() -> StoreIden {
+        StoreIden::Procs
+    }
 }

@@ -1,10 +1,10 @@
 use crate::{
-    Act, ChannelOptions, Engine, Message, Query, StoreAdapter, Vars, Workflow,
+    Act, ChannelOptions, Engine, Message, Vars, Workflow,
     data::{self, Package},
     event::{MessageState, Model},
     export::ExecutorQuery,
     scheduler::TaskState,
-    store::{Cond, Expr},
+    store::query::*,
     utils,
 };
 use serde_json::json;
