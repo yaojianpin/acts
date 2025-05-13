@@ -50,9 +50,7 @@ impl Cache {
         self.store.init();
     }
 
-    pub fn close(&self) {
-        // self.store.read().unwrap().close();
-    }
+    pub fn close(&self) {}
 
     #[instrument]
     pub fn push_proc(&self, proc: &Arc<Process>) {

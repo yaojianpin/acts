@@ -1,83 +1,88 @@
 use crate::database::{DbInit, DbRow};
 use acts::{DbCollection, PageData, Result, data};
-use rusqlite::{Error as DbError, Result as DbResult, Row};
 use sea_query::{
     Alias as SeaAlias, ColumnDef, Expr as SeaExpr, Func as SeaFunc, Iden, Index, Order as SeaOrder,
-    Query as SeaQuery, SqliteQueryBuilder, Table,
+    PostgresQueryBuilder, Query as SeaQuery, Table,
 };
-use sea_query_rusqlite::RusqliteBinder;
+use sea_query_binder::SqlxBinder;
+use sqlx::{Error as DbError, Row, postgres::PgRow};
 
 use super::{DbConnection, into_query, map_db_err};
 
-#[derive(Debug)]
-pub struct ProcCollection {
+pub struct TaskCollection {
     conn: DbConnection,
 }
 
 #[derive(Iden)]
-#[iden = "procs"]
+#[iden = "tasks"]
 enum CollectionIden {
     Table,
+
     Id,
-    State,
-    Mid,
+    Pid,
+    Tid,
+    NodeData,
+    Kind,
+    Prev,
+
     Name,
+    State,
+    Data,
+    Err,
     StartTime,
     EndTime,
+    Hooks,
     Timestamp,
-    Model,
-    EnvLocal,
-    Err,
 }
 
-impl DbCollection for ProcCollection {
-    type Item = data::Proc;
+impl DbCollection for TaskCollection {
+    type Item = data::Task;
 
     fn exists(&self, id: &str) -> Result<bool> {
-        let conn = self.conn.get().unwrap();
         let (sql, values) = SeaQuery::select()
             .from(CollectionIden::Table)
             .expr(SeaFunc::count(SeaExpr::col(CollectionIden::Id)))
             .and_where(SeaExpr::col(CollectionIden::Id).eq(id))
-            .build_rusqlite(SqliteQueryBuilder);
+            .build_sqlx(PostgresQueryBuilder);
 
-        let mut stmt = conn.prepare(sql.as_str()).map_err(map_db_err)?;
-        let result = stmt
-            .query_row(&*values.as_params(), |row| row.get::<usize, i64>(0))
+        let count = self
+            .conn
+            .query_one(sql.as_str(), values)
+            .map(|row| row.get::<i64, usize>(0))
             .map_err(map_db_err)?;
 
-        Ok(result > 0)
+        Ok(count > 0)
     }
 
     fn find(&self, id: &str) -> Result<Self::Item> {
-        let conn = self.conn.get().unwrap();
         let (sql, values) = SeaQuery::select()
             .from(CollectionIden::Table)
             .columns([
                 CollectionIden::Id,
-                CollectionIden::State,
-                CollectionIden::Mid,
+                CollectionIden::Pid,
+                CollectionIden::Tid,
+                CollectionIden::NodeData,
+                CollectionIden::Kind,
+                CollectionIden::Prev,
                 CollectionIden::Name,
+                CollectionIden::State,
+                CollectionIden::Data,
+                CollectionIden::Err,
                 CollectionIden::StartTime,
                 CollectionIden::EndTime,
+                CollectionIden::Hooks,
                 CollectionIden::Timestamp,
-                CollectionIden::Model,
-                CollectionIden::EnvLocal,
-                CollectionIden::Err,
             ])
             .and_where(SeaExpr::col(CollectionIden::Id).eq(id))
-            .build_rusqlite(SqliteQueryBuilder);
+            .build_sqlx(PostgresQueryBuilder);
 
-        let mut stmt = conn.prepare(sql.as_str()).map_err(map_db_err)?;
-        let row = stmt
-            .query_row(&*values.as_params(), |row| data::Proc::from_row(row))
-            .map_err(map_db_err)?;
-
-        Ok(row)
+        self.conn
+            .query_one(&sql, values)
+            .map(|row| Self::Item::from_row(&row).map_err(map_db_err))
+            .map_err(map_db_err)?
     }
 
     fn query(&self, q: &acts::query::Query) -> Result<acts::PageData<Self::Item>> {
-        let conn = self.conn.get().unwrap();
         let filter = into_query(q);
 
         let mut count_query = SeaQuery::select();
@@ -89,15 +94,19 @@ impl DbCollection for ProcCollection {
         query
             .columns([
                 CollectionIden::Id,
-                CollectionIden::State,
-                CollectionIden::Mid,
+                CollectionIden::Pid,
+                CollectionIden::Tid,
+                CollectionIden::NodeData,
+                CollectionIden::Kind,
+                CollectionIden::Prev,
                 CollectionIden::Name,
+                CollectionIden::State,
+                CollectionIden::Data,
+                CollectionIden::Err,
                 CollectionIden::StartTime,
                 CollectionIden::EndTime,
+                CollectionIden::Hooks,
                 CollectionIden::Timestamp,
-                CollectionIden::Model,
-                CollectionIden::EnvLocal,
-                CollectionIden::Err,
             ])
             .from(CollectionIden::Table);
 
@@ -117,14 +126,14 @@ impl DbCollection for ProcCollection {
         let (sql, values) = query
             .limit(q.limit() as u64)
             .offset(q.offset() as u64)
-            .build_rusqlite(SqliteQueryBuilder);
+            .build_sqlx(PostgresQueryBuilder);
 
-        let (count_sql, count_values) = count_query.build_rusqlite(SqliteQueryBuilder);
-        let count = conn
-            .prepare(count_sql.as_str())
+        let (count_sql, count_values) = count_query.build_sqlx(PostgresQueryBuilder);
+        let count = self
+            .conn
+            .query_one(count_sql.as_str(), count_values)
             .map_err(map_db_err)?
-            .query_row::<usize, _, _>(&*count_values.as_params(), |row| row.get(0))
-            .map_err(map_db_err)?;
+            .get::<i64, usize>(0) as usize;
         let page_count = count.div_ceil(q.limit());
         let page_num = q.offset() / q.limit() + 1;
         let data = PageData {
@@ -132,119 +141,135 @@ impl DbCollection for ProcCollection {
             page_size: q.limit(),
             page_num,
             page_count,
-            rows: conn
-                .prepare(&sql.as_str())
+            rows: self
+                .conn
+                .query(&sql, values)
                 .map_err(map_db_err)?
-                .query_map(&*values.as_params(), |row| data::Proc::from_row(row))
-                .map_err(map_db_err)?
-                .map(|v| v.unwrap())
+                .iter()
+                .map(|row| Self::Item::from_row(row).unwrap())
                 .collect::<Vec<_>>(),
         };
         Ok(data)
     }
 
     fn create(&self, data: &Self::Item) -> Result<bool> {
-        let conn = self.conn.get().unwrap();
         let data = data.clone();
         let (sql, sql_values) = SeaQuery::insert()
             .into_table(CollectionIden::Table)
             .columns([
                 CollectionIden::Id,
-                CollectionIden::State,
-                CollectionIden::Mid,
+                CollectionIden::Pid,
+                CollectionIden::Tid,
+                CollectionIden::NodeData,
+                CollectionIden::Kind,
+                CollectionIden::Prev,
                 CollectionIden::Name,
+                CollectionIden::State,
+                CollectionIden::Data,
+                CollectionIden::Err,
                 CollectionIden::StartTime,
                 CollectionIden::EndTime,
+                CollectionIden::Hooks,
                 CollectionIden::Timestamp,
-                CollectionIden::Model,
-                CollectionIden::EnvLocal,
-                CollectionIden::Err,
             ])
             .values([
                 data.id.into(),
-                data.state.into(),
-                data.mid.into(),
+                data.pid.into(),
+                data.tid.into(),
+                data.node_data.into(),
+                data.kind.into(),
+                data.prev.into(),
                 data.name.into(),
+                data.state.into(),
+                data.data.into(),
+                data.err.into(),
                 data.start_time.into(),
                 data.end_time.into(),
+                data.hooks.into(),
                 data.timestamp.into(),
-                data.model.into(),
-                data.env_local.into(),
-                data.err.into(),
             ])
             .map_err(map_db_err)?
-            .build_rusqlite(SqliteQueryBuilder);
+            .build_sqlx(PostgresQueryBuilder);
 
-        let result = conn
-            .execute(sql.as_str(), &*sql_values.as_params())
+        let result = self
+            .conn
+            .execute(sql.as_str(), sql_values)
             .map_err(map_db_err)?;
-        Ok(result > 0)
+        Ok(result.rows_affected() > 0)
     }
 
     fn update(&self, data: &Self::Item) -> Result<bool> {
-        let conn = self.conn.get().unwrap();
         let model = data.clone();
         let (sql, sql_values) = SeaQuery::update()
             .table(CollectionIden::Table)
             .values([
-                (CollectionIden::State, model.state.into()),
-                (CollectionIden::Mid, model.mid.into()),
+                (CollectionIden::Pid, model.pid.into()),
+                (CollectionIden::Tid, model.tid.into()),
+                (CollectionIden::NodeData, model.node_data.into()),
+                (CollectionIden::Kind, model.kind.into()),
+                (CollectionIden::Prev, model.prev.into()),
                 (CollectionIden::Name, model.name.into()),
+                (CollectionIden::State, model.state.into()),
+                (CollectionIden::Data, model.data.into()),
+                (CollectionIden::Err, model.err.into()),
                 (CollectionIden::StartTime, model.start_time.into()),
                 (CollectionIden::EndTime, model.end_time.into()),
+                (CollectionIden::Hooks, model.hooks.into()),
                 (CollectionIden::Timestamp, model.timestamp.into()),
-                (CollectionIden::Model, model.model.into()),
-                (CollectionIden::EnvLocal, model.env_local.into()),
-                (CollectionIden::Err, model.err.into()),
             ])
             .and_where(SeaExpr::col(CollectionIden::Id).eq(data.id()))
-            .build_rusqlite(SqliteQueryBuilder);
+            .build_sqlx(PostgresQueryBuilder);
 
-        let result = conn
-            .execute(sql.as_str(), &*sql_values.as_params())
+        let result = self
+            .conn
+            .execute(sql.as_str(), sql_values)
             .map_err(map_db_err)?;
-        Ok(result > 0)
+        Ok(result.rows_affected() > 0)
     }
 
     fn delete(&self, id: &str) -> Result<bool> {
-        let conn = self.conn.get().unwrap();
         let (sql, values) = SeaQuery::delete()
             .from_table(CollectionIden::Table)
             .and_where(SeaExpr::col(CollectionIden::Id).eq(id))
-            .build_rusqlite(SqliteQueryBuilder);
+            .build_sqlx(PostgresQueryBuilder);
 
-        let result = conn
-            .execute(sql.as_str(), &*values.as_params())
+        let result = self
+            .conn
+            .execute(sql.as_str(), values)
             .map_err(map_db_err)?;
-        Ok(result > 0)
+        Ok(result.rows_affected() > 0)
     }
 }
 
-impl DbRow for data::Proc {
+impl DbRow for data::Task {
     fn id(&self) -> &str {
         &self.id
     }
 
-    fn from_row(row: &Row<'_>) -> DbResult<Self, DbError>
+    fn from_row(row: &PgRow) -> std::result::Result<Self, DbError>
     where
         Self: Sized,
     {
         Ok(Self {
-            id: row.get_unwrap("id"),
-            state: row.get_unwrap("state"),
-            mid: row.get_unwrap("mid"),
-            name: row.get_unwrap("name"),
-            model: row.get_unwrap("model"),
-            env_local: row.get_unwrap("name"),
-            err: row.get_unwrap("err"),
-            start_time: row.get_unwrap("start_time"),
-            end_time: row.get_unwrap("end_time"),
-            timestamp: row.get_unwrap("timestamp"),
+            id: row.get("id"),
+            pid: row.get("pid"),
+            tid: row.get("tid"),
+            node_data: row.get("node_data"),
+            kind: row.get("kind"),
+            prev: row.get("prev"),
+            name: row.get("name"),
+            state: row.get("state"),
+            data: row.get("data"),
+            err: row.get("err"),
+            start_time: row.get("start_time"),
+            end_time: row.get("end_time"),
+            hooks: row.get("hooks"),
+            timestamp: row.get("timestamp"),
         })
     }
 }
 
-impl DbInit for ProcCollection {
+impl DbInit for TaskCollection {
     fn init(&self) {
         let sql = [
             Table::create()
@@ -256,9 +281,15 @@ impl DbInit for ProcCollection {
                         .not_null()
                         .primary_key(),
                 )
-                .col(ColumnDef::new(CollectionIden::State).string().not_null())
-                .col(ColumnDef::new(CollectionIden::Mid).string().not_null())
+                .col(ColumnDef::new(CollectionIden::Pid).string().not_null())
+                .col(ColumnDef::new(CollectionIden::Tid).string().not_null())
+                .col(ColumnDef::new(CollectionIden::NodeData).string())
+                .col(ColumnDef::new(CollectionIden::Kind).string().not_null())
+                .col(ColumnDef::new(CollectionIden::Prev).string())
                 .col(ColumnDef::new(CollectionIden::Name).string())
+                .col(ColumnDef::new(CollectionIden::State).string().not_null())
+                .col(ColumnDef::new(CollectionIden::Data).string())
+                .col(ColumnDef::new(CollectionIden::Err).string())
                 .col(
                     ColumnDef::new(CollectionIden::StartTime)
                         .big_integer()
@@ -269,35 +300,32 @@ impl DbInit for ProcCollection {
                         .big_integer()
                         .default(0),
                 )
-                .col(ColumnDef::new(CollectionIden::Model).string().not_null())
-                .col(ColumnDef::new(CollectionIden::EnvLocal).string().not_null())
-                .col(ColumnDef::new(CollectionIden::Err).string())
                 .col(
                     ColumnDef::new(CollectionIden::Timestamp)
                         .big_integer()
                         .default(0),
                 )
-                .build(SqliteQueryBuilder),
+                .col(ColumnDef::new(CollectionIden::Hooks).string())
+                .build(PostgresQueryBuilder),
             Index::create()
-                .name("idx_procs_state")
+                .name("idx_tasks_pid")
                 .if_not_exists()
                 .table(CollectionIden::Table)
-                .col(CollectionIden::State)
-                .build(SqliteQueryBuilder),
+                .col(CollectionIden::Pid)
+                .build(PostgresQueryBuilder),
             Index::create()
-                .name("idx_procs_mid")
+                .name("idx_tasks_tid")
                 .if_not_exists()
                 .table(CollectionIden::Table)
-                .col(CollectionIden::Mid)
-                .build(SqliteQueryBuilder),
-        ]
-        .join("; ");
-        let conn = self.conn.get().unwrap();
-        conn.execute_batch(&sql).unwrap();
+                .col(CollectionIden::Tid)
+                .build(PostgresQueryBuilder),
+        ];
+
+        self.conn.batch_execute(&sql).unwrap();
     }
 }
 
-impl ProcCollection {
+impl TaskCollection {
     pub fn new(conn: &DbConnection) -> Self {
         Self { conn: conn.clone() }
     }

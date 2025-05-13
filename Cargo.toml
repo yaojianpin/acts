@@ -11,7 +11,7 @@ repository = "https://github.com/yaojianpin/acts.git"
 version = "0.16.0"
 
 [dependencies]
-async-trait = "0.1"
+async-trait = "0.1.88"
 chrono = "0.4"
 globset = "0.4"
 inventory = "0.3.20"
@@ -46,4 +46,4 @@ opt-level = "z"
 strip = true
 
 [workspace]
-members = ["store/postgres", "store/sqlite"]
+members = ["store/sqlite", "store/postgres"]

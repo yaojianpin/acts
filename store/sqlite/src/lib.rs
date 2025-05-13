@@ -1,3 +1,8 @@
+//! Acts sqlite store
+
+#![allow(rustdoc::bare_urls)]
+#![doc = include_str!("../README.md")]
+
 mod collection;
 mod database;
 

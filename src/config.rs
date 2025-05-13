@@ -20,8 +20,6 @@ impl Default for Config {
         Self {
             cache_cap: 1024,
             log_dir: "log".to_string(),
-            // data_dir: "data".to_string(),
-            // db_name: "acts.db".to_string(),
             log_level: "INFO".to_string(),
 
             // default to 15s

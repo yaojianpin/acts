@@ -1,4 +1,3 @@
-
 use crate::{ActPlugin, Config, Engine};
 
 pub struct EngineBuilder {
@@ -17,7 +16,6 @@ impl EngineBuilder {
         Self {
             config: Config::default(),
             plugins: Vec::new(),
-            // store: None,
         }
     }
 
@@ -45,16 +43,6 @@ impl EngineBuilder {
         self
     }
 
-    // pub fn data_dir(mut self, data_dir: &str) -> Self {
-    //     self.config.data_dir = data_dir.to_string();
-    //     self
-    // }
-
-    // pub fn db_name(mut self, db_name: &str) -> Self {
-    //     self.config.db_name = db_name.to_string();
-    //     self
-    // }
-
     pub fn tick_interval_secs(mut self, secs: u64) -> Self {
         self.config.tick_interval_secs = secs;
         self
@@ -64,11 +52,6 @@ impl EngineBuilder {
         self.config.max_message_retry_times = retry_times;
         self
     }
-
-    // pub fn set_store<STORE: StoreAdapter + Clone + 'static>(mut self, store: &STORE) -> Self {
-    //     self.store = Some(Arc::new(store.clone()));
-    //     self
-    // }
 
     /// register plugin
     ///

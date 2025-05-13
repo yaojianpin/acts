@@ -430,6 +430,18 @@ async fn main() {
 }
 ```
 
+- acts-postgres
+
+```rust,ignore
+use acts::EngineBuilder;
+use acts_postgres::PostgresStore;
+
+#[tokio::main]
+async fn main() {
+  let engine = EngineBuilder::new().add_plugin(&PostgresStore).build().start();
+}
+```
+
 How to create custom store plugin, please see the code under `store/`
 
 ## Package
@@ -485,8 +497,8 @@ acts:
 
 - store extension
 
-  - [ ] sqlite (will migrate sqite from acts store feature)
-  - [ ] postgres
+  - [x] sqlite
+  - [x] postgres
 
 - package extension
   - [ ] form (packages/form)

@@ -1,18 +1,13 @@
 use crate::database::Database;
 use acts::{MessageState, Vars, data::*, query::*};
 use serde_json::json;
-use tokio::sync::OnceCell;
 
-static STORE: OnceCell<Database> = OnceCell::const_new();
 async fn init() -> Database {
-    let db = Database::new("sqlite://test_data/test.db");
+    let db = Database::new("postgresql://postgres:pass123@127.0.0.1:5432/postgres");
     db.init();
     db
 }
 
-async fn store() -> &'static Database {
-    STORE.get_or_init(init).await
-}
 mod utils {
     use nanoid::nanoid;
     pub fn longid() -> String {
@@ -36,7 +31,7 @@ mod utils {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_model_create() {
-    let store = store().await;
+    let store = init().await;
     let model = Model {
         id: utils::longid(),
         name: "test".to_string(),
@@ -53,7 +48,7 @@ async fn store_model_create() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_model_find() {
-    let store = store().await;
+    let store = init().await;
     let mid: String = utils::longid();
     let model = Model {
         id: mid.clone(),
@@ -71,7 +66,7 @@ async fn store_model_find() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_model_query() {
-    let store = store().await;
+    let store = init().await;
     let models = store.models();
     for _ in 0..5 {
         let model = Model {
@@ -96,7 +91,7 @@ async fn store_model_query() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_model_update() {
-    let store = store().await;
+    let store = init().await;
 
     let mut model = Model {
         id: utils::longid(),
@@ -121,7 +116,7 @@ async fn store_model_update() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_model_delete() {
-    let store = store().await;
+    let store = init().await;
     let model = Model {
         id: utils::longid(),
         name: "test".to_string(),
@@ -140,7 +135,7 @@ async fn store_model_delete() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_proc_create() {
-    let store = store().await;
+    let store = init().await;
     let proc = Proc {
         id: utils::longid(),
         name: "name".to_string(),
@@ -159,7 +154,7 @@ async fn store_proc_create() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_proc_find() {
-    let store = store().await;
+    let store = init().await;
     let pid = utils::longid();
     let proc = Proc {
         id: pid.clone(),
@@ -179,7 +174,7 @@ async fn store_proc_find() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_proc_query() {
-    let store = store().await;
+    let store = init().await;
     let procs = store.procs();
     let mid = utils::longid();
     for i in 0..5 {
@@ -207,7 +202,7 @@ async fn store_proc_query() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_proc_update() {
-    let store = store().await;
+    let store = init().await;
 
     let mut vars: Vars = Vars::new();
     vars.insert("k1".to_string(), "v1".into());
@@ -238,7 +233,7 @@ async fn store_proc_update() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_proc_delete() {
-    let store = store().await;
+    let store = init().await;
     let proc = Proc {
         id: utils::shortid(),
         name: "test".to_string(),
@@ -259,7 +254,7 @@ async fn store_proc_delete() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_task_create() {
-    let store = store().await;
+    let store = init().await;
     let tasks = store.tasks();
     let task = Task {
         id: utils::shortid(),
@@ -283,7 +278,7 @@ async fn store_task_create() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_task_find() {
-    let store = store().await;
+    let store = init().await;
     let tasks = store.tasks();
     let tid = utils::shortid();
     let task = Task {
@@ -308,7 +303,7 @@ async fn store_task_find() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_task_query() {
-    let store = store().await;
+    let store = init().await;
     let tasks = store.tasks();
     let pid = utils::shortid();
     for _ in 0..5 {
@@ -340,7 +335,7 @@ async fn store_task_query() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_task_update() {
-    let store = store().await;
+    let store = init().await;
     let table = store.tasks();
     let mut task = Task {
         kind: "workflow".to_string(),
@@ -372,7 +367,7 @@ async fn store_task_update() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_task_delete() {
-    let store = store().await;
+    let store = init().await;
     let table = store.tasks();
     let task = Task {
         kind: "workflow".to_string(),
@@ -398,7 +393,7 @@ async fn store_task_delete() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_message_create() {
-    let store = store().await;
+    let store = init().await;
 
     let pid = utils::longid();
     let tid = utils::shortid();
@@ -438,7 +433,7 @@ async fn store_message_create() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_message_query() {
-    let store = store().await;
+    let store = init().await;
 
     let pid = utils::longid();
     let tid = utils::shortid();
@@ -478,7 +473,7 @@ async fn store_message_query() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_message_update() {
-    let store = store().await;
+    let store = init().await;
 
     let pid = utils::longid();
     let tid = utils::shortid();
@@ -526,7 +521,7 @@ async fn store_message_update() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_message_remove() {
-    let store = store().await;
+    let store = init().await;
 
     let pid = utils::longid();
     let tid = utils::shortid();
@@ -566,7 +561,7 @@ async fn store_message_remove() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_package_create() {
-    let store = store().await;
+    let store = init().await;
 
     let id = utils::longid();
     let package = Package {
@@ -592,7 +587,7 @@ async fn store_package_create() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_package_query() {
-    let store = store().await;
+    let store = init().await;
 
     let id = utils::longid();
     let package = Package {
@@ -618,7 +613,7 @@ async fn store_package_query() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_package_update() {
-    let store = store().await;
+    let store = init().await;
 
     let id = utils::longid();
     let package = Package {
@@ -651,7 +646,7 @@ async fn store_package_update() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_package_remove() {
-    let store = store().await;
+    let store = init().await;
 
     let id = utils::longid();
     let package = Package {
@@ -678,7 +673,7 @@ async fn store_package_remove() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_event_create() {
-    let store = store().await;
+    let store = init().await;
 
     let id = utils::longid();
     let evt = Event {
@@ -696,7 +691,7 @@ async fn store_event_create() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_event_query() {
-    let store = store().await;
+    let store = init().await;
 
     let id = utils::longid();
     let evt = Event {
@@ -714,7 +709,7 @@ async fn store_event_query() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_event_update() {
-    let store = store().await;
+    let store = init().await;
 
     let id = utils::longid();
     let evt = Event {
@@ -740,7 +735,7 @@ async fn store_event_update() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_event_remove() {
-    let store = store().await;
+    let store = init().await;
 
     let id = utils::longid();
     let evt = Event {

@@ -297,13 +297,17 @@ impl DbInit for TaskCollection {
                 .col(ColumnDef::new(CollectionIden::Err).string())
                 .col(
                     ColumnDef::new(CollectionIden::StartTime)
-                        .integer()
+                        .big_integer()
                         .default(0),
                 )
-                .col(ColumnDef::new(CollectionIden::EndTime).integer().default(0))
+                .col(
+                    ColumnDef::new(CollectionIden::EndTime)
+                        .big_integer()
+                        .default(0),
+                )
                 .col(
                     ColumnDef::new(CollectionIden::Timestamp)
-                        .integer()
+                        .big_integer()
                         .default(0),
                 )
                 .col(ColumnDef::new(CollectionIden::Hooks).string())

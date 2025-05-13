@@ -21,7 +21,6 @@ pub struct Runtime {
     cache: Arc<Cache>,
     emitter: Arc<Emitter>,
     package: Arc<Package>,
-    // adapter: Arc<Adapter>,
 }
 
 impl Runtime {
@@ -57,10 +56,6 @@ impl Runtime {
     pub fn store(&self) -> Arc<Store> {
         self.cache.store().clone()
     }
-
-    // pub fn adapter(&self) -> &Arc<Adapter> {
-    //     &self.adapter
-    // }
 
     #[allow(unused)]
     pub fn config(&self) -> &Arc<Config> {
