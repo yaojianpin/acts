@@ -108,3 +108,5 @@
 
 - feat: reafactoring the act package to support act extension [#8]
 - feat: adding package meta struct to support package jsonschema definition [#9]
+- feat: add acts-sqlite plugin
+- feat: add acts-postgres plugin #[13]
