@@ -1,5 +1,6 @@
 use crate::event::EventAction;
 use crate::{Act, Engine, EngineBuilder, MessageState, Vars, Workflow, utils};
+use serde::Deserialize;
 use serde_json::json;
 
 #[tokio::test]
@@ -155,12 +156,6 @@ async fn engine_build_cache_size() {
 }
 
 #[tokio::test]
-async fn engine_build_database_url() {
-    let engine = EngineBuilder::new().database_url("test").build().start();
-    assert_eq!(engine.config().database_url.as_ref().unwrap(), "test")
-}
-
-#[tokio::test]
 async fn engine_build_log_dir() {
     let engine = EngineBuilder::new().log_dir("test").build().start();
     assert_eq!(engine.config().log_dir, "test")
@@ -193,4 +188,108 @@ async fn engine_drop() {
     drop(engine);
     let engine = Engine::new().start();
     drop(engine)
+}
+
+#[tokio::test]
+async fn engine_build_config_default() {
+    let path = "acts.cfg";
+    if std::path::Path::new(path).exists() {
+        std::fs::remove_file(path).unwrap();
+    }
+    std::fs::write(
+        path,
+        r#"{ 
+            cache_cap: 100,
+            log_dir: data,
+            log_level: INFO,
+            tick_interval_secs: 200,
+        }"#,
+    )
+    .unwrap();
+    let engine = EngineBuilder::new().build();
+    assert_eq!(engine.config().cache_cap, 100);
+    assert_eq!(engine.config().log_dir, "data");
+    assert_eq!(engine.config().log_level, "INFO");
+    assert_eq!(engine.config().tick_interval_secs, 200);
+}
+
+#[tokio::test]
+async fn engine_build_config_set_source() {
+    let path = std::path::Path::new("test/acts.cfg");
+
+    if path.exists() {
+        std::fs::remove_file(path).unwrap();
+        std::fs::read_dir("test").unwrap();
+    }
+    if path.parent().is_none() {
+        std::fs::create_dir("test").unwrap();
+    }
+
+    std::fs::write(
+        path,
+        r#"{ 
+            cache_cap: 100,
+            log_dir: data,
+            log_level: INFO,
+            tick_interval_secs: 200,
+        }"#,
+    )
+    .unwrap();
+    let engine = EngineBuilder::new().set_config_source(path).build();
+    assert_eq!(engine.config().cache_cap, 100);
+    assert_eq!(engine.config().log_dir, "data");
+    assert_eq!(engine.config().log_level, "INFO");
+    assert_eq!(engine.config().tick_interval_secs, 200);
+}
+
+#[tokio::test]
+async fn engine_build_config_with_env() {
+    unsafe {
+        std::env::set_var("MY_ENV", "DEBUG");
+    }
+
+    let path = std::path::Path::new("acts.cfg");
+    if path.exists() {
+        std::fs::remove_file(path).unwrap();
+    }
+    std::fs::write(
+        path,
+        r#"{ 
+            log_level: ${MY_ENV}
+        }"#,
+    )
+    .unwrap();
+    let engine = EngineBuilder::new().build();
+    assert_eq!(engine.config().log_level, "DEBUG");
+}
+
+#[tokio::test]
+async fn engine_get_custom_config() {
+    #[derive(Deserialize)]
+    struct Custom {
+        myint: i32,
+        mystr: String,
+        my_option: Option<i32>,
+    }
+
+    let path = "acts.cfg";
+    if std::path::Path::new(path).exists() {
+        std::fs::remove_file(path).unwrap();
+    }
+    std::fs::write(
+        path,
+        r#"{ 
+            custom {
+              myint: 100,
+              mystr: myData
+            }
+
+        }"#,
+    )
+    .unwrap();
+    let engine = EngineBuilder::new().build();
+    let custom = engine.config().get::<Custom>("custom").unwrap();
+    assert_eq!(custom.myint, 100);
+    assert_eq!(custom.mystr, "myData");
+    assert_eq!(custom.my_option, None);
 }

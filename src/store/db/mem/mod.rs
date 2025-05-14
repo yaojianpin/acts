@@ -34,16 +34,14 @@ impl MemStore {
         let messages = Collect::new("messages");
         let events = Collect::new("events");
 
-        let store = Self {
+        Self {
             models: Arc::new(models),
             procs: Arc::new(procs),
             tasks: Arc::new(tasks),
             packages: Arc::new(packages),
             messages: Arc::new(messages),
             events: Arc::new(events),
-        };
-
-        store
+        }
     }
 
     pub fn tasks(&self) -> Arc<dyn DbCollection<Item = data::Task> + Send + Sync> {

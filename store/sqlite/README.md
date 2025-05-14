@@ -5,6 +5,13 @@ The acts sqlite plugin for acts store.
 ## Installation
 
 
+create `acts.cfg` in current dir
+```
+sqlite {
+    database_url: "sqlite://<your file path>"
+}
+```
+
 ```bash
 cargo add acts-sqlite
 ```

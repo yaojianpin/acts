@@ -127,7 +127,7 @@ impl Store {
 
     pub fn with_no_response_messages<F: Fn(&Message)>(
         &self,
-        timeout_millis: u64,
+        timeout_millis: i64,
         max_message_retry_times: i32,
         f: F,
     ) -> Result<()> {
@@ -136,7 +136,7 @@ impl Store {
                 .push(Expr::eq("status", MessageStatus::Created))
                 .push(Expr::lt(
                     "update_time",
-                    utils::time::time_millis() as u64 - timeout_millis,
+                    utils::time::time_millis() - timeout_millis,
                 )),
         );
         let collection = self.messages();

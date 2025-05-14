@@ -15,14 +15,18 @@ use acts::ActPlugin;
 #[derive(Clone)]
 pub struct PostgresStore;
 
+#[derive(serde::Deserialize)]
+struct ProgresConfig {
+    database_url: String,
+}
+
 impl ActPlugin for PostgresStore {
     fn on_init(&self, engine: &acts::Engine) {
-        let config = engine.config();
-        let Some(db_url) = &config.database_url else {
-            panic!("cannot find database_url in config file");
-        };
-
-        let db = database::Database::new(db_url);
+        let config = engine
+            .config()
+            .get::<ProgresConfig>("postgres")
+            .expect("cannot find database_url in config file");
+        let db = database::Database::new(&config.database_url);
         db.init();
 
         engine.extender().register_collection(db.packages());

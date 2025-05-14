@@ -9,11 +9,13 @@ name = "acts"
 homepage = "https://docs.rs/acts"
 repository = "https://github.com/yaojianpin/acts.git"
 version = "0.16.0"
+include = ["src/**/*", "LICENSE", "README.md", "CHANGELOG.md", "!**/tests/**/*"]
 
 [dependencies]
 async-trait = "0.1.88"
 chrono = "0.4"
 globset = "0.4"
+hocon = "0.9.0"
 inventory = "0.3.20"
 jsonschema = "0.30.0"
 moka = { version = "0.12", features = ["sync"] }

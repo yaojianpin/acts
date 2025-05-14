@@ -14,14 +14,19 @@ use acts::ActPlugin;
 #[derive(Clone)]
 pub struct SqliteStore;
 
+#[derive(serde::Deserialize)]
+struct SqliteConfig {
+    database_url: String,
+}
+
 impl ActPlugin for SqliteStore {
     fn on_init(&self, engine: &acts::Engine) {
-        let config = engine.config();
-        let Some(db_url) = &config.database_url else {
-            panic!("cannot find database_url in config file");
-        };
+        let config = engine
+            .config()
+            .get::<SqliteConfig>("sqlite")
+            .expect("cannot find sqlite in config file");
 
-        let db = database::Database::new(db_url);
+        let db = database::Database::new(&config.database_url);
         db.init();
 
         engine.extender().register_collection(db.packages());

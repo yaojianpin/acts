@@ -20,6 +20,12 @@ pub struct Store {
     collections: ShareLock<HashMap<StoreIden, Arc<dyn Any + Send + Sync + 'static>>>,
 }
 
+impl Default for Store {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Store {
     pub fn new() -> Self {
         Self {
@@ -34,6 +40,7 @@ impl Store {
         let collections = self.collections.read().unwrap();
         let collection = collections.get(&DATA::iden()).unwrap();
 
+        #[allow(clippy::expect_fun_call)]
         collection
             .downcast_ref::<DynDbSetRef<DATA>>()
             .map(|v| v.0.clone())
@@ -144,29 +151,17 @@ impl Store {
         let mem = MemStore::new();
         let mut collections = self.collections.write().unwrap();
         for item in StoreIden::iter() {
-            if !collections.contains_key(&item) {
-                // fill the mem store when there is no collection
-                match item {
-                    StoreIden::Packages => {
-                        collections.insert(item, Arc::new(DynDbSetRef(mem.packages())));
-                    }
-                    StoreIden::Models => {
-                        collections.insert(item, Arc::new(DynDbSetRef(mem.models())));
-                    }
-                    StoreIden::Procs => {
-                        collections.insert(item, Arc::new(DynDbSetRef(mem.procs())));
-                    }
-                    StoreIden::Tasks => {
-                        collections.insert(item, Arc::new(DynDbSetRef(mem.tasks())));
-                    }
-                    StoreIden::Messages => {
-                        collections.insert(item, Arc::new(DynDbSetRef(mem.messages())));
-                    }
-                    StoreIden::Events => {
-                        collections.insert(item, Arc::new(DynDbSetRef(mem.events())));
-                    }
-                };
-            }
+            // fill the mem store when there is no collection
+            collections
+                .entry(item.clone())
+                .or_insert_with(|| match item {
+                    StoreIden::Packages => Arc::new(DynDbSetRef(mem.packages())),
+                    StoreIden::Models => Arc::new(DynDbSetRef(mem.models())),
+                    StoreIden::Procs => Arc::new(DynDbSetRef(mem.procs())),
+                    StoreIden::Tasks => Arc::new(DynDbSetRef(mem.tasks())),
+                    StoreIden::Messages => Arc::new(DynDbSetRef(mem.messages())),
+                    StoreIden::Events => Arc::new(DynDbSetRef(mem.events())),
+                });
         }
     }
 }

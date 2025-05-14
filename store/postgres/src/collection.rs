@@ -31,13 +31,13 @@ fn into_query(q: &acts::query::Query) -> SeaCond {
     if q.is_cond() {
         let mut q = q.clone();
         let queries = q.queries();
-        for (_index, cond) in queries.iter().enumerate() {
+        for cond in queries.iter() {
             let mut sea_cond = match cond.r#type {
                 CondType::And => SeaCond::all(),
                 CondType::Or => SeaCond::any(),
             };
 
-            for (_index, expr) in cond.conds().iter().enumerate() {
+            for expr in cond.conds().iter() {
                 let cond = into_cond(expr);
                 sea_cond = sea_cond.add(cond);
             }
@@ -51,7 +51,7 @@ fn into_query(q: &acts::query::Query) -> SeaCond {
 fn into_cond(expr: &Expr) -> Condition {
     let key = &expr.key;
     let value = json_to_sea_value(expr.value.clone());
-    let expr_condition = match expr.op {
+    match expr.op {
         ExprOp::EQ => {
             if expr.value.is_null() {
                 SeaExpr::col(SeaAlias::new(key)).is_null().into_condition()
@@ -84,9 +84,7 @@ fn into_cond(expr: &Expr) -> Condition {
         ExprOp::GE => SeaExpr::col(SeaAlias::new(key))
             .gte(value.unwrap())
             .into_condition(),
-    };
-
-    expr_condition
+    }
 }
 
 fn json_to_sea_value(value: serde_json::Value) -> Option<Value> {

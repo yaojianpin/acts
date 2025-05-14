@@ -12,6 +12,7 @@ pub struct SynClient {
 
 impl SynClient {
     pub fn connect(db_url: &str) -> Self {
+        #[allow(clippy::expect_fun_call)]
         let pool = block_on(async move {
             PgPoolOptions::new()
                 .acquire_timeout(Duration::from_secs(5))

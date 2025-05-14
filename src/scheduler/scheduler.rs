@@ -1,11 +1,10 @@
 use crate::{
-    config::Config,
+    Engine, Event, Result,
     event::{Emitter, TaskExtra},
     scheduler::{
-        queue::{Queue, Signal},
         Process, Task,
+        queue::{Queue, Signal},
     },
-    Engine, Event, Result,
 };
 use std::sync::{Arc, Mutex};
 use tracing::debug;
@@ -25,10 +24,6 @@ impl std::fmt::Debug for Scheduler {
 
 impl Scheduler {
     pub fn new() -> Arc<Self> {
-        Scheduler::new_with(&Config::default())
-    }
-
-    pub fn new_with(_options: &Config) -> Arc<Self> {
         Arc::new(Self {
             queue: Queue::new(),
             emitter: Arc::new(Emitter::new()),

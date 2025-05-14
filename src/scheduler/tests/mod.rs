@@ -10,7 +10,7 @@ mod vars;
 mod workflow;
 
 use super::{Process, Runtime};
-use crate::{Config, Engine, EngineBuilder, Signal, Workflow, export::Channel};
+use crate::{ConfigData, Engine, EngineBuilder, Signal, Workflow, export::Channel};
 use std::sync::Arc;
 
 fn create_proc(workflow: &mut Workflow, pid: &str) -> (Arc<Process>, Arc<Runtime>, Arc<Channel>) {
@@ -99,13 +99,11 @@ fn create_proc_signal2<R: Clone + Default + Send + 'static>(
 
 #[allow(clippy::type_complexity)]
 fn create_proc_signal_config<R: Clone + Default + Send + 'static>(
-    config: &Config,
+    config: &ConfigData,
     workflow: &Workflow,
     pid: &str,
 ) -> (Engine, Arc<Process>, Signal<R>) {
-    let mut builder = EngineBuilder::new();
-    builder.set_config(config);
-    let engine = builder.build().start();
+    let engine = EngineBuilder::new().set_config(config).build().start();
     let rt = engine.runtime();
 
     let proc = rt.create_proc(pid, workflow);

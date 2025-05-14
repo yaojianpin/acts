@@ -3,7 +3,7 @@ use tracing::{debug, error};
 
 use super::{Process, Scheduler, Task, TaskState};
 use crate::{
-    ActError, Action, Config, Engine, Package, Result, Vars, Workflow,
+    ActError, Action, Config, ConfigData, Engine, Package, Result, Vars, Workflow,
     cache::Cache,
     data,
     env::Enviroment,
@@ -157,9 +157,9 @@ impl Runtime {
     }
 
     fn create(config: &Config) -> Arc<Runtime> {
-        let scher = Scheduler::new_with(config);
+        let scher = Scheduler::new();
         let env = Arc::new(Enviroment::new());
-        let cache = Arc::new(Cache::new(config.cache_cap));
+        let cache = Arc::new(Cache::new(config.cache_cap as usize));
         let emitter = Arc::new(Emitter::new());
         let package = Arc::new(Package::new());
         let runtime = Arc::new(Runtime {
@@ -175,7 +175,7 @@ impl Runtime {
         runtime
     }
 
-    fn initialize(self: &Arc<Self>, options: &Config) {
+    fn initialize(self: &Arc<Self>, options: &ConfigData) {
         {
             let cache = self.cache.clone();
             let rt = self.clone();
@@ -282,7 +282,8 @@ impl Runtime {
 
             let evt = self.emitter().clone();
             Handle::current().spawn(async move {
-                let mut intv = time::interval(Duration::from_millis(default_interval_millis));
+                let mut intv =
+                    time::interval(Duration::from_millis(default_interval_millis as u64));
                 loop {
                     intv.tick().await;
                     evt.emit_tick();

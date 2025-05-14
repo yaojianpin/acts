@@ -98,7 +98,7 @@ impl DbCollection for MessageCollection {
 
         let mut stmt = conn.prepare(sql.as_str()).map_err(map_db_err)?;
         let row = stmt
-            .query_row(&*values.as_params(), |row| Self::Item::from_row(row))
+            .query_row(&*values.as_params(), Self::Item::from_row)
             .map_err(map_db_err)?;
 
         Ok(row)
@@ -174,9 +174,9 @@ impl DbCollection for MessageCollection {
             page_num,
             page_count,
             rows: conn
-                .prepare(&sql.as_str())
+                .prepare(&sql)
                 .map_err(map_db_err)?
-                .query_map(&*values.as_params(), |row| Self::Item::from_row(row))
+                .query_map(&*values.as_params(), Self::Item::from_row)
                 .map_err(map_db_err)?
                 .map(|v| v.unwrap())
                 .collect::<Vec<_>>(),

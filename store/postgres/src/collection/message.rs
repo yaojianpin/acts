@@ -95,13 +95,10 @@ impl DbCollection for MessageCollection {
             .and_where(SeaExpr::col(CollectionIden::Id).eq(id))
             .build_sqlx(PostgresQueryBuilder);
 
-        let row = self
-            .conn
+        self.conn
             .query_one(&sql, values)
             .map(|row| Self::Item::from_row(&row).map_err(map_db_err))
-            .map_err(map_db_err)?;
-
-        row
+            .map_err(map_db_err)?
     }
 
     fn query(&self, q: &acts::query::Query) -> Result<acts::PageData<Self::Item>> {

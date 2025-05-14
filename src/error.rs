@@ -8,6 +8,9 @@ use crate::{Result, Vars};
 #[derive(Deserialize, Serialize, Error, Debug, Clone, PartialEq)]
 pub enum ActError {
     #[error("{0}")]
+    Config(String),
+
+    #[error("{0}")]
     Convert(String),
 
     #[error("{0}")]
@@ -21,9 +24,6 @@ pub enum ActError {
 
     #[error("{0}")]
     Runtime(String),
-
-    #[error("{0}")]
-    Adapter(String),
 
     #[error("{0}")]
     Store(String),

@@ -1,4 +1,7 @@
+#[cfg(test)]
+use crate::ConfigData;
 use crate::{ActPlugin, Config, Engine};
+use std::path::Path;
 
 pub struct EngineBuilder {
     config: Config,
@@ -13,43 +16,53 @@ impl Default for EngineBuilder {
 
 impl EngineBuilder {
     pub fn new() -> Self {
+        let mut config = Config::default();
+        let file = Path::new("acts.cfg");
+        if file.exists() {
+            config = Config::create(file);
+        }
         Self {
-            config: Config::default(),
+            config,
             plugins: Vec::new(),
         }
     }
 
-    pub fn set_config(&mut self, config: &Config) {
-        self.config = config.clone();
+    #[cfg(test)]
+    pub fn set_config(mut self, data: &ConfigData) -> Self {
+        self.config = Config {
+            data: data.clone(),
+            table: hocon::Hocon::Null,
+        };
+        self
+    }
+
+    pub fn set_config_source(mut self, source: &Path) -> Self {
+        self.config = Config::create(source);
+        self
     }
 
     pub fn log_dir(mut self, log_dir: &str) -> Self {
-        self.config.log_dir = log_dir.to_string();
+        self.config.data.log_dir = log_dir.to_string();
         self
     }
 
     pub fn log_level(mut self, level: &str) -> Self {
-        self.config.log_level = level.to_string();
+        self.config.data.log_level = level.to_string();
         self
     }
 
-    pub fn cache_size(mut self, size: usize) -> Self {
-        self.config.cache_cap = size;
+    pub fn cache_size(mut self, size: i64) -> Self {
+        self.config.data.cache_cap = size;
         self
     }
 
-    pub fn database_url(mut self, url: &str) -> Self {
-        self.config.database_url = Some(url.to_string());
-        self
-    }
-
-    pub fn tick_interval_secs(mut self, secs: u64) -> Self {
-        self.config.tick_interval_secs = secs;
+    pub fn tick_interval_secs(mut self, secs: i64) -> Self {
+        self.config.data.tick_interval_secs = secs;
         self
     }
 
     pub fn max_message_retry_times(mut self, retry_times: i32) -> Self {
-        self.config.max_message_retry_times = retry_times;
+        self.config.data.max_message_retry_times = retry_times;
         self
     }
 

@@ -110,3 +110,5 @@
 - feat: adding package meta struct to support package jsonschema definition [#9]
 - feat: add acts-sqlite plugin
 - feat: add acts-postgres plugin #[13]
+- feat: add acts.cfg support
+- feat: modify Config to support getting custom config section
