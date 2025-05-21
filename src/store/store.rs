@@ -112,7 +112,7 @@ impl Store {
     pub fn deploy(&self, model: &Workflow) -> Result<bool> {
         trace!("store::deploy({})", model.id);
         if model.id.is_empty() {
-            return Err(ActError::Action("missing id in model".into()));
+            return Err(ActError::Model("missing id in model".into()));
         }
         let models = self.models();
         match models.find(&model.id) {
@@ -123,7 +123,7 @@ impl Store {
                     name: model.name.clone(),
                     data: text.clone(),
                     ver: m.ver + 1,
-                    size: text.len() as u32,
+                    size: text.len() as i32,
                     create_time: m.create_time,
                     update_time: utils::time::time_millis(),
                     timestamp: utils::time::timestamp(),
@@ -137,7 +137,7 @@ impl Store {
                     name: model.name.clone(),
                     data: text.clone(),
                     ver: 1,
-                    size: text.len() as u32,
+                    size: text.len() as i32,
                     create_time: utils::time::time_millis(),
                     update_time: 0,
                     timestamp: utils::time::timestamp(),

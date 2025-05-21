@@ -219,12 +219,9 @@ async fn engine_build_config_set_source() {
 
     if path.exists() {
         std::fs::remove_file(path).unwrap();
-        std::fs::read_dir("test").unwrap();
+        std::fs::remove_dir("test").unwrap();
     }
-    if path.parent().is_none() {
-        std::fs::create_dir("test").unwrap();
-    }
-
+    std::fs::create_dir("test").unwrap();
     std::fs::write(
         path,
         r#"{ 

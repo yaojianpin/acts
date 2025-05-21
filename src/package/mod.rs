@@ -1,10 +1,14 @@
 pub mod core;
+pub mod event;
 pub mod transform;
 
 #[cfg(test)]
 mod tests;
 
-use crate::{Act, ActError, Engine, Result, Vars, data, scheduler::Context};
+use crate::{
+    ActError, Engine, Result, Vars, data,
+    scheduler::{Context, Runtime},
+};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     collections::HashMap,
@@ -24,8 +28,15 @@ pub trait ActPackage {
     fn meta() -> ActPackageMeta;
 }
 
+#[async_trait::async_trait]
 pub trait ActPackageFn: Send + Sync {
+    /// executing with task context
     fn execute(&self, _ctx: &Context) -> Result<Option<Vars>> {
+        Ok(None)
+    }
+
+    /// start with non-context, such as workflow event
+    fn start(&self, _rt: &Arc<Runtime>, _options: &Vars) -> Result<Option<Vars>> {
         Ok(None)
     }
 }
@@ -66,6 +77,9 @@ pub enum ActRunAs {
 pub enum ActPackageCatalog {
     /// acts core packages
     Core,
+
+    /// workflow event
+    Event,
 
     /// data transform
     Transform,
@@ -129,7 +143,7 @@ pub struct ActOperation {
 #[derive(Debug, Clone)]
 pub struct ActPackageRegister {
     pub meta: fn() -> ActPackageMeta,
-    pub(crate) create: fn(&Act, &Context) -> Result<Box<dyn ActPackageFn>>,
+    pub(crate) create: fn(serde_json::Value) -> Result<Box<dyn ActPackageFn>>,
 }
 
 impl ActPackageRegister {
@@ -139,14 +153,9 @@ impl ActPackageRegister {
     {
         Self {
             meta: T::meta,
-            create: (|_act, ctx: &Context| {
+            create: (|params: serde_json::Value| {
                 let meta = T::meta();
 
-                // let inputs: serde_json::Value = ctx.task().inputs().into();
-                // jsonschema::validate(&meta.schema, &inputs)
-                //     .map_err(|e| ActError::ValidationError(format!("{:?}", e)))?;
-                // let ret = serde_json::from_value::<T>(inputs)?;
-                let params = ctx.task().params();
                 jsonschema::validate(&meta.schema, &params)
                     .map_err(|e| ActError::ValidationError(format!("{:?}", e)))?;
                 let ret = serde_json::from_value::<T>(params)?;

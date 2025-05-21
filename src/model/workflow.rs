@@ -32,7 +32,10 @@ pub struct Workflow {
     pub setup: Vec<Act>,
 
     #[serde(default)]
-    ver: u32,
+    pub on: Vec<Act>,
+
+    #[serde(default)]
+    pub ver: i32,
 }
 
 impl Workflow {
@@ -92,7 +95,7 @@ impl Workflow {
         self.id = id.to_string();
     }
 
-    pub fn set_ver(&mut self, ver: u32) {
+    pub fn set_ver(&mut self, ver: i32) {
         self.ver = ver;
     }
 
@@ -168,6 +171,12 @@ impl Workflow {
     pub fn with_setup(mut self, build: fn(Vec<Act>) -> Vec<Act>) -> Self {
         let stmts = Vec::new();
         self.setup = build(stmts);
+        self
+    }
+
+    pub fn with_on(mut self, build: fn(Act) -> Act) -> Self {
+        let act = build(Act::default());
+        self.on.push(act);
         self
     }
 }

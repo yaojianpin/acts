@@ -34,3 +34,6 @@ pub const ACT_SUBFLOW_TO: &str = "to";
 pub const ACT_DEFAULT_OUTPUTS: &str = "$default_outputs";
 
 pub const TASK_ROOT_TID: &str = "$";
+
+pub const PROCESS_ID: &str = "pid";
+pub const MODEL_ID: &str = "mid";

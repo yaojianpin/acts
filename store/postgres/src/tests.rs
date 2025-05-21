@@ -680,6 +680,9 @@ async fn store_event_create() {
         id,
         name: "name".to_string(),
         mid: "mid".to_string(),
+        ver: 1,
+        uses: "acts.event.manual".to_string(),
+        params: "".to_string(),
         create_time: utils::time_millis(),
         timestamp: utils::timestamp(),
     };
@@ -698,6 +701,9 @@ async fn store_event_query() {
         id,
         name: "name".to_string(),
         mid: "mid".to_string(),
+        ver: 1,
+        uses: "acts.event.manual".to_string(),
+        params: "".to_string(),
         create_time: 0,
         timestamp: 0,
     };
@@ -716,6 +722,9 @@ async fn store_event_update() {
         id,
         name: "name".to_string(),
         mid: "mid".to_string(),
+        ver: 1,
+        uses: "acts.event.manual".to_string(),
+        params: "".to_string(),
         create_time: 0,
         timestamp: 0,
     };
@@ -742,6 +751,9 @@ async fn store_event_remove() {
         id,
         name: "name".to_string(),
         mid: "mid".to_string(),
+        ver: 1,
+        uses: "acts.event.manual".to_string(),
+        params: "".to_string(),
         create_time: 0,
         timestamp: 0,
     };

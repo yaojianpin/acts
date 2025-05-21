@@ -142,3 +142,21 @@ fn model_workflow_setup_parse() {
     let m = Workflow::from_yml(text).unwrap();
     assert_eq!(m.setup.len(), 9);
 }
+
+#[test]
+fn model_workflow_on_event() {
+    let workflow = Workflow::new()
+        .with_id("my-event-model")
+        .with_on(|act| {
+            act.with_id("event1")
+                .with_uses("acts.event.manual")
+                .with_params_vars(|vars| vars.with("test", 10))
+        })
+        .with_on(|act| {
+            act.with_id("event2")
+                .with_uses("acts.event.manual")
+                .with_params_vars(|vars| vars.with("test", 20))
+        })
+        .with_step(|step| step.with_id("step1"));
+    assert_eq!(workflow.on.len(), 2);
+}

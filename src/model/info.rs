@@ -58,8 +58,8 @@ pub struct TaskInfo {
 pub struct ModelInfo {
     pub id: String,
     pub name: String,
-    pub ver: u32,
-    pub size: u32,
+    pub ver: i32,
+    pub size: i32,
     pub create_time: i64,
     pub update_time: i64,
     pub data: String,
@@ -82,6 +82,20 @@ pub struct MessageInfo {
     pub update_time: i64,
     pub retry_times: i32,
     pub status: String,
+    pub timestamp: i64,
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct EventInfo {
+    pub id: String,
+    pub name: String,
+    pub mid: String,
+    pub ver: i32,
+
+    pub uses: String,
+    pub params: String,
+
+    pub create_time: i64,
     pub timestamp: i64,
 }
 
@@ -250,6 +264,27 @@ impl From<ModelInfo> for serde_json::Value {
 
 impl From<MessageInfo> for serde_json::Value {
     fn from(val: MessageInfo) -> Self {
+        serde_json::to_value(val).unwrap()
+    }
+}
+
+impl From<&data::Event> for EventInfo {
+    fn from(m: &data::Event) -> Self {
+        Self {
+            id: m.id.clone(),
+            name: m.name.clone(),
+            timestamp: m.timestamp,
+            create_time: m.create_time,
+            mid: m.mid.clone(),
+            ver: m.ver,
+            uses: m.uses.clone(),
+            params: m.params.clone(),
+        }
+    }
+}
+
+impl From<EventInfo> for serde_json::Value {
+    fn from(val: EventInfo) -> Self {
         serde_json::to_value(val).unwrap()
     }
 }

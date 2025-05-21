@@ -11,7 +11,7 @@ mod tests;
 
 pub use act::{Act, Catch, Retry, Timeout, TimeoutLimit};
 pub use branch::Branch;
-pub use info::{MessageInfo, ModelInfo, PackageInfo, ProcInfo, TaskInfo};
+pub use info::{EventInfo, MessageInfo, ModelInfo, PackageInfo, ProcInfo, TaskInfo};
 pub use output::{Output, OutputType, Outputs};
 pub use step::Step;
 pub use vars::Vars;

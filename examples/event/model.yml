@@ -1,0 +1,32 @@
+name: event model
+id: my-event-model
+inputs:
+  # workflow global vars
+  result: 0
+
+outputs:
+  result:
+on:
+  # start event by manual and return the result directly
+  - id: event-manual
+    uses: acts.event.manual
+    name: start by manual
+
+  # start event by hook and return the result util the workflow completed
+  - id: event-hook
+    uses: acts.event.hook
+    name: start by hook
+
+  # start event by chat string
+  - id: event-chat
+    uses: acts.event.chat
+    name: start by chat
+
+steps:
+  - name: step 1
+  - name: step 2
+    acts:
+      - uses: acts.transform.set
+        params:
+          result: 100
+    

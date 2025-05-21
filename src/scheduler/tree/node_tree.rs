@@ -32,12 +32,22 @@ impl NodeTree {
 
     pub fn load(&mut self, model: &Workflow) -> Result<()> {
         let mut model = model.clone();
+
+        for on in model.on.iter() {
+            let data = NodeContent::Act(on.clone());
+            // make an act node to check if the act is valid
+            // not to generate the on event node id
+            if on.id.is_empty() {
+                return Err(ActError::Model("workflow event id is empty".to_string()));
+            }
+            self.make(&on.id, data, 0)?;
+        }
+
         build::build_workflow(&mut model, self)
     }
 
     pub fn make(&self, id: &str, data: NodeContent, level: usize) -> Result<Arc<Node>> {
         let node = Arc::new(Node::new(id, data, level));
-
         let mut node_map = self.node_map.write().unwrap();
         if node_map.contains_key(node.id()) {
             return Err(ActError::Model(format!("dup node id with '{}'", node.id())));

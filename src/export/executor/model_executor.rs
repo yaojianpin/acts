@@ -1,4 +1,6 @@
-use crate::{ModelInfo, Result, Workflow, scheduler::Runtime, store::PageData};
+use crate::{
+    Act, ModelInfo, Result, Workflow, data, scheduler::Runtime, store::PageData,
+};
 use std::sync::Arc;
 use tracing::instrument;
 
@@ -19,10 +21,10 @@ impl ModelExecutor {
     #[instrument(skip(self))]
     pub fn deploy(&self, model: &Workflow) -> Result<bool> {
         model.valid()?;
-        let ret = self.runtime.cache().store().deploy(model)?;
 
-        // get the model triggers
-        // for trigger in &model.on {}
+        let store = self.runtime.cache().store();
+        let ret = store.deploy(model)?;
+        self.deploy_event(&model.on, &model.id, model.ver)?;
 
         Ok(ret)
     }
@@ -60,5 +62,29 @@ impl ModelExecutor {
     #[instrument(skip(self))]
     pub fn rm(&self, id: &str) -> Result<bool> {
         self.runtime.cache().store().models().delete(id)
+    }
+
+    fn deploy_event(&self, acts: &[Act], mid: &str, ver: i32) -> Result<()> {
+        let store = self.runtime.cache().store();
+        for act in acts {
+            let event_id = format!("{}:{}", mid, act.id);
+            match store.events().find(&event_id) {
+                Ok(evt) => {
+                    if evt.ver == ver {
+                        continue;
+                    }
+                    store
+                        .events()
+                        .update(&data::Event::from_act(act, mid, ver, &event_id)?)?;
+                }
+                Err(_) => {
+                    store
+                        .events()
+                        .create(&data::Event::from_act(act, mid, ver, &event_id)?)?;
+                }
+            }
+        }
+
+        Ok(())
     }
 }

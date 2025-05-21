@@ -112,3 +112,4 @@
 - feat: add acts-postgres plugin #[13]
 - feat: add acts.cfg support
 - feat: modify Config to support getting custom config section
+- feat: add workflow.on events (manual, hook, chat)

@@ -75,7 +75,7 @@ impl ActTask for Act {
                     "cannot find the registed package '{}'",
                     self.uses
                 )))?;
-            let package = (register.create)(self, ctx)?;
+            let package = (register.create)(ctx.task().params())?;
             if let Some(vars) = package.execute(ctx)? {
                 task.update_data(&vars);
                 task.set_data_with(move |data| data.set(consts::ACT_OUTPUTS, &vars));

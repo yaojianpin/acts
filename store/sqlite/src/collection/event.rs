@@ -21,6 +21,9 @@ enum CollectionIden {
     Id,
     Name,
     Mid,
+    Ver,
+    Uses,
+    Params,
     CreateTime,
     Timestamp,
 }
@@ -52,6 +55,9 @@ impl DbCollection for EventCollection {
                 CollectionIden::Id,
                 CollectionIden::Name,
                 CollectionIden::Mid,
+                CollectionIden::Ver,
+                CollectionIden::Uses,
+                CollectionIden::Params,
                 CollectionIden::CreateTime,
                 CollectionIden::Timestamp,
             ])
@@ -81,6 +87,9 @@ impl DbCollection for EventCollection {
                 CollectionIden::Id,
                 CollectionIden::Name,
                 CollectionIden::Mid,
+                CollectionIden::Ver,
+                CollectionIden::Uses,
+                CollectionIden::Params,
                 CollectionIden::CreateTime,
                 CollectionIden::Timestamp,
             ])
@@ -137,6 +146,9 @@ impl DbCollection for EventCollection {
                 CollectionIden::Id,
                 CollectionIden::Name,
                 CollectionIden::Mid,
+                CollectionIden::Ver,
+                CollectionIden::Uses,
+                CollectionIden::Params,
                 CollectionIden::CreateTime,
                 CollectionIden::Timestamp,
             ])
@@ -164,6 +176,9 @@ impl DbCollection for EventCollection {
             .values([
                 (CollectionIden::Name, model.name.into()),
                 (CollectionIden::Mid, model.mid.into()),
+                (CollectionIden::Ver, model.ver.into()),
+                (CollectionIden::Uses, model.uses.into()),
+                (CollectionIden::Params, model.params.into()),
                 (CollectionIden::CreateTime, model.create_time.into()),
                 (CollectionIden::Timestamp, model.timestamp.into()),
             ])
@@ -203,6 +218,9 @@ impl DbRow for data::Event {
             id: row.get_unwrap("id"),
             name: row.get_unwrap("name"),
             mid: row.get_unwrap("mid"),
+            ver: row.get_unwrap("ver"),
+            uses: row.get_unwrap("uses"),
+            params: row.get_unwrap("params"),
             create_time: row.get_unwrap("create_time"),
             timestamp: row.get_unwrap("timestamp"),
         })
@@ -222,6 +240,9 @@ impl DbInit for EventCollection {
             )
             .col(ColumnDef::new(CollectionIden::Name).string().not_null())
             .col(ColumnDef::new(CollectionIden::Mid).string().not_null())
+            .col(ColumnDef::new(CollectionIden::Ver).integer().not_null())
+            .col(ColumnDef::new(CollectionIden::Uses).string().not_null())
+            .col(ColumnDef::new(CollectionIden::Params).string())
             .col(
                 ColumnDef::new(CollectionIden::CreateTime)
                     .big_integer()

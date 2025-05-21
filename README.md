@@ -459,7 +459,7 @@ please see more from [`acts-server`](https://github.com/yaojianpin/acts-server)
 - python https://github.com/yaojianpin/acts-channel-py
 - go https://github.com/yaojianpin/acts-channel-go
 
-## Road map
+## Roadmap
 
 acts:
 
@@ -476,7 +476,7 @@ acts:
 
 - store
   - [x] memory
-  - [x] sqlite
+
 - packages
 
   - core
@@ -488,6 +488,13 @@ acts:
     - [x] sequence
     - [x] subflow
     - [ ] http
+
+  - event
+    - [x] manual
+    - [x] hook
+    - [x] chat
+    - [ ] schedule
+    
   - transform
     - [x] set
     - [x] code

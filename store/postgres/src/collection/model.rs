@@ -215,8 +215,8 @@ impl DbRow for data::Model {
         Ok(Self {
             id: row.get("id"),
             name: row.get("name"),
-            ver: row.get::<i32, &str>("ver") as u32,
-            size: row.get::<i32, &str>("size") as u32,
+            ver: row.get::<i32, &str>("ver"),
+            size: row.get::<i32, &str>("size"),
             create_time: row.get("create_time"),
             update_time: row.get("update_time"),
             data: row.get("data"),
