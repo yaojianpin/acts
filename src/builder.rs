@@ -17,10 +17,16 @@ impl Default for EngineBuilder {
 impl EngineBuilder {
     pub fn new() -> Self {
         let mut config = Config::default();
-        let file = Path::new("acts.cfg");
+        #[cfg(not(test))]
+        let file = Path::new("config/acts.cfg");
+
+        #[cfg(test)]
+        let file = Path::new("test/acts.cfg");
+
         if file.exists() {
             config = Config::create(file);
         }
+
         Self {
             config,
             plugins: Vec::new(),

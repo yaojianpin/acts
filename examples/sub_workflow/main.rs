@@ -12,11 +12,6 @@ async fn main() {
     deploy_model(&exec, include_str!("./model/sub.yml"));
 
     let executor = engine.executor().clone();
-    executor
-        .proc()
-        .start("main", &Vars::new())
-        .expect("start workflow");
-
     engine.channel().on_message(move |e| {
         let ret = client.process(&executor, e);
         if ret.is_err() {
@@ -48,6 +43,13 @@ async fn main() {
         eprintln!("on_workflow_error: pid={} state={:?}", e.pid, e.state);
         s2.close();
     });
+
+    engine
+        .executor()
+        .proc()
+        .start("main", &Vars::new())
+        .expect("start workflow");
+
     sig.recv().await;
 }
 

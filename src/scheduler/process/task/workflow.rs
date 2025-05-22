@@ -1,7 +1,5 @@
 use crate::{ActTask, Result, TaskState, Workflow, scheduler::Context};
-use async_trait::async_trait;
 
-#[async_trait]
 impl ActTask for Workflow {
     fn init(&self, ctx: &Context) -> Result<()> {
         // set the env to process env local

@@ -4,9 +4,7 @@ use crate::{
     model::Step,
     scheduler::{Context, TaskState},
 };
-use async_trait::async_trait;
 
-#[async_trait]
 impl ActTask for Step {
     fn init(&self, ctx: &Context) -> Result<()> {
         let task = ctx.task();

@@ -52,6 +52,7 @@ impl<'a> Client<'a> {
     }
 
     pub fn process(&self, executor: &Executor, message: &Message) -> Result<()> {
+        // println!("message: {:?}", message);
         if message.is_key("init") && message.is_state(MessageState::Created) {
             // init the workflow
             println!("do init work");
@@ -88,11 +89,12 @@ impl<'a> Client<'a> {
                 &message.tid, &message.key, &message.inputs,
             );
         } else if message.is_key("pm") && message.is_state(MessageState::Created) {
+            let params = message.inputs.get::<Vars>("params").unwrap();
             let mut options = Vars::new();
             options.insert("uid".into(), "admin".into());
             options.insert(
                 "pm".into(),
-                json!(self.role(&message.inputs.get::<String>("role_id").unwrap())),
+                json!(self.role(&params.get::<String>("role_id").unwrap())),
             );
             executor
                 .act()
@@ -103,11 +105,11 @@ impl<'a> Client<'a> {
             );
         } else if message.is_key("gm") && message.is_state(MessageState::Created) {
             let mut options = Vars::new();
-
+            let params = message.inputs.get::<Vars>("params").unwrap();
             options.insert("uid".into(), "admin".into());
             options.insert(
                 "gm".into(),
-                json!(self.role(&message.inputs.get::<String>("role_id").unwrap())),
+                json!(self.role(&params.get::<String>("role_id").unwrap())),
             );
 
             executor

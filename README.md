@@ -3,17 +3,17 @@
 [![Build](https://github.com/yaojianpin/acts/actions/workflows/rust.yml/badge.svg)](https://github.com/yaojianpin/acts/actions?workflow=rust)
 [![Test](https://github.com/yaojianpin/acts/actions/workflows/test.yml/badge.svg)](https://github.com/yaojianpin/acts/actions?workflow=test)
 
-`acts` is a fast, tiny, extensiable workflow engine, which provides the abilities to execute workflow based on yml model.
+Acts is a fast, lightweight, extensiable workflow engine that executes workflows defined in YAML format.
 
-The yml workflow model is not as same as the tranditional workflow. such as `bpmn`. The yml format is inspired by Github actions. The main point of this workflow is to create a top abstraction to run the workflow logic and interact with the client via `act` node.
+Unlike traditional workflow engines (such as BPMN). Acts uses a message-driven architecture to execute and distribute messages. 
 
-This workflow engine focus on the workflow logics itself and message distributions. the complex business logic will be completed by `act` via the act message.
+Acts uses Step, Branch, Act to build the workflow. Step and Branch are the workflow stucture to run in sequence or to step into different branch by condition. Act is responsible for the action execution.
 
 ## Key Features
 
 ### Fast
 
-Uses rust to create the lib, there is no virtual machine, no db dependencies. It also provides the feature `store` to enable the local store.
+Write in Rust, No virtual machine.
 
 1. bechmark with memory store
 
@@ -24,9 +24,9 @@ start                   time:   [80.320 µs 82.188 µs 84.336 µs]
 act                     time:   [601.40 µs 636.69 µs 674.49 µs]
 ```
 
-### Tiny
+### Lightweight
 
-The lib size is only 5mb.
+The lib size is about 4.6mb now.
 
 ### Extensiable
 
@@ -34,7 +34,7 @@ The lib size is only 5mb.
   support creating external store, please refer to the code under `store/sqlite`.
 
 - pakcage extension
-  support creteing creating custom package, please refer to the code under `example/pakcage`.
+  support creating custom package, please refer to the code under `example/pakcage`.
 
 ## Installation
 
@@ -43,10 +43,6 @@ The easiest way to get the latest version of `acts` is to install it via `cargo`
 ```bash
 cargo add acts
 ```
-
-## Build
-
-If you are using `store` feature, For Windows, recommeded [`MSYS2`](https://www.msys2.org/) and toolchain of stable-x86_64-pc-windows-gnu
 
 ## Quickstart
 
@@ -99,33 +95,54 @@ Please see [`examples`](https://github.com/yaojianpin/acts/tree/main/examples)
 
 ## Model Usage
 
-The model is a yaml format file. where there are different type of node, including [`Workflow`], [`Branch`], [`Step`] and [`Act`]. Every workflow can have more steps, a step can have more branches. In a step, it consists of many acts to complete the step task, such as 'irq', 'msg', 'each', 'chain', 'set', 'expose' and so on. these acts are responsible to act with client or do a single task simplely.
+The model is a yaml format file. where there are different type of node, including [`Workflow`], [`Branch`], [`Step`] and [`Act`]. 
 
-The `run` property is the script based on `javascript`
-The `inputs` property can be set the initialzed vars in each node.
 
 ```yml
 name: model name
+# workflow.inputs are the global vars
 inputs:
   value: 0
+# the event to start the workflow
+on:
+  - id: event1
+    uses: acts.event.manual
+# workflow steps
 steps:
   - name: step 1
-    run: |
-      print("step 1")
+    # execute by act
+    acts:
+        # init with interrupt request to client
+        # and make sure complete the action with 'list' var
+      - name: init
+        uses: acts.core.irq
+        outputs:
+          list:
 
   - name: step 2
+    # workflow branches to run by condition
     branches:
       - name: branch 1
         if: ${ $("value") > 100 }
-        run: |
-          print("branch 1");
+        steps:
+          - name: step 3
+            acts:
+              - name: send a message
+                uses: acts.core.msg
 
       - name: branch 2
         if: ${ $("value") <= 100 }
         steps:
-          - name: step 3
-            run: |
-              print("branch 2")
+          - name: step 4
+            acts:
+              - name: send a message
+                uses: acts.core.parallel
+                params:
+                  in: ${ ${list} }
+                  acts:
+                    - uses: acts.core.irq
+  - name: final step
+
 ```
 
 ### Inputs

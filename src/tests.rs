@@ -192,7 +192,10 @@ async fn engine_drop() {
 
 #[tokio::test]
 async fn engine_build_config_default() {
-    let path = "acts.cfg";
+    if !std::path::Path::new("test").exists() {
+        std::fs::create_dir("test").unwrap();
+    }
+    let path = "test/acts.cfg";
     if std::path::Path::new(path).exists() {
         std::fs::remove_file(path).unwrap();
     }
@@ -215,13 +218,14 @@ async fn engine_build_config_default() {
 
 #[tokio::test]
 async fn engine_build_config_set_source() {
-    let path = std::path::Path::new("test/acts.cfg");
+    if !std::path::Path::new("test").exists() {
+        std::fs::create_dir("test").unwrap();
+    }
+    let path = std::path::Path::new("test/test.cfg");
 
     if path.exists() {
         std::fs::remove_file(path).unwrap();
-        std::fs::remove_dir("test").unwrap();
     }
-    std::fs::create_dir("test").unwrap();
     std::fs::write(
         path,
         r#"{ 
@@ -245,7 +249,11 @@ async fn engine_build_config_with_env() {
         std::env::set_var("MY_ENV", "DEBUG");
     }
 
-    let path = std::path::Path::new("acts.cfg");
+    if !std::path::Path::new("test").exists() {
+        std::fs::create_dir("test").unwrap();
+    }
+
+    let path = std::path::Path::new("test/acts.cfg");
     if path.exists() {
         std::fs::remove_file(path).unwrap();
     }
@@ -269,7 +277,7 @@ async fn engine_get_custom_config() {
         my_option: Option<i32>,
     }
 
-    let path = "acts.cfg";
+    let path = "test/acts.cfg";
     if std::path::Path::new(path).exists() {
         std::fs::remove_file(path).unwrap();
     }

@@ -1,5 +1,9 @@
 use crate::{
-    Act, ModelInfo, Result, Workflow, data, scheduler::Runtime, store::PageData,
+    Act, ModelInfo, Result, Workflow, data,
+    query::{Cond, Expr, Query},
+    scheduler::Runtime,
+    store::PageData,
+    utils::consts,
 };
 use std::sync::Arc;
 use tracing::instrument;
@@ -61,7 +65,18 @@ impl ModelExecutor {
 
     #[instrument(skip(self))]
     pub fn rm(&self, id: &str) -> Result<bool> {
-        self.runtime.cache().store().models().delete(id)
+        let store = self.runtime.cache().store();
+
+        // find the model events and delete them
+        let events = store
+            .events()
+            .query(&Query::new().push(Cond::and().push(Expr::eq(consts::MODEL_ID, id))))?;
+        for evt in events.rows {
+            store.events().delete(&evt.id)?;
+        }
+
+        // remove the model
+        store.models().delete(id)
     }
 
     fn deploy_event(&self, acts: &[Act], mid: &str, ver: i32) -> Result<()> {

@@ -31,7 +31,7 @@ impl Client {
     }
 
     pub fn process(&self, executor: &Executor, e: &Event<Message>) -> Result<()> {
-        if e.is_type("irq") && e.is_state(MessageState::Created) {
+        if e.is_irq() && e.is_state(MessageState::Created) {
             match self.actions.get(&e.key) {
                 Some(action) => {
                     action(executor, e)?;
@@ -41,7 +41,7 @@ impl Client {
             }
         }
 
-        if e.is_type("msg") {
+        if e.is_msg() {
             if let Some(action) = self.messages.get(&e.key) {
                 action(executor, e);
             }

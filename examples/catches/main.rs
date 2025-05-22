@@ -18,12 +18,9 @@ async fn main() {
         .model()
         .deploy(&workflow)
         .expect("deploy model");
-    executor
-        .proc()
-        .start(&workflow.id, &Vars::new())
-        .expect("start workflow");
 
     engine.channel().on_message(move |e| {
+        println!("on_message: key={} inputs={}", e.key, e.inputs);
         let ret = client.process(&executor, e);
         if ret.is_err() {
             eprintln!("{}", ret.err().unwrap());
@@ -40,5 +37,10 @@ async fn main() {
         );
         s.close();
     });
+    engine
+        .executor()
+        .proc()
+        .start(&workflow.id, &Vars::new())
+        .expect("start workflow");
     sig.recv().await;
 }

@@ -60,7 +60,8 @@ impl Client {
         vars
     }
     pub fn action2(inputs: &Vars) -> Vars {
-        let result = inputs.get_value("v").unwrap().as_i64().unwrap();
+        let params = inputs.get::<Vars>("params").unwrap();
+        let result = params.get::<i64>("v").unwrap();
 
         let mut vars = Vars::new();
         vars.insert("uid".to_string(), json!("u3"));

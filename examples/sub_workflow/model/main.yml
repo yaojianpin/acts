@@ -13,7 +13,7 @@ steps:
   - name: enter sub workflow
     acts:
       - uses: acts.core.subflow
-        inputs:
+        params:
             to: sub
             extra:
               v: ${ $("v") }
@@ -22,6 +22,6 @@ steps:
     acts:
       - uses: acts.core.irq
         key: action2
-        inputs:
+        params:
           v: ${ $("v") }
     

@@ -2,9 +2,7 @@ use super::TaskLifeCycle;
 use crate::{
     Act, ActError, ActRunAs, ActTask, Result, TaskState, scheduler::Context, utils::consts,
 };
-use async_trait::async_trait;
 
-#[async_trait]
 impl ActTask for Act {
     fn init(&self, ctx: &Context) -> Result<()> {
         let task = ctx.task();

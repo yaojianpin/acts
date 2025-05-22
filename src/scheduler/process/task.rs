@@ -16,7 +16,6 @@ use crate::{
     },
     utils::{self, consts},
 };
-use async_trait::async_trait;
 pub use hook::{StatementBatch, TaskLifeCycle};
 use serde::de::DeserializeOwned;
 use serde_json::json;
@@ -880,7 +879,6 @@ impl Task {
     }
 }
 
-#[async_trait]
 impl ActTask for Arc<Task> {
     fn init(&self, ctx: &Context) -> Result<()> {
         ctx.set_task(self);

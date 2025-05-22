@@ -10,8 +10,6 @@ mod tree;
 #[cfg(test)]
 mod tests;
 
-use async_trait::async_trait;
-
 pub use crate::Result;
 pub use context::Context;
 pub use process::{Process, StatementBatch, Task, TaskLifeCycle};
@@ -22,7 +20,6 @@ pub use state::TaskState;
 #[allow(unused_imports)]
 pub use tree::{Node, NodeContent, NodeData, NodeKind, NodeTree};
 
-#[async_trait]
 pub trait ActTask: Clone + Send {
     fn init(&self, _ctx: &Context) -> Result<()> {
         Ok(())

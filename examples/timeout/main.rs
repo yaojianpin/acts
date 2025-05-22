@@ -17,10 +17,6 @@ async fn main() {
         .model()
         .deploy(&workflow)
         .expect("deploy model");
-    executor
-        .proc()
-        .start(&workflow.id, &Vars::new())
-        .expect("start workflow");
 
     engine.channel().on_message(move |e| {
         let ret = client.process(&executor, e);
@@ -49,5 +45,10 @@ async fn main() {
         );
         s2.close();
     });
+    engine
+        .executor()
+        .proc()
+        .start(&workflow.id, &Vars::new())
+        .expect("start workflow");
     sig.recv().await;
 }

@@ -22,14 +22,14 @@ steps:
             acts:
               - uses: acts.core.irq
                 key: action1
-                inputs:
+                params:
                   v: ${ $("v") }
           - name: step2
             id: step2
             acts:
               - uses: acts.core.irq
                 key: action2
-                inputs:
+                params:
                   v: ${ $("v") }        
       - name: cond 2
         id: cond2
@@ -45,7 +45,7 @@ steps:
     acts:
       - uses: acts.core.irq
         key: action4
-        inputs:
+        params:
           v: ${ $("v") }
   
 

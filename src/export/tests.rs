@@ -5,7 +5,7 @@ use crate::{
     export::ExecutorQuery,
     scheduler::TaskState,
     store::query::*,
-    utils,
+    utils::{self, consts},
 };
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -289,6 +289,46 @@ async fn export_manager_model_remove() {
         manager
             .model()
             .list(&ExecutorQuery::new().with_offset(0).with_count(10))
+            .unwrap()
+            .count,
+        0
+    );
+}
+
+#[tokio::test]
+async fn export_manager_model_remove_with_events() {
+    let engine = Engine::new().start();
+    let manager = engine.executor();
+    let mut model = Workflow::new()
+        .with_on(|act| act.with_id("event1").with_uses("acts.event.manual"))
+        .with_on(|act| act.with_id("event2").with_uses("acts.event.manual"))
+        .with_step(|step| step.with_id("step1"));
+
+    model.set_id(&utils::longid());
+    manager.model().deploy(&model).unwrap();
+
+    assert_eq!(
+        manager
+            .evt()
+            .list(&ExecutorQuery::new().with_query(consts::MODEL_ID, &model.id))
+            .unwrap()
+            .count,
+        2
+    );
+
+    manager.model().rm(&model.id).unwrap();
+    assert_eq!(
+        manager
+            .model()
+            .list(&ExecutorQuery::new().with_offset(0).with_count(10))
+            .unwrap()
+            .count,
+        0
+    );
+    assert_eq!(
+        manager
+            .evt()
+            .list(&ExecutorQuery::new().with_query(consts::MODEL_ID, &model.id))
             .unwrap()
             .count,
         0

@@ -8,7 +8,7 @@ setup:
   - uses: acts.core.msg
     on: created
     key: fn1
-    inputs:
+    params:
       a: ${ $("value") }
   - uses: acts.core.msg
     on: step
@@ -28,14 +28,14 @@ steps:
         key: fn3
     acts:
       - uses: acts.transform.set
-        inputs:
+        params:
           value: 100
   - name: step 3
     id: step3
     setup:
       - uses: acts.core.block
         on: completed
-        inputs:
+        params:
           mode: sequence
           acts:
             - uses: acts.core.msg

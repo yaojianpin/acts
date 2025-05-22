@@ -1,5 +1,5 @@
 name: a timeout example
-id: timeout
+id: timeout_model
 steps:
   - name: prepare
     id: prepare
@@ -14,22 +14,29 @@ steps:
     timeout:
       - on: 2s
         steps:
-          - uses: acts.core.msg
-            key: step1_timeout_2s
-            inputs:
-              a: 1
+          - name: step 2s
+            acts:
+              - uses: acts.core.msg
+                key: step1_timeout_2s
+                params:
+                  a: 1
       - on: 5s
         steps:
-          - uses: acts.core.irq
-            key: step1_timeout_5s
-            inputs:
-              a: 2
+          - name: step 5s
+            acts:
+              - uses: acts.core.irq
+                key: step1_timeout_5s
+                params:
+                  a: 2
       - on: 8s
-        then:
-          - uses: acts.core.action
-            inputs:
-              action: error
-              options:
-                ecode: err_timeout_8s
+        steps:
+          - name: step 8s
+            acts:
+              - uses: acts.core.action
+                params:
+                  action: error
+                  options:
+                    ecode: err_timeout_8s
+
   - name: final
     id: final

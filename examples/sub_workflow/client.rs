@@ -55,7 +55,8 @@ impl Client {
     }
     pub fn action2(inputs: &Vars) -> Vars {
         println!("action2: {inputs}");
-        let v = inputs.get_value("v").unwrap().as_i64().unwrap();
+        let params = inputs.get::<Vars>("params").unwrap();
+        let v = params.get::<i64>("v").unwrap();
 
         let mut vars = Vars::new();
         vars.insert("v".to_string(), json!(v * 2));

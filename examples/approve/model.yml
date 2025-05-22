@@ -17,14 +17,14 @@ steps:
     acts:
       - uses: acts.core.irq
         key: pm
-        inputs:
+        params:
           role_id: pm
-        rets:
+        outputs:
           pm:
       # parse the pm variable from prev act
       # and parallel run multiple acts
       - uses: acts.core.parallel
-        inputs:
+        params:
           in: $("pm")
           acts:
             - uses: acts.core.irq
@@ -38,18 +38,17 @@ steps:
     acts:
       - uses: acts.core.irq
         key: gm
-        inputs:
+        params:
           role_id: gm
-        rets:
+        outputs:
           gm:
       # parallel generate multiple acts
       - uses: acts.core.parallel
-        in: $("gm")
-        acts:
-          - act: msg
-            key: gm_act_msg
-      # generate one irq and wait util completed
+        params:
+          in: $("gm")
+          acts:
+            - uses: acts.core.msg
+              key: gm_act_msg
+      # generate an irq and wait util completed
       - uses: acts.core.irq
         key: gm_act
-        inputs:
-          v: ${ $("gm") }

@@ -28,7 +28,6 @@ pub trait ActPackage {
     fn meta() -> ActPackageMeta;
 }
 
-#[async_trait::async_trait]
 pub trait ActPackageFn: Send + Sync {
     /// executing with task context
     fn execute(&self, _ctx: &Context) -> Result<Option<Vars>> {
