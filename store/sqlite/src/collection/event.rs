@@ -156,6 +156,9 @@ impl DbCollection for EventCollection {
                 data.id.into(),
                 data.name.into(),
                 data.mid.into(),
+                data.ver.into(),
+                data.uses.into(),
+                data.params.into(),
                 data.create_time.into(),
                 data.timestamp.into(),
             ])

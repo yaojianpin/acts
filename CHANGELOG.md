@@ -114,3 +114,4 @@
 - feat: modify Config to support getting custom config section
 - feat: add workflow.on events (manual, hook, chat)
 - feat: add acts-state package to support get or set state
+- feat: change the directory structure with acts, plugins, examples, benches, config

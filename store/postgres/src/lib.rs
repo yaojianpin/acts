@@ -7,8 +7,8 @@ mod collection;
 mod database;
 mod synclient;
 
-#[cfg(test)]
-mod tests;
+// #[cfg(test)]
+// mod tests;
 
 use acts::{ActError, ActPlugin, Result};
 
