@@ -25,7 +25,7 @@ impl ActPackage for ParallelPackage {
             doc: "",
             schema: json!({}),
             run_as: ActRunAs::Func,
-            group: vec![],
+            resources: vec![],
             catalog: ActPackageCatalog::Core,
         }
     }

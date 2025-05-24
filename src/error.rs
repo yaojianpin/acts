@@ -35,7 +35,7 @@ pub enum ActError {
     IoError(String),
 
     #[error("{0}")]
-    ValidationError(String),
+    Package(String),
 }
 
 #[derive(Default, Debug, Clone, Deserialize, Serialize)]
@@ -69,6 +69,19 @@ impl Error {
 impl From<ActError> for String {
     fn from(val: ActError) -> Self {
         val.to_string()
+    }
+}
+
+impl From<ActError> for Vars {
+    fn from(val: ActError) -> Self {
+        match val {
+            ActError::Exception { ecode, message } => {
+                Vars::new().with("ecode", ecode).with("message", message)
+            }
+            err => Vars::new()
+                .with("ecode", "")
+                .with("message", err.to_string()),
+        }
     }
 }
 
@@ -123,6 +136,12 @@ impl From<serde_json::Error> for ActError {
 impl<'a> From<rquickjs::CaughtError<'a>> for ActError {
     fn from(error: rquickjs::CaughtError<'a>) -> Self {
         ActError::Script(error.to_string())
+    }
+}
+
+impl From<jsonschema::ValidationError<'_>> for ActError {
+    fn from(error: jsonschema::ValidationError<'_>) -> Self {
+        ActError::Runtime(error.to_string())
     }
 }
 

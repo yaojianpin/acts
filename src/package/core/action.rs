@@ -26,7 +26,7 @@ impl ActPackage for ActionPackage {
             doc: "",
             schema: json!({}),
             run_as: ActRunAs::Func,
-            group: vec![],
+            resources: vec![],
             catalog: ActPackageCatalog::Core,
         }
     }

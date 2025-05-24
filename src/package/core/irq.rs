@@ -17,7 +17,7 @@ impl ActPackage for IrqPackage {
             doc: "",
             schema: json!({}),
             run_as: ActRunAs::Irq,
-            group: vec![],
+            resources: vec![],
             catalog: ActPackageCatalog::Core,
         }
     }

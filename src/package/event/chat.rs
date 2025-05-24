@@ -22,7 +22,7 @@ impl ActPackage for ManualEventPackage {
             doc: "",
             schema: json!({}),
             run_as: ActRunAs::Func,
-            group: vec![],
+            resources: vec![],
             catalog: ActPackageCatalog::Event,
         }
     }
@@ -39,7 +39,7 @@ impl ActPackageFn for ManualEventPackage {
         let model: ModelInfo = rt.cache().store().models().find(&mid)?.into();
         let workflow = model.workflow()?;
 
-        let options = options.clone().with(consts::ACT_VALUE, self.0.clone());
+        let options = options.clone().with(consts::ACT_INPUT_DATA, self.0.clone());
         let ret = rt.start(&workflow, &options)?;
 
         Ok(Some(Vars::new().with(consts::PROCESS_ID, ret.id())))

@@ -34,7 +34,7 @@ pub use event::{Action, Event, Message, MessageState};
 pub use export::{Channel, ChannelOptions, Executor, ExecutorQuery, Extender};
 pub use model::*;
 pub use package::{
-    ActGroup, ActOperation, ActPackage, ActPackageCatalog, ActPackageFn, ActPackageMeta, ActRunAs,
+    ActOperation, ActPackage, ActPackageCatalog, ActPackageMeta, ActResource, ActRunAs,
 };
 pub use plugin::ActPlugin;
 pub use scheduler::Context;

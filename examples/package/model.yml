@@ -1,4 +1,5 @@
 id: pack_example
+# global input variable will be set when the process is starting
 outputs:
   result: ${  $("input")  }
 steps:
@@ -18,12 +19,6 @@ steps:
         params:
           a: ${ $("input") }
           b: [ "a", "b" ]
-      - uses: pack3
-        params:
-          func: call_from_client
-          options:
-            a: ${ $("input") }
-            b: "this package will call from client"
 
 
 

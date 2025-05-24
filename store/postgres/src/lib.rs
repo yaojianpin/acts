@@ -10,7 +10,7 @@ mod synclient;
 #[cfg(test)]
 mod tests;
 
-use acts::ActPlugin;
+use acts::{ActError, ActPlugin, Result};
 
 #[derive(Clone)]
 pub struct PostgresStore;
@@ -20,12 +20,14 @@ struct ProgresConfig {
     database_url: String,
 }
 
+#[async_trait::async_trait]
 impl ActPlugin for PostgresStore {
-    fn on_init(&self, engine: &acts::Engine) {
+    async fn on_init(&self, engine: &acts::Engine) -> Result<()> {
         let config = engine
             .config()
             .get::<ProgresConfig>("postgres")
-            .expect("cannot find database_url in config file");
+            .map_err(|err| ActError::Config(format!("get postgres config error: {}", err)))?;
+
         let db = database::Database::new(&config.database_url);
         db.init();
 
@@ -35,5 +37,7 @@ impl ActPlugin for PostgresStore {
         engine.extender().register_collection(db.tasks());
         engine.extender().register_collection(db.messages());
         engine.extender().register_collection(db.events());
+
+        Ok(())
     }
 }

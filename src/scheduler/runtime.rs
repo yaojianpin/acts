@@ -77,7 +77,7 @@ impl Runtime {
         debug!("scheduler::start({})", model.id);
 
         let mut proc_id = utils::longid();
-        if let Some(pid) = &options.get::<String>("pid") {
+        if let Some(pid) = &options.get::<String>(consts::PROCESS_ID) {
             // the pid will use as the proc_id
             proc_id = pid.to_string();
         }

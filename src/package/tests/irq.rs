@@ -41,7 +41,12 @@ async fn pack_irq_multi_threads() {
     });
 
     workflow.print();
-    let engine = EngineBuilder::new().cache_size(10).build().start();
+    let engine = EngineBuilder::new()
+        .cache_size(10)
+        .build()
+        .await
+        .unwrap()
+        .start();
     engine.executor().model().deploy(&workflow).unwrap();
     let (s1, s2) = engine.signal(false).double();
     let count = Arc::new(Mutex::new(0));

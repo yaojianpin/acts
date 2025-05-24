@@ -20,7 +20,7 @@ impl ActPackage for SetPackage {
             version: "0.1.0",
             schema: json!({}),
             run_as: ActRunAs::Func,
-            group: Vec::new(),
+            resources: Vec::new(),
             catalog: ActPackageCatalog::Transform,
         }
     }

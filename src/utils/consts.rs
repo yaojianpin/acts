@@ -11,7 +11,7 @@ pub const STEP_KEY: &str = "step";
 pub const ACT_OPTIONS_KEY: &str = "options";
 pub const ACT_PARAMS_KEY: &str = "params";
 
-pub const ACT_ERR_MESSAGE: &str = "error";
+pub const ACT_ERR_MESSAGE: &str = "message";
 pub const ACT_ERR_CODE: &str = "ecode";
 
 pub const ACT_INDEX: &str = "$index";
@@ -23,10 +23,7 @@ pub const IS_CATCH_PROCESSED: &str = "$is_catch_processed";
 pub const IS_EVENT_PROCESSED: &str = "$is_event_processed";
 pub const IS_TIMEOUT_PROCESSED_PREFIX: &str = "$is_timeout_";
 
-// pub const ACT_TYPE_BLOCK: &str = "acts.core.block";
 pub const ACT_OUTPUTS: &str = "outputs";
-// pub const ACT_OUTPUTS_CACHE: &str = "$outputs";
-// pub const ACT_INPUTS_CACHE: &str = "$inputs";
 pub const ACT_PARAMS_CACHE: &str = "$params";
 
 pub const ACT_SUBFLOW_TO: &str = "to";
@@ -37,3 +34,5 @@ pub const TASK_ROOT_TID: &str = "$";
 
 pub const PROCESS_ID: &str = "pid";
 pub const MODEL_ID: &str = "mid";
+
+pub const ACT_INPUT_DATA: &str = "data";

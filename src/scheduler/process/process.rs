@@ -404,7 +404,7 @@ impl Process {
                 }
 
                 println!(
-                    "Task({}) {}{} nid={} name={} tag={} prev={} state={} err={:?} inputs={}  outputs={}",
+                    "Task({}) {}{} nid={} name={} tag={} prev={} state={} err={:?} data={} inputs={}  outputs={}",
                     task.id,
                     task.node().kind(),
                     if task.node().kind() == NodeKind::Act {
@@ -421,6 +421,7 @@ impl Process {
                     },
                     task.state(),
                     task.err(),
+                    task.data(),
                     task.inputs(),
                     task.outputs(),
                 );

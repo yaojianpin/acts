@@ -1,31 +1,30 @@
 # acts-sqlite
 
-The acts sqlite store plugin for acts. 
+The acts state package plugin for acts. 
 
 ## Installation
 
-
 create `acts.cfg` in current dir
 ```
-sqlite {
-    database_url: "sqlite://<your file path>"
+state {
+    uri: "redis://<your connection path>"
 }
 ```
 
 ```bash
-cargo add acts-store-sqlite
+cargo add acts-package-state
 ```
 
 ## Example
 
 ```rust,no_run
 use acts::EngineBuilder;
-use acts_store_sqlite::SqliteStore;
+use acts_package_state::StatePackagePlugin;
 
 #[tokio::main]
 async fn main() {
     let engine = EngineBuilder::new()
-        .add_plugin(&SqliteStore)
+        .add_plugin(&StatePackagePlugin)
         .build()
         .start();
 }

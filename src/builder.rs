@@ -1,6 +1,6 @@
 #[cfg(test)]
 use crate::ConfigData;
-use crate::{ActPlugin, Config, Engine};
+use crate::{ActPlugin, Config, Engine, Result};
 use std::path::Path;
 
 pub struct EngineBuilder {
@@ -77,7 +77,7 @@ impl EngineBuilder {
     /// ## Example
     ///
     /// ```no_run
-    /// use acts::{ActPlugin, Message, Engine, EngineBuilder, Workflow};
+    /// use acts::{ActPlugin, Message, Engine, EngineBuilder, Workflow, Result};
     ///
     /// #[derive(Clone)]
     /// struct TestPlugin;
@@ -86,15 +86,21 @@ impl EngineBuilder {
     ///         Self
     ///     }
     /// }
+    /// #[async_trait::async_trait]
     /// impl ActPlugin for TestPlugin {
-    ///     fn on_init(&self, engine: &Engine) {
+    ///     async fn on_init(&self, engine: &Engine) -> Result<()> {
     ///         println!("TestPlugin");
     ///         engine.channel().on_start(|e| {});
     ///         engine.channel().on_complete(|e| {});
     ///         engine.channel().on_message(|e| {});
+    ///         Ok(())       
     ///     }
     /// }
-    /// let engine = EngineBuilder::new().add_plugin(&TestPlugin::new()).build().start();
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let engine = EngineBuilder::new().add_plugin(&TestPlugin::new()).build().await.unwrap().start();
+    /// }
     /// ```
     pub fn add_plugin<T>(mut self, plugin: &T) -> Self
     where
@@ -104,14 +110,17 @@ impl EngineBuilder {
         self
     }
 
-    pub fn build(&self) -> Engine {
+    pub async fn build(&self) -> Result<Engine> {
         let engine = Engine::new_with_config(&self.config);
+
+        // init the cache store to make sure the plugin can registry package to the store
+        engine.runtime().cache().init(&engine);
 
         // init plugins
         for plugin in self.plugins.iter() {
-            plugin.on_init(&engine);
+            plugin.on_init(&engine).await?;
         }
 
-        engine
+        Ok(engine)
     }
 }

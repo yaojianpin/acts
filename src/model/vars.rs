@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::ops::{Deref, DerefMut};
 
+use crate::utils::consts;
+
 #[derive(Default, Clone)]
 pub struct Vars {
     inner: Map<String, Value>,
@@ -130,6 +132,10 @@ impl From<Vars> for serde_json::Value {
 impl Vars {
     pub fn new() -> Self {
         Self { inner: Map::new() }
+    }
+
+    pub fn with_data(self, data: serde_json::Value) -> Self {
+        self.with(consts::ACT_INPUT_DATA, data)
     }
 
     pub fn with<T>(self, name: &str, value: T) -> Self

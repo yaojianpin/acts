@@ -6,7 +6,7 @@ pub mod transform;
 mod tests;
 
 use crate::{
-    ActError, Engine, Result, Vars, data,
+    Engine, Result, Vars, data,
     scheduler::{Context, Runtime},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -54,9 +54,12 @@ pub trait ActPackageFn: Send + Sync {
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
 pub enum ActRunAs {
-    #[default]
+    /// only used internally
     Func,
+    /// interrupt request, need to response
+    #[default]
     Irq,
+    /// message without response
     Msg,
 }
 
@@ -116,18 +119,19 @@ pub struct ActPackageMeta {
     pub schema: serde_json::Value,
 
     /// package run as Irq, Msg or Func
+    /// Func is only used internally
     pub run_as: ActRunAs,
 
-    /// package group to the package operations
-    /// it is used for the editor ui to search and select the operation
-    pub group: Vec<ActGroup>,
+    /// package resources to the orgnize multiple operations
+    /// it is used for the editor ui to search and select the operations
+    pub resources: Vec<ActResource>,
 
     /// package catalog
     pub catalog: ActPackageCatalog,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ActGroup {
+pub struct ActResource {
     pub name: String,
     pub desc: String,
     pub operations: Vec<ActOperation>,
@@ -137,6 +141,7 @@ pub struct ActGroup {
 pub struct ActOperation {
     pub name: String,
     pub desc: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone)]
@@ -155,8 +160,7 @@ impl ActPackageRegister {
             create: (|params: serde_json::Value| {
                 let meta = T::meta();
 
-                jsonschema::validate(&meta.schema, &params)
-                    .map_err(|e| ActError::ValidationError(format!("{:?}", e)))?;
+                jsonschema::validate(&meta.schema, &params)?;
                 let ret = serde_json::from_value::<T>(params)?;
                 Ok(Box::new(ret) as Box<dyn ActPackageFn>)
             }),
@@ -199,7 +203,7 @@ impl ActPackageMeta {
             version: pack.version.to_string(),
             schema: pack.schema.to_string(),
             run_as: pack.run_as,
-            groups: serde_json::to_string(&pack.group)
+            groups: serde_json::to_string(&pack.resources)
                 .expect("cannot convert ActPackageMeta.group to json"),
             catalog: pack.catalog,
             create_time: 0,

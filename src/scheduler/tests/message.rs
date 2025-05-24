@@ -923,7 +923,8 @@ async fn sch_message_error_if_not_ack_and_exceed_max_reties() {
         max_message_retry_times: 2,
         ..ConfigData::default()
     };
-    let (engine, proc, sig) = create_proc_signal_config::<Vec<Message>>(&config, &workflow, &id);
+    let (engine, proc, sig) =
+        create_proc_signal_config::<Vec<Message>>(&config, &workflow, &id).await;
     let rx = sig.clone();
     let options = ChannelOptions {
         id: "e1".to_string(),

@@ -22,7 +22,7 @@ impl ActPackage for ManualEventPackage {
             doc: "",
             schema: json!({}),
             run_as: ActRunAs::Func,
-            group: vec![],
+            resources: vec![],
             catalog: ActPackageCatalog::Event,
         }
     }

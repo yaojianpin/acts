@@ -1,6 +1,6 @@
 # acts-postgres
 
-The acts postgres plugin for acts store. 
+The acts postgres plugin for acts. 
 
 ## Installation
 
@@ -12,14 +12,14 @@ postgres {
 ```
 
 ```bash
-cargo add acts-postgres
+cargo add acts-store-postgres
 ```
 
 ## Example
 
 ```rust,no_run
 use acts::EngineBuilder;
-use acts_postgres::PostgresStore;
+use acts_store_postgres::PostgresStore;
 
 #[tokio::main]
 async fn main() {

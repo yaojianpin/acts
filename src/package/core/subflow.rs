@@ -32,7 +32,7 @@ impl ActPackage for SubflowPackage {
                 }
             }),
             run_as: ActRunAs::Func,
-            group: vec![],
+            resources: vec![],
             catalog: ActPackageCatalog::Core,
         }
     }

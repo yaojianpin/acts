@@ -443,7 +443,7 @@ use acts_sqlite::SqliteStore;
 
 #[tokio::main]
 async fn main() {
-  let engine = EngineBuilder::new().add_plugin(&SqliteStore).build().start();
+  let engine = EngineBuilder::new().add_plugin(&SqliteStore).build().await.unwrap().start();
 }
 ```
 
@@ -455,7 +455,7 @@ use acts_postgres::PostgresStore;
 
 #[tokio::main]
 async fn main() {
-  let engine = EngineBuilder::new().add_plugin(&PostgresStore).build().start();
+  let engine = EngineBuilder::new().add_plugin(&PostgresStore).build().await.unwrap().start();
 }
 ```
 
@@ -486,7 +486,6 @@ acts:
   - [x] scheduler (Config, Builder, Node, Process, Task, Queue, Event)
   - [x] javascript runner
   - [x] cache
-  - [x] store adapter
   - [x] plugin register
   - [x] package register
   - [x] message channel
@@ -525,10 +524,10 @@ acts:
   - [x] postgres
 
 - package extension
-  - [ ] form (packages/form)
-  - [ ] ai (packages/ai)
-  - [ ] state (packages/state)
-  - [ ] pubsub (packages/pubsub)
-  - [ ] observability (packages/obs)
-  - [ ] database (packages/database)
-  - [ ] mail (packages/mail)
+  - [ ] form (plugins/form)
+  - [ ] ai (plugins/ai)
+  - [x] state (plugins/state)
+  - [ ] pubsub (plugins/pubsub)
+  - [ ] observability (plugins/obs)
+  - [ ] database (plugins/database)
+  - [ ] mail (plugins/mail)

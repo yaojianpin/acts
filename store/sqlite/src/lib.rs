@@ -9,7 +9,7 @@ mod database;
 #[cfg(test)]
 mod tests;
 
-use acts::ActPlugin;
+use acts::{ActError, ActPlugin, Result};
 
 #[derive(Clone)]
 pub struct SqliteStore;
@@ -19,12 +19,13 @@ struct SqliteConfig {
     database_url: String,
 }
 
+#[async_trait::async_trait]
 impl ActPlugin for SqliteStore {
-    fn on_init(&self, engine: &acts::Engine) {
+    async fn on_init(&self, engine: &acts::Engine) -> Result<()> {
         let config = engine
             .config()
             .get::<SqliteConfig>("sqlite")
-            .expect("cannot find sqlite in config file");
+            .map_err(|err| ActError::Config(format!("get sqlite config error: {}", err)))?;
 
         let db = database::Database::new(&config.database_url);
         db.init();
@@ -35,5 +36,7 @@ impl ActPlugin for SqliteStore {
         engine.extender().register_collection(db.tasks());
         engine.extender().register_collection(db.messages());
         engine.extender().register_collection(db.events());
+
+        Ok(())
     }
 }

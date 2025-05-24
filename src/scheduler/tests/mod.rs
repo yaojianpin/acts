@@ -98,12 +98,17 @@ fn create_proc_signal2<R: Clone + Default + Send + 'static>(
 }
 
 #[allow(clippy::type_complexity)]
-fn create_proc_signal_config<R: Clone + Default + Send + 'static>(
+async fn create_proc_signal_config<R: Clone + Default + Send + 'static>(
     config: &ConfigData,
     workflow: &Workflow,
     pid: &str,
 ) -> (Engine, Arc<Process>, Signal<R>) {
-    let engine = EngineBuilder::new().set_config(config).build().start();
+    let engine = EngineBuilder::new()
+        .set_config(config)
+        .build()
+        .await
+        .unwrap()
+        .start();
     let rt = engine.runtime();
 
     let proc = rt.create_proc(pid, workflow);

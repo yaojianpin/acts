@@ -21,6 +21,9 @@ pub struct ChannelOptions {
     /// use the blob pattern to match the message key
     /// eg. key1*
     pub key: String,
+
+    /// use the glob pattern to match the message uses
+    pub uses: String,
 }
 
 impl Default for ChannelOptions {
@@ -32,6 +35,7 @@ impl Default for ChannelOptions {
             state: "*".to_string(),
             tag: "*".to_string(),
             key: "*".to_string(),
+            uses: "*".to_string(),
         }
     }
 }
@@ -50,6 +54,7 @@ pub struct Channel {
     chan_id: String,
     pattern: String,
     glob: (
+        globset::GlobMatcher,
         globset::GlobMatcher,
         globset::GlobMatcher,
         globset::GlobMatcher,
@@ -75,13 +80,13 @@ impl Channel {
             .compile_matcher();
         let pat_tag = globset::Glob::new(&options.tag).unwrap().compile_matcher();
         let pat_key = globset::Glob::new(&options.key).unwrap().compile_matcher();
-
+        let pat_uses = globset::Glob::new(&options.uses).unwrap().compile_matcher();
         Self {
             runtime: rt.clone(),
             ack: options.ack,
             chan_id: options.id.clone(),
             pattern: options.pattern(),
-            glob: (pat_type, pat_state, pat_tag, pat_key),
+            glob: (pat_type, pat_state, pat_tag, pat_key, pat_uses),
         }
     }
 
@@ -177,7 +182,7 @@ impl Channel {
 
 fn store_if(runtime: &Arc<Runtime>, ack: bool, chan_id: &str, pattern: &str, message: &Message) {
     if ack && !chan_id.is_empty() && message.retry_times == 0 {
-        println!("store: {message:?}");
+        info!("store: {message:?}");
         let msg = message.into(chan_id, pattern);
         runtime
             .cache()
@@ -198,12 +203,14 @@ fn is_match(
         globset::GlobMatcher,
         globset::GlobMatcher,
         globset::GlobMatcher,
+        globset::GlobMatcher,
     ),
     e: &Event<Message>,
 ) -> bool {
-    let (pat_type, pat_state, pat_tag, pat_key) = glob;
+    let (pat_type, pat_state, pat_tag, pat_key, pat_uses) = glob;
     pat_type.is_match(&e.r#type)
         && pat_state.is_match(e.state.as_ref())
         && (pat_tag.is_match(&e.tag) || pat_tag.is_match(&e.model.tag))
         && pat_key.is_match(&e.key)
+        && pat_uses.is_match(&e.uses)
 }

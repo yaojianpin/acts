@@ -18,7 +18,7 @@ impl ActPackage for CodePackage {
             doc: "",
             schema: json!({}),
             run_as: ActRunAs::Func,
-            group: vec![],
+            resources: vec![],
             catalog: ActPackageCatalog::Transform,
         }
     }

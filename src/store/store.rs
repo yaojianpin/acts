@@ -38,7 +38,12 @@ impl Store {
         DATA: DbCollectionIden + Send + Sync + 'static,
     {
         let collections = self.collections.read().unwrap();
-        let collection = collections.get(&DATA::iden()).unwrap();
+
+        #[allow(clippy::expect_fun_call)]
+        let collection = collections.get(&DATA::iden()).expect(&format!(
+            "fail to get collection: {}",
+            DATA::iden().as_ref()
+        ));
 
         #[allow(clippy::expect_fun_call)]
         collection

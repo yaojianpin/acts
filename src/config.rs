@@ -67,11 +67,12 @@ impl Deref for Config {
 
 impl Config {
     pub fn create(path: &Path) -> Self {
+        #[allow(clippy::expect_fun_call)]
         let table = hocon::HoconLoader::new()
             .load_file(path)
-            .expect("failed to load acts.cfg")
+            .expect(&format!("failed to load config file: {:?}", path))
             .hocon()
-            .expect("failed to parse acts.cfg");
+            .expect(&format!("failed to parse config file: {:?}", path));
 
         Self {
             table: table.clone(),

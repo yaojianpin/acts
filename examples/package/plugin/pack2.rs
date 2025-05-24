@@ -1,4 +1,4 @@
-use acts::{ActPackage, ActPackageFn, ActPackageMeta, Context, Vars};
+use acts::{ActPackage, ActPackageMeta, Vars};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -23,18 +23,18 @@ impl ActPackage for Pack2 {
                     "b": { "type": "array" }
                 }
             }),
-            run_as: acts::ActRunAs::Func,
-            group: vec![],
+            run_as: acts::ActRunAs::Msg,
+            resources: vec![],
             catalog: acts::ActPackageCatalog::App,
         }
     }
 }
 
-impl ActPackageFn for Pack2 {
-    fn execute(&self, _ctx: &Context) -> acts::Result<Option<Vars>> {
+impl Pack2 {
+    pub fn execute(&self) -> acts::Result<Vars> {
         println!("inputs: {:?}", self);
         let vars = Vars::new().with("input", self.a + 10);
 
-        Ok(Some(vars))
+        Ok(vars)
     }
 }

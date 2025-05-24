@@ -39,9 +39,14 @@ impl ActTask for Act {
 
         // find the package to run
         let package = ctx.executor.pack().get(&self.uses)?;
+        let schema: serde_json::Value = serde_json::from_str(&package.schema)?;
         match package.run_as {
-            ActRunAs::Irq => task.set_state(TaskState::Interrupt),
+            ActRunAs::Irq => {
+                jsonschema::validate(&schema, &task.params())?;
+                task.set_state(TaskState::Interrupt);
+            }
             ActRunAs::Msg => {
+                jsonschema::validate(&schema, &task.params())?;
                 task.set_emit_disabled(true);
                 task.set_state(TaskState::Ready);
             }

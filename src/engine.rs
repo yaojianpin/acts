@@ -76,7 +76,15 @@ impl Engine {
     /// use acts::{ Engine, ChannelOptions };
     ///
     /// let engine = Engine::new().start();
-    /// let chan = engine.channel_with_options(&ChannelOptions {  id: "chan1".to_string(),  ack: true,  r#type: "step".to_string(), key: "my_key*".to_string(), state: "{created, completed}".to_string(), tag: "*".to_string()  });
+    /// let chan = engine.channel_with_options(&ChannelOptions {  
+    ///     id: "chan1".to_string(),  
+    ///     ack: true,  
+    ///     r#type: "step".to_string(),
+    ///     key: "my_key*".to_string(),
+    ///     state: "{created, completed}".to_string(),
+    ///     uses: "my_package".to_string(),
+    ///     tag: "*".to_string()  
+    /// });
     /// chan.on_message(|e| {
     ///     // do something
     /// });

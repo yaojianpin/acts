@@ -17,7 +17,7 @@ impl ActPackage for MsgPackage {
             doc: "",
             schema: json!({}),
             run_as: ActRunAs::Msg,
-            group: vec![],
+            resources: vec![],
             catalog: ActPackageCatalog::Core,
         }
     }

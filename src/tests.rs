@@ -151,25 +151,45 @@ async fn engine_model_create() {
 
 #[tokio::test]
 async fn engine_build_cache_size() {
-    let engine = EngineBuilder::new().cache_size(100).build().start();
+    let engine = EngineBuilder::new()
+        .cache_size(100)
+        .build()
+        .await
+        .unwrap()
+        .start();
     assert_eq!(engine.config().cache_cap, 100)
 }
 
 #[tokio::test]
 async fn engine_build_log_dir() {
-    let engine = EngineBuilder::new().log_dir("test").build().start();
+    let engine = EngineBuilder::new()
+        .log_dir("test")
+        .build()
+        .await
+        .unwrap()
+        .start();
     assert_eq!(engine.config().log_dir, "test")
 }
 
 #[tokio::test]
 async fn engine_build_log_level() {
-    let engine = EngineBuilder::new().log_level("DEBUG").build().start();
+    let engine = EngineBuilder::new()
+        .log_level("DEBUG")
+        .build()
+        .await
+        .unwrap()
+        .start();
     assert_eq!(engine.config().log_level, "DEBUG")
 }
 
 #[tokio::test]
 async fn engine_build_tick_interval_secs() {
-    let engine = EngineBuilder::new().tick_interval_secs(10).build().start();
+    let engine = EngineBuilder::new()
+        .tick_interval_secs(10)
+        .build()
+        .await
+        .unwrap()
+        .start();
     assert_eq!(engine.config().tick_interval_secs, 10)
 }
 
@@ -178,6 +198,8 @@ async fn engine_build_max_message_retry_times() {
     let engine = EngineBuilder::new()
         .max_message_retry_times(100)
         .build()
+        .await
+        .unwrap()
         .start();
     assert_eq!(engine.config().max_message_retry_times, 100)
 }
@@ -209,7 +231,7 @@ async fn engine_build_config_default() {
         }"#,
     )
     .unwrap();
-    let engine = EngineBuilder::new().build();
+    let engine = EngineBuilder::new().build().await.unwrap();
     assert_eq!(engine.config().cache_cap, 100);
     assert_eq!(engine.config().log_dir, "data");
     assert_eq!(engine.config().log_level, "INFO");
@@ -236,7 +258,11 @@ async fn engine_build_config_set_source() {
         }"#,
     )
     .unwrap();
-    let engine = EngineBuilder::new().set_config_source(path).build();
+    let engine = EngineBuilder::new()
+        .set_config_source(path)
+        .build()
+        .await
+        .unwrap();
     assert_eq!(engine.config().cache_cap, 100);
     assert_eq!(engine.config().log_dir, "data");
     assert_eq!(engine.config().log_level, "INFO");
@@ -264,7 +290,7 @@ async fn engine_build_config_with_env() {
         }"#,
     )
     .unwrap();
-    let engine = EngineBuilder::new().build();
+    let engine = EngineBuilder::new().build().await.unwrap();
     assert_eq!(engine.config().log_level, "DEBUG");
 }
 
@@ -292,7 +318,7 @@ async fn engine_get_custom_config() {
         }"#,
     )
     .unwrap();
-    let engine = EngineBuilder::new().build();
+    let engine = EngineBuilder::new().build().await.unwrap();
     let custom = engine.config().get::<Custom>("custom").unwrap();
     assert_eq!(custom.myint, 100);
     assert_eq!(custom.mystr, "myData");
