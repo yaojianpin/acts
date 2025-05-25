@@ -16,6 +16,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - uses: actions-rs/toolchain@v1
+        with:
+            toolchain: stable
+            override: true
+            components: rustfmt, clippy
       - name: Build
         run: cargo build --verbose
 
@@ -24,6 +29,11 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - uses: actions-rs/toolchain@v1
+        with:
+            toolchain: stable
+            override: true
+            components: rustfmt, clippy
       - name: Build
         run: cargo fmt --check
 
@@ -32,5 +42,10 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - uses: actions-rs/toolchain@v1
+        with:
+            toolchain: stable
+            override: true
+            components: rustfmt, clippy
       - name: Build
         run: cargo clippy --all-targets --all-features --workspace -- -D warnings
