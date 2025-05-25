@@ -19,7 +19,7 @@ cargo add acts-store-sqlite
 ## Example
 
 ```rust,no_run
-use acts::{EngineBuilder，Result};
+use acts::{EngineBuilder,Result};
 use acts_store_sqlite::SqliteStore;
 
 #[tokio::main]

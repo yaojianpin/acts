@@ -63,7 +63,7 @@ pub struct Task {
 
 impl Task {
     pub fn new(proc: &Arc<Process>, tid: &str, node: Arc<Node>, rt: &Arc<Runtime>) -> Self {
-        let task = Self {
+        Self {
             pid: proc.id().to_string(),
             id: tid.to_string(),
             node,
@@ -79,9 +79,7 @@ impl Task {
             hooks: Arc::new(RwLock::new(HashMap::new())),
             runtime: rt.clone(),
             // sync: Arc::new(std::sync::Mutex::new(0)),
-        };
-
-        task
+        }
     }
 
     pub fn unique_id(&self) -> String {

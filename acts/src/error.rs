@@ -105,6 +105,7 @@ impl From<std::io::Error> for ActError {
 
 impl From<ActError> for std::io::Error {
     fn from(val: ActError) -> Self {
+        #[allow(clippy::io_other_error)]
         std::io::Error::new(ErrorKind::Other, val.to_string())
     }
 }

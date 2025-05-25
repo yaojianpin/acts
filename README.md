@@ -59,7 +59,7 @@ use acts::{Engine, Vars, Workflow};
 async fn main() {
     let engine = Engine::new().start();
 
-    let text = include_str!("../examples/simple/model.yml");
+    let text = include_str!("../../examples/simple/model.yml");
     let workflow = Workflow::from_yml(text).unwrap();
 
     let executor = engine.executor();
