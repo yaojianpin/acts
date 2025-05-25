@@ -135,7 +135,7 @@ steps:
         steps:
           - name: step 4
             acts:
-              - name: send a message
+              - name: parallel send irq request
                 uses: acts.core.parallel
                 params:
                   in: ${ ${list} }
@@ -439,7 +439,7 @@ You can add more store support by store plugins. The avaliable store plugins are
 
 ```rust,ignore
 use acts::EngineBuilder;
-use acts_sqlite::SqliteStore;
+use acts_store_sqlite::SqliteStore;
 
 #[tokio::main]
 async fn main() {
@@ -451,7 +451,7 @@ async fn main() {
 
 ```rust,ignore
 use acts::EngineBuilder;
-use acts_postgres::PostgresStore;
+use acts_store_postgres::PostgresStore;
 
 #[tokio::main]
 async fn main() {
