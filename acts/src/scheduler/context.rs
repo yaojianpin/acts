@@ -53,16 +53,14 @@ impl Context {
     }
 
     pub fn new(proc: &Arc<Process>, task: &Arc<Task>) -> Self {
-        let ctx = Context {
+        Context {
             runtime: task.runtime().clone(),
             executor: Arc::new(Executor::new(task.runtime())),
             proc: proc.clone(),
             action: RefCell::new(None),
             task: RefCell::new(task.clone()),
             vars: RefCell::new(Vars::new()),
-        };
-
-        ctx
+        }
     }
 
     pub fn scope<T, F: Fn() -> T>(ctx: Context, f: F) -> T {

@@ -21,7 +21,7 @@ use tracing::info;
 /// async fn main() {
 ///     let engine = Engine::new().start();
 ///
-///     let model = include_str!("../examples/simple/model.yml");
+///     let model = include_str!("../../examples/simple/model.yml");
 ///     let workflow = Workflow::from_yml(model).unwrap();
 ///     
 ///     engine.channel().on_complete(|e| {

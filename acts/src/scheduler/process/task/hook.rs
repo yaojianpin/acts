@@ -18,6 +18,7 @@ pub enum TaskLifeCycle {
     ErrorCatch,
 }
 
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum StatementBatch {
     Statement(Act),
