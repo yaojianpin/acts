@@ -8,14 +8,8 @@ license = "Apache-2.0"
 name = "acts"
 homepage = "https://docs.rs/acts"
 repository = "https://github.com/yaojianpin/acts.git"
-version = "0.16.0"
-include = [
-    "src/**/*",
-    "../LICENSE",
-    "../README.md",
-    "../CHANGELOG.md",
-    "!**/tests/**/*",
-]
+version = "0.16.1"
+include = ["src/**/*", "../LICENSE", "../README.md", "!**/tests/**/*"]
 
 [dependencies]
 tokio = { features = ["full"], workspace = true }

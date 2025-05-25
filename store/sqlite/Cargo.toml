@@ -1,6 +1,12 @@
 [package]
 name = "acts-store-sqlite"
-version = "0.1.0"
+authors = ["Yao <yaojianpin@sohu.com>"]
+description = "acts store plugin for sqlite"
+keywords = ["workflow"]
+license = "Apache-2.0"
+homepage = "https://docs.rs/acts-store-sqlite"
+repository = "https://github.com/yaojianpin/acts.git"
+version = "0.16.1"
 edition = "2024"
 
 [dependencies]
