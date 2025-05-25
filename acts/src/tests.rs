@@ -241,7 +241,7 @@ async fn engine_build_config_default() {
 #[tokio::test]
 async fn engine_build_config_set_source() {
     if !std::path::Path::new("test").exists() {
-        std::fs::create_dir("test").unwrap();
+        let _ = std::fs::create_dir("test");
     }
     let path = std::path::Path::new("test/test.cfg");
 
