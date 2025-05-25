@@ -1,6 +1,6 @@
 use crate::scheduler::queue::Signal;
 use std::sync::Arc;
-use tokio::{runtime::Handle, sync::mpsc, sync::Mutex};
+use tokio::{runtime::Handle, sync::Mutex, sync::mpsc};
 
 #[derive(Clone)]
 pub struct Queue {
