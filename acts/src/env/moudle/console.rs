@@ -1,5 +1,5 @@
-use crate::{env::ActModule, Result};
-use rquickjs::{class::Trace, JsLifetime};
+use crate::{Result, env::ActModule};
+use rquickjs::{JsLifetime, class::Trace};
 
 #[derive(Trace, Clone, JsLifetime)]
 #[rquickjs::class]

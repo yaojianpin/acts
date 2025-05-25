@@ -77,11 +77,12 @@ impl<'js> FromJs<'js> for ActValue {
             rquickjs::Type::Bool => Ok(serde_json::json!(v.as_bool().unwrap_or(false))),
             rquickjs::Type::Int => Ok(serde_json::json!(v.as_int().unwrap_or(0))),
             rquickjs::Type::Float => Ok(serde_json::json!(v.as_float().unwrap_or(0.0))),
-            rquickjs::Type::String => Ok(serde_json::json!(v
-                .as_string()
-                .unwrap()
-                .to_string()
-                .unwrap_or(String::from("")))),
+            rquickjs::Type::String => Ok(serde_json::json!(
+                v.as_string()
+                    .unwrap()
+                    .to_string()
+                    .unwrap_or(String::from(""))
+            )),
             rquickjs::Type::Array => {
                 let empty = &JsArray::new(ctx.clone())?;
                 Ok(serde_json::Value::Array(

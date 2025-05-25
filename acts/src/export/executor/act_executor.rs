@@ -1,5 +1,5 @@
 use crate::event::EventAction;
-use crate::{scheduler::Runtime, Action, Result, Vars};
+use crate::{Action, Result, Vars, scheduler::Runtime};
 use std::sync::Arc;
 
 #[derive(Clone)]

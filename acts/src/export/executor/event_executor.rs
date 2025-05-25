@@ -1,6 +1,5 @@
 use crate::{
-    ActError, EventInfo, Result, Vars, scheduler::Runtime, store::PageData,
-    utils::consts,
+    ActError, EventInfo, Result, Vars, scheduler::Runtime, store::PageData, utils::consts,
 };
 use std::sync::Arc;
 use tracing::instrument;

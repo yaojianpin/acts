@@ -1,8 +1,8 @@
 use crate::{
-    store::{db::mem::DbDocument, Task},
     Result,
+    store::{Task, db::mem::DbDocument},
 };
-use serde_json::{json, Value as JsonValue};
+use serde_json::{Value as JsonValue, json};
 use std::collections::HashMap;
 
 impl DbDocument for Task {

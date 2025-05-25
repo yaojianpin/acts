@@ -6,7 +6,7 @@ mod value;
 use crate::{ActError, Result, ShareLock, Vars};
 use core::fmt;
 use rquickjs::{Context as JsContext, Ctx as JsCtx, FromJs, Runtime as JsRuntime};
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::sync::{Arc, RwLock};
 
 use self::value::ActValue;

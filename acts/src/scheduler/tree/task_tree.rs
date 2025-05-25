@@ -1,4 +1,4 @@
-use crate::{scheduler::Task, NodeKind};
+use crate::{NodeKind, scheduler::Task};
 use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Debug)]
