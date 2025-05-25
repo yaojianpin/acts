@@ -1,8 +1,3 @@
-//! A lightweight, fast, tiny, extensiable workflow engine
-
-#![doc = include_str!("../README.md")]
-
-// mod adapter;
 mod builder;
 mod cache;
 mod config;
