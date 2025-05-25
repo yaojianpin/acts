@@ -5,9 +5,9 @@ members = [
     "store/sqlite",
     "store/postgres",
     "plugins/state",
-    "examples/plugins/state",
+    "examples/plugins/*",
 ]
-exclude = ["examples/**"]
+exclude = ["examples/plugins/state"]
 resolver = "3"
 
 [workspace.dependencies]
