@@ -276,7 +276,7 @@ async fn engine_build_config_with_env() {
     }
 
     if !std::path::Path::new("test").exists() {
-        std::fs::create_dir("test").unwrap();
+        let _ = std::fs::create_dir("test");
     }
 
     let path = std::path::Path::new("test/acts.cfg");
