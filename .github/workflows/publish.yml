@@ -22,5 +22,5 @@ jobs:
       - name: Run Publish
         run: |
           cp README.md ./acts/ &&
-          sed -i 's|include_str!("../README.md")|' acts/src/lib.rs
+          sed -i 's|include_str!("../../README.md")|include_str!("../README.md")|' acts/src/lib.rs
           cargo ws publish --publish-as-is --token=${{secrets.CARGO_TOKEN}} --allow-dirty
