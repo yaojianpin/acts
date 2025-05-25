@@ -5,18 +5,13 @@ mod client;
 async fn main() {
     let client = client::Client::new();
 
-    let engine = Engine::new();
+    let engine = Engine::new().start();
     let (s1, s2, sig) = engine.signal(()).triple();
     let exec = engine.executor();
     deploy_model(&exec, include_str!("./model/main.yml"));
     deploy_model(&exec, include_str!("./model/sub.yml"));
 
     let executor = engine.executor().clone();
-    executor
-        .proc()
-        .start("main", &Vars::new())
-        .expect("start workflow");
-
     engine.channel().on_message(move |e| {
         let ret = client.process(&executor, e);
         if ret.is_err() {
@@ -48,6 +43,13 @@ async fn main() {
         eprintln!("on_workflow_error: pid={} state={:?}", e.pid, e.state);
         s2.close();
     });
+
+    engine
+        .executor()
+        .proc()
+        .start("main", &Vars::new())
+        .expect("start workflow");
+
     sig.recv().await;
 }
 

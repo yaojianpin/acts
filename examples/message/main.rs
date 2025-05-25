@@ -2,7 +2,7 @@ use acts::{ChannelOptions, Engine, Vars, Workflow};
 
 #[tokio::main]
 async fn main() {
-    let engine = Engine::new();
+    let engine = Engine::new().start();
 
     let executor = engine.executor();
     let (s, sig) = engine.signal(()).double();
@@ -26,7 +26,9 @@ async fn main() {
             ..Default::default()
         })
         .on_message(move |message| {
-            println!("on_message: {:?}", message);
+            if message.is_type("act") {
+                println!("on_message: key={} inputs={}", message.key, message.inputs);
+            }
         });
 
     engine.channel().on_complete(move |e| {

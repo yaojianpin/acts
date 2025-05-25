@@ -23,11 +23,11 @@ impl Client {
     }
 
     pub fn process(&self, executor: &Executor, e: &Event<Message>) -> Result<()> {
-        if e.is_source("act") && e.is_state(MessageState::Created) {
+        if e.is_irq() && e.is_state(MessageState::Created) {
             match self.actions.get(&e.key) {
                 Some(action) => {
+                    println!("action:{} inputs={:?}", &e.key, e.inputs);
                     action(executor, e)?;
-                    println!("action state: key={}", &e.key);
                 }
                 None => eprintln!("cannot find action '{}'", e.key),
             }
@@ -47,12 +47,6 @@ impl Client {
 
         // will catch by catch1
         vars.set("ecode", "err1");
-
-        // will catch by catch2
-        // vars.insert("error".to_string(), json!({ "ecode": "err2" }));
-
-        // will catch by catch_others
-        // vars.insert("error".to_string(), json!({ "ecode": "the_other_err_code" }));
 
         // cause the error
         executor.act().error(&e.pid, &e.tid, &vars)

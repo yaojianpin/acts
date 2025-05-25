@@ -1,11 +1,11 @@
-use acts::{Builder, Vars, Workflow};
+use acts::{EngineBuilder, Vars, Workflow};
 
 mod client;
 
 #[tokio::main]
 async fn main() {
     let client = client::Client::new();
-    let engine = Builder::new().tick_interval_secs(1).build();
+    let engine = EngineBuilder::new().tick_interval_secs(1).build().await.unwrap().start();
     let (s1, s2, sig) = engine.signal(()).triple();
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text).unwrap();
@@ -17,10 +17,6 @@ async fn main() {
         .model()
         .deploy(&workflow)
         .expect("deploy model");
-    executor
-        .proc()
-        .start(&workflow.id, &Vars::new())
-        .expect("start workflow");
 
     engine.channel().on_message(move |e| {
         let ret = client.process(&executor, e);
@@ -49,5 +45,10 @@ async fn main() {
         );
         s2.close();
     });
+    engine
+        .executor()
+        .proc()
+        .start(&workflow.id, &Vars::new())
+        .expect("start workflow");
     sig.recv().await;
 }

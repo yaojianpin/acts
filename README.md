@@ -3,17 +3,17 @@
 [![Build](https://github.com/yaojianpin/acts/actions/workflows/rust.yml/badge.svg)](https://github.com/yaojianpin/acts/actions?workflow=rust)
 [![Test](https://github.com/yaojianpin/acts/actions/workflows/test.yml/badge.svg)](https://github.com/yaojianpin/acts/actions?workflow=test)
 
-`acts` is a fast, tiny, extensiable workflow engine, which provides the abilities to execute workflow based on yml model.
+Acts is a fast, lightweight, extensiable workflow engine that executes workflows defined in YAML format.
 
-The yml workflow model is not as same as the tranditional workflow. such as `bpmn`. The yml format is inspired by Github actions. The main point of this workflow is to create a top abstraction to run the workflow logic and interact with the client via `act` node.
+Unlike traditional workflow engines (such as BPMN). Acts uses a message-driven architecture to execute and distribute messages. 
 
-This workflow engine focus on the workflow logics itself and message distributions. the complex business logic will be completed by `act` via the act message.
+Acts uses Step, Branch, Act to build the workflow. Step and Branch are the workflow stucture to run in sequence or to step into different branch by condition. Act is responsible for the action execution.
 
 ## Key Features
 
 ### Fast
 
-Uses rust to create the lib, there is no virtual machine, no db dependencies. It also provides the feature `store` to enable the local store.
+Write in Rust, No virtual machine.
 
 1. bechmark with memory store
 
@@ -24,14 +24,17 @@ start                   time:   [80.320 µs 82.188 µs 84.336 µs]
 act                     time:   [601.40 µs 636.69 µs 674.49 µs]
 ```
 
-### Tiny
+### Lightweight
 
-The lib size is only 3mb (no store), 4mb(embeded sqlite) you can also use Adapter to create external store.
+The lib size is about 4.6mb now.
 
 ### Extensiable
 
-Supports for extending the plugin
-Supports for creating external store, please refer to the code under `src/store/db/local`.
+- store collection extension
+  support creating external store, please refer to the code under `store/sqlite`.
+
+- pakcage extension
+  support creating custom package, please refer to the code under `example/pakcage`.
 
 ## Installation
 
@@ -40,10 +43,6 @@ The easiest way to get the latest version of `acts` is to install it via `cargo`
 ```bash
 cargo add acts
 ```
-
-## Build
-
-If you are using `store` feature, For Windows, recommeded [`MSYS2`](https://www.msys2.org/) and toolchain of stable-x86_64-pc-windows-gnu
 
 ## Quickstart
 
@@ -58,7 +57,7 @@ use acts::{Engine, Vars, Workflow};
 
 #[tokio::main]
 async fn main() {
-    let engine = Engine::new();
+    let engine = Engine::new().start();
 
     let text = include_str!("../examples/simple/model.yml");
     let workflow = Workflow::from_yml(text).unwrap();
@@ -96,33 +95,54 @@ Please see [`examples`](https://github.com/yaojianpin/acts/tree/main/examples)
 
 ## Model Usage
 
-The model is a yaml format file. where there are different type of node, including [`Workflow`], [`Branch`], [`Step`] and [`Act`]. Every workflow can have more steps, a step can have more branches. In a step, it consists of many acts to complete the step task, such as 'irq', 'msg', 'each', 'chain', 'set', 'expose' and so on. these acts are responsible to act with client or do a single task simplely.
+The model is a yaml format file. where there are different type of node, including [`Workflow`], [`Branch`], [`Step`] and [`Act`]. 
 
-The `run` property is the script based on `javascript`
-The `inputs` property can be set the initialzed vars in each node.
 
 ```yml
 name: model name
+# workflow.inputs are the global vars
 inputs:
   value: 0
+# the event to start the workflow
+on:
+  - id: event1
+    uses: acts.event.manual
+# workflow steps
 steps:
   - name: step 1
-    run: |
-      print("step 1")
+    # execute by act
+    acts:
+        # init with interrupt request to client
+        # and make sure complete the action with 'list' var
+      - name: init
+        uses: acts.core.irq
+        outputs:
+          list:
 
   - name: step 2
+    # workflow branches to run by condition
     branches:
       - name: branch 1
         if: ${ $("value") > 100 }
-        run: |
-          print("branch 1");
+        steps:
+          - name: step 3
+            acts:
+              - name: send a message
+                uses: acts.core.msg
 
       - name: branch 2
         if: ${ $("value") <= 100 }
         steps:
-          - name: step 3
-            run: |
-              print("branch 2")
+          - name: step 4
+            acts:
+              - name: parallel send irq request
+                uses: acts.core.parallel
+                params:
+                  in: ${ ${list} }
+                  acts:
+                    - uses: acts.core.irq
+  - name: final step
+
 ```
 
 ### Inputs
@@ -146,7 +166,7 @@ use acts::{Engine, Vars, Workflow};
 
 #[tokio::main]
 async fn main() {
-  let engine = Engine::new();
+  let engine = Engine::new().start();
   let executor = engine.executor();
 
   let mut vars = Vars::new();
@@ -173,65 +193,46 @@ steps:
 
 ### Setup
 
-In `workflow` node, you can setup acts by `setup`.
+In `workflow` node, you can setup act event by `setup`.
 
 The act `msg` is to send a message to client.
 For more acts, please see the comments as follow:
 
 ```yml
 name: model name
-setup:
-setup:
-  # set the data by !set
-  - act: set
-    inputs:
-      a: ["u1", "u2"]
+steps:
+  - uses: acts.core.set
+    params:
+      a: ['u1', 'u2']
       v: 10
-
-  # checks the condition and enters into the 'then' acts
-  - act: if
-    on: $("v") > 0
-    then:
-      - act: msg
-        key: msg2
+  - uses: acts.core.msg
+    if: $("v") > 0
+    key: msg1
+setup:
   # on step created
-  - act: on_created
-    then:
-      - act: msg
-        key: msg3
+  - uses: acts.core.msg
+    on: created
+    key: msg3
 
   # on workflow completed
-  - act: on_completed
-    then:
-      - act: msg
-        key: msg4
+  - uses: acts.core.msg
+    on: completed
+    key: msg4
+
   # on act created
-  - act: on_before_update
-    then:
-      - act: msg
-        key: msg5
+  - uses: acts.core.msg
+    on: before_update
+    key: msg5
+
   # on act completed
-  - act: on_updated
-    then:
-      - act: msg
-        key: msg5
+  - uses: acts.core.msg
+    on: updated
+    key: msg5
 
   # on step created or completed
-  - act: on_step
-    then:
-      - act: msg
-        key: msg3
-  # on error catch
-  - act: on_catch
-    then:
-      - on: err1
-        then:
-          - act: irq
-            key: act3
-  # expose the data with special keys
-  - act: expose
-    inputs:
-      out:
+  - uses: acts.core.msg
+    on: step
+    key: msg3
 ```
 
 ### Steps
@@ -249,9 +250,9 @@ steps:
 
 #### step.setup
 
-Use the `setup` to setup some acts when the step is creating.
+Use the `setup` to setup some act event for step.
 
-The acts are 'irq', 'msg', 'set', 'expose', 'chain', 'each' and 'if', it also includes some hooks, such as 'on_created', 'on_completed', 'on_before_update', 'on_updated', 'on_timeout' and 'on_error_catch'.
+The act event includes 'created', 'completed', 'step', 'before_update' and 'updated'.
 
 ```yml
 name: a setup example
@@ -260,83 +261,31 @@ steps:
   - name: step 1
     id: step1
     setup:
-      # set the data by !set
-      - act: set
-        inputs:
-          a: ['u1', 'u2']
-          v: 10
-      # send message with key msg1
-      - act: msg
-        key: msg1
-        inputs:
-          data: ${ $("a") }
-
-      # chains and runs 'then' one by one by 'in' data
-      - act: chain
-        in: $("a")
-        then:
-          - act: irq
-            key: act1
-
-      # each the var 'a'
-      - act: each
-        in: $("a")
-        then:
-          # the each will generate two "irq" with `act_index`  and `act_value`
-          # the `act_index` is the each index. It is 0 and 1 in this example
-          # the `act_value` is the each data. It is 'u1' and 'u2' in this example
-          - act: irq
-            key: act2
-      # checks the condition and enters into the 'then' acts
-      - act: if
-        on: $("v") > 0
-        then:
-          - act: msg
-            key: msg2
       # on step created
-      - act: on_created
-        then:
-          - act: msg
-            key: msg3
+      - uses: acts.core.msg
+        on: created
+        key: msg3
 
       # on step completed
-      - act: on_completed
-        then:
-          - act: msg
-            key: msg4
+      - uses: acts.core.msg
+        on: completed
+        key: msg4
+
       # on act created
-      - act: on_before_update
-        then:
-          - act: msg
-            key: msg5
+      - uses: acts.core.msg
+        on: before_update
+        key: msg5
+
       # on act completed
-      - act: on_updated
-        then:
-          - act: msg
-            key: msg5
+      - uses: acts.core.msg
+        on: updated
+        key: msg5
 
       # on step created or completed
-      - act: on_step
-        then:
-          - act: msg
-            key: msg3
-      # on error catch
-      - act: on_catch
-        - on: err1
-          then:
-            - act: irq
-              key: act3
-      # on timeout
-      - act: on_timeout
-        then:
-          - on: 6h
-            then:
-              - act: irq
-                key: act3
-      # expose the data with special keys
-      - act: expose
-        inputs:
-          out:
+      - uses: acts.core.msg
+        on: step
+        key: msg3
+
   - name: final
     id: final
 ```
@@ -354,26 +303,30 @@ steps:
   - name: prepare
     id: prepare
     acts:
-      - act: irq
+      - uses: acts.core.irq
         key: init
   - name: step1
     id: step1
     acts:
-      - act: irq
+      - uses: acts.core.irq
         key: act1
     # catch the step errors
     catches:
       - id: catch1
         on: err1
-        then:
-          - act: irq
-            key: act2
+        steps:
+          - name: catch step 1
+            acts:
+              - uses: acts.core.irq
+                key: act2
+
       - id: catch2
         on: err2
-        then:
-          - act: irq
-            key: act3
-      - id: catch_others
+        steps:
+          - name: catch step 2
+            acts:
+              - uses: acts.core.irq
+                key: act3
 
   - name: final
     id: final
@@ -390,27 +343,32 @@ steps:
   - name: prepare
     id: prepare
     acts:
-      - act: irq
+      - uses: acts.core.irq
         key: init
   - name: step1
     id: step1
     acts:
-      - act: irq
+      - uses: acts.core.irq
         key: act1
     # check timeout rules
     timeout:
       # 1d means one day
       # triggers act2 when timeout
       - on: 1d
-        then:
-          - act: irq
-            id: act2
+        steps:
+          - name: timeout step 1
+            acts:
+              - uses: acts.core.irq
+                id: act2
+
       # 2h means two hours
       # triggers act3 when timeout
       - on: 2h
-        then:
-          - act: irq
-            id: act3
+        steps:
+          - name: timeout step 2
+            acts:
+              - uses: acts.core.irq
+                id: act3
 
   - name: final
     id: final
@@ -452,27 +410,23 @@ steps:
   - name: step1
     acts:
       # send message to client
-      - act: msg
+      - uses: acts.core.msg
         key: msg1
-        inputs:
+        params:
           a: 1
 
       # irq is an act to send a request from acts server
       # the client can complete the act and pass data to serever
-      - act: irq
+      - uses: acts.core.irq
         key: init
         name: my act init
 
         # passes data to the act
-        inputs:
+        params:
           a: 6
 
-        # exposes the data to step
-        outputs:
-          a:
-
         # limits the data keys when acting
-        rets:
+        outputs:
           a:
 ```
 
@@ -480,56 +434,36 @@ For more acts example, please see [`examples`](https://github.com/yaojianpin/act
 
 ## Store
 
-You can enable the store feature using `store`, which uses [`rusqlite`](https://github.com/rusqlite/rusqlite) to build.
+You can add more store support by store plugins. The avaliable store plugins are as follow:
+- acts-sqlite
 
-To enable feature `store`
-
-```ignore
-[dependencies]
-acts = { version = "*", features = ["store"] }
-```
-
-For external store:
-
-```rust,no_run
-use acts::{Engine, Builder, data::{Model, Proc, Task, Package, Message}, DbSet, StoreAdapter};
-use std::sync::Arc;
-
-#[derive(Clone)]
-struct TestStore;
-
-impl StoreAdapter for TestStore {
-    fn models(&self) -> Arc<dyn DbSet<Item = Model>> {
-        todo!()
-    }
-    fn procs(&self) -> Arc<dyn DbSet<Item =Proc>> {
-        todo!()
-    }
-    fn tasks(&self) -> Arc<dyn DbSet<Item =Task>> {
-        todo!()
-    }
-    fn packages(&self) -> Arc<dyn DbSet<Item =Package>> {
-        todo!()
-    }
-    fn messages(&self) -> Arc<dyn DbSet<Item =Message>> {
-        todo!()
-    }
-    fn init(&self) {}
-    fn close(&self) {}
-}
+```rust,ignore
+use acts::EngineBuilder;
+use acts_store_sqlite::SqliteStore;
 
 #[tokio::main]
 async fn main() {
-   // set custom store
- let store = TestStore;
- let engine = Builder::new().store(&store).build();
+  let engine = EngineBuilder::new().add_plugin(&SqliteStore).build().await.unwrap().start();
 }
 ```
 
+- acts-postgres
+
+```rust,ignore
+use acts::EngineBuilder;
+use acts_store_postgres::PostgresStore;
+
+#[tokio::main]
+async fn main() {
+  let engine = EngineBuilder::new().add_plugin(&PostgresStore).build().await.unwrap().start();
+}
+```
+
+How to create custom store plugin, please see the code under `store/`
+
 ## Package
 
-`acts` engine intergrates the [`rquickjs`](https://github.com/delskayn/rquickjs) runtime to execute the package, which can extend the engine abilities.
-for more information please see the example [`package`](https://github.com/yaojianpin/acts/tree/main/examples/package)
+Please see the example `example/pakcage`.
 
 ## Acts-Server
 
@@ -541,3 +475,59 @@ please see more from [`acts-server`](https://github.com/yaojianpin/acts-server)
 - rust https://github.com/yaojianpin/acts-channel
 - python https://github.com/yaojianpin/acts-channel-py
 - go https://github.com/yaojianpin/acts-channel-go
+
+## Roadmap
+
+acts:
+
+- runtime
+
+  - [x] model (Workflow, Branch, Step, Act)
+  - [x] scheduler (Config, Builder, Node, Process, Task, Queue, Event)
+  - [x] javascript runner
+  - [x] cache
+  - [x] plugin register
+  - [x] package register
+  - [x] message channel
+
+- store
+  - [x] memory
+
+- packages
+
+  - core
+    - [x] irq
+    - [x] msg
+    - [x] block
+    - [x] action
+    - [x] parallel
+    - [x] sequence
+    - [x] subflow
+    - [ ] http
+
+  - event
+    - [x] manual
+    - [x] hook
+    - [x] chat
+    - [ ] schedule
+    
+  - transform
+    - [x] set
+    - [x] code
+    - [ ] split
+
+- [ ] doc (doc/)
+
+- store extension
+
+  - [x] sqlite
+  - [x] postgres
+
+- package extension
+  - [ ] form (plugins/form)
+  - [ ] ai (plugins/ai)
+  - [x] state (plugins/state)
+  - [ ] pubsub (plugins/pubsub)
+  - [ ] observability (plugins/obs)
+  - [ ] database (plugins/database)
+  - [ ] mail (plugins/mail)

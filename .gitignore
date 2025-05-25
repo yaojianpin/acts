@@ -5,3 +5,7 @@ test_data
 log
 Cargo.lock
 .idea
+/test_data
+/test
+/acts/test
+/acts.cfg

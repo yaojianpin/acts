@@ -1,0 +1,10 @@
+[package]
+name = "acts-example-plugin-app-state"
+version = "0.1.0"
+edition = "2024"
+
+
+[dependencies]
+tokio = { workspace = true }
+acts = { version = "0.16.0", path = "../../../acts" }
+acts-package-state = { version = "0.1.0", path = "../../../plugins/state" }

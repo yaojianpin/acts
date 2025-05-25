@@ -5,39 +5,43 @@ inputs:
 outputs:
   value:
 setup:
-  - act: on_created
-    then:
-      - act: msg
-        key: fn1
-  - act: on_step
-    then:
-      - act: msg
-        key: fn_on_step
-  - act: on_completed
-    then:
-      - act: msg
-        key: fn1
+  - uses: acts.core.msg
+    on: created
+    key: fn1
+    params:
+      a: ${ $("value") }
+  - uses: acts.core.msg
+    on: step
+    key: fn_on_step
+  - uses: acts.core.msg
+    on: completed
+    key: fn2
+
 steps:
   - name: step 1
     id: step1
   - name: step 2
     id: step2
     setup:
-      - act: set
-        inputs:
+      - uses: acts.core.msg
+        on: completed
+        key: fn3
+    acts:
+      - uses: acts.transform.set
+        params:
           value: 100
-      - act: on_completed
-        then:
-          - act: msg
-            key: fn2
   - name: step 3
     id: step3
     setup:
-      - act: on_completed
-        then:
-          - act: msg
-            key: fn3
-            inputs:
-              a: ${ $("value") }
+      - uses: acts.core.block
+        on: completed
+        params:
+          mode: sequence
+          acts:
+            - uses: acts.core.msg
+              key: fn4
+              inputs:
+                a: ${ $("value") }
+
   - name: step 4
     

@@ -1,53 +1,54 @@
 name: approve
 id: approve
 setup:
-  - act: on_completed
-    then:
-      - act: msg
-        key: final
+  - uses: acts.core.msg
+    on: completed
+    key: final
 steps:
   - name: prepare
     id: prepare
+    desc: prepare the model and set the initial value
     acts:
-      - act: irq
+      - uses: acts.core.irq
         key: init
   - name: pm approval
     id: pm_approval
+    desc: move to next step when all of the users in pm role approves the act
     acts:
-      - act: irq
+      - uses: acts.core.irq
         key: pm
-        inputs:
+        params:
           role_id: pm
-        rets:
+        outputs:
           pm:
-        setup:
-          - act: on_completed
-            then:
-              - act: each
-                in: $("pm")
-                then:
-                  - act: irq
-                    key: pm_act
-                  - act: msg
-                    key: pm_act_msg
+      # parse the pm variable from prev act
+      # and parallel run multiple acts
+      - uses: acts.core.parallel
+        params:
+          in: $("pm")
+          acts:
+            - uses: acts.core.irq
+              key: pm_act
+            - uses: acts.core.msg
+              key: pm_act_msg
+
   - name: gm approval
     id: gm_approval
+    desc: move to next when any of the users in gm role approves the act
     acts:
-      - act: irq
+      - uses: acts.core.irq
         key: gm
-        inputs:
+        params:
           role_id: gm
-        rets:
+        outputs:
           gm:
-        setup:
-          - act: on_completed
-            then:
-              - act: irq
-                key: gm_act
-                inputs:
-                  v: ${ $("gm") }
-              - act: each
-                in: $("gm")
-                then:
-                  - act: msg
-                    key: gm_act_msg
+      # parallel generate multiple acts
+      - uses: acts.core.parallel
+        params:
+          in: $("gm")
+          acts:
+            - uses: acts.core.msg
+              key: gm_act_msg
+      # generate an irq and wait util completed
+      - uses: acts.core.irq
+        key: gm_act

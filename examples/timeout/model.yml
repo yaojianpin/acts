@@ -1,35 +1,42 @@
 name: a timeout example
-id: timeout
+id: timeout_model
 steps:
   - name: prepare
     id: prepare
     acts:
-      - act: irq
+      - uses: acts.core.irq
         key: init
   - name: step1
     id: step1
     acts:
-      - act: irq
+      - uses: acts.core.irq
         key: act1
     timeout:
       - on: 2s
-        then:
-          - act: msg
-            key: step1_timeout_2s
-            inputs:
-              a: 1
+        steps:
+          - name: step 2s
+            acts:
+              - uses: acts.core.msg
+                key: step1_timeout_2s
+                params:
+                  a: 1
       - on: 5s
-        then:
-          - act: irq
-            key: step1_timeout_5s
-            inputs:
-              a: 2
+        steps:
+          - name: step 5s
+            acts:
+              - uses: acts.core.irq
+                key: step1_timeout_5s
+                params:
+                  a: 2
       - on: 8s
-        then:
-          - act: do
-            key: error
-            inputs:
-              error:
-                ecode: err_timeout_8s
+        steps:
+          - name: step 8s
+            acts:
+              - uses: acts.core.action
+                params:
+                  action: error
+                  options:
+                    ecode: err_timeout_8s
+
   - name: final
     id: final

@@ -4,10 +4,10 @@ mod client;
 
 #[tokio::main]
 async fn main() {
-    let mut store = client::Client::new();
-    store.init();
+    let mut client = client::Client::new();
+    client.init();
 
-    let engine = Engine::new();
+    let engine = Engine::new().start();
     let (s, sig) = engine.signal(()).double();
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text).unwrap();
@@ -25,7 +25,7 @@ async fn main() {
         .expect("start workflow");
 
     engine.channel().on_message(move |e| {
-        let ret = store.process(&executor, e);
+        let ret = client.process(&executor, e);
         if ret.is_err() {
             eprintln!("{}", ret.err().unwrap());
             std::process::exit(1);

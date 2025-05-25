@@ -1,0 +1,57 @@
+
+[package]
+authors = ["Yao <yaojianpin@sohu.com>"]
+description = "a fast, lightweight, extensiable workflow engine"
+keywords = ["workflow"]
+edition = "2024"
+license = "Apache-2.0"
+name = "acts"
+homepage = "https://docs.rs/acts"
+repository = "https://github.com/yaojianpin/acts.git"
+version = "0.16.0"
+include = [
+    "src/**/*",
+    "../LICENSE",
+    "../README.md",
+    "../CHANGELOG.md",
+    "!**/tests/**/*",
+]
+
+[dependencies]
+tokio = { features = ["full"], workspace = true }
+async-trait = { workspace = true }
+chrono = { version = "0.4" }
+globset = { version = "0.4", default-features = false }
+hocon = { version = "0.9.0", default-features = false, features = [
+    "serde-support",
+] }
+inventory = "0.3.20"
+jsonschema = { version = "0.30.0", default-features = false }
+moka = { version = "0.12", features = ["sync"] }
+nanoid = "0.4"
+regex = "1.10"
+rquickjs = { version = "0.9", features = ["full", "parallel"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_repr = "0.1"
+serde_yaml = "0.9"
+strum = { version = "0.27", features = ["derive"] }
+thiserror = "2"
+tracing = "0.1"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[features]
+default = []
+
+[[bench]]
+harness = false
+name = "workflow"
+path = "../benches/workflow.rs"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "z"
+strip = true
