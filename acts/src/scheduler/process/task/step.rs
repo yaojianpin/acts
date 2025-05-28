@@ -40,10 +40,6 @@ impl ActTask for Step {
 
     fn run(&self, ctx: &Context) -> Result<()> {
         let task = ctx.task();
-        if let Some(script) = &self.run {
-            ctx.eval::<()>(script)?;
-        }
-
         let children = task.node.children();
         if !children.is_empty() {
             for child in &children {

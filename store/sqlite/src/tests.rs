@@ -150,7 +150,7 @@ async fn store_proc_create() {
         end_time: 0,
         timestamp: utils::timestamp(),
         model: "".to_string(),
-        env_local: "{}".to_string(),
+        env: "{}".to_string(),
         err: None,
     };
     store.procs().create(&proc).unwrap();
@@ -170,7 +170,7 @@ async fn store_proc_find() {
         end_time: 0,
         timestamp: 0,
         model: "".to_string(),
-        env_local: "{}".to_string(),
+        env: "{}".to_string(),
         err: None,
     };
     store.procs().create(&proc).unwrap();
@@ -192,7 +192,7 @@ async fn store_proc_query() {
             end_time: 0,
             timestamp: 0,
             model: "".to_string(),
-            env_local: "{}".to_string(),
+            env: "{}".to_string(),
             err: None,
         };
         procs.create(&proc).unwrap();
@@ -221,7 +221,7 @@ async fn store_proc_update() {
         end_time: 0,
         timestamp: 0,
         model: "".to_string(),
-        env_local: "{}".to_string(),
+        env: "{}".to_string(),
         err: None,
     };
     store.procs().create(&proc).unwrap();
@@ -248,7 +248,7 @@ async fn store_proc_delete() {
         end_time: 0,
         timestamp: utils::timestamp(),
         model: "".to_string(),
-        env_local: "{}".to_string(),
+        env: "{}".to_string(),
         err: None,
     };
     store.procs().create(&proc).unwrap();

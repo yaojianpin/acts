@@ -157,7 +157,7 @@ async fn export_executor_start_dup_pid_error() {
         end_time: 0,
         timestamp: 0,
         model: model.to_json().unwrap(),
-        env_local: "{}".to_string(),
+        env: "{}".to_string(),
         err: None,
     };
     store.procs().create(&proc).expect("create process");
@@ -1787,10 +1787,10 @@ async fn export_extender_register_module() {
     let engine = Engine::new().start();
     let extender = engine.extender();
 
-    let before_count = engine.runtime().env().modules_count();
+    let before_count = engine.runtime().env().user_env_count();
     let module = test_module::TestModule;
-    extender.register_module(&module);
-    let count = engine.runtime().env().modules_count();
+    extender.register_var(&module);
+    let count = engine.runtime().env().user_env_count();
     assert_eq!(count, before_count + 1);
 }
 
@@ -2283,13 +2283,17 @@ async fn export_message_resend_error_messages() {
 }
 
 mod test_module {
-    use crate::ActModule;
+    use crate::{ActUserVar, Vars};
 
     #[derive(Clone)]
     pub struct TestModule;
-    impl ActModule for TestModule {
-        fn init(&self, _ctx: &rquickjs::Ctx<'_>) -> crate::Result<()> {
-            Ok(())
+    impl ActUserVar for TestModule {
+        fn name(&self) -> String {
+            "test_env".to_string()
+        }
+
+        fn default_data(&self) -> Option<crate::Vars> {
+            Some(Vars::new().with("a", 10))
         }
     }
 }

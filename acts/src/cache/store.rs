@@ -25,8 +25,8 @@ impl Store {
             let procs = self.procs().query(&query)?;
             for p in procs.rows {
                 let model = Workflow::from_json(&p.model)?;
-                let env_local: serde_json::Value = serde_json::from_str(&p.env_local)
-                    .map_err(|err| ActError::Store(err.to_string()))?;
+                let env_local: serde_json::Value =
+                    serde_json::from_str(&p.env).map_err(|err| ActError::Store(err.to_string()))?;
                 let state = p.state.clone();
                 let proc = scheduler::Process::new_with_timestamp(&p.id, p.timestamp, rt);
 
@@ -34,7 +34,7 @@ impl Store {
                 proc.set_pure_state(state.into());
                 proc.set_start_time(p.start_time);
                 proc.set_end_time(p.end_time);
-                proc.set_env_local(&env_local.into());
+                proc.set_env(&env_local.into());
                 if let Some(err) = p.err {
                     let err: Error = serde_json::from_str(&err)
                         .map_err(|err| ActError::Store(err.to_string()))?;
@@ -60,13 +60,13 @@ impl Store {
                 // println!("process model={}", p.model);
                 let model = Workflow::from_json(&p.model)?;
                 let proc = scheduler::Process::new(pid, rt);
-                let env_local: serde_json::Value = serde_json::from_str(&p.env_local)
-                    .map_err(|err| ActError::Store(err.to_string()))?;
+                let env_local: serde_json::Value =
+                    serde_json::from_str(&p.env).map_err(|err| ActError::Store(err.to_string()))?;
 
                 proc.load(&model)?;
                 proc.set_pure_state(p.state.into());
                 proc.set_start_time(p.start_time);
-                proc.set_env_local(&env_local.into());
+                proc.set_env(&env_local.into());
                 self.load_tasks(&proc, rt)?;
                 if let Some(err) = p.err {
                     let err: Error = serde_json::from_str(&err)

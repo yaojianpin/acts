@@ -12,7 +12,7 @@ pub struct Proc {
     pub end_time: i64,
     pub timestamp: i64,
     pub model: String,
-    pub env_local: String,
+    pub env: String,
     pub err: Option<String>,
 }
 

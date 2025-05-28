@@ -9,9 +9,12 @@ outputs:
 steps:
   - name: init
     id: init
-    run: |
-      $("value", 0);
-      $("index", 0);
+    acts:
+      - uses: acts.transform.code
+        params: |
+          $("value", 0);
+          $("index", 0);
+
   - name: cond
     id: cond
     branches:
@@ -25,11 +28,13 @@ steps:
           - name: add
             id: add
             next: cond
-            run: |
-              let index = $("index");
-              let value = $("value");
-              $("value", value + index);
-              $("index", index + 1);
+            acts:
+              - uses: acts.transform.code
+                params: |
+                  let index = $("index");
+                  let value = $("value");
+                  $("value", value + index);
+                  $("index", index + 1);
 
       - name: ">input"
         id: ">input"

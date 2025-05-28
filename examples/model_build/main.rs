@@ -1,4 +1,4 @@
-use acts::{Engine, Vars, Workflow};
+use acts::{Act, Engine, Vars, Workflow};
 use nanoid::nanoid;
 #[tokio::main]
 async fn main() {
@@ -13,13 +13,13 @@ async fn main() {
             step.with_id("cond")
                 .with_branch(|b| {
                     b.with_if(r#"$("index") <= $("count")"#).with_step(|step| {
-                        step.with_next("cond").with_run(
+                        step.with_next("cond").with_act(Act::code(
                             r#" let index = $("index");
                                 let value = $("result");
                                 $("index", index + 1);
                                 $("result", value + index);
                                 "#,
-                        )
+                        ))
                     })
                 })
                 .with_branch(|b| b.with_if(r#"$("index") > $("count")"#))

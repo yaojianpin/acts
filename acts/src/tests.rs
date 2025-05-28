@@ -129,19 +129,18 @@ async fn engine_model_create() {
         .with_step(|step| {
             step.with_id("step1")
                 .with_name("step1")
-                .with_run(r#"print("step1")"#)
                 .with_branch(|branch| {
                     branch
                         .with_if(r#"${ $("v") > 100 }"#)
-                        .with_step(|step| step.with_name("step3").with_run(r#"print("step3")"#))
+                        .with_step(|step| step.with_name("step3"))
                 })
                 .with_branch(|branch| {
                     branch
                         .with_if(r#"${ $("v") <= 100 }"#)
-                        .with_step(|step| step.with_name("step4").with_run(r#"print("step4")"#))
+                        .with_step(|step| step.with_name("step4"))
                 })
         })
-        .with_step(|step| step.with_name("step2").with_run(r#"print("step2")"#));
+        .with_step(|step| step.with_name("step2"));
 
     assert_eq!(workflow.name, "w1");
     let step = workflow.step("step1").unwrap();

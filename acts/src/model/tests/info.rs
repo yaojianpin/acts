@@ -48,7 +48,7 @@ fn model_info_proc() {
         end_time: 2345,
         timestamp: 11111,
         model: "{}".to_string(),
-        env_local: "".to_string(),
+        env: "".to_string(),
         err: None,
     };
     let info: ProcInfo = proc.into();
@@ -184,7 +184,7 @@ fn model_info_proc_arr_to_value() {
         end_time: 2345,
         timestamp: 11111,
         model: "{}".to_string(),
-        env_local: "".to_string(),
+        env: "".to_string(),
         err: None,
     };
     let info: ProcInfo = proc.into();

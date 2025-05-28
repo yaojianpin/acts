@@ -6,7 +6,7 @@ keywords = ["workflow"]
 license = "Apache-2.0"
 homepage = "https://docs.rs/acts-package-state"
 repository = "https://github.com/yaojianpin/acts.git"
-version = "0.16.1"
+version = "0.17.0"
 edition = "2024"
 
 [dependencies]

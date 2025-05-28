@@ -61,7 +61,6 @@ impl ParallelPackage {
         if scr.is_empty() {
             return Err(ActError::Runtime("'inputs.in' is empty".to_string()));
         }
-
         let result = ctx.eval::<Vec<String>>(scr)?;
         if result.is_empty() {
             return Err(ActError::Runtime(format!(

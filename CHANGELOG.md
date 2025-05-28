@@ -115,3 +115,10 @@
 - feat: add workflow.on events (manual, hook, chat)
 - feat: add acts-state package to support get or set state
 - feat: change the directory structure with acts, plugins, examples, benches, config
+
+# 0.17.0
+- feat: reactoring env module to add register_var trait
+- feat: add "resects" user var to support get resects data from task context
+- feat: add step env module to support get step vars by step id
+- feat: change env var to $env, change act var to $act, and add inputs and data js function for $act
+- feat: rename proc env_local to env

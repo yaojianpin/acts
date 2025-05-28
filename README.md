@@ -59,16 +59,42 @@ use acts::{Engine, Vars, Workflow};
 async fn main() {
     let engine = Engine::new().start();
 
-    let text = include_str!("../../examples/simple/model.yml");
-    let workflow = Workflow::from_yml(text).unwrap();
+    // create yaml workflow model
+    let model = r#"
+    id: my_model
+    name: my model
+    outputs:
+        a:
+    steps:
+      - name: step 1
+        acts:
+          - uses: acts.transform.set
+            params:
+              a: 10
+      - name: step 2
+        acts:
+          - uses: acts.transform.code
+            params: |
+                let a = $("a");
+                return { a: a + 10 };
+    "#;
+    let workflow = Workflow::from_yml(model).unwrap();
 
     let executor = engine.executor();
     executor.model().deploy(&workflow).expect("fail to deploy workflow");
 
     let mut vars = Vars::new();
-    vars.insert("input".into(), 3.into());
+
+    // set the input value
+    vars.insert("a".into(), 0.into());
+
+    // set the pid or auto generate by engine
     vars.insert("pid".to_string(), "w1".into());
-    executor.proc().start(&workflow.id, &vars).expect("fail to start workflow");;
+
+    // start workflow by model id
+    executor.proc().start(&workflow.id, &vars).expect("fail to start workflow");
+
+    // create channel to receive messages
     let chan = engine.channel();
 
     chan.on_start(|e| {
@@ -155,8 +181,12 @@ inputs:
   a: 100
 steps:
   - name: step1
-    run: |
-      $("output_key", "output value");
+    acts:
+      - uses: acts.transform.code
+        params: |
+          // get the a variable
+          let a = $("a");
+          // do somthing else
 ```
 
 The inputs can also be set by starting the workflow.
@@ -187,8 +217,12 @@ outputs:
   output_key:
 steps:
   - name: step1
-    run: |
-      $("output_key", "output value");
+    acts:
+      - uses: acts.transform.set
+        params:
+          output_key: 100
+    outputs:
+      output_key:
 ```
 
 ### Setup
@@ -201,13 +235,15 @@ For more acts, please see the comments as follow:
 ```yml
 name: model name
 steps:
-  - uses: acts.core.set
-    params:
-      a: ['u1', 'u2']
-      v: 10
-  - uses: acts.core.msg
-    if: $("v") > 0
-    key: msg1
+  - name: step 1
+    acts:
+      - uses: acts.transform.set
+        params:
+          a: ['u1', 'u2']
+          v: 10
+      - uses: acts.core.msg
+        if: $("v") > 0
+        key: msg1
 setup:
   # on step created
   - uses: acts.core.msg

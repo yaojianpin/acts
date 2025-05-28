@@ -4,12 +4,12 @@ use crate::{
 };
 
 #[tokio::test]
-async fn pack_code_inputs() {
+async fn pack_code_get_inputs() {
     let mut workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_input("a", 10.into()).with_act(
+        step.with_id("step1").with_act(
             Act::code(
                 r#"
-                let inputs = act.inputs();
+                let inputs = $act.inputs();
                 inputs
             "#,
             )
@@ -37,13 +37,45 @@ async fn pack_code_inputs() {
 }
 
 #[tokio::test]
+async fn pack_code_get_data() {
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1").with_act(
+            Act::code(
+                r#"
+                let data = $act.data();
+                return data
+            "#,
+            )
+            .with_id("code1")
+            .with_input("my_value", "abc"),
+        )
+    });
+
+    workflow.print();
+    let (proc, scher, _emitter, tx, _rx) =
+        create_proc_signal::<()>(&mut workflow, &utils::longid());
+    scher.launch(&proc);
+    tx.recv().await;
+    proc.print();
+
+    assert_eq!(
+        proc.task_by_nid("code1")
+            .first()
+            .unwrap()
+            .outputs()
+            .get::<String>("my_value")
+            .unwrap(),
+        "abc"
+    );
+}
+
+#[tokio::test]
 async fn pack_code_outputs() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_act(
             Act::code(
                 r#"
-                let ret = { "my_output": "abc" };
-                ret
+                return { "my_output": "abc" };
             "#,
             )
             .with_id("code1"),

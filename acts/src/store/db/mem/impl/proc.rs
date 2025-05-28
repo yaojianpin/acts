@@ -20,7 +20,7 @@ impl DbDocument for Proc {
         map.insert("end_time".to_string(), json!(self.end_time));
         map.insert("timestamp".to_string(), json!(self.timestamp));
         map.insert("model".to_string(), json!(self.model.clone()));
-        map.insert("env_local".to_string(), json!(self.env_local.clone()));
+        map.insert("env".to_string(), json!(self.env.clone()));
         Ok(map)
     }
 }

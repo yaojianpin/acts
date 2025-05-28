@@ -7,7 +7,7 @@ pub use retry::Retry;
 
 use crate::{ModelBase, StmtBuild, Vars};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value as JsonValue, json};
+use serde_json::Value as JsonValue;
 
 #[allow(unused_imports)]
 pub use timeout::{Timeout, TimeoutLimit, TimeoutUnit};
@@ -31,7 +31,7 @@ pub struct Act {
 
     // package params
     #[serde(default)]
-    pub params: serde_json::Value,
+    pub params: JsonValue,
 
     // package extra options
     // such as ACT_INDEX, ACT_VALUE
@@ -128,11 +128,8 @@ impl Act {
         self
     }
 
-    pub fn with_params_str<T>(mut self, v: &str) -> Self
-    where
-        T: Serialize + Clone,
-    {
-        self.params = json!(v);
+    pub fn with_params_data(mut self, v: JsonValue) -> Self {
+        self.params = v;
         self
     }
 
@@ -220,7 +217,7 @@ impl Act {
         }
     }
 
-    pub fn subflow(params: serde_json::Value) -> Self {
+    pub fn subflow(params: JsonValue) -> Self {
         Act {
             params,
             uses: "acts.core.subflow".to_string(),

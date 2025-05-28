@@ -370,7 +370,7 @@ async fn store_proc_query_by_id() {
         end_time: 0,
         timestamp: utils::time::timestamp(),
         model: "{}".to_string(),
-        env_local: "{}".to_string(),
+        env: "{}".to_string(),
         err: None,
     };
 
@@ -394,7 +394,7 @@ async fn store_proc_query_by_offset_count() {
             end_time: 0,
             timestamp: utils::time::timestamp(),
             model: "{}".to_string(),
-            env_local: "{}".to_string(),
+            env: "{}".to_string(),
             err: None,
         };
         store.procs().create(&proc).expect("create process");
@@ -431,7 +431,7 @@ async fn store_proc_query_by_cond_and() {
             end_time: 0,
             timestamp: utils::time::timestamp(),
             model: "{}".to_string(),
-            env_local: "{}".to_string(),
+            env: "{}".to_string(),
             err: None,
         };
         store.procs().create(&proc).expect("create process");
@@ -468,7 +468,7 @@ async fn store_proc_query_by_cond_or() {
             end_time: 0,
             timestamp: utils::time::timestamp(),
             model: "{}".to_string(),
-            env_local: "{}".to_string(),
+            env: "{}".to_string(),
             err: None,
         };
         store.procs().create(&proc).expect("create process");
@@ -484,7 +484,7 @@ async fn store_proc_query_by_cond_or() {
             end_time: 0,
             timestamp: utils::time::timestamp(),
             model: "{}".to_string(),
-            env_local: "{}".to_string(),
+            env: "{}".to_string(),
             err: None,
         };
         store.procs().create(&proc).expect("create process");
@@ -517,7 +517,7 @@ async fn store_proc_query_by_order() {
             end_time: 0,
             timestamp: utils::time::timestamp(),
             model: "{}".to_string(),
-            env_local: "{}".to_string(),
+            env: "{}".to_string(),
             err: None,
         };
         store.procs().create(&proc).expect("create process");
@@ -1594,7 +1594,7 @@ fn create_proc(id: &str, state: TaskState, model: &Workflow) -> Proc {
         end_time: 0,
         timestamp: utils::time::timestamp(),
         model: model.to_json().unwrap(),
-        env_local: "{}".to_string(),
+        env: "{}".to_string(),
         err: None,
     }
 }

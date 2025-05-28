@@ -1,5 +1,5 @@
 use crate::{
-    ActError, ActModule, ActPackageMeta, ActRunAs, DbCollection, Result, scheduler::Runtime,
+    ActError, ActPackageMeta, ActRunAs, DbCollection, Result, env::ActUserVar, scheduler::Runtime,
     store::DbCollectionIden,
 };
 use core::fmt;
@@ -29,21 +29,25 @@ impl Extender {
     /// ```no_run
     /// use acts::Engine;
     /// mod test_module {
-    ///   use acts::{ActModule, Result};
+    ///   use acts::{ActUserVar, Vars, Result};
     ///   #[derive(Clone)]
     ///   pub struct TestModule;
-    ///   impl ActModule for TestModule {
-    ///     fn init<'a>(&self, _ctx: &rquickjs::Ctx<'a>) -> Result<()> {
-    ///         Ok(())
+    ///   impl ActUserVar for TestModule {
+    ///     fn name(&self) -> String {
+    ///         "my_var".to_string()
+    ///     }
+    ///
+    ///     fn default_data(&self) -> Option<Vars> {
+    ///         None
     ///     }
     ///   }
     /// }
     /// let engine = Engine::new().start();
     /// let module = test_module::TestModule;
-    /// engine.extender().register_module(&module);
+    /// engine.extender().register_var(&module);
     /// ```
-    pub fn register_module<T: ActModule + Clone + 'static>(&self, module: &T) {
-        self.runtime.env().register_module(module)
+    pub fn register_var<T: ActUserVar + Clone + 'static>(&self, module: &T) {
+        self.runtime.env().register_var(module)
     }
 
     /// register package with meta definition

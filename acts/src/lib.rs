@@ -27,7 +27,7 @@ use std::sync::RwLock;
 pub use builder::EngineBuilder;
 pub use config::Config;
 pub use engine::Engine;
-pub use env::ActModule;
+pub use env::ActUserVar;
 pub use error::{ActError, Error};
 pub use event::{Action, Event, Message, MessageState};
 pub use export::{Channel, ChannelOptions, Executor, ExecutorQuery, Extender};

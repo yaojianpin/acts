@@ -4,7 +4,7 @@ The acts state package plugin for acts.
 
 ## Installation
 
-create `acts.cfg` in current dir
+create `config/acts.cfg` in current dir
 ```
 state {
     uri: "redis://<your connection path>"

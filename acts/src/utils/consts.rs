@@ -35,4 +35,5 @@ pub const TASK_ROOT_TID: &str = "$";
 pub const PROCESS_ID: &str = "pid";
 pub const MODEL_ID: &str = "mid";
 
-pub const ACT_INPUT_DATA: &str = "data";
+/// it is used to save the input data
+pub const ACT_INPUT_DATA: &str = "$input_data";

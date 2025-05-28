@@ -4,13 +4,21 @@ mod act;
 mod array;
 mod console;
 mod env;
+mod step;
+mod vars;
 
 impl Enviroment {
     pub fn init(&mut self) {
         let mut modules = self.modules.write().unwrap();
-        modules.push(Box::new(console::Console::new()));
-        modules.push(Box::new(array::Array::new()));
-        modules.push(Box::new(act::ActPackage::new()));
-        modules.push(Box::new(env::Env::new()));
+
+        modules.push(Box::new(console::ConsoleModule::new()));
+        modules.push(Box::new(array::ArrayModule::new()));
+        modules.push(Box::new(act::ActJsModule::new()));
+        modules.push(Box::new(step::StepModule::new()));
+        modules.push(Box::new(env::ProcEnv::new()));
+        modules.push(Box::new(vars::UserVars::new(self)));
+
+        let mut user_vars = self.user_vars.write().unwrap();
+        user_vars.push(Box::new(vars::secrets::SecretsVar));
     }
 }
