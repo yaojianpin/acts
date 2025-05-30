@@ -86,6 +86,7 @@ async fn pack_event_manual_start() {
         .executor()
         .evt()
         .start("my-event-model:event1", &Vars::new().into())
+        .await
         .unwrap();
 
     assert!(ret.unwrap().get::<String>("pid").is_some());
@@ -114,6 +115,7 @@ async fn pack_event_hook_start() {
         .executor()
         .evt()
         .start("my-event-model:event1", &Vars::new().into())
+        .await
         .unwrap();
 
     println!("event ret: {:?}", ret);
@@ -136,6 +138,7 @@ async fn pack_event_chat_start() {
         .executor()
         .evt()
         .start("my-event-model:event1", &"hello".into())
+        .await
         .unwrap();
 
     println!("event ret: {:?}", ret);
@@ -166,6 +169,7 @@ async fn pack_event_multiple() {
         .executor()
         .evt()
         .start("my-event-model:event1", &Vars::new().into())
+        .await
         .unwrap();
 
     assert!(ret.unwrap().get::<String>("pid").is_some());
@@ -174,6 +178,7 @@ async fn pack_event_multiple() {
         .executor()
         .evt()
         .start("my-event-model:event2", &Vars::new().into())
+        .await
         .unwrap();
 
     assert!(ret.unwrap().get::<String>("pid").is_some());

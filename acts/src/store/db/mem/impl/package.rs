@@ -20,7 +20,7 @@ impl DbDocument for Package {
         map.insert("version".to_string(), json!(self.version.clone()));
         map.insert("schema".to_string(), json!(self.schema.clone()));
         map.insert("run_as".to_string(), json!(self.run_as.clone()));
-        map.insert("groups".to_string(), json!(self.groups.clone()));
+        map.insert("resources".to_string(), json!(self.resources.clone()));
         map.insert("catalog".to_string(), json!(self.catalog.clone()));
 
         map.insert("create_time".to_string(), json!(self.create_time.clone()));

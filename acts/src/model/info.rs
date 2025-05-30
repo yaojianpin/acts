@@ -17,7 +17,7 @@ pub struct PackageInfo {
     pub version: String,
     pub schema: String,
     pub run_as: ActRunAs,
-    pub groups: String,
+    pub resources: String,
     pub catalog: ActPackageCatalog,
 
     pub create_time: i64,
@@ -109,7 +109,7 @@ impl From<&data::Package> for PackageInfo {
             version: m.version.clone(),
             schema: m.schema.clone(),
             run_as: m.run_as,
-            groups: m.groups.clone(),
+            resources: m.resources.clone(),
             catalog: m.catalog,
 
             timestamp: m.timestamp,

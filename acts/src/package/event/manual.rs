@@ -28,8 +28,13 @@ impl ActPackage for ManualEventPackage {
     }
 }
 
+#[async_trait::async_trait]
 impl ActPackageFn for ManualEventPackage {
-    fn start(&self, rt: &Arc<crate::scheduler::Runtime>, options: &Vars) -> Result<Option<Vars>> {
+    async fn start(
+        &self,
+        rt: &Arc<crate::scheduler::Runtime>,
+        options: &Vars,
+    ) -> Result<Option<Vars>> {
         let mid = options
             .get::<String>(consts::MODEL_ID)
             .ok_or(ActError::Runtime(format!(

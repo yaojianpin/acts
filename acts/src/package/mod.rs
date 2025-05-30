@@ -28,6 +28,7 @@ pub trait ActPackage {
     fn meta() -> ActPackageMeta;
 }
 
+#[async_trait::async_trait]
 pub trait ActPackageFn: Send + Sync {
     /// executing with task context
     fn execute(&self, _ctx: &Context) -> Result<Option<Vars>> {
@@ -35,7 +36,7 @@ pub trait ActPackageFn: Send + Sync {
     }
 
     /// start with non-context, such as workflow event
-    fn start(&self, _rt: &Arc<Runtime>, _options: &Vars) -> Result<Option<Vars>> {
+    async fn start(&self, _rt: &Arc<Runtime>, _options: &Vars) -> Result<Option<Vars>> {
         Ok(None)
     }
 }
@@ -203,7 +204,7 @@ impl ActPackageMeta {
             version: pack.version.to_string(),
             schema: pack.schema.to_string(),
             run_as: pack.run_as,
-            groups: serde_json::to_string(&pack.resources)
+            resources: serde_json::to_string(&pack.resources)
                 .expect("cannot convert ActPackageMeta.group to json"),
             catalog: pack.catalog,
             create_time: 0,

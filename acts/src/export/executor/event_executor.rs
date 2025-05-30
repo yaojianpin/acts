@@ -39,7 +39,7 @@ impl EventExecutor {
         Ok(event.into())
     }
 
-    pub fn start(&self, event_id: &str, params: &serde_json::Value) -> Result<Option<Vars>> {
+    pub async fn start(&self, event_id: &str, params: &serde_json::Value) -> Result<Option<Vars>> {
         let event = self.runtime.cache().store().events().find(event_id)?;
 
         let register = self
@@ -60,7 +60,7 @@ impl EventExecutor {
             })?;
         }
         let package = (register.create)(params)?;
-        let ret = package.start(&self.runtime, &options)?;
+        let ret = package.start(&self.runtime, &options).await?;
         Ok(ret)
     }
 }

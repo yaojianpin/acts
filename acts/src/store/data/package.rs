@@ -14,7 +14,7 @@ pub struct Package {
     pub version: String,
     pub schema: String,
     pub run_as: ActRunAs,
-    pub groups: String,
+    pub resources: String,
     pub catalog: ActPackageCatalog,
     pub built_in: bool,
 

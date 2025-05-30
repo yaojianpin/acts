@@ -10,7 +10,7 @@ version = "0.17.0"
 edition = "2024"
 
 [dependencies]
-acts = { version = "0.16.0", path = "../../acts" }
+acts = { version = "0.17.0", path = "../../acts" }
 futures = "0.3.31"
 sea-query = { version = "0.32.4" }
 sqlx = { version = "0.8.5", features = ["postgres", "runtime-tokio"] }

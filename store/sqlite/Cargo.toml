@@ -10,7 +10,7 @@ version = "0.17.0"
 edition = "2024"
 
 [dependencies]
-acts = { version = "0.16.0", path = "../../acts" }
+acts = { version = "0.17.0", path = "../../acts" }
 r2d2 = "0.8.10"
 r2d2_sqlite = { version = "0.25", features = ["bundled"] }
 rusqlite = { version = "0.32", features = ["bundled"] }

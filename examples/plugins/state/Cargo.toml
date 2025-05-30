@@ -6,5 +6,5 @@ edition = "2024"
 
 [dependencies]
 tokio = { workspace = true }
-acts = { version = "0.16.0", path = "../../../acts" }
-acts-package-state = { version = "0.1.0", path = "../../../plugins/state" }
+acts = { version = "0.17.0", path = "../../../acts" }
+acts-package-state = { version = "0.17.0", path = "../../../plugins/state" }

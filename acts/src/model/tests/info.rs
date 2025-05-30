@@ -18,7 +18,7 @@ fn model_info_package() {
         version: "0.1.0".to_string(),
         schema: "{}".to_string(),
         run_as: crate::ActRunAs::Func,
-        groups: "[]".to_string(),
+        resources: "[]".to_string(),
         catalog: crate::package::ActPackageCatalog::Core,
         built_in: false,
     };
@@ -30,7 +30,7 @@ fn model_info_package() {
     assert_eq!(info.version, package.version);
     assert_eq!(info.schema, package.schema);
     assert_eq!(info.run_as, package.run_as);
-    assert_eq!(info.groups, package.groups);
+    assert_eq!(info.resources, package.resources);
     assert_eq!(info.catalog, package.catalog);
     assert_eq!(info.create_time, package.create_time);
     assert_eq!(info.update_time, package.update_time);
@@ -129,7 +129,7 @@ fn model_info_package_arr_to_value() {
         version: "0.1.0".to_string(),
         schema: "{}".to_string(),
         run_as: crate::ActRunAs::Func,
-        groups: "[]".to_string(),
+        resources: "[]".to_string(),
         catalog: crate::package::ActPackageCatalog::Core,
         create_time: 0,
         update_time: 0,
@@ -154,7 +154,7 @@ fn model_info_package_arr_to_value() {
         serde_json::from_value::<ActRunAs>(v.get("run_as").unwrap().clone()).unwrap(),
         info.run_as
     );
-    assert_eq!(v.get("groups").unwrap().as_str().unwrap(), info.groups);
+    assert_eq!(v.get("groups").unwrap().as_str().unwrap(), info.resources);
     assert_eq!(
         serde_json::from_value::<ActPackageCatalog>(v.get("catalog").unwrap().clone()).unwrap(),
         info.catalog
