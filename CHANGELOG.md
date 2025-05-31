@@ -122,3 +122,5 @@
 - feat: add step env module to support get step vars by step id
 - feat: change env var to $env, change act var to $act, and add inputs and data js function for $act
 - feat: rename proc env_local to env
+- feat: change event package params to Option<T>
+- feat: skip initialization of plugin when there is no related section

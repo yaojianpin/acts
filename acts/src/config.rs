@@ -89,4 +89,9 @@ impl Config {
             crate::ActError::Config(format!("failed to get '{}' config: {}", name, err))
         })
     }
+
+    pub fn has(&self, name: &str) -> bool {
+        let value = self.table[name].clone();
+        value == Hocon::Null
+    }
 }

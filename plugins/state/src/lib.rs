@@ -12,18 +12,25 @@ mod tests;
 use acts::{ActError, ActPackage, ActPlugin, ChannelOptions, Result};
 use package::StatePackage;
 
+const CONFIG_NAME: &str = "state";
 #[derive(Clone)]
 pub struct StatePackagePlugin;
 
 #[async_trait::async_trait]
 impl ActPlugin for StatePackagePlugin {
     async fn on_init(&self, engine: &acts::Engine) -> Result<()> {
+        if !engine.config().has(CONFIG_NAME) {
+            println!(
+                "skip the initialization of StatePackagePlugin for no 'state' secion in config file"
+            );
+            return Ok(());
+        }
         let config = engine
             .config()
-            .get::<config::StateConfig>("state")
+            .get::<config::StateConfig>(CONFIG_NAME)
             .map_err(|err| acts::ActError::Config(format!("get state config error: {}", err)))?;
 
-        let mut client = redis::Client::open(config.uri.as_str())
+        let mut client = redis::Client::open(config.database_uri.as_str())
             .map_err(|err| acts::ActError::Config(format!("create redis client error: {}", err)))?;
 
         redis::cmd("PING")

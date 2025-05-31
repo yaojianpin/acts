@@ -11,7 +11,7 @@ use serde::Serialize;
 use serde_json::json;
 
 #[derive(Debug, Clone, Serialize)]
-pub struct HookEventPackage(Vars);
+pub struct HookEventPackage(Option<Vars>);
 
 impl ActPackage for HookEventPackage {
     fn meta() -> ActPackageMeta {
@@ -54,7 +54,8 @@ impl ActPackageFn for HookEventPackage {
             s3.send(m.outputs.clone());
         });
 
-        rt.start(&workflow, &options).unwrap();
+        let params = self.0.clone().unwrap_or(Vars::new());
+        rt.start(&workflow, &params).unwrap();
         let ret = s.recv().await;
         Ok(Some(ret))
     }
@@ -65,7 +66,7 @@ impl<'de> serde::de::Deserialize<'de> for HookEventPackage {
     where
         D: serde::Deserializer<'de>,
     {
-        let value = Vars::deserialize(deserializer)?;
+        let value = Option::<Vars>::deserialize(deserializer)?;
         Ok(Self(value))
     }
 }
