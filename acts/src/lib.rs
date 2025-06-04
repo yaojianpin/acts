@@ -43,6 +43,5 @@ pub type Result<T> = std::result::Result<T, ActError>;
 
 pub(crate) use scheduler::NodeKind;
 pub(crate) type ShareLock<T> = Arc<RwLock<T>>;
-pub(crate) use config::ConfigData;
 pub(crate) use package::Package;
 pub(crate) use scheduler::{ActTask, TaskState};

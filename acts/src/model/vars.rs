@@ -135,7 +135,7 @@ impl Vars {
     }
 
     pub fn with_data(self, data: serde_json::Value) -> Self {
-        self.with(consts::ACT_INPUT_DATA, data)
+        self.with(consts::ACT_DATA, data)
     }
 
     pub fn with<T>(self, name: &str, value: T) -> Self

@@ -156,29 +156,29 @@ async fn engine_build_cache_size() {
         .await
         .unwrap()
         .start();
-    assert_eq!(engine.config().cache_cap, 100)
+    assert_eq!(engine.config().cache_cap(), 100)
 }
 
 #[tokio::test]
 async fn engine_build_log_dir() {
     let engine = EngineBuilder::new()
-        .log_dir("test")
+        .log("test", "INFO")
         .build()
         .await
         .unwrap()
         .start();
-    assert_eq!(engine.config().log_dir, "test")
+    assert_eq!(engine.config().log().dir, "test")
 }
 
 #[tokio::test]
 async fn engine_build_log_level() {
     let engine = EngineBuilder::new()
-        .log_level("DEBUG")
+        .log("log", "DEBUG")
         .build()
         .await
         .unwrap()
         .start();
-    assert_eq!(engine.config().log_level, "DEBUG")
+    assert_eq!(engine.config().log().level, "DEBUG")
 }
 
 #[tokio::test]
@@ -189,7 +189,7 @@ async fn engine_build_tick_interval_secs() {
         .await
         .unwrap()
         .start();
-    assert_eq!(engine.config().tick_interval_secs, 10)
+    assert_eq!(engine.config().tick_interval_secs(), 10)
 }
 
 #[tokio::test]
@@ -200,7 +200,7 @@ async fn engine_build_max_message_retry_times() {
         .await
         .unwrap()
         .start();
-    assert_eq!(engine.config().max_message_retry_times, 100)
+    assert_eq!(engine.config().max_message_retry_times(), 100)
 }
 
 #[tokio::test]
@@ -216,25 +216,27 @@ async fn engine_build_config_default() {
     if !std::path::Path::new("test").exists() {
         std::fs::create_dir("test").unwrap();
     }
-    let path = "test/acts.cfg";
+    let path = "test/acts.toml";
     if std::path::Path::new(path).exists() {
         std::fs::remove_file(path).unwrap();
     }
     std::fs::write(
         path,
-        r#"{ 
-            cache_cap: 100,
-            log_dir: data,
-            log_level: INFO,
-            tick_interval_secs: 200,
-        }"#,
+        r#"
+        cache_cap =  100
+        tick_interval_secs = 200
+
+        [log]
+        dir = "data"
+        level = "INFO"
+        "#,
     )
     .unwrap();
     let engine = EngineBuilder::new().build().await.unwrap();
-    assert_eq!(engine.config().cache_cap, 100);
-    assert_eq!(engine.config().log_dir, "data");
-    assert_eq!(engine.config().log_level, "INFO");
-    assert_eq!(engine.config().tick_interval_secs, 200);
+    assert_eq!(engine.config().cache_cap(), 100);
+    assert_eq!(engine.config().log().dir, "data");
+    assert_eq!(engine.config().log().level, "INFO");
+    assert_eq!(engine.config().tick_interval_secs(), 200);
 }
 
 #[tokio::test]
@@ -242,19 +244,24 @@ async fn engine_build_config_set_source() {
     if !std::path::Path::new("test").exists() {
         let _ = std::fs::create_dir("test");
     }
-    let path = std::path::Path::new("test/test.cfg");
+    let path = std::path::Path::new("test/test.toml");
 
     if path.exists() {
         std::fs::remove_file(path).unwrap();
     }
     std::fs::write(
         path,
-        r#"{ 
-            cache_cap: 100,
-            log_dir: data,
-            log_level: INFO,
-            tick_interval_secs: 200,
-        }"#,
+        r#"
+        cache_cap =  100
+        tick_interval_secs = 200
+        default_outputs = [ 
+            "data"
+        ]
+
+        [log]
+        dir = "data"
+        level = "INFO"
+        "#,
     )
     .unwrap();
     let engine = EngineBuilder::new()
@@ -262,35 +269,10 @@ async fn engine_build_config_set_source() {
         .build()
         .await
         .unwrap();
-    assert_eq!(engine.config().cache_cap, 100);
-    assert_eq!(engine.config().log_dir, "data");
-    assert_eq!(engine.config().log_level, "INFO");
-    assert_eq!(engine.config().tick_interval_secs, 200);
-}
-
-#[tokio::test]
-async fn engine_build_config_with_env() {
-    unsafe {
-        std::env::set_var("MY_ENV", "DEBUG");
-    }
-
-    if !std::path::Path::new("test").exists() {
-        let _ = std::fs::create_dir("test");
-    }
-
-    let path = std::path::Path::new("test/acts.cfg");
-    if path.exists() {
-        std::fs::remove_file(path).unwrap();
-    }
-    std::fs::write(
-        path,
-        r#"{ 
-            log_level: ${MY_ENV}
-        }"#,
-    )
-    .unwrap();
-    let engine = EngineBuilder::new().build().await.unwrap();
-    assert_eq!(engine.config().log_level, "DEBUG");
+    assert_eq!(engine.config().cache_cap(), 100);
+    assert_eq!(engine.config().log().dir, "data");
+    assert_eq!(engine.config().log().level, "INFO");
+    assert_eq!(engine.config().tick_interval_secs(), 200);
 }
 
 #[tokio::test]
@@ -302,19 +284,17 @@ async fn engine_get_custom_config() {
         my_option: Option<i32>,
     }
 
-    let path = "test/acts.cfg";
+    let path = "test/acts.toml";
     if std::path::Path::new(path).exists() {
         std::fs::remove_file(path).unwrap();
     }
     std::fs::write(
         path,
-        r#"{ 
-            custom {
-              myint: 100,
-              mystr: myData
-            }
-
-        }"#,
+        r#"
+        [custom]
+        myint = 100
+        mystr = "myData"
+        "#,
     )
     .unwrap();
     let engine = EngineBuilder::new().build().await.unwrap();

@@ -23,17 +23,28 @@ pub const IS_CATCH_PROCESSED: &str = "$is_catch_processed";
 pub const IS_EVENT_PROCESSED: &str = "$is_event_processed";
 pub const IS_TIMEOUT_PROCESSED_PREFIX: &str = "$is_timeout_";
 
-pub const ACT_OUTPUTS: &str = "outputs";
+pub const ACT_OUTPUTS: &str = "$outputs";
 pub const ACT_PARAMS_CACHE: &str = "$params";
 
 pub const ACT_SUBFLOW_TO: &str = "to";
 
-pub const ACT_DEFAULT_OUTPUTS: &str = "$default_outputs";
+/// global expose var keys
+pub const ACT_GLOBAL_EXPOSE: &str = "expose";
 
 pub const TASK_ROOT_TID: &str = "$";
 
 pub const PROCESS_ID: &str = "pid";
 pub const MODEL_ID: &str = "mid";
 
-/// it is used to save the input data
-pub const ACT_INPUT_DATA: &str = "$input_data";
+/// it is used to save the input/output data
+/// the data var is default to expose to next task
+pub const ACT_DATA: &str = "data";
+
+/// private keys regex
+/// these keys can only be as local data
+pub const ACT_PRI_KEYS_REGEX: &str = "^(data|__).*";
+
+/// check if the key is private
+pub fn is_private_key(key: &str) -> bool {
+    key.starts_with("__")
+}

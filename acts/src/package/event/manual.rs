@@ -43,7 +43,7 @@ impl ActPackageFn for ManualEventPackage {
             )))?;
         let model: ModelInfo = rt.cache().store().models().find(&mid)?.into();
         let workflow = model.workflow()?;
-        let params = self.0.clone().unwrap_or(Vars::new());
+        let params = self.0.clone().unwrap_or_default();
         let ret = rt.start(&workflow, &params)?;
 
         Ok(Some(Vars::new().with(consts::PROCESS_ID, ret.id())))

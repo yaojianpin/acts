@@ -3,7 +3,7 @@ use tracing::{debug, error};
 
 use super::{Process, Scheduler, Task, TaskState};
 use crate::{
-    ActError, Action, Config, ConfigData, Engine, Package, Result, Vars, Workflow,
+    ActError, Action, Config, Engine, Package, Result, Vars, Workflow,
     cache::Cache,
     data,
     env::Enviroment,
@@ -159,7 +159,7 @@ impl Runtime {
     fn create(config: &Config) -> Arc<Runtime> {
         let scher = Scheduler::new();
         let env = Arc::new(Enviroment::new());
-        let cache = Arc::new(Cache::new(config.cache_cap as usize));
+        let cache = Arc::new(Cache::new(config.cache_cap() as usize));
         let emitter = Arc::new(Emitter::new());
         let package = Arc::new(Package::new());
         let runtime = Arc::new(Runtime {
@@ -175,7 +175,7 @@ impl Runtime {
         runtime
     }
 
-    fn initialize(self: &Arc<Self>, options: &ConfigData) {
+    fn initialize(self: &Arc<Self>, options: &Config) {
         {
             let cache = self.cache.clone();
             let rt = self.clone();
@@ -199,7 +199,7 @@ impl Runtime {
                             rt.return_to_act(&ppid, &ptid, proc);
                         }
 
-                        if !rt.config.keep_processes {
+                        if !rt.config.keep_processes() {
                             debug!("remove: {:?}", proc.tasks());
                             cache.remove(proc.id()).unwrap_or_else(|err| {
                                 error!("scher.initialize remove={}", err);
@@ -248,11 +248,11 @@ impl Runtime {
             // start tick interval
             #[allow(unused_assignments)]
             let mut default_interval_millis = 15;
-            let max_message_retry_times = options.max_message_retry_times;
-            if options.tick_interval_secs > 0 {
+            let max_message_retry_times = options.max_message_retry_times();
+            if options.tick_interval_secs() > 0 {
                 #[allow(unused_assignments)]
                 {
-                    default_interval_millis = options.tick_interval_secs * 1000;
+                    default_interval_millis = options.tick_interval_secs() * 1000;
                 }
             }
             #[cfg(test)]

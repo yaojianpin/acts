@@ -54,7 +54,7 @@ impl ActPackageFn for HookEventPackage {
             s3.send(m.outputs.clone());
         });
 
-        let params = self.0.clone().unwrap_or(Vars::new());
+        let params = self.0.clone().unwrap_or_default();
         rt.start(&workflow, &params).unwrap();
         let ret = s.recv().await;
         Ok(Some(ret))

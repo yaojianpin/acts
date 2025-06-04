@@ -1,0 +1,8 @@
+
+cache_cap = 1024
+tick_interval_secs = 15
+max_message_retry_times = 20
+
+[log]
+dir = "data"
+level = "INFO"

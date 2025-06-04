@@ -15,12 +15,12 @@ impl UserVars {
     }
 
     pub fn get_data(&self, key: &str) -> Option<Vars> {
-        Context::with(|ctx| {
+        if let Ok(ctx) = Context::current() {
             if let Some(v) = ctx.task().find::<Vars>(key) {
                 return Some(v);
             }
-            None
-        })
+        }
+        None
     }
 }
 

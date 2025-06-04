@@ -65,7 +65,7 @@ impl ActPlugin for StatePackagePlugin {
 
             // convert the params to StatePackage
             let pakage: StatePackage = serde_json::from_value(params).unwrap();
-            match pakage.run(&client) {
+            match pakage.run(&client, &e.pid) {
                 Ok(ref vars) => {
                     executor.act().complete(&e.pid, &e.tid, vars).unwrap();
                 }

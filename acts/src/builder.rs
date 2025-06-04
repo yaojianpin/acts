@@ -1,6 +1,6 @@
 #[cfg(test)]
-use crate::ConfigData;
-use crate::{ActPlugin, Config, Engine, Result};
+use crate::config::ConfigData;
+use crate::{ActPlugin, Config, Engine, Result, config::ConfigLog};
 use std::path::Path;
 
 pub struct EngineBuilder {
@@ -18,10 +18,10 @@ impl EngineBuilder {
     pub fn new() -> Self {
         let mut config = Config::default();
         #[cfg(not(test))]
-        let file = Path::new("config/acts.cfg");
+        let file = Path::new("config/acts.toml");
 
         #[cfg(test)]
-        let file = Path::new("test/acts.cfg");
+        let file = Path::new("test/acts.toml");
 
         if file.exists() {
             config = Config::create(file);
@@ -37,7 +37,7 @@ impl EngineBuilder {
     pub fn set_config(mut self, data: &ConfigData) -> Self {
         self.config = Config {
             data: data.clone(),
-            table: hocon::Hocon::Null,
+            table: toml::Table::new(),
         };
         self
     }
@@ -47,28 +47,26 @@ impl EngineBuilder {
         self
     }
 
-    pub fn log_dir(mut self, log_dir: &str) -> Self {
-        self.config.data.log_dir = log_dir.to_string();
-        self
-    }
-
-    pub fn log_level(mut self, level: &str) -> Self {
-        self.config.data.log_level = level.to_string();
+    pub fn log(mut self, dir: &str, level: &str) -> Self {
+        self.config.data.log = Some(ConfigLog {
+            dir: dir.to_string(),
+            level: level.to_string(),
+        });
         self
     }
 
     pub fn cache_size(mut self, size: i64) -> Self {
-        self.config.data.cache_cap = size;
+        self.config.data.cache_cap = Some(size);
         self
     }
 
     pub fn tick_interval_secs(mut self, secs: i64) -> Self {
-        self.config.data.tick_interval_secs = secs;
+        self.config.data.tick_interval_secs = Some(secs);
         self
     }
 
     pub fn max_message_retry_times(mut self, retry_times: i32) -> Self {
-        self.config.data.max_message_retry_times = retry_times;
+        self.config.data.max_message_retry_times = Some(retry_times);
         self
     }
 

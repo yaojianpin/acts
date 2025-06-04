@@ -124,3 +124,7 @@
 - feat: rename proc env_local to env
 - feat: change event package params to Option<T>
 - feat: skip initialization of plugin when there is no related section
+- feat: add `acts.core.http` package plugin
+- feat: add `pid` prefix to the acts.app.state package
+- feat: support private vars (starts with `__`)
+- feat: use `acts.toml` instead of `acts.cfg`

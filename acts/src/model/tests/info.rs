@@ -154,7 +154,10 @@ fn model_info_package_arr_to_value() {
         serde_json::from_value::<ActRunAs>(v.get("run_as").unwrap().clone()).unwrap(),
         info.run_as
     );
-    assert_eq!(v.get("groups").unwrap().as_str().unwrap(), info.resources);
+    assert_eq!(
+        v.get("resources").unwrap().as_str().unwrap(),
+        info.resources
+    );
     assert_eq!(
         serde_json::from_value::<ActPackageCatalog>(v.get("catalog").unwrap().clone()).unwrap(),
         info.catalog

@@ -1,6 +1,7 @@
 use crate::event::EventAction;
 use crate::{
-    Act, Action, ChannelOptions, ConfigData, Message, Vars, Workflow,
+    Act, Action, ChannelOptions, Message, Vars, Workflow,
+    config::ConfigData,
     data::MessageStatus,
     event::MessageState,
     scheduler::tests::{create_proc_signal, create_proc_signal_config, create_proc_signal2},
@@ -920,7 +921,7 @@ async fn sch_message_error_if_not_ack_and_exceed_max_reties() {
     let id = utils::longid();
 
     let config = ConfigData {
-        max_message_retry_times: 2,
+        max_message_retry_times: Some(2),
         ..ConfigData::default()
     };
     let (engine, proc, sig) =
@@ -952,5 +953,5 @@ async fn sch_message_error_if_not_ack_and_exceed_max_reties() {
     assert_eq!(message.status, MessageStatus::Error);
     assert!(message.create_time > 0);
     assert!(message.update_time > 0);
-    assert_eq!(message.retry_times, config.max_message_retry_times);
+    assert_eq!(message.retry_times, config.max_message_retry_times.unwrap());
 }

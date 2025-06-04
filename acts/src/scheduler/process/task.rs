@@ -254,13 +254,6 @@ impl Task {
     }
 
     pub fn inputs(self: &Arc<Self>) -> Vars {
-        // if self.data().contains_key(consts::ACT_INPUTS_CACHE) {
-        //     return self
-        //         .data()
-        //         .get::<Vars>(consts::ACT_INPUTS_CACHE)
-        //         .unwrap_or_default();
-        // }
-
         let ctx = self.create_context();
         let mut vars = Vars::new();
         if let Some(prev) = self.prev() {
@@ -274,48 +267,29 @@ impl Task {
 
         // merge the inputs
         let inputs = utils::fill_inputs(&self.node.content.inputs(), &ctx);
-
-        // write the inputs to cache
-        // to avoid the dup calculation
-        // self.set_data_with(|data| data.set(consts::ACT_INPUTS_CACHE, inputs.clone()));
-
         vars.extend(inputs)
     }
 
     pub fn outputs(self: &Arc<Self>) -> Vars {
-        // if self.data().contains_key(consts::ACT_OUTPUTS_CACHE) {
-        //     return self
-        //         .data()
-        //         .get::<Vars>(consts::ACT_OUTPUTS_CACHE)
-        //         .unwrap_or_default();
-        // }
         let ctx = self.create_context();
-
         let mut outputs = self.node.content.outputs();
 
-        // sets the default outputs
-        // sets once uses in each outputs of the task
-        if let Some(values) = ctx.get_env::<Vec<String>>(consts::ACT_DEFAULT_OUTPUTS) {
-            for v in &values {
-                outputs.set(v, json!(null));
-            }
+        // get the global expose keys
+        // the ["data"] is the default expose key
+        let global_expose_keys = ctx
+            .get_env::<Vec<String>>(consts::ACT_GLOBAL_EXPOSE)
+            .unwrap_or(vec![consts::ACT_DATA.to_string()]);
+        for key in global_expose_keys {
+            outputs.set(&key, json!(null));
         }
 
-        let mut outputs = utils::fill_outputs(&outputs, &ctx);
-        // The task(Workflow) can also set the outputs by expose act
-        // These data is stored in consts::ACT_OUTPUTS
-        // merge the expose data with the outputs
-        if let Some(vars) = self.with_data(|data| data.get::<Vars>(consts::ACT_OUTPUTS)) {
-            for (key, value) in &vars {
-                outputs.set(&key, value.clone());
+        // sets the outputs from data
+        if let Some(data) = self.data().get::<Vec<String>>(consts::ACT_OUTPUTS) {
+            for v in data {
+                outputs.set(&v, json!(null));
             }
         }
-
-        // write the outputs to cache
-        // to avoid the dup calculation
-        // self.set_data_with(|data| data.set(consts::ACT_OUTPUTS_CACHE, outputs.clone()));
-
-        outputs
+        utils::fill_outputs(&outputs, &ctx)
     }
 
     pub fn options(self: &Arc<Self>) -> Vars {
@@ -406,11 +380,6 @@ impl Task {
     }
 
     pub fn update(self: &Arc<Self>, ctx: &Context) -> Result<()> {
-        // let _lock = self.sync.lock().unwrap();
-        self.update_no_lock(ctx)
-    }
-
-    pub fn update_no_lock(self: &Arc<Self>, ctx: &Context) -> Result<()> {
         info!("update task={:?}", ctx.task());
         let action = ctx.action().ok_or(ActError::Action(
             "cannot find action in context".to_string(),
@@ -1026,6 +995,17 @@ impl Task {
         }
     }
 
+    pub fn expose(&self, keys: &Vec<&str>) {
+        self.set_data_with(move |data| {
+            data.set(
+                consts::ACT_OUTPUTS,
+                keys.iter()
+                    .filter(|v| !consts::is_private_key(v))
+                    .collect::<Vec<_>>(),
+            )
+        });
+    }
+
     pub fn update_data_if_exists<F: Fn(&mut Vars) -> bool>(&self, f: F) -> bool {
         let mut data = self.data.write().unwrap();
         f(&mut data)
@@ -1052,6 +1032,11 @@ impl Task {
     }
 
     pub fn update_data(&self, vars: &Vars) {
+        #[allow(clippy::expect_fun_call)]
+        let pri_keys_regex = regex::Regex::new(consts::ACT_PRI_KEYS_REGEX).expect(&format!(
+            "failed to create regex: {}",
+            consts::ACT_PRI_KEYS_REGEX
+        ));
         let mut refs = Vec::new();
         let mut parent = self.parent();
         while let Some(task) = parent {
@@ -1060,6 +1045,10 @@ impl Task {
         }
 
         for (ref name, ref value) in vars {
+            // skip private keys
+            if pri_keys_regex.is_match(name) {
+                continue;
+            }
             for t in refs.iter().rev() {
                 let is_updated = t.update_data_if_exists(|v| {
                     if v.contains_key(name) {

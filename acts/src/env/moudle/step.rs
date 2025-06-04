@@ -50,18 +50,17 @@ mod step {
 
     #[rquickjs::function]
     pub fn get_steps() -> Vec<String> {
-        if Context::current().is_err() {
-            return vec![];
-        }
-        Context::with(|ctx| {
-            ctx.task()
+        if let Ok(ctx) = Context::current() {
+            return ctx
+                .task()
                 .proc()
                 .tasks()
                 .iter()
                 .filter(|task| task.is_kind(crate::NodeKind::Step))
                 .map(|task| task.node().id().to_string())
-                .collect()
-        })
+                .collect();
+        }
+        vec![]
     }
 
     #[rquickjs::function]

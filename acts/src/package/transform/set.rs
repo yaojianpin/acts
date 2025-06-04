@@ -27,7 +27,10 @@ impl ActPackage for SetPackage {
 }
 
 impl ActPackageFn for SetPackage {
-    fn execute(&self, _ctx: &Context) -> Result<Option<Vars>> {
+    fn execute(&self, ctx: &Context) -> Result<Option<Vars>> {
+        // expose the set keys as next inputs
+        let keys = self.0.keys().map(|k| k.as_str()).collect::<Vec<_>>();
+        ctx.task().expose(&keys);
         Ok(Some(self.0.clone()))
     }
 }

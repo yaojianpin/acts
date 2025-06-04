@@ -1,13 +1,13 @@
 [package]
 name = "acts-store-postgres"
-authors = ["Yao <yaojianpin@sohu.com>"]
 description = "acts store plugin for postgres"
-keywords = ["workflow"]
-license = "Apache-2.0"
 homepage = "https://docs.rs/acts-store-postgres"
-repository = "https://github.com/yaojianpin/acts.git"
-version = "0.17.0"
-edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+edition.workspace = true
+
 
 [dependencies]
 acts = { version = "0.17.0", path = "../../acts" }

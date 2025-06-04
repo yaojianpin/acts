@@ -5,12 +5,30 @@ members = [
     "store/sqlite",
     "store/postgres",
     "plugins/state",
+    "plugins/http",
     "examples/plugins/*",
 ]
-exclude = ["examples/plugins/state"]
+# exclude = ["examples/plugins/state", "examples/plugins/http"]
 resolver = "3"
 
+[workspace.package]
+authors = ["Yao <yaojianpin@sohu.com>"]
+description = "a fast, lightweight, extensiable workflow engine"
+keywords = ["workflow"]
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/yaojianpin/acts.git"
+version = "0.17.0"
 
 [workspace.dependencies]
 tokio = { version = "1.44", features = ["full"] }
 async-trait = { version = "0.1.88" }
+serde = "1.0.219"
+serde_json = "1.0.140"
+strum = { version = "0.27", features = ["derive"] }
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "z"
+strip = true
