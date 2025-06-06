@@ -1,0 +1,17 @@
+[package]
+name = "acts-package-shell"
+description = "acts package for shell"
+homepage = "https://docs.rs/acts-package-http"
+version = "0.17.0"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+edition.workspace = true
+
+[dependencies]
+acts = { version = "0.17.0", path = "../../acts" }
+async-trait = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+strum = { workspace = true }

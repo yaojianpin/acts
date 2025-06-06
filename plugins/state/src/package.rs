@@ -79,7 +79,7 @@ impl StatePackage {
                     .to_string();
 
                 let ret = redis::cmd("GET")
-                    .arg(&format!("{pid}:{key}"))
+                    .arg(format!("{pid}:{key}"))
                     .query::<String>(&mut conn)
                     .map_err(|err| {
                         ActError::Package(format!("error happend to set value: {}", err))
@@ -112,7 +112,7 @@ impl StatePackage {
                 })?;
 
                 redis::cmd("SET")
-                    .arg(&&format!("{pid}:{key}"))
+                    .arg(format!("{pid}:{key}"))
                     .arg(v.as_str())
                     .query::<String>(&mut conn)
                     .map_err(|err| {

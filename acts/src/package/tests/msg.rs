@@ -60,7 +60,7 @@ async fn pack_msg_with_inputs_var() {
             .with_input("a", json!(5))
             .with_setup(|setup| {
                 setup.add(Act::msg(|msg| {
-                    msg.with_key("msg1").with_input("a", r#"${ $("a") }"#)
+                    msg.with_key("msg1").with_input("a", r#"{{ a }}"#)
                 }))
             })
     });

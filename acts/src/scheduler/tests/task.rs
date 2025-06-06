@@ -202,7 +202,7 @@ async fn sch_task_branch_if_false_else_success() {
             .with_branch(|branch| {
                 branch
                     .with_id("b2")
-                    .with_if(r#"$("v") < 0"#)
+                    .with_if(r#"v < 0"#)
                     .with_name("branch 2")
                     .with_step(|step| step.with_id("step21"))
             })
@@ -236,7 +236,7 @@ async fn sch_task_branch_if_false_else_running() {
             .with_branch(|branch| {
                 branch
                     .with_id("b2")
-                    .with_if(r#"$("v") < 0"#)
+                    .with_if(r#"v < 0"#)
                     .with_name("branch 2")
                     .with_step(|step| step.with_id("step21"))
             })
@@ -281,7 +281,7 @@ async fn sch_task_branch_if_true_else() {
             .with_branch(|branch| {
                 branch
                     .with_id("b1")
-                    .with_if(r#"$("v") > 0"#)
+                    .with_if(r#"v > 0"#)
                     .with_name("branch 1")
                     .with_step(|step| step.with_id("step11"))
             })
@@ -318,14 +318,14 @@ async fn sch_task_branch_if_two_no_else() {
             .with_branch(|branch| {
                 branch
                     .with_id("b1")
-                    .with_if(r#"$("v") > 0"#)
+                    .with_if(r#"v > 0"#)
                     .with_name("branch 1")
                     .with_step(|step| step.with_id("step11"))
             })
             .with_branch(|branch| {
                 branch
                     .with_id("b2")
-                    .with_if(r#"$("v") <= 0"#)
+                    .with_if(r#"v <= 0"#)
                     .with_name("branch 2")
                     .with_step(|step| step.with_id("step21"))
             })
@@ -355,21 +355,21 @@ async fn sch_task_branch_if_mutli_true() {
             .with_branch(|branch| {
                 branch
                     .with_id("b1")
-                    .with_if(r#"$("v") > 0"#)
+                    .with_if(r#"v > 0"#)
                     .with_name("branch 1")
                     .with_step(|step| step.with_id("step11"))
             })
             .with_branch(|branch| {
                 branch
                     .with_id("b2")
-                    .with_if(r#"$("v") <= 0"#)
+                    .with_if(r#"v <= 0"#)
                     .with_name("branch 2")
                     .with_step(|step| step.with_id("step21"))
             })
             .with_branch(|branch| {
                 branch
                     .with_id("b3")
-                    .with_if(r#"$("v") > 2"#)
+                    .with_if(r#"v > 2"#)
                     .with_name("branch 3")
                     .with_step(|step| step.with_id("step31"))
             })
@@ -403,7 +403,7 @@ async fn sch_task_branch_needs_state() {
             .with_branch(|branch| {
                 branch
                     .with_id("b1")
-                    .with_if(r#"$("v") > 0"#)
+                    .with_if(r#"v > 0"#)
                     .with_name("branch 1")
                     .with_step(|step| {
                         step.with_id("step11")
@@ -413,7 +413,7 @@ async fn sch_task_branch_needs_state() {
             .with_branch(|branch| {
                 branch
                     .with_id("b2")
-                    .with_if(r#"$("v") > 2"#)
+                    .with_if(r#"v > 2"#)
                     .with_name("branch 2")
                     .with_need("b1")
                     .with_step(|step| step.with_id("step21"))

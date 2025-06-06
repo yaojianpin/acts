@@ -22,13 +22,14 @@ async fn main() -> Result<()> {
                 test:
                     var1: "changed_var1"
             params:
-                var1: ${ test.var1 }
+                var1: '{{ test.var1 }}'
       - name: step 2
         acts:
           - uses: acts.transform.code
             params: |
                 let var2 = test.var2;
                 console.log("test.var2 = " + var2)
+                return { data: var2 }
     "#;
     let workflow = Workflow::from_yml(model).unwrap();
 

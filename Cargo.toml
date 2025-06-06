@@ -6,7 +6,7 @@ members = [
     "store/postgres",
     "plugins/state",
     "plugins/http",
-    "examples/plugins/*",
+    "examples/plugins/*", "plugins/shell",
 ]
 # exclude = ["examples/plugins/state", "examples/plugins/http"]
 resolver = "3"

@@ -44,7 +44,7 @@ async fn pack_code_get_data() {
         step.with_id("step1").with_act(
             Act::code(
                 r#"
-                let data = $act.data();
+                let data = $data();
                 return { data: data.my_value }
             "#,
             )

@@ -81,7 +81,7 @@ async fn pack_set_local_var() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_input("b", json!("abc"))
-            .with_setup(|setup| setup.add(Act::set(Vars::new().with("a", r#"${ $("b") }"#))))
+            .with_setup(|setup| setup.add(Act::set(Vars::new().with("a", r#"{{ b }}"#))))
     });
 
     workflow.print();
@@ -106,7 +106,7 @@ async fn pack_set_calc_str() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_input("a", json!("a"))
-            .with_setup(|setup| setup.add(Act::set(Vars::new().with("a", r#"${ $("a") + "bc" }"#))))
+            .with_setup(|setup| setup.add(Act::set(Vars::new().with("a", r#"{{ a + "bc" }}"#))))
     });
 
     workflow.print();
@@ -131,7 +131,7 @@ async fn pack_set_calc_int() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_input("a", json!(10))
-            .with_act(Act::set(Vars::new().with("a", r#"${ $("a") + 20 }"#)))
+            .with_act(Act::set(Vars::new().with("a", r#"{{ a + 20 }}"#)))
     });
 
     workflow.print();
@@ -185,7 +185,7 @@ async fn sch_act_get_global_var() {
         .with_input("b", json!("abc"))
         .with_step(|step| {
             step.with_id("step1")
-                .with_setup(|setup| setup.add(Act::set(Vars::new().with("a", r#"${ $("b") }"#))))
+                .with_setup(|setup| setup.add(Act::set(Vars::new().with("a", r#"{{ b }}"#))))
         });
 
     workflow.print();

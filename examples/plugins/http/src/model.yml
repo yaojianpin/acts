@@ -11,9 +11,12 @@ steps:
           url: http://127.0.0.1:1234/hello
           method: GET
           # params from workflow.inputs
-          params:
-            key1: ${ $("key1") }
-            key2: ${ $("key2") }
+          params: 
+            - key: key1
+              value: '{{ key1 }}'
+            - key: key2
+              value: '{{ key2 }}'
+
       - uses: acts.core.http
         params:
           url: http://127.0.0.1:1234/world
@@ -21,5 +24,5 @@ steps:
           content-type: json
           # body data from prev http response data
           body:
-            data: ${ $act.inputs().data }
+            data: '{{ $inputs().data }}'
 

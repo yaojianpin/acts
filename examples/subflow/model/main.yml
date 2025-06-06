@@ -3,7 +3,7 @@ id: main
 inputs:
   v: 0
 outputs:
-  result: ${ $("v") }
+  result: '{{ v }}'
 steps:
   - name: prepare
     id: prepare
@@ -16,12 +16,12 @@ steps:
         params:
             to: sub
             extra:
-              v: ${ $("v") }
+              v: '{{ v }}'
   - name: final
     id: final
     acts:
       - uses: acts.core.irq
         key: action2
         params:
-          v: ${ $("v") }
+          v: '{{ v }}'
     

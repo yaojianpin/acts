@@ -1,0 +1,93 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+        "url": {
+            "type": "string",
+            "title": "Url"
+        },
+        "method": {
+            "type": "string",
+            "title": "Method",
+            "enum": ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS", "HEAD"]
+        },
+        "content-type": {
+            "type": "string",
+            "title": "Content Type",
+            "enum": ["text", "html", "json", "binary", "urlencoded", "form-data", "image", "video", "audio"]
+        },
+        "headers": {
+            "type": "array",
+            "title": "Headers",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "key": { "type": "string" },
+                    "value": { "type": "string" }
+                },
+                "required": ["key", "value"]
+            }
+        },
+        "params": {
+            "type": "array",
+            "title": "Params",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "key": { "type": "string" },
+                    "value": { "type": "string" }
+                },
+                "required": ["key", "value"]
+            }
+        }
+    },
+    "dependentSchemas": {
+        "content-type": {
+            "oneOf": [
+                {
+                    "properties": {
+                        "content-type": { "const": "json" },
+                        "body": { "type": "object" }
+                    },
+                    "required": ["body"]
+                },
+                {
+                    "properties": {
+                        "content-type": { "enum": ["text", "html"] },
+                        "body": { "type": "string" }
+                    },
+                    "required": ["body"]
+                },
+                {
+                    "properties": {
+                        "content-type": { "enum": ["urlencoded", "form-data"] },
+                        "body": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "key": { "type": "string" },
+                                    "value": { "type": "string" }
+                                },
+                                "required": ["key", "value"]
+                            }
+                        }
+                    },
+                    "required": ["body"]
+                },
+                {
+                    "properties": {
+                        "content-type": { "enum": ["image", "video", "audio", "binary"] },
+                        "body": { "type": "string" }
+                    },
+                    "required": ["body"]
+                },
+                {
+                    "properties": {
+                        "body": { "type": "null" }
+                    }
+                }
+            ]
+        }
+    }
+}

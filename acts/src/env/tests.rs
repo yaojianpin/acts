@@ -216,7 +216,7 @@ async fn env_task_get() {
     sig.recv().await;
     let task = proc.root().unwrap();
     let script = r#"
-        $("a")
+        a
     "#;
 
     let context = task.create_context();
@@ -241,7 +241,7 @@ async fn env_task_set() {
     sig.recv().await;
     let task = proc.root().unwrap();
     let script = r#"
-        $("a", 100);
+        $set("a", 100);
     "#;
     let context = task.create_context();
     Context::scope(context, || {
@@ -265,9 +265,9 @@ async fn env_task_multi_line() {
 
     let context = task.create_context();
     Context::scope(context, || {
-        env.eval::<()>(r#"$("a", 100)"#).unwrap();
-        env.eval::<()>(r#"$("b", 200)"#).unwrap();
-        let value = env.eval::<bool>(r#"$("a") < $("b")"#).unwrap();
+        env.eval::<()>(r#"$set("a", 100)"#).unwrap();
+        env.eval::<()>(r#"$set("b", 200)"#).unwrap();
+        let value = env.eval::<bool>(r#"a < b"#).unwrap();
         assert!(value);
     });
 }
@@ -640,7 +640,7 @@ async fn env_act_get_inputs() {
     sig.recv().await;
     let task = proc.task_by_nid("act1").last().cloned().unwrap();
     let script = r#"
-        $act.inputs()
+        $inputs()
     "#;
 
     let context = task.create_context();
@@ -671,8 +671,8 @@ async fn env_act_get_data() {
     sig.recv().await;
     let task = proc.task_by_nid("act1").last().cloned().unwrap();
     let script = r#"
-        $act.set("my_value", 20)
-        $act.data()
+        $set("my_value", 20)
+        $data()
     "#;
 
     let context = task.create_context();
@@ -812,4 +812,16 @@ async fn env_user_var_secrets_get() {
         proc.print();
         assert_eq!(result, "my_token");
     });
+}
+
+#[tokio::test]
+async fn env_user_var_os_get() {
+    let env = Enviroment::new();
+
+    let script = r#"
+        os
+    "#;
+
+    let result = env.eval::<String>(script);
+    assert!(["linux", "windows", "macos"].contains(&result.unwrap().as_str()));
 }

@@ -32,7 +32,7 @@ async fn sch_vars_workflow_outputs_value() {
 async fn sch_vars_workflow_outputs_script() {
     let mut workflow = Workflow::new()
         .with_input("a", json!(10))
-        .with_output("var1", json!(r#"${ $("a") }"#));
+        .with_output("var1", json!(r#"{{ a }}"#));
     let (proc, scher, emiter, tx, rx) = create_proc_signal::<Vars>(&mut workflow, &utils::longid());
     // emiter.reset();
     emiter.on_complete(move |e| {
@@ -81,7 +81,7 @@ async fn sch_vars_get_with_script() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_input("var1", 10.into())
-            .with_input("var2", r#"${ $("var1") }"#.into())
+            .with_input("var2", r#"{{ var1 }}"#.into())
     });
     let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     scher.launch(&proc);
@@ -101,7 +101,7 @@ async fn sch_vars_get_with_script() {
 async fn sch_vars_get_with_not_exists() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_input("var2", r#"${ $("var1") }"#.into())
+            .with_input("var2", r#"{{ var1 }}"#.into())
     });
     let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     scher.launch(&proc);
@@ -612,11 +612,8 @@ async fn sch_vars_act_inputs_from_step() {
         step.with_id("step1")
             .with_input("a", json!("abc"))
             .with_act(
-                Act::irq(|act| {
-                    act.with_key("act1")
-                        .with_input("a", json!(r#"${ $("a") }"#))
-                })
-                .with_id("act1"),
+                Act::irq(|act| act.with_key("act1").with_input("a", json!(r#"{{ a }}"#)))
+                    .with_id("act1"),
             )
     });
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());

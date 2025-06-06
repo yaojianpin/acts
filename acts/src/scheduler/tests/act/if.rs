@@ -9,9 +9,7 @@ async fn sch_act_if_true() {
             setup
                 .add(Act::set(Vars::new().with("a", 10)))
                 .add(Act::msg(|act| {
-                    act.with_if(r#"$("a") > 0"#)
-                        .with_key("msg1")
-                        .with_id("msg1")
+                    act.with_if(r#"a > 0"#).with_key("msg1").with_id("msg1")
                 }))
                 .add(Act::irq(|act| act.with_key("act1")))
         })
@@ -41,9 +39,7 @@ async fn sch_act_if_false() {
             setup
                 .add(Act::set(Vars::new().with("a", 10)))
                 .add(Act::msg(|act| {
-                    act.with_if(r#"$("a") < 0"#)
-                        .with_key("msg1")
-                        .with_id("msg1")
+                    act.with_if(r#"a < 0"#).with_key("msg1").with_id("msg1")
                 }))
         })
     });

@@ -75,7 +75,6 @@ async fn main() {
         acts:
           - uses: acts.transform.code
             params: |
-                let a = $("a");
                 return { a: a + 10 };
     "#;
     let workflow = Workflow::from_yml(model).unwrap();
@@ -149,7 +148,7 @@ steps:
     # workflow branches to run by condition
     branches:
       - name: branch 1
-        if: ${ $("value") > 100 }
+        if: value > 100
         steps:
           - name: step 3
             acts:
@@ -157,14 +156,14 @@ steps:
                 uses: acts.core.msg
 
       - name: branch 2
-        if: ${ $("value") <= 100 }
+        if: value <= 100
         steps:
           - name: step 4
             acts:
               - name: parallel send irq request
                 uses: acts.core.parallel
                 params:
-                  in: ${ ${list} }
+                  in: '{{ list }}'
                   acts:
                     - uses: acts.core.irq
   - name: final step
@@ -185,7 +184,7 @@ steps:
       - uses: acts.transform.code
         params: |
           // get the a variable
-          let a = $("a");
+          let v = a + 100;
           // do somthing else
 ```
 
@@ -242,7 +241,7 @@ steps:
           a: ['u1', 'u2']
           v: 10
       - uses: acts.core.msg
-        if: $("v") > 0
+        if: v > 0
         key: msg1
 setup:
   # on step created
@@ -421,7 +420,7 @@ steps:
     name: step 1
     branches:
       - id: b1
-        if: $("v") > 0
+        if: v > 0
         steps:
           - name: step a
           - name: step b
@@ -539,7 +538,6 @@ acts:
     - [x] parallel
     - [x] sequence
     - [x] subflow
-    - [ ] http
 
   - event
     - [x] manual
@@ -550,7 +548,6 @@ acts:
   - transform
     - [x] set
     - [x] code
-    - [ ] split
 
 - [ ] doc (doc/)
 
@@ -563,6 +560,8 @@ acts:
   - [ ] form (plugins/form)
   - [ ] ai (plugins/ai)
   - [x] state (plugins/state)
+  - [x] http (plugins/http)
+  - [x] shell (plugins/shell) support nushell, bash and powershell
   - [ ] pubsub (plugins/pubsub)
   - [ ] observability (plugins/obs)
   - [ ] database (plugins/database)

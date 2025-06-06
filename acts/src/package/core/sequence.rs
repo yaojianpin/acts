@@ -1,17 +1,17 @@
 use super::super::core::{BlockPackage, RunningMode};
 use crate::Context;
-use crate::package::{ActPackage, ActPackageCatalog, ActPackageMeta, ActPackageRegister};
+use crate::package::{ActPackage, ActPackageCatalog, ActPackageMeta, ActPackageRegister, Result};
 use crate::utils::consts;
 use crate::{
-    Act, ActError, Result, Vars,
+    Act, Vars,
     package::{ActPackageFn, ActRunAs},
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value as JsonValue, json};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SequencePackage {
-    r#in: String,
+    r#in: Vec<JsonValue>,
     acts: Vec<Act>,
 }
 
@@ -33,10 +33,8 @@ impl ActPackage for SequencePackage {
 
 impl ActPackageFn for SequencePackage {
     fn execute(&self, ctx: &Context) -> Result<Option<Vars>> {
-        let list = self.parse(ctx, &self.r#in)?;
-
         let mut acts = Vec::new();
-        for (index, value) in list.iter().enumerate() {
+        for (index, value) in self.r#in.iter().enumerate() {
             let params = serde_json::to_value(BlockPackage {
                 mode: RunningMode::Sequence,
                 acts: self.acts.clone(),
@@ -57,23 +55,6 @@ impl ActPackageFn for SequencePackage {
     }
 }
 
-impl SequencePackage {
-    pub fn parse(&self, ctx: &Context, scr: &str) -> Result<Vec<String>> {
-        if scr.is_empty() {
-            return Err(ActError::Runtime("'inputs.in' is empty".to_string()));
-        }
-
-        let result = ctx.eval::<Vec<String>>(scr)?;
-        if result.is_empty() {
-            return Err(ActError::Runtime(format!(
-                "'in' is empty in task({})",
-                ctx.task().id
-            )));
-        }
-        Ok(result)
-    }
-}
-
 inventory::submit!(ActPackageRegister::new::<SequencePackage>());
 
 #[cfg(test)]
@@ -83,7 +64,7 @@ mod tests {
     #[test]
     fn pack_sequence_parse() {
         let params = r#"
-        in: "[\"u1\", \"u2\"]"
+        in: ["u1", "u2"]
         acts:
             - uses: acts.core.irq
               params:

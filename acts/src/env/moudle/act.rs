@@ -1,11 +1,18 @@
 use super::super::ActModule;
-use crate::{ActError, Result};
+use crate::{ActError, Context, Result, Vars, env::value::ActValue};
 use rquickjs::{CatchResultExt, Module as JsModule};
 
 pub struct ActJsModule;
 impl ActJsModule {
     pub fn new() -> Self {
         Self
+    }
+
+    pub fn vars(&self) -> Option<Vars> {
+        if let Ok(ctx) = Context::current() {
+            return Some(ctx.task().vars());
+        }
+        None
     }
 }
 
@@ -55,22 +62,21 @@ mod act {
 impl ActModule for ActJsModule {
     fn init(&self, ctx: &rquickjs::Ctx<'_>) -> Result<()> {
         JsModule::declare_def::<js_act, _>(ctx.clone(), "@acts/act").unwrap();
+
+        if let Some(vars) = self.vars() {
+            for (key, value) in &vars {
+                ctx.globals().set(&key, ActValue::new(value))?;
+            }
+        }
+
         let source = r#"
         import { get_act_value, set_act_value, set_process_var, get_act_inputs, get_act_data } from '@acts/act';
-        globalThis.$ = (name, value) => {
-            if(value === undefined) {
-                return get_act_value(name);
-            }
-            set_act_value(name, value);
-        }
-       
-        globalThis.$act = {
-            get: get_act_value, 
-            set: set_act_value, 
-            set_process_var, 
-            inputs: get_act_inputs,
-            data: get_act_data, 
-        };
+
+        globalThis.$get = get_act_value;
+        globalThis.$set = set_act_value;
+        globalThis.$inputs = get_act_inputs;
+        globalThis.$data = get_act_data;
+        globalThis.$set_process_var = set_process_var;
         "#;
         let _ = JsModule::evaluate(ctx.clone(), "@acts/act", source)
             .catch(ctx)

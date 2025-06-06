@@ -301,10 +301,13 @@ impl Task {
             return self
                 .data()
                 .get::<serde_json::Value>(consts::ACT_PARAMS_CACHE)
-                .unwrap_or_default();
+                .unwrap_or(serde_json::Value::Null);
         }
         let ctx = self.create_context();
-        utils::fill_params(&self.node.content.params(), &ctx)
+        let value = utils::fill_params(&self.node.content.params(), &ctx);
+        self.set_data_with(|data| data.set(consts::ACT_PARAMS_CACHE, value.clone()));
+
+        value
     }
 
     pub fn set_prev(&self, prev: Option<String>) {
@@ -976,6 +979,16 @@ impl std::fmt::Debug for Task {
 impl Task {
     pub fn data(&self) -> Vars {
         self.data.read().unwrap().clone()
+    }
+
+    pub fn vars(&self) -> Vars {
+        let mut vars = self.data();
+        if let Some(parent) = self.parent() {
+            let data = parent.vars();
+            vars = vars.extend(data)
+        }
+
+        vars
     }
 
     pub fn with_data<T, F: Fn(&Vars) -> T>(&self, f: F) -> T {

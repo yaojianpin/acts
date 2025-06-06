@@ -9,7 +9,7 @@ setup:
     on: created
     key: fn1
     params:
-      a: ${ $("value") }
+      a: '{{ value }}'
   - uses: acts.core.msg
     on: step
     key: fn_on_step
@@ -41,7 +41,7 @@ steps:
             - uses: acts.core.msg
               key: fn4
               inputs:
-                a: ${ $("value") }
+                a: '{{ value }}'
 
   - name: step 4
     

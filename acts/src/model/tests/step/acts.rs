@@ -12,8 +12,10 @@ fn model_step_yml_acts() {
               params:
                 a: 5
             - uses: acts.core.msg
+              inputs:
+                a: 10
               params:
-                b: ${ $("5") }
+                b: '{{ a }}'
     "#;
     let m = Workflow::from_yml(text).unwrap();
     let step = m.steps.first().unwrap();

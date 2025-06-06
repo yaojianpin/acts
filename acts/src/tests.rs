@@ -131,12 +131,12 @@ async fn engine_model_create() {
                 .with_name("step1")
                 .with_branch(|branch| {
                     branch
-                        .with_if(r#"${ $("v") > 100 }"#)
+                        .with_if(r#"{{ v > 100 }}"#)
                         .with_step(|step| step.with_name("step3"))
                 })
                 .with_branch(|branch| {
                     branch
-                        .with_if(r#"${ $("v") <= 100 }"#)
+                        .with_if(r#"{{ v <= 100 }}"#)
                         .with_step(|step| step.with_name("step4"))
                 })
         })

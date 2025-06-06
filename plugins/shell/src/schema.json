@@ -1,0 +1,8 @@
+{
+    "type": "object",
+    "properties": {
+        "shell": { "type": "string", "enum": ["nu", "bash", "powershell"] },
+        "script": { "type": "string"},
+        "content-type": { "type": ["string", "null"], "enum": ["text", "json"]}
+    }
+}

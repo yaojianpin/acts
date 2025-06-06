@@ -5,15 +5,15 @@ inputs:
   index: 0
   value: 0
 outputs:
-  result: ${ $("value") }
+  result: '{{ value }}'
 steps:
   - name: init
     id: init
     acts:
       - uses: acts.transform.code
         params: |
-          $("value", 0);
-          $("index", 0);
+          $set("value", 0);
+          $set("index", 0);
 
   - name: cond
     id: cond
@@ -21,8 +21,6 @@ steps:
       - name: "<=input"
         id: "<=input"
         if: |
-          let index = $("index");
-          let input = $("input");
           index <= input
         steps:
           - name: add
@@ -31,14 +29,12 @@ steps:
             acts:
               - uses: acts.transform.code
                 params: |
-                  let index = $("index");
-                  let value = $("value");
-                  $("value", value + index);
-                  $("index", index + 1);
+                  $set("value", value + index);
+                  $set("index", index + 1);
 
       - name: ">input"
         id: ">input"
-        if: $("index") > $("input")
+        if: index > input
   - name: end
     id: end
     

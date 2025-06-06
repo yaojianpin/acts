@@ -144,7 +144,7 @@ async fn pack_irq_with_inputs_var() {
             .with_input("a", json!(5))
             .with_act(Act::irq(|act| {
                 act.with_key("act1")
-                    .with_params_vars(|vars| vars.with("a", r#"${ $("a") }"#))
+                    .with_params_vars(|vars| vars.with("a", r#"{{ a }}"#))
                     .with_id("act1")
             }))
     });

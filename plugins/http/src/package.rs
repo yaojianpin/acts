@@ -1,10 +1,12 @@
-use acts::{ActError, ActPackage, ActPackageCatalog, ActPackageMeta, ActRunAs, Result, Vars};
+use acts::{
+    ActError, ActPackage, ActPackageCatalog, ActPackageMeta, ActRunAs, Result, Vars, include_json,
+};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, InvalidHeaderValue};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value as JsonValue, json};
+use serde_json::Value as JsonValue;
 
-const RESPONSE_DATA_KEY: &str = "data";
+const DATA_KEY: &str = "data";
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub enum ContentType {
@@ -32,6 +34,12 @@ pub enum ContentType {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Pair {
+    pub key: String,
+    pub value: JsonValue,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HttpPackage {
     pub url: String,
     pub method: String,
@@ -39,9 +47,9 @@ pub struct HttpPackage {
     #[serde(rename(deserialize = "content-type"))]
     pub content_type: ContentType,
     #[serde(default)]
-    pub headers: Vars,
+    pub headers: Vec<Pair>,
     #[serde(default)]
-    pub params: Vars,
+    pub params: Vec<Pair>,
     pub body: Option<JsonValue>,
 }
 
@@ -53,10 +61,7 @@ impl ActPackage for HttpPackage {
             version: "0.1.0",
             icon: "icon-http",
             doc: "",
-            schema: json!({
-                "type": "object"
-
-            }),
+            schema: include_json!("./schema.json"),
             run_as: ActRunAs::Irq,
             resources: vec![],
             catalog: ActPackageCatalog::Core,
@@ -68,7 +73,7 @@ impl HttpPackage {
     pub fn create(inputs: &Vars) -> Result<Self> {
         let params = inputs
             .get::<serde_json::Value>("params")
-            .ok_or(ActError::Package("missing 'params' in inputs".to_string()))?;
+            .ok_or(ActError::Package("missing 'params' in package".to_string()))?;
 
         let package = serde_json::from_value::<Self>(params)?;
         Ok(package)
@@ -82,22 +87,22 @@ impl HttpPackage {
             HeaderValue::from_static("*/*"),
         );
 
-        for (k, v) in &self.headers {
+        for Pair { key, value } in &self.headers {
             headers.insert(
-                k.parse::<HeaderName>()
+                key.parse::<HeaderName>()
                     .map_err(|err| ActError::Runtime(err.to_string()))?,
-                v.to_string()
+                value
+                    .to_string()
                     .parse()
                     .map_err(|err: InvalidHeaderValue| ActError::Runtime(err.to_string()))?,
             );
         }
         let mut query = Vec::new();
-        for item in &self.params {
-            query.push(item);
+        for Pair { key, value } in &self.params {
+            query.push((key.clone(), value.clone()));
         }
 
         let c = reqwest::Client::new();
-
         let mut request = c
             .request(
                 self.method
@@ -111,9 +116,9 @@ impl HttpPackage {
         match self.content_type {
             ContentType::Text | ContentType::Html => {
                 if let Some(text) = &self.body {
-                    let data = text.as_str().ok_or(ActError::Package(format!(
-                        "content-type did not match the body content"
-                    )))?;
+                    let data = text.as_str().ok_or(ActError::Package(
+                        "content-type did not match the body content".to_string(),
+                    ))?;
                     request = request.body::<String>(data.to_string());
                 }
             }
@@ -125,17 +130,17 @@ impl HttpPackage {
             }
             ContentType::FormData | ContentType::UrlEncoded => {
                 if let Some(form) = &self.body {
-                    let data = form.as_object().ok_or(ActError::Package(format!(
-                        "content-type did not match the body content"
-                    )))?;
+                    let data = form.as_object().ok_or(ActError::Package(
+                        "content-type did not match the body content".to_string(),
+                    ))?;
                     request = request.form(data);
                 }
             }
             ContentType::Binary | ContentType::Image | ContentType::Video | ContentType::Audio => {
                 if let Some(value) = &self.body {
-                    let data = value.as_str().ok_or(ActError::Package(format!(
-                        "content-type did not match the body content"
-                    )))?;
+                    let data = value.as_str().ok_or(ActError::Package(
+                        "content-type did not match the body content".to_string(),
+                    ))?;
                     let data = STANDARD
                         .decode(data)
                         .map_err(|err| ActError::Package(err.to_string()))?;
@@ -162,13 +167,13 @@ impl HttpPackage {
         match response_type {
             ContentType::Text | ContentType::Html => {
                 ret.insert(
-                    RESPONSE_DATA_KEY.to_string(),
+                    DATA_KEY.to_string(),
                     res.text().await.map_err(map_package_err)?.into(),
                 );
             }
             ContentType::Json => {
                 ret.insert(
-                    RESPONSE_DATA_KEY.to_string(),
+                    DATA_KEY.to_string(),
                     res.json::<serde_json::Value>()
                         .await
                         .map_err(map_package_err)?,
@@ -177,14 +182,14 @@ impl HttpPackage {
             ContentType::Binary | ContentType::Image | ContentType::Video | ContentType::Audio => {
                 let data = res.bytes().await.map_err(map_package_err)?.to_vec();
                 let data = STANDARD.encode(&data);
-                ret.insert(RESPONSE_DATA_KEY.to_string(), data.into());
+                ret.insert(DATA_KEY.to_string(), data.into());
             }
             _ => {}
         }
         if !status.is_success() {
             return Err(ActError::Exception {
                 ecode: status.as_u16().to_string(),
-                message: ret.get(RESPONSE_DATA_KEY).unwrap_or(status.to_string()),
+                message: ret.get(DATA_KEY).unwrap_or(status.to_string()),
             });
         }
 
