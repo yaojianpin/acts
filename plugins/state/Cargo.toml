@@ -11,7 +11,7 @@ repository.workspace = true
 
 [dependencies]
 redis = { version = "0.31.0", default-features = false }
-acts = { version = "0.17.0", path = "../../acts" }
+acts = { path = "../../acts" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }

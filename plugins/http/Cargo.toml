@@ -2,14 +2,14 @@
 name = "acts-package-http"
 description = "acts package for http request"
 homepage = "https://docs.rs/acts-package-http"
-version = "0.17.0"
+version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true
 edition.workspace = true
 
 [dependencies]
-acts = { version = "0.17.0", path = "../../acts" }
+acts = { path = "../../acts" }
 async-trait = { workspace = true }
 base64 = "0.22.1"
 reqwest = { version = "0.12.18", features = ["blocking", "json"] }

@@ -141,3 +141,6 @@
 
 # 0.17.1
 - fix: fix examples/plugins build issue when exclude examples
+
+# 0.17.2
+- fix: add info.MessageInfo uses property
