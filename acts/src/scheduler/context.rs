@@ -9,7 +9,7 @@ use crate::{
     utils::{self, consts, shortid},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::{cell::RefCell, sync::Arc, vec};
+use std::{any::type_name, cell::RefCell, sync::Arc, vec};
 use tracing::debug;
 
 tokio::task_local! {
@@ -40,7 +40,6 @@ impl std::fmt::Debug for Context {
 
 impl Context {
     fn init_vars(&self, task: &Arc<Task>) {
-        // calculate previous task's outputs
         let inputs = task.inputs();
         debug!("init_vars: {inputs}");
 
@@ -119,7 +118,7 @@ impl Context {
     {
         // in context, the global env is not writable
         // just set the value to local env of the process
-        self.proc.with_env_local_mut(|data| {
+        self.proc.with_env_mut(|data| {
             data.set(name, value);
         });
     }
@@ -128,15 +127,20 @@ impl Context {
     where
         T: for<'de> Deserialize<'de> + Clone,
     {
-        // find the env from env local firstly
-        if let Some(v) = self.proc.with_env_local(|vars| vars.get(name)) {
+        // find the env from proc
+        if let Some(v) = self.proc.with_env(|vars| vars.get(name)) {
             return Some(v);
         }
 
-        // then get the value from global env
-        if let Some(v) = self.runtime.env().get(name) {
-            return Some(v);
+        // get from system env
+        if let Ok(v) = std::env::var(name) {
+            #[allow(clippy::expect_fun_call)]
+            return Some(T::deserialize(serde_json::json!(v)).expect(&format!(
+                "cannot convert env '{name} to {}",
+                type_name::<T>()
+            )));
         }
+
         None
     }
 

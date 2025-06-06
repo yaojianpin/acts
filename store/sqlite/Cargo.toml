@@ -1,16 +1,16 @@
 [package]
 name = "acts-store-sqlite"
-authors = ["Yao <yaojianpin@sohu.com>"]
 description = "acts store plugin for sqlite"
-keywords = ["workflow"]
-license = "Apache-2.0"
 homepage = "https://docs.rs/acts-store-sqlite"
-repository = "https://github.com/yaojianpin/acts.git"
-version = "0.16.1"
-edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+edition.workspace = true
+
 
 [dependencies]
-acts = { version = "0.16.0", path = "../../acts" }
+acts = { version = "0.17.0", path = "../../acts" }
 r2d2 = "0.8.10"
 r2d2_sqlite = { version = "0.25", features = ["bundled"] }
 rusqlite = { version = "0.32", features = ["bundled"] }

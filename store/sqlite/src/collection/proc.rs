@@ -26,7 +26,7 @@ enum CollectionIden {
     EndTime,
     Timestamp,
     Model,
-    EnvLocal,
+    Env,
     Err,
 }
 
@@ -62,7 +62,7 @@ impl DbCollection for ProcCollection {
                 CollectionIden::EndTime,
                 CollectionIden::Timestamp,
                 CollectionIden::Model,
-                CollectionIden::EnvLocal,
+                CollectionIden::Env,
                 CollectionIden::Err,
             ])
             .and_where(SeaExpr::col(CollectionIden::Id).eq(id))
@@ -96,7 +96,7 @@ impl DbCollection for ProcCollection {
                 CollectionIden::EndTime,
                 CollectionIden::Timestamp,
                 CollectionIden::Model,
-                CollectionIden::EnvLocal,
+                CollectionIden::Env,
                 CollectionIden::Err,
             ])
             .from(CollectionIden::Table);
@@ -157,7 +157,7 @@ impl DbCollection for ProcCollection {
                 CollectionIden::EndTime,
                 CollectionIden::Timestamp,
                 CollectionIden::Model,
-                CollectionIden::EnvLocal,
+                CollectionIden::Env,
                 CollectionIden::Err,
             ])
             .values([
@@ -169,7 +169,7 @@ impl DbCollection for ProcCollection {
                 data.end_time.into(),
                 data.timestamp.into(),
                 data.model.into(),
-                data.env_local.into(),
+                data.env.into(),
                 data.err.into(),
             ])
             .map_err(map_db_err)?
@@ -194,7 +194,7 @@ impl DbCollection for ProcCollection {
                 (CollectionIden::EndTime, model.end_time.into()),
                 (CollectionIden::Timestamp, model.timestamp.into()),
                 (CollectionIden::Model, model.model.into()),
-                (CollectionIden::EnvLocal, model.env_local.into()),
+                (CollectionIden::Env, model.env.into()),
                 (CollectionIden::Err, model.err.into()),
             ])
             .and_where(SeaExpr::col(CollectionIden::Id).eq(data.id()))
@@ -235,7 +235,7 @@ impl DbRow for data::Proc {
             mid: row.get_unwrap("mid"),
             name: row.get_unwrap("name"),
             model: row.get_unwrap("model"),
-            env_local: row.get_unwrap("name"),
+            env: row.get_unwrap("name"),
             err: row.get_unwrap("err"),
             start_time: row.get_unwrap("start_time"),
             end_time: row.get_unwrap("end_time"),
@@ -270,7 +270,7 @@ impl DbInit for ProcCollection {
                         .default(0),
                 )
                 .col(ColumnDef::new(CollectionIden::Model).string().not_null())
-                .col(ColumnDef::new(CollectionIden::EnvLocal).string().not_null())
+                .col(ColumnDef::new(CollectionIden::Env).string().not_null())
                 .col(ColumnDef::new(CollectionIden::Err).string())
                 .col(
                     ColumnDef::new(CollectionIden::Timestamp)

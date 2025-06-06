@@ -26,7 +26,9 @@ impl ActPackage for CodePackage {
 
 impl ActPackageFn for CodePackage {
     fn execute(&self, ctx: &Context) -> Result<Option<Vars>> {
-        let outputs = ctx.eval::<serde_json::Value>(&self.0)?;
+        // wrap the code into a function to support return synax
+        let func = format!(r#"(()=>{{ {} }})()"#, self.0);
+        let outputs = ctx.eval::<serde_json::Value>(&func)?;
         let mut ret = None;
         if let serde_json::Value::Object(map) = outputs {
             ret = Some(Vars::from(map));

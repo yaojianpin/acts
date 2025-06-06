@@ -90,12 +90,6 @@ fn model_step_tag() {
 }
 
 #[test]
-fn model_step_run() {
-    let step = Step::new().with_run(r#"print("run")"#);
-    assert!(step.run.is_some());
-}
-
-#[test]
 fn model_step_next() {
     let mut step = Step::new();
     assert!(step.next.is_none());

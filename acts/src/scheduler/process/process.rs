@@ -26,7 +26,7 @@ pub struct Process {
     err: ShareLock<Option<Error>>,
     end_time: ShareLock<i64>,
     timestamp: i64,
-    env_local: ShareLock<Vars>,
+    env: ShareLock<Vars>,
     runtime: Arc<Runtime>,
 }
 
@@ -37,6 +37,7 @@ impl fmt::Debug for Process {
             .field("mid", &self.model().id)
             .field("state", &self.state())
             .field("err", &self.err())
+            .field("env", &self.env())
             .field("start_time", &self.start_time())
             .field("end_time", &self.end_time())
             .field("timestamp", &self.timestamp)
@@ -60,7 +61,7 @@ impl Process {
             tasks: Arc::new(RwLock::new(TaskTree::new())),
             // sync: Arc::new(std::sync::Mutex::new(0)),
             timestamp,
-            env_local: Arc::new(RwLock::new(Vars::new())),
+            env: Arc::new(RwLock::new(Vars::new())),
             err: Arc::new(RwLock::new(None)),
             runtime: rt.clone(),
         })
@@ -121,22 +122,22 @@ impl Process {
         self.timestamp
     }
 
-    pub fn env_local(&self) -> Vars {
-        let env_local = self.env_local.read().unwrap();
-        env_local.clone()
+    pub fn env(&self) -> Vars {
+        let env = self.env.read().unwrap();
+        env.clone()
     }
 
-    pub fn with_env_local<T, F: FnOnce(&Vars) -> T>(&self, f: F) -> T
+    pub fn with_env<T, F: FnOnce(&Vars) -> T>(&self, f: F) -> T
     where
         T: for<'de> Deserialize<'de> + Clone,
     {
-        let local = self.env_local.read().unwrap();
-        f(&local)
+        let env = self.env.read().unwrap();
+        f(&env)
     }
 
-    pub fn with_env_local_mut<F: FnOnce(&mut Vars)>(&self, f: F) {
-        let mut local = self.env_local.write().unwrap();
-        f(&mut local)
+    pub fn with_env_mut<F: FnOnce(&mut Vars)>(&self, f: F) {
+        let mut env = self.env.write().unwrap();
+        f(&mut env)
     }
 
     pub fn outputs(&self) -> Vars {
@@ -251,8 +252,8 @@ impl Process {
         *self.err.write().unwrap() = Some(err.clone());
     }
 
-    pub(crate) fn set_env_local(&self, value: &Vars) {
-        *self.env_local.write().unwrap() = value.clone();
+    pub(crate) fn set_env(&self, value: &Vars) {
+        *self.env.write().unwrap() = value.clone();
     }
 
     pub(crate) fn do_tick(&self) {
@@ -471,7 +472,7 @@ impl Process {
             start_time: self.start_time(),
             end_time: self.end_time(),
             timestamp: self.timestamp(),
-            env_local: self.env_local().to_string(),
+            env: self.env().to_string(),
             err: self.err().map(|err| err.to_string()),
         })
     }

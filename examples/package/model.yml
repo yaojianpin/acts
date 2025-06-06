@@ -1,7 +1,7 @@
 id: pack_example
 # global input variable will be set when the process is starting
 outputs:
-  result: ${  $("input")  }
+  result: '{{ input }}'
 steps:
   - name: step 1
     id: step1
@@ -10,14 +10,14 @@ steps:
         params:
           # set the inputs variable from global 'input'
           # the input variable will be set when the process is starting
-          v1: ${ $("input") }
+          v1: '{{ input }}'
   - name: step 2
     id: step2
     acts:
         # use pack2
       - uses: pack2
         params:
-          a: ${ $("input") }
+          a: '{{ input }}'
           b: [ "a", "b" ]
 
 

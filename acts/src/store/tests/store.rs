@@ -370,7 +370,7 @@ async fn store_proc_query_by_id() {
         end_time: 0,
         timestamp: utils::time::timestamp(),
         model: "{}".to_string(),
-        env_local: "{}".to_string(),
+        env: "{}".to_string(),
         err: None,
     };
 
@@ -394,7 +394,7 @@ async fn store_proc_query_by_offset_count() {
             end_time: 0,
             timestamp: utils::time::timestamp(),
             model: "{}".to_string(),
-            env_local: "{}".to_string(),
+            env: "{}".to_string(),
             err: None,
         };
         store.procs().create(&proc).expect("create process");
@@ -431,7 +431,7 @@ async fn store_proc_query_by_cond_and() {
             end_time: 0,
             timestamp: utils::time::timestamp(),
             model: "{}".to_string(),
-            env_local: "{}".to_string(),
+            env: "{}".to_string(),
             err: None,
         };
         store.procs().create(&proc).expect("create process");
@@ -468,7 +468,7 @@ async fn store_proc_query_by_cond_or() {
             end_time: 0,
             timestamp: utils::time::timestamp(),
             model: "{}".to_string(),
-            env_local: "{}".to_string(),
+            env: "{}".to_string(),
             err: None,
         };
         store.procs().create(&proc).expect("create process");
@@ -484,7 +484,7 @@ async fn store_proc_query_by_cond_or() {
             end_time: 0,
             timestamp: utils::time::timestamp(),
             model: "{}".to_string(),
-            env_local: "{}".to_string(),
+            env: "{}".to_string(),
             err: None,
         };
         store.procs().create(&proc).expect("create process");
@@ -517,7 +517,7 @@ async fn store_proc_query_by_order() {
             end_time: 0,
             timestamp: utils::time::timestamp(),
             model: "{}".to_string(),
-            env_local: "{}".to_string(),
+            env: "{}".to_string(),
             err: None,
         };
         store.procs().create(&proc).expect("create process");
@@ -1304,7 +1304,7 @@ async fn store_package_create() {
         version: "0.1.0".to_string(),
         schema: "{}".to_string(),
         run_as: crate::ActRunAs::Func,
-        groups: "[]".to_string(),
+        resources: "[]".to_string(),
         catalog: crate::package::ActPackageCatalog::Core,
         create_time: 0,
         update_time: 0,
@@ -1330,7 +1330,7 @@ async fn store_package_query_by_id() {
         version: "0.1.0".to_string(),
         schema: "{}".to_string(),
         run_as: crate::ActRunAs::Func,
-        groups: "[]".to_string(),
+        resources: "[]".to_string(),
         catalog: crate::package::ActPackageCatalog::Core,
         create_time: 0,
         update_time: 0,
@@ -1355,7 +1355,7 @@ async fn store_package_query_by_offset_count() {
             version: "0.1.0".to_string(),
             schema: "{}".to_string(),
             run_as: crate::ActRunAs::Func,
-            groups: "[]".to_string(),
+            resources: "[]".to_string(),
             catalog: crate::package::ActPackageCatalog::Core,
             create_time: 100,
             update_time: 0,
@@ -1394,7 +1394,7 @@ async fn store_package_query_by_cond_and() {
             version: "0.1.0".to_string(),
             schema: "{}".to_string(),
             run_as: crate::ActRunAs::Func,
-            groups: "[]".to_string(),
+            resources: "[]".to_string(),
             catalog: crate::package::ActPackageCatalog::Core,
             create_time: 200,
             update_time: 100,
@@ -1435,7 +1435,7 @@ async fn store_package_query_by_cond_or() {
             version: "0.1.0".to_string(),
             schema: "{}".to_string(),
             run_as: crate::ActRunAs::Func,
-            groups: "[]".to_string(),
+            resources: "[]".to_string(),
             catalog: crate::package::ActPackageCatalog::Core,
             create_time: 300,
             update_time: 0,
@@ -1454,7 +1454,7 @@ async fn store_package_query_by_cond_or() {
             version: "0.2.0".to_string(),
             schema: "{}".to_string(),
             run_as: crate::ActRunAs::Func,
-            groups: "[]".to_string(),
+            resources: "[]".to_string(),
             catalog: crate::package::ActPackageCatalog::Core,
             create_time: 300,
             update_time: 0,
@@ -1489,7 +1489,7 @@ async fn store_package_query_by_order() {
             version: "0.1.0".to_string(),
             schema: "{}".to_string(),
             run_as: crate::ActRunAs::Func,
-            groups: "[]".to_string(),
+            resources: "[]".to_string(),
             catalog: crate::package::ActPackageCatalog::Core,
             create_time: 400,
             update_time: 0,
@@ -1533,7 +1533,7 @@ async fn store_package_update() {
         version: "0.1.0".to_string(),
         schema: "{}".to_string(),
         run_as: crate::ActRunAs::Func,
-        groups: "[]".to_string(),
+        resources: "[]".to_string(),
         catalog: crate::package::ActPackageCatalog::Core,
         create_time: 0,
         update_time: 0,
@@ -1564,7 +1564,7 @@ async fn store_package_remove() {
         version: "0.1.0".to_string(),
         schema: "{}".to_string(),
         run_as: crate::ActRunAs::Func,
-        groups: "[]".to_string(),
+        resources: "[]".to_string(),
         catalog: crate::package::ActPackageCatalog::Core,
         create_time: 0,
         update_time: 0,
@@ -1594,7 +1594,7 @@ fn create_proc(id: &str, state: TaskState, model: &Workflow) -> Proc {
         end_time: 0,
         timestamp: utils::time::timestamp(),
         model: model.to_json().unwrap(),
-        env_local: "{}".to_string(),
+        env: "{}".to_string(),
         err: None,
     }
 }

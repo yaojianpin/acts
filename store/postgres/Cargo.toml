@@ -1,16 +1,16 @@
 [package]
 name = "acts-store-postgres"
-authors = ["Yao <yaojianpin@sohu.com>"]
 description = "acts store plugin for postgres"
-keywords = ["workflow"]
-license = "Apache-2.0"
 homepage = "https://docs.rs/acts-store-postgres"
-repository = "https://github.com/yaojianpin/acts.git"
-version = "0.16.1"
-edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+edition.workspace = true
+
 
 [dependencies]
-acts = { version = "0.16.0", path = "../../acts" }
+acts = { version = "0.17.0", path = "../../acts" }
 futures = "0.3.31"
 sea-query = { version = "0.32.4" }
 sqlx = { version = "0.8.5", features = ["postgres", "runtime-tokio"] }

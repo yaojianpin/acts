@@ -115,3 +115,29 @@
 - feat: add workflow.on events (manual, hook, chat)
 - feat: add acts-state package to support get or set state
 - feat: change the directory structure with acts, plugins, examples, benches, config
+
+# 0.17.0
+- feat: reactoring env module to add register_var trait
+- feat: add "resects" user var to support get resects data from task context
+- feat: add step env module to support get step vars by step id
+- feat: change env var to $env
+- feat: rename proc env_local to env
+- feat: change event package params to Option<T>
+- feat: skip initialization of plugin when there is no related section
+- feat: add `acts.core.http` package plugin
+- feat: add `pid` prefix to the acts.app.state package
+- feat: support private vars (starts with `__`)
+- feat: use `acts.toml` instead of `acts.cfg`
+- feat: add `env.expose` in workflow to support set default outputs, the default outputs is `data`
+- feat: add `acts.app.shell` package plugin to support nushell, bash and powershell
+        support {{ }} refs the var in shell script
+- feat: add `os` var in expression
+- feat: use {{ }} for expression instead of ${ }
+- feat: use var name directly in script or expression instead of $("var")
+        use $get("var") instead of $("var")
+        use $set("var", value) instead of $("var", value)
+        use $inputs() instead of $act.inputs()
+        use $data() instead of $act.data()
+
+# 0.17.1
+- fix: fix examples/plugins build issue when exclude examples

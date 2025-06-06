@@ -1,0 +1,32 @@
+name: shell example
+id: shell-example
+inputs:
+  my_input:  "hello, world"
+steps:
+  - name: shell step
+    acts:
+      - uses: acts.app.shell
+        params:
+          shell: nu
+          content-type: json
+          # nushell can run on all os
+          script: |
+            let data = "{{ my_input }}"
+            $data | split row ',' | each { |it| $it | str trim  } | to json
+
+      - uses: acts.app.shell
+        # execute in different os
+        if: os == "linux"
+        params:
+          shell: bash
+          script: |
+            echo "bash"
+
+      # run powershell
+      # - uses: acts.app.shell
+      #   if: os == "windows"
+      #   params:
+      #     shell: powershell
+      #     script: |
+      #       echo "powershell"
+

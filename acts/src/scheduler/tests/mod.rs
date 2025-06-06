@@ -10,7 +10,7 @@ mod vars;
 mod workflow;
 
 use super::{Process, Runtime};
-use crate::{ConfigData, Engine, EngineBuilder, Signal, Workflow, export::Channel};
+use crate::{Engine, EngineBuilder, Signal, Workflow, config::ConfigData, export::Channel};
 use std::sync::Arc;
 
 fn create_proc(workflow: &mut Workflow, pid: &str) -> (Arc<Process>, Arc<Runtime>, Arc<Channel>) {

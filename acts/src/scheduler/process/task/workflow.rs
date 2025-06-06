@@ -2,9 +2,9 @@ use crate::{ActTask, Result, TaskState, Workflow, scheduler::Context};
 
 impl ActTask for Workflow {
     fn init(&self, ctx: &Context) -> Result<()> {
-        // set the env to process env local
+        // init process env
         if !self.env.is_empty() {
-            ctx.proc.with_env_local_mut(|data| {
+            ctx.proc.with_env_mut(|data| {
                 for (k, v) in self.env.iter() {
                     data.set(k, v.clone());
                 }
@@ -14,9 +14,6 @@ impl ActTask for Workflow {
         // run setup
         if !self.setup.is_empty() {
             ctx.dispatch_acts(self.setup.clone(), true)?;
-            // for s in &self.setup {
-            //     s.exec(ctx)?;
-            // }
         }
         Ok(())
     }

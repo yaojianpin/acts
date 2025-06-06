@@ -91,7 +91,7 @@ async fn pack_action_submit_auto() {
                     "is_auto_submit": true
                 }),
             ))
-            .with_if(r#"$("is_auto_submit") == null"#),
+            .with_if(r#"$get("is_auto_submit") == null"#),
         )
     });
 

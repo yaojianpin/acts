@@ -11,7 +11,7 @@ async fn sch_act_chain_list() {
     let mut main = Workflow::new().with_id("main").with_step(|step| {
         step.with_id("step1").with_act({
             Act::sequence(json!({
-                "in": r#"["u1", "u2"]"#,
+                "in": ["u1", "u2"],
                 "acts": vec![
                     Act::irq(|act| act.with_key("act1"))
                 ]
@@ -45,7 +45,7 @@ async fn sch_act_chain_order() {
     let mut main = Workflow::new().with_id("main").with_step(|step| {
         step.with_id("step1").with_act({
             Act::sequence(json!({
-                "in": r#"["u1", "u2"]"#,
+                "in": ["u1", "u2"],
                 "acts": vec![
                     Act::irq(|act| act.with_key("act1"))
                 ]
@@ -80,7 +80,7 @@ async fn sch_act_chain_var() {
         step.with_id("step1")
             .with_act(Act::set(Vars::new().with("a", ["u1", "u2"])))
             .with_act(Act::sequence(json!({
-                "in": r#"$("a")"#,
+                "in": r#"{{ a }}"#,
                 "acts": vec![
                     Act::irq(|act| act.with_key("act1"))
                 ]

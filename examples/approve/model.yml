@@ -25,7 +25,7 @@ steps:
       # and parallel run multiple acts
       - uses: acts.core.parallel
         params:
-          in: $("pm")
+          in: '{{ pm }}'
           acts:
             - uses: acts.core.irq
               key: pm_act
@@ -45,7 +45,7 @@ steps:
       # parallel generate multiple acts
       - uses: acts.core.parallel
         params:
-          in: $("gm")
+          in: '{{ gm }}'
           acts:
             - uses: acts.core.msg
               key: gm_act_msg

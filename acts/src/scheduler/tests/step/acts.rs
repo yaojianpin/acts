@@ -110,7 +110,7 @@ async fn sch_step_acts_if_true() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_input("a", json!(10))
             .with_id("step1")
-            .with_act(Act::irq(|act| act.with_if(r#"$("a") > 0"#).with_key("act1")).with_id("act1"))
+            .with_act(Act::irq(|act| act.with_if(r#"a > 0"#).with_key("act1")).with_id("act1"))
     });
 
     workflow.print();
@@ -135,7 +135,7 @@ async fn sch_step_acts_if_false() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_input("a", json!(10))
             .with_id("step1")
-            .with_act(Act::irq(|act| act.with_if(r#"$("a") < 0"#).with_key("act1")).with_id("act1"))
+            .with_act(Act::irq(|act| act.with_if(r#"a < 0"#).with_key("act1")).with_id("act1"))
     });
 
     workflow.print();

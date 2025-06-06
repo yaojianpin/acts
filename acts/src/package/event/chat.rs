@@ -10,7 +10,7 @@ use serde_json::json;
 use std::sync::Arc;
 
 #[derive(Debug, Clone, Serialize)]
-pub struct ManualEventPackage(String);
+pub struct ManualEventPackage(Option<String>);
 
 impl ActPackage for ManualEventPackage {
     fn meta() -> ActPackageMeta {
@@ -28,8 +28,13 @@ impl ActPackage for ManualEventPackage {
     }
 }
 
+#[async_trait::async_trait]
 impl ActPackageFn for ManualEventPackage {
-    fn start(&self, rt: &Arc<crate::scheduler::Runtime>, options: &Vars) -> Result<Option<Vars>> {
+    async fn start(
+        &self,
+        rt: &Arc<crate::scheduler::Runtime>,
+        options: &Vars,
+    ) -> Result<Option<Vars>> {
         let mid = options
             .get::<String>(consts::MODEL_ID)
             .ok_or(ActError::Runtime(format!(
@@ -39,8 +44,11 @@ impl ActPackageFn for ManualEventPackage {
         let model: ModelInfo = rt.cache().store().models().find(&mid)?.into();
         let workflow = model.workflow()?;
 
-        let options = options.clone().with(consts::ACT_INPUT_DATA, self.0.clone());
-        let ret = rt.start(&workflow, &options)?;
+        let mut params = Vars::new();
+        if let Some(ref v) = self.0 {
+            params.insert(consts::ACT_DATA.to_string(), json!(v));
+        }
+        let ret = rt.start(&workflow, &params)?;
 
         Ok(Some(Vars::new().with(consts::PROCESS_ID, ret.id())))
     }
@@ -51,7 +59,7 @@ impl<'de> serde::de::Deserialize<'de> for ManualEventPackage {
     where
         D: serde::Deserializer<'de>,
     {
-        let value = String::deserialize(deserializer)?;
+        let value = Option::<String>::deserialize(deserializer)?;
         Ok(Self(value))
     }
 }

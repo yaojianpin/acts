@@ -3,7 +3,7 @@ id: actions
 inputs:
   v: 0
 outputs:
-  result: ${ $("v")}
+  result: '{{ v }}'
 steps:
   - name: prepare
     id: prepare
@@ -15,7 +15,7 @@ steps:
     branches:
       - name: cond 1
         id: cond1
-        if: $("v") > 0
+        if: v > 0
         steps:
           - name: step1
             id: step1
@@ -23,14 +23,14 @@ steps:
               - uses: acts.core.irq
                 key: action1
                 params:
-                  v: ${ $("v") }
+                  v: '{{ v }}'
           - name: step2
             id: step2
             acts:
               - uses: acts.core.irq
                 key: action2
                 params:
-                  v: ${ $("v") }        
+                  v: '{{ v }}'      
       - name: cond 2
         id: cond2
         else: true
@@ -46,6 +46,6 @@ steps:
       - uses: acts.core.irq
         key: action4
         params:
-          v: ${ $("v") }
+          v: '{{ v }}'
   
 

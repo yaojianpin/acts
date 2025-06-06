@@ -1,5 +1,5 @@
 #[derive(serde::Deserialize)]
 pub struct StateConfig {
     // redis uri
-    pub uri: String,
+    pub database_uri: String,
 }

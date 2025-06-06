@@ -5,7 +5,7 @@ The acts sqlite store plugin for acts.
 ## Installation
 
 
-create `acts.cfg` in current dir
+create `config/acts.cfg` in current dir
 ```no_compile
 sqlite {
     database_url: "sqlite://<your file path>"

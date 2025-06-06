@@ -24,15 +24,19 @@ async fn main() {
             "my-event-model:event-manual",
             &Vars::new().with("result", 0).into(),
         )
-        .unwrap();
+        .await;
     println!("event-manual: {ret:?}");
-    let ret = executor.evt().start(
-        "my-event-model:event-hook",
-        &Vars::new().with("var1", 10).with("var2", "hello").into(),
-    );
+    let ret = executor
+        .evt()
+        .start(
+            "my-event-model:event-hook",
+            &Vars::new().with("var1", 10).with("var2", "hello").into(),
+        )
+        .await;
     println!("event-hook: {ret:?}");
     let ret = executor
         .evt()
-        .start("my-event-model:event-chat", &"hello world".into());
+        .start("my-event-model:event-chat", &"hello world".into())
+        .await;
     println!("event-chat: {ret:?}");
 }

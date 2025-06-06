@@ -66,7 +66,7 @@ impl<'de> serde::de::Deserialize<'de> for StatePackage {
 }
 
 impl StatePackage {
-    pub fn run(&self, client: &redis::Client) -> Result<Vars> {
+    pub fn run(&self, client: &redis::Client, pid: &str) -> Result<Vars> {
         let mut conn = client.get_connection().map_err(|err| {
             ActError::Package(format!("error happend to get connection: {}", err))
         })?;
@@ -79,7 +79,7 @@ impl StatePackage {
                     .to_string();
 
                 let ret = redis::cmd("GET")
-                    .arg(&key)
+                    .arg(format!("{pid}:{key}"))
                     .query::<String>(&mut conn)
                     .map_err(|err| {
                         ActError::Package(format!("error happend to set value: {}", err))
@@ -112,7 +112,7 @@ impl StatePackage {
                 })?;
 
                 redis::cmd("SET")
-                    .arg(&key)
+                    .arg(format!("{pid}:{key}"))
                     .arg(v.as_str())
                     .query::<String>(&mut conn)
                     .map_err(|err| {

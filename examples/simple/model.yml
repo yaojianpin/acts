@@ -5,35 +5,36 @@ inputs:
   index: 0
   value: 0
 outputs:
-  result: ${ $("value") }
+  result: '{{ value }}'
 steps:
   - name: init
     id: init
-    run: |
-      $("value", 0);
-      $("index", 0);
+    acts:
+      - uses: acts.transform.code
+        params: |
+          $set("value", 0);
+          $set("index", 0);
+
   - name: cond
     id: cond
     branches:
       - name: "<=input"
         id: "<=input"
         if: |
-          let index = $("index");
-          let input = $("input");
           index <= input
         steps:
           - name: add
             id: add
             next: cond
-            run: |
-              let index = $("index");
-              let value = $("value");
-              $("value", value + index);
-              $("index", index + 1);
+            acts:
+              - uses: acts.transform.code
+                params: |
+                  $set("value", value + index);
+                  $set("index", index + 1);
 
       - name: ">input"
         id: ">input"
-        if: $("index") > $("input")
+        if: index > input
   - name: end
     id: end
     

@@ -6,16 +6,42 @@ use std::sync::Arc;
 pub fn fill_params(params: &JsonValue, ctx: &Context) -> JsonValue {
     match params {
         JsonValue::String(value) => {
-            if let Some(expr) = get_expr(value) {
-                let result = Context::scope(ctx.clone(), move || {
-                    ctx.runtime.env().eval::<JsonValue>(&expr)
-                });
-                let new_value = result.unwrap_or_else(|err| {
-                    eprintln!("fill_inputs: expr:{value}, err={err}");
-                    JsonValue::Null
-                });
-                return new_value;
+            let exprs = get_exprs(value);
+            if !exprs.is_empty() {
+                let mut value = value.clone();
+                for (range, expr) in &exprs {
+                    let result = Context::scope(ctx.clone(), move || {
+                        ctx.runtime.env().eval::<JsonValue>(expr)
+                    })
+                    .unwrap_or_else(|err| {
+                        eprintln!("fill_params: expr:{value}, err={err}");
+                        JsonValue::Null
+                    });
+                    // just return json for only one express
+                    if range.start == 0 && range.end == value.len() {
+                        return result;
+                    }
+
+                    match result {
+                        JsonValue::Bool(v) => {
+                            value = value.replace(expr, &v.to_string());
+                        }
+                        JsonValue::Number(v) => {
+                            value = value.replace(expr, &v.to_string());
+                        }
+                        JsonValue::String(v) => {
+                            value = value.replace(expr, &v);
+                        }
+                        v => {
+                            value = value.replace(expr, &v.to_string());
+                        }
+                    }
+                }
+                // return string json for multiple expressions
+                return JsonValue::String(value);
             }
+
+            // return params itself for no expression
             params.clone()
         }
         JsonValue::Array(values) => {
@@ -42,13 +68,13 @@ pub fn fill_params(params: &JsonValue, ctx: &Context) -> JsonValue {
 pub fn fill_inputs(inputs: &Vars, ctx: &Context) -> Vars {
     let mut ret = Vars::new();
     for (k, ref v) in inputs {
-        if let JsonValue::String(string) = v {
-            if let Some(expr) = get_expr(string) {
+        if let JsonValue::String(value) = v {
+            if let Some(expr) = get_expr(value) {
                 let result = Context::scope(ctx.clone(), move || {
                     ctx.runtime.env().eval::<JsonValue>(&expr)
                 });
                 let new_value = result.unwrap_or_else(|err| {
-                    eprintln!("fill_inputs: expr:{string}, err={err}");
+                    eprintln!("fill_inputs: expr:{value}, err={err}");
                     JsonValue::Null
                 });
 
@@ -131,7 +157,7 @@ pub fn fill_proc_vars(task: &Arc<Task>, values: &Vars, ctx: &Context) -> Vars {
 }
 
 pub fn get_expr(text: &str) -> Option<String> {
-    let re = Regex::new(r"^\$\{(.+)\}$").unwrap();
+    let re = Regex::new(r"^\{\{(.+)\}\}$").unwrap();
     let caps = re.captures(text);
 
     if let Some(caps) = caps {
@@ -140,4 +166,11 @@ pub fn get_expr(text: &str) -> Option<String> {
     }
 
     None
+}
+
+pub fn get_exprs(text: &str) -> Vec<(core::ops::Range<usize>, String)> {
+    let re = Regex::new(r"\{\{(.*)\}\}").unwrap();
+    re.find_iter(text)
+        .map(|cap| (cap.range(), cap.as_str().to_string()))
+        .collect()
 }

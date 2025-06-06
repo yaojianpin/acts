@@ -142,7 +142,7 @@ async fn sch_act_irq_with_inputs_value() {
 async fn sch_act_irq_with_inputs_var() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_input("a", json!(5)).with_act(
-            Act::irq(|act| act.with_key("act1").with_input("a", r#"${ $("a") }"#)).with_id("act1"),
+            Act::irq(|act| act.with_key("act1").with_input("a", r#"{{ a }}"#)).with_id("act1"),
         )
     });
 

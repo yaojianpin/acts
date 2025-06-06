@@ -132,7 +132,7 @@ async fn store_mem_proc_create() {
         end_time: 0,
         timestamp: 0,
         model: "".to_string(),
-        env_local: "".to_string(),
+        env: "".to_string(),
         err: None,
     };
     store.procs().create(&proc).unwrap();
@@ -152,7 +152,7 @@ async fn store_mem_proc_find() {
         end_time: 0,
         timestamp: 0,
         model: "".to_string(),
-        env_local: "".to_string(),
+        env: "".to_string(),
         err: None,
     };
     store.procs().create(&proc).unwrap();
@@ -174,7 +174,7 @@ async fn store_mem_proc_query() {
             end_time: 0,
             timestamp: 0,
             model: "".to_string(),
-            env_local: "".to_string(),
+            env: "".to_string(),
             err: None,
         };
         procs.create(&proc).unwrap();
@@ -203,7 +203,7 @@ async fn store_mem_proc_update() {
         end_time: 0,
         timestamp: 0,
         model: "".to_string(),
-        env_local: "".to_string(),
+        env: "".to_string(),
         err: None,
     };
     store.procs().create(&proc).unwrap();
@@ -227,7 +227,7 @@ async fn store_mem_proc_delete() {
         end_time: 0,
         timestamp: 0,
         model: "".to_string(),
-        env_local: "".to_string(),
+        env: "".to_string(),
         err: None,
     };
     store.procs().create(&proc).unwrap();
@@ -552,7 +552,7 @@ async fn store_mem_package_create() {
         version: "0.1.0".to_string(),
         schema: "{}".to_string(),
         run_as: crate::ActRunAs::Func,
-        groups: "[]".to_string(),
+        resources: "[]".to_string(),
         catalog: crate::package::ActPackageCatalog::Core,
         create_time: 0,
         update_time: 0,
@@ -578,7 +578,7 @@ async fn store_mem_package_query() {
         version: "0.1.0".to_string(),
         schema: "{}".to_string(),
         run_as: crate::ActRunAs::Func,
-        groups: "[]".to_string(),
+        resources: "[]".to_string(),
         catalog: crate::package::ActPackageCatalog::Core,
         create_time: 0,
         update_time: 0,
@@ -604,7 +604,7 @@ async fn store_mem_package_update() {
         version: "0.1.0".to_string(),
         schema: "{}".to_string(),
         run_as: crate::ActRunAs::Func,
-        groups: "[]".to_string(),
+        resources: "[]".to_string(),
         catalog: crate::package::ActPackageCatalog::Core,
         create_time: 0,
         update_time: 0,
@@ -637,7 +637,7 @@ async fn store_mem_package_remove() {
         version: "0.1.0".to_string(),
         schema: "{}".to_string(),
         run_as: crate::ActRunAs::Func,
-        groups: "[]".to_string(),
+        resources: "[]".to_string(),
         catalog: crate::package::ActPackageCatalog::Core,
         create_time: 0,
         update_time: 0,

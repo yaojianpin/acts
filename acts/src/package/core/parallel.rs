@@ -1,17 +1,17 @@
 use super::super::core::{BlockPackage, RunningMode};
 use crate::{
-    Act, ActError, Context, Result, Vars,
+    Act, Context, Result, Vars,
     package::{
         ActPackage, ActPackageCatalog, ActPackageFn, ActPackageMeta, ActPackageRegister, ActRunAs,
     },
     utils::consts,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value as JsonValue, json};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ParallelPackage {
-    r#in: String,
+    r#in: Vec<JsonValue>,
     acts: Vec<Act>,
 }
 
@@ -33,10 +33,8 @@ impl ActPackage for ParallelPackage {
 
 impl ActPackageFn for ParallelPackage {
     fn execute(&self, ctx: &Context) -> Result<Option<Vars>> {
-        let list = self.parse(ctx, &self.r#in)?;
-
         let mut acts = Vec::new();
-        for (index, value) in list.iter().enumerate() {
+        for (index, value) in self.r#in.iter().enumerate() {
             let params = serde_json::to_value(BlockPackage {
                 mode: RunningMode::Sequence,
                 acts: self.acts.clone(),
@@ -56,23 +54,6 @@ impl ActPackageFn for ParallelPackage {
     }
 }
 
-impl ParallelPackage {
-    pub fn parse(&self, ctx: &Context, scr: &str) -> Result<Vec<String>> {
-        if scr.is_empty() {
-            return Err(ActError::Runtime("'inputs.in' is empty".to_string()));
-        }
-
-        let result = ctx.eval::<Vec<String>>(scr)?;
-        if result.is_empty() {
-            return Err(ActError::Runtime(format!(
-                "'in' is empty in task({})",
-                ctx.task().id
-            )));
-        }
-        Ok(result)
-    }
-}
-
 inventory::submit!(ActPackageRegister::new::<ParallelPackage>());
 
 #[cfg(test)]
@@ -82,7 +63,7 @@ mod tests {
     #[test]
     fn pack_parallel_parse() {
         let params = r#"
-            in: "[\"u1\", \"u2\"]"
+            in: ["u1", "u2"]
             acts:
                 - uses: acts.core.irq
                   params:

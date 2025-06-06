@@ -4,7 +4,7 @@ The acts postgres plugin for acts.
 
 ## Installation
 
-create `acts.cfg` in current dir
+create `config/acts.cfg` in current dir
 ```no_compile
 postgres {
     database_url: "postgresql://<your connection string>"

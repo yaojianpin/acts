@@ -3,18 +3,18 @@ use rquickjs::{JsLifetime, class::Trace};
 
 #[derive(Trace, Clone, JsLifetime)]
 #[rquickjs::class]
-pub struct Console {}
+pub struct ConsoleModule {}
 
-impl Default for Console {
+impl Default for ConsoleModule {
     fn default() -> Self {
         Self::new()
     }
 }
 
 #[rquickjs::methods]
-impl Console {
+impl ConsoleModule {
     pub fn new() -> Self {
-        Console {}
+        ConsoleModule {}
     }
 
     fn log(&self, message: String) {
@@ -34,7 +34,7 @@ impl Console {
     }
 }
 
-impl ActModule for Console {
+impl ActModule for ConsoleModule {
     fn init(&self, ctx: &rquickjs::Ctx<'_>) -> Result<()> {
         ctx.globals().set("console", self.clone())?;
 

@@ -14,7 +14,7 @@ async fn pack_parallel_setup_list() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_setup(|setup| {
             setup.add(Act::parallel(json!({
-                "in": r#"["u1", "u2"]"#,
+                "in": ["u1", "u2"],
                 "acts": vec![
                     Act::irq(|act| act.with_key("act1").with_id("act1"))
                 ]
@@ -54,7 +54,7 @@ async fn pack_parallel_var_exist() {
         step.with_id("step1")
             .with_act(Act::set(Vars::new().with("a", ["u1", "u2"])))
             .with_act(Act::parallel(json!({
-                "in": r#"$("a")"#,
+                "in": r#"{{ a }}"#,
                 "acts": vec![
                     Act::irq(|act| act.with_key("act1").with_id("act1"))
                 ]
@@ -119,15 +119,7 @@ async fn pack_parallel_setup_code() {
             setup
                 .add(Act::set(Vars::new().with("a", ["u1", "u2"])))
                 .add(Act::parallel(json!({
-                    "in": r#"
-                        let a = $("a");
-                        let b = ["u3"];
-                        let c = [ "u1" ];
-                        let d = [ "u3", "u4" ];
-
-                        // result = u3
-                        a.union(b).difference(c).intersection(d)
-                        "#,
+                    "in": r#"{{ let b = ["u3"];let c = [ "u1" ];let d = [ "u3", "u4" ];a.union(b).difference(c).intersection(d) }}"#,
                     "acts": vec![
                         Act::irq(|act| act.with_key("act1").with_id("act1"))
                     ]

@@ -26,7 +26,7 @@ enum CollectionIden {
     Version,
     Schema,
     RunAs,
-    Groups,
+    Resources,
     Catalog,
     BuiltIn,
     CreateTime,
@@ -64,7 +64,7 @@ impl DbCollection for PackageCollection {
                 CollectionIden::Version,
                 CollectionIden::Schema,
                 CollectionIden::RunAs,
-                CollectionIden::Groups,
+                CollectionIden::Resources,
                 CollectionIden::Catalog,
                 CollectionIden::BuiltIn,
                 CollectionIden::CreateTime,
@@ -98,7 +98,7 @@ impl DbCollection for PackageCollection {
                 CollectionIden::Version,
                 CollectionIden::Schema,
                 CollectionIden::RunAs,
-                CollectionIden::Groups,
+                CollectionIden::Resources,
                 CollectionIden::Catalog,
                 CollectionIden::BuiltIn,
                 CollectionIden::CreateTime,
@@ -161,7 +161,7 @@ impl DbCollection for PackageCollection {
                 CollectionIden::Version,
                 CollectionIden::Schema,
                 CollectionIden::RunAs,
-                CollectionIden::Groups,
+                CollectionIden::Resources,
                 CollectionIden::Catalog,
                 CollectionIden::BuiltIn,
                 CollectionIden::CreateTime,
@@ -176,7 +176,7 @@ impl DbCollection for PackageCollection {
                 data.version.into(),
                 data.schema.into(),
                 data.run_as.as_ref().into(),
-                data.groups.into(),
+                data.resources.into(),
                 data.catalog.as_ref().into(),
                 data.built_in.into(),
                 data.create_time.into(),
@@ -204,7 +204,7 @@ impl DbCollection for PackageCollection {
                 (CollectionIden::Version, model.version.into()),
                 (CollectionIden::Schema, model.schema.into()),
                 (CollectionIden::RunAs, model.run_as.as_ref().into()),
-                (CollectionIden::Groups, model.groups.into()),
+                (CollectionIden::Resources, model.resources.into()),
                 (CollectionIden::Catalog, model.catalog.as_ref().into()),
                 (CollectionIden::BuiltIn, model.built_in.into()),
                 (CollectionIden::CreateTime, model.create_time.into()),
@@ -252,7 +252,7 @@ impl DbRow for data::Package {
             version: row.get("version"),
             schema: row.get("schema"),
             run_as: acts::ActRunAs::from_str(&row.get::<String, &str>("run_as")).unwrap(),
-            groups: row.get("groups"),
+            resources: row.get("resources"),
             catalog: acts::ActPackageCatalog::from_str(&row.get::<String, &str>("catalog"))
                 .unwrap(),
             built_in: row.get("built_in"),
@@ -281,7 +281,11 @@ impl DbInit for PackageCollection {
                 .col(ColumnDef::new(CollectionIden::Version).string().not_null())
                 .col(ColumnDef::new(CollectionIden::Schema).string().not_null())
                 .col(ColumnDef::new(CollectionIden::RunAs).string().not_null())
-                .col(ColumnDef::new(CollectionIden::Groups).string().not_null())
+                .col(
+                    ColumnDef::new(CollectionIden::Resources)
+                        .string()
+                        .not_null(),
+                )
                 .col(ColumnDef::new(CollectionIden::Catalog).string().not_null())
                 .col(
                     ColumnDef::new(CollectionIden::CreateTime)

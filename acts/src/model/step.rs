@@ -24,9 +24,6 @@ pub struct Step {
     pub tag: String,
 
     #[serde(default)]
-    pub run: Option<String>,
-
-    #[serde(default)]
     pub r#if: Option<String>,
 
     #[serde(default)]
@@ -87,16 +84,6 @@ impl Step {
         self.r#if = Some(r#if.to_string());
         self
     }
-
-    pub fn with_run(mut self, run: &str) -> Self {
-        self.run = Some(run.to_string());
-        self
-    }
-
-    // pub fn with_uses(mut self, uses: &str) -> Self {
-    //     self.uses = Some(uses.to_string());
-    //     self
-    // }
 
     pub fn with_input(mut self, name: &str, value: JsonValue) -> Self {
         self.inputs.insert(name.to_string(), value);

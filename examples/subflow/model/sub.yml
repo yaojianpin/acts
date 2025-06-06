@@ -12,7 +12,5 @@ steps:
         outputs:
           v:
   - name: t2
-    run: |
-      console.log(`${$("v")}`);
 
 

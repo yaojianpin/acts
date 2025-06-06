@@ -11,7 +11,7 @@ use serde::Serialize;
 use serde_json::json;
 
 #[derive(Debug, Clone, Serialize)]
-pub struct HookEventPackage(Vars);
+pub struct HookEventPackage(Option<Vars>);
 
 impl ActPackage for HookEventPackage {
     fn meta() -> ActPackageMeta {
@@ -29,10 +29,13 @@ impl ActPackage for HookEventPackage {
     }
 }
 
+#[async_trait::async_trait]
 impl ActPackageFn for HookEventPackage {
-    fn start(&self, rt: &Arc<crate::scheduler::Runtime>, options: &Vars) -> Result<Option<Vars>> {
-        let chan = Arc::new(Channel::new(rt));
-
+    async fn start(
+        &self,
+        rt: &Arc<crate::scheduler::Runtime>,
+        options: &Vars,
+    ) -> Result<Option<Vars>> {
         let mid = options
             .get::<String>(consts::MODEL_ID)
             .ok_or(ActError::Runtime(format!(
@@ -41,14 +44,19 @@ impl ActPackageFn for HookEventPackage {
             )))?;
         let model: ModelInfo = rt.cache().store().models().find(&mid)?.into();
         let workflow = model.workflow()?;
-        rt.start(&workflow, options)?;
 
-        let (tx, rx) = std::sync::mpsc::channel();
-        chan.on_complete(move |m| tx.send(m.outputs.clone()).unwrap());
+        let chan = Arc::new(Channel::new(rt));
+        let (s, s2, s3) = crate::signal::Signal::new(Vars::new()).triple();
+        chan.on_complete(move |m| {
+            s2.send(m.outputs.clone());
+        });
+        chan.on_error(move |m| {
+            s3.send(m.outputs.clone());
+        });
 
-        let ret = rx
-            .recv()
-            .map_err(|e| ActError::Runtime(format!("failed to receive process outputs: {}", e)))?;
+        let params = self.0.clone().unwrap_or_default();
+        rt.start(&workflow, &params).unwrap();
+        let ret = s.recv().await;
         Ok(Some(ret))
     }
 }
@@ -58,7 +66,7 @@ impl<'de> serde::de::Deserialize<'de> for HookEventPackage {
     where
         D: serde::Deserializer<'de>,
     {
-        let value = Vars::deserialize(deserializer)?;
+        let value = Option::<Vars>::deserialize(deserializer)?;
         Ok(Self(value))
     }
 }

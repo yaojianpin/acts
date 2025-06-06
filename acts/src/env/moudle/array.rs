@@ -1,8 +1,9 @@
-use crate::{ActError, ActModule, Result};
+use super::super::ActModule;
+use crate::{ActError, Result};
 use rquickjs::{CatchResultExt, Module as JsModule};
 
 #[derive(Clone)]
-pub struct Array {}
+pub struct ArrayModule {}
 
 #[allow(clippy::module_inception)]
 #[rquickjs::module(rename_vars = "camelCase")]
@@ -64,13 +65,13 @@ mod array {
     }
 }
 
-impl Array {
+impl ArrayModule {
     pub fn new() -> Self {
         Self {}
     }
 }
 
-impl ActModule for Array {
+impl ActModule for ArrayModule {
     fn init(&self, ctx: &rquickjs::Ctx<'_>) -> Result<()> {
         JsModule::declare_def::<js_array, _>(ctx.clone(), "@acts/array").unwrap();
 

@@ -5,7 +5,12 @@ mod client;
 #[tokio::main]
 async fn main() {
     let client = client::Client::new();
-    let engine = EngineBuilder::new().tick_interval_secs(1).build().await.unwrap().start();
+    let engine = EngineBuilder::new()
+        .tick_interval_secs(1)
+        .build()
+        .await
+        .unwrap()
+        .start();
     let (s1, s2, sig) = engine.signal(()).triple();
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text).unwrap();

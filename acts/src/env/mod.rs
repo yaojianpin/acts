@@ -6,38 +6,55 @@ mod value;
 use crate::{ActError, Result, ShareLock, Vars};
 use core::fmt;
 use rquickjs::{Context as JsContext, Ctx as JsCtx, FromJs, Runtime as JsRuntime};
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::de::DeserializeOwned;
 use std::sync::{Arc, RwLock};
 
 use self::value::ActValue;
 
-/// ActModule to extend the js features
-///
-/// # Example
-/// ```rust
-///   use acts::{ActModule, Result};
-///   #[derive(Clone)]
-///   pub struct TestModule;
-///   impl ActModule for TestModule {
-///     fn init<'a>(&self, _ctx: &rquickjs::Ctx<'a>) -> Result<()> {
-///         Ok(())
-///     }
-///   }
-/// ```
 pub trait ActModule: Send + Sync {
     fn init(&self, ctx: &JsCtx<'_>) -> Result<()>;
 }
 
+/// User var trait
+/// It can create user releated context data
+///
+/// # Example
+/// ```rust
+///   use acts::{ActUserVar, Vars, Result};
+///   #[derive(Clone)]
+///   pub struct TestModule;
+///   impl ActUserVar for TestModule {
+///     fn name(&self) -> String {
+///         "my_var".to_string()
+///     }
+///     
+///     fn default_data(&self) -> Option<Vars> {
+///         None
+///     }
+///   }
+/// ```
+pub trait ActUserVar: Send + Sync {
+    /// global easier access name in js expression
+    /// such as secrets.TOKEN, the secrets will be the name
+    /// it will get the data by the name from task context
+    fn name(&self) -> String;
+
+    /// initialzie default data
+    /// the data will be overridden by context vars
+    fn default_data(&self) -> Option<Vars> {
+        None
+    }
+}
+
+#[derive(Clone)]
 pub struct Enviroment {
-    vars: ShareLock<Vars>,
     modules: ShareLock<Vec<Box<dyn ActModule>>>,
+    pub(crate) user_vars: ShareLock<Vec<Box<dyn ActUserVar>>>,
 }
 
 impl fmt::Debug for Enviroment {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Enviroment")
-            .field("vars", &self.vars.read().unwrap())
-            .finish()
+        f.debug_struct("Enviroment").finish()
     }
 }
 
@@ -54,39 +71,20 @@ impl Enviroment {
     pub fn new() -> Self {
         let mut env = Enviroment {
             modules: Arc::new(RwLock::new(Vec::new())),
-            vars: Arc::new(RwLock::new(Vars::new())),
+            user_vars: Arc::new(RwLock::new(Vec::new())),
         };
         env.init();
         env
     }
 
     #[cfg(test)]
-    pub fn modules_count(&self) -> usize {
-        self.modules.read().unwrap().len()
+    pub fn user_env_count(&self) -> usize {
+        self.user_vars.read().unwrap().len()
     }
 
-    pub fn register_module<T: ActModule + Clone + 'static>(&self, module: &T) {
-        let mut modules = self.modules.write().unwrap();
-        modules.push(Box::new(module.clone()));
-    }
-
-    pub fn get<T>(&self, name: &str) -> Option<T>
-    where
-        T: for<'de> Deserialize<'de> + Clone,
-    {
-        self.vars.read().unwrap().get::<T>(name)
-    }
-
-    pub fn set<T>(&self, name: &str, value: T)
-    where
-        T: Serialize + Clone,
-    {
-        self.vars.write().unwrap().set(name, value);
-    }
-
-    pub fn update<F: FnOnce(&mut Vars)>(&self, f: F) {
-        let mut vars = self.vars.write().unwrap();
-        f(&mut vars);
+    pub fn register_var<T: ActUserVar + Clone + 'static>(&self, module: &T) {
+        let mut user_envs = self.user_vars.write().unwrap();
+        user_envs.push(Box::new(module.clone()));
     }
 
     pub fn eval<T>(&self, expr: &str) -> Result<T>
