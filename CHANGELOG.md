@@ -138,3 +138,6 @@
         use $set("var", value) instead of $("var", value)
         use $inputs() instead of $act.inputs()
         use $data() instead of $act.data()
+
+# 0.17.1
+- fix: fix examples/plugins build issue when exclude examples

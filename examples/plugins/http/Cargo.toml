@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-tokio = { workspace = true }
+tokio = { version = "1.44", features = ["full"] }
 acts = { path = "../../../acts" }
 acts-package-http = { path = "../../../plugins/http" }
 mockito = "1.7.0"
-serde_json = { workspace = true }
+serde_json = "1.0.140"

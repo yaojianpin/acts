@@ -5,6 +5,6 @@ edition = "2024"
 
 
 [dependencies]
-tokio = { workspace = true }
+tokio = { version = "1.44", features = ["full"] }
 acts = { path = "../../../acts" }
 acts-package-state = { path = "../../../plugins/state" }

@@ -1,8 +1,8 @@
 name: http example
 id: http-example
 inputs:
-  key1: 1
-  key2: 2
+  key1: "1"
+  key2: "2"
 steps:
   - name: http step
     acts:
