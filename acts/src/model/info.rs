@@ -83,6 +83,7 @@ pub struct MessageInfo {
     pub retry_times: i32,
     pub status: String,
     pub timestamp: i64,
+    pub uses: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -234,6 +235,7 @@ impl From<&data::Message> for MessageInfo {
             outputs: m.outputs.clone(),
             retry_times: m.retry_times,
             status: m.status.to_string(),
+            uses: m.uses.clone(),
         }
     }
 }

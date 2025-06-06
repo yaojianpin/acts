@@ -23,7 +23,7 @@ keywords = ["workflow"]
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/yaojianpin/acts.git"
-version = "0.17.1"
+version = "0.17.2"
 
 [workspace.dependencies]
 tokio = { version = "1.44", features = ["full"] }
