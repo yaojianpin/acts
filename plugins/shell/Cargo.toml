@@ -9,7 +9,7 @@ repository.workspace = true
 edition.workspace = true
 
 [dependencies]
-acts = { path = "../../acts" }
+acts = { workspace = true }
 async-trait = { workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }

@@ -9,7 +9,7 @@ repository.workspace = true
 edition.workspace = true
 
 [dependencies]
-acts = { path = "../../acts" }
+acts = { workspace = true }
 async-trait = { workspace = true }
 base64 = "0.22.1"
 reqwest = { version = "0.12.18", features = ["blocking", "json"] }
