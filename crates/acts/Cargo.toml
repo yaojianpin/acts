@@ -1,0 +1,93 @@
+
+[package]
+authors = ["Yao <yaojianpin@sohu.com>"]
+description = "a fast, lightweight, extensiable workflow engine"
+keywords = ["workflow"]
+edition = "2024"
+license = "Apache-2.0"
+name = "acts"
+homepage = "https://docs.rs/acts"
+repository = "https://github.com/yaojianpin/acts.git"
+include = ["src/**/*", "../LICENSE", "../README.md", "!**/tests/**/*"]
+version.workspace = true
+
+[dependencies]
+tokio = { features = ["full", "macros"], workspace = true }
+async-trait = { workspace = true }
+chrono = { version = "0.4" }
+globset = { version = "0.4", default-features = false }
+inventory = "0.3.20"
+jsonschema = { version = "0.30.0", default-features = false }
+moka = { version = "0.12", features = ["sync"] }
+nanoid = "0.4"
+regex = "1.10"
+rquickjs = { version = "0.9", features = ["full", "parallel"] }
+serde = { features = ["derive"], workspace = true }
+serde_json = { workspace = true }
+serde_repr = "0.1"
+serde_yaml = "0.9"
+strum = { features = ["derive"], workspace = true }
+thiserror = "2"
+tracing = "0.1"
+toml = "0.8.22"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["async_tokio"] }
+
+[features]
+default = []
+
+[[bench]]
+harness = false
+name = "workflow"
+path = "../../benches/workflow.rs"
+
+[[example]]
+name = "simple"
+path = "../../examples/simple/main.rs"
+
+[[example]]
+name = "model_build"
+path = "../../examples/model_build/main.rs"
+
+[[example]]
+name = "actions"
+path = "../../examples/actions/main.rs"
+
+[[example]]
+name = "approve"
+path = "../../examples/approve/main.rs"
+
+[[example]]
+name = "catches"
+path = "../../examples/catches/main.rs"
+
+[[example]]
+name = "event"
+path = "../../examples/event/main.rs"
+
+[[example]]
+name = "message"
+path = "../../examples/message/main.rs"
+
+[[example]]
+name = "package"
+path = "../../examples/package/main.rs"
+
+[[example]]
+name = "subflow"
+path = "../../examples/subflow/main.rs"
+
+[[example]]
+name = "timeout"
+path = "../../examples/timeout/main.rs"
+
+[[example]]
+name = "user_var"
+path = "../../examples/user_var/main.rs"
+
+[profile.release]
+codegen-units = 1
+lto = true
+opt-level = "z"
+strip = true

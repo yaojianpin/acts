@@ -5,6 +5,6 @@ edition = "2024"
 
 [dependencies]
 tokio = { version = "1.44", features = ["full"] }
-acts = { path = "../../../acts" }
-acts-package-shell = { path = "../../../plugins/shell" }
+acts = { path = "../../../crates/acts" }
+acts-package-shell = { path = "../../../crates/acts-package-shell" }
 serde_json = "1.0.140"

@@ -144,3 +144,8 @@
 
 # 0.17.2
 - fix: add info.MessageInfo uses property
+
+# 0.18.0
+- feat: change the workspace structure
+- feat: use Query instead of ExecuteQuery
+- feat: add `match` operation to FilterExpr

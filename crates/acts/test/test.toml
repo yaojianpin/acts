@@ -1,0 +1,11 @@
+
+        cache_cap =  100
+        tick_interval_secs = 200
+        default_outputs = [ 
+            "data"
+        ]
+
+        [log]
+        dir = "data"
+        level = "INFO"
+        

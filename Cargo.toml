@@ -1,14 +1,6 @@
 
 [workspace]
-members = [
-    "acts",
-    "store/sqlite",
-    "store/postgres",
-    "plugins/state",
-    "plugins/http",
-    "examples/plugins/*",
-    "plugins/shell",
-]
+members = ["crates/*", "examples/plugins/*"]
 exclude = [
     "examples/plugins/state",
     "examples/plugins/http",
@@ -23,7 +15,7 @@ keywords = ["workflow"]
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/yaojianpin/acts.git"
-version = "0.17.2"
+version = "0.18.0"
 
 [workspace.dependencies]
 tokio = { version = "1.44", features = ["full"] }
@@ -31,7 +23,7 @@ async-trait = { version = "0.1.88" }
 serde = "1.0.219"
 serde_json = "1.0.140"
 strum = { version = "0.27", features = ["derive"] }
-acts = { version = "0.17.2", path = "./acts" }
+acts = { version = "0.18.0", path = "./crates/acts" }
 
 [profile.release]
 codegen-units = 1

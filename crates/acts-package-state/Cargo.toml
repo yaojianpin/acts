@@ -1,0 +1,17 @@
+[package]
+name = "acts-package-state"
+description = "acts package for state store"
+homepage = "https://docs.rs/acts-package-state"
+edition = "2024"
+version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+
+[dependencies]
+redis = { version = "0.31.0", default-features = false }
+acts = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
