@@ -11,10 +11,6 @@ impl ActTask for Workflow {
             });
         }
 
-        // run setup
-        if !self.setup.is_empty() {
-            ctx.dispatch_acts(self.setup.clone(), true)?;
-        }
         Ok(())
     }
 

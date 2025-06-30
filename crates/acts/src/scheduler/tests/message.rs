@@ -73,7 +73,7 @@ async fn sch_message_workflow_id() {
 
 #[tokio::test]
 async fn sch_message_workflow_inputs() {
-    let mut workflow = Workflow::new().with_id("my_id").with_input("a", json!(5));
+    let mut workflow = Workflow::new().with_id("my_id").with_var("a", json!(5));
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<Message>(&mut workflow, &id);
     emitter.on_message(move |e| {
@@ -92,7 +92,7 @@ async fn sch_message_workflow_inputs() {
 async fn sch_message_workflow_outputs() {
     let mut workflow = Workflow::new()
         .with_id("my_id")
-        .with_input("a", json!(5))
+        .with_var("a", json!(5))
         .with_output("a", json!(null));
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<Message>(&mut workflow, &id);
@@ -150,7 +150,7 @@ async fn sch_message_step_created() {
 async fn sch_message_step_outputs() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_input("a", json!(5))
+            .with_var("a", json!(5))
             .with_output("a", json!(null))
     });
     let id = utils::longid();
@@ -233,7 +233,7 @@ async fn sch_message_act_created_by_push_action() {
                 .with("uses", "acts.core.irq")
                 .with("key", "act2")
                 .with("tag", "tag2");
-            e.do_action(&e.pid, &e.tid, EventAction::Push, &options)
+            e.do_action(&e.pid, &e.tid, EventAction::Push, options)
                 .unwrap();
         }
 
@@ -262,7 +262,7 @@ async fn sch_message_act_tag_by_push_action() {
                 .with("key", "act2")
                 .with("uses", "acts.core.irq")
                 .with("tag", "tag2");
-            e.do_action(&e.pid, &e.tid, EventAction::Push, &options)
+            e.do_action(&e.pid, &e.tid, EventAction::Push, options)
                 .unwrap();
         }
 
@@ -291,7 +291,7 @@ async fn sch_message_act_inputs_by_push_action() {
                 .with("key", "act2")
                 .with("uses", "acts.core.irq")
                 .with("params", Vars::new().with("a", 5));
-            e.do_action(&e.pid, &e.tid, EventAction::Push, &options)
+            e.do_action(&e.pid, &e.tid, EventAction::Push, options)
                 .unwrap();
         }
 
@@ -326,8 +326,11 @@ async fn sch_message_act_outputs_by_push_action() {
             let options = Vars::new()
                 .with("key", "act2")
                 .with("uses", "acts.core.irq")
-                .with("outputs", Vars::new().with("a", 5));
-            e.do_action(&e.pid, &e.tid, EventAction::Push, &options)
+                .with(
+                    "options",
+                    Vars::new().with("outputs", Vars::new().with("a", 5)),
+                );
+            e.do_action(&e.pid, &e.tid, EventAction::Push, options)
                 .unwrap();
         }
 
@@ -341,44 +344,12 @@ async fn sch_message_act_outputs_by_push_action() {
     assert!(ret);
 }
 
-// #[tokio::test]
-// async fn sch_message_act_outputs_by_push_action() {
-//     let mut workflow = Workflow::new().with_step(|step| {
-//         step.with_id("step1")
-//             .with_act(Act::irq(|act| act.with_key("act1")))
-//     });
-//     let id = utils::longid();
-//     let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
-//     emitter.on_message(move |e| {
-//         println!("message: {e:?}");
-//         if e.r#type == "step" && e.state() == MessageState::Created {
-//             let options = Vars::new()
-//                 .with("key", "act2")
-//                 .with("uses", "acts.core.irq")
-//                 .with("outputs", Vars::new().with("a", json!(null)));
-//             e.do_action(&e.pid, &e.tid, EventAction::Push, &options)
-//                 .unwrap();
-//         }
-
-//         if e.is_key("act2") && e.is_state(MessageState::Created) {
-//             rx.send(
-//                 e.do_action(&e.pid, &e.tid, EventAction::Next, &Vars::new())
-//                     .is_err(),
-//             );
-//         }
-//     });
-//     scher.launch(&proc);
-//     let ret = tx.recv().await;
-//     proc.print();
-//     assert!(ret);
-// }
-
 #[tokio::test]
 async fn sch_message_act_outputs() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_act(Act::irq(|act| {
             act.with_key("act1")
-                .with_input("a", json!(5))
+                .with_var("a", json!(5))
                 .with_output("a", json!(null))
         }))
     });
@@ -407,7 +378,7 @@ async fn sch_message_act_completed() {
         if msg.r#type == "act" && msg.state() == MessageState::Created {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            let action = Action::new(&msg.pid, &msg.tid, EventAction::Next, &options);
+            let action = Action::new(&msg.pid, &msg.tid, EventAction::Next, options);
             s.do_action(&action).unwrap();
         }
         if msg.r#type == "act" && msg.state() == MessageState::Completed {
@@ -432,7 +403,7 @@ async fn sch_message_act_sumitted() {
         if msg.is_key("act1") && msg.state() == MessageState::Created {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            let action = Action::new(&msg.pid, &msg.tid, EventAction::Submit, &options);
+            let action = Action::new(&msg.pid, &msg.tid, EventAction::Submit, options);
             s.do_action(&action).unwrap();
         }
         if msg.is_key("act1") && msg.state() == MessageState::Submitted {
@@ -457,7 +428,7 @@ async fn sch_message_act_skip() {
         if msg.is_key("act1") && msg.state() == MessageState::Created {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            let action = Action::new(&msg.pid, &msg.tid, EventAction::Skip, &options);
+            let action = Action::new(&msg.pid, &msg.tid, EventAction::Skip, options);
             s.do_action(&action).unwrap();
         }
         if msg.is_key("act1") && msg.state() == MessageState::Skipped {
@@ -487,7 +458,7 @@ async fn sch_message_act_back() {
         if msg.is_key("act1") && msg.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            let action = Action::new(&msg.pid, &msg.tid, EventAction::Next, &options);
+            let action = Action::new(&msg.pid, &msg.tid, EventAction::Next, options);
             s.do_action(&action).unwrap();
         }
 
@@ -495,7 +466,7 @@ async fn sch_message_act_back() {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.insert("to".to_string(), json!("step1"));
-            let action = Action::new(&msg.pid, &msg.tid, EventAction::Back, &options);
+            let action = Action::new(&msg.pid, &msg.tid, EventAction::Back, options);
             s.do_action(&action).unwrap();
         }
 
@@ -528,7 +499,7 @@ async fn sch_message_act_cancel() {
         if msg.is_key("act1") && msg.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            let action = Action::new(&msg.pid, &msg.tid, EventAction::Next, &options);
+            let action = Action::new(&msg.pid, &msg.tid, EventAction::Next, options);
             s.do_action(&action).unwrap();
         }
 
@@ -537,7 +508,7 @@ async fn sch_message_act_cancel() {
             options.insert("uid".to_string(), json!("u1"));
 
             *act_req_id.lock().unwrap() = Some(msg.tid.to_string());
-            let action = Action::new(&msg.pid, &msg.tid, EventAction::Cancel, &options);
+            let action = Action::new(&msg.pid, &msg.tid, EventAction::Cancel, options);
             s.do_action(&action).unwrap();
         }
 
@@ -550,7 +521,7 @@ async fn sch_message_act_cancel() {
                 &msg.pid,
                 act_req_id.as_deref().unwrap(),
                 EventAction::Cancel,
-                &options,
+                options,
             );
             s.do_action(&action).unwrap();
         }
@@ -582,7 +553,7 @@ async fn sch_message_act_remove() {
                 &msg.inner().pid,
                 &msg.inner().tid,
                 EventAction::Remove,
-                &options,
+                options,
             );
             s.do_action(&action).unwrap();
         }
@@ -608,7 +579,7 @@ async fn sch_message_act_abort() {
         if msg.is_key("act1") && msg.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            let action = Action::new(&msg.pid, &msg.tid, EventAction::Abort, &options);
+            let action = Action::new(&msg.pid, &msg.tid, EventAction::Abort, options);
             s.do_action(&action).unwrap();
         }
 
@@ -637,7 +608,7 @@ async fn sch_message_act_error() {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "err1");
-            let action = Action::new(&e.pid, &e.tid, EventAction::Error, &options);
+            let action = Action::new(&e.pid, &e.tid, EventAction::Error, options);
             s.do_action(&action).unwrap();
         }
 
@@ -668,7 +639,7 @@ async fn sch_message_act_inputs_with_err() {
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "err1");
             options.set(consts::ACT_ERR_MESSAGE, "abc");
-            e.do_action(&e.pid, &e.tid, EventAction::Error, &options)
+            e.do_action(&e.pid, &e.tid, EventAction::Error, options)
                 .unwrap();
         }
 
@@ -730,12 +701,12 @@ async fn sch_message_emit_options_with_id() {
     let id = utils::longid();
     let (engine, proc, tx, rx) = create_proc_signal2::<bool>(&workflow, &id);
 
-    let options = ChannelOptions {
+    let chan_options = ChannelOptions {
         id: "e1".to_string(),
         ..Default::default()
     };
     engine
-        .channel_with_options(&options)
+        .channel_with_options(&chan_options)
         .on_message(move |msg| {
             if msg.r#type == "workflow" && msg.state() == MessageState::Created {
                 rx.send(true);
@@ -769,14 +740,14 @@ async fn sch_message_ack_exist_message_in_store() {
     let id = utils::longid();
     let (engine, proc, tx, rx) = create_proc_signal2::<Message>(&workflow, &id);
 
-    let options = ChannelOptions {
+    let chan_options = ChannelOptions {
         id: "e1".to_string(),
         ack: true,
         ..Default::default()
     };
     let e2 = engine.clone();
     engine
-        .channel_with_options(&options)
+        .channel_with_options(&chan_options)
         .on_message(move |msg| {
             if msg.r#type == "workflow" && msg.state() == MessageState::Created {
                 engine.executor().msg().ack(&msg.id).unwrap();
@@ -820,7 +791,7 @@ async fn sch_message_complete_message_in_store() {
                 engine
                     .executor()
                     .act()
-                    .complete(&msg.pid, &msg.tid, &Vars::new())
+                    .complete(&msg.pid, &msg.tid, Vars::new())
                     .unwrap();
                 rx.update(|data| *data = msg.id.clone());
             }

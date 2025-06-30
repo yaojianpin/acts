@@ -1,4 +1,4 @@
-use crate::{Act, ActError, ModelBase, Result, Step, Vars, scheduler::NodeTree};
+use crate::{Act, ActError, ModelBase, Result, Step, Vars, scheduler::NodeTree, utils::consts};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
@@ -22,20 +22,32 @@ pub struct Workflow {
     #[serde(default)]
     pub env: Vars,
 
+    /// define the workflow global vars
     #[serde(default)]
-    pub inputs: Vars,
+    pub vars: Vars,
 
+    /// input json schema
     #[serde(default)]
-    pub outputs: Vars,
+    pub inputs: JsonValue,
 
+    /// output json schema
     #[serde(default)]
-    pub setup: Vec<Act>,
+    pub outputs: JsonValue,
 
     #[serde(default)]
     pub on: Vec<Act>,
 
     #[serde(default)]
     pub ver: i32,
+
+    /// extra options to send to client
+    #[serde(default)]
+    pub options: Vars,
+
+    /// metadata to store some extra value for UI styles
+    /// don't send to client
+    #[serde(default)]
+    pub metadata: Vars,
 }
 
 impl Workflow {
@@ -64,9 +76,9 @@ impl Workflow {
         }
     }
 
-    pub fn set_inputs(&mut self, vars: &Vars) {
+    pub fn set_vars(&mut self, vars: &Vars) {
         for (name, value) in vars {
-            self.inputs
+            self.vars
                 .entry(name.clone())
                 .and_modify(|v| *v = value.clone())
                 .or_insert(value.clone());
@@ -147,8 +159,8 @@ impl Workflow {
         self
     }
 
-    pub fn with_input(mut self, name: &str, value: JsonValue) -> Self {
-        self.inputs.insert(name.to_string(), value);
+    pub fn with_var(mut self, name: &str, value: JsonValue) -> Self {
+        self.vars.insert(name.to_string(), value);
         self
     }
 
@@ -158,19 +170,21 @@ impl Workflow {
     }
 
     pub fn with_output(mut self, name: &str, value: JsonValue) -> Self {
-        self.outputs.insert(name.to_string(), value);
+        self.options
+            .entry(consts::ACT_OUTPUTS)
+            .and_modify(|outputs| {
+                if let Some(obj) = outputs.as_object_mut() {
+                    obj.insert(name.to_string(), value.clone());
+                }
+            })
+            .or_insert(Vars::new().with(name, value).into());
+
         self
     }
 
     pub fn with_step(mut self, build: fn(Step) -> Step) -> Self {
         let step = Step::default();
         self.steps.push(build(step));
-        self
-    }
-
-    pub fn with_setup(mut self, build: fn(Vec<Act>) -> Vec<Act>) -> Self {
-        let stmts = Vec::new();
-        self.setup = build(stmts);
         self
     }
 

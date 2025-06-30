@@ -14,7 +14,21 @@
         "content-type": {
             "type": "string",
             "title": "Content Type",
-            "enum": ["text", "html", "json", "binary", "urlencoded", "form-data", "image", "video", "audio"]
+            "enum": ["text", "html", "json", "binary", "urlencoded", "form-data", "image", "video", "audio"],
+            "default": "json",
+            "ui": {
+                "options": [
+                    { "value": "text", "label": "Text" },
+                    { "value": "html", "label": "HTML" },
+                    { "value": "json", "label": "JSON" },
+                    { "value": "binary", "label": "Binary" },
+                    { "value": "urlencoded", "label": "URL Encoded" },
+                    { "value": "form-data", "label": "Form Data" },
+                    { "value": "image", "label": "Image" },
+                    { "value": "video", "label": "Video" },
+                    { "value": "audio", "label": "Audio" }
+                ]
+            }
         },
         "headers": {
             "type": "array",
@@ -41,7 +55,7 @@
             }
         }
     },
-    "dependentSchemas": {
+    "dependencies": {
         "content-type": {
             "oneOf": [
                 {

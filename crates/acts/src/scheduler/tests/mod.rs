@@ -7,7 +7,6 @@ mod step;
 mod task;
 mod tree;
 mod vars;
-mod workflow;
 
 use super::{Process, Runtime};
 use crate::{Engine, EngineBuilder, Signal, Workflow, config::ConfigData, export::Channel};

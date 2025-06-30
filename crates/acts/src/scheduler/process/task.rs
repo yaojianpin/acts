@@ -58,7 +58,6 @@ pub struct Task {
     hooks: ShareLock<HashMap<TaskLifeCycle, Vec<StatementBatch>>>,
 
     runtime: Arc<Runtime>,
-    // sync: Arc<std::sync::Mutex<usize>>,
 }
 
 impl Task {
@@ -78,7 +77,6 @@ impl Task {
 
             hooks: Arc::new(RwLock::new(HashMap::new())),
             runtime: rt.clone(),
-            // sync: Arc::new(std::sync::Mutex::new(0)),
         }
     }
 
@@ -255,40 +253,37 @@ impl Task {
 
     pub fn inputs(self: &Arc<Self>) -> Vars {
         let ctx = self.create_context();
-        let mut vars = Vars::new();
+        let mut inputs = Vars::new();
         if let Some(prev) = self.prev() {
             if let Some(prev_task) = self.proc.task(&prev) {
                 // set the prev task's outputs as current inputs
                 for (ref k, v) in &prev_task.outputs() {
-                    vars.set(k, v.clone());
+                    inputs.set(k, v.clone());
                 }
             }
         }
 
-        // merge the inputs
-        let inputs = utils::fill_inputs(&self.node.content.inputs(), &ctx);
-        vars.extend(inputs)
+        // merge the node vars
+        let vars = utils::fill_inputs(&self.node.content.vars(), &ctx);
+        inputs.extend(vars)
     }
 
     pub fn outputs(self: &Arc<Self>) -> Vars {
         let ctx = self.create_context();
-        let mut outputs = self.node.content.outputs();
-
-        // get the global expose keys
-        // the ["data"] is the default expose key
-        let global_expose_keys = ctx
-            .get_env::<Vec<String>>(consts::ACT_GLOBAL_EXPOSE)
-            .unwrap_or(vec![consts::ACT_DATA.to_string()]);
-        for key in global_expose_keys {
-            outputs.set(&key, json!(null));
-        }
-
-        // sets the outputs from data
-        if let Some(data) = self.data().get::<Vec<String>>(consts::ACT_OUTPUTS) {
-            for v in data {
-                outputs.set(&v, json!(null));
+        let mut outputs = Vars::new();
+        if let Some(exports) = self.node.content.options().get::<Vars>(consts::ACT_OUTPUTS) {
+            for (key, value) in &exports {
+                outputs.set(&key, value);
+            }
+        } else {
+            // export all data except the private ones
+            for (key, _) in ctx.task().data().iter() {
+                if !consts::is_private_key(key) {
+                    outputs.set(key, json!(null))
+                }
             }
         }
+
         utils::fill_outputs(&outputs, &ctx)
     }
 
@@ -297,17 +292,8 @@ impl Task {
     }
 
     pub fn params(self: &Arc<Self>) -> serde_json::Value {
-        if self.data().contains_key(consts::ACT_PARAMS_CACHE) {
-            return self
-                .data()
-                .get::<serde_json::Value>(consts::ACT_PARAMS_CACHE)
-                .unwrap_or(serde_json::Value::Null);
-        }
         let ctx = self.create_context();
-        let value = utils::fill_params(&self.node.content.params(), &ctx);
-        self.set_data_with(|data| data.set(consts::ACT_PARAMS_CACHE, value.clone()));
-
-        value
+        utils::fill_params(&self.node.content.params(), &ctx)
     }
 
     pub fn set_prev(&self, prev: Option<String>) {
@@ -399,7 +385,7 @@ impl Task {
                     key: key.clone(),
                     uses: package.clone(),
                     params: ctx.get_var("params").unwrap_or_default(),
-                    outputs: ctx.get_var("outputs").unwrap_or_default(),
+                    options: ctx.get_var("options").unwrap_or_default(),
                     ..Default::default()
                 };
 
@@ -1045,11 +1031,6 @@ impl Task {
     }
 
     pub fn update_data(&self, vars: &Vars) {
-        #[allow(clippy::expect_fun_call)]
-        let pri_keys_regex = regex::Regex::new(consts::ACT_PRI_KEYS_REGEX).expect(&format!(
-            "failed to create regex: {}",
-            consts::ACT_PRI_KEYS_REGEX
-        ));
         let mut refs = Vec::new();
         let mut parent = self.parent();
         while let Some(task) = parent {
@@ -1059,7 +1040,7 @@ impl Task {
 
         for (ref name, ref value) in vars {
             // skip private keys
-            if pri_keys_regex.is_match(name) {
+            if consts::is_private_key(name) {
                 continue;
             }
             for t in refs.iter().rev() {

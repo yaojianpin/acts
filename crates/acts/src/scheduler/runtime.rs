@@ -89,7 +89,7 @@ impl Runtime {
         }
 
         let mut w = model.clone();
-        w.set_inputs(options);
+        w.set_vars(options);
 
         let proc = Process::new(&proc_id, self);
         proc.load(&w)?;
@@ -313,7 +313,7 @@ impl Runtime {
             _ => EventAction::Next,
         };
 
-        let action = Action::new(pid, tid, event, &vars);
+        let action = Action::new(pid, tid, event, vars);
         let scher = self.clone();
         tokio::spawn(async move {
             let _ = scher

@@ -15,12 +15,21 @@ pub struct ManualEventPackage(Option<String>);
 impl ActPackage for ManualEventPackage {
     fn meta() -> ActPackageMeta {
         ActPackageMeta {
-            name: "acts.event.chat",
+            id: "acts.event.chat",
+            name: "Chat",
             desc: "do an event by chat",
             version: "0.1.0",
-            icon: "icon-chat",
+            icon: r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-message-circle-more-icon lucide-message-circle-more"><path d="M7.9 20A9 9 0 1 0 4 16.1L2 22Z"/><path d="M8 12h.01"/><path d="M12 12h.01"/><path d="M16 12h.01"/></svg>"#,
             doc: "",
-            schema: json!({}),
+            in_schema: json!({
+                "type": "string",
+                "description": "The chat message to send",
+                "default": "",
+            }),
+            ui_schema: Some(json!({
+                "ui:widget": "textarea",
+
+            })),
             run_as: ActRunAs::Func,
             resources: vec![],
             catalog: ActPackageCatalog::Event,
@@ -77,6 +86,6 @@ mod tests {
         let value = serde_yaml::from_str::<serde_json::Value>(params).unwrap();
         let meta = super::ManualEventPackage::meta();
         serde_json::from_value::<super::ManualEventPackage>(value.clone()).unwrap();
-        jsonschema::validate(&meta.schema, &value).unwrap()
+        jsonschema::validate(&meta.in_schema, &value).unwrap()
     }
 }

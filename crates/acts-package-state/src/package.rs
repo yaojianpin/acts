@@ -14,12 +14,13 @@ pub struct StatePackage {
 impl ActPackage for StatePackage {
     fn meta() -> acts::ActPackageMeta {
         ActPackageMeta {
-            name: "acts.app.state",
+            id: "acts.app.state",
+            name: "State",
             desc: "get or set state to redis",
             version: "0.1.0",
             icon: "icon-app-state",
             doc: "",
-            schema: json!({
+            in_schema: json!({
                 "type": "object",
                 "properties": {
                     "op": { "type": "string", "enum": ["GET", "SET" ] },
@@ -28,6 +29,30 @@ impl ActPackage for StatePackage {
                 },
                 "required": ["op", "key"],
             }),
+            ui_schema: Some(json!({
+                "ui:order": ["op", "key", "value"],
+                "op": {
+                    "ui:widget": "select",
+                    "ui:options": {
+                        "label": false,
+                        "placeholder": "Select an operation"
+                    }
+                },
+                "key": {
+                    "ui:widget": "text",
+                    "ui:options": {
+                        "label": false,
+                        "placeholder": "Enter the key"
+                    }
+                },
+                "value": {
+                    "ui:widget": "textarea",
+                    "ui:options": {
+                        "label": false,
+                        "placeholder": "Enter the value"
+                    }
+                }
+            })),
             run_as: ActRunAs::Irq,
             resources: vec![ActResource {
                 name: "Get or set state store".to_string(),

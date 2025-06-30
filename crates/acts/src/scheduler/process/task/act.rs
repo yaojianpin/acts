@@ -24,11 +24,6 @@ impl ActTask for Act {
             }
         }
 
-        // run setup
-        if !self.setup.is_empty() {
-            ctx.dispatch_acts(self.setup.clone(), true)?;
-        }
-
         if self.uses.is_empty() {
             return Err(crate::ActError::Action(format!(
                 "cannot find 'uses' in act '{}' with key '{}'",
@@ -78,6 +73,7 @@ impl ActTask for Act {
                     "cannot find the registed package '{}'",
                     self.uses
                 )))?;
+
             let package = (register.create)(ctx.task().params())?;
             if let Some(vars) = package.execute(ctx)? {
                 task.update_data(&vars);
@@ -180,11 +176,11 @@ impl Act {
         // let package = ctx.executor.pack().get(&self.uses)?;
         let mut act = self.clone();
         if let Some(v) = ctx.get_var::<u32>(consts::ACT_INDEX) {
-            act.inputs.set(consts::ACT_INDEX, v);
+            act.vars.set(consts::ACT_INDEX, v);
         }
 
         if let Some(v) = ctx.get_var::<String>(consts::ACT_VALUE) {
-            act.inputs.set(consts::ACT_VALUE, v);
+            act.vars.set(consts::ACT_VALUE, v);
         }
 
         ctx.dispatch_act(self, is_hook_event)?;

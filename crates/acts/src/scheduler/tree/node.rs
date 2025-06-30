@@ -80,28 +80,21 @@ impl NodeContent {
         }
     }
 
-    pub fn inputs(&self) -> Vars {
+    pub fn vars(&self) -> Vars {
         match self {
-            NodeContent::Workflow(c) => c.inputs.clone(),
-            NodeContent::Branch(c) => c.inputs.clone(),
-            NodeContent::Step(c) => c.inputs.clone(),
-            NodeContent::Act(c) => c.inputs.clone(),
-        }
-    }
-
-    pub fn outputs(&self) -> Vars {
-        match self {
-            NodeContent::Workflow(node) => node.outputs.clone(),
-            NodeContent::Branch(node) => node.outputs.clone(),
-            NodeContent::Step(node) => node.outputs.clone(),
-            NodeContent::Act(node) => node.outputs.clone(),
+            NodeContent::Workflow(data) => data.vars.clone(),
+            NodeContent::Branch(data) => data.vars.clone(),
+            NodeContent::Step(data) => data.vars.clone(),
+            NodeContent::Act(data) => data.vars.clone(),
         }
     }
 
     pub fn options(&self) -> Vars {
         match self {
+            NodeContent::Workflow(node) => node.options.clone(),
+            NodeContent::Branch(node) => node.options.clone(),
+            NodeContent::Step(node) => node.options.clone(),
             NodeContent::Act(node) => node.options.clone(),
-            _ => Vars::new(),
         }
     }
 
@@ -259,9 +252,9 @@ impl Node {
         self.content.name()
     }
 
-    pub fn outputs(&self) -> Vars {
-        self.content.outputs()
-    }
+    // pub fn outputs(&self) -> Vars {
+    //     self.content.outputs()
+    // }
 
     pub fn kind(&self) -> NodeKind {
         match &self.content {

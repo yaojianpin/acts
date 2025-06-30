@@ -19,7 +19,7 @@ async fn export_manager_publish_ok() {
         icon: "icon".to_string(),
         doc: "doc".to_string(),
         version: "0.1.0".to_string(),
-        schema: "{}".to_string(),
+        in_schema: "{}".to_string(),
         run_as: crate::ActRunAs::Func,
         resources: "[]".to_string(),
         catalog: crate::package::ActPackageCatalog::Core,
@@ -1158,11 +1158,13 @@ async fn export_manager_packages_count() {
     for i in 0..count {
         let package = Package {
             id: utils::longid(),
+            name: format!("test-{}", i + 1),
             desc: i.to_string(),
             icon: "icon".to_string(),
             doc: "doc".to_string(),
             version: "0.1.0".to_string(),
-            schema: "{}".to_string(),
+            in_schema: "{}".to_string(),
+            ui_schema: None,
             run_as: crate::ActRunAs::Func,
             resources: "[]".to_string(),
             catalog: crate::package::ActPackageCatalog::Core,
@@ -1197,11 +1199,13 @@ async fn export_manager_packages_order() {
     for i in 0..count {
         let package = Package {
             id: utils::longid(),
+            name: format!("test-{}", i + 1),
             desc: format!("test-{}", i + 1),
             icon: "icon".to_string(),
             doc: "doc".to_string(),
             version: "0.1.0".to_string(),
-            schema: "{}".to_string(),
+            in_schema: "{}".to_string(),
+            ui_schema: None,
             run_as: crate::ActRunAs::Func,
             resources: "[]".to_string(),
             catalog: crate::package::ActPackageCatalog::Core,
@@ -1234,11 +1238,13 @@ async fn export_manager_packages_query() {
     for i in 0..count {
         let package = Package {
             id: utils::longid(),
+            name: format!("test-{}", i + 1),
             desc: format!("test-{}", i + 1),
             icon: "icon".to_string(),
             doc: "doc".to_string(),
             version: "0.1.0".to_string(),
-            schema: "{}".to_string(),
+            in_schema: "{}".to_string(),
+            ui_schema: None,
             run_as: crate::ActRunAs::Func,
             resources: "[]".to_string(),
             catalog: crate::package::ActPackageCatalog::Core,
@@ -1267,11 +1273,13 @@ async fn export_manager_packages_offset_in_range() {
     for i in 0..count {
         let package = Package {
             id: utils::longid(),
+            name: format!("test-{}", i + 1),
             desc: i.to_string(),
             icon: "icon".to_string(),
             doc: "doc".to_string(),
             version: "0.1.0".to_string(),
-            schema: "{}".to_string(),
+            in_schema: "{}".to_string(),
+            ui_schema: None,
             run_as: crate::ActRunAs::Func,
             resources: "[]".to_string(),
             catalog: crate::package::ActPackageCatalog::Core,
@@ -1304,14 +1312,16 @@ async fn export_manager_packages_offset_out_range() {
     let manager = engine.executor();
 
     let count = 5;
-    for _i in 0..count {
+    for i in 0..count {
         let package = Package {
             id: utils::longid(),
+            name: format!("test-{}", i + 1),
             desc: "desc".to_string(),
             icon: "icon".to_string(),
             doc: "doc".to_string(),
             version: "0.1.0".to_string(),
-            schema: "{}".to_string(),
+            in_schema: "{}".to_string(),
+            ui_schema: None,
             run_as: crate::ActRunAs::Func,
             resources: "[]".to_string(),
             catalog: crate::package::ActPackageCatalog::Core,
@@ -1340,11 +1350,13 @@ async fn export_manager_package_rm() {
 
     let package = Package {
         id: utils::longid(),
+        name: "test name".to_string(),
         desc: "desc".to_string(),
         icon: "icon".to_string(),
         doc: "doc".to_string(),
         version: "0.1.0".to_string(),
-        schema: "{}".to_string(),
+        in_schema: "{}".to_string(),
+        ui_schema: None,
         run_as: crate::ActRunAs::Func,
         resources: "[]".to_string(),
         catalog: crate::package::ActPackageCatalog::Core,
@@ -1411,7 +1423,7 @@ async fn export_executor_complete() {
         if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
-            let ret = engine.executor().act().complete(&e.pid, &e.tid, &vars);
+            let ret = engine.executor().act().complete(&e.pid, &e.tid, vars);
             s1.send(ret.is_ok());
         }
     });
@@ -1438,7 +1450,7 @@ async fn export_executor_complete_no_uid() {
     engine.channel().on_message(move |e| {
         if e.is_key("act1") && e.is_state(MessageState::Created) {
             let vars = Vars::new();
-            let ret = engine.executor().act().complete(&e.pid, &e.tid, &vars);
+            let ret = engine.executor().act().complete(&e.pid, &e.tid, vars);
 
             // no uid is still ok in version 0.7.0+
             s1.send(ret.is_ok());
@@ -1466,7 +1478,7 @@ async fn export_executor_submit() {
         if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
-            let ret = engine.executor().act().submit(&e.pid, &e.tid, &vars);
+            let ret = engine.executor().act().submit(&e.pid, &e.tid, vars);
             s1.send(ret.is_ok());
         }
     });
@@ -1493,7 +1505,7 @@ async fn export_executor_skip() {
         if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
-            let ret = engine.executor().act().skip(&e.pid, &e.tid, &vars);
+            let ret = engine.executor().act().skip(&e.pid, &e.tid, vars);
             s1.send(ret.is_ok());
         }
     });
@@ -1520,7 +1532,7 @@ async fn export_executor_error() {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             vars.insert("ecode".to_string(), json!("code_1"));
-            let ret = engine.executor().act().error(&e.pid, &e.tid, &vars);
+            let ret = engine.executor().act().error(&e.pid, &e.tid, vars);
             s1.send(ret.is_ok());
         }
     });
@@ -1548,7 +1560,7 @@ async fn export_executor_abort() {
         if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
-            let ret = engine.executor().act().abort(&e.pid, &e.tid, &vars);
+            let ret = engine.executor().act().abort(&e.pid, &e.tid, vars);
             s1.send(ret.is_ok());
         }
     });
@@ -1589,7 +1601,7 @@ async fn export_executor_back() {
             engine
                 .executor()
                 .act()
-                .complete(&e.pid, &e.tid, &vars)
+                .complete(&e.pid, &e.tid, vars)
                 .unwrap();
 
             *count += 1;
@@ -1599,7 +1611,7 @@ async fn export_executor_back() {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             vars.insert("to".to_string(), json!("step1"));
-            let ret = engine.executor().act().back(&e.pid, &e.tid, &vars);
+            let ret = engine.executor().act().back(&e.pid, &e.tid, vars);
             s1.update(|data| *data = ret.is_ok());
         }
     });
@@ -1640,7 +1652,7 @@ async fn export_executor_cancel() {
             engine
                 .executor()
                 .act()
-                .complete(&e.pid, &e.tid, &vars)
+                .complete(&e.pid, &e.tid, vars)
                 .unwrap();
 
             *tid.lock().unwrap() = e.tid.clone();
@@ -1653,7 +1665,7 @@ async fn export_executor_cancel() {
             let ret = engine
                 .executor()
                 .act()
-                .cancel(&e.pid, &tid.lock().unwrap(), &vars);
+                .cancel(&e.pid, &tid.lock().unwrap(), vars);
             s1.update(|data| *data = ret.is_ok());
         }
     });
@@ -1682,7 +1694,7 @@ async fn export_executor_push() {
             let vars = Vars::new()
                 .with("uses", "acts.core.irq")
                 .with("key", "act2");
-            engine.executor().act().push(&e.pid, &e.tid, &vars).unwrap();
+            engine.executor().act().push(&e.pid, &e.tid, vars).unwrap();
         }
 
         if e.is_key("act2") && e.is_state(MessageState::Created) {
@@ -1715,7 +1727,7 @@ async fn export_executor_push_no_key_error() {
                 engine
                     .executor()
                     .act()
-                    .push(&e.pid, &e.tid, &Vars::new())
+                    .push(&e.pid, &e.tid, Vars::new())
                     .is_err(),
             );
         }
@@ -1743,7 +1755,7 @@ async fn export_executor_push_not_step_id_error() {
         println!("message: {e:?}");
         if e.is_key("act1") && e.is_state(MessageState::Created) {
             let vars = Vars::new();
-            s1.send(engine.executor().act().push(&e.pid, &e.tid, &vars).is_err());
+            s1.send(engine.executor().act().push(&e.pid, &e.tid, vars).is_err());
         }
     });
     let mut vars = Vars::new();
@@ -1771,7 +1783,7 @@ async fn export_executor_remove() {
                 engine
                     .executor()
                     .act()
-                    .remove(&e.pid, &e.tid, &Vars::new())
+                    .remove(&e.pid, &e.tid, Vars::new())
                     .is_ok(),
             );
         }

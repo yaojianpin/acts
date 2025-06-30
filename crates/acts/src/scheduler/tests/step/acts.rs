@@ -60,7 +60,7 @@ async fn sch_step_acts_req() {
 async fn sch_step_acts_set() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_input("a", json!(0))
+            .with_var("a", json!(0))
             .with_act(Act::set(Vars::new().with("a", 10)))
     });
 
@@ -81,34 +81,10 @@ async fn sch_step_acts_set() {
     );
 }
 
-// #[tokio::test]
-// async fn sch_step_acts_expose() {
-//     let mut workflow = Workflow::new().with_step(|step| {
-//         step.with_id("step1")
-//             .with_act(Act::expose(Vars::new().with("a", 10)))
-//     });
-
-//     workflow.print();
-//     let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
-
-//     scher.launch(&proc);
-//     tx.recv().await;
-//     proc.print();
-//     assert_eq!(
-//         proc.task_by_nid("step1")
-//             .first()
-//             .unwrap()
-//             .data()
-//             .get::<i32>("a")
-//             .unwrap(),
-//         10
-//     );
-// }
-
 #[tokio::test]
 async fn sch_step_acts_if_true() {
     let mut workflow = Workflow::new().with_step(|step| {
-        step.with_input("a", json!(10))
+        step.with_var("a", json!(10))
             .with_id("step1")
             .with_act(Act::irq(|act| act.with_if(r#"a > 0"#).with_key("act1")).with_id("act1"))
     });
@@ -133,7 +109,7 @@ async fn sch_step_acts_if_true() {
 #[tokio::test]
 async fn sch_step_acts_if_false() {
     let mut workflow = Workflow::new().with_step(|step| {
-        step.with_input("a", json!(10))
+        step.with_var("a", json!(10))
             .with_id("step1")
             .with_act(Act::irq(|act| act.with_if(r#"a < 0"#).with_key("act1")).with_id("act1"))
     });
@@ -251,7 +227,7 @@ async fn sch_step_acts_if_false() {
 #[tokio::test]
 async fn sch_step_acts_action() {
     let mut workflow = Workflow::new().with_step(|step| {
-        step.with_input("a", json!(10))
+        step.with_var("a", json!(10))
             .with_id("step1")
             .with_act(Act::action(Vars::new().with("action", EventAction::Next)))
     });

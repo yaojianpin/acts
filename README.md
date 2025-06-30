@@ -63,8 +63,6 @@ async fn main() {
     let model = r#"
     id: my_model
     name: my model
-    outputs:
-        a:
     steps:
       - name: step 1
         acts:
@@ -75,7 +73,7 @@ async fn main() {
         acts:
           - uses: acts.transform.code
             params: |
-                return { a: a + 10 };
+                return { data: a + 10 };
     "#;
     let workflow = Workflow::from_yml(model).unwrap();
 
@@ -125,9 +123,26 @@ The model is a yaml format file. where there are different type of node, includi
 
 ```yml
 name: model name
-# workflow.inputs are the global vars
+# workflow default inputs vars
 inputs:
   value: 0
+
+# schema for inputs and outputs
+schema:
+  inputs:
+    type: object
+    properties:
+      value: 
+        type: number
+        title: Value
+        desc: Set value when starting workflow
+  outputs:
+      type: object
+      properties:
+        data:
+          type: object
+          title: Output data
+
 # the event to start the workflow
 on:
   - id: event1
@@ -135,14 +150,11 @@ on:
 # workflow steps
 steps:
   - name: step 1
-    # execute by act
     acts:
         # init with interrupt request to client
         # and make sure complete the action with 'list' var
       - name: init
         uses: acts.core.irq
-        outputs:
-          list:
 
   - name: step 2
     # workflow branches to run by condition
@@ -459,10 +471,6 @@ steps:
         # passes data to the act
         params:
           a: 6
-
-        # limits the data keys when acting
-        outputs:
-          a:
 ```
 
 For more acts example, please see [`examples`](https://github.com/yaojianpin/acts/tree/main/examples)

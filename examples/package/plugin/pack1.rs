@@ -10,17 +10,19 @@ pub struct Pack1 {
 impl ActPackage for Pack1 {
     fn meta() -> ActPackageMeta {
         ActPackageMeta {
+            id: "pack1",
             name: "pack1",
             desc: "",
             icon: "",
             doc: "",
             version: "0.1.0",
-            schema: json!({
+            in_schema: json!({
                 "type": "object",
                 "properties": {
                     "v1": { "type": "number" }
                 }
             }),
+            ui_schema: None,
             run_as: acts::ActRunAs::Irq,
             resources: vec![],
             catalog: acts::ActPackageCatalog::App,

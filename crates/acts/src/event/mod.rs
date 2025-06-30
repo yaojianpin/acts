@@ -25,7 +25,15 @@ pub struct Event<T, E = ()> {
 }
 
 #[derive(
-    Serialize, Deserialize, Debug, Clone, Default, PartialEq, strum::AsRefStr, strum::EnumString,
+    Serialize,
+    Deserialize,
+    Debug,
+    Clone,
+    Default,
+    PartialEq,
+    strum::AsRefStr,
+    strum::EnumString,
+    strum::EnumIter,
 )]
 #[serde(rename_all = "snake_case")]
 #[strum(serialize_all = "snake_case")]
@@ -97,7 +105,7 @@ where
         pid: &str,
         tid: &str,
         action: EventAction,
-        options: &crate::Vars,
+        options: crate::Vars,
     ) -> Result<()> {
         if let Some(scher) = &self.runtime {
             return scher.do_action(&Action::new(pid, tid, action, options));

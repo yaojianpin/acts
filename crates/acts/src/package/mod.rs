@@ -84,6 +84,9 @@ pub enum ActPackageCatalog {
     /// workflow event
     Event,
 
+    /// workflow trace package
+    Trace,
+
     /// data transform
     Transform,
 
@@ -101,6 +104,9 @@ pub enum ActPackageCatalog {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ActPackageMeta {
+    /// package id, used to identify the package
+    pub id: &'static str,
+
     /// package simple name
     pub name: &'static str,
 
@@ -116,8 +122,12 @@ pub struct ActPackageMeta {
     /// package version
     pub version: &'static str,
 
-    /// json schema for package inputs
-    pub schema: serde_json::Value,
+    /// json schema for package params
+    pub in_schema: serde_json::Value,
+
+    /// ui-schema for package
+    /// please refer to https://github.com/rjsf-team/react-jsonschema-form#readme
+    pub ui_schema: Option<serde_json::Value>,
 
     /// package run as Irq, Msg or Func
     /// Func is only used internally
@@ -161,7 +171,7 @@ impl ActPackageRegister {
             create: (|params: serde_json::Value| {
                 let meta = T::meta();
 
-                jsonschema::validate(&meta.schema, &params)?;
+                jsonschema::validate(&meta.in_schema, &params)?;
                 let ret = serde_json::from_value::<T>(params)?;
                 Ok(Box::new(ret) as Box<dyn ActPackageFn>)
             }),
@@ -197,12 +207,14 @@ impl ActPackageMeta {
     pub fn into_data(&self) -> Result<data::Package> {
         let pack = self.clone();
         Ok(data::Package {
-            id: pack.name.to_string(),
+            id: pack.id.to_string(),
+            name: pack.name.to_string(),
             desc: pack.desc.to_string(),
             icon: pack.icon.to_string(),
             doc: pack.doc.to_string(),
             version: pack.version.to_string(),
-            schema: pack.schema.to_string(),
+            in_schema: pack.in_schema.to_string(),
+            ui_schema: pack.ui_schema.map(|v| v.to_string()),
             run_as: pack.run_as,
             resources: serde_json::to_string(&pack.resources)
                 .expect("cannot convert ActPackageMeta.group to json"),
@@ -232,6 +244,6 @@ pub fn init(engine: &Engine) {
             .pack()
             .publish(&pack)
             .unwrap_or_else(|_| panic!("cannot publish package '{}'", pack.id));
-        engine.runtime().package().register(meta.name, register);
+        engine.runtime().package().register(meta.id, register);
     }
 }

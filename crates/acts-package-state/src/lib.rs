@@ -57,7 +57,7 @@ impl ActPlugin for StatePackagePlugin {
                     .error(
                         &e.pid,
                         &e.tid,
-                        &ActError::Package("missing 'params' in inputs".to_string()).into(),
+                        ActError::Package("missing 'params' in inputs".to_string()).into(),
                     )
                     .unwrap();
                 return;
@@ -67,10 +67,13 @@ impl ActPlugin for StatePackagePlugin {
             let pakage: StatePackage = serde_json::from_value(params).unwrap();
             match pakage.run(&client, &e.pid) {
                 Ok(ref vars) => {
-                    executor.act().complete(&e.pid, &e.tid, vars).unwrap();
+                    executor
+                        .act()
+                        .complete(&e.pid, &e.tid, vars.clone())
+                        .unwrap();
                 }
                 Err(err) => {
-                    executor.act().error(&e.pid, &e.tid, &err.into()).unwrap();
+                    executor.act().error(&e.pid, &e.tid, err.into()).unwrap();
                 }
             }
         });

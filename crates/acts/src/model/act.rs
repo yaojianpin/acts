@@ -5,14 +5,12 @@ mod timeout;
 pub use catch::Catch;
 pub use retry::Retry;
 
-use crate::{ModelBase, StmtBuild, Vars};
+use crate::{ModelBase, Vars, utils::consts};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 #[allow(unused_imports)]
 pub use timeout::{Timeout, TimeoutLimit, TimeoutUnit};
-
-use super::ActEvent;
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct Act {
@@ -33,11 +31,6 @@ pub struct Act {
     #[serde(default)]
     pub params: JsonValue,
 
-    // package extra options
-    // such as ACT_INDEX, ACT_VALUE
-    #[serde(default)]
-    pub options: Vars,
-
     #[serde(default)]
     pub r#if: Option<String>,
 
@@ -48,45 +41,30 @@ pub struct Act {
     #[serde(default)]
     pub tag: String,
 
-    /// on event for 'created', 'completed'
+    /// act variables
     #[serde(default)]
-    pub on: Option<ActEvent>,
-
-    /// act arguments
-    #[serde(default)]
-    pub inputs: Vars,
-
-    #[serde(default)]
-    pub outputs: Vars,
-
-    #[serde(default)]
-    pub setup: Vec<Act>,
+    pub vars: Vars,
 
     #[serde(default)]
     pub catches: Vec<Catch>,
 
     #[serde(default)]
     pub timeout: Vec<Timeout>,
+
+    // package extra options to send to client
+    // such as ACT_INDEX, ACT_VALUE
+    #[serde(default)]
+    pub options: Vars,
+
+    /// metadata to store some extra value for UI styles
+    /// don't send to client
+    #[serde(default)]
+    pub metadata: Vars,
 }
 
 impl ModelBase for Act {
     fn id(&self) -> &str {
         &self.id
-    }
-}
-
-impl<T> StmtBuild<T> for Vec<T> {
-    fn add(mut self, s: T) -> Self {
-        self.push(s);
-        self
-    }
-
-    fn with<F: Fn(T) -> T>(mut self, build: F) -> Self
-    where
-        T: Default,
-    {
-        self.push(build(T::default()));
-        self
     }
 }
 
@@ -120,11 +98,11 @@ impl Act {
         self
     }
 
-    pub fn with_input<T>(mut self, name: &str, value: T) -> Self
+    pub fn with_var<T>(mut self, name: &str, value: T) -> Self
     where
         T: Serialize + Clone,
     {
-        self.inputs.set(name, value);
+        self.vars.set(name, value);
         self
     }
 
@@ -147,23 +125,20 @@ impl Act {
     {
         let mut vec = Vec::new();
         f(&mut vec);
-        self.inputs.set(name, vec);
+        self.vars.set(name, vec);
         self
     }
 
     pub fn with_output(mut self, name: &str, value: JsonValue) -> Self {
-        self.outputs.insert(name.to_string(), value);
-        self
-    }
+        self.options
+            .entry(consts::ACT_OUTPUTS)
+            .and_modify(|outputs| {
+                if let Some(obj) = outputs.as_object_mut() {
+                    obj.insert(name.to_string(), value.clone());
+                }
+            })
+            .or_insert(Vars::new().with(name, value).into());
 
-    pub fn with_setup(mut self, build: fn(Vec<Act>) -> Vec<Act>) -> Self {
-        let stmts = Vec::new();
-        self.setup = build(stmts);
-        self
-    }
-
-    pub fn with_on(mut self, event: ActEvent) -> Self {
-        self.on = Some(event);
         self
     }
 

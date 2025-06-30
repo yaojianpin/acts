@@ -1,6 +1,4 @@
 mod catch;
-mod hooks;
-mod setup;
 mod timeout;
 
 use crate::Act;

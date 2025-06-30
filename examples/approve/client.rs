@@ -61,7 +61,7 @@ impl<'a> Client<'a> {
 
             executor
                 .act()
-                .complete(&message.pid, &message.tid, &options)?;
+                .complete(&message.pid, &message.tid, options)?;
             println!(
                 "action state: id={} key={} inputs={}",
                 &message.tid, &message.key, &message.inputs,
@@ -72,7 +72,7 @@ impl<'a> Client<'a> {
 
             executor
                 .act()
-                .complete(&message.pid, &message.tid, &options)?;
+                .complete(&message.pid, &message.tid, options)?;
             println!(
                 "action state: id={} key={} inputs={}",
                 &message.tid, &message.key, &message.inputs,
@@ -83,7 +83,7 @@ impl<'a> Client<'a> {
 
             executor
                 .act()
-                .complete(&message.pid, &message.tid, &options)?;
+                .complete(&message.pid, &message.tid, options)?;
             println!(
                 "action state: id={} key={} inputs={}",
                 &message.tid, &message.key, &message.inputs,
@@ -98,7 +98,7 @@ impl<'a> Client<'a> {
             );
             executor
                 .act()
-                .complete(&message.pid, &message.tid, &options)?;
+                .complete(&message.pid, &message.tid, options)?;
             println!(
                 "action state: id={} key={} inputs={}",
                 &message.tid, &message.key, &message.inputs,
@@ -114,7 +114,7 @@ impl<'a> Client<'a> {
 
             executor
                 .act()
-                .complete(&message.pid, &message.tid, &options)?;
+                .complete(&message.pid, &message.tid, options)?;
             println!("action state: id={} key={}", &message.tid, &message.key,);
         } else if message.is_type("msg") {
             println!(

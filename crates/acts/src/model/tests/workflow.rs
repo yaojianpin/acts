@@ -1,4 +1,4 @@
-use crate::{Act, StmtBuild, Vars, Workflow};
+use crate::{Vars, Workflow};
 use serde_json::json;
 
 #[test]
@@ -47,12 +47,12 @@ fn model_workflow_set_id() {
 }
 
 #[test]
-fn model_workflow_set_input() {
+fn model_workflow_set_vars() {
     let mut m = Workflow::new();
     let mut vars = Vars::new();
     vars.insert("v1".to_string(), 5.into());
-    m.set_inputs(&vars);
-    assert_eq!(m.inputs.get_value("v1"), Some(&json!(5)));
+    m.set_vars(&vars);
+    assert_eq!(m.vars.get_value("v1"), Some(&json!(5)));
 }
 
 #[test]
@@ -82,65 +82,6 @@ fn model_workflow_steps() {
 fn model_workflow_tag() {
     let m = Workflow::new().with_tag("tag1");
     assert_eq!(m.tag, "tag1");
-}
-
-#[test]
-fn model_workflow_setup_build() {
-    let m = Workflow::new().with_setup(|stmts| {
-        stmts
-            .add(Act::msg(|msg| msg.with_key("msg1")))
-            .add(Act::set(Vars::new().with("a", 5)))
-    });
-    assert_eq!(m.setup.len(), 2);
-}
-
-#[test]
-fn model_workflow_setup_parse() {
-    let text = r#"
-    name: workflow
-    id: m1
-    setup:
-       - act: msg
-         inputs:
-           key: msg1
-       - act: set
-         a: 6
-       - act: on_created
-         then:
-            - act: msg
-              inputs:
-                key: msg2
-       - act: on_completed
-         then:
-           - act: msg
-             inputs:
-               key: msg3
-       - act: on_step
-         then:
-           - act: msg
-             inputs:
-               key: msg3
-       - act: on_before_update
-         then:
-           - act: msg
-             inputs:
-               key: msg3
-       - act: on_updated
-         then:
-           - act: msg
-             inputs:
-               key: msg3
-       - act: on_step
-         then:
-           - act: msg
-             inputs:
-               key: msg3
-       - act: expose
-         inputs:
-           out:
-    "#;
-    let m = Workflow::from_yml(text).unwrap();
-    assert_eq!(m.setup.len(), 9);
 }
 
 #[test]

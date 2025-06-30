@@ -18,12 +18,47 @@ pub struct ParallelPackage {
 impl ActPackage for ParallelPackage {
     fn meta() -> ActPackageMeta {
         ActPackageMeta {
-            name: "acts.core.parallel",
+            id: "acts.core.parallel",
+            name: "Parallel",
             desc: "create acts based on an array and run them in parallel",
             version: "0.1.0",
-            icon: "icon-parallel",
+            icon: r#"<svg viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" width="24" height="24"><path d="M822.656 649.344l128 128v45.312l-128 128-45.312-45.312L850.752 832H250.496a96 96 0 1 1 0-64h600.256l-73.408-73.344z m0-640l-45.312 45.312L850.752 128H250.496a96 96 0 1 0 0 64h600.256l-73.408 73.344 45.312 45.312 128-128v-45.312z m-45.312 365.312L850.752 448H250.496a96 96 0 1 0 0 64h600.256l-73.408 73.344 45.312 45.312 128-128v-45.312l-128-128z" fill="currentColor"></path></svg>"#,
             doc: "",
-            schema: json!({}),
+            in_schema: json!({
+                "type": "object",
+                "properties": {
+                    "in": {
+                        "type": "array",
+                        "title": "In",
+                        "items": { "type": "string" },
+                        "description": "The input array to create acts"
+                    },
+                    "acts": {
+                        "type": "array",
+                        "title": "Act List",
+                        "items": { "type": "object" },
+                        "description": "The acts to run in parallel"
+                    }
+                },
+                "required": ["in", "acts"]
+            }),
+            ui_schema: Some(json!({
+                "in": {
+                    "ui:widget": "array",
+                    "ui:options": {
+                        "label": false,
+                        "addButtonText": "Add Input"
+                    }
+                },
+                "acts": {
+                    "ui:widget": "acts",
+                    "ui:options": {
+                        "label": false,
+                        "addButtonText": "Add Act"
+                    }
+                }
+            })),
+
             run_as: ActRunAs::Func,
             resources: vec![],
             catalog: ActPackageCatalog::Core,
@@ -36,7 +71,7 @@ impl ActPackageFn for ParallelPackage {
         let mut acts = Vec::new();
         for (index, value) in self.r#in.iter().enumerate() {
             let params = serde_json::to_value(BlockPackage {
-                mode: RunningMode::Sequence,
+                mode: RunningMode::Parallel,
                 acts: self.acts.clone(),
             })?;
 
@@ -75,6 +110,6 @@ mod tests {
 
         let value = serde_yaml::from_str::<serde_json::Value>(params).unwrap();
         let meta = super::ParallelPackage::meta();
-        jsonschema::validate(&meta.schema, &value).unwrap()
+        jsonschema::validate(&meta.in_schema, &value).unwrap()
     }
 }

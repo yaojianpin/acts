@@ -19,18 +19,35 @@ pub struct SubflowPackage {
 impl ActPackage for SubflowPackage {
     fn meta() -> ActPackageMeta {
         ActPackageMeta {
-            name: "acts.core.subflow",
+            id: "acts.core.subflow",
+            name: "Subflow",
             desc: "call a subflow",
             version: "0.1.0",
-            icon: "icon-subflow",
+            icon: r#"<svg viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" width="24" height="24"><path d="M608 64c53.02 0 96 42.98 96 96v144c0 53.02-42.98 96-96 96h-64v80h160c53.02 0 96 42.98 96 96v48h64c53.02 0 96 42.98 96 96v144c0 53.02-42.98 96-96 96H672c-53.02 0-96-42.98-96-96V720c0-53.02 42.98-96 96-96h64v-48c0-17.496-14.042-31.713-31.47-31.996L704 544H320c-17.496 0-31.713 14.042-32 31.47V624h64c53.02 0 96 42.98 96 96v144c0 53.02-42.98 96-96 96H160c-53.02 0-96-42.98-96-96V720c0-53.02 42.98-96 96-96h64v-48c0-53.02 42.98-96 96-96h160v-80h-64c-53.02 0-96-42.98-96-96V160c0-53.02 42.98-96 96-96h192z m256 624H672c-17.496 0-31.713 14.042-31.996 31.47L640 720v144c0 17.496 14.042 31.713 31.47 31.996l0.53 0.004h192c17.496 0 31.713-14.042 31.996-31.47L896 864V720c0-17.496-14.042-31.713-31.47-31.996L864 688z m-512 0H160c-17.496 0-31.713 14.042-31.996 31.47L128 720v144c0 17.496 14.042 31.713 31.47 31.996l0.53 0.004h192c17.496 0 31.713-14.042 31.996-31.47L384 864V720c0-17.496-14.042-31.713-31.47-31.996L352 688z m256-560H416c-17.496 0-31.713 14.042-31.996 31.47L384 160v144c0 17.496 14.042 31.713 31.47 31.996l0.53 0.004h192c17.496 0 31.713-14.042 31.996-31.47L640 304V160c0-17.496-14.042-31.713-31.47-31.996L608 128z" fill="currentColor"></path></svg>"#,
             doc: "",
-            schema: json!({
+            in_schema: json!({
                 "type": "object",
                 "properties": {
-                    "to": { "type": "string" },
-                    "options": { "type": "object"}
-                }
+                    "to": {
+                        "type": "string",
+                        "title": "Subflow ID",
+                        "description": "The subflow id to call"
+                    },
+                    "options": {
+                        "type": "object",
+                        "title": "Options",
+                        "default": {},
+                        "description": "Options to pass to the subflow",
+                        "additionalProperties": {
+                            "type": ["string", "number", "array", "boolean", "null"]
+                        }
+                    }
+                },
+                "required": ["to"]
             }),
+            ui_schema: Some(json!({
+                "ui:order": ["to", "options"]
+            })),
             run_as: ActRunAs::Func,
             resources: vec![],
             catalog: ActPackageCatalog::Core,
@@ -72,6 +89,6 @@ mod tests {
         let value = serde_yaml::from_str::<serde_json::Value>(params).unwrap();
         let meta = super::SubflowPackage::meta();
         serde_json::from_value::<super::SubflowPackage>(value.clone()).unwrap();
-        jsonschema::validate(&meta.schema, &value).unwrap()
+        jsonschema::validate(&meta.in_schema, &value).unwrap()
     }
 }

@@ -2,7 +2,7 @@ use serde_json::json;
 
 use crate::Vars;
 use crate::event::EventAction;
-use crate::{Act, StmtBuild, TaskState, Workflow, utils, utils::test::create_proc_signal};
+use crate::{Act, TaskState, Workflow, utils, utils::test::create_proc_signal};
 
 #[tokio::test]
 async fn pack_action_submit_on_step() {
@@ -53,31 +53,6 @@ async fn pack_action_sumit_on_step_with_inputs() {
             .get::<i32>("a")
             .unwrap(),
         5
-    );
-}
-
-#[tokio::test]
-async fn pack_action_submit_on_act() {
-    let mut workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_act(
-            Act::irq(|act| act.with_key("act1").with_id("act1")).with_setup(|stmts| {
-                stmts.add(
-                    Act::action(Vars::new().with("action", "submit"))
-                        .with_on(crate::ActEvent::Created),
-                )
-            }),
-        )
-    });
-
-    workflow.print();
-    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
-
-    scher.launch(&proc);
-    tx.recv().await;
-    proc.print();
-    assert_eq!(
-        proc.task_by_nid("act1").first().unwrap().state(),
-        TaskState::Submitted
     );
 }
 
@@ -172,31 +147,6 @@ async fn pack_action_complete_on_step_with_inputs() {
 }
 
 #[tokio::test]
-async fn pack_action_complete_on_act() {
-    let mut workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_act(
-            Act::irq(|act| act.with_id("act1").with_key("act1")).with_setup(|stmts| {
-                stmts.add(
-                    Act::action(Vars::new().with("action", EventAction::Next))
-                        .with_on(crate::ActEvent::Created),
-                )
-            }),
-        )
-    });
-
-    workflow.print();
-    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
-
-    scher.launch(&proc);
-    tx.recv().await;
-    proc.print();
-    assert_eq!(
-        proc.task_by_nid("act1").first().unwrap().state(),
-        TaskState::Completed
-    );
-}
-
-#[tokio::test]
 async fn pack_action_abort_on_step() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -249,30 +199,6 @@ async fn pack_action_abort_on_step_with_inputs() {
             .get::<i32>("a")
             .unwrap(),
         5
-    );
-}
-
-#[tokio::test]
-async fn pack_action_abort_on_act() {
-    let mut workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_act({
-            Act::irq(|act| act.with_id("act1")).with_setup(|stmts| {
-                stmts.add(
-                    Act::action(Vars::new().with("action", "abort"))
-                        .with_on(crate::ActEvent::Created),
-                )
-            })
-        })
-    });
-
-    workflow.print();
-    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
-    scher.launch(&proc);
-    tx.recv().await;
-    proc.print();
-    assert_eq!(
-        proc.task_by_nid("act1").first().unwrap().state(),
-        TaskState::Aborted
     );
 }
 
@@ -367,36 +293,7 @@ async fn pack_action_error_on_step_with_no_err_code() {
 }
 
 #[tokio::test]
-async fn pack_action_error_on_act() {
-    let mut workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_id("act1")).with_setup(|smts| {
-                smts.add(
-                    Act::action(Vars::new().with("action", "error").with(
-                        "options",
-                        json!({
-                            "ecode": "err1"
-                        }),
-                    ))
-                    .with_on(crate::ActEvent::Created),
-                )
-            }))
-    });
-
-    workflow.print();
-    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
-
-    scher.launch(&proc);
-    tx.recv().await;
-    proc.print();
-    assert_eq!(
-        proc.task_by_nid("act1").first().unwrap().state(),
-        TaskState::Error
-    );
-}
-
-#[tokio::test]
-async fn pack_action_skip() {
+async fn pack_action_skip_on_step() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::action(Vars::new().with("action", "skip")))

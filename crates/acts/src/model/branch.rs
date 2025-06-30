@@ -1,4 +1,4 @@
-use crate::{ModelBase, Vars, model::Step};
+use crate::{ModelBase, Vars, model::Step, utils::consts};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
@@ -14,10 +14,7 @@ pub struct Branch {
     pub id: String,
 
     #[serde(default)]
-    pub inputs: Vars,
-
-    #[serde(default)]
-    pub outputs: Vars,
+    pub vars: Vars,
 
     #[serde(default)]
     pub tag: String,
@@ -38,6 +35,15 @@ pub struct Branch {
 
     #[serde(default)]
     pub needs: Vec<String>,
+
+    /// extra options to send to client
+    #[serde(default)]
+    pub options: Vars,
+
+    /// metadata to store some extra value for UI styles
+    /// don't send to client
+    #[serde(default)]
+    pub metadata: Vars,
 }
 
 impl ModelBase for Branch {
@@ -65,13 +71,21 @@ impl Branch {
         self
     }
 
-    pub fn with_input(mut self, name: &str, value: JsonValue) -> Self {
-        self.inputs.insert(name.to_string(), value);
+    pub fn with_var(mut self, name: &str, value: JsonValue) -> Self {
+        self.vars.insert(name.to_string(), value);
         self
     }
 
     pub fn with_output(mut self, name: &str, value: JsonValue) -> Self {
-        self.outputs.insert(name.to_string(), value);
+        self.options
+            .entry(consts::ACT_OUTPUTS)
+            .and_modify(|outputs| {
+                if let Some(obj) = outputs.as_object_mut() {
+                    obj.insert(name.to_string(), value.clone());
+                }
+            })
+            .or_insert(Vars::new().with(name, value).into());
+
         self
     }
 

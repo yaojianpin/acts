@@ -1,5 +1,5 @@
 use crate::{
-    Act, MessageState, StmtBuild, Vars, Workflow,
+    Act, MessageState, Vars, Workflow,
     event::EventAction,
     scheduler::TaskState,
     utils::{
@@ -12,14 +12,12 @@ use serde_json::json;
 #[tokio::test]
 async fn pack_parallel_setup_list() {
     let mut workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_setup(|setup| {
-            setup.add(Act::parallel(json!({
-                "in": ["u1", "u2"],
-                "acts": vec![
-                    Act::irq(|act| act.with_key("act1").with_id("act1"))
-                ]
-            })))
-        })
+        step.with_id("step1").with_act(Act::parallel(json!({
+            "in": ["u1", "u2"],
+            "acts": vec![
+                Act::irq(|act| act.with_key("act1").with_id("act1"))
+            ]
+        })))
     });
 
     workflow.print();
@@ -71,7 +69,7 @@ async fn pack_parallel_var_exist() {
                 let vars = e.inputs.get::<Vars>(consts::ACT_OPTIONS_KEY).unwrap();
                 data.push(vars);
             });
-            e.do_action(&e.pid, &e.tid, EventAction::Next, &Vars::new())
+            e.do_action(&e.pid, &e.tid, EventAction::Next, Vars::new())
                 .unwrap();
         }
     });
@@ -92,16 +90,14 @@ async fn pack_parallel_var_exist() {
 }
 
 #[tokio::test]
-async fn pack_parallel_setup_var_not_exist() {
+async fn pack_parallel_in_not_exist() {
     let mut workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_setup(|stmts| {
-            stmts.add(Act::parallel(json!({
-                "in": r#"$("not_exists")"#,
-                "acts": vec![
-                    Act::irq(|act| act.with_key("act1"))
-                ]
-            })))
-        })
+        step.with_id("step1").with_act(Act::parallel(json!({
+            "in": r#"$("not_exists")"#,
+            "acts": vec![
+                Act::irq(|act| act.with_key("act1"))
+            ]
+        })))
     });
 
     workflow.print();
@@ -113,18 +109,16 @@ async fn pack_parallel_setup_var_not_exist() {
 }
 
 #[tokio::test]
-async fn pack_parallel_setup_code() {
+async fn pack_parallel_in_code() {
     let mut workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_setup(|setup| {
-            setup
-                .add(Act::set(Vars::new().with("a", ["u1", "u2"])))
-                .add(Act::parallel(json!({
+        step.with_id("step1").with_act(Act::set(Vars::new().with("a", ["u1", "u2"])))
+                .with_act(Act::parallel(json!({
                     "in": r#"{{ let b = ["u3"];let c = [ "u1" ];let d = [ "u3", "u4" ];a.union(b).difference(c).intersection(d) }}"#,
                     "acts": vec![
                         Act::irq(|act| act.with_key("act1").with_id("act1"))
                     ]
                 })))
-        })
+
     });
 
     workflow.print();

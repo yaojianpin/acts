@@ -65,18 +65,21 @@ impl Extender {
     /// impl ActPackage for MyPackage {
     ///     fn meta() -> ActPackageMeta {
     ///        ActPackageMeta {
-    ///             name: "my_package",
+    ///             id: "my_package",
+    ///             name: "my package",
     ///             desc: "",
     ///             icon: "",
     ///             doc: "",
     ///             version: "0.1.0",
-    ///             schema: json!({
+    ///             in_schema: json!({
     ///                 "type": "object",
     ///                 "properties": {
     ///                     "a": { "type": "number" },
     ///                     "b": { "type": "array" }
     ///                 }
     ///             }),
+    ///             // refers to https://github.com/rjsf-team/react-jsonschema-form
+    ///             ui_schema: None,
     ///             run_as: acts::ActRunAs::Irq,
     ///             resources: vec![],
     ///             catalog: acts::ActPackageCatalog::App,

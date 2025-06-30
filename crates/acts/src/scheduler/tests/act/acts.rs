@@ -21,7 +21,7 @@ async fn sch_act_run_in_order() {
         if e.is_irq() && e.is_state(MessageState::Created) {
             rx.update(|data| data.push((e.key.clone(), e.start_time)));
             std::thread::sleep(std::time::Duration::from_millis(1000));
-            e.do_action(&e.pid, &e.tid, EventAction::Next, &Vars::new())
+            e.do_action(&e.pid, &e.tid, EventAction::Next, Vars::new())
                 .unwrap();
         }
     });
@@ -172,8 +172,8 @@ async fn sch_act_params_expr_brace_not_in_same_line_not_support() {
 async fn sch_act_params_multi_expr_str() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_input("a", "hello".into())
-            .with_input("b", "world".into())
+            .with_var("a", "hello".into())
+            .with_var("b", "world".into())
             .with_act(Act::irq(|act| {
                 act.with_key("act1").with_params_data(json!(
                     r#"
@@ -207,8 +207,8 @@ async fn sch_act_params_multi_expr_str() {
 async fn sch_act_params_multi_expr_bool() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_input("a", true.into())
-            .with_input("b", false.into())
+            .with_var("a", true.into())
+            .with_var("b", false.into())
             .with_act(Act::irq(|act| {
                 act.with_key("act1").with_params_data(json!(
                     r#"
@@ -242,9 +242,9 @@ async fn sch_act_params_multi_expr_bool() {
 async fn sch_act_params_multi_expr_others() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_input("a", json!({ "v1": 10 }))
-            .with_input("b", json!(["v2"]))
-            .with_input("c", json!(null))
+            .with_var("a", json!({ "v1": 10 }))
+            .with_var("b", json!(["v2"]))
+            .with_var("c", json!(null))
             .with_act(Act::irq(|act| {
                 act.with_key("act1").with_params_data(json!(
                     r#"

@@ -4,9 +4,6 @@
   steps:
     - name: step 1
     - name: step 2
-      run: |
-        let v = 50;
-    - name: step 3
       inputs:
         e: abc
       branches:
@@ -19,5 +16,5 @@
           if: a < 100
           steps:
             - name:  branch 2.1
-    - name: step 4
+    - name: step 3
       

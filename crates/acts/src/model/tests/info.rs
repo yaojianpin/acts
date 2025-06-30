@@ -9,6 +9,7 @@ use crate::{
 fn model_info_package() {
     let package = &data::Package {
         id: utils::shortid(),
+        name: "test_package".to_string(),
         create_time: 0,
         update_time: 0,
         timestamp: 0,
@@ -16,7 +17,8 @@ fn model_info_package() {
         icon: "icon".to_string(),
         doc: "doc".to_string(),
         version: "0.1.0".to_string(),
-        schema: "{}".to_string(),
+        in_schema: "{}".to_string(),
+        ui_schema: None,
         run_as: crate::ActRunAs::Func,
         resources: "[]".to_string(),
         catalog: crate::package::ActPackageCatalog::Core,
@@ -24,11 +26,12 @@ fn model_info_package() {
     };
     let info: PackageInfo = package.into();
     assert_eq!(info.id, package.id);
+    assert_eq!(info.name, package.name);
     assert_eq!(info.desc, package.desc);
     assert_eq!(info.icon, package.icon);
     assert_eq!(info.doc, package.doc);
     assert_eq!(info.version, package.version);
-    assert_eq!(info.schema, package.schema);
+    assert_eq!(info.schema, package.in_schema);
     assert_eq!(info.run_as, package.run_as);
     assert_eq!(info.resources, package.resources);
     assert_eq!(info.catalog, package.catalog);
@@ -123,11 +126,13 @@ fn model_info_model() {
 fn model_info_package_arr_to_value() {
     let package = &data::Package {
         id: utils::shortid(),
+        name: "name".to_string(),
         desc: "desc".to_string(),
         icon: "icon".to_string(),
         doc: "doc".to_string(),
         version: "0.1.0".to_string(),
-        schema: "{}".to_string(),
+        in_schema: "{}".to_string(),
+        ui_schema: None,
         run_as: crate::ActRunAs::Func,
         resources: "[]".to_string(),
         catalog: crate::package::ActPackageCatalog::Core,

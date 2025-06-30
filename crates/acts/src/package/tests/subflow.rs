@@ -110,8 +110,7 @@ async fn pack_subflow_act_complete() {
     Executor::new(&scher).model().deploy(&w2).unwrap();
     emitter.on_message(move |e| {
         if e.is_key("act1") && e.is_state(MessageState::Created) {
-            let options = Vars::new();
-            e.do_action(&e.pid, &e.tid, EventAction::Next, &options)
+            e.do_action(&e.pid, &e.tid, EventAction::Next, Vars::new())
                 .unwrap();
         }
     });
@@ -148,8 +147,7 @@ async fn pack_subflow_act_skip() {
     Executor::new(&scher).model().deploy(&w2).unwrap();
     emitter.on_message(move |e| {
         if e.is_key("act1") && e.is_state(MessageState::Created) {
-            let options = Vars::new();
-            e.do_action(&e.pid, &e.tid, EventAction::Skip, &options)
+            e.do_action(&e.pid, &e.tid, EventAction::Skip, Vars::new())
                 .unwrap();
         }
     });
@@ -189,8 +187,7 @@ async fn pack_subflow_act_abort() {
     emitter.on_message(move |e| {
         println!("message: {:?}", e.inner());
         if e.is_key("act1") && e.is_state(MessageState::Created) {
-            let options = Vars::new();
-            e.do_action(&e.pid, &e.tid, EventAction::Abort, &options)
+            e.do_action(&e.pid, &e.tid, EventAction::Abort, Vars::new())
                 .unwrap();
         }
     });
@@ -236,7 +233,7 @@ async fn pack_subflow_act_error() {
             let mut options = Vars::new();
             options.set(consts::ACT_ERR_CODE, "err1");
             options.set(consts::ACT_ERR_MESSAGE, "sub workflow error");
-            e.do_action(&e.pid, &e.tid, EventAction::Error, &options)
+            e.do_action(&e.pid, &e.tid, EventAction::Error, options)
                 .unwrap();
         }
     });

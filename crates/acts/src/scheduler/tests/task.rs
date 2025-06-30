@@ -188,7 +188,7 @@ async fn sch_task_branch_empty_if() {
 
 #[tokio::test]
 async fn sch_task_branch_if_false_else_success() {
-    let mut workflow = Workflow::new().with_input("v", 1.into()).with_step(|step| {
+    let mut workflow = Workflow::new().with_var("v", 1.into()).with_step(|step| {
         step.with_name("step1")
             .with_branch(|branch| {
                 branch
@@ -221,7 +221,7 @@ async fn sch_task_branch_if_false_else_success() {
 
 #[tokio::test]
 async fn sch_task_branch_if_false_else_running() {
-    let mut workflow = Workflow::new().with_input("v", 1.into()).with_step(|step| {
+    let mut workflow = Workflow::new().with_var("v", 1.into()).with_step(|step| {
         step.with_name("step1")
             .with_branch(|branch| {
                 branch
@@ -276,7 +276,7 @@ async fn sch_task_branch_if_false_else_running() {
 
 #[tokio::test]
 async fn sch_task_branch_if_true_else() {
-    let mut workflow = Workflow::new().with_input("v", 1.into()).with_step(|step| {
+    let mut workflow = Workflow::new().with_var("v", 1.into()).with_step(|step| {
         step.with_id("step1")
             .with_branch(|branch| {
                 branch
@@ -313,7 +313,7 @@ async fn sch_task_branch_if_true_else() {
 
 #[tokio::test]
 async fn sch_task_branch_if_two_no_else() {
-    let mut workflow = Workflow::new().with_input("v", 1.into()).with_step(|step| {
+    let mut workflow = Workflow::new().with_var("v", 1.into()).with_step(|step| {
         step.with_name("step1")
             .with_branch(|branch| {
                 branch
@@ -350,7 +350,7 @@ async fn sch_task_branch_if_two_no_else() {
 
 #[tokio::test]
 async fn sch_task_branch_if_mutli_true() {
-    let mut workflow = Workflow::new().with_input("v", 5.into()).with_step(|step| {
+    let mut workflow = Workflow::new().with_var("v", 5.into()).with_step(|step| {
         step.with_name("step1")
             .with_branch(|branch| {
                 branch
@@ -398,7 +398,7 @@ async fn sch_task_branch_if_mutli_true() {
 
 #[tokio::test]
 async fn sch_task_branch_needs_state() {
-    let mut workflow = Workflow::new().with_input("v", 5.into()).with_step(|step| {
+    let mut workflow = Workflow::new().with_var("v", 5.into()).with_step(|step| {
         step.with_name("step1")
             .with_branch(|branch| {
                 branch

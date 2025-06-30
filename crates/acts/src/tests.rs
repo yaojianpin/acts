@@ -106,7 +106,7 @@ async fn engine_event_on_error() {
         options.set("ecode", "err1");
 
         if e.is_key("act1") && e.is_state(MessageState::Created) {
-            e.do_action(&e.pid, &e.tid, EventAction::Error, &options)
+            e.do_action(&e.pid, &e.tid, EventAction::Error, options)
                 .unwrap();
         }
     });
@@ -125,7 +125,7 @@ async fn engine_event_on_error() {
 async fn engine_model_create() {
     let workflow = Workflow::new()
         .with_name("w1")
-        .with_input("v", 0.into())
+        .with_var("v", 0.into())
         .with_step(|step| {
             step.with_id("step1")
                 .with_name("step1")

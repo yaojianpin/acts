@@ -149,3 +149,8 @@
 - feat: change the workspace structure
 - feat: use Query instead of ExecuteQuery
 - feat: add `match` operation to FilterExpr
+- feat: add `ui_schema` property to `ActPackageMeta`
+- feat: add `vars` property to `Workflow`, `Step` and `Act`
+- feat: change `inputs` and `outputs` to Json schema definitions of workflow
+- feat: add `metadata` property to store UI data
+- feat: remove `setup` property of `Workflow`, `Step` and `Act`

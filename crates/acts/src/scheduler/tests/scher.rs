@@ -81,7 +81,7 @@ async fn sch_scher_do_action() {
         if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            let action = Action::new(&e.pid, &e.tid, EventAction::Next, &options);
+            let action = Action::new(&e.pid, &e.tid, EventAction::Next, options);
             s.do_action(&action).unwrap();
         }
     });

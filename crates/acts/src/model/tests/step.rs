@@ -1,9 +1,8 @@
 mod acts;
 mod catch;
-mod setup;
 mod timeout;
 
-use crate::{Act, Step, Workflow};
+use crate::{Act, Step, Vars, Workflow, utils::consts};
 use serde_json::json;
 
 #[test]
@@ -20,13 +19,13 @@ fn model_step_yml_simple() {
 }
 
 #[test]
-fn model_step_yml_inputs() {
+fn model_step_yml_vars() {
     let text = r#"
     name: workflow
     id: m1
     steps:
         - id: act1
-          inputs:
+          vars:
             p1: 5
     "#;
     let m = Workflow::from_yml(text).unwrap();
@@ -34,8 +33,8 @@ fn model_step_yml_inputs() {
     assert_eq!(m.steps.first().unwrap().id, "act1");
 
     let step = m.steps.first().unwrap();
-    assert_eq!(step.inputs.len(), 1);
-    assert_eq!(step.inputs.get_value("p1"), Some(&json!(5)));
+    assert_eq!(step.vars.len(), 1);
+    assert_eq!(step.vars.get_value("p1"), Some(&json!(5)));
 }
 
 #[test]
@@ -45,16 +44,19 @@ fn model_step_yml_outputs() {
     id: m1
     steps:
         - id: act1
-          outputs:
-            p1:
+          options:
+            outputs:
+                p1:
     "#;
     let m = Workflow::from_yml(text).unwrap();
     assert_eq!(m.steps.len(), 1);
     assert_eq!(m.steps.first().unwrap().id, "act1");
 
     let step = m.steps.first().unwrap();
-    assert_eq!(step.outputs.len(), 1);
-    assert_eq!(step.outputs.get_value("p1"), Some(&json!(null)));
+
+    let options = step.options.get::<Vars>(consts::ACT_OUTPUTS).unwrap();
+    assert_eq!(options.len(), 1);
+    assert_eq!(options.get_value("p1"), Some(&json!(null)));
 }
 
 #[test]
@@ -71,16 +73,18 @@ fn model_step_name() {
 
 #[test]
 fn model_step_inputs() {
-    let step = Step::new().with_input("p1", json!(5));
-    assert_eq!(step.inputs.len(), 1);
-    assert_eq!(step.inputs.get_value("p1"), Some(&json!(5)));
+    let step = Step::new().with_var("p1", json!(5));
+    assert_eq!(step.vars.len(), 1);
+    assert_eq!(step.vars.get_value("p1"), Some(&json!(5)));
 }
 
 #[test]
 fn model_step_outputs() {
     let step = Step::new().with_output("p1", json!(5));
-    assert_eq!(step.outputs.len(), 1);
-    assert!(step.outputs.get_value("p1").is_some());
+
+    let options = step.options.get::<Vars>(consts::ACT_OUTPUTS).unwrap();
+    assert_eq!(options.len(), 1);
+    assert!(options.get_value("p1").is_some());
 }
 
 #[test]

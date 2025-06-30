@@ -1293,11 +1293,13 @@ async fn store_package_create() {
     let id = utils::longid();
     let package = Package {
         id,
+        name: "name".to_string(),
         desc: "desc".to_string(),
         icon: "icon".to_string(),
         doc: "doc".to_string(),
         version: "0.1.0".to_string(),
-        schema: "{}".to_string(),
+        in_schema: "{}".to_string(),
+        ui_schema: None,
         run_as: crate::ActRunAs::Func,
         resources: "[]".to_string(),
         catalog: crate::package::ActPackageCatalog::Core,
@@ -1319,11 +1321,13 @@ async fn store_package_query_by_id() {
     let id = utils::longid();
     let package = Package {
         id,
+        name: "test name".to_string(),
         desc: "desc".to_string(),
         icon: "icon".to_string(),
         doc: "doc".to_string(),
         version: "0.1.0".to_string(),
-        schema: "{}".to_string(),
+        in_schema: "{}".to_string(),
+        ui_schema: None,
         run_as: crate::ActRunAs::Func,
         resources: "[]".to_string(),
         catalog: crate::package::ActPackageCatalog::Core,
@@ -1344,11 +1348,13 @@ async fn store_package_query_by_offset_count() {
     for _i in 0..10 {
         let package = Package {
             id: utils::shortid(),
+            name: "test name".to_string(),
             desc: "desc".to_string(),
             icon: "icon".to_string(),
             doc: "doc".to_string(),
             version: "0.1.0".to_string(),
-            schema: "{}".to_string(),
+            in_schema: "{}".to_string(),
+            ui_schema: None,
             run_as: crate::ActRunAs::Func,
             resources: "[]".to_string(),
             catalog: crate::package::ActPackageCatalog::Core,
@@ -1383,11 +1389,13 @@ async fn store_package_query_by_cond_and() {
     for _i in 0..10 {
         let package = Package {
             id: utils::shortid(),
+            name: "test name".to_string(),
             desc: "desc".to_string(),
             icon: "icon".to_string(),
             doc: "doc".to_string(),
             version: "0.1.0".to_string(),
-            schema: "{}".to_string(),
+            in_schema: "{}".to_string(),
+            ui_schema: None,
             run_as: crate::ActRunAs::Func,
             resources: "[]".to_string(),
             catalog: crate::package::ActPackageCatalog::Core,
@@ -1424,11 +1432,13 @@ async fn store_package_query_by_cond_or() {
     for _i in 0..10 {
         let package = Package {
             id: utils::shortid(),
+            name: "test name".to_string(),
             desc: "desc".to_string(),
             icon: "icon".to_string(),
             doc: "doc".to_string(),
             version: "0.1.0".to_string(),
-            schema: "{}".to_string(),
+            in_schema: "{}".to_string(),
+            ui_schema: None,
             run_as: crate::ActRunAs::Func,
             resources: "[]".to_string(),
             catalog: crate::package::ActPackageCatalog::Core,
@@ -1443,11 +1453,13 @@ async fn store_package_query_by_cond_or() {
     for _i in 0..10 {
         let package = Package {
             id: utils::shortid(),
+            name: "name".to_string(),
             desc: "desc".to_string(),
             icon: "icon".to_string(),
             doc: "doc".to_string(),
             version: "0.2.0".to_string(),
-            schema: "{}".to_string(),
+            in_schema: "{}".to_string(),
+            ui_schema: None,
             run_as: crate::ActRunAs::Func,
             resources: "[]".to_string(),
             catalog: crate::package::ActPackageCatalog::Core,
@@ -1476,11 +1488,13 @@ async fn store_package_query_by_order() {
     for i in 0..10 {
         let package = Package {
             id: utils::shortid(),
+            name: format!("name-{}", i + 1),
             desc: format!("test-{}", i + 1),
             icon: "icon".to_string(),
             doc: "doc".to_string(),
             version: "0.1.0".to_string(),
-            schema: "{}".to_string(),
+            in_schema: "{}".to_string(),
+            ui_schema: None,
             run_as: crate::ActRunAs::Func,
             resources: "[]".to_string(),
             catalog: crate::package::ActPackageCatalog::Core,
@@ -1520,11 +1534,13 @@ async fn store_package_update() {
     let id = utils::longid();
     let package = Package {
         id,
+        name: "test name".to_string(),
         desc: "desc".to_string(),
         icon: "icon".to_string(),
         doc: "doc".to_string(),
         version: "0.1.0".to_string(),
-        schema: "{}".to_string(),
+        in_schema: "{}".to_string(),
+        ui_schema: None,
         run_as: crate::ActRunAs::Func,
         resources: "[]".to_string(),
         catalog: crate::package::ActPackageCatalog::Core,
@@ -1551,11 +1567,13 @@ async fn store_package_remove() {
     let id = utils::longid();
     let package = Package {
         id,
+        name: "test name".to_string(),
         desc: "desc".to_string(),
         icon: "icon".to_string(),
         doc: "doc".to_string(),
         version: "0.1.0".to_string(),
-        schema: "{}".to_string(),
+        in_schema: "{}".to_string(),
+        ui_schema: None,
         run_as: crate::ActRunAs::Func,
         resources: "[]".to_string(),
         catalog: crate::package::ActPackageCatalog::Core,

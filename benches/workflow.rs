@@ -75,7 +75,7 @@ fn act(c: &mut Criterion) {
                     engine
                         .executor()
                         .act()
-                        .complete(&e.pid, &e.tid, &Vars::new())
+                        .complete(&e.pid, &e.tid, Vars::new())
                         .unwrap();
                     let elapsed = start.elapsed();
                     *t.lock().unwrap() += elapsed;

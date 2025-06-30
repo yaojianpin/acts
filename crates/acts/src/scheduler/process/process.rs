@@ -59,7 +59,6 @@ impl Process {
             start_time: Arc::new(RwLock::new(0)),
             end_time: Arc::new(RwLock::new(0)),
             tasks: Arc::new(RwLock::new(TaskTree::new())),
-            // sync: Arc::new(std::sync::Mutex::new(0)),
             timestamp,
             env: Arc::new(RwLock::new(Vars::new())),
             err: Arc::new(RwLock::new(None)),
@@ -149,10 +148,9 @@ impl Process {
     }
 
     pub fn inputs(&self) -> Vars {
-        let inputs = &self.model().inputs;
         if let Some(task) = self.root() {
             let ctx = task.create_context();
-            let vars = utils::fill_proc_vars(&task, inputs, &ctx);
+            let vars = utils::fill_proc_vars(&task, &self.model().vars, &ctx);
             return vars;
         }
         Vars::new()
@@ -291,19 +289,19 @@ impl Process {
             )));
         }
 
-        // check the outputs
-        let rets = task.node().outputs();
-        if !rets.is_empty() {
+        // filter the data by options.outputs
+        if let Some(outputs) = task.options().get::<Vars>(consts::ACT_OUTPUTS) {
             let mut options = Vars::new();
-            for (ref key, _) in &rets {
-                if !action.options.contains_key(key) {
+            for (key, _) in &outputs {
+                if !action.options.contains_key(&key) {
                     return Err(ActError::Action(format!(
                         "the options is not satisfied with act's outputs '{}' in task({})",
                         key, action.tid
                     )));
                 }
-                let value = action.options.get_value(key).unwrap();
-                options.set(key, value.clone());
+                if let Some(value) = action.options.get_value(&key) {
+                    options.set(&key, value.clone());
+                }
             }
 
             // retset the options by rets defination
@@ -339,7 +337,6 @@ impl Process {
 
     #[instrument()]
     pub fn start(self: &Arc<Self>) {
-        // let _lock = self.sync.lock().unwrap();
         self.set_state(TaskState::Running);
         self.runtime.cache().push_proc(self);
         let tr = self.tree();

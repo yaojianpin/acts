@@ -39,7 +39,7 @@ impl Client {
     pub fn init(executor: &Executor, e: &Event<Message>) -> Result<()> {
         let mut vars = Vars::new();
         vars.insert("uid".to_string(), json!("u1"));
-        executor.act().complete(&e.pid, &e.tid, &vars)
+        executor.act().complete(&e.pid, &e.tid, vars)
     }
     pub fn act1(executor: &Executor, e: &Event<Message>) -> Result<()> {
         let mut vars = Vars::new();
@@ -49,25 +49,25 @@ impl Client {
         vars.set("ecode", "err1");
 
         // cause the error
-        executor.act().error(&e.pid, &e.tid, &vars)
+        executor.act().error(&e.pid, &e.tid, vars)
     }
     pub fn catch1(executor: &Executor, e: &Event<Message>) -> Result<()> {
         let mut vars = Vars::new();
         vars.insert("uid".to_string(), json!("u3"));
         vars.set("ecode", "err1");
 
-        executor.act().complete(&e.pid, &e.tid, &vars)
+        executor.act().complete(&e.pid, &e.tid, vars)
     }
     pub fn catch2(executor: &Executor, e: &Event<Message>) -> Result<()> {
         let mut vars = Vars::new();
         vars.insert("uid".to_string(), json!("u4"));
 
-        executor.act().complete(&e.pid, &e.tid, &vars)
+        executor.act().complete(&e.pid, &e.tid, vars)
     }
 
     pub fn catch_others(executor: &Executor, e: &Event<Message>) -> Result<()> {
         let mut vars = Vars::new();
         vars.insert("uid".to_string(), json!("u5"));
-        executor.act().complete(&e.pid, &e.tid, &vars)
+        executor.act().complete(&e.pid, &e.tid, vars)
     }
 }

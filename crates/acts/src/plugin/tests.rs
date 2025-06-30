@@ -70,17 +70,23 @@ impl ActPlugin for TestPackagePlugin {
         engine
             .extender()
             .register_package(&crate::ActPackageMeta {
+                id: "test_package",
                 name: "test_package",
                 desc: "test package description",
                 icon: "test_package_icon",
                 doc: "test package doc",
                 version: "0.1.0",
-                schema: serde_json::json!({
+                in_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "v1": { "type": "number" }
                     }
                 }),
+                ui_schema: Some(serde_json::json!({
+                    "v1": {
+                        "ui:widget": "text",
+                    }
+                })),
                 run_as: crate::ActRunAs::Irq,
                 resources: vec![],
                 catalog: crate::ActPackageCatalog::App,
@@ -90,17 +96,23 @@ impl ActPlugin for TestPackagePlugin {
         engine
             .extender()
             .register_package(&crate::ActPackageMeta {
+                id: "test_package2",
                 name: "test_package2",
                 desc: "test package description",
                 icon: "test_package_icon",
                 doc: "test package doc",
                 version: "0.1.0",
-                schema: serde_json::json!({
+                in_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "v1": { "type": "number" }
                     }
                 }),
+                ui_schema: Some(serde_json::json!({
+                    "v1": {
+                        "ui:widget": "text",
+                    }
+                })),
                 run_as: crate::ActRunAs::Msg,
                 resources: vec![],
                 catalog: crate::ActPackageCatalog::App,

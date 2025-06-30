@@ -1,3 +1,4 @@
+use crate::utils::consts;
 #[allow(unused_imports)]
 use crate::{Act, Catch, ModelBase, Timeout, Vars, model::Branch};
 use serde::{Deserialize, Serialize};
@@ -14,11 +15,9 @@ pub struct Step {
     #[serde(default)]
     pub id: String,
 
+    /// define the step vars
     #[serde(default)]
-    pub inputs: Vars,
-
-    #[serde(default)]
-    pub outputs: Vars,
+    pub vars: Vars,
 
     #[serde(default)]
     pub tag: String,
@@ -41,8 +40,14 @@ pub struct Step {
     #[serde(default)]
     pub timeout: Vec<Timeout>,
 
+    /// extra options to send to client
     #[serde(default)]
-    pub setup: Vec<Act>,
+    pub options: Vars,
+
+    /// metadata to store some extra value for UI styles
+    /// don't send to client
+    #[serde(default)]
+    pub metadata: Vars,
 }
 
 impl ModelBase for Step {
@@ -70,8 +75,8 @@ impl Step {
         self
     }
 
-    pub fn with_act(mut self, stmt: Act) -> Self {
-        self.acts.push(stmt);
+    pub fn with_act(mut self, act: Act) -> Self {
+        self.acts.push(act);
         self
     }
 
@@ -85,13 +90,21 @@ impl Step {
         self
     }
 
-    pub fn with_input(mut self, name: &str, value: JsonValue) -> Self {
-        self.inputs.insert(name.to_string(), value);
+    pub fn with_var(mut self, name: &str, value: JsonValue) -> Self {
+        self.vars.insert(name.to_string(), value);
         self
     }
 
     pub fn with_output(mut self, name: &str, value: JsonValue) -> Self {
-        self.outputs.insert(name.to_string(), value);
+        self.options
+            .entry(consts::ACT_OUTPUTS)
+            .and_modify(|outputs| {
+                if let Some(obj) = outputs.as_object_mut() {
+                    obj.insert(name.to_string(), value.clone());
+                }
+            })
+            .or_insert(Vars::new().with(name, value).into());
+
         self
     }
 
@@ -110,12 +123,6 @@ impl Step {
     pub fn with_timeout(mut self, build: fn(Timeout) -> Timeout) -> Self {
         let timeout = Timeout::default();
         self.timeout.push(build(timeout));
-        self
-    }
-
-    pub fn with_setup(mut self, build: fn(Vec<Act>) -> Vec<Act>) -> Self {
-        let stmts = Vec::new();
-        self.setup = build(stmts);
         self
     }
 }

@@ -16,7 +16,7 @@ async fn pack_code_get_inputs() {
             "#,
             )
             .with_id("code1")
-            .with_input("abc", "test"),
+            .with_var("abc", "test"),
         )
     });
 
@@ -49,7 +49,7 @@ async fn pack_code_get_data() {
             "#,
             )
             .with_id("code1")
-            .with_input("my_value", "abc"),
+            .with_var("my_value", "abc"),
         )
     });
 

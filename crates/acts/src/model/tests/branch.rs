@@ -1,4 +1,4 @@
-use crate::Branch;
+use crate::{Branch, Vars, utils::consts};
 use serde_json::json;
 
 #[test]
@@ -14,17 +14,19 @@ fn model_branch_name() {
 }
 
 #[test]
-fn model_branch_inputs() {
-    let b = Branch::new().with_input("p1", json!(5));
-    assert_eq!(b.inputs.len(), 1);
-    assert_eq!(b.inputs.get_value("p1"), Some(&json!(5)));
+fn model_branch_vars() {
+    let b = Branch::new().with_var("p1", json!(5));
+    assert_eq!(b.vars.len(), 1);
+    assert_eq!(b.vars.get_value("p1"), Some(&json!(5)));
 }
 
 #[test]
 fn model_branch_outputs() {
     let b = Branch::new().with_output("p1", json!(5));
-    assert_eq!(b.outputs.len(), 1);
-    assert!(b.outputs.get_value("p1").is_some());
+
+    let options = b.options.get::<Vars>(consts::ACT_OUTPUTS).unwrap();
+    assert_eq!(options.len(), 1);
+    assert!(options.get_value("p1").is_some());
 }
 
 #[test]

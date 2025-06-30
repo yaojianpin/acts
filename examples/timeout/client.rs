@@ -54,7 +54,7 @@ impl Client {
         println!("req: {} inputs={}", e.key, e.inputs);
         let mut vars = Vars::new();
         vars.insert("uid".to_string(), json!("u1"));
-        executor.act().complete(&e.pid, &e.tid, &vars)
+        executor.act().complete(&e.pid, &e.tid, vars)
     }
 
     pub fn timeout_2s(_executor: &Executor, e: &Event<Message>) {
@@ -62,6 +62,6 @@ impl Client {
     }
     pub fn timeout_5s(executor: &Executor, e: &Event<Message>) -> Result<()> {
         println!("req: {} inputs={}", e.key, e.inputs);
-        executor.act().complete(&e.pid, &e.tid, &Vars::new())
+        executor.act().complete(&e.pid, &e.tid, Vars::new())
     }
 }

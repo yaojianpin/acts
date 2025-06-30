@@ -837,11 +837,13 @@ async fn store_mem_package_create() {
     let id = utils::longid();
     let package = Package {
         id,
+        name: "name".to_string(),
         desc: "desc".to_string(),
         icon: "icon".to_string(),
         doc: "doc".to_string(),
         version: "0.1.0".to_string(),
-        schema: "{}".to_string(),
+        in_schema: "{}".to_string(),
+        ui_schema: None,
         run_as: crate::ActRunAs::Func,
         resources: "[]".to_string(),
         catalog: crate::package::ActPackageCatalog::Core,
@@ -863,11 +865,13 @@ async fn store_mem_package_query_id() {
     let id = utils::longid();
     let package = Package {
         id,
+        name: "name".to_string(),
         desc: "desc".to_string(),
         icon: "icon".to_string(),
         doc: "doc".to_string(),
         version: "0.1.0".to_string(),
-        schema: "{}".to_string(),
+        in_schema: "{}".to_string(),
+        ui_schema: None,
         run_as: crate::ActRunAs::Func,
         resources: "[]".to_string(),
         catalog: crate::package::ActPackageCatalog::Core,
@@ -890,11 +894,13 @@ async fn store_mem_package_query_match_or() {
         let id = utils::longid();
         let package = Package {
             id,
+            name: format!("name text {idx}"),
             desc: format!("desc text {idx}"),
             icon: format!("icon text {idx}"),
             doc: "doc".to_string(),
             version: "0.2.0".to_string(),
-            schema: "{}".to_string(),
+            in_schema: "{}".to_string(),
+            ui_schema: None,
             run_as: crate::ActRunAs::Func,
             resources: "[]".to_string(),
             catalog: crate::package::ActPackageCatalog::Core,
@@ -926,11 +932,13 @@ async fn store_mem_package_query_match_and() {
         let id = utils::longid();
         let package = Package {
             id,
+            name: format!("name text {idx}"),
             desc: format!("desc text {idx}"),
             icon: format!("icon text {idx}"),
             doc: "doc".to_string(),
             version: "0.3.0".to_string(),
-            schema: "{}".to_string(),
+            in_schema: "{}".to_string(),
+            ui_schema: None,
             run_as: crate::ActRunAs::Func,
             resources: "[]".to_string(),
             catalog: crate::package::ActPackageCatalog::Core,
@@ -961,11 +969,13 @@ async fn store_mem_package_update() {
     let id = utils::longid();
     let package = Package {
         id,
+        name: "test name".to_string(),
         desc: "desc".to_string(),
         icon: "icon".to_string(),
         doc: "doc".to_string(),
         version: "0.1.0".to_string(),
-        schema: "{}".to_string(),
+        in_schema: "{}".to_string(),
+        ui_schema: None,
         run_as: crate::ActRunAs::Func,
         resources: "[]".to_string(),
         catalog: crate::package::ActPackageCatalog::Core,
@@ -978,13 +988,13 @@ async fn store_mem_package_update() {
     let mut p = store.packages().find(&package.id).unwrap();
     p.desc = "my desc".to_string();
     p.version = "0.2.0".to_string();
-    p.schema = "{ 'b': 100 }".to_string();
+    p.in_schema = "{ 'b': 100 }".to_string();
     store.packages().update(&p).unwrap();
 
     let p2 = store.packages().find(&package.id).unwrap();
     assert_eq!(p2.desc, "my desc");
     assert_eq!(p2.version, "0.2.0");
-    assert_eq!(p2.schema, "{ 'b': 100 }");
+    assert_eq!(p2.in_schema, "{ 'b': 100 }");
 }
 
 #[tokio::test]
@@ -994,11 +1004,13 @@ async fn store_mem_package_remove() {
     let id = utils::longid();
     let package = Package {
         id,
+        name: "test name".to_string(),
         desc: "desc".to_string(),
         icon: "icon".to_string(),
         doc: "doc".to_string(),
         version: "0.1.0".to_string(),
-        schema: "{}".to_string(),
+        in_schema: "{}".to_string(),
+        ui_schema: None,
         run_as: crate::ActRunAs::Func,
         resources: "[]".to_string(),
         catalog: crate::package::ActPackageCatalog::Core,

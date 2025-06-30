@@ -9,7 +9,7 @@ use crate::{
     utils::{self, consts, shortid},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::{any::type_name, cell::RefCell, sync::Arc, vec};
+use std::{any::type_name, cell::RefCell, sync::Arc};
 use tracing::debug;
 
 tokio::task_local! {
@@ -18,8 +18,6 @@ tokio::task_local! {
 
 #[derive(Clone)]
 pub struct Context {
-    // pub scher: Arc<Scheduler>,
-    // pub env: Arc<Enviroment>,
     pub runtime: Arc<Runtime>,
     pub executor: Arc<Executor>,
     pub proc: Arc<Process>,
@@ -203,14 +201,6 @@ impl Context {
             task.node().level + 1,
         ));
 
-        // let task = self.proc.create_task(&node, Some(task));
-        // if is_hook_event {
-        //     // set the tag on task to avoid the repetitive hook execution
-        //     task.set_data_with(|data| data.set(consts::IS_EVENT_PROCESSED, true));
-        // }
-
-        // self.runtime.push(&task);
-
         if !task.state().is_none() {
             let task = self.proc.create_task(&node, Some(task));
 
@@ -241,35 +231,6 @@ impl Context {
             )?;
         }
 
-        Ok(())
-    }
-
-    pub fn dispatch_acts(&self, acts: Vec<Act>, is_sequence: bool) -> Result<()> {
-        let task = self.task();
-        let mut normal_acts = vec![];
-        acts.iter().for_each(|act| {
-            // if the act is setting the 'on' event, it will be added to the task's hook
-            if let Some(on) = act.on.as_ref() {
-                match on {
-                    crate::ActEvent::Created => {
-                        task.add_hook_stmts(super::TaskLifeCycle::Created, act)
-                    }
-                    crate::ActEvent::Completed => {
-                        task.add_hook_stmts(super::TaskLifeCycle::Completed, act)
-                    }
-                    crate::ActEvent::BeforeUpdate => {
-                        task.add_hook_stmts(super::TaskLifeCycle::BeforeUpdate, act)
-                    }
-                    crate::ActEvent::Updated => {
-                        task.add_hook_stmts(super::TaskLifeCycle::Updated, act)
-                    }
-                    crate::ActEvent::Step => task.add_hook_stmts(super::TaskLifeCycle::Step, act),
-                }
-            } else {
-                normal_acts.push(act.clone());
-            }
-        });
-        self.build_acts(&normal_acts, is_sequence)?;
         Ok(())
     }
 
@@ -443,7 +404,7 @@ impl Context {
     pub fn emit_message(&self, msg: &Act) -> Result<()> {
         debug!("emit_message: {:?}", msg);
         let workflow = self.proc.model();
-        let mut inputs = utils::fill_inputs(&msg.inputs, self);
+        let mut inputs = utils::fill_inputs(&msg.vars, self);
         // append act.optins to inputs
         inputs.set(consts::ACT_OPTIONS_KEY, msg.options.clone());
 

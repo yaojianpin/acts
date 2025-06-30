@@ -8,11 +8,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Default, Deserialize, Serialize, Debug, Clone)]
 pub struct Package {
     pub id: String,
+    pub name: String,
     pub desc: String,
     pub icon: String,
     pub doc: String,
     pub version: String,
-    pub schema: String,
+    pub in_schema: String,
+    pub ui_schema: Option<String>,
     pub run_as: ActRunAs,
     pub resources: String,
     pub catalog: ActPackageCatalog,

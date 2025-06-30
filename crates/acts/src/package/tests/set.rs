@@ -1,4 +1,4 @@
-use crate::{Act, StmtBuild, Vars, Workflow, utils, utils::test::create_proc_signal};
+use crate::{Act, Vars, Workflow, utils, utils::test::create_proc_signal};
 use serde_json::json;
 
 #[test]
@@ -22,7 +22,7 @@ fn pack_set_parse_primary() {
 async fn pack_set_one() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_setup(|setup| setup.add(Act::set(Vars::new().with("a", 5))))
+            .with_act(Act::set(Vars::new().with("a", 5)))
     });
 
     workflow.print();
@@ -46,7 +46,7 @@ async fn pack_set_one() {
 async fn pack_set_many() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_setup(|setup| setup.add(Act::set(Vars::new().with("a", 5).with("b", "bb"))))
+            .with_act(Act::set(Vars::new().with("a", 5).with("b", "bb")))
     });
 
     workflow.print();
@@ -80,8 +80,8 @@ async fn pack_set_many() {
 async fn pack_set_local_var() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_input("b", json!("abc"))
-            .with_setup(|setup| setup.add(Act::set(Vars::new().with("a", r#"{{ b }}"#))))
+            .with_var("b", json!("abc"))
+            .with_act(Act::set(Vars::new().with("a", r#"{{ b }}"#)))
     });
 
     workflow.print();
@@ -105,8 +105,8 @@ async fn pack_set_local_var() {
 async fn pack_set_calc_str() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_input("a", json!("a"))
-            .with_setup(|setup| setup.add(Act::set(Vars::new().with("a", r#"{{ a + "bc" }}"#))))
+            .with_var("a", json!("a"))
+            .with_act(Act::set(Vars::new().with("a", r#"{{ a + "bc" }}"#)))
     });
 
     workflow.print();
@@ -130,7 +130,7 @@ async fn pack_set_calc_str() {
 async fn pack_set_calc_int() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_input("a", json!(10))
+            .with_var("a", json!(10))
             .with_act(Act::set(Vars::new().with("a", r#"{{ a + 20 }}"#)))
     });
 
@@ -158,8 +158,8 @@ async fn pack_set_calc_int() {
 async fn pack_set_update_local() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_input("b", json!("abc"))
-            .with_setup(|setup| setup.add(Act::set(Vars::new().with("a", r#"123"#))))
+            .with_var("b", json!("abc"))
+            .with_act(Act::set(Vars::new().with("a", r#"123"#)))
     });
 
     workflow.print();
@@ -182,10 +182,10 @@ async fn pack_set_update_local() {
 #[tokio::test]
 async fn sch_act_get_global_var() {
     let mut workflow = Workflow::new()
-        .with_input("b", json!("abc"))
+        .with_var("b", json!("abc"))
         .with_step(|step| {
             step.with_id("step1")
-                .with_setup(|setup| setup.add(Act::set(Vars::new().with("a", r#"{{ b }}"#))))
+                .with_act(Act::set(Vars::new().with("a", r#"{{ b }}"#)))
         });
 
     workflow.print();
@@ -208,10 +208,10 @@ async fn sch_act_get_global_var() {
 #[tokio::test]
 async fn pack_set_global_var() {
     let mut workflow = Workflow::new()
-        .with_input("b", json!("abc"))
+        .with_var("b", json!("abc"))
         .with_step(|step| {
             step.with_id("step1")
-                .with_setup(|setup| setup.add(Act::set(Vars::new().with("b", r#"123"#))))
+                .with_act(Act::set(Vars::new().with("b", r#"123"#)))
         });
 
     workflow.print();

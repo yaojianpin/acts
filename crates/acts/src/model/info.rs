@@ -10,12 +10,13 @@ use std::sync::Arc;
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct PackageInfo {
     pub id: String,
-
+    pub name: String,
     pub desc: String,
     pub icon: String,
     pub doc: String,
     pub version: String,
     pub schema: String,
+    pub ui_schema: Option<String>,
     pub run_as: ActRunAs,
     pub resources: String,
     pub catalog: ActPackageCatalog,
@@ -104,11 +105,13 @@ impl From<&data::Package> for PackageInfo {
     fn from(m: &data::Package) -> Self {
         Self {
             id: m.id.clone(),
+            name: m.name.clone(),
             desc: m.desc.clone(),
             icon: m.icon.clone(),
             doc: m.doc.clone(),
             version: m.version.clone(),
-            schema: m.schema.clone(),
+            schema: m.in_schema.clone(),
+            ui_schema: m.ui_schema.clone(),
             run_as: m.run_as,
             resources: m.resources.clone(),
             catalog: m.catalog,

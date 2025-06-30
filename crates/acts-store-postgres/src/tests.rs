@@ -1,13 +1,18 @@
 use crate::database::Database;
 use acts::{MessageState, Vars, data::*, query::*};
 use serde_json::json;
+use tokio::sync::OnceCell;
 
+static STORE: OnceCell<Database> = OnceCell::const_new();
 async fn init() -> Database {
     let db = Database::new("postgresql://postgres:pass123@127.0.0.1:5432/postgres");
     db.init();
     db
 }
 
+async fn store() -> &'static Database {
+    STORE.get_or_init(init).await
+}
 mod utils {
     use nanoid::nanoid;
     pub fn longid() -> String {
@@ -31,7 +36,7 @@ mod utils {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_model_create() {
-    let store = init().await;
+    let store = store().await;
     let model = Model {
         id: utils::longid(),
         name: "test".to_string(),
@@ -48,7 +53,7 @@ async fn store_model_create() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_model_find() {
-    let store = init().await;
+    let store = store().await;
     let mid: String = utils::longid();
     let model = Model {
         id: mid.clone(),
@@ -65,8 +70,8 @@ async fn store_model_find() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
-async fn store_model_query() {
-    let store = init().await;
+async fn store_model_query_id() {
+    let store = store().await;
     let models = store.models();
     for _ in 0..5 {
         let model = Model {
@@ -83,15 +88,73 @@ async fn store_model_query() {
     }
 
     let q = Query::new()
-        .push(Cond::and().push(Expr::eq("name", "test_model")))
-        .set_limit(5);
+        .filter(Filter::and().expr(Expr::eq("name", "test_model")))
+        .limit(5);
     let items = models.query(&q).unwrap();
     assert_eq!(items.rows.len(), 5);
 }
 
+#[tokio::test]
+async fn store_model_query_match_or() {
+    let store = store().await;
+    for i in 0..5 {
+        let model = Model {
+            id: utils::longid(),
+            name: format!("test_model {i}"),
+            ver: 1,
+            size: 1000,
+            create_time: 3333,
+            update_time: 0,
+            data: format!("data {i}"),
+            timestamp: 0,
+        };
+        store.models().create(&model).unwrap();
+    }
+
+    let q = Query::new().filter(
+        Filter::and().expr(Expr::eq("size", 1000)).push(
+            Filter::or()
+                .expr(Expr::matches("name", "test_model"))
+                .expr(Expr::matches("data", "data")),
+        ),
+    );
+
+    let ret = store.models().query(&q).unwrap();
+    assert_eq!(ret.count, 5);
+}
+
+#[tokio::test]
+async fn store_model_query_match_and() {
+    let store = store().await;
+    for i in 0..5 {
+        let model = Model {
+            id: utils::longid(),
+            name: format!("test_model {i}"),
+            ver: 1,
+            size: 2000,
+            create_time: 3333,
+            update_time: 0,
+            data: format!("data {i}"),
+            timestamp: 0,
+        };
+        store.models().create(&model).unwrap();
+    }
+
+    let q = Query::new().filter(
+        Filter::and().expr(Expr::eq("size", 2000)).push(
+            Filter::and()
+                .expr(Expr::matches("name", "0"))
+                .expr(Expr::matches("data", "0")),
+        ),
+    );
+
+    let ret = store.models().query(&q).unwrap();
+    assert_eq!(ret.count, 1);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_model_update() {
-    let store = init().await;
+    let store = store().await;
 
     let mut model = Model {
         id: utils::longid(),
@@ -116,7 +179,7 @@ async fn store_model_update() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_model_delete() {
-    let store = init().await;
+    let store = store().await;
     let model = Model {
         id: utils::longid(),
         name: "test".to_string(),
@@ -135,7 +198,7 @@ async fn store_model_delete() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_proc_create() {
-    let store = init().await;
+    let store = store().await;
     let proc = Proc {
         id: utils::longid(),
         name: "name".to_string(),
@@ -145,7 +208,7 @@ async fn store_proc_create() {
         end_time: 0,
         timestamp: utils::timestamp(),
         model: "".to_string(),
-        env_local: "{}".to_string(),
+        env: "{}".to_string(),
         err: None,
     };
     store.procs().create(&proc).unwrap();
@@ -154,7 +217,7 @@ async fn store_proc_create() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_proc_find() {
-    let store = init().await;
+    let store = store().await;
     let pid = utils::longid();
     let proc = Proc {
         id: pid.clone(),
@@ -165,7 +228,7 @@ async fn store_proc_find() {
         end_time: 0,
         timestamp: 0,
         model: "".to_string(),
-        env_local: "{}".to_string(),
+        env: "{}".to_string(),
         err: None,
     };
     store.procs().create(&proc).unwrap();
@@ -173,8 +236,8 @@ async fn store_proc_find() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
-async fn store_proc_query() {
-    let store = init().await;
+async fn store_proc_query_id() {
+    let store = store().await;
     let procs = store.procs();
     let mid = utils::longid();
     for i in 0..5 {
@@ -187,22 +250,86 @@ async fn store_proc_query() {
             end_time: 0,
             timestamp: 0,
             model: "".to_string(),
-            env_local: "{}".to_string(),
+            env: "{}".to_string(),
             err: None,
         };
         procs.create(&proc).unwrap();
     }
 
     let q = Query::new()
-        .push(Cond::and().push(Expr::eq("mid", mid)))
-        .set_limit(5);
+        .filter(Filter::and().expr(Expr::eq("mid", mid)))
+        .limit(5);
     let items = procs.query(&q).unwrap();
     assert_eq!(items.rows.len(), 5);
 }
 
+#[tokio::test]
+async fn store_proc_query_match_or() {
+    let store = store().await;
+    let mid = utils::longid();
+    for i in 0..5 {
+        let proc = Proc {
+            id: utils::longid(),
+            name: format!("name {i}"),
+            mid: mid.to_string(),
+            state: "none".to_string(),
+            start_time: 0,
+            end_time: 0,
+            timestamp: 0,
+            model: format!("model {i}"),
+            env: "".to_string(),
+            err: None,
+        };
+        store.procs().create(&proc).unwrap();
+    }
+
+    let q = Query::new().filter(
+        Filter::and().expr(Expr::eq("mid", mid)).push(
+            Filter::or()
+                .expr(Expr::matches("name", "name"))
+                .expr(Expr::matches("model", "model")),
+        ),
+    );
+
+    let ret = store.procs().query(&q).unwrap();
+    assert_eq!(ret.count, 5);
+}
+
+#[tokio::test]
+async fn store_proc_query_match_and() {
+    let store = store().await;
+    let mid = utils::longid();
+    for i in 0..5 {
+        let proc = Proc {
+            id: utils::longid(),
+            name: format!("name {i}"),
+            mid: mid.to_string(),
+            state: "none".to_string(),
+            start_time: 0,
+            end_time: 0,
+            timestamp: 0,
+            model: format!("model {i}"),
+            env: "".to_string(),
+            err: None,
+        };
+        store.procs().create(&proc).unwrap();
+    }
+
+    let q = Query::new().filter(
+        Filter::and().expr(Expr::eq("mid", mid)).push(
+            Filter::and()
+                .expr(Expr::matches("name", "0"))
+                .expr(Expr::matches("model", "0")),
+        ),
+    );
+
+    let ret = store.procs().query(&q).unwrap();
+    assert_eq!(ret.count, 1);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_proc_update() {
-    let store = init().await;
+    let store = store().await;
 
     let mut vars: Vars = Vars::new();
     vars.insert("k1".to_string(), "v1".into());
@@ -216,7 +343,7 @@ async fn store_proc_update() {
         end_time: 0,
         timestamp: 0,
         model: "".to_string(),
-        env_local: "{}".to_string(),
+        env: "{}".to_string(),
         err: None,
     };
     store.procs().create(&proc).unwrap();
@@ -233,7 +360,7 @@ async fn store_proc_update() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_proc_delete() {
-    let store = init().await;
+    let store = store().await;
     let proc = Proc {
         id: utils::shortid(),
         name: "test".to_string(),
@@ -243,7 +370,7 @@ async fn store_proc_delete() {
         end_time: 0,
         timestamp: utils::timestamp(),
         model: "".to_string(),
-        env_local: "{}".to_string(),
+        env: "{}".to_string(),
         err: None,
     };
     store.procs().create(&proc).unwrap();
@@ -254,7 +381,7 @@ async fn store_proc_delete() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_task_create() {
-    let store = init().await;
+    let store = store().await;
     let tasks = store.tasks();
     let task = Task {
         id: utils::shortid(),
@@ -278,7 +405,7 @@ async fn store_task_create() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_task_find() {
-    let store = init().await;
+    let store = store().await;
     let tasks = store.tasks();
     let tid = utils::shortid();
     let task = Task {
@@ -302,8 +429,8 @@ async fn store_task_find() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
-async fn store_task_query() {
-    let store = init().await;
+async fn store_task_query_id() {
+    let store = store().await;
     let tasks = store.tasks();
     let pid = utils::shortid();
     for _ in 0..5 {
@@ -327,15 +454,88 @@ async fn store_task_query() {
     }
 
     let q = Query::new()
-        .push(Cond::and().push(Expr::eq("pid", pid)))
-        .set_limit(5);
+        .filter(Filter::and().expr(Expr::eq("pid", pid)))
+        .limit(5);
     let items = tasks.query(&q).unwrap();
     assert_eq!(items.rows.len(), 5);
 }
 
+#[tokio::test]
+async fn store_task_query_match_or() {
+    let store = store().await;
+    let pid = utils::shortid();
+    for idx in 0..5 {
+        let task = Task {
+            kind: "workflow".to_string(),
+            id: utils::shortid(),
+            name: format!("test {idx}"),
+            tid: format!("tid {idx}"),
+            pid: pid.to_string(),
+            node_data: "nid2".to_string(),
+            state: "none".to_string(),
+            prev: None,
+            start_time: 0,
+            end_time: 0,
+            hooks: "{}".to_string(),
+            timestamp: 0,
+            data: "{}".to_string(),
+            err: None,
+        };
+        store.tasks().create(&task).unwrap();
+    }
+
+    let q = Query::new().filter(
+        Filter::and().expr(Expr::eq("node_data", "nid2")).push(
+            Filter::or()
+                .expr(Expr::matches("name", "test"))
+                .expr(Expr::matches("tid", "tid")),
+        ),
+    );
+
+    let ret = store.tasks().query(&q).unwrap();
+    assert_eq!(ret.count, 5);
+}
+
+#[tokio::test]
+async fn store_task_query_match_and() {
+    let store = store().await;
+
+    let pid = utils::shortid();
+    for idx in 0..5 {
+        let task = Task {
+            kind: "workflow".to_string(),
+            id: utils::shortid(),
+            name: format!("test {idx}"),
+            tid: format!("tid {idx}"),
+            pid: pid.to_string(),
+            node_data: "nid3".to_string(),
+            state: "none".to_string(),
+            prev: None,
+            start_time: 0,
+            end_time: 0,
+            hooks: "{}".to_string(),
+            timestamp: 0,
+            data: "{}".to_string(),
+            err: None,
+        };
+        store.tasks().create(&task).unwrap();
+    }
+
+    let q = Query::new().filter(
+        Filter::and().expr(Expr::eq("node_data", "nid3")).push(
+            Filter::and()
+                .expr(Expr::matches("name", "0"))
+                .expr(Expr::matches("tid", "0")),
+        ),
+    );
+
+    let ret = store.tasks().query(&q).unwrap();
+    assert_eq!(ret.count, 1);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_task_update() {
-    let store = init().await;
+    let store = store().await;
     let table = store.tasks();
     let mut task = Task {
         kind: "workflow".to_string(),
@@ -367,7 +567,7 @@ async fn store_task_update() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_task_delete() {
-    let store = init().await;
+    let store = store().await;
     let table = store.tasks();
     let task = Task {
         kind: "workflow".to_string(),
@@ -393,7 +593,7 @@ async fn store_task_delete() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_message_create() {
-    let store = init().await;
+    let store = store().await;
 
     let pid = utils::longid();
     let tid = utils::shortid();
@@ -432,8 +632,8 @@ async fn store_message_create() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
-async fn store_message_query() {
-    let store = init().await;
+async fn store_message_query_id() {
+    let store = store().await;
 
     let pid = utils::longid();
     let tid = utils::shortid();
@@ -466,14 +666,110 @@ async fn store_message_query() {
 
     store.messages().create(&msg).expect("create message");
 
-    let q = Query::new().push(Cond::and().push(Expr::eq("id", id)));
+    let q = Query::new().filter(Filter::and().expr(Expr::eq("id", id)));
     let ret = store.messages().query(&q);
     assert!(ret.is_ok());
 }
 
+#[tokio::test]
+async fn store_mem_message_query_match_or() {
+    let store = store().await;
+
+    for idx in 0..5 {
+        let pid = utils::longid();
+        let tid = utils::shortid();
+        let msg = Message {
+            id: format!("{pid}:{tid}"),
+            name: "test".to_string(),
+            pid: pid.clone(),
+            tid: tid.clone(),
+            nid: utils::shortid(),
+            mid: utils::shortid(),
+            state: MessageState::Created,
+            start_time: 0,
+            end_time: 0,
+            r#type: "step".to_string(),
+            model: json!({ "id": "m1"}).to_string(),
+            key: format!("test {idx}"),
+            uses: format!("package {idx}"),
+            inputs: json!({}).to_string(),
+            outputs: json!({}).to_string(),
+            tag: "tag1".to_string(),
+            chan_id: "test2".to_string(),
+            chan_pattern: "*:*:*:*".to_string(),
+            create_time: 0,
+            update_time: 0,
+            retry_times: 0,
+            timestamp: 0,
+            status: MessageStatus::Created,
+        };
+
+        store.messages().create(&msg).expect("create message");
+    }
+
+    let q = Query::new().filter(
+        Filter::and().expr(Expr::eq("chan_id", "test2")).push(
+            Filter::or()
+                .expr(Expr::matches("key", "test"))
+                .expr(Expr::matches("uses", "package")),
+        ),
+    );
+
+    let ret = store.messages().query(&q).unwrap();
+    assert_eq!(ret.count, 5);
+}
+
+#[tokio::test]
+async fn store_mem_message_query_match_and() {
+    let store = store().await;
+
+    for idx in 0..5 {
+        let pid = utils::longid();
+        let tid = utils::shortid();
+        let msg = Message {
+            id: format!("{pid}:{tid}"),
+            name: "test".to_string(),
+            pid: pid.clone(),
+            tid: tid.clone(),
+            nid: utils::shortid(),
+            mid: utils::shortid(),
+            state: MessageState::Created,
+            start_time: 0,
+            end_time: 0,
+            r#type: "step".to_string(),
+            model: json!({ "id": "m1"}).to_string(),
+            key: format!("test {idx}"),
+            uses: format!("package {idx}"),
+            inputs: json!({}).to_string(),
+            outputs: json!({}).to_string(),
+            tag: "tag1".to_string(),
+            chan_id: "test3".to_string(),
+            chan_pattern: "*:*:*:*".to_string(),
+            create_time: 0,
+            update_time: 0,
+            retry_times: 0,
+            timestamp: 0,
+            status: MessageStatus::Created,
+        };
+
+        store.messages().create(&msg).expect("create message");
+    }
+
+    let q = Query::new().filter(
+        Filter::and().expr(Expr::eq("chan_id", "test3")).push(
+            Filter::and()
+                .expr(Expr::matches("key", "0"))
+                .expr(Expr::matches("uses", "0")),
+        ),
+    );
+
+    let ret = store.messages().query(&q).unwrap();
+    assert_eq!(ret.count, 1);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_message_update() {
-    let store = init().await;
+    let store = store().await;
 
     let pid = utils::longid();
     let tid = utils::shortid();
@@ -521,7 +817,7 @@ async fn store_message_update() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_message_remove() {
-    let store = init().await;
+    let store = store().await;
 
     let pid = utils::longid();
     let tid = utils::shortid();
@@ -561,16 +857,18 @@ async fn store_message_remove() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_package_create() {
-    let store = init().await;
+    let store = store().await;
 
     let id = utils::longid();
     let package = Package {
         id,
+        name: "name".to_string(),
         desc: "desc".to_string(),
         icon: "icon".to_string(),
         doc: "doc".to_string(),
         version: "0.1.0".to_string(),
-        schema: "{}".to_string(),
+        in_schema: "{}".to_string(),
+        ui_schema: None,
         run_as: acts::ActRunAs::Func,
         resources: "[]".to_string(),
         catalog: acts::ActPackageCatalog::Core,
@@ -586,17 +884,19 @@ async fn store_package_create() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
-async fn store_package_query() {
-    let store = init().await;
+async fn store_package_query_id() {
+    let store = store().await;
 
     let id = utils::longid();
     let package = Package {
         id,
+        name: "name".to_string(),
         desc: "desc".to_string(),
         icon: "icon".to_string(),
         doc: "doc".to_string(),
         version: "0.1.0".to_string(),
-        schema: "{}".to_string(),
+        in_schema: "{}".to_string(),
+        ui_schema: None,
         run_as: acts::ActRunAs::Func,
         resources: "[]".to_string(),
         catalog: acts::ActPackageCatalog::Core,
@@ -606,23 +906,101 @@ async fn store_package_query() {
         built_in: false,
     };
     store.packages().create(&package).unwrap();
-    let q = Query::new().push(Cond::and().push(Expr::eq("id", package.id)));
+    let q = Query::new().filter(Filter::and().expr(Expr::eq("id", package.id)));
     let ret = store.packages().query(&q);
     assert!(ret.is_ok());
 }
 
+#[tokio::test]
+async fn store_package_query_match_or() {
+    let store = store().await;
+
+    for idx in 0..5 {
+        let id = utils::longid();
+        let package = Package {
+            id,
+            name: format!("name text {idx}"),
+            desc: format!("desc text {idx}"),
+            icon: format!("icon text {idx}"),
+            doc: "doc".to_string(),
+            version: "0.2.0".to_string(),
+            in_schema: "{}".to_string(),
+            ui_schema: None,
+            run_as: acts::ActRunAs::Func,
+            resources: "[]".to_string(),
+            catalog: acts::ActPackageCatalog::Core,
+            create_time: 0,
+            update_time: 0,
+            timestamp: 0,
+            built_in: false,
+        };
+        store.packages().create(&package).unwrap();
+    }
+
+    let q = Query::new().filter(
+        Filter::and().expr(Expr::eq("version", "0.2.0")).push(
+            Filter::or()
+                .expr(Expr::matches("desc", "desc"))
+                .expr(Expr::matches("icon", "icon")),
+        ),
+    );
+
+    let ret = store.packages().query(&q).unwrap();
+    assert_eq!(ret.count, 5);
+}
+
+#[tokio::test]
+async fn store_package_query_match_and() {
+    let store = store().await;
+
+    for idx in 0..5 {
+        let id = utils::longid();
+        let package = Package {
+            id,
+            name: format!("name text {idx}"),
+            desc: format!("desc text {idx}"),
+            icon: format!("icon text {idx}"),
+            doc: "doc".to_string(),
+            version: "0.3.0".to_string(),
+            in_schema: "{}".to_string(),
+            ui_schema: None,
+            run_as: acts::ActRunAs::Func,
+            resources: "[]".to_string(),
+            catalog: acts::ActPackageCatalog::Core,
+            create_time: 0,
+            update_time: 0,
+            timestamp: 0,
+            built_in: false,
+        };
+        store.packages().create(&package).unwrap();
+    }
+
+    let q = Query::new().filter(
+        Filter::and().expr(Expr::eq("version", "0.3.0")).push(
+            Filter::and()
+                .expr(Expr::matches("desc", "0"))
+                .expr(Expr::matches("icon", "0")),
+        ),
+    );
+
+    let ret = store.packages().query(&q).unwrap();
+    assert_eq!(ret.count, 1);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_package_update() {
-    let store = init().await;
+    let store = store().await;
 
     let id = utils::longid();
     let package = Package {
         id,
+        name: "name".to_string(),
         desc: "desc".to_string(),
         icon: "icon".to_string(),
         doc: "doc".to_string(),
         version: "0.1.0".to_string(),
-        schema: "{}".to_string(),
+        in_schema: "{}".to_string(),
+        ui_schema: None,
         run_as: acts::ActRunAs::Func,
         resources: "[]".to_string(),
         catalog: acts::ActPackageCatalog::Core,
@@ -635,27 +1013,29 @@ async fn store_package_update() {
     let mut p = store.packages().find(&package.id).unwrap();
     p.desc = "my name".to_string();
     p.update_time = utils::time_millis();
-    p.schema = "{\"a\": 0 }".to_string();
+    p.in_schema = "{\"a\": 0 }".to_string();
     store.packages().update(&p).unwrap();
 
     let p2 = store.packages().find(&package.id).unwrap();
     assert_eq!(p2.desc, "my name");
     assert_eq!(p2.update_time, p.update_time);
-    assert_eq!(p2.schema, "{\"a\": 0 }");
+    assert_eq!(p2.in_schema, "{\"a\": 0 }");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_package_remove() {
-    let store = init().await;
+    let store = store().await;
 
     let id = utils::longid();
     let package = Package {
         id,
+        name: "name".to_string(),
         desc: "desc".to_string(),
         icon: "icon".to_string(),
         doc: "doc".to_string(),
         version: "0.1.0".to_string(),
-        schema: "{}".to_string(),
+        in_schema: "{}".to_string(),
+        ui_schema: None,
         run_as: acts::ActRunAs::Func,
         resources: "[]".to_string(),
         catalog: acts::ActPackageCatalog::Core,
@@ -673,7 +1053,7 @@ async fn store_package_remove() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_event_create() {
-    let store = init().await;
+    let store = store().await;
 
     let id = utils::longid();
     let evt = Event {
@@ -693,8 +1073,8 @@ async fn store_event_create() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
-async fn store_event_query() {
-    let store = init().await;
+async fn store_event_query_id() {
+    let store = store().await;
 
     let id = utils::longid();
     let evt = Event {
@@ -708,14 +1088,76 @@ async fn store_event_query() {
         timestamp: 0,
     };
     store.events().create(&evt).unwrap();
-    let q = Query::new().push(Cond::and().push(Expr::eq("id", evt.id)));
+    let q = Query::new().filter(Filter::and().expr(Expr::eq("id", evt.id)));
     let ret = store.events().query(&q);
     assert!(ret.is_ok());
 }
 
+#[tokio::test]
+async fn store_event_query_match_or() {
+    let store = store().await;
+
+    for idx in 0..5 {
+        let id = utils::longid();
+        let evt = Event {
+            id,
+            name: format!("name {idx}"),
+            mid: "mid1".to_string(),
+            ver: 1,
+            uses: "acts.event.manual".to_string(),
+            params: "".to_string(),
+            create_time: 0,
+            timestamp: 0,
+        };
+        store.events().create(&evt).unwrap();
+    }
+
+    let q = Query::new().filter(
+        Filter::and().expr(Expr::eq("mid", "mid1")).push(
+            Filter::or()
+                .expr(Expr::matches("name", "name"))
+                .expr(Expr::matches("uses", "manual")),
+        ),
+    );
+
+    let ret = store.events().query(&q).unwrap();
+    assert_eq!(ret.count, 5);
+}
+
+#[tokio::test]
+async fn store_event_query_match_and() {
+    let store = store().await;
+
+    for idx in 0..5 {
+        let id = utils::longid();
+        let evt = Event {
+            id,
+            name: format!("name {idx}"),
+            mid: "mid2".to_string(),
+            ver: 1,
+            uses: "acts.event.manual".to_string(),
+            params: "".to_string(),
+            create_time: 0,
+            timestamp: 0,
+        };
+        store.events().create(&evt).unwrap();
+    }
+
+    let q = Query::new().filter(
+        Filter::and().expr(Expr::eq("mid", "mid2")).push(
+            Filter::and()
+                .expr(Expr::matches("name", "0"))
+                .expr(Expr::matches("uses", "manual")),
+        ),
+    );
+
+    let ret = store.events().query(&q).unwrap();
+    assert_eq!(ret.count, 1);
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_event_update() {
-    let store = init().await;
+    let store = store().await;
 
     let id = utils::longid();
     let evt = Event {
@@ -744,7 +1186,7 @@ async fn store_event_update() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 10)]
 async fn store_event_remove() {
-    let store = init().await;
+    let store = store().await;
 
     let id = utils::longid();
     let evt = Event {

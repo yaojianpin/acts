@@ -1,0 +1,10 @@
+{
+    "ui:order": [
+        "url",
+        "method",
+        "headers",
+        "content-type",
+        "params",
+        "body"
+    ]
+}

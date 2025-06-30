@@ -20,11 +20,13 @@ pub struct PackageCollection {
 enum CollectionIden {
     Table,
     Id,
+    Name,
     Desc,
     Icon,
     Doc,
     Version,
-    Schema,
+    InSchema,
+    UiSchema,
     RunAs,
     Resources,
     Catalog,
@@ -59,11 +61,13 @@ impl DbCollection for PackageCollection {
             .from(CollectionIden::Table)
             .columns([
                 CollectionIden::Id,
+                CollectionIden::Name,
                 CollectionIden::Desc,
                 CollectionIden::Icon,
                 CollectionIden::Doc,
                 CollectionIden::Version,
-                CollectionIden::Schema,
+                CollectionIden::InSchema,
+                CollectionIden::UiSchema,
                 CollectionIden::RunAs,
                 CollectionIden::Resources,
                 CollectionIden::Catalog,
@@ -96,11 +100,13 @@ impl DbCollection for PackageCollection {
         query
             .columns([
                 CollectionIden::Id,
+                CollectionIden::Name,
                 CollectionIden::Desc,
                 CollectionIden::Icon,
                 CollectionIden::Doc,
                 CollectionIden::Version,
-                CollectionIden::Schema,
+                CollectionIden::InSchema,
+                CollectionIden::UiSchema,
                 CollectionIden::RunAs,
                 CollectionIden::Resources,
                 CollectionIden::Catalog,
@@ -164,11 +170,13 @@ impl DbCollection for PackageCollection {
             .into_table(CollectionIden::Table)
             .columns([
                 CollectionIden::Id,
+                CollectionIden::Name,
                 CollectionIden::Desc,
                 CollectionIden::Icon,
                 CollectionIden::Doc,
                 CollectionIden::Version,
-                CollectionIden::Schema,
+                CollectionIden::InSchema,
+                CollectionIden::UiSchema,
                 CollectionIden::RunAs,
                 CollectionIden::Resources,
                 CollectionIden::Catalog,
@@ -179,11 +187,13 @@ impl DbCollection for PackageCollection {
             ])
             .values([
                 data.id.into(),
+                data.name.into(),
                 data.desc.into(),
                 data.icon.into(),
                 data.doc.into(),
                 data.version.into(),
-                data.schema.into(),
+                data.in_schema.into(),
+                data.ui_schema.into(),
                 data.run_as.as_ref().into(),
                 data.resources.into(),
                 data.catalog.as_ref().into(),
@@ -207,11 +217,13 @@ impl DbCollection for PackageCollection {
         let (sql, sql_values) = SeaQuery::update()
             .table(CollectionIden::Table)
             .values([
+                (CollectionIden::Name, model.name.into()),
                 (CollectionIden::Desc, model.desc.into()),
                 (CollectionIden::Icon, model.icon.into()),
                 (CollectionIden::Doc, model.doc.into()),
                 (CollectionIden::Version, model.version.into()),
-                (CollectionIden::Schema, model.schema.into()),
+                (CollectionIden::InSchema, model.in_schema.into()),
+                (CollectionIden::UiSchema, model.ui_schema.into()),
                 (CollectionIden::RunAs, model.run_as.as_ref().into()),
                 (CollectionIden::Resources, model.resources.into()),
                 (CollectionIden::Catalog, model.catalog.as_ref().into()),
@@ -254,11 +266,13 @@ impl DbRow for data::Package {
     {
         Ok(Self {
             id: row.get_unwrap("id"),
+            name: row.get_unwrap("name"),
             desc: row.get_unwrap("desc"),
             icon: row.get_unwrap("icon"),
             doc: row.get_unwrap("doc"),
             version: row.get_unwrap("version"),
-            schema: row.get_unwrap("schema"),
+            in_schema: row.get_unwrap("in_schema"),
+            ui_schema: row.get_unwrap("ui_schema"),
             run_as: acts::ActRunAs::from_str(&row.get_unwrap::<&str, String>("run_as")).unwrap(),
             resources: row.get_unwrap("resources"),
             catalog: acts::ActPackageCatalog::from_str(&row.get_unwrap::<&str, String>("catalog"))
@@ -283,11 +297,13 @@ impl DbInit for PackageCollection {
                         .not_null()
                         .primary_key(),
                 )
+                .col(ColumnDef::new(CollectionIden::Name).string().not_null())
                 .col(ColumnDef::new(CollectionIden::Desc).string())
                 .col(ColumnDef::new(CollectionIden::Icon).string().not_null())
                 .col(ColumnDef::new(CollectionIden::Doc).string())
                 .col(ColumnDef::new(CollectionIden::Version).string().not_null())
-                .col(ColumnDef::new(CollectionIden::Schema).string().not_null())
+                .col(ColumnDef::new(CollectionIden::InSchema).string().not_null())
+                .col(ColumnDef::new(CollectionIden::UiSchema).string().not_null())
                 .col(ColumnDef::new(CollectionIden::RunAs).string().not_null())
                 .col(
                     ColumnDef::new(CollectionIden::Resources)
@@ -321,6 +337,18 @@ impl DbInit for PackageCollection {
                 .if_not_exists()
                 .table(CollectionIden::Table)
                 .col(CollectionIden::Version)
+                .build(SqliteQueryBuilder),
+            Index::create()
+                .name("idx_packages_name")
+                .if_not_exists()
+                .table(CollectionIden::Table)
+                .col(CollectionIden::Name)
+                .build(SqliteQueryBuilder),
+            Index::create()
+                .name("idx_packages_desc")
+                .if_not_exists()
+                .table(CollectionIden::Table)
+                .col(CollectionIden::Desc)
                 .build(SqliteQueryBuilder),
         ]
         .join("; ");

@@ -35,10 +35,10 @@ impl ActPlugin for MyPackagePlugin {
                     let ret = pack1.execute();
                     match ret {
                         Ok(vars) => {
-                            executor.act().complete(&e.pid, &e.tid, &vars).unwrap();
+                            executor.act().complete(&e.pid, &e.tid, vars).unwrap();
                         }
                         Err(err) => {
-                            executor.act().error(&e.pid, &e.tid, &err.into()).unwrap();
+                            executor.act().error(&e.pid, &e.tid, err.into()).unwrap();
                         }
                     }
                 }

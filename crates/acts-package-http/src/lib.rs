@@ -28,17 +28,17 @@ impl ActPlugin for HttpPackagePlugin {
             tokio::spawn(async move {
                 let pack = package::HttpPackage::create(&inputs);
                 if let Err(err) = pack {
-                    executor.act().error(&pid, &tid, &err.into()).unwrap();
+                    executor.act().error(&pid, &tid, err.into()).unwrap();
                     return;
                 }
 
                 let pack = pack.unwrap();
                 match pack.run().await {
                     Ok(data) => {
-                        executor.act().complete(&pid, &tid, &data).unwrap();
+                        executor.act().complete(&pid, &tid, data).unwrap();
                     }
                     Err(err) => {
-                        executor.act().error(&pid, &tid, &err.into()).unwrap();
+                        executor.act().error(&pid, &tid, err.into()).unwrap();
                     }
                 };
             });

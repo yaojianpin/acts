@@ -29,7 +29,7 @@ async fn sch_act_chain_list() {
                 let vars = e.inputs.get::<Vars>(consts::ACT_OPTIONS_KEY).unwrap();
                 data.push(vars.get::<String>(consts::ACT_VALUE).unwrap());
             });
-            e.do_action(&e.pid, &e.tid, EventAction::Next, &Vars::new())
+            e.do_action(&e.pid, &e.tid, EventAction::Next, Vars::new())
                 .unwrap();
         }
     });
@@ -61,7 +61,7 @@ async fn sch_act_chain_order() {
         if e.is_key("act1") && e.is_state(MessageState::Created) {
             rx.update(|data| data.push(e.start_time));
             std::thread::sleep(std::time::Duration::from_secs(1));
-            e.do_action(&e.pid, &e.tid, EventAction::Next, &Vars::new())
+            e.do_action(&e.pid, &e.tid, EventAction::Next, Vars::new())
                 .unwrap();
         }
     });
@@ -97,7 +97,7 @@ async fn sch_act_chain_var() {
                 let vars = e.inputs.get::<Vars>(consts::ACT_OPTIONS_KEY).unwrap();
                 data.push(vars.get::<String>(consts::ACT_VALUE).unwrap());
             });
-            e.do_action(&e.pid, &e.tid, EventAction::Next, &Vars::new())
+            e.do_action(&e.pid, &e.tid, EventAction::Next, Vars::new())
                 .unwrap();
         }
     });

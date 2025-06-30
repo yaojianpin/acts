@@ -2,7 +2,7 @@ use acts::{
     ActError, ActPackage, ActPackageCatalog, ActPackageMeta, ActRunAs, Result, Vars, include_json,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
+use serde_json::{Value as JsonValue, json};
 use std::process::Command;
 use strum::AsRefStr;
 
@@ -45,12 +45,19 @@ pub struct ShellPackage {
 impl ActPackage for ShellPackage {
     fn meta() -> ActPackageMeta {
         ActPackageMeta {
-            name: "acts.app.shell",
+            id: "acts.app.shell",
+            name: "Shell",
             desc: "do shell script with nushell, bash or powershell",
             version: "0.1.0",
-            icon: "icon-shell",
+            icon: r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-square-chevron-right-icon lucide-square-chevron-right"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="m10 8 4 4-4 4"/></svg>"#,
             doc: "",
-            schema: include_json!("./schema.json"),
+            in_schema: include_json!("./schema.json"),
+            ui_schema: Some(json!({
+                "ui:order": ["shell", "script", "content-type"],
+                "script": {
+                    "ui:widget": "textarea",
+                },
+            })),
             run_as: ActRunAs::Irq,
             resources: vec![],
             catalog: ActPackageCatalog::App,

@@ -13,12 +13,13 @@ impl DbDocument for Package {
     fn doc(&self) -> Result<HashMap<String, JsonValue>> {
         let mut map = HashMap::new();
         map.insert("id".to_string(), json!(self.id.clone()));
-
+        map.insert("name".to_string(), json!(self.name.clone()));
         map.insert("desc".to_string(), json!(self.desc.clone()));
         map.insert("icon".to_string(), json!(self.icon.clone()));
         map.insert("doc".to_string(), json!(self.doc.clone()));
         map.insert("version".to_string(), json!(self.version.clone()));
-        map.insert("schema".to_string(), json!(self.schema.clone()));
+        map.insert("in_schema".to_string(), json!(self.in_schema.clone()));
+        map.insert("ui_schema".to_string(), json!(self.ui_schema.clone()));
         map.insert("run_as".to_string(), json!(self.run_as.clone()));
         map.insert("resources".to_string(), json!(self.resources.clone()));
         map.insert("catalog".to_string(), json!(self.catalog.clone()));

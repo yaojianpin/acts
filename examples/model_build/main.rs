@@ -6,8 +6,8 @@ async fn main() {
     let (s, sig) = engine.signal(()).double();
     let workflow = Workflow::new()
         .with_id("m1")
-        .with_input("index", 0.into())
-        .with_input("result", 0.into())
+        .with_var("index", 0.into())
+        .with_var("result", 0.into())
         .with_output("result", r#"{{ result }}"#.into())
         .with_step(|step| {
             step.with_id("cond")

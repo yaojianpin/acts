@@ -11,12 +11,12 @@ pub struct Action {
 }
 
 impl Action {
-    pub fn new(pid: &str, tid: &str, event: EventAction, options: &Vars) -> Self {
+    pub fn new(pid: &str, tid: &str, event: EventAction, options: Vars) -> Self {
         Self {
             pid: pid.to_string(),
             tid: tid.to_string(),
             event,
-            options: options.clone(),
+            options,
         }
     }
 
