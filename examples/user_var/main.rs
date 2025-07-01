@@ -18,7 +18,7 @@ async fn main() -> Result<()> {
       - name: step 1
         acts:
           - uses: acts.core.msg
-            inputs:
+            vars:
                 test:
                     var1: "changed_var1"
             params:
@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
     );
     executor
         .proc()
-        .start(&workflow.id, &vars)
+        .start(&workflow.id, vars)
         .expect("fail to start workflow");
     let chan = engine.channel();
 

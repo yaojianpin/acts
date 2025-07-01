@@ -1,6 +1,6 @@
 name: shell example
 id: shell-example
-inputs:
+vars:
   my_input:  "hello, world"
 steps:
   - name: shell step

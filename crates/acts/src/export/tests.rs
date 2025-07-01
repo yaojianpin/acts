@@ -96,7 +96,7 @@ async fn engine_executor_start_no_pid() {
         .with_step(|step| step.with_act(Act::irq(|act| act.with_key("test"))));
     engine.executor().model().deploy(&workflow).unwrap();
     let options = Vars::new();
-    let result = executor.proc().start(&workflow.id, &options);
+    let result = executor.proc().start(&workflow.id, options);
     assert!(result.is_ok());
 }
 
@@ -112,7 +112,7 @@ async fn engine_executor_start_with_pid() {
     engine.executor().model().deploy(&workflow).unwrap();
     let mut options = Vars::new();
     options.insert("pid".to_string(), "123".into());
-    let result = executor.proc().start(&workflow.id, &options);
+    let result = executor.proc().start(&workflow.id, options);
     assert!(result.is_ok());
 
     assert_eq!(result.unwrap(), "123");
@@ -131,7 +131,7 @@ async fn export_executor_start_empty_pid() {
     engine.executor().model().deploy(&workflow).unwrap();
     let mut options = Vars::new();
     options.insert("pid".to_string(), "".into());
-    let result = executor.proc().start(&workflow.id, &options);
+    let result = executor.proc().start(&workflow.id, options);
     assert!(result.is_ok());
 }
 
@@ -167,7 +167,71 @@ async fn export_executor_start_dup_pid_error() {
         .expect("fail to deploy workflow");
     let mut options = Vars::new();
     options.insert("pid".to_string(), json!(pid.to_string()));
-    let result = executor.proc().start(&model.id, &options);
+    let result = executor.proc().start(&model.id, options);
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn export_executor_start_from_yaml() {
+    let engine = Engine::new().start();
+    let executor = engine.executor();
+    let mid = utils::longid();
+    let model = Workflow::new()
+        .with_id(&mid)
+        .with_step(|step| step.with_act(Act::irq(|act| act.with_key("test"))))
+        .to_yml()
+        .unwrap();
+
+    let result = executor
+        .proc()
+        .start_from_model(&model, "yaml", Vars::new());
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn export_executor_start_from_json() {
+    let engine = Engine::new().start();
+    let executor = engine.executor();
+    let mid = utils::longid();
+    let model = Workflow::new()
+        .with_id(&mid)
+        .with_step(|step| step.with_act(Act::irq(|act| act.with_key("test"))))
+        .to_json()
+        .unwrap();
+
+    let result = executor
+        .proc()
+        .start_from_model(&model, "json", Vars::new());
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn export_executor_start_from_empty_fmt() {
+    let engine = Engine::new().start();
+    let executor = engine.executor();
+    let mid = utils::longid();
+    let model = Workflow::new()
+        .with_id(&mid)
+        .with_step(|step| step.with_act(Act::irq(|act| act.with_key("test"))))
+        .to_json()
+        .unwrap();
+
+    let result = executor.proc().start_from_model(&model, "", Vars::new());
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn export_executor_start_from_error_fmt() {
+    let engine = Engine::new().start();
+    let executor = engine.executor();
+    let mid = utils::longid();
+    let model = Workflow::new()
+        .with_id(&mid)
+        .with_step(|step| step.with_act(Act::irq(|act| act.with_key("test"))))
+        .to_json()
+        .unwrap();
+
+    let result = executor.proc().start_from_model(&model, "xml", Vars::new());
     assert!(result.is_err());
 }
 
@@ -594,7 +658,7 @@ async fn export_manager_tasks_count() {
     vars.insert("uid".to_string(), json!("u1"));
     vars.insert("pid".to_string(), json!(pid));
 
-    rt.start(&model, &vars).unwrap();
+    rt.start(&model, vars).unwrap();
     sig.recv().await;
 
     let tasks = manager
@@ -631,7 +695,7 @@ async fn export_manager_tasks_offset_in_range() {
     vars.insert("uid".to_string(), json!("u1"));
     vars.insert("pid".to_string(), json!(pid));
 
-    rt.start(&model, &vars).unwrap();
+    rt.start(&model, vars).unwrap();
     sig.recv().await;
 
     let tasks = manager
@@ -668,7 +732,7 @@ async fn export_manager_tasks_offset_out_range() {
     vars.insert("uid".to_string(), json!("u1"));
     vars.insert("pid".to_string(), json!(pid));
 
-    rt.start(&model, &vars).unwrap();
+    rt.start(&model, vars).unwrap();
     sig.recv().await;
 
     let tasks = manager
@@ -705,7 +769,7 @@ async fn export_manager_tasks_query() {
     vars.insert("uid".to_string(), json!("u1"));
     vars.insert("pid".to_string(), json!(pid));
 
-    rt.start(&model, &vars).unwrap();
+    rt.start(&model, vars).unwrap();
     sig.recv().await;
 
     let tasks = manager
@@ -744,7 +808,7 @@ async fn export_manager_tasks_order() {
     vars.insert("uid".to_string(), json!("u1"));
     vars.insert("pid".to_string(), json!(pid));
 
-    rt.start(&model, &vars).unwrap();
+    rt.start(&model, vars).unwrap();
     sig.recv().await;
 
     let tasks = manager
@@ -780,7 +844,7 @@ async fn export_manager_task_get() {
     vars.insert("uid".to_string(), json!("u1"));
     vars.insert("pid".to_string(), json!(pid));
 
-    rt.start(&model, &vars).unwrap();
+    rt.start(&model, vars).unwrap();
     sig.recv().await;
     let tasks = manager
         .task()
@@ -1387,7 +1451,7 @@ async fn export_executor_start() {
     vars.insert("uid".to_string(), json!("u1"));
     vars.insert("pid".to_string(), json!(pid));
 
-    let result = engine.executor().proc().start(&model.id, &vars);
+    let result = engine.executor().proc().start(&model.id, vars);
     sig.recv().await;
     assert!(result.is_ok());
 }
@@ -1404,7 +1468,7 @@ async fn export_executor_start_not_found_model() {
     vars.insert("uid".to_string(), json!("u1"));
     vars.insert("pid".to_string(), json!(pid));
 
-    let result = engine.executor().proc().start("not_exists", &vars);
+    let result = engine.executor().proc().start("not_exists", vars);
     assert!(result.is_err());
 }
 
@@ -1429,7 +1493,7 @@ async fn export_executor_complete() {
     });
     let mut vars = Vars::new();
     vars.insert("uid".to_string(), json!("u1"));
-    rt.start(&model, &vars).unwrap();
+    rt.start(&model, vars).unwrap();
     let ret = sig.recv().await;
     assert!(ret);
 }
@@ -1456,7 +1520,7 @@ async fn export_executor_complete_no_uid() {
             s1.send(ret.is_ok());
         }
     });
-    rt.start(&model, &Vars::new()).unwrap();
+    rt.start(&model, Vars::new()).unwrap();
     let ret = sig.recv().await;
     assert!(ret);
 }
@@ -1484,7 +1548,7 @@ async fn export_executor_submit() {
     });
     let mut vars = Vars::new();
     vars.insert("uid".to_string(), json!("u1"));
-    rt.start(&model, &vars).unwrap();
+    rt.start(&model, vars).unwrap();
     let ret = sig.recv().await;
     assert!(ret);
 }
@@ -1511,7 +1575,7 @@ async fn export_executor_skip() {
     });
     let mut vars = Vars::new();
     vars.insert("uid".to_string(), json!("u1"));
-    rt.start(&model, &vars).unwrap();
+    rt.start(&model, vars).unwrap();
     let ret = sig.recv().await;
     assert!(ret);
 }
@@ -1538,7 +1602,7 @@ async fn export_executor_error() {
     });
     let mut vars = Vars::new();
     vars.insert("uid".to_string(), json!("u1"));
-    rt.start(&model, &vars).unwrap();
+    rt.start(&model, vars).unwrap();
     let ret = sig.recv().await;
     assert!(ret);
 }
@@ -1566,7 +1630,7 @@ async fn export_executor_abort() {
     });
     let mut vars = Vars::new();
     vars.insert("uid".to_string(), json!("u1"));
-    rt.start(&model, &vars).unwrap();
+    rt.start(&model, vars).unwrap();
     let ret = sig.recv().await;
     assert!(ret);
 }
@@ -1617,7 +1681,7 @@ async fn export_executor_back() {
     });
     let mut vars = Vars::new();
     vars.insert("uid".to_string(), json!("u1"));
-    rt.start(&model, &vars).unwrap();
+    rt.start(&model, vars).unwrap();
     let ret = sig.recv().await;
     assert!(ret);
 }
@@ -1671,7 +1735,7 @@ async fn export_executor_cancel() {
     });
     let mut vars = Vars::new();
     vars.insert("uid".to_string(), json!("u1"));
-    rt.start(&model, &vars).unwrap();
+    rt.start(&model, vars).unwrap();
     let ret = sig.recv().await;
     assert!(ret);
 }
@@ -1703,7 +1767,7 @@ async fn export_executor_push() {
     });
     let mut vars = Vars::new();
     vars.insert("uid".to_string(), json!("u1"));
-    rt.start(&model, &vars).unwrap();
+    rt.start(&model, vars).unwrap();
     let ret = sig.recv().await;
     assert!(ret);
 }
@@ -1734,7 +1798,7 @@ async fn export_executor_push_no_key_error() {
     });
     let mut vars = Vars::new();
     vars.insert("uid".to_string(), json!("u1"));
-    rt.start(&model, &vars).unwrap();
+    rt.start(&model, vars).unwrap();
     let ret = sig.recv().await;
     assert!(ret);
 }
@@ -1760,7 +1824,7 @@ async fn export_executor_push_not_step_id_error() {
     });
     let mut vars = Vars::new();
     vars.insert("uid".to_string(), json!("u1"));
-    rt.start(&model, &vars).unwrap();
+    rt.start(&model, vars).unwrap();
     let ret = sig.recv().await;
     assert!(ret);
 }
@@ -1790,7 +1854,7 @@ async fn export_executor_remove() {
     });
     let mut vars = Vars::new();
     vars.insert("uid".to_string(), json!("u1"));
-    rt.start(&model, &vars).unwrap();
+    rt.start(&model, vars).unwrap();
     let ret = sig.recv().await;
     assert!(ret);
 }

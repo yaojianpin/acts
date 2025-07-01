@@ -73,7 +73,7 @@ impl Runtime {
         self.emitter.init(&engine.runtime());
     }
 
-    pub fn start(self: &Arc<Self>, model: &Workflow, options: &Vars) -> Result<Arc<Process>> {
+    pub fn start(self: &Arc<Self>, model: &Workflow, options: Vars) -> Result<Arc<Process>> {
         debug!("scheduler::start({})", model.id);
 
         let mut proc_id = utils::longid();
@@ -88,11 +88,16 @@ impl Runtime {
             )));
         }
 
-        let mut w = model.clone();
-        w.set_vars(options);
+        // validate the options
+        if !model.inputs.is_null() {
+            jsonschema::validate(&model.inputs, &(options.to_value()))?;
+        }
+
+        let mut model = model.clone();
+        model.set_vars(&options);
 
         let proc = Process::new(&proc_id, self);
-        proc.load(&w)?;
+        proc.load(&model)?;
         self.launch(&proc);
 
         Ok(proc)

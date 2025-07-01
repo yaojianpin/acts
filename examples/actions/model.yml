@@ -1,9 +1,10 @@
 name: actions
 id: actions
-inputs:
+vars:
   v: 0
-outputs:
-  result: '{{ v }}'
+options:
+  outputs:
+    result: '{{ v }}'
 steps:
   - name: prepare
     id: prepare

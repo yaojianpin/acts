@@ -297,7 +297,7 @@ impl DbInit for PackageCollection {
                 .col(ColumnDef::new(CollectionIden::Doc).string())
                 .col(ColumnDef::new(CollectionIden::Version).string().not_null())
                 .col(ColumnDef::new(CollectionIden::InSchema).string().not_null())
-                .col(ColumnDef::new(CollectionIden::UiSchema).string().not_null())
+                .col(ColumnDef::new(CollectionIden::UiSchema).string())
                 .col(ColumnDef::new(CollectionIden::RunAs).string().not_null())
                 .col(
                     ColumnDef::new(CollectionIden::Resources)

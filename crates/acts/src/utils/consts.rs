@@ -1,9 +1,6 @@
-pub const INITIATOR: &str = "$initiator";
-
 pub const ACT_USE_PARENT_PROC_ID: &str = "$parent_pid";
 pub const ACT_USE_PARENT_TASK_ID: &str = "$parent_tid";
 
-pub const FOR_ACT_KEY_UID: &str = "uid";
 pub const STEP_NODE_ID: &str = "node_id";
 pub const STEP_NODE_NAME: &str = "node_name";
 pub const STEP_TASK_ID: &str = "task_id";
@@ -31,10 +28,6 @@ pub const TASK_ROOT_TID: &str = "$";
 
 pub const PROCESS_ID: &str = "pid";
 pub const MODEL_ID: &str = "mid";
-
-/// it is used to save the input/output data
-/// the data var is default to expose to next task
-pub const ACT_DATA: &str = "data";
 
 /// check if the key is private
 /// these keys can only be as local data

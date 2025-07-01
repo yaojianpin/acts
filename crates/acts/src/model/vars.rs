@@ -2,8 +2,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 use std::ops::{Deref, DerefMut};
 
-use crate::utils::consts;
-
 #[derive(Default, Clone)]
 pub struct Vars {
     inner: Map<String, Value>,
@@ -134,10 +132,6 @@ impl Vars {
         Self { inner: Map::new() }
     }
 
-    pub fn with_data(self, data: serde_json::Value) -> Self {
-        self.with(consts::ACT_DATA, data)
-    }
-
     pub fn with<T>(self, name: &str, value: T) -> Self
     where
         T: Serialize,
@@ -176,8 +170,17 @@ impl Vars {
         self.inner.get(name)
     }
 
-    pub fn pop(&mut self, name: &str) -> Option<Value> {
-        self.inner.remove(name)
+    pub fn pop<T>(&mut self, name: &str) -> Option<T>
+    where
+        T: for<'de> Deserialize<'de> + Clone,
+    {
+        if let Some(value) = self.inner.remove(name) {
+            if let Ok(value) = serde_json::from_value::<T>(value) {
+                return Some(value);
+            }
+        }
+
+        None
     }
 
     pub fn extend(mut self, vars: Vars) -> Self {
@@ -187,6 +190,10 @@ impl Vars {
 
     pub fn append(&mut self, vars: &mut Vars) {
         self.inner.append(&mut vars.inner);
+    }
+
+    pub fn to_value(&self) -> Value {
+        Value::Object(self.inner.clone())
     }
 }
 

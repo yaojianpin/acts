@@ -15,7 +15,7 @@ async fn main() {
         .expect("deploy model");
     executor
         .proc()
-        .start(&workflow.id, &Vars::new())
+        .start(&workflow.id, Vars::new())
         .expect("start workflow");
 
     let ret = executor

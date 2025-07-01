@@ -1,11 +1,12 @@
 name: simple
 id: simple
-inputs:
+vars:
   input: 4
   index: 0
-  value: 0
-outputs:
-  result: '{{ value }}'
+  value:
+options:
+  outputs:
+    result: '{{ value }}'
 steps:
   - name: init
     id: init

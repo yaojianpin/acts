@@ -1,11 +1,5 @@
 name: event model
 id: my-event-model
-inputs:
-  # workflow global vars
-  result: 0
-
-outputs:
-  result:
 on:
   # start event by manual and return the result directly
   - id: event-manual

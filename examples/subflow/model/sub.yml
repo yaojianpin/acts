@@ -1,9 +1,10 @@
 name: sub
 id: sub
-inputs:
+vars:
   v: 0
-outputs:
-  v:
+options:
+  outputs:
+    v:
 steps:
   - name: t1
     acts:

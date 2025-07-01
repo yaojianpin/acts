@@ -53,7 +53,7 @@ async fn main() {
     engine
         .executor()
         .proc()
-        .start(&workflow.id, &Vars::new())
+        .start(&workflow.id, Vars::new())
         .expect("start workflow");
     sig.recv().await;
 }

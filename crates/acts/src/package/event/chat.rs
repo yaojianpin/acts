@@ -55,9 +55,9 @@ impl ActPackageFn for ManualEventPackage {
 
         let mut params = Vars::new();
         if let Some(ref v) = self.0 {
-            params.insert(consts::ACT_DATA.to_string(), json!(v));
+            params.insert(consts::ACT_PARAMS_KEY.to_string(), json!(v));
         }
-        let ret = rt.start(&workflow, &params)?;
+        let ret = rt.start(&workflow, params)?;
 
         Ok(Some(Vars::new().with(consts::PROCESS_ID, ret.id())))
     }

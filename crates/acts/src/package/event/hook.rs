@@ -75,7 +75,7 @@ impl ActPackageFn for HookEventPackage {
         });
 
         let params = self.0.clone().unwrap_or_default();
-        rt.start(&workflow, &params).unwrap();
+        rt.start(&workflow, params).unwrap();
         let ret = s.recv().await;
         Ok(Some(ret))
     }

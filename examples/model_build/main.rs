@@ -38,7 +38,7 @@ async fn main() {
     vars.insert("count".into(), 100.into());
     executor
         .proc()
-        .start(&workflow.id, &vars)
+        .start(&workflow.id, vars)
         .expect("start workflow");
 
     engine.channel().on_error(|e| {

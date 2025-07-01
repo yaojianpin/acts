@@ -31,7 +31,7 @@ async fn engine_event_on_message() {
 
     let mut options = Vars::new();
     options.insert("pid".to_string(), json!(utils::longid()));
-    executor.proc().start(&workflow.id, &options).unwrap();
+    executor.proc().start(&workflow.id, options).unwrap();
     let ret = sig.recv().await;
     assert_eq!(ret, "test");
 }
@@ -56,7 +56,7 @@ async fn engine_event_on_start() {
 
     let mut options = Vars::new();
     options.insert("pid".to_string(), json!(utils::longid()));
-    executor.proc().start(&workflow.id, &options).unwrap();
+    executor.proc().start(&workflow.id, options).unwrap();
     let ret = sig.recv().await;
     assert_eq!(ret, mid);
 }
@@ -80,7 +80,7 @@ async fn engine_event_on_complete() {
 
     let mut options = Vars::new();
     options.insert("pid".to_string(), json!(utils::longid()));
-    executor.proc().start(&workflow.id, &options).unwrap();
+    executor.proc().start(&workflow.id, options).unwrap();
     let ret = sig.recv().await;
     assert!(ret);
 }
@@ -116,7 +116,7 @@ async fn engine_event_on_error() {
 
     let mut options = Vars::new();
     options.insert("pid".to_string(), json!(utils::longid()));
-    executor.proc().start(&workflow.id, &options).unwrap();
+    executor.proc().start(&workflow.id, options).unwrap();
     let ret = sig.recv().await;
     assert!(ret);
 }

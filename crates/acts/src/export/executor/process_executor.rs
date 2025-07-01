@@ -1,7 +1,8 @@
+use crate::Workflow;
 use crate::scheduler::Process;
 use crate::{
-    ModelInfo, ProcInfo, Result, TaskInfo, Vars, query::Query, scheduler::Runtime, store::PageData,
-    utils::consts,
+    ActError, ModelInfo, ProcInfo, Result, TaskInfo, Vars, query::Query, scheduler::Runtime,
+    store::PageData,
 };
 use std::sync::Arc;
 use tracing::instrument;
@@ -18,16 +19,22 @@ impl ProcessExecutor {
         }
     }
 
-    pub fn start(&self, mid: &str, options: &Vars) -> Result<String> {
+    pub fn start(&self, mid: &str, options: Vars) -> Result<String> {
         let model: ModelInfo = self.runtime.cache().store().models().find(mid)?.into();
         let workflow = model.workflow()?;
+        let proc = self.runtime.start(&workflow, options)?;
+        Ok(proc.id().to_string())
+    }
 
-        let mut vars = options.clone();
-        // set the workflow initiator
-        if let Some(uid) = options.get_value(consts::FOR_ACT_KEY_UID) {
-            vars.insert(consts::INITIATOR.to_string(), uid.clone());
-        }
-        let proc = self.runtime.start(&workflow, &vars)?;
+    pub fn start_from_model(&self, model: &str, fmt: &str, options: Vars) -> Result<String> {
+        let workflow = match fmt {
+            "yaml" | "yml" => Workflow::from_yml(model),
+            "json" => Workflow::from_json(model),
+            _ => Err(ActError::Model(format!(
+                "'{fmt}' is invalid, it must be one of 'yaml' and 'json'"
+            ))),
+        }?;
+        let proc = self.runtime.start(&workflow, options)?;
         Ok(proc.id().to_string())
     }
 

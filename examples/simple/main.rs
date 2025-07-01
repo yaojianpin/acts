@@ -18,7 +18,7 @@ async fn main() {
     vars.insert("input".into(), 10.into());
     executor
         .proc()
-        .start(&workflow.id, &vars)
+        .start(&workflow.id, vars)
         .expect("start workflow");
     engine.channel().on_error(move |e| {
         print!("on_error: {e:?}");

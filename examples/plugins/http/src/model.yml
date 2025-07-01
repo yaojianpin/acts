@@ -1,6 +1,6 @@
 name: http example
 id: http-example
-inputs:
+vars:
   key1: "1"
   key2: "2"
 steps:

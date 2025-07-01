@@ -1,7 +1,5 @@
 name: actions
 id: actions
-outputs:
-  key1:
 steps:
   - name: set state value
     id: set-value
@@ -19,10 +17,4 @@ steps:
         params:
           op: GET
           key: key1
-        # output key1 to step
-        outputs:
-          key1:
-    # output key1 to workflow
-    outputs:
-      key1:
 

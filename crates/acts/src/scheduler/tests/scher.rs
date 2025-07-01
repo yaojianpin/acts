@@ -15,7 +15,7 @@ async fn sch_scher_next() {
     tokio::spawn(async move {
         let mut options = Vars::new();
         options.insert("pid".to_string(), json!(utils::longid()));
-        s.start(&workflow, &options).unwrap();
+        s.start(&workflow, options).unwrap();
     });
 
     let ret = rt.scher().next().await;
@@ -44,7 +44,7 @@ async fn sch_scher_start_default() {
     let engine = Engine::new().start();
     let rt = engine.runtime();
     let workflow = Workflow::new();
-    let result = rt.start(&workflow, &Vars::new());
+    let result = rt.start(&workflow, Vars::new());
     assert!(result.is_ok());
 }
 
@@ -57,7 +57,7 @@ async fn sch_scher_start_with_vars() {
     vars.insert("a".to_string(), json!(100));
     vars.insert("b".to_string(), json!("string"));
 
-    let proc = rt.start(&workflow, &vars).unwrap();
+    let proc = rt.start(&workflow, vars).unwrap();
     rt.scher().next().await;
 
     assert_eq!(proc.inputs().get::<i64>("a").unwrap(), 100);

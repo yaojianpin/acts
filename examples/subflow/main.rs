@@ -47,7 +47,7 @@ async fn main() {
     engine
         .executor()
         .proc()
-        .start("main", &Vars::new())
+        .start("main", Vars::new())
         .expect("start workflow");
 
     sig.recv().await;

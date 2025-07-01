@@ -27,7 +27,7 @@ async fn main() -> Result<()> {
         .with_body(json!({ "key": 2 }).to_string())
         .with_status(200)
         .with_header("content-type", "application/json")
-        .with_body(json!({ "data": "world"}).to_string())
+        .with_body(json!({ "my_value": "world"}).to_string())
         .create();
 
     let engine = EngineBuilder::new()
@@ -47,7 +47,7 @@ async fn main() -> Result<()> {
         .expect("deploy model");
     executor
         .proc()
-        .start(&workflow.id, &Vars::new())
+        .start(&workflow.id, Vars::new())
         .expect("start workflow");
 
     engine.channel().on_complete(move |e| {

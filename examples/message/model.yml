@@ -1,9 +1,7 @@
 name: event_test
 id: m1
-inputs:
+vars:
   value: 0
-outputs:
-  value:
 setup:
   - uses: acts.core.msg
     on: created
@@ -40,7 +38,7 @@ steps:
           acts:
             - uses: acts.core.msg
               key: fn4
-              inputs:
+              vars:
                 a: '{{ value }}'
 
   - name: step 4

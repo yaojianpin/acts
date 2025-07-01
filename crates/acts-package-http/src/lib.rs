@@ -13,11 +13,11 @@ impl ActPlugin for HttpPackagePlugin {
 
         let executor = engine.executor();
         let chan = engine.channel_with_options(&ChannelOptions {
-            id: meta.name.to_string(),
+            id: meta.id.to_string(),
             ack: true,
             r#type: "act".to_string(),
             state: "created".to_string(),
-            uses: meta.name.to_string(),
+            uses: meta.id.to_string(),
             ..Default::default()
         });
         chan.on_message(move |e| {

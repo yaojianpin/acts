@@ -2,7 +2,7 @@ use serde_json::json;
 
 use crate::{
     Act, Workflow,
-    utils::{self, consts, test::create_proc_signal},
+    utils::{self, test::create_proc_signal},
 };
 
 #[tokio::test]
@@ -65,7 +65,7 @@ async fn pack_code_get_data() {
             .first()
             .unwrap()
             .outputs()
-            .get::<String>(consts::ACT_DATA)
+            .get::<String>("data")
             .unwrap(),
         "abc"
     );

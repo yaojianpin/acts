@@ -1,9 +1,5 @@
 name: approve
 id: approve
-setup:
-  - uses: acts.core.msg
-    on: completed
-    key: final
 steps:
   - name: prepare
     id: prepare
@@ -19,8 +15,9 @@ steps:
         key: pm
         params:
           role_id: pm
-        outputs:
-          pm:
+        options:
+          outputs:
+            pm:
       # parse the pm variable from prev act
       # and parallel run multiple acts
       - uses: acts.core.parallel
@@ -40,8 +37,9 @@ steps:
         key: gm
         params:
           role_id: gm
-        outputs:
-          gm:
+        options:
+          outputs:
+            gm:
       # parallel generate multiple acts
       - uses: acts.core.parallel
         params:

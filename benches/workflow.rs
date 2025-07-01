@@ -44,7 +44,7 @@ fn start(c: &mut Criterion) {
                 engine
                     .executor()
                     .proc()
-                    .start(&workflow.id, &Vars::new())
+                    .start(&workflow.id, Vars::new())
                     .unwrap();
             })
         });
@@ -92,7 +92,7 @@ fn act(c: &mut Criterion) {
                 let _ = e2
                     .executor()
                     .proc()
-                    .start(&workflow.id, &Vars::new())
+                    .start(&workflow.id, Vars::new())
                     .unwrap();
             }
             sig.recv().await;

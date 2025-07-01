@@ -24,7 +24,7 @@ async fn main() -> acts::Result<()> {
 
     executor
         .proc()
-        .start(&workflow.id, &vars)
+        .start(&workflow.id, vars)
         .expect("start workflow");
     let emitter = engine.channel();
 
