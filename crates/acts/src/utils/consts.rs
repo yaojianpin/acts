@@ -20,7 +20,7 @@ pub const IS_CATCH_PROCESSED: &str = "__is_catch_processed";
 pub const IS_EVENT_PROCESSED: &str = "__is_event_processed";
 pub const IS_TIMEOUT_PROCESSED_PREFIX: &str = "__is_timeout_";
 
-pub const ACT_OUTPUTS: &str = "outputs";
+pub const ACT_EXPOSE: &str = "expose";
 
 pub const ACT_SUBFLOW_TO: &str = "to";
 

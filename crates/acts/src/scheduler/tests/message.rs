@@ -93,7 +93,7 @@ async fn sch_message_workflow_outputs() {
     let mut workflow = Workflow::new()
         .with_id("my_id")
         .with_var("a", json!(5))
-        .with_output("a", json!(null));
+        .with_options_expose("a", json!(null));
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<Message>(&mut workflow, &id);
     emitter.on_message(move |e| {
@@ -328,7 +328,7 @@ async fn sch_message_act_outputs_by_push_action() {
                 .with("uses", "acts.core.irq")
                 .with(
                     "options",
-                    Vars::new().with("outputs", Vars::new().with("a", 5)),
+                    Vars::new().with(consts::ACT_EXPOSE, Vars::new().with("a", 5)),
                 );
             e.do_action(&e.pid, &e.tid, EventAction::Push, options)
                 .unwrap();

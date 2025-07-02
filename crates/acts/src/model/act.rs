@@ -88,6 +88,11 @@ impl Act {
         self
     }
 
+    pub fn with_desc(mut self, desc: &str) -> Self {
+        self.desc = desc.to_string();
+        self
+    }
+
     pub fn with_key(mut self, key: &str) -> Self {
         self.key = key.to_string();
         self
@@ -131,7 +136,7 @@ impl Act {
 
     pub fn with_output(mut self, name: &str, value: JsonValue) -> Self {
         self.options
-            .entry(consts::ACT_OUTPUTS)
+            .entry(consts::ACT_EXPOSE)
             .and_modify(|outputs| {
                 if let Some(obj) = outputs.as_object_mut() {
                     obj.insert(name.to_string(), value.clone());
@@ -156,6 +161,14 @@ impl Act {
 
     pub fn with_if(mut self, v: &str) -> Self {
         self.r#if = Some(v.to_string());
+        self
+    }
+
+    pub fn with_metadata<T>(mut self, name: &str, value: T) -> Self
+    where
+        T: Serialize + Clone,
+    {
+        self.metadata.set(name, value);
         self
     }
 

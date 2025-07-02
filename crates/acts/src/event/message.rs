@@ -1,4 +1,7 @@
-use crate::{TaskState, Vars, data, utils};
+use crate::{
+    TaskState, Vars, data,
+    utils::{self, consts},
+};
 use core::fmt;
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;
@@ -190,6 +193,11 @@ impl Message {
             timestamp: utils::time::timestamp(),
             status: data::MessageStatus::Created,
         }
+    }
+
+    pub fn set_err(&mut self, ecode: &str, message: &str) {
+        self.inputs.set(consts::ACT_ERR_CODE, ecode);
+        self.inputs.set(consts::ACT_ERR_MESSAGE, message);
     }
 }
 

@@ -70,6 +70,11 @@ impl Step {
         self
     }
 
+    pub fn with_desc(mut self, desc: &str) -> Self {
+        self.desc = desc.to_string();
+        self
+    }
+
     pub fn with_tag(mut self, tag: &str) -> Self {
         self.tag = tag.to_string();
         self
@@ -97,7 +102,7 @@ impl Step {
 
     pub fn with_output(mut self, name: &str, value: JsonValue) -> Self {
         self.options
-            .entry(consts::ACT_OUTPUTS)
+            .entry(consts::ACT_EXPOSE)
             .and_modify(|outputs| {
                 if let Some(obj) = outputs.as_object_mut() {
                     obj.insert(name.to_string(), value.clone());
@@ -123,6 +128,14 @@ impl Step {
     pub fn with_timeout(mut self, build: fn(Timeout) -> Timeout) -> Self {
         let timeout = Timeout::default();
         self.timeout.push(build(timeout));
+        self
+    }
+
+    pub fn with_metadata<T>(mut self, name: &str, value: T) -> Self
+    where
+        T: Serialize + Clone,
+    {
+        self.metadata.set(name, value);
         self
     }
 }

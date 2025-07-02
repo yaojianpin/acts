@@ -394,6 +394,7 @@ impl Context {
                 if let Some(err) = task.err() {
                     self.proc.set_err(&err);
                 }
+
                 self.runtime.scher().emit_proc_event(&self.proc);
             }
         }

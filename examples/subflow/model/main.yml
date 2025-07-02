@@ -3,7 +3,7 @@ id: main
 vars:
   v: 0
 options:
-  outputs:
+  expose:
     result: '{{ v }}'
 steps:
   - name: prepare

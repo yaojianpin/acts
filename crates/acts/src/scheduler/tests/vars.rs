@@ -15,7 +15,7 @@ async fn sch_vars_workflow_inputs() {
 
 #[tokio::test]
 async fn sch_vars_workflow_outputs_value() {
-    let mut workflow = Workflow::new().with_output("var1", 10.into());
+    let mut workflow = Workflow::new().with_options_expose("var1", 10.into());
     let (proc, scher, emiter, tx, rx) = create_proc_signal::<Vars>(&mut workflow, &utils::longid());
     // emiter.reset();
     emiter.on_complete(move |e| {
@@ -30,7 +30,7 @@ async fn sch_vars_workflow_outputs_value() {
 async fn sch_vars_workflow_outputs_script() {
     let mut workflow = Workflow::new()
         .with_var("a", json!(10))
-        .with_output("var1", json!(r#"{{ a }}"#));
+        .with_options_expose("var1", json!(r#"{{ a }}"#));
     let (proc, scher, emiter, tx, rx) = create_proc_signal::<Vars>(&mut workflow, &utils::longid());
     // emiter.reset();
     emiter.on_complete(move |e| {
@@ -62,7 +62,7 @@ async fn sch_vars_workflow_expose_options() {
     let mut workflow = Workflow::new()
         .with_var("var1", 10.into())
         .with_var("var2", 20.into())
-        .with_output("var1", json!(null));
+        .with_options_expose("var1", json!(null));
 
     let (proc, scher, emiter, tx, rx) = create_proc_signal::<Vars>(&mut workflow, &utils::longid());
     // emiter.reset();

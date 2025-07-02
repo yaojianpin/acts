@@ -45,7 +45,7 @@ fn model_step_yml_outputs() {
     steps:
         - id: act1
           options:
-            outputs:
+            expose:
                 p1:
     "#;
     let m = Workflow::from_yml(text).unwrap();
@@ -54,7 +54,7 @@ fn model_step_yml_outputs() {
 
     let step = m.steps.first().unwrap();
 
-    let options = step.options.get::<Vars>(consts::ACT_OUTPUTS).unwrap();
+    let options = step.options.get::<Vars>(consts::ACT_EXPOSE).unwrap();
     assert_eq!(options.len(), 1);
     assert_eq!(options.get_value("p1"), Some(&json!(null)));
 }
@@ -72,17 +72,23 @@ fn model_step_name() {
 }
 
 #[test]
-fn model_step_inputs() {
+fn model_step_desc() {
+    let step = Step::new().with_desc("desc1");
+    assert_eq!(step.desc, "desc1");
+}
+
+#[test]
+fn model_step_set_var() {
     let step = Step::new().with_var("p1", json!(5));
     assert_eq!(step.vars.len(), 1);
     assert_eq!(step.vars.get_value("p1"), Some(&json!(5)));
 }
 
 #[test]
-fn model_step_outputs() {
+fn model_step_set_output() {
     let step = Step::new().with_output("p1", json!(5));
 
-    let options = step.options.get::<Vars>(consts::ACT_OUTPUTS).unwrap();
+    let options = step.options.get::<Vars>(consts::ACT_EXPOSE).unwrap();
     assert_eq!(options.len(), 1);
     assert!(options.get_value("p1").is_some());
 }
@@ -124,8 +130,19 @@ fn model_step_acts() {
     assert_eq!(step.acts.len(), 2);
 }
 
-// #[test]
-// fn model_step_uses() {
-//     let step = Step::new().with_uses("p1");
-//     assert_eq!(step.uses.unwrap(), "p1");
-// }
+#[test]
+fn model_step_set_metadata() {
+    let step = Step::new()
+        .with_metadata("r1", 1)
+        .with_metadata("r2", "abc")
+        .with_metadata("r3", json!(["a", "b"]))
+        .with_metadata("r4", true);
+
+    assert_eq!(step.metadata.get::<i32>("r1").unwrap(), 1);
+    assert_eq!(step.metadata.get::<String>("r2").unwrap(), "abc");
+    assert_eq!(
+        step.metadata.get::<Vec<String>>("r3").unwrap(),
+        vec!["a", "b"]
+    );
+    assert!(step.metadata.get::<bool>("r4").unwrap());
+}

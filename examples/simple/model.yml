@@ -5,7 +5,7 @@ vars:
   index: 0
   value:
 options:
-  outputs:
+  expose:
     result: '{{ value }}'
 steps:
   - name: init

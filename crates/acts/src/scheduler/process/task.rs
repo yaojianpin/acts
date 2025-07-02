@@ -271,7 +271,7 @@ impl Task {
     pub fn outputs(self: &Arc<Self>) -> Vars {
         let ctx = self.create_context();
         let mut outputs = Vars::new();
-        if let Some(exports) = self.node.content.options().get::<Vars>(consts::ACT_OUTPUTS) {
+        if let Some(exports) = self.node.content.options().get::<Vars>(consts::ACT_EXPOSE) {
             for (key, value) in &exports {
                 outputs.set(&key, value);
             }
@@ -997,7 +997,7 @@ impl Task {
     pub fn expose(&self, keys: &Vec<&str>) {
         self.set_data_with(move |data| {
             data.set(
-                consts::ACT_OUTPUTS,
+                consts::ACT_EXPOSE,
                 keys.iter()
                     .filter(|v| !consts::is_private_key(v))
                     .collect::<Vec<_>>(),

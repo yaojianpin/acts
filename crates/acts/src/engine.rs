@@ -35,7 +35,7 @@ use tracing::info;
 ///     vars.insert("pid".into(), "test1".into());
 ///     exec.proc().start(
 ///        &workflow.id,
-///        &vars);
+///        vars);
 /// }
 /// ```
 #[derive(Clone)]

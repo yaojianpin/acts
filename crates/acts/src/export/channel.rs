@@ -114,7 +114,7 @@ impl Channel {
     ///     vars.insert("pid".into(), "w1".into());
     ///     exec.proc().start(
     ///        &workflow.id,
-    ///        &vars,
+    ///        vars,
     ///    );
     /// }
     /// ```

@@ -290,7 +290,7 @@ impl Process {
         }
 
         // filter the data by options.outputs
-        if let Some(outputs) = task.options().get::<Vars>(consts::ACT_OUTPUTS) {
+        if let Some(outputs) = task.options().get::<Vars>(consts::ACT_EXPOSE) {
             let mut options = Vars::new();
             for (key, _) in &outputs {
                 if !action.options.contains_key(&key) {

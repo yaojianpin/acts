@@ -85,6 +85,26 @@ fn model_workflow_tag() {
 }
 
 #[test]
+fn model_workflow_desc() {
+    let m = Workflow::new().with_desc("desc1");
+    assert_eq!(m.desc, "desc1");
+}
+
+#[test]
+fn model_workflow_inputs_schema() {
+    let schema = json!({ "type": ["string"] });
+    let m = Workflow::new().with_inputs(schema.clone());
+    assert_eq!(m.inputs, schema);
+}
+
+#[test]
+fn model_workflow_outputs_schema() {
+    let schema = json!({ "type": "object", "properties": { "data": { "type": "string"} } });
+    let m = Workflow::new().with_outputs(schema.clone());
+    assert_eq!(m.outputs, schema);
+}
+
+#[test]
 fn model_workflow_on_event() {
     let workflow = Workflow::new()
         .with_id("my-event-model")
@@ -100,4 +120,18 @@ fn model_workflow_on_event() {
         })
         .with_step(|step| step.with_id("step1"));
     assert_eq!(workflow.on.len(), 2);
+}
+
+#[test]
+fn model_workflow_set_metadata() {
+    let m = Workflow::new()
+        .with_metadata("r1", 1)
+        .with_metadata("r2", "abc")
+        .with_metadata("r3", json!(["a", "b"]))
+        .with_metadata("r4", true);
+
+    assert_eq!(m.metadata.get::<i32>("r1").unwrap(), 1);
+    assert_eq!(m.metadata.get::<String>("r2").unwrap(), "abc");
+    assert_eq!(m.metadata.get::<Vec<String>>("r3").unwrap(), vec!["a", "b"]);
+    assert!(m.metadata.get::<bool>("r4").unwrap());
 }

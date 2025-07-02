@@ -130,6 +130,14 @@ impl Workflow {
         root.load(self)?;
         Ok(())
     }
+
+    pub fn with_metadata<T>(mut self, name: &str, value: T) -> Self
+    where
+        T: Serialize + Clone,
+    {
+        self.metadata.set(name, value);
+        self
+    }
 }
 
 impl ModelBase for Workflow {
@@ -154,6 +162,11 @@ impl Workflow {
         self
     }
 
+    pub fn with_desc(mut self, desc: &str) -> Self {
+        self.desc = desc.to_string();
+        self
+    }
+
     pub fn with_tag(mut self, tag: &str) -> Self {
         self.tag = tag.to_string();
         self
@@ -169,9 +182,19 @@ impl Workflow {
         self
     }
 
-    pub fn with_output(mut self, name: &str, value: JsonValue) -> Self {
+    pub fn with_inputs(mut self, inputs: JsonValue) -> Self {
+        self.inputs = inputs;
+        self
+    }
+
+    pub fn with_outputs(mut self, outputs: JsonValue) -> Self {
+        self.outputs = outputs;
+        self
+    }
+
+    pub fn with_options_expose(mut self, name: &str, value: JsonValue) -> Self {
         self.options
-            .entry(consts::ACT_OUTPUTS)
+            .entry(consts::ACT_EXPOSE)
             .and_modify(|outputs| {
                 if let Some(obj) = outputs.as_object_mut() {
                     obj.insert(name.to_string(), value.clone());

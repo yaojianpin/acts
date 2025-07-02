@@ -78,7 +78,7 @@ impl Branch {
 
     pub fn with_output(mut self, name: &str, value: JsonValue) -> Self {
         self.options
-            .entry(consts::ACT_OUTPUTS)
+            .entry(consts::ACT_EXPOSE)
             .and_modify(|outputs| {
                 if let Some(obj) = outputs.as_object_mut() {
                     obj.insert(name.to_string(), value.clone());
@@ -117,6 +117,14 @@ impl Branch {
 
     pub fn with_need(mut self, need: &str) -> Self {
         self.needs.push(need.to_string());
+        self
+    }
+
+    pub fn with_metadata<T>(mut self, name: &str, value: T) -> Self
+    where
+        T: Serialize + Clone,
+    {
+        self.metadata.set(name, value);
         self
     }
 }

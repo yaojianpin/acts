@@ -24,7 +24,7 @@ fn model_branch_vars() {
 fn model_branch_outputs() {
     let b = Branch::new().with_output("p1", json!(5));
 
-    let options = b.options.get::<Vars>(consts::ACT_OUTPUTS).unwrap();
+    let options = b.options.get::<Vars>(consts::ACT_EXPOSE).unwrap();
     assert_eq!(options.len(), 1);
     assert!(options.get_value("p1").is_some());
 }
@@ -77,4 +77,18 @@ fn model_branch_steps() {
         .with_step(|step| step.with_id("step1"))
         .with_step(|step| step.with_id("step2"));
     assert_eq!(b.steps.len(), 2);
+}
+
+#[test]
+fn model_branch_set_metadata() {
+    let b = Branch::new()
+        .with_metadata("r1", 1)
+        .with_metadata("r2", "abc")
+        .with_metadata("r3", json!(["a", "b"]))
+        .with_metadata("r4", true);
+
+    assert_eq!(b.metadata.get::<i32>("r1").unwrap(), 1);
+    assert_eq!(b.metadata.get::<String>("r2").unwrap(), "abc");
+    assert_eq!(b.metadata.get::<Vec<String>>("r3").unwrap(), vec!["a", "b"]);
+    assert!(b.metadata.get::<bool>("r4").unwrap());
 }

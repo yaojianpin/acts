@@ -3,15 +3,16 @@ id: sub
 vars:
   v: 0
 options:
-  outputs:
+  expose:
     v:
 steps:
   - name: t1
     acts:
       - uses: acts.core.irq
         key: action1
-        outputs:
-          v:
+        options:
+          expose:
+            v:
   - name: t2
 
 

@@ -1,5 +1,5 @@
 use crate::{
-    Act, ChannelOptions, Engine, Message, Vars, Workflow,
+    Act, ChannelOptions, Engine, Message, Signal, Vars, Workflow,
     data::{self, Package},
     event::{MessageState, Model},
     scheduler::TaskState,
@@ -203,6 +203,81 @@ async fn export_executor_start_from_json() {
         .proc()
         .start_from_model(&model, "json", Vars::new());
     assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn export_executor_start_with_inputs_schema_ok() {
+    let engine = Engine::new().start();
+    let executor = engine.executor();
+    let mid = utils::longid();
+    let workflow = Workflow::new()
+        .with_id(&mid)
+        .with_inputs(json!({ "type": "object", "properties": { "a": { "type": "string" } }, "additionalProperties": false }))
+        .with_step(|step| step.with_act(Act::irq(|act| act.with_key("test"))));
+    engine.executor().model().deploy(&workflow).unwrap();
+    let result = executor.proc().start(&mid, Vars::new().with("a", "abc"));
+    assert!(result.is_ok());
+}
+
+#[tokio::test]
+async fn export_executor_start_with_inputs_schema_err() {
+    let engine = Engine::new().start();
+    let executor = engine.executor();
+    let mid = utils::longid();
+    let workflow = Workflow::new()
+        .with_id(&mid)
+        .with_inputs(json!({ "type": "object", "properties": { "a": { "type": "string" } } }))
+        .with_step(|step| step.with_act(Act::irq(|act| act.with_key("test"))));
+    engine.executor().model().deploy(&workflow).unwrap();
+    let result = executor.proc().start(&mid, Vars::new().with("a", 100));
+    assert!(result.is_err());
+}
+
+#[tokio::test]
+async fn export_executor_start_with_outputs_schema_ok() {
+    let engine = Engine::new().start();
+    let executor = engine.executor();
+    let mid = utils::longid();
+    let workflow = Workflow::new()
+        .with_id(&mid)
+        .with_outputs(json!({ "type": "object", "properties": { "a": { "type": "number" } } }));
+    engine.executor().model().deploy(&workflow).unwrap();
+
+    let (s1, s2) = Signal::new(0).double();
+    executor
+        .proc()
+        .start(&mid, Vars::new().with("a", 100))
+        .unwrap();
+    engine.channel().on_complete(move |e| {
+        s2.send(e.outputs.get::<i32>("a").unwrap());
+    });
+
+    let ret = s1.recv().await;
+    assert_eq!(ret, 100);
+}
+
+#[tokio::test]
+async fn export_executor_start_with_outputs_schema_err() {
+    let engine = Engine::new().start();
+    let executor = engine.executor();
+    let mid = utils::longid();
+    let workflow = Workflow::new()
+        .with_id(&mid)
+        .with_outputs(json!({ "type": "object", "properties": { "a": { "type": "number" } } }));
+    engine.executor().model().deploy(&workflow).unwrap();
+
+    let (s1, s2) = Signal::new(None).double();
+    executor
+        .proc()
+        .start(&mid, Vars::new().with("a", "abc"))
+        .unwrap();
+
+    engine.channel().on_error(move |e| {
+        s2.send(e.inputs.get::<String>("message"));
+    });
+
+    let ret = s1.recv().await;
+    assert!(ret.is_some());
 }
 
 #[tokio::test]

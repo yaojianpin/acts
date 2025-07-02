@@ -3,7 +3,7 @@ use tracing::{debug, error};
 
 use super::{Process, Scheduler, Task, TaskState};
 use crate::{
-    ActError, Action, Config, Engine, Package, Result, Vars, Workflow,
+    ActError, Action, Config, Engine, Error, Package, Result, Vars, Workflow,
     cache::Cache,
     data,
     env::Enviroment,
@@ -188,14 +188,31 @@ impl Runtime {
                 debug!("on_proc: {:?}", proc);
                 if let Some(root) = proc.root() {
                     let state = proc.state();
-                    let message = root.create_message();
+                    let mut message = root.create_message();
                     if state.is_running() || state.is_pending() {
                         rt.emitter().emit_start_event(&message);
                     } else {
                         if state.is_error() {
                             rt.emitter().emit_error(&message);
                         } else if state.is_completed() {
-                            rt.emitter().emit_complete_event(&message);
+                            let mut is_validation_err = false;
+                            let outputs = proc.model().outputs;
+                            if !outputs.is_null() {
+                                // validate the process outputs
+                                if let Err(e) =
+                                    jsonschema::validate(&outputs, &(message.outputs.to_value()))
+                                {
+                                    is_validation_err = true;
+                                    let error = e.to_string();
+                                    message.set_err("", &error);
+                                    proc.set_err(&Error::new(&error, ""));
+                                    rt.emitter().emit_error(&message);
+                                }
+                            }
+
+                            if !is_validation_err {
+                                rt.emitter().emit_complete_event(&message);
+                            }
                         }
 
                         // if the process is a sub process

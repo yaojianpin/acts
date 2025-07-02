@@ -8,7 +8,7 @@ async fn main() {
         .with_id("m1")
         .with_var("index", 0.into())
         .with_var("result", 0.into())
-        .with_output("result", r#"{{ result }}"#.into())
+        .with_options_expose("result", r#"{{ result }}"#.into())
         .with_step(|step| {
             step.with_id("cond")
                 .with_branch(|b| {

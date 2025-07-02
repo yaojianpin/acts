@@ -89,7 +89,7 @@ async fn main() {
     vars.insert("pid".to_string(), "w1".into());
 
     // start workflow by model id
-    executor.proc().start(&workflow.id, &vars).expect("fail to start workflow");
+    executor.proc().start(&workflow.id, vars).expect("fail to start workflow");
 
     // create channel to receive messages
     let chan = engine.channel();
@@ -128,20 +128,19 @@ inputs:
   value: 0
 
 # schema for inputs and outputs
-schema:
-  inputs:
+inputs:
+  type: object
+  properties:
+    value: 
+      type: number
+      title: Value
+      desc: Set value when starting workflow
+outputs:
     type: object
     properties:
-      value: 
-        type: number
-        title: Value
-        desc: Set value when starting workflow
-  outputs:
-      type: object
-      properties:
-        data:
-          type: object
-          title: Output data
+      data:
+        type: object
+        title: Output data
 
 # the event to start the workflow
 on:
@@ -214,7 +213,7 @@ async fn main() {
   vars.insert("input".into(), 3.into());
   vars.insert("pid".to_string(), "w2".into());
 
-  executor.proc().start("m1", &vars);
+  executor.proc().start("m1", vars);
 }
 ```
 
@@ -224,16 +223,15 @@ In the [`Workflow`], you can set the `outputs` to output the env to use.
 
 ```yml
 name: model name
-outputs:
-  output_key:
+options:
+  expose:
+    output_key:
 steps:
   - name: step1
     acts:
       - uses: acts.transform.set
         params:
           output_key: 100
-    outputs:
-      output_key:
 ```
 
 ### Setup
@@ -451,8 +449,9 @@ Use `acts` to create act to interact with client， or finish a special function
 
 ```yml
 name: model name
-outputs:
-  output_key:
+options:
+  outputs:
+    output_key:
 steps:
   - name: step1
     acts:
