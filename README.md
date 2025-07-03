@@ -124,7 +124,7 @@ The model is a yaml format file. where there are different type of node, includi
 ```yml
 name: model name
 # workflow default inputs vars
-inputs:
+vars:
   value: 0
 
 # schema for inputs and outputs
@@ -181,13 +181,13 @@ steps:
 
 ```
 
-### Inputs
+### Vars
 
-In the [`Workflow`], you can set the `inputs` to init the workflow vars.
+In the [`Workflow`], you can set the `vars` to init the workflow vars.
 
 ```yml
 name: model name
-inputs:
+vars:
   a: 100
 steps:
   - name: step1
@@ -199,7 +199,7 @@ steps:
           // do somthing else
 ```
 
-The inputs can also be set by starting the workflow.
+The vars can also be set by starting the workflow.
 
 ```rust,no_run
 use acts::{Engine, Vars, Workflow};
@@ -217,9 +217,9 @@ async fn main() {
 }
 ```
 
-### Outputs
+### Options
 
-In the [`Workflow`], you can set the `outputs` to output the env to use.
+In the [`Workflow`], you can set the `options.expose` to filter the outputs.
 
 ```yml
 name: model name
@@ -234,51 +234,6 @@ steps:
           output_key: 100
 ```
 
-### Setup
-
-In `workflow` node, you can setup act event by `setup`.
-
-The act `msg` is to send a message to client.
-For more acts, please see the comments as follow:
-
-```yml
-name: model name
-steps:
-  - name: step 1
-    acts:
-      - uses: acts.transform.set
-        params:
-          a: ['u1', 'u2']
-          v: 10
-      - uses: acts.core.msg
-        if: v > 0
-        key: msg1
-setup:
-  # on step created
-  - uses: acts.core.msg
-    on: created
-    key: msg3
-
-  # on workflow completed
-  - uses: acts.core.msg
-    on: completed
-    key: msg4
-
-  # on act created
-  - uses: acts.core.msg
-    on: before_update
-    key: msg5
-
-  # on act completed
-  - uses: acts.core.msg
-    on: updated
-    key: msg5
-
-  # on step created or completed
-  - uses: acts.core.msg
-    on: step
-    key: msg3
-```
 
 ### Steps
 
@@ -291,48 +246,6 @@ steps:
     name: step 1
   - id: step2
     name: step 2
-```
-
-#### step.setup
-
-Use the `setup` to setup some act event for step.
-
-The act event includes 'created', 'completed', 'step', 'before_update' and 'updated'.
-
-```yml
-name: a setup example
-id: setup
-steps:
-  - name: step 1
-    id: step1
-    setup:
-      # on step created
-      - uses: acts.core.msg
-        on: created
-        key: msg3
-
-      # on step completed
-      - uses: acts.core.msg
-        on: completed
-        key: msg4
-
-      # on act created
-      - uses: acts.core.msg
-        on: before_update
-        key: msg5
-
-      # on act completed
-      - uses: acts.core.msg
-        on: updated
-        key: msg5
-
-      # on step created or completed
-      - uses: acts.core.msg
-        on: step
-        key: msg3
-
-  - name: final
-    id: final
 ```
 
 For more acts example, please see [`examples`](https://github.com/yaojianpin/acts/tree/main/examples)
@@ -450,7 +363,7 @@ Use `acts` to create act to interact with client， or finish a special function
 ```yml
 name: model name
 options:
-  outputs:
+  expose:
     output_key:
 steps:
   - name: step1
