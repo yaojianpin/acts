@@ -34,7 +34,7 @@ impl ActTask for Act {
 
         // find the package to run
         let package = ctx.executor.pack().get(&self.uses)?;
-        let schema: serde_json::Value = serde_json::from_str(&package.schema)?;
+        let schema: serde_json::Value = serde_json::from_str(&package.in_schema)?;
         match package.run_as {
             ActRunAs::Irq => {
                 jsonschema::validate(&schema, &task.params())?;
