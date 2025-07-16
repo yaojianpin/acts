@@ -18,7 +18,7 @@ async fn sch_step_acts_msg() {
     let (proc, scher, emitter, tx, rx) =
         create_proc_signal::<Vec<Message>>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
-        println!("message: {:?}", e);
+        println!("message: {e:?}");
         if e.is_msg() {
             rx.update(|data| data.push(e.inner().clone()));
             rx.close();
@@ -42,7 +42,7 @@ async fn sch_step_acts_req() {
     let (proc, scher, emitter, tx, rx) =
         create_proc_signal::<Vec<Message>>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
-        println!("message: {:?}", e);
+        println!("message: {e:?}");
         if e.is_irq() {
             rx.update(|data| data.push(e.inner().clone()));
             rx.close();
@@ -92,7 +92,7 @@ async fn sch_step_acts_if_true() {
     workflow.print();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
-        println!("message: {:?}", e);
+        println!("message: {e:?}");
         if e.is_type("act") {
             rx.close();
         }
@@ -117,7 +117,7 @@ async fn sch_step_acts_if_false() {
     workflow.print();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
-        println!("message: {:?}", e);
+        println!("message: {e:?}");
         if e.is_type("act") {
             rx.close();
         }

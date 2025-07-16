@@ -190,8 +190,8 @@ fn store_if(runtime: &Arc<Runtime>, ack: bool, chan_id: &str, pattern: &str, mes
             .messages()
             .create(&msg)
             .unwrap_or_else(|err| {
-                error!("channel.store_if_emit_id: {}", err.to_string());
-                eprintln!("channel.store_if_emit_id: {}", err);
+                error!("channel.store_if_emit_id: {err}");
+                eprintln!("channel.store_if_emit_id: {err}");
                 false
             });
     }
@@ -210,7 +210,7 @@ fn is_match(
     let (pat_type, pat_state, pat_tag, pat_key, pat_uses) = glob;
     pat_type.is_match(&e.r#type)
         && pat_state.is_match(e.state.as_ref())
-        && (pat_tag.is_match(&e.tag) || pat_tag.is_match(&e.model.tag))
+        && pat_tag.is_match(&e.tag)
         && pat_key.is_match(&e.key)
         && pat_uses.is_match(&e.uses)
 }

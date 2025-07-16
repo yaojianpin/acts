@@ -32,7 +32,7 @@ impl ActPackage for Pack1 {
 
 impl Pack1 {
     pub fn execute(&self) -> acts::Result<Vars> {
-        println!("inputs {:?}", self);
+        println!("inputs {self:?}");
         let mut vars = Vars::new();
         vars.set("input", self.v1);
 

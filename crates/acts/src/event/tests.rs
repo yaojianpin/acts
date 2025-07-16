@@ -175,7 +175,7 @@ async fn event_start() {
     let evt = Emitter::new();
     let workflow2 = workflow.clone();
     evt.on_start("k1", move |e| {
-        assert!(e.model.id == workflow2.id);
+        assert!(e.mid == workflow2.id);
     });
     proc.start();
     if let Some(root) = proc.root() {
@@ -193,7 +193,7 @@ async fn event_finished() {
     let evt = Emitter::new();
     let workflow2 = workflow.clone();
     evt.on_complete("k1", move |e| {
-        assert!(e.model.id == workflow2.id);
+        assert!(e.mid == workflow2.id);
     });
 
     proc.start();
@@ -213,7 +213,7 @@ async fn event_error() {
 
     let evt = Emitter::new();
     evt.on_error("k1", move |e| {
-        assert!(e.model.id == workflow_id);
+        assert!(e.mid == workflow_id);
     });
 
     proc.start();
@@ -234,7 +234,7 @@ async fn event_message_default() {
     let (s1, s2) = engine.signal(false).double();
     let evt = Emitter::new();
     evt.on_message("k1", move |e| {
-        s1.send(e.model.id == workflow_id);
+        s1.send(e.mid == workflow_id);
     });
 
     proc.start();
@@ -258,7 +258,7 @@ async fn event_message_dup_key() {
     let evt = Emitter::new();
     evt.on_message("k1", move |_| {});
     evt.on_message("k1", move |e| {
-        s1.send(e.model.id == workflow_id);
+        s1.send(e.mid == workflow_id);
     });
 
     proc.start();

@@ -22,7 +22,7 @@ async fn pack_block_sequence() {
     let (proc, scher, emitter, tx, rx) =
         create_proc_signal::<Vec<Message>>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
-        println!("message: {:?}", e);
+        println!("message: {e:?}");
         if e.is_msg() {
             // std::thread::sleep(std::time::Duration::from_millis(200));
             rx.update(|data| data.push(e.inner().clone()));
@@ -53,7 +53,7 @@ async fn pack_block_parallel() {
     let (proc, scher, emitter, tx, rx) =
         create_proc_signal::<Vec<Message>>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
-        println!("message: {:?}", e);
+        println!("message: {e:?}");
         if e.is_irq() {
             rx.update(|data| data.push(e.inner().clone()));
         }

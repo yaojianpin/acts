@@ -260,8 +260,8 @@ impl Process {
             .for_each(|t| {
                 let ctx = t.create_context();
                 t.run_hooks_timeout(&ctx).unwrap_or_else(|err| {
-                    eprintln!("{}", err);
-                    error!("{}", err);
+                    eprintln!("{err}",);
+                    error!("{err}",);
                 });
             });
     }

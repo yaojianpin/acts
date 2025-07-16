@@ -63,8 +63,7 @@ pub fn build_step(
                 node.set_next(next, false);
             }
             None => tree.set_error(ActError::Runtime(format!(
-                "found next node error by '{}'",
-                next
+                "found next node error by '{next}'",
             ))),
         },
         None => {

@@ -72,8 +72,8 @@ impl Cache {
             Some(proc) => Some(proc.clone()),
             None => {
                 if let Some(proc) = self.store.load_proc(pid, rt).unwrap_or_else(|err| {
-                    error!("cache.process store.loadproc={}", err);
-                    eprintln!("cache.process store.loadproc={}", err);
+                    error!("cache.process store.loadproc={err}");
+                    eprintln!("cache.process store.loadproc={err}");
                     None
                 }) {
                     debug!("loaded: {:?}", proc);

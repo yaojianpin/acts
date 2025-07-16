@@ -155,7 +155,7 @@ impl HttpPackage {
         let res = request
             .send()
             .await
-            .map_err(|err| ActError::Runtime(format!("Http error: {}", err)))?;
+            .map_err(|err| ActError::Runtime(format!("Http error: {err}")))?;
 
         let default_type = HeaderValue::from_static("application/json");
         let response_type = res

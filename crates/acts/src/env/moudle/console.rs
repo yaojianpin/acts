@@ -22,15 +22,15 @@ impl ConsoleModule {
     }
 
     fn info(&self, message: String) {
-        println!("[info] {}", message);
+        println!("[info] {message}");
     }
 
     fn warn(&self, message: String) {
-        println!("[warn] {}", message);
+        println!("[warn] {message}");
     }
 
     fn error(&self, message: String) {
-        println!("[error] {}", message);
+        println!("[error] {message}");
     }
 }
 

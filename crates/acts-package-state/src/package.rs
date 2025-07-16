@@ -92,9 +92,9 @@ impl<'de> serde::de::Deserialize<'de> for StatePackage {
 
 impl StatePackage {
     pub fn run(&self, client: &redis::Client, pid: &str) -> Result<Vars> {
-        let mut conn = client.get_connection().map_err(|err| {
-            ActError::Package(format!("error happend to get connection: {}", err))
-        })?;
+        let mut conn = client
+            .get_connection()
+            .map_err(|err| ActError::Package(format!("error happend to get connection: {err}")))?;
         match self.op.as_str() {
             "GET" => {
                 let key = self
@@ -107,14 +107,14 @@ impl StatePackage {
                     .arg(format!("{pid}:{key}"))
                     .query::<String>(&mut conn)
                     .map_err(|err| {
-                        ActError::Package(format!("error happend to set value: {}", err))
+                        ActError::Package(format!("error happend to set value: {err}"))
                     })?;
 
                 let mut vars = Vars::new();
                 vars.insert(
                     key,
                     serde_json::from_str(&ret).map_err(|err| {
-                        ActError::Package(format!("error happend to parse value: {}", err))
+                        ActError::Package(format!("error happend to parse value: {err}"))
                     })?,
                 );
 
@@ -133,7 +133,7 @@ impl StatePackage {
                     .ok_or(ActError::Package("missing 'value' in params".to_string()))?;
 
                 let v = serde_json::to_string(&value).map_err(|err| {
-                    ActError::Package(format!("error happend to parse value: {}", err))
+                    ActError::Package(format!("error happend to parse value: {err}"))
                 })?;
 
                 redis::cmd("SET")
@@ -141,7 +141,7 @@ impl StatePackage {
                     .arg(v.as_str())
                     .query::<String>(&mut conn)
                     .map_err(|err| {
-                        ActError::Package(format!("error happend to set value: {}", err))
+                        ActError::Package(format!("error happend to set value: {err}"))
                     })?;
                 Ok(Vars::new())
             }

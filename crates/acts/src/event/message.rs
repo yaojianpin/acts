@@ -34,18 +34,6 @@ pub enum MessageState {
 }
 
 #[derive(Default, Serialize, Deserialize, Clone, Debug)]
-pub struct Model {
-    /// workflow id
-    pub id: String,
-
-    /// workflow tag
-    pub tag: String,
-
-    /// workflow name
-    pub name: String,
-}
-
-#[derive(Default, Serialize, Deserialize, Clone, Debug)]
 pub struct Message {
     /// message id
     pub id: String,
@@ -62,8 +50,6 @@ pub struct Message {
     /// message type
     /// workflow | step | branch | act
     pub r#type: String,
-
-    pub model: Model,
 
     /// process id
     pub pid: String,
@@ -174,7 +160,6 @@ impl Message {
             name: value.name,
             state: value.state,
             r#type: value.r#type,
-            model: serde_json::to_string(&value.model).unwrap(),
             pid: value.pid,
             nid: value.nid,
             mid: value.mid,
@@ -257,7 +242,6 @@ impl From<data::Message> for Message {
             name: v.name,
             state: v.state,
             r#type: v.r#type,
-            model: serde_json::from_str(&v.model).unwrap_or_default(),
             pid: v.pid,
             nid: v.nid,
             mid: v.mid,

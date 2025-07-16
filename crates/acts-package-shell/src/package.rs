@@ -81,7 +81,7 @@ impl ShellPackage {
             .arg("-c")
             .arg(&self.script)
             .output()
-            .map_err(|err| ActError::Package(format!("{}", err)))?;
+            .map_err(|err| ActError::Package(format!("{err}")))?;
 
         if !output.status.success() {
             let err = String::from_utf8(output.stderr)?;
@@ -94,7 +94,7 @@ impl ShellPackage {
             ContentType::Json => ret.set(
                 DATA_KEY,
                 serde_json::from_str::<JsonValue>(&data).map_err(|err| {
-                    ActError::Package(format!("failed to convert data to json: {}", err))
+                    ActError::Package(format!("failed to convert data to json: {err}"))
                 })?,
             ),
         }

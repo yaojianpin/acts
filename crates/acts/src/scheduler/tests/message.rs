@@ -33,7 +33,13 @@ async fn sch_message_workflow_name() {
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<String>(&mut workflow, &id);
     emitter.on_message(move |msg| {
         if msg.r#type == "workflow" && msg.state() == MessageState::Created {
-            rx.send(msg.model.name.clone());
+            let name = msg
+                .inputs
+                .get::<Vars>(consts::WORKFLOW_MODEL_KEY)
+                .unwrap()
+                .get::<String>("name")
+                .unwrap();
+            rx.send(name);
         }
     });
     scher.launch(&proc);
@@ -48,7 +54,14 @@ async fn sch_message_workflow_tag() {
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<String>(&mut workflow, &id);
     emitter.on_message(move |msg| {
         if msg.r#type == "workflow" && msg.state() == MessageState::Created {
-            rx.send(msg.model.tag.clone());
+            rx.send(
+                msg.inputs
+                    .get::<Vars>(consts::WORKFLOW_MODEL_KEY)
+                    .unwrap()
+                    .get::<String>("tag")
+                    .unwrap()
+                    .clone(),
+            );
         }
     });
     scher.launch(&proc);
@@ -63,7 +76,13 @@ async fn sch_message_workflow_id() {
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<String>(&mut workflow, &id);
     emitter.on_message(move |msg| {
         if msg.r#type == "workflow" && msg.state() == MessageState::Created {
-            rx.send(msg.model.id.clone());
+            let id = msg
+                .inputs
+                .get::<Vars>(consts::WORKFLOW_MODEL_KEY)
+                .unwrap()
+                .get::<String>("id")
+                .unwrap();
+            rx.send(id);
         }
     });
     scher.launch(&proc);
@@ -84,7 +103,13 @@ async fn sch_message_workflow_inputs() {
     scher.launch(&proc);
     let ret = tx.recv().await;
 
-    assert_eq!(ret.model.id, "my_id");
+    let id = ret
+        .inputs
+        .get::<Vars>(consts::WORKFLOW_MODEL_KEY)
+        .unwrap()
+        .get::<String>("id")
+        .unwrap();
+    assert_eq!(id, "my_id");
     assert_eq!(ret.inputs.get::<i32>("a").unwrap(), 5);
 }
 
@@ -104,7 +129,13 @@ async fn sch_message_workflow_outputs() {
     scher.launch(&proc);
     let ret = tx.recv().await;
 
-    assert_eq!(ret.model.id, "my_id");
+    let id = ret
+        .inputs
+        .get::<Vars>(consts::WORKFLOW_MODEL_KEY)
+        .unwrap()
+        .get::<String>("id")
+        .unwrap();
+    assert_eq!(id, "my_id");
     assert_eq!(ret.outputs.get::<i32>("a").unwrap(), 5);
 }
 

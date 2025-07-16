@@ -20,7 +20,7 @@ impl SynClient {
                 .connect(db_url)
                 .await
         })
-        .expect(&format!("failed to connect to DB {}", db_url));
+        .expect(&format!("failed to connect to DB {db_url}"));
 
         Self { pool }
     }

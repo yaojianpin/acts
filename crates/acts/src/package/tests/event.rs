@@ -118,7 +118,7 @@ async fn pack_event_hook_start() {
         .await
         .unwrap();
 
-    println!("event ret: {:?}", ret);
+    println!("event ret: {ret:?}");
     assert_eq!(ret.unwrap().get::<i32>("ret").unwrap(), 100);
 }
 
@@ -141,7 +141,7 @@ async fn pack_event_chat_start() {
         .await
         .unwrap();
 
-    println!("event ret: {:?}", ret);
+    println!("event ret: {ret:?}");
     assert!(ret.unwrap().get::<String>("pid").is_some());
 }
 

@@ -25,7 +25,7 @@ impl ActPlugin for SqliteStore {
         let config = engine
             .config()
             .get::<SqliteConfig>("sqlite")
-            .map_err(|err| ActError::Config(format!("get sqlite config error: {}", err)))?;
+            .map_err(|err| ActError::Config(format!("get sqlite config error: {err}")))?;
 
         let db = database::Database::new(&config.database_url);
         db.init();

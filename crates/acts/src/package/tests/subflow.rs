@@ -24,7 +24,7 @@ async fn pack_subflow_start() {
     // deploy w2 workflow
     Executor::new(&scher).model().deploy(&w2).unwrap();
     emitter.on_start(move |e| {
-        if e.model.id == "w2" {
+        if e.mid == "w2" {
             rx.update(|data| *data = true);
         }
     });
@@ -73,7 +73,7 @@ async fn pack_subflow_act_running() {
     });
 
     emitter.on_start(move |e| {
-        if e.model.id == "w2" {
+        if e.mid == "w2" {
             rx.close();
         }
     });
@@ -223,7 +223,7 @@ async fn pack_subflow_act_error() {
 
     Executor::new(&scher).model().deploy(&w2).unwrap();
     emitter.on_error(move |e| {
-        if e.model.id == "main" {
+        if e.mid == "main" {
             rx.close();
         }
     });

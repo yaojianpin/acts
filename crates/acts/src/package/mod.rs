@@ -85,7 +85,7 @@ pub enum ActPackageCatalog {
     Event,
 
     /// workflow trace package
-    Trace,
+    Output,
 
     /// data transform
     Transform,

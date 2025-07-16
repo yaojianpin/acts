@@ -107,7 +107,7 @@ async fn main() {
     });
 
     chan.on_error(|e| {
-        println!("error on proc id: {} model id: {}", e.pid, e.model.id);
+        println!("error on proc id: {} model id: {}", e.pid, e.mid);
     });
 }
 ```

@@ -9,7 +9,7 @@ use crate::{
     Act, ActError, ActTask, Catch, Error, Message, MessageState, NodeKind, Result, ShareLock,
     Timeout, Vars,
     data::{self, MessageStatus},
-    event::{EventAction, Model},
+    event::EventAction,
     scheduler::{
         Context, Process, Runtime, TaskState,
         tree::{Node, NodeContent},
@@ -170,12 +170,21 @@ impl Task {
                 parent = task.parent();
             }
 
-            // append act.optins to inputs
-            inputs.set(consts::ACT_OPTIONS_KEY, self.options());
-
             // append act.params to inputs
             inputs.set(consts::ACT_PARAMS_KEY, self.params());
         }
+
+        // append act.optins to inputs
+        inputs.set(consts::ACT_OPTIONS_KEY, self.options());
+
+        // append workflow model to inputs
+        inputs.set(
+            consts::WORKFLOW_MODEL_KEY,
+            Vars::new()
+                .with("id", workflow.id.clone())
+                .with("name", workflow.name)
+                .with("tag", workflow.tag),
+        );
 
         // add error to inputs
         if let Some(err) = self.err() {
@@ -196,13 +205,6 @@ impl Task {
             key: self.node.key(),
             uses: self.node.uses(),
             tag: self.node.tag().to_string(),
-
-            model: Model {
-                id: workflow.id.clone(),
-                name: workflow.name.clone(),
-                tag: workflow.tag.clone(),
-            },
-
             inputs,
             outputs: self.outputs(),
             start_time: self.start_time(),
@@ -436,8 +438,7 @@ impl Task {
                 );
 
                 let task = task.ok_or(ActError::Action(format!(
-                    "cannot find history task by nid '{}'",
-                    nid
+                    "cannot find history task by nid '{nid}'",
                 )))?;
 
                 ctx.back_task(&ctx.task(), &path_tasks)?;

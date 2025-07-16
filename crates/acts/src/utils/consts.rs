@@ -5,6 +5,7 @@ pub const STEP_NODE_ID: &str = "node_id";
 pub const STEP_NODE_NAME: &str = "node_name";
 pub const STEP_TASK_ID: &str = "task_id";
 pub const STEP_KEY: &str = "step";
+pub const WORKFLOW_MODEL_KEY: &str = "model";
 pub const ACT_OPTIONS_KEY: &str = "options";
 pub const ACT_PARAMS_KEY: &str = "params";
 

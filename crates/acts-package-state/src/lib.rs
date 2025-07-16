@@ -28,14 +28,14 @@ impl ActPlugin for StatePackagePlugin {
         let config = engine
             .config()
             .get::<config::StateConfig>(CONFIG_NAME)
-            .map_err(|err| acts::ActError::Config(format!("get state config error: {}", err)))?;
+            .map_err(|err| acts::ActError::Config(format!("get state config error: {err}")))?;
 
         let mut client = redis::Client::open(config.database_uri.as_str())
-            .map_err(|err| acts::ActError::Config(format!("create redis client error: {}", err)))?;
+            .map_err(|err| acts::ActError::Config(format!("create redis client error: {err}")))?;
 
         redis::cmd("PING")
             .exec(&mut client)
-            .map_err(|err| acts::ActError::Config(format!("ping redis error: {}", err)))?;
+            .map_err(|err| acts::ActError::Config(format!("ping redis error: {err}")))?;
 
         let meta = package::StatePackage::meta();
         engine.extender().register_package(&meta)?;

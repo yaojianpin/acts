@@ -36,7 +36,7 @@ impl ActPackage for Pack2 {
 
 impl Pack2 {
     pub fn execute(&self) -> acts::Result<Vars> {
-        println!("inputs: {:?}", self);
+        println!("inputs: {self:?}");
         let vars = Vars::new().with("input", self.a + 10);
 
         Ok(vars)

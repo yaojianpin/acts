@@ -1,7 +1,7 @@
 use crate::{
     Act, ChannelOptions, Engine, Message, Signal, Vars, Workflow,
     data::{self, Package},
-    event::{MessageState, Model},
+    event::MessageState,
     scheduler::TaskState,
     store::query::*,
     utils::{self, consts},
@@ -2076,16 +2076,12 @@ async fn export_emitter_tag_match() {
 
     let msg = Message {
         tag: "aaaa".to_string(),
-        model: Model {
-            tag: "tag2".to_string(),
-            ..Default::default()
-        },
         ..Message::default()
     };
     engine.runtime().emitter().emit_message(&msg);
 
     let ret = sig.timeout(100).await;
-    assert_eq!(ret.len(), 2);
+    assert_eq!(ret.len(), 1);
 }
 
 #[tokio::test]

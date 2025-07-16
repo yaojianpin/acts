@@ -42,11 +42,11 @@ impl Config {
     pub fn create(path: &Path) -> Self {
         #[allow(clippy::expect_fun_call)]
         let data =
-            std::fs::read_to_string(path).expect(&format!("failed to load config file {:?}", path));
+            std::fs::read_to_string(path).expect(&format!("failed to load config file {path:?}"));
 
         #[allow(clippy::expect_fun_call)]
         let table = toml::from_str::<Table>(data.as_str())
-            .expect(&format!("failed to parse the toml file({:?})", path));
+            .expect(&format!("failed to parse the toml file({path:?})"));
 
         let data = ConfigData::deserialize(table.clone()).unwrap();
         Self {
@@ -60,9 +60,8 @@ impl Config {
         T: Deserialize<'de>,
     {
         let value = self.table[name].clone();
-        T::deserialize(value).map_err(|err| {
-            crate::ActError::Config(format!("failed to get '{}' config: {}", name, err))
-        })
+        T::deserialize(value)
+            .map_err(|err| crate::ActError::Config(format!("failed to get '{name}' config: {err}")))
     }
 
     pub fn has(&self, name: &str) -> bool {

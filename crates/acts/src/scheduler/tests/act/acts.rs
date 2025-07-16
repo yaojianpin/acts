@@ -17,7 +17,7 @@ async fn sch_act_run_in_order() {
     let (proc, scher, emitter, tx, rx) =
         create_proc_signal::<Vec<(String, i64)>>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
-        println!("message: {:?}", e);
+        println!("message: {e:?}");
         if e.is_irq() && e.is_state(MessageState::Created) {
             rx.update(|data| data.push((e.key.clone(), e.start_time)));
             std::thread::sleep(std::time::Duration::from_millis(1000));
@@ -45,7 +45,7 @@ async fn sch_act_params_no_expr_line() {
     let (proc, scher, emitter, tx, rx) =
         create_proc_signal::<String>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
-        println!("message: {:?}", e);
+        println!("message: {e:?}");
         if e.is_irq() && e.is_state(MessageState::Created) {
             let params = e.inputs.get::<String>("params").unwrap();
             rx.send(params);
@@ -71,7 +71,7 @@ async fn sch_act_params_expr_full_line() {
     let (proc, scher, emitter, tx, rx) =
         create_proc_signal::<String>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
-        println!("message: {:?}", e);
+        println!("message: {e:?}");
         if e.is_irq() && e.is_state(MessageState::Created) {
             let params = e.inputs.get::<String>("params").unwrap();
             rx.send(params);
@@ -97,7 +97,7 @@ async fn sch_act_params_expr_partial_line() {
     let (proc, scher, emitter, tx, rx) =
         create_proc_signal::<String>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
-        println!("message: {:?}", e);
+        println!("message: {e:?}");
         if e.is_irq() && e.is_state(MessageState::Created) {
             let params = e.inputs.get::<String>("params").unwrap();
             rx.send(params);
@@ -124,7 +124,7 @@ async fn sch_act_params_expr_multi_statements() {
     let (proc, scher, emitter, tx, rx) =
         create_proc_signal::<String>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
-        println!("message: {:?}", e);
+        println!("message: {e:?}");
         if e.is_irq() && e.is_state(MessageState::Created) {
             let params = e.inputs.get::<String>("params").unwrap();
             rx.send(params);
@@ -155,7 +155,7 @@ async fn sch_act_params_expr_brace_not_in_same_line_not_support() {
     let (proc, scher, emitter, tx, rx) =
         create_proc_signal::<String>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
-        println!("message: {:?}", e);
+        println!("message: {e:?}");
         if e.is_irq() && e.is_state(MessageState::Created) {
             let params = e.inputs.get::<String>("params").unwrap();
             rx.send(params);
@@ -189,7 +189,7 @@ async fn sch_act_params_multi_expr_str() {
     let (proc, scher, emitter, tx, rx) =
         create_proc_signal::<String>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
-        println!("message: {:?}", e);
+        println!("message: {e:?}");
         if e.is_irq() && e.is_state(MessageState::Created) {
             let params = e.inputs.get::<String>("params").unwrap();
             rx.send(params);
@@ -224,7 +224,7 @@ async fn sch_act_params_multi_expr_bool() {
     let (proc, scher, emitter, tx, rx) =
         create_proc_signal::<String>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
-        println!("message: {:?}", e);
+        println!("message: {e:?}");
         if e.is_irq() && e.is_state(MessageState::Created) {
             let params = e.inputs.get::<String>("params").unwrap();
             rx.send(params);
@@ -260,7 +260,7 @@ async fn sch_act_params_multi_expr_others() {
     let (proc, scher, emitter, tx, rx) =
         create_proc_signal::<String>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
-        println!("message: {:?}", e);
+        println!("message: {e:?}");
         if e.is_irq() && e.is_state(MessageState::Created) {
             let params = e.inputs.get::<String>("params").unwrap();
             rx.send(params);

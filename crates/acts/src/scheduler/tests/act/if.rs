@@ -14,7 +14,7 @@ async fn sch_act_if_true() {
     workflow.print();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
-        println!("message: {:?}", e);
+        println!("message: {e:?}");
         if e.is_msg() {
             rx.close();
         }
@@ -62,7 +62,7 @@ async fn sch_act_if_null_value() {
     workflow.print();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
-        println!("message: {:?}", e);
+        println!("message: {e:?}");
         if e.is_msg() {
             rx.close();
         }

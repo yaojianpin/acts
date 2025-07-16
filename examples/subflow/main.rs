@@ -22,19 +22,19 @@ async fn main() {
     engine.channel().on_start(move |e| {
         println!(
             "on_workflow_start: mid={} pid={} inputs={:?}\n",
-            e.model.id, e.pid, e.inputs
+            e.mid, e.pid, e.inputs
         );
     });
     engine.channel().on_complete(move |e| {
         println!(
             "on_workflow_complete: mid={} pid={} cost={}ms outputs={:?}\n",
-            e.model.id,
+            e.mid,
             e.pid,
             e.cost(),
             e.outputs
         );
 
-        if e.model.id == "main" {
+        if e.mid == "main" {
             s1.close();
         }
     });

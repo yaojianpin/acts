@@ -116,7 +116,7 @@ impl DbCollection for EventCollection {
             .offset(q.offset as u64)
             .build_rusqlite(SqliteQueryBuilder);
 
-        println!("sql: {} values={:?}", sql, values);
+        println!("sql: {sql} values={values:?}");
 
         let (count_sql, count_values) = count_query.build_rusqlite(SqliteQueryBuilder);
         let count = conn

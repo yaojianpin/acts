@@ -17,7 +17,6 @@ impl DbDocument for Message {
         map.insert("tid".to_string(), json!(self.tid.clone()));
         map.insert("state".to_string(), json!(self.state.clone()));
         map.insert("type".to_string(), json!(self.r#type.clone()));
-        map.insert("model".to_string(), json!(self.model.clone()));
         map.insert("pid".to_string(), json!(self.pid.clone()));
         map.insert("nid".to_string(), json!(self.nid.clone()));
         map.insert("mid".to_string(), json!(self.mid.clone()));

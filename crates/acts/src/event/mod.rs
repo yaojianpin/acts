@@ -10,7 +10,7 @@ use crate::{ActError, Result, scheduler::Runtime};
 pub use action::Action;
 pub use emitter::Emitter;
 pub use extra::TaskExtra;
-pub use message::{Message, MessageState, Model};
+pub use message::{Message, MessageState};
 
 use serde::{Deserialize, Serialize};
 use std::str::FromStr;

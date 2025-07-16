@@ -161,7 +161,7 @@ async fn cache_restore_count() {
 
     cache
         .restore(&engine.runtime(), |proc| {
-            println!("on_load: {:?}", proc);
+            println!("on_load: {proc:?}");
         })
         .unwrap();
     assert_eq!(cache.count(), 5);
@@ -214,7 +214,7 @@ async fn cache_restore_working_state() {
 
     cache
         .restore(&engine.runtime(), |proc| {
-            println!("on_load: {:?}", proc);
+            println!("on_load: {proc:?}");
         })
         .unwrap();
     assert_eq!(cache.count(), 5);
@@ -267,7 +267,7 @@ async fn cache_restore_completed_state() {
 
     cache
         .restore(&engine.runtime(), |proc| {
-            println!("on_load: {:?}", proc);
+            println!("on_load: {proc:?}");
         })
         .unwrap();
     assert_eq!(cache.count(), 0);
@@ -309,7 +309,7 @@ async fn cache_restore_less_cap() {
 
     cache
         .restore(&engine.runtime(), |proc| {
-            println!("on_load: {:?}", proc);
+            println!("on_load: {proc:?}");
         })
         .unwrap();
     assert_eq!(cache.count(), 3);

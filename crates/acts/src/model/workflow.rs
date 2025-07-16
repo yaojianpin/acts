@@ -55,7 +55,7 @@ impl Workflow {
         let workflow = serde_yaml::from_str::<Workflow>(s);
         match workflow {
             Ok(v) => Ok(v),
-            Err(e) => Err(ActError::Model(format!("{}", e))),
+            Err(e) => Err(ActError::Model(format!("{e}"))),
         }
     }
 
@@ -63,7 +63,7 @@ impl Workflow {
         let workflow = serde_json::from_str::<Workflow>(s);
         match workflow {
             Ok(v) => Ok(v),
-            Err(e) => Err(ActError::Model(format!("{}", e))),
+            Err(e) => Err(ActError::Model(format!("{e}"))),
         }
     }
 

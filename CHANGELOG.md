@@ -155,3 +155,4 @@
 - feat: add `metadata` property to store UI data
 - feat: remove `setup` property of `Workflow`, `Step` and `Act`
 - feat: add `start_from_model` to export.proc
+- feat: move `message.model` to `message.inputs.model`

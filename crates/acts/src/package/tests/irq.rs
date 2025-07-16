@@ -19,7 +19,7 @@ async fn pack_irq_one() {
     workflow.print();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
-        println!("message: {:?}", e);
+        println!("message: {e:?}");
         if e.is_type("act") {
             rx.close();
         }
@@ -92,7 +92,7 @@ async fn pack_irq_many() {
     workflow.print();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
-        println!("message: {:?}", e);
+        println!("message: {e:?}");
         if e.is_type("act") {
             rx.close();
         }
@@ -119,7 +119,7 @@ async fn pack_irq_with_inputs_value() {
     let (proc, scher, emitter, tx, rx) =
         create_proc_signal::<Vars>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
-        println!("message: {:?}", e);
+        println!("message: {e:?}");
         if e.is_irq() && e.is_state(MessageState::Created) {
             rx.send(e.inputs.clone());
         }
@@ -150,7 +150,7 @@ async fn pack_irq_with_inputs_var() {
     let (proc, scher, emitter, tx, rx) =
         create_proc_signal::<Vars>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
-        println!("message: {:?}", e);
+        println!("message: {e:?}");
         if e.is_irq() && e.is_state(MessageState::Created) {
             rx.send(e.inputs.clone());
         }
@@ -188,7 +188,7 @@ async fn pack_irq_complete() {
 
             let action = Action::new(&e.pid, &e.tid, EventAction::Next, options);
             if let Err(err) = s.do_action(&action) {
-                println!("error: {}", err);
+                println!("error: {err}");
                 rx.send(false);
             } else {
                 rx.send(true);
@@ -1290,7 +1290,7 @@ async fn pack_irq_with_key() {
     let (proc, scher, emitter, tx, rx) =
         create_proc_signal::<Vec<Message>>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
-        println!("message: {:?}", e);
+        println!("message: {e:?}");
         if e.is_irq() && e.is_state(MessageState::Created) {
             rx.update(|data| data.push(e.inner().clone()));
             rx.close();

@@ -34,7 +34,7 @@ impl Event {
             ver,
             uses: act.uses.clone(),
             params: serde_json::to_string(&act.params).map_err(|err| {
-                ActError::Convert(format!("failed to convert params to string: {}", err))
+                ActError::Convert(format!("failed to convert params to string: {err}"))
             })?,
             create_time: utils::time::time_millis(),
             timestamp: utils::time::timestamp(),

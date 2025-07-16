@@ -23,7 +23,6 @@ pub struct Message {
     pub name: String,
     pub state: MessageState,
     pub r#type: String,
-    pub model: String,
     pub pid: String,
     pub nid: String,
     pub mid: String,

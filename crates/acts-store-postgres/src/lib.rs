@@ -26,7 +26,7 @@ impl ActPlugin for PostgresStore {
         let config = engine
             .config()
             .get::<ProgresConfig>("postgres")
-            .map_err(|err| ActError::Config(format!("get postgres config error: {}", err)))?;
+            .map_err(|err| ActError::Config(format!("get postgres config error: {err}")))?;
 
         let db = database::Database::new(&config.database_url);
         db.init();

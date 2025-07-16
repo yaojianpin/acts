@@ -76,7 +76,7 @@ where
                     .collect::<Vec<_>>();
             }
         } else {
-            rows = db.iter().map(|(_, v)| v).collect::<Vec<_>>();
+            rows = db.values().collect::<Vec<_>>();
         }
         // order the rows
         if !q.get_order_by().is_empty() {

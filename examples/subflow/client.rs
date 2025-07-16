@@ -20,7 +20,7 @@ impl Client {
     }
 
     pub fn process(&self, executor: &Executor, message: &Message) -> Result<()> {
-        println!("process: {:?}", message);
+        println!("process: {message:?}");
         if message.is_type("act") && message.is_state(MessageState::Created) {
             match self.actions.get(&message.key) {
                 Some(action) => {
@@ -30,7 +30,7 @@ impl Client {
                         .complete(&message.pid, &message.tid, outputs.clone())?;
                     println!("action state: key={}", &message.key);
                     println!("inputs:{:?}", &message.inputs);
-                    println!("outputs:{:?}", outputs);
+                    println!("outputs:{outputs:?}");
                     println!();
                 }
                 None => eprintln!("cannot find action '{}'", message.key),

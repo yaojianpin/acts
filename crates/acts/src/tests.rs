@@ -48,7 +48,7 @@ async fn engine_event_on_start() {
         .with_step(|step| step.with_act(Act::irq(|act| act.with_key("test"))));
 
     engine.channel().on_start(move |e| {
-        s.send(e.model.id.clone());
+        s.send(e.mid.clone());
     });
 
     let executor = engine.executor();
@@ -72,7 +72,7 @@ async fn engine_event_on_complete() {
         .with_step(|step| step.with_id("step1"));
 
     engine.channel().on_complete(move |e| {
-        s1.send(e.model.id == mid);
+        s1.send(e.mid == mid);
     });
 
     let executor = engine.executor();
@@ -97,7 +97,7 @@ async fn engine_event_on_error() {
     let sig = engine.signal(false);
     let s1 = sig.clone();
     engine.channel().on_error(move |e| {
-        s1.send(e.model.id == mid);
+        s1.send(e.mid == mid);
     });
 
     engine.channel().on_message(move |e| {

@@ -16,7 +16,7 @@ async fn main() -> acts::Result<()> {
     let mut vars = Vars::new();
     vars.set("input", 10);
 
-    println!("inputs: {:?}", vars);
+    println!("inputs: {vars:?}");
 
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text).unwrap();

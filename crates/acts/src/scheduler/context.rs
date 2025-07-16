@@ -1,7 +1,7 @@
 use super::{ActTask, Runtime};
 use crate::{
     Act, ActError, Executor, Message, MessageState, NodeKind, Result, TaskState, Vars,
-    event::{Action, Model},
+    event::Action,
     scheduler::{
         Node, Process, Task,
         tree::{NodeContent, dyn_build_act},
@@ -406,6 +406,16 @@ impl Context {
         debug!("emit_message: {:?}", msg);
         let workflow = self.proc.model();
         let mut inputs = utils::fill_inputs(&msg.vars, self);
+
+        // append workflow model to inputs
+        inputs.set(
+            consts::WORKFLOW_MODEL_KEY,
+            Vars::new()
+                .with("id", workflow.id)
+                .with("name", workflow.name)
+                .with("tag", workflow.tag),
+        );
+
         // append act.optins to inputs
         inputs.set(consts::ACT_OPTIONS_KEY, msg.options.clone());
 
@@ -429,12 +439,6 @@ impl Context {
             key: msg.key.clone(),
             name: task.node().name(),
             uses: msg.uses.clone(),
-            model: Model {
-                id: workflow.id.clone(),
-                name: workflow.name.to_string(),
-                tag: workflow.tag.to_string(),
-            },
-
             tag: msg.tag.to_string(),
             inputs,
             ..Default::default()

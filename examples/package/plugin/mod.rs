@@ -46,7 +46,7 @@ impl ActPlugin for MyPackagePlugin {
                 if e.uses == "pack2" {
                     let pack1: pack2::Pack2 = serde_json::from_value(params.clone()).unwrap();
                     let ret = pack1.execute();
-                    println!("pack2 result: {:?}", ret);
+                    println!("pack2 result: {ret:?}");
                 }
             });
 

@@ -25,7 +25,6 @@ enum CollectionIden {
     Name,
     State,
     Type,
-    Model,
     Pid,
     Nid,
     Mid,
@@ -73,7 +72,6 @@ impl DbCollection for MessageCollection {
                 CollectionIden::Name,
                 CollectionIden::State,
                 CollectionIden::Type,
-                CollectionIden::Model,
                 CollectionIden::Pid,
                 CollectionIden::Nid,
                 CollectionIden::Mid,
@@ -117,7 +115,6 @@ impl DbCollection for MessageCollection {
                 CollectionIden::Name,
                 CollectionIden::State,
                 CollectionIden::Type,
-                CollectionIden::Model,
                 CollectionIden::Pid,
                 CollectionIden::Nid,
                 CollectionIden::Mid,
@@ -193,7 +190,6 @@ impl DbCollection for MessageCollection {
                 CollectionIden::Name,
                 CollectionIden::State,
                 CollectionIden::Type,
-                CollectionIden::Model,
                 CollectionIden::Pid,
                 CollectionIden::Nid,
                 CollectionIden::Mid,
@@ -218,7 +214,6 @@ impl DbCollection for MessageCollection {
                 data.name.into(),
                 data.state.as_ref().into(),
                 data.r#type.into(),
-                data.model.into(),
                 data.pid.into(),
                 data.nid.into(),
                 data.mid.into(),
@@ -256,7 +251,6 @@ impl DbCollection for MessageCollection {
                 (CollectionIden::Name, model.name.into()),
                 (CollectionIden::State, model.state.as_ref().into()),
                 (CollectionIden::Type, model.r#type.into()),
-                (CollectionIden::Model, model.model.into()),
                 (CollectionIden::Pid, model.pid.into()),
                 (CollectionIden::Nid, model.nid.into()),
                 (CollectionIden::Mid, model.mid.into()),
@@ -317,7 +311,6 @@ impl DbRow for data::Message {
             name: row.get("name"),
             state: acts::MessageState::from_str(&row.get::<String, &str>("state")).unwrap(),
             r#type: row.get("type"),
-            model: row.get("model"),
             pid: row.get("pid"),
             nid: row.get("nid"),
             mid: row.get("mid"),
@@ -355,7 +348,6 @@ impl DbInit for MessageCollection {
                 .col(ColumnDef::new(CollectionIden::Name).string())
                 .col(ColumnDef::new(CollectionIden::State).string().not_null())
                 .col(ColumnDef::new(CollectionIden::Type).string().not_null())
-                .col(ColumnDef::new(CollectionIden::Model).string().not_null())
                 .col(ColumnDef::new(CollectionIden::Pid).string().not_null())
                 .col(ColumnDef::new(CollectionIden::Nid).string().not_null())
                 .col(ColumnDef::new(CollectionIden::Mid).string().not_null())

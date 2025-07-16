@@ -38,8 +38,7 @@ mod step {
                 let task = tasks.last().unwrap();
                 if task.state().is_completed() {
                     return Err(ActError::Script(format!(
-                        "Task with nid '{}' is already completed, cannot set value",
-                        nid
+                        "Task with nid '{nid}' is already completed, cannot set value",
                     )));
                 }
                 task.update_data(&Vars::new().with(&name, value.inner()))

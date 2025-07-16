@@ -404,7 +404,7 @@ impl From<&str> for NodeKind {
             "branch" => NodeKind::Branch,
             "step" => NodeKind::Step,
             "act" => NodeKind::Act,
-            _ => panic!("not found NodeKind: {}", str),
+            _ => panic!("not found NodeKind: {str}"),
         }
     }
 }

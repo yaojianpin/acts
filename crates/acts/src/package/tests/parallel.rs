@@ -24,7 +24,7 @@ async fn pack_parallel_setup_list() {
     let (proc, scher, emitter, tx, rx) =
         create_proc_signal_with_auto_clomplete::<()>(&mut workflow, &utils::longid(), false);
     emitter.on_message(move |e| {
-        println!("message: {:?}", e);
+        println!("message: {e:?}");
         if e.is_type("act") {
             rx.close();
         }
@@ -63,7 +63,7 @@ async fn pack_parallel_var_exist() {
     let (proc, scher, emitter, tx, rx) =
         create_proc_signal::<Vec<Vars>>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
-        println!("message: {:?}", e);
+        println!("message: {e:?}");
         if e.is_key("act1") && e.is_state(MessageState::Created) {
             rx.update(|data| {
                 let vars = e.inputs.get::<Vars>(consts::ACT_OPTIONS_KEY).unwrap();
@@ -124,7 +124,7 @@ async fn pack_parallel_in_code() {
     workflow.print();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     emitter.on_message(move |e| {
-        println!("message: {:?}", e);
+        println!("message: {e:?}");
         if e.is_type("act") {
             rx.close();
         }
