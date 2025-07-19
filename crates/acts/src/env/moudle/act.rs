@@ -81,9 +81,13 @@ mod act {
     #[rquickjs::function]
     pub fn cost_in(value: String) -> bool {
         Context::with(|ctx| {
-            let millis = utils::time::time_millis() - ctx.task().start_time();
+            let mut cost = utils::time::time_millis() - ctx.task().start_time();
+            if let Some(v) = ctx.task().data().get::<i64>(consts::TASK_COST) {
+                cost = v;
+            }
+
             let on = TimeoutLimit::parse(&value).unwrap_or_default();
-            millis >= on.as_secs() * 1000
+            cost >= on.as_secs() * 1000
         })
     }
 }

@@ -12,16 +12,14 @@ steps:
       - uses: acts.core.irq
         key: act1
     catches:
-      - on: err1
-        steps:
-          - uses: acts.core.msg
-            key: abc
-      - id: catch1
-        on: err1
-      - id: catch2
-        on: err2
-      - steps:
-          - uses: acts.core.msg
-            key: aaa
+      - uses: acts.core.msg
+        if: $ecode() == 'err1'
+        key: catch1
+      - uses: acts.core.msg
+        if: $ecode() == 'err2'
+        key: catch2
+      - uses: acts.core.msg
+        key: others
+
   - name: final
     id: final

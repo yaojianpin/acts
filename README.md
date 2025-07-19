@@ -290,9 +290,9 @@ steps:
     id: final
 ```
 
-#### step.timeout
+#### step.timeouts
 
-Use the `timeout` to check the task time.
+Use the `timeouts` to check the task time.
 
 ```yml
 name: a timeout example
@@ -309,24 +309,18 @@ steps:
       - uses: acts.core.irq
         key: act1
     # check timeout rules
-    timeout:
+    timeouts:
       # 1d means one day
       # triggers act2 when timeout
-      - on: 1d
-        steps:
-          - name: timeout step 1
-            acts:
-              - uses: acts.core.irq
-                id: act2
+      - uses: acts.core.irq
+        id: act2
+        if: $cost_in('1d')
 
       # 2h means two hours
       # triggers act3 when timeout
-      - on: 2h
-        steps:
-          - name: timeout step 2
-            acts:
-              - uses: acts.core.irq
-                id: act3
+      - uses: acts.core.irq
+        id: act2
+        if: $cost_in('2h')
 
   - name: final
     id: final

@@ -11,32 +11,25 @@ steps:
     acts:
       - uses: acts.core.irq
         key: act1
-    timeout:
-      - on: 2s
-        steps:
-          - name: step 2s
-            acts:
-              - uses: acts.core.msg
-                key: step1_timeout_2s
-                params:
-                  a: 1
-      - on: 5s
-        steps:
-          - name: step 5s
-            acts:
-              - uses: acts.core.irq
-                key: step1_timeout_5s
-                params:
-                  a: 2
-      - on: 8s
-        steps:
-          - name: step 8s
-            acts:
-              - uses: acts.core.action
-                params:
-                  action: error
-                  options:
-                    ecode: err_timeout_8s
+    timeouts:
+      - uses: acts.core.msg
+        key: step1_timeout_2s
+        if: $cost_in('2s')
+        params:
+          a: 1
+
+      - uses: acts.core.irq
+        key: step1_timeout_5s
+        if: $cost_in('5s')
+        params:
+          a: 2
+
+      - uses: acts.core.action
+        if: $cost_in('8s')
+        params:
+          action: error
+          options:
+            ecode: err_timeout_8s
 
   - name: final
     id: final
