@@ -46,10 +46,10 @@ pub struct Act {
     pub vars: Vars,
 
     #[serde(default)]
-    pub catches: Vec<Catch>,
+    pub catches: Vec<Act>,
 
     #[serde(default)]
-    pub timeout: Vec<Timeout>,
+    pub timeouts: Vec<Act>,
 
     // package extra options to send to client
     // such as ACT_INDEX, ACT_VALUE
@@ -147,15 +147,13 @@ impl Act {
         self
     }
 
-    pub fn with_catch(mut self, build: fn(Catch) -> Catch) -> Self {
-        let catch = Catch::default();
-        self.catches.push(build(catch));
+    pub fn with_catch(mut self, catch: Act) -> Self {
+        self.catches.push(catch);
         self
     }
 
-    pub fn with_timeout(mut self, build: fn(Timeout) -> Timeout) -> Self {
-        let timeout = Timeout::default();
-        self.timeout.push(build(timeout));
+    pub fn with_timeout(mut self, timeout: Act) -> Self {
+        self.timeouts.push(timeout);
         self
     }
 

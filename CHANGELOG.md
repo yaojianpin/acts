@@ -156,3 +156,4 @@
 - feat: remove `setup` property of `Workflow`, `Step` and `Act`
 - feat: add `start_from_model` to export.proc
 - feat: move `message.model` to `message.inputs.model`
+- feat: refactoring `catches` and `timeouts` for `step` and `act`

@@ -19,7 +19,7 @@ pub struct Task {
     pub err: Option<String>,
     pub start_time: i64,
     pub end_time: i64,
-    pub hooks: String,
+    // pub hooks: String,
     pub timestamp: i64,
 }
 

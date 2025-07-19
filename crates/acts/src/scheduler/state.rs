@@ -95,7 +95,7 @@ impl TaskState {
     }
 
     pub fn is_success(&self) -> bool {
-        *self == TaskState::Completed
+        *self == TaskState::Completed || *self == TaskState::Submitted
     }
 
     pub fn is_skip(&self) -> bool {

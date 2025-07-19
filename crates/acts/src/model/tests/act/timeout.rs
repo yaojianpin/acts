@@ -1,29 +1,25 @@
-use crate::{Act, TimeoutLimit, Workflow, model::act::TimeoutUnit};
+use crate::{Act, Workflow};
 
 #[test]
 fn model_act_timeout() {
     let mut act = Act::new();
-    assert_eq!(act.timeout.len(), 0);
+    assert_eq!(act.timeouts.len(), 0);
 
     act = act
-        .with_timeout(|t| {
-            t.with_on("1h")
-                .with_step(|step| step.with_act(Act::msg(|msg| msg.with_key("msg1"))))
-        })
-        .with_timeout(|t| {
-            t.with_on("2d")
-                .with_step(|step| step.with_act(Act::msg(|msg| msg.with_key("msg2"))))
-        });
+        .with_timeout(Act::msg(|msg| {
+            msg.with_key("msg1").with_if(r#"$cost_in('1h')"#)
+        }))
+        .with_timeout(Act::msg(|msg| {
+            msg.with_key("msg2").with_if(r#"$cost_in('2d')"#)
+        }));
 
-    assert_eq!(act.timeout.len(), 2);
+    assert_eq!(act.timeouts.len(), 2);
 
-    let timeout1 = TimeoutLimit::parse(&act.timeout.first().unwrap().on).unwrap();
-    assert_eq!(timeout1.value, 1);
-    assert_eq!(timeout1.unit, TimeoutUnit::Hour);
+    let timeout = act.timeouts.first().unwrap();
+    assert_eq!(timeout.r#if.as_ref().unwrap(), "$cost_in('1h')");
 
-    let timeout2 = TimeoutLimit::parse(&act.timeout.get(1).unwrap().on).unwrap();
-    assert_eq!(timeout2.value, 2);
-    assert_eq!(timeout2.unit, TimeoutUnit::Day);
+    let timeout = act.timeouts.get(1).unwrap();
+    assert_eq!(timeout.r#if.as_ref().unwrap(), "$cost_in('2d')");
 }
 
 #[test]
@@ -35,28 +31,20 @@ fn model_act_yml_timeout() {
         - id: step1
           acts:
             - uses: acts.core.irq
-              timeout:
-                - on: 2d
-                - on: 3m
-                  steps:
-                    - id: step1
-                      acts:
-                        - uses: acts.core.irq
-                          key: act2
+              timeouts:
+                - uses: acts.core.irq
+                  if: $cost_in('2d')
+                - uses: acts.core.irq
+                  if: $cost_in('3m')
     "#;
     let m = Workflow::from_yml(text).unwrap();
     let step = m.steps.first().unwrap();
     let act = step.acts.first().unwrap();
-    assert_eq!(act.timeout.len(), 2);
+    assert_eq!(act.timeouts.len(), 2);
 
-    let timeout = act.timeout.first().unwrap();
-    let timeout_limit = TimeoutLimit::parse(&timeout.on).unwrap();
-    assert_eq!(timeout_limit.value, 2);
-    assert_eq!(timeout_limit.as_secs(), 2 * 24 * 60 * 60);
+    let timeout = act.timeouts.first().unwrap();
+    assert_eq!(timeout.r#if.as_ref().unwrap(), "$cost_in('2d')");
 
-    let timeout = act.timeout.get(1).unwrap();
-    let timeout_limit = TimeoutLimit::parse(&timeout.on).unwrap();
-    assert_eq!(timeout_limit.value, 3);
-    assert_eq!(timeout_limit.as_secs(), 3 * 60);
-    assert_eq!(timeout.steps.len(), 1);
+    let timeout = act.timeouts.get(1).unwrap();
+    assert_eq!(timeout.r#if.as_ref().unwrap(), "$cost_in('3m')");
 }

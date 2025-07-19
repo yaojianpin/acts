@@ -105,25 +105,37 @@ fn model_timeout_deser() {
 #[test]
 fn model_step_timeout() {
     let mut step = Step::new();
-    assert_eq!(step.timeout.len(), 0);
+    assert_eq!(step.timeouts.len(), 0);
 
     step = step
-        .with_timeout(|t| {
-            t.with_on("1h").with_step(|step| {
-                step.with_id("step1")
-                    .with_act(Act::msg(|msg| msg.with_key("msg1")))
-            })
-        })
-        .with_timeout(|t| {
-            t.with_on("2d").with_step(|step| {
-                step.with_id("step2")
-                    .with_act(Act::msg(|msg| msg.with_key("msg2")))
-            })
-        });
+        .with_timeout(Act::msg(|msg| {
+            msg.with_key("msg1").with_if(r#"$cost_in('1h')"#)
+        }))
+        .with_timeout(Act::msg(|msg| {
+            msg.with_key("msg2").with_if(r#"$cost_in('2d')"#)
+        }));
 
-    assert_eq!(step.timeout.len(), 2);
-    assert_eq!(step.timeout.first().unwrap().on, "1h");
-    assert_eq!(step.timeout.get(1).unwrap().on, "2d");
+    assert_eq!(step.timeouts.len(), 2);
+    assert_eq!(
+        step.timeouts
+            .first()
+            .as_ref()
+            .unwrap()
+            .r#if
+            .as_ref()
+            .unwrap(),
+        "$cost_in('1h')"
+    );
+    assert_eq!(
+        step.timeouts
+            .get(1)
+            .as_ref()
+            .unwrap()
+            .r#if
+            .as_ref()
+            .unwrap(),
+        "$cost_in('2d')"
+    );
 }
 
 #[test]
@@ -133,26 +145,21 @@ fn model_step_yml_timeout() {
     id: m1
     steps:
         - id: act1
-          timeout:
-            - on: 2d
-            - on: 3m
-              steps:
-                - uses: acts.core.irq
-                  key: act2
+          timeouts:
+            - uses: acts.core.irq
+              key: act2
+              if: $cost_in('2d')
+            - uses: acts.core.irq
+              key: act3
+              if: $cost_in('3m')
     "#;
     let m = Workflow::from_yml(text).unwrap();
     let step = m.steps.first().unwrap();
-    assert_eq!(step.timeout.len(), 2);
+    assert_eq!(step.timeouts.len(), 2);
 
-    let timeout = step.timeout.first().unwrap();
-    assert_eq!(timeout.on, "2d");
-    assert_eq!(
-        TimeoutLimit::parse(&timeout.on).unwrap().as_secs(),
-        2 * 24 * 60 * 60
-    );
+    let timeout = step.timeouts.first().unwrap();
+    assert_eq!(timeout.r#if.as_ref().unwrap(), "$cost_in('2d')");
 
-    let timeout = step.timeout.get(1).unwrap();
-    assert_eq!(timeout.on, "3m");
-    assert_eq!(TimeoutLimit::parse(&timeout.on).unwrap().as_secs(), 3 * 60);
-    assert_eq!(timeout.steps.len(), 1);
+    let timeout = step.timeouts.get(1).unwrap();
+    assert_eq!(timeout.r#if.as_ref().unwrap(), "$cost_in('3m')");
 }

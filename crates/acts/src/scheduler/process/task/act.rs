@@ -1,6 +1,6 @@
-use super::TaskLifeCycle;
 use crate::{
-    Act, ActError, ActRunAs, ActTask, Result, TaskState, scheduler::Context, utils::consts,
+    Act, ActError, ActRunAs, ActTask, Error, Result, TaskState, Vars, scheduler::Context,
+    utils::consts,
 };
 
 impl ActTask for Act {
@@ -11,16 +11,6 @@ impl ActTask for Act {
             if !cond {
                 task.set_state(TaskState::Skipped);
                 return Ok(());
-            }
-        }
-
-        for s in self.catches.iter() {
-            task.add_hook_catch(TaskLifeCycle::ErrorCatch, s);
-        }
-
-        if !self.timeout.is_empty() {
-            for s in &self.timeout {
-                task.add_hook_timeout(TaskLifeCycle::Timeout, s);
             }
         }
 
@@ -144,19 +134,41 @@ impl ActTask for Act {
                     ctx.emit_error()?;
                     return Ok(false);
                 }
-                if t.state().is_skip() {
-                    task.set_state(TaskState::Skipped);
-                    return Ok(true);
-                }
+                // if t.state().is_skip() {
+                //     task.set_state(TaskState::Skipped);
+                //     return Ok(true);
+                // }
 
-                if t.state().is_success() {
+                if t.state().is_success() || t.state().is_skip() {
                     count += 1;
                 }
             }
 
             if count == tasks.len() {
                 if !task.state().is_completed() {
-                    task.set_state(TaskState::Completed);
+                    // check if the task is error catched
+                    let is_empty_catched = tasks
+                        .iter()
+                        .filter(|t| t.is_sign(consts::TASK_SIGN_CATCH))
+                        .all(|t| t.state().is_skip());
+
+                    if task.is_sign(consts::TASK_SIGN_ERR) && is_empty_catched {
+                        // no any action to match
+                        // resume the task error state
+                        let err = task.with_data(|data| {
+                            Error::new(
+                                &data
+                                    .get::<String>(consts::ACT_ERR_MESSAGE)
+                                    .unwrap_or_default(),
+                                &data.get::<String>(consts::ACT_ERR_CODE).unwrap_or_default(),
+                            )
+                        });
+                        task.set_err(&err);
+                        ctx.emit_error()?;
+                        return Ok(false);
+                    } else {
+                        task.set_state(TaskState::Completed);
+                    }
                 }
 
                 if let Some(next) = &task.node.next().upgrade() {
@@ -172,7 +184,7 @@ impl ActTask for Act {
 }
 
 impl Act {
-    pub fn dispatch(&self, ctx: &Context, is_hook_event: bool) -> Result<()> {
+    pub fn dispatch(&self, ctx: &Context, vars: Vars) -> Result<()> {
         // let package = ctx.executor.pack().get(&self.uses)?;
         let mut act = self.clone();
         if let Some(v) = ctx.get_var::<u32>(consts::ACT_INDEX) {
@@ -183,7 +195,7 @@ impl Act {
             act.vars.set(consts::ACT_VALUE, v);
         }
 
-        ctx.dispatch_act(self, is_hook_event)?;
+        ctx.dispatch_act(self, vars)?;
         Ok(())
     }
 }

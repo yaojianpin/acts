@@ -3,7 +3,7 @@ use crate::{
     ActError, Error, NodeKind, ProcInfo, Result, ShareLock, Vars, Workflow, data,
     event::Action,
     scheduler::{
-        Context, Runtime, Task, TaskLifeCycle, TaskState,
+        Context, Runtime, Task, TaskState,
         tree::{Node, NodeTree, TaskTree},
     },
     utils::{self, consts},
@@ -255,15 +255,13 @@ impl Process {
     }
 
     pub(crate) fn do_tick(&self) {
-        self.find_tasks(|t| t.hooks().contains_key(&TaskLifeCycle::Timeout))
-            .iter()
-            .for_each(|t| {
-                let ctx = t.create_context();
-                t.run_hooks_timeout(&ctx).unwrap_or_else(|err| {
-                    eprintln!("{err}",);
-                    error!("{err}",);
-                });
+        self.find_tasks(|t| t.is_timeouts()).iter().for_each(|t| {
+            let ctx = t.create_context();
+            t.run_hooks_timeout(&ctx).unwrap_or_else(|err| {
+                eprintln!("{err}");
+                error!("{err}");
             });
+        });
     }
 
     #[instrument()]

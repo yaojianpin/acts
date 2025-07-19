@@ -49,7 +49,6 @@ impl Visitor {
         index: usize,
         is_last: bool,
         path: &HashMap<usize, bool>,
-        // next_sibling: bool,
     ) -> Box<Self> {
         let mut path = path.clone();
         path.entry(node.level)
@@ -66,13 +65,13 @@ impl Visitor {
     }
 
     #[allow(clippy::vec_box)]
-    pub fn children_visits(&self) -> Vec<Box<Self>> {
+    pub fn children_visits<F: Fn(&Visitor) + Clone>(&self, f: &F) {
         let len = self.node.children().len();
         self.node
             .children()
             .iter()
             .enumerate()
-            .map(|(i, iter)| {
+            .for_each(|(i, iter)| {
                 let mut is_last = i == len - 1;
                 if iter.kind() == NodeKind::Step {
                     if let Some(next) = iter.next().upgrade() {
@@ -81,15 +80,16 @@ impl Visitor {
                         }
                     }
                 }
-                Visitor::new(&self.root, iter, iter.level, i, is_last, &self.path)
-            })
-            .collect::<Vec<_>>()
+
+                let mut node = Visitor::new(&self.root, iter, iter.level, i, is_last, &self.path);
+                node.walk(f);
+            });
     }
 
-    pub fn next_visit(&self) -> Option<Box<Self>> {
+    pub fn next_visit<F: Fn(&Visitor) + Clone>(&self, f: &F) {
         if let Some(next) = self.node.next().upgrade() {
             if self.root.visit_count(next.id()) == 0 {
-                let node = Visitor::new(
+                let mut node = Visitor::new(
                     &self.root,
                     &next,
                     next.level,
@@ -97,11 +97,9 @@ impl Visitor {
                     next.next().upgrade().is_none(),
                     &self.path,
                 );
-                return Some(node);
+                node.walk(f);
             }
         }
-
-        None
     }
 
     pub fn visit(&mut self) {
@@ -114,14 +112,18 @@ impl Visitor {
 
     pub fn walk<F: Fn(&Visitor) + Clone>(&mut self, f: &F) {
         f(self);
+
+        self.node
+            .children_in(super::NodeOutputKind::Timeout)
+            .iter()
+            .enumerate()
+            .for_each(|(i, iter)| {
+                let mut node = Visitor::new(&self.root, iter, iter.level + 1, i, false, &self.path);
+                node.walk(f);
+            });
+
         self.visit();
-
-        for node in self.children_visits().iter_mut() {
-            node.walk(f);
-        }
-
-        if let Some(mut next) = self.next_visit() {
-            next.walk(f);
-        }
+        self.children_visits(f);
+        self.next_visit(f);
     }
 }

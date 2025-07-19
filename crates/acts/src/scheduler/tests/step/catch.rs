@@ -10,12 +10,7 @@ use serde_json::json;
 async fn sch_step_catch_by_any_error() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(|c| {
-                c.with_step(|step| {
-                    step.with_id("step2")
-                        .with_act(Act::irq(|act| act.with_key("catch1")))
-                })
-            })
+            .with_catch(Act::irq(|act| act.with_key("catch1")))
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
     workflow.print();
@@ -47,12 +42,7 @@ async fn sch_step_catch_by_any_error() {
 async fn sch_step_catch_by_msg() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(|c| {
-                c.with_step(|step| {
-                    step.with_id("step2")
-                        .with_act(Act::msg(|msg| msg.with_key("msg1")))
-                })
-            })
+            .with_catch(Act::msg(|msg| msg.with_key("msg1")))
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
     workflow.print();
@@ -81,10 +71,10 @@ async fn sch_step_catch_by_msg() {
 }
 
 #[tokio::test]
-async fn sch_step_catch_empty_then() {
+async fn sch_step_catch_empty_default() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(|c| c)
+            .with_catch(Act::msg(|act| act))
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
     workflow.print();
@@ -110,12 +100,9 @@ async fn sch_step_catch_empty_then() {
 async fn sch_step_catch_by_err_code() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(|c| {
-                c.with_on("123").with_step(|step| {
-                    step.with_id("step2")
-                        .with_act(Act::irq(|act| act.with_key("catch1")))
-                })
-            })
+            .with_catch(Act::irq(|act| {
+                act.with_key("catch1").with_if(r#"$ecode() == "123""#)
+            }))
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
     workflow.print();
@@ -148,12 +135,11 @@ async fn sch_step_catch_by_err_code() {
 async fn sch_step_catch_by_wrong_code() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(|c| {
-                c.with_on("wrong_code").with_step(|step| {
-                    step.with_id("step2")
-                        .with_act(Act::irq(|act| act.with_key("catch1")).with_id("catch1"))
-                })
-            })
+            .with_catch(Act::irq(|act| {
+                act.with_key("catch1")
+                    .with_if(r#"$ecode() == "wrong_code""#)
+                    .with_id("catch1")
+            }))
             .with_act(Act::irq(|act| act.with_key("act1")).with_id("act1"))
     });
     workflow.print();
@@ -183,12 +169,7 @@ async fn sch_step_catch_by_wrong_code() {
 async fn sch_step_catch_by_no_err_code() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(|c| {
-                c.with_step(|step| {
-                    step.with_id("step2")
-                        .with_act(Act::irq(|act| act.with_key("catch1")))
-                })
-            })
+            .with_catch(Act::irq(|act| act.with_key("catch1")))
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
     workflow.print();
@@ -213,15 +194,98 @@ async fn sch_step_catch_by_no_err_code() {
 }
 
 #[tokio::test]
+async fn sch_step_catch_many_if() {
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_var("v1", 10)
+            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_catch(Act::irq(|act| {
+                act.with_key("catch1")
+                    .with_id("catch1")
+                    .with_if(r#"v1 > 0"#)
+            }))
+            .with_catch(Act::irq(|act| {
+                act.with_key("catch2")
+                    .with_id("catch2")
+                    .with_if(r#"v1 == 0"#)
+            }))
+            .with_catch(Act::irq(|act| act.with_key("catch3").with_id("catch3")))
+    });
+    workflow.print();
+    let (proc, scher, emitter, tx, rx) =
+        create_proc_signal::<bool>(&mut workflow, &utils::longid());
+
+    let s = scher.clone();
+    emitter.on_message(move |e| {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
+            let mut options = Vars::new();
+            options.set(consts::ACT_ERR_CODE, "err1");
+            let action = Action::new(&e.pid, &e.tid, EventAction::Error, options);
+            s.do_action(&action).unwrap();
+        }
+
+        if e.is_key("catch1") && e.is_state(MessageState::Created) {
+            rx.send(true);
+        }
+    });
+
+    scher.launch(&proc);
+    let ret = tx.recv().await;
+    proc.print();
+    assert!(ret);
+    assert!(proc.task_by_nid("catch2").is_empty());
+    assert!(proc.task_by_nid("catch3").is_empty());
+}
+
+#[tokio::test]
+async fn sch_step_catch_many_else() {
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_var("v1", 10)
+            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_catch(Act::irq(|act| {
+                act.with_key("catch1")
+                    .with_id("catch1")
+                    .with_if(r#"v1 < 0"#)
+            }))
+            .with_catch(Act::irq(|act| {
+                act.with_key("catch2")
+                    .with_id("catch2")
+                    .with_if(r#"v1 == 0"#)
+            }))
+            .with_catch(Act::irq(|act| act.with_key("catch3").with_id("catch3")))
+    });
+    workflow.print();
+    let (proc, scher, emitter, tx, rx) =
+        create_proc_signal::<bool>(&mut workflow, &utils::longid());
+
+    let s = scher.clone();
+    emitter.on_message(move |e| {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
+            let mut options = Vars::new();
+            options.set(consts::ACT_ERR_CODE, "err1");
+            let action = Action::new(&e.pid, &e.tid, EventAction::Error, options);
+            s.do_action(&action).unwrap();
+        }
+
+        if e.is_key("catch3") && e.is_state(MessageState::Created) {
+            rx.send(true);
+        }
+    });
+
+    scher.launch(&proc);
+    let ret = tx.recv().await;
+    proc.print();
+    assert!(ret);
+    assert!(proc.task_by_nid("catch1").is_empty());
+    assert!(proc.task_by_nid("catch2").is_empty());
+}
+
+#[tokio::test]
 async fn sch_step_catch_as_complete() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(|c| {
-                c.with_step(|step| {
-                    step.with_id("step2")
-                        .with_act(Act::irq(|act| act.with_key("catch1")))
-                })
-            })
+            .with_catch(Act::irq(|act| act.with_key("catch1")))
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
     workflow.print();
@@ -268,12 +332,7 @@ async fn sch_step_catch_as_complete() {
 async fn sch_step_catch_as_error() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(|c| {
-                c.with_step(|step| {
-                    step.with_id("step2")
-                        .with_act(Act::irq(|act| act.with_key("catch1")))
-                })
-            })
+            .with_catch(Act::irq(|act| act.with_key("catch1")))
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
     workflow.print();
@@ -321,12 +380,7 @@ async fn sch_step_catch_as_skip() {
     let mut workflow = Workflow::new()
         .with_step(|step| {
             step.with_id("step1")
-                .with_catch(|c| {
-                    c.with_step(|step| {
-                        step.with_id("step3")
-                            .with_act(Act::irq(|act| act.with_key("catch1")).with_id("catch1"))
-                    })
-                })
+                .with_catch(Act::irq(|act| act.with_key("catch1")).with_id("catch1"))
                 .with_act(Act::irq(|act| act.with_key("act1")).with_id("act1"))
         })
         .with_step(|step| step.with_id("step2"));
@@ -364,24 +418,16 @@ async fn sch_step_catch_as_skip() {
     assert!(proc.task_by_nid("act1").first().unwrap().state().is_error());
     assert_eq!(
         proc.task_by_nid("step1").first().unwrap().state(),
-        TaskState::Completed
+        TaskState::Error
     );
-    assert_eq!(
-        proc.task_by_nid("step2").first().unwrap().state(),
-        TaskState::Completed
-    );
+    assert!(proc.task_by_nid("step2").is_empty());
 }
 
 #[tokio::test]
 async fn sch_step_catch_as_abort() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(|c| {
-                c.with_step(|step| {
-                    step.with_id("step2")
-                        .with_act(Act::irq(|act| act.with_key("catch1")))
-                })
-            })
+            .with_catch(Act::irq(|act| act.with_key("catch1")))
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
     workflow.print();
@@ -418,12 +464,7 @@ async fn sch_step_catch_as_abort() {
 async fn sch_step_catch_as_submit() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(|c| {
-                c.with_step(|step| {
-                    step.with_id("step2")
-                        .with_act(Act::irq(|act| act.with_key("catch1")).with_id("catch1"))
-                })
-            })
+            .with_catch(Act::irq(|act| act.with_key("catch1")).with_id("catch1"))
             .with_act(Act::irq(|act| act.with_key("act1")).with_id("act1"))
     });
     workflow.print();
@@ -473,12 +514,7 @@ async fn sch_step_catch_as_back() {
         })
         .with_step(|step| {
             step.with_id("step2")
-                .with_catch(|c| {
-                    c.with_step(|step| {
-                        step.with_id("step3")
-                            .with_act(Act::irq(|act| act.with_key("catch2")).with_id("catch2"))
-                    })
-                })
+                .with_catch(Act::irq(|act| act.with_key("catch2")).with_id("catch2"))
                 .with_act(Act::irq(|act| act.with_key("act2")).with_id("act2"))
         });
     workflow.print();
@@ -540,12 +576,7 @@ async fn sch_step_catch_and_continue() {
     let mut workflow = Workflow::new()
         .with_step(|step| {
             step.with_id("step1")
-                .with_catch(|c| {
-                    c.with_step(|step| {
-                        step.with_id("step3")
-                            .with_act(Act::msg(|msg| msg.with_key("msg1")))
-                    })
-                })
+                .with_catch(Act::msg(|msg| msg.with_key("msg1")))
                 .with_act(Act::irq(|act| act.with_key("act1")))
         })
         .with_step(|step| {

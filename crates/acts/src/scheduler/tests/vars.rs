@@ -80,8 +80,8 @@ async fn sch_vars_workflow_expose_options() {
 async fn sch_vars_get_with_script() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_var("var1", 10.into())
-            .with_var("var2", r#"{{ var1 }}"#.into())
+            .with_var("var1", 10)
+            .with_var("var2", r#"{{ var1 }}"#)
     });
     let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     scher.launch(&proc);
@@ -99,10 +99,8 @@ async fn sch_vars_get_with_script() {
 
 #[tokio::test]
 async fn sch_vars_get_with_not_exists() {
-    let mut workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_var("var2", r#"{{ var1 }}"#.into())
-    });
+    let mut workflow =
+        Workflow::new().with_step(|step| step.with_id("step1").with_var("var2", r#"{{ var1 }}"#));
     let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     scher.launch(&proc);
     tx.recv().await;
@@ -121,7 +119,7 @@ async fn sch_vars_get_with_not_exists() {
 async fn sch_vars_output_only_key_name() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_var("var1", 10.into())
+            .with_var("var1", 10)
             .with_output("var1", json!(null))
     });
     let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
@@ -140,8 +138,7 @@ async fn sch_vars_output_only_key_name() {
 
 #[tokio::test]
 async fn sch_vars_step_inputs() {
-    let mut workflow =
-        Workflow::new().with_step(|step| step.with_id("step1").with_var("var1", 10.into()));
+    let mut workflow = Workflow::new().with_step(|step| step.with_id("step1").with_var("var1", 10));
     let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
     scher.launch(&proc);
     tx.recv().await;
@@ -177,8 +174,7 @@ async fn sch_vars_one_step_outputs() {
 
 #[tokio::test]
 async fn sch_vars_step_default_expose() {
-    let mut workflow =
-        Workflow::new().with_step(|step| step.with_id("step1").with_var("var1", 10.into()));
+    let mut workflow = Workflow::new().with_step(|step| step.with_id("step1").with_var("var1", 10));
     let (proc, scher, _, tx, _) = create_proc_signal::<Vars>(&mut workflow, &utils::longid());
     scher.launch(&proc);
     tx.recv().await;
@@ -198,8 +194,8 @@ async fn sch_vars_step_default_expose() {
 async fn sch_vars_step_expose_options() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_var("var1", 10.into())
-            .with_var("var2", 20.into())
+            .with_var("var1", 10)
+            .with_var("var2", 20)
             .with_output("var1", json!(null))
     });
     let (proc, scher, _, tx, _) = create_proc_signal::<Vars>(&mut workflow, &utils::longid());

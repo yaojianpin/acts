@@ -171,25 +171,20 @@ impl Context {
         self.runtime.push(&task);
     }
 
-    pub fn dispatch_act(&self, act: &Act, is_hook_event: bool) -> Result<()> {
+    pub fn sched_task_with_vars(&self, node: &Arc<Node>, vars: Vars) {
+        debug!("sched_task: {}", node.to_string());
+        let task = self.proc.create_task(node, Some(self.task()));
+        task.set_data_with(|data| {
+            for (k, v) in &vars {
+                data.set(&k, v);
+            }
+        });
+        self.runtime.push(&task);
+    }
+
+    pub fn dispatch_act(&self, act: &Act, vars: Vars) -> Result<()> {
         debug!("dispatch_act: {act:?}  {:?}", self.task);
         let task = self.task();
-        // if task.is_kind(NodeKind::Act) {
-        //     let is_block_backage = task.is_uses(consts::ACT_TYPE_BLOCK);
-
-        //     // not package act or completed package
-        //     if !is_block_backage || task.state().is_completed() {
-        //         // find its parent to append task
-        //         while let Some(parent) = task.parent() {
-        //             if parent.is_kind(NodeKind::Step) || parent.is_uses(consts::ACT_TYPE_BLOCK) {
-        //                 task = parent;
-        //                 break;
-        //             }
-        //             task = parent;
-        //         }
-        //     }
-        // }
-
         let mut id = act.id.to_string();
         if id.is_empty() {
             id = shortid();
@@ -203,11 +198,11 @@ impl Context {
 
         if !task.state().is_none() {
             let task = self.proc.create_task(&node, Some(task));
-
-            // set the tag on task to avoid the repetitive hook execution
-            if is_hook_event {
-                task.set_data_with(|data| data.set(consts::IS_EVENT_PROCESSED, true));
-            }
+            task.set_data_with(|data| {
+                for (k, v) in &vars {
+                    data.set(&k, v);
+                }
+            });
             self.runtime.push(&task);
         }
 

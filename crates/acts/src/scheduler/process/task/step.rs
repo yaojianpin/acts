@@ -1,8 +1,8 @@
-use super::hook::TaskLifeCycle;
 use crate::{
-    ActTask, Result,
+    ActTask, Error, Result,
     model::Step,
     scheduler::{Context, TaskState},
+    utils::consts,
 };
 
 impl ActTask for Step {
@@ -13,20 +13,6 @@ impl ActTask for Step {
             if !cond {
                 task.set_state(TaskState::Skipped);
                 return Ok(());
-            }
-        }
-
-        // add catch hooks
-        if !self.catches.is_empty() {
-            for c in &self.catches {
-                task.add_hook_catch(TaskLifeCycle::ErrorCatch, c);
-            }
-        }
-
-        // add timeout hooks
-        if !self.timeout.is_empty() {
-            for s in &self.timeout {
-                task.add_hook_timeout(TaskLifeCycle::Timeout, s);
             }
         }
 
@@ -110,7 +96,29 @@ impl ActTask for Step {
 
             if count == tasks.len() {
                 if !task.state().is_completed() {
-                    task.set_state(TaskState::Completed);
+                    // check if the task is error catched
+                    let is_empty_catched = tasks
+                        .iter()
+                        .filter(|t| t.is_sign(consts::TASK_SIGN_CATCH))
+                        .all(|t| t.state().is_skip());
+
+                    if task.is_sign(consts::TASK_SIGN_ERR) && is_empty_catched {
+                        // no any action to match
+                        // resume the task error state
+                        let err = task.with_data(|data| {
+                            Error::new(
+                                &data
+                                    .get::<String>(consts::ACT_ERR_MESSAGE)
+                                    .unwrap_or_default(),
+                                &data.get::<String>(consts::ACT_ERR_CODE).unwrap_or_default(),
+                            )
+                        });
+                        task.set_err(&err);
+                        ctx.emit_error()?;
+                        return Ok(false);
+                    } else {
+                        task.set_state(TaskState::Completed);
+                    }
                 }
 
                 if let Some(next) = &task.node.next().upgrade() {

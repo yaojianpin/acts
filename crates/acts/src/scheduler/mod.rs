@@ -12,7 +12,7 @@ mod tests;
 
 pub use crate::Result;
 pub use context::Context;
-pub use process::{Process, StatementBatch, Task, TaskLifeCycle};
+pub use process::{Process, Task};
 pub use runtime::Runtime;
 pub use scheduler::Scheduler;
 pub use state::TaskState;

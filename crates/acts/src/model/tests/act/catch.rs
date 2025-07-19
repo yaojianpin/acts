@@ -5,11 +5,15 @@ fn model_act_catch() {
     let mut act = Act::new();
     assert_eq!(act.catches.len(), 0);
 
-    act = act.with_catch(|c| c.with_on("err1")).with_catch(|c| c);
+    act = act
+        .with_catch(Act::new().with_if(r#"$ecode() == "err1""#))
+        .with_catch(Act::new());
     assert_eq!(act.catches.len(), 2);
-
-    assert_eq!(act.catches.first().unwrap().on.as_ref().unwrap(), "err1");
-    assert_eq!(act.catches.get(1).unwrap().on, None);
+    assert_eq!(
+        act.catches.first().unwrap().r#if,
+        Some(r#"$ecode() == "err1""#.to_string())
+    );
+    assert_eq!(act.catches.get(1).unwrap().r#if, None);
 }
 
 #[test]
@@ -22,13 +26,10 @@ fn model_act_yml_catches_err() {
           acts:
             - uses: acts.core.irq
               catches:
-                - on: err1
-                - on: err2
-                  steps:
-                    - id: step2
-                      acts:
-                        - uses: acts.core.irq
-                          key: act2
+                - uses: acts.core.irq
+                  if: $ecode() == 'err1'
+                - uses: acts.core.irq
+                  if: $ecode() == 'err2'
 
     "#;
     let m = Workflow::from_yml(text).unwrap();
@@ -37,8 +38,7 @@ fn model_act_yml_catches_err() {
     assert_eq!(act.catches.len(), 2);
 
     let catch = act.catches.get(1).unwrap();
-    assert_eq!(catch.on.as_ref().unwrap(), "err2");
-    assert_eq!(catch.steps.len(), 1);
+    assert_eq!(catch.r#if.as_ref().unwrap(), "$ecode() == 'err2'");
 }
 
 #[test]
@@ -51,27 +51,15 @@ fn model_act_yml_catches_all() {
           acts:
             - uses: acts.core.irq
               catches:
-                - on: err1
-                - steps:
-                    - id: step2
-                      acts:
-                        - uses: acts.core.irq
-                          key: act2
-                    - id: step3
-                      acts:
-                        - uses: acts.core.msg
-                          key: msg1
+                - uses: acts.core.irq
+                  key: act2
+                  if: $ecode() == 'err1'
     "#;
     let m = Workflow::from_yml(text).unwrap();
     let step = m.steps.first().unwrap();
     let act = step.acts.first().unwrap();
-    assert_eq!(act.catches.len(), 2);
+    assert_eq!(act.catches.len(), 1);
 
     let catch = act.catches.first().unwrap();
-    assert_eq!(catch.on.as_ref().unwrap(), "err1");
-    assert_eq!(catch.steps.len(), 0);
-
-    let catch = act.catches.get(1).unwrap();
-    assert_eq!(catch.on, None);
-    assert_eq!(catch.steps.len(), 2);
+    assert_eq!(catch.r#if.as_ref().unwrap(), "$ecode() == 'err1'");
 }

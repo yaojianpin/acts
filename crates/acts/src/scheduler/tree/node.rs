@@ -32,7 +32,6 @@ pub enum NodeOutputKind {
 #[derive(Debug, Clone)]
 pub struct NodeOutput {
     pub typ: NodeOutputKind,
-    pub on: Option<String>,
     pub node: Arc<Node>,
 }
 
@@ -121,6 +120,24 @@ impl NodeContent {
             _ => "".to_string(),
         }
     }
+
+    pub fn r#if(&self) -> Option<String> {
+        match self {
+            NodeContent::Step(node) => node.r#if.clone(),
+            NodeContent::Branch(node) => node.r#if.clone(),
+            NodeContent::Act(node) => node.r#if.clone(),
+            _ => None,
+        }
+    }
+
+    pub fn set_if(&mut self, v: Option<String>) {
+        match self {
+            NodeContent::Step(node) => node.r#if = v,
+            NodeContent::Branch(node) => node.r#if = v,
+            NodeContent::Act(node) => node.r#if = v,
+            _ => {}
+        }
+    }
 }
 
 impl Node {
@@ -150,25 +167,23 @@ impl Node {
         None
     }
 
-    pub fn push_child(&self, typ: NodeOutputKind, on: Option<String>, child: &Arc<Node>) {
+    pub fn push_child(&self, typ: NodeOutputKind, child: &Arc<Node>) {
         let mut children = self.children.write().unwrap();
         children.push(NodeOutput {
             typ,
-            on,
             node: child.clone(),
         });
     }
 
     pub fn set_parent(&self, parent: &Arc<Node>) {
-        self.set_parent_in(NodeOutputKind::Normal, None, parent);
+        self.set_parent_in(NodeOutputKind::Normal, parent);
     }
 
     /// set parent in the node tree with the given type
-    pub fn set_parent_in(&self, typ: NodeOutputKind, on: Option<String>, parent: &Arc<Node>) {
+    pub fn set_parent_in(&self, typ: NodeOutputKind, parent: &Arc<Node>) {
         *self.parent.write().unwrap() = Arc::downgrade(parent);
         parent.children.write().unwrap().push(NodeOutput {
             typ,
-            on,
             node: Arc::new(self.clone()),
         });
     }
@@ -186,32 +201,14 @@ impl Node {
         node
     }
 
-    // pub fn insert_node(
-    //     self: &Arc<Node>,
-    //     index: usize,
-    //     node: NodeContent,
-    //     level: usize,
-    // ) -> Arc<Node> {
-    //     let id = node.id();
-    //     self.nodes.write().unwrap().insert(index, node.clone());
-    //     Arc::new(Node::new(&id, node, level))
-    // }
-
-    // fn set_prev(self: &Arc<Node>, node: &Arc<Node>, is_next: bool) {
-    //     *self.prev.write().unwrap() = Arc::downgrade(node);
-    //     if is_next {
-    //         *node.next.write().unwrap() = Arc::downgrade(self);
-    //     }
-    // }
-
     pub fn children(&self) -> Vec<Arc<Node>> {
-        self.children_in(NodeOutputKind::Normal, None)
+        self.children_in(NodeOutputKind::Normal)
     }
 
-    pub fn children_in(&self, typ: NodeOutputKind, on: Option<String>) -> Vec<Arc<Node>> {
+    pub fn children_in(&self, typ: NodeOutputKind) -> Vec<Arc<Node>> {
         let node = self.children.read().unwrap();
         node.iter()
-            .filter(|n| n.typ == typ && n.on == on)
+            .filter(|n| n.typ == typ)
             .map(|n| n.node.clone())
             .collect::<Vec<_>>()
     }
@@ -251,10 +248,6 @@ impl Node {
     pub fn name(&self) -> String {
         self.content.name()
     }
-
-    // pub fn outputs(&self) -> Vars {
-    //     self.content.outputs()
-    // }
 
     pub fn kind(&self) -> NodeKind {
         match &self.content {

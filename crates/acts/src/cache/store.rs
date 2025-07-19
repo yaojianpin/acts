@@ -1,11 +1,11 @@
 use crate::{
     ActError, Error, Message, Result, Workflow,
     data::{self, MessageStatus},
-    scheduler::{self, Node, Runtime, StatementBatch, TaskLifeCycle, TaskState},
+    scheduler::{self, Node, Runtime, TaskState},
     store::{Store, query::*},
     utils::{self, Id},
 };
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 use tracing::debug;
 
 impl Store {
@@ -245,10 +245,6 @@ impl Store {
                 serde_json::from_str(&t.data).map_err(|err| ActError::Store(err.to_string()))?;
             task.set_data(&data);
 
-            let hooks: HashMap<TaskLifeCycle, Vec<StatementBatch>> =
-                serde_json::from_str(&t.hooks).map_err(|err| ActError::Store(err.to_string()))?;
-
-            task.set_hooks(&hooks);
             if let Some(err) = t.err {
                 let err: Error =
                     serde_json::from_str(&err).map_err(|err| ActError::Store(err.to_string()))?;

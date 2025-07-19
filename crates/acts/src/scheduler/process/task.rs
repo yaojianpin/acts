@@ -1,13 +1,13 @@
 mod act;
 mod branch;
-mod hook;
+// mod hook;
 mod step;
 mod workflow;
 
+use crate::scheduler::tree::NodeOutputKind;
 use crate::utils::consts::TASK_ROOT_TID;
 use crate::{
-    Act, ActError, ActTask, Catch, Error, Message, MessageState, NodeKind, Result, ShareLock,
-    Timeout, Vars,
+    Act, ActError, ActTask, Error, Message, MessageState, NodeKind, Result, ShareLock, Vars,
     data::{self, MessageStatus},
     event::EventAction,
     scheduler::{
@@ -16,13 +16,9 @@ use crate::{
     },
     utils::{self, consts},
 };
-pub use hook::{StatementBatch, TaskLifeCycle};
 use serde::de::DeserializeOwned;
 use serde_json::json;
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-};
+use std::sync::{Arc, RwLock};
 use tracing::{debug, info};
 
 #[derive(Clone)]
@@ -55,8 +51,7 @@ pub struct Task {
     node: Arc<Node>,
 
     // lifecycle hooks
-    hooks: ShareLock<HashMap<TaskLifeCycle, Vec<StatementBatch>>>,
-
+    // hooks: ShareLock<HashMap<TaskLifeCycle, Vec<StatementBatch>>>,
     runtime: Arc<Runtime>,
 }
 
@@ -75,7 +70,7 @@ impl Task {
             timestamp: utils::time::timestamp(),
             proc: proc.clone(),
 
-            hooks: Arc::new(RwLock::new(HashMap::new())),
+            // hooks: Arc::new(RwLock::new(HashMap::new())),
             runtime: rt.clone(),
         }
     }
@@ -112,8 +107,7 @@ impl Task {
         if self.state().is_completed() {
             return self.end_time() - self.start_time();
         }
-
-        0
+        utils::time::time_millis() - self.start_time()
     }
 
     pub fn is_emit_disabled(&self) -> bool {
@@ -132,9 +126,23 @@ impl Task {
             .unwrap_or(true)
     }
 
-    pub fn is_event_processed(&self) -> bool {
-        self.with_data(|data| data.get::<bool>(consts::IS_EVENT_PROCESSED))
-            .unwrap_or(false)
+    pub fn is_sign(&self, sign: &str) -> bool {
+        self.with_data(|data| {
+            if let Some(ref v) = data.get::<String>(consts::TASK_SIGN) {
+                return v == sign;
+            }
+            false
+        })
+    }
+
+    pub fn sign(&self) -> Option<String> {
+        self.with_data(|data| data.get::<String>(consts::TASK_SIGN))
+    }
+
+    pub fn set_sign(&self, sign: &str) {
+        self.set_data_with(move |data| {
+            data.set(consts::TASK_SIGN, sign);
+        });
     }
 
     pub fn set_auto_complete(&self, v: bool) {
@@ -264,7 +272,6 @@ impl Task {
                 }
             }
         }
-
         // merge the node vars
         let vars = utils::fill_inputs(&self.node.content.vars(), &ctx);
         inputs.extend(vars)
@@ -322,6 +329,11 @@ impl Task {
 
     pub fn set_err(&self, err: &Error) {
         *self.err.write().unwrap() = Some(err.clone());
+
+        self.set_data_with(|data| {
+            data.set(consts::ACT_ERR_CODE, &err.ecode);
+            data.set(consts::ACT_ERR_MESSAGE, &err.message)
+        });
         self.set_state(TaskState::Error);
     }
 
@@ -353,6 +365,22 @@ impl Task {
             return self.node.uses() == v;
         }
         false
+    }
+
+    pub fn is_timeouts(&self) -> bool {
+        match &self.node.content {
+            NodeContent::Step(step) => !step.timeouts.is_empty(),
+            NodeContent::Act(act) => !act.timeouts.is_empty(),
+            _ => false,
+        }
+    }
+
+    pub fn is_catches(&self) -> bool {
+        match &self.node.content {
+            NodeContent::Step(step) => !step.catches.is_empty(),
+            NodeContent::Act(act) => !act.catches.is_empty(),
+            _ => false,
+        }
     }
 
     pub fn exec(self: &Arc<Self>, ctx: &Context) -> Result<()> {
@@ -398,7 +426,7 @@ impl Task {
                     ));
                 }
 
-                ctx.dispatch_act(&act, false)?;
+                ctx.dispatch_act(&act, Vars::new())?;
             }
             EventAction::Remove => {
                 self.set_state(TaskState::Removed);
@@ -629,128 +657,81 @@ impl Task {
         Ok(())
     }
 
-    /// add statement to task lifecycle hooks
-    pub fn add_hook_stmts(&self, key: TaskLifeCycle, value: &Act) {
-        let mut hooks = self.hooks.write().unwrap();
+    pub fn run_hooks_timeout(&self, ctx: &Context) -> Result<()> {
+        let children = self.node.children_in(NodeOutputKind::Timeout);
+        if !children.is_empty() {
+            self.set_sign(consts::TASK_SIGN_TIMEOUTS);
+            let mut timeouts = self
+                .with_data(|data| data.get::<Vec<String>>(consts::TASK_TIMEOUTS))
+                .unwrap_or_default();
+            let cost = self.cost();
+            for child in &children {
+                if timeouts.contains(&child.id) {
+                    continue;
+                }
+                let mut is_timeout = false;
+                if let Some(expr) = &child.content.r#if() {
+                    is_timeout = ctx.eval::<bool>(expr)?;
+                }
+                if is_timeout {
+                    timeouts.push(child.id.clone());
+                    self.set_data_with(|data| data.set(consts::TASK_TIMEOUTS, timeouts.clone()));
+                    ctx.sched_task_with_vars(
+                        child,
+                        Vars::new()
+                            .with(consts::TASK_COST, cost)
+                            .with(consts::TASK_SIGN, consts::TASK_SIGN_CATCH),
+                    );
+                }
+            }
+        }
 
-        let batch = StatementBatch::Statement(value.clone());
-        hooks
-            .entry(key)
-            .and_modify(|list| list.push(batch.clone()))
-            .or_insert(vec![batch]);
+        Ok(())
     }
 
-    pub fn add_hook_catch(&self, key: TaskLifeCycle, value: &Catch) {
-        let mut hooks = self.hooks.write().unwrap();
-
-        let batch = StatementBatch::Catch(value.clone());
-        hooks
-            .entry(key)
-            .and_modify(|list| list.push(batch.clone()))
-            .or_insert(vec![batch]);
-    }
-
-    pub fn add_hook_timeout(&self, key: TaskLifeCycle, value: &Timeout) {
-        let mut hooks = self.hooks.write().unwrap();
-
-        let batch = StatementBatch::Timeout(value.clone());
-        hooks
-            .entry(key)
-            .and_modify(|list| list.push(batch.clone()))
-            .or_insert(vec![batch]);
-    }
-
-    pub fn run_hooks(&self, ctx: &Context) -> Result<()> {
-        // check if the task is from hook itself
-        let is_event_processed = ctx
-            .task()
-            .with_data(|data| data.get::<bool>(consts::IS_EVENT_PROCESSED))
-            .unwrap_or_default();
-        if is_event_processed {
+    pub fn run_hooks_err(&self, ctx: &Context) -> Result<()> {
+        if self.sign().is_some() {
             return Ok(());
         }
-
-        let state = self.state();
-        match state {
-            TaskState::None | TaskState::Running => {}
-            TaskState::Ready | TaskState::Pending | TaskState::Interrupt => {
-                self.run_hooks_by(TaskLifeCycle::Created, ctx)?;
-                if self.is_kind(NodeKind::Act) {
-                    let mut parent = self.parent();
-                    while let Some(task) = parent {
-                        if task.is_kind(NodeKind::Step) {
-                            task.run_hooks_by(TaskLifeCycle::BeforeUpdate, ctx)?;
-                            break;
-                        }
-                        parent = task.parent();
-                    }
-
-                    if let Some(root) = ctx.proc.root() {
-                        root.run_hooks_by(TaskLifeCycle::BeforeUpdate, ctx)?
-                    }
+        let children = self.node.children_in(NodeOutputKind::Catch);
+        if !children.is_empty() {
+            // no if condition in catch acts
+            let mut catch_elses = vec![];
+            let mut is_err_catch = false;
+            for child in children.iter() {
+                let mut is_cond_catch = false;
+                if let Some(expr) = &child.content.r#if() {
+                    is_cond_catch = ctx.eval::<bool>(expr)?;
+                } else {
+                    catch_elses.push(child.clone());
                 }
-                // else if self.is_kind(NodeKind::Step) {
-                //     ctx.task().run_hooks_by(TaskLifeCycle::Step, ctx)?;
-                //     if let Some(root) = ctx.proc.root() {
-                //         root.run_hooks_by(TaskLifeCycle::Step, ctx)?
-                //     }
-                // }
-            }
-            TaskState::Completed
-            | TaskState::Backed
-            | TaskState::Cancelled
-            | TaskState::Submitted
-            | TaskState::Aborted
-            | TaskState::Removed
-            | TaskState::Skipped => {
-                self.run_hooks_by(TaskLifeCycle::Completed, ctx)?;
-                if self.is_kind(NodeKind::Act) {
-                    // triggers step updated hook when the act is completed
-                    let mut parent = self.parent();
-                    while let Some(task) = parent {
-                        if task.is_kind(NodeKind::Step) {
-                            task.run_hooks_by(TaskLifeCycle::Updated, ctx)?;
-                            break;
-                        }
-                        parent = task.parent();
-                    }
-                    if let Some(root) = ctx.proc.root() {
-                        root.run_hooks_by(TaskLifeCycle::Updated, ctx)?
-                    }
-                } else if self.is_kind(NodeKind::Step) {
-                    ctx.task().run_hooks_by(TaskLifeCycle::Step, ctx)?;
-                    if let Some(root) = ctx.proc.root() {
-                        root.run_hooks_by(TaskLifeCycle::Step, ctx)?
-                    }
+
+                if is_cond_catch {
+                    is_err_catch = true;
+                    self.set_sign(consts::TASK_SIGN_ERR);
+                    self.set_state(TaskState::Running);
+                    ctx.sched_task_with_vars(
+                        child,
+                        Vars::new().with(consts::TASK_SIGN, consts::TASK_SIGN_CATCH),
+                    );
                 }
             }
-            TaskState::Error => self.run_hooks_by(TaskLifeCycle::ErrorCatch, ctx)?,
+
+            if !is_err_catch && !catch_elses.is_empty() {
+                self.set_sign(consts::TASK_SIGN_ERR);
+                self.set_state(TaskState::Running);
+                // if there is no other catched acts
+                // do the none if action
+                for child in catch_elses.iter() {
+                    ctx.sched_task_with_vars(
+                        child,
+                        Vars::new().with(consts::TASK_SIGN, consts::TASK_SIGN_CATCH),
+                    );
+                }
+            }
         }
 
         Ok(())
-    }
-
-    pub fn run_hooks_timeout(&self, ctx: &Context) -> Result<()> {
-        self.run_hooks_by(TaskLifeCycle::Timeout, ctx)
-    }
-
-    fn run_hooks_by(&self, key: TaskLifeCycle, ctx: &Context) -> Result<()> {
-        debug!("run_hooks_by:{:?} {:?}", key, self);
-        let hooks = self.hooks.read().unwrap();
-        let default = Vec::new();
-        let stmts = hooks.get(&key).unwrap_or(&default);
-        for s in stmts {
-            s.run(ctx)?;
-        }
-        Ok(())
-    }
-
-    pub(crate) fn set_hooks(&self, hooks: &HashMap<TaskLifeCycle, Vec<StatementBatch>>) {
-        *self.hooks.write().unwrap() = hooks.clone();
-    }
-
-    pub(crate) fn hooks(&self) -> HashMap<TaskLifeCycle, Vec<StatementBatch>> {
-        self.hooks.read().unwrap().clone()
     }
 
     pub fn into_data(self: &Arc<Self>) -> Result<data::Task> {
@@ -767,7 +748,6 @@ impl Task {
             data: self.data().to_string(),
             start_time: self.start_time(),
             end_time: self.end_time(),
-            hooks: serde_json::to_string(&self.hooks()).map_err(ActError::from)?,
             timestamp: self.timestamp,
             err: self.err().map(|err| err.to_string()),
         })
@@ -889,7 +869,7 @@ impl ActTask for Arc<Task> {
             self.update_data(&ctx.vars());
             ctx.emit_task(self)?;
 
-            if !is_next && !ctx.task().is_event_processed() {
+            if !is_next {
                 let parent = ctx.task().parent();
                 if let Some(task) = &parent.clone() {
                     task.review(ctx)?;
@@ -901,7 +881,7 @@ impl ActTask for Arc<Task> {
     }
 
     fn review(&self, ctx: &Context) -> Result<bool> {
-        if ctx.task().is_event_processed() {
+        if ctx.task().is_sign(consts::TASK_SIGN_TIMEOUTS) {
             return Ok(false);
         }
         // last task's outputs

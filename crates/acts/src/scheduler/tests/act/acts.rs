@@ -172,8 +172,8 @@ async fn sch_act_params_expr_brace_not_in_same_line_not_support() {
 async fn sch_act_params_multi_expr_str() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_var("a", "hello".into())
-            .with_var("b", "world".into())
+            .with_var("a", "hello")
+            .with_var("b", "world")
             .with_act(Act::irq(|act| {
                 act.with_key("act1").with_params_data(json!(
                     r#"
@@ -207,8 +207,8 @@ async fn sch_act_params_multi_expr_str() {
 async fn sch_act_params_multi_expr_bool() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_var("a", true.into())
-            .with_var("b", false.into())
+            .with_var("a", true)
+            .with_var("b", false)
             .with_act(Act::irq(|act| {
                 act.with_key("act1").with_params_data(json!(
                     r#"

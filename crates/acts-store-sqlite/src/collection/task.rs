@@ -32,7 +32,6 @@ enum CollectionIden {
     Err,
     StartTime,
     EndTime,
-    Hooks,
     Timestamp,
 }
 
@@ -72,7 +71,6 @@ impl DbCollection for TaskCollection {
                 CollectionIden::Err,
                 CollectionIden::StartTime,
                 CollectionIden::EndTime,
-                CollectionIden::Hooks,
                 CollectionIden::Timestamp,
             ])
             .and_where(SeaExpr::col(CollectionIden::Id).eq(id))
@@ -110,7 +108,6 @@ impl DbCollection for TaskCollection {
                 CollectionIden::Err,
                 CollectionIden::StartTime,
                 CollectionIden::EndTime,
-                CollectionIden::Hooks,
                 CollectionIden::Timestamp,
             ])
             .from(CollectionIden::Table);
@@ -178,7 +175,6 @@ impl DbCollection for TaskCollection {
                 CollectionIden::Err,
                 CollectionIden::StartTime,
                 CollectionIden::EndTime,
-                CollectionIden::Hooks,
                 CollectionIden::Timestamp,
             ])
             .values([
@@ -194,7 +190,6 @@ impl DbCollection for TaskCollection {
                 data.err.into(),
                 data.start_time.into(),
                 data.end_time.into(),
-                data.hooks.into(),
                 data.timestamp.into(),
             ])
             .map_err(map_db_err)?
@@ -223,7 +218,6 @@ impl DbCollection for TaskCollection {
                 (CollectionIden::Err, model.err.into()),
                 (CollectionIden::StartTime, model.start_time.into()),
                 (CollectionIden::EndTime, model.end_time.into()),
-                (CollectionIden::Hooks, model.hooks.into()),
                 (CollectionIden::Timestamp, model.timestamp.into()),
             ])
             .and_where(SeaExpr::col(CollectionIden::Id).eq(data.id()))
@@ -271,7 +265,6 @@ impl DbRow for data::Task {
             err: row.get_unwrap("err"),
             start_time: row.get_unwrap("start_time"),
             end_time: row.get_unwrap("end_time"),
-            hooks: row.get_unwrap("hooks"),
             timestamp: row.get_unwrap("timestamp"),
         })
     }
@@ -313,7 +306,6 @@ impl DbInit for TaskCollection {
                         .big_integer()
                         .default(0),
                 )
-                .col(ColumnDef::new(CollectionIden::Hooks).string())
                 .build(SqliteQueryBuilder),
             Index::create()
                 .name("idx_tasks_pid")

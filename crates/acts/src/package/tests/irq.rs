@@ -972,16 +972,16 @@ async fn pack_irq_do_action_not_act_req_task() {
 }
 
 #[tokio::test]
-async fn pack_irq_on_catch() {
+async fn pack_irq_on_catch_one() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_name("step1").with_act(
             Act::irq(|act| act.with_key("act1"))
                 .with_id("act1")
-                .with_catch(|c| {
-                    c.with_on("err1").with_step(|step| {
-                        step.with_act(Act::irq(|act| act.with_key("act2")).with_id("act2"))
-                    })
-                }),
+                .with_catch(Act::irq(|act| {
+                    act.with_key("act2")
+                        .with_id("act2")
+                        .with_if(r#"$ecode() == "err1""#)
+                })),
         )
     });
 
@@ -1017,11 +1017,11 @@ async fn pack_irq_on_catch_as_error() {
         step.with_name("step1").with_act(
             Act::irq(|act| act.with_key("act1"))
                 .with_id("act1")
-                .with_catch(|c| {
-                    c.with_on("err1").with_step(|step| {
-                        step.with_act(Act::irq(|act| act.with_key("act2")).with_id("act2"))
-                    })
-                }),
+                .with_catch(Act::irq(|act| {
+                    act.with_key("act2")
+                        .with_id("act2")
+                        .with_if(r#"$ecode() == "err1""#)
+                })),
         )
     });
 
@@ -1069,11 +1069,11 @@ async fn pack_irq_on_catch_as_skip() {
         step.with_name("step1").with_act(
             Act::irq(|act| act.with_key("act1"))
                 .with_id("act1")
-                .with_catch(|c| {
-                    c.with_on("err1").with_step(|step| {
-                        step.with_act(Act::irq(|act| act.with_key("act2")).with_id("act2"))
-                    })
-                }),
+                .with_catch(Act::irq(|act| {
+                    act.with_key("act2")
+                        .with_id("act2")
+                        .with_if(r#"$ecode() == "err1""#)
+                })),
         )
     });
 
@@ -1101,7 +1101,7 @@ async fn pack_irq_on_catch_as_skip() {
     proc.print();
     assert_eq!(
         proc.task_by_nid("act1").first().unwrap().state(),
-        TaskState::Completed
+        TaskState::Error
     );
     assert_eq!(
         proc.task_by_nid("act2").first().unwrap().state(),
@@ -1115,11 +1115,11 @@ async fn pack_irq_on_catch_no_match() {
         step.with_name("step1").with_act(
             Act::irq(|act| act.with_key("act1"))
                 .with_id("act1")
-                .with_catch(|c| {
-                    c.with_on("err1").with_step(|step| {
-                        step.with_act(Act::irq(|act| act.with_key("act2")).with_id("act2"))
-                    })
-                }),
+                .with_catch(Act::irq(|act| {
+                    act.with_key("act2")
+                        .with_id("act2")
+                        .with_if(r#"$ecode() == "err1""#)
+                })),
         )
     });
 
@@ -1150,11 +1150,7 @@ async fn pack_irq_on_catch_match_any() {
         step.with_name("step1").with_act(
             Act::irq(|act| act.with_key("act1"))
                 .with_id("act1")
-                .with_catch(|c| {
-                    c.with_step(|step| {
-                        step.with_act(Act::irq(|act| act.with_key("act2")).with_id("act2"))
-                    })
-                }),
+                .with_catch(Act::irq(|act| act.with_key("act2")).with_id("act2")),
         )
     });
 
@@ -1198,12 +1194,11 @@ async fn pack_irq_on_catch_as_complete() {
         step.with_name("step1").with_act(
             Act::irq(|act| act.with_key("act1"))
                 .with_id("act1")
-                .with_catch(|c| {
-                    c.with_on("err1").with_step(|step| {
-                        step.with_id("step2")
-                            .with_act(Act::irq(|act| act.with_key("act2")).with_id("act2"))
-                    })
-                }),
+                .with_catch(Act::irq(|act| {
+                    act.with_key("act2")
+                        .with_id("act2")
+                        .with_if(r#"$ecode() == 'err1'"#)
+                })),
         )
     });
 
@@ -1313,11 +1308,11 @@ async fn pack_irq_on_timeout() {
         step.with_name("step1").with_act(
             Act::irq(|act| act.with_key("act1"))
                 .with_id("act1")
-                .with_timeout(|c| {
-                    c.with_on("2s").with_step(|stmts| {
-                        stmts.with_act(Act::irq(|act| act.with_key("act2")).with_id("act2"))
-                    })
-                }),
+                .with_timeout(Act::irq(|act| {
+                    act.with_key("act2")
+                        .with_id("act2")
+                        .with_if(r#"$cost() > 2000"#)
+                })),
         )
     });
 

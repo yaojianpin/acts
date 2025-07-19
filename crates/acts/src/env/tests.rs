@@ -437,8 +437,8 @@ async fn env_step_get_data_by_id() {
 
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new()
-        .with_step(|step| step.with_id("step1").with_var("a", 10.into()))
-        .with_step(|step| step.with_id("step2").with_var("b", "abc".into()));
+        .with_step(|step| step.with_id("step1").with_var("a", 10))
+        .with_step(|step| step.with_id("step2").with_var("b", "abc"));
     let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     engine.channel().on_complete(move |_| s1.close());
     sig.recv().await;
@@ -471,7 +471,7 @@ async fn env_step_get_data_null() {
     let s1 = sig.clone();
 
     let env = engine.runtime().env().clone();
-    let workflow = Workflow::new().with_step(|step| step.with_id("step1").with_var("a", 10.into()));
+    let workflow = Workflow::new().with_step(|step| step.with_id("step1").with_var("a", 10));
     let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     engine.channel().on_complete(move |_| s1.close());
     sig.recv().await;
@@ -495,7 +495,7 @@ async fn env_step_set_data_err_with_completed_state() {
     let s1 = sig.clone();
 
     let env = engine.runtime().env().clone();
-    let workflow = Workflow::new().with_step(|step| step.with_id("step1").with_var("a", 10.into()));
+    let workflow = Workflow::new().with_step(|step| step.with_id("step1").with_var("a", 10));
     let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     engine.channel().on_complete(move |_| s1.close());
     sig.recv().await;
@@ -521,7 +521,7 @@ async fn env_step_set_data_ok_with_running_state() {
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_var("a", 10.into())
+            .with_var("a", 10)
             .with_act(Act::irq(|act| act.with_key("test")))
     });
     engine.channel().on_message(move |e| {
@@ -561,7 +561,7 @@ async fn env_step_get_data() {
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_var("a", 10.into())
+            .with_var("a", 10)
             .with_act(Act::irq(|act| act.with_key("test")))
     });
     engine.channel().on_message(move |e| {
@@ -594,7 +594,7 @@ async fn env_step_get_inputs() {
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_var("a", 10.into())
+            .with_var("a", 10)
             .with_act(Act::irq(|act| act.with_key("test")))
     });
     engine.channel().on_message(move |e| {

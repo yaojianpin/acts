@@ -17,9 +17,14 @@ pub const ACT_VALUE: &str = "$value";
 
 pub const TASK_EMIT_DISABLED: &str = "__emit_disabled";
 pub const TASK_AUOT_COMPLETE: &str = "__auto_complete";
-pub const IS_CATCH_PROCESSED: &str = "__is_catch_processed";
-pub const IS_EVENT_PROCESSED: &str = "__is_event_processed";
-pub const IS_TIMEOUT_PROCESSED_PREFIX: &str = "__is_timeout_";
+
+pub const TASK_SIGN: &str = "__sign";
+pub const TASK_SIGN_ERR: &str = "error";
+pub const TASK_SIGN_CATCH: &str = "catch";
+pub const TASK_SIGN_TIMEOUTS: &str = "timeouts";
+
+pub const TASK_TIMEOUTS: &str = "__timeouts";
+pub const TASK_COST: &str = "__cost";
 
 pub const ACT_EXPOSE: &str = "expose";
 

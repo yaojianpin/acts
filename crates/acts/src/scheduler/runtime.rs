@@ -255,8 +255,10 @@ impl Runtime {
 
                 let ctx = e.create_context();
                 // run the hook events
-                e.run_hooks(&ctx)
-                    .unwrap_or_else(|err| error!("scher.initialize hooks={}", err));
+                if e.state().is_error() {
+                    e.run_hooks_err(&ctx)
+                        .unwrap_or_else(|err| error!("scher.initialize hooks={}", err));
+                }
 
                 // check task is allowed to emit message to client
                 if !e.state().is_pending() && !e.state().is_running() && !e.is_emit_disabled() {

@@ -19,7 +19,11 @@ impl ActJsModule {
 #[allow(clippy::module_inception)]
 #[rquickjs::module(rename_vars = "camelCase")]
 mod act {
-    use crate::{Context, Vars, env::value::ActValue};
+    use crate::{
+        Context, TimeoutLimit, Vars,
+        env::value::ActValue,
+        utils::{self, consts},
+    };
 
     #[rquickjs::function]
     pub fn get_act_value(name: String) -> Option<ActValue> {
@@ -57,6 +61,31 @@ mod act {
     pub fn get_act_data() -> ActValue {
         Context::with(|ctx| ctx.task().data().into())
     }
+
+    #[rquickjs::function]
+    pub fn err_code() -> Option<String> {
+        Context::with(|ctx| ctx.task().data().get::<String>(consts::ACT_ERR_CODE))
+    }
+
+    #[rquickjs::function]
+    pub fn cost() -> i64 {
+        Context::with(|ctx| {
+            // the data.cost is user custom cost value
+            if let Some(cost) = ctx.task().data().get::<i64>(consts::TASK_COST) {
+                return cost;
+            }
+            ctx.task().cost()
+        })
+    }
+
+    #[rquickjs::function]
+    pub fn cost_in(value: String) -> bool {
+        Context::with(|ctx| {
+            let millis = utils::time::time_millis() - ctx.task().start_time();
+            let on = TimeoutLimit::parse(&value).unwrap_or_default();
+            millis >= on.as_secs() * 1000
+        })
+    }
 }
 
 impl ActModule for ActJsModule {
@@ -70,13 +99,16 @@ impl ActModule for ActJsModule {
         }
 
         let source = r#"
-        import { get_act_value, set_act_value, set_process_var, get_act_inputs, get_act_data } from '@acts/act';
+        import { get_act_value, set_act_value, set_process_var, get_act_inputs, get_act_data, err_code, cost, cost_in } from '@acts/act';
 
         globalThis.$get = get_act_value;
         globalThis.$set = set_act_value;
         globalThis.$inputs = get_act_inputs;
         globalThis.$data = get_act_data;
         globalThis.$set_process_var = set_process_var;
+        globalThis.$ecode = err_code;
+        globalThis.$cost = cost
+        globalThis.$cost_in = cost_in
         "#;
         let _ = JsModule::evaluate(ctx.clone(), "@acts/act", source)
             .catch(ctx)
