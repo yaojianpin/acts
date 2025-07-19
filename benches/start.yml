@@ -1,10 +1,10 @@
   id: test1
-  inputs: 
+  vars: 
     a: 100
   steps:
     - name: step 1
     - name: step 2
-      inputs:
+      vars:
         e: abc
       branches:
         - name: branch 1
