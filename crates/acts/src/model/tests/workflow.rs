@@ -1,8 +1,9 @@
-use crate::{Vars, Workflow};
+use crate::{ActValue, Variant, Vars, Workflow, model::var::VariantTypes, utils::consts};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 #[test]
-fn model_workflow_from_yml_str() {
+fn model_workflow_from_yml_str_name_id() {
     let text = r#"
     name: workflow
     id: m1
@@ -13,7 +14,114 @@ fn model_workflow_from_yml_str() {
 }
 
 #[test]
-fn model_workflow_from_json_str() {
+fn model_workflow_from_yml_str_env() {
+    let text = r#"
+    env:
+        - name: a
+          value: 10
+        - name: b
+          value: abc
+        - name: c
+          value: 
+            - 1
+            - 2
+        - name: d
+          value: 
+            v1: 1
+            v2: 2
+    "#;
+    let m = Workflow::from_yml(text).unwrap();
+    let env = m.env();
+
+    #[derive(Serialize, Deserialize, Clone)]
+    struct Obj {
+        v1: i32,
+        v2: i32,
+    }
+    assert_eq!(env.get::<i32>("a").unwrap(), 10);
+    assert_eq!(env.get::<String>("b").unwrap(), "abc");
+    assert_eq!(env.get::<Vec<i32>>("c").unwrap(), vec![1, 2]);
+
+    let obj = env.get::<Obj>("d").unwrap();
+    assert_eq!(obj.v1, 1);
+    assert_eq!(obj.v2, 2);
+}
+
+#[test]
+fn model_workflow_from_yml_str_vars() {
+    let text = r#"
+    vars:
+        - name: a
+          value: 10
+        - name: b
+          value: abc
+        - name: c
+          value: 
+            - 1
+            - 2
+        - name: d
+          value: 
+            v1: 1
+            v2: 2
+    "#;
+    let m = Workflow::from_yml(text).unwrap();
+    let vars = m.vars();
+
+    #[derive(Serialize, Deserialize, Clone)]
+    struct Obj {
+        v1: i32,
+        v2: i32,
+    }
+    assert_eq!(vars.get::<i32>("a").unwrap(), 10);
+    assert_eq!(vars.get::<String>("b").unwrap(), "abc");
+    assert_eq!(vars.get::<Vec<i32>>("c").unwrap(), vec![1, 2]);
+
+    let obj = vars.get::<Obj>("d").unwrap();
+    assert_eq!(obj.v1, 1);
+    assert_eq!(obj.v2, 2);
+}
+
+#[test]
+fn model_workflow_from_yml_str_expose() {
+    let text = r#"
+    options:
+        expose:
+            - name: a
+              value: 10
+            - name: b
+              value: abc
+            - name: c
+              value: 
+                - 1
+                - 2
+            - name: d
+              value: 
+                v1: 1
+                v2: 2
+    "#;
+    let m = Workflow::from_yml(text).unwrap();
+    let expose: Vars = m
+        .options
+        .get::<Vec<Variant>>(consts::ACT_EXPOSE)
+        .unwrap()
+        .into();
+
+    #[derive(Serialize, Deserialize, Clone)]
+    struct Obj {
+        v1: i32,
+        v2: i32,
+    }
+    assert_eq!(expose.get::<i32>("a").unwrap(), 10);
+    assert_eq!(expose.get::<String>("b").unwrap(), "abc");
+    assert_eq!(expose.get::<Vec<i32>>("c").unwrap(), vec![1, 2]);
+
+    let obj = expose.get::<Obj>("d").unwrap();
+    assert_eq!(obj.v1, 1);
+    assert_eq!(obj.v2, 2);
+}
+
+#[test]
+fn model_workflow_from_json_str_name_id() {
     let text = r#"
     {
         "name": "workflow",
@@ -52,16 +160,15 @@ fn model_workflow_set_vars() {
     let mut vars = Vars::new();
     vars.insert("v1".to_string(), 5.into());
     m.set_vars(&vars);
-    assert_eq!(m.vars.get_value("v1"), Some(&json!(5)));
+    assert_eq!(m.vars().get::<i32>("v1").unwrap(), 5);
 }
 
 #[test]
 fn model_workflow_set_env() {
     let mut m = Workflow::new();
-    let mut vars = Vars::new();
-    vars.insert("v1".to_string(), 5.into());
+    let vars = vec![Variant::create("v1", 5)];
     m.set_env(&vars);
-    assert_eq!(m.env.get_value("v1"), Some(&json!(5)));
+    assert_eq!(m.env().get_value("v1"), Some(&json!(5)));
 }
 
 #[test]
@@ -92,14 +199,16 @@ fn model_workflow_desc() {
 
 #[test]
 fn model_workflow_inputs_schema() {
-    let schema = json!({ "type": ["string"] });
+    let schema = ActValue::Var(Variant::new().name("input").r#type(VariantTypes::String));
     let m = Workflow::new().with_inputs(schema.clone());
     assert_eq!(m.inputs, schema);
 }
 
 #[test]
 fn model_workflow_outputs_schema() {
-    let schema = json!({ "type": "object", "properties": { "data": { "type": "string"} } });
+    let schema = ActValue::Vars(vec![
+        Variant::new().name("data").r#type(VariantTypes::String),
+    ]);
     let m = Workflow::new().with_outputs(schema.clone());
     assert_eq!(m.outputs, schema);
 }

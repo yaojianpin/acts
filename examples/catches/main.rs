@@ -20,7 +20,10 @@ async fn main() {
         .expect("deploy model");
 
     engine.channel().on_message(move |e| {
-        println!("on_message: key={} inputs={}", e.key, e.inputs);
+        println!(
+            "on_message: key={} state={} inputs={}",
+            e.key, e.state, e.inputs
+        );
         let ret = client.process(&executor, e);
         if ret.is_err() {
             eprintln!("{}", ret.err().unwrap());

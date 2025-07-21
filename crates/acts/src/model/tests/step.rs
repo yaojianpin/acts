@@ -26,7 +26,8 @@ fn model_step_yml_vars() {
     steps:
         - id: act1
           vars:
-            p1: 5
+            - name: p1
+              value: 5
     "#;
     let m = Workflow::from_yml(text).unwrap();
     assert_eq!(m.steps.len(), 1);
@@ -34,11 +35,11 @@ fn model_step_yml_vars() {
 
     let step = m.steps.first().unwrap();
     assert_eq!(step.vars.len(), 1);
-    assert_eq!(step.vars.get_value("p1"), Some(&json!(5)));
+    assert_eq!(step.vars().get_value("p1"), Some(&json!(5)));
 }
 
 #[test]
-fn model_step_yml_outputs() {
+fn model_step_yml_expose() {
     let text = r#"
     name: workflow
     id: m1
@@ -46,7 +47,7 @@ fn model_step_yml_outputs() {
         - id: act1
           options:
             expose:
-                p1:
+                - name: p1
     "#;
     let m = Workflow::from_yml(text).unwrap();
     assert_eq!(m.steps.len(), 1);
@@ -54,9 +55,9 @@ fn model_step_yml_outputs() {
 
     let step = m.steps.first().unwrap();
 
-    let options = step.options.get::<Vars>(consts::ACT_EXPOSE).unwrap();
-    assert_eq!(options.len(), 1);
-    assert_eq!(options.get_value("p1"), Some(&json!(null)));
+    let exposes = step.exposes();
+    assert_eq!(exposes.len(), 1);
+    assert_eq!(exposes.get_value("p1"), Some(&json!(null)));
 }
 
 #[test]
@@ -81,12 +82,12 @@ fn model_step_desc() {
 fn model_step_set_var() {
     let step = Step::new().with_var("p1", json!(5));
     assert_eq!(step.vars.len(), 1);
-    assert_eq!(step.vars.get_value("p1"), Some(&json!(5)));
+    assert_eq!(step.vars().get_value("p1"), Some(&json!(5)));
 }
 
 #[test]
 fn model_step_set_output() {
-    let step = Step::new().with_output("p1", json!(5));
+    let step = Step::new().with_expose("p1", json!(5));
 
     let options = step.options.get::<Vars>(consts::ACT_EXPOSE).unwrap();
     assert_eq!(options.len(), 1);

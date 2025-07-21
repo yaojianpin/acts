@@ -118,7 +118,7 @@ async fn sch_message_workflow_outputs() {
     let mut workflow = Workflow::new()
         .with_id("my_id")
         .with_var("a", json!(5))
-        .with_options_expose("a", json!(null));
+        .with_expose("a", json!(null));
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<Message>(&mut workflow, &id);
     emitter.on_message(move |e| {
@@ -182,7 +182,7 @@ async fn sch_message_step_outputs() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_var("a", json!(5))
-            .with_output("a", json!(null))
+            .with_expose("a", json!(null))
     });
     let id = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<Message>(&mut workflow, &id);
@@ -381,7 +381,7 @@ async fn sch_message_act_outputs() {
         step.with_id("step1").with_act(Act::irq(|act| {
             act.with_key("act1")
                 .with_var("a", json!(5))
-                .with_output("a", json!(null))
+                .with_expose("a", json!(null))
         }))
     });
     let id = utils::longid();

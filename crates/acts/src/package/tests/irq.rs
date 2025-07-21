@@ -679,8 +679,8 @@ async fn pack_irq_do_action_outputs() {
         step.with_id("step1").with_name("step1").with_act(
             Act::irq(|act| {
                 act.with_key("fn1")
-                    .with_output("a", json!(null))
-                    .with_output("b", json!(null))
+                    .with_expose("a", json!(null))
+                    .with_expose("b", json!(null))
                     .with_var("uid", json!("a"))
             })
             .with_id("fn1"),
@@ -751,9 +751,9 @@ async fn pack_irq_do_action_rets() {
         step.with_id("step1").with_name("step1").with_act(
             Act::irq(|act| {
                 act.with_key("fn1")
-                    .with_output("a", json!(null))
-                    .with_output("b", json!(null))
-                    .with_output("c", json!(null))
+                    .with_expose("a", json!(null))
+                    .with_expose("b", json!(null))
+                    .with_expose("c", json!(null))
                     .with_var("uid", json!("a"))
             })
             .with_id("fn1"),
@@ -862,7 +862,7 @@ async fn pack_irq_do_action_output_key_check() {
             .with_name("step1")
             .with_act(Act::irq(|act| {
                 act.with_key("fn1")
-                    .with_output("abc", json!(null))
+                    .with_expose("abc", json!(null))
                     .with_var("uid", json!("a"))
             }))
     });

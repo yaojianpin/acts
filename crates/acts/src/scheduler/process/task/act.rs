@@ -185,14 +185,13 @@ impl ActTask for Act {
 
 impl Act {
     pub fn dispatch(&self, ctx: &Context, vars: Vars) -> Result<()> {
-        // let package = ctx.executor.pack().get(&self.uses)?;
         let mut act = self.clone();
         if let Some(v) = ctx.get_var::<u32>(consts::ACT_INDEX) {
-            act.vars.set(consts::ACT_INDEX, v);
+            act.vars.push(crate::Variant::create(consts::ACT_INDEX, v));
         }
 
         if let Some(v) = ctx.get_var::<String>(consts::ACT_VALUE) {
-            act.vars.set(consts::ACT_VALUE, v);
+            act.vars.push(crate::Variant::create(consts::ACT_VALUE, v));
         }
 
         ctx.dispatch_act(self, vars)?;

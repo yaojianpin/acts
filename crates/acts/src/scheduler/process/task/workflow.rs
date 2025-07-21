@@ -5,8 +5,8 @@ impl ActTask for Workflow {
         // init process env
         if !self.env.is_empty() {
             ctx.proc.with_env_mut(|data| {
-                for (k, v) in self.env.iter() {
-                    data.set(k, v.clone());
+                for var in self.env.iter() {
+                    data.set(&var.name, var.value.clone());
                 }
             });
         }

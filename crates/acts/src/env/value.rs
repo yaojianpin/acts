@@ -6,9 +6,9 @@ use rquickjs::{
 use serde::de::DeserializeOwned;
 
 #[derive(Debug)]
-pub struct ActValue(serde_json::Value);
+pub struct ActJsValue(serde_json::Value);
 
-impl ActValue {
+impl ActJsValue {
     pub fn new(v: serde_json::Value) -> Self {
         Self(v)
     }
@@ -25,7 +25,7 @@ impl ActValue {
     }
 }
 
-impl<'js> IntoJs<'js> for ActValue {
+impl<'js> IntoJs<'js> for ActJsValue {
     fn into_js(self, ctx: &rquickjs::Ctx<'js>) -> rquickjs::Result<JsValue<'js>> {
         let value = match self.0 {
             serde_json::Value::Null => JsValue::new_null(ctx.clone()),
@@ -48,7 +48,7 @@ impl<'js> IntoJs<'js> for ActValue {
             serde_json::Value::Array(v) => {
                 let arr = JsArray::new(ctx.clone()).unwrap();
                 for (idx, v) in v.iter().enumerate() {
-                    let val = ActValue(v.clone()).into_js(ctx).unwrap();
+                    let val = ActJsValue(v.clone()).into_js(ctx).unwrap();
                     arr.set(idx, val).unwrap();
                 }
                 JsValue::from_array(arr)
@@ -56,8 +56,11 @@ impl<'js> IntoJs<'js> for ActValue {
             serde_json::Value::Object(v) => {
                 let obj = JsObject::new(ctx.clone()).unwrap();
                 for (k, v) in v {
-                    obj.set(k.into_atom(ctx).unwrap(), ActValue(v).into_js(ctx).unwrap())
-                        .unwrap();
+                    obj.set(
+                        k.into_atom(ctx).unwrap(),
+                        ActJsValue(v).into_js(ctx).unwrap(),
+                    )
+                    .unwrap();
                 }
 
                 JsValue::from_object(obj)
@@ -68,7 +71,7 @@ impl<'js> IntoJs<'js> for ActValue {
     }
 }
 
-impl<'js> FromJs<'js> for ActValue {
+impl<'js> FromJs<'js> for ActJsValue {
     fn from_js(ctx: &rquickjs::Ctx<'js>, v: JsValue<'js>) -> rquickjs::Result<Self> {
         let result = match v.type_of() {
             rquickjs::Type::Null | rquickjs::Type::Undefined | rquickjs::Type::Uninitialized => {
@@ -90,7 +93,7 @@ impl<'js> FromJs<'js> for ActValue {
                         .unwrap_or(empty)
                         .iter::<JsValue>()
                         .filter_map(|v| {
-                            v.map(|v| ActValue::from_js(ctx, v.clone()).unwrap().into())
+                            v.map(|v| ActJsValue::from_js(ctx, v.clone()).unwrap().into())
                                 .ok()
                         })
                         .collect(),
@@ -115,7 +118,7 @@ impl<'js> FromJs<'js> for ActValue {
                     })
                     .collect::<Vec<_>>();
                 for (k, v) in values {
-                    value.insert(k.clone(), ActValue::from_js(ctx, v)?.into());
+                    value.insert(k.clone(), ActJsValue::from_js(ctx, v)?.into());
                 }
                 Ok(serde_json::Value::Object(value))
             }
@@ -140,24 +143,24 @@ impl<'js> FromJs<'js> for ActValue {
             )),
         }?;
 
-        Ok(ActValue(result))
+        Ok(ActJsValue(result))
     }
 }
 
-impl From<ActValue> for serde_json::Value {
-    fn from(val: ActValue) -> Self {
+impl From<ActJsValue> for serde_json::Value {
+    fn from(val: ActJsValue) -> Self {
         val.0
     }
 }
 
-impl From<Vars> for ActValue {
+impl From<Vars> for ActJsValue {
     fn from(value: Vars) -> Self {
-        ActValue(value.into())
+        ActJsValue(value.into())
     }
 }
 
-impl From<String> for ActValue {
+impl From<String> for ActJsValue {
     fn from(value: String) -> Self {
-        ActValue(value.into())
+        ActJsValue(value.into())
     }
 }

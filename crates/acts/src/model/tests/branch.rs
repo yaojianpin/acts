@@ -1,4 +1,4 @@
-use crate::{Branch, Vars, utils::consts};
+use crate::{Branch, Vars, Workflow, utils::consts};
 use serde_json::json;
 
 #[test]
@@ -17,12 +17,12 @@ fn model_branch_name() {
 fn model_branch_vars() {
     let b = Branch::new().with_var("p1", json!(5));
     assert_eq!(b.vars.len(), 1);
-    assert_eq!(b.vars.get_value("p1"), Some(&json!(5)));
+    assert_eq!(b.vars().get_value("p1"), Some(&json!(5)));
 }
 
 #[test]
 fn model_branch_outputs() {
-    let b = Branch::new().with_output("p1", json!(5));
+    let b = Branch::new().with_expose("p1", json!(5));
 
     let options = b.options.get::<Vars>(consts::ACT_EXPOSE).unwrap();
     assert_eq!(options.len(), 1);
@@ -91,4 +91,51 @@ fn model_branch_set_metadata() {
     assert_eq!(b.metadata.get::<String>("r2").unwrap(), "abc");
     assert_eq!(b.metadata.get::<Vec<String>>("r3").unwrap(), vec!["a", "b"]);
     assert!(b.metadata.get::<bool>("r4").unwrap());
+}
+
+#[test]
+fn model_branch_yml_vars() {
+    let text = r#"
+    name: workflow
+    id: m1
+    steps:
+        - id: step1
+          branches:
+            - id: b1
+              if: true
+              vars:
+                - name: p1
+                  value: 5
+
+    "#;
+    let m = Workflow::from_yml(text).unwrap();
+
+    let step = m.steps.first().unwrap();
+    let barnch = step.branches.first().unwrap();
+    assert_eq!(barnch.vars.len(), 1);
+    assert_eq!(barnch.vars().get_value("p1"), Some(&json!(5)));
+}
+
+#[test]
+fn model_branch_yml_expose() {
+    let text = r#"
+    name: workflow
+    id: m1
+    steps:
+        - id: step1
+          branches:
+            - id: b1
+              if: true
+              options:
+                expose:
+                    - name: p1
+
+    "#;
+
+    let m = Workflow::from_yml(text).unwrap();
+    let step = m.steps.first().unwrap();
+    let barnch = step.branches.first().unwrap();
+    let exposes = barnch.exposes();
+    assert_eq!(exposes.len(), 1);
+    assert_eq!(exposes.get_value("p1"), Some(&json!(null)));
 }

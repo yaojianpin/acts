@@ -3,7 +3,7 @@ pub mod secrets;
 use super::super::ActModule;
 use crate::{
     Context, Result, Vars,
-    env::{Enviroment, value::ActValue},
+    env::{Enviroment, value::ActJsValue},
 };
 
 pub struct UserVars {
@@ -38,7 +38,7 @@ impl ActModule for UserVars {
                     data.set(k, v);
                 }
             }
-            ctx.globals().set(env.name(), ActValue::new(data.into()))?;
+            ctx.globals().set(env.name(), ActJsValue::new(data.into()))?;
         }
         Ok(())
     }

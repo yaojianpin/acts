@@ -81,7 +81,7 @@ async fn pack_code_outputs() {
             "#,
             )
             .with_id("code1")
-            .with_output("my_output", json!(null)),
+            .with_expose("my_output", json!(null)),
         )
     });
 

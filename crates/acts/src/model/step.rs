@@ -1,8 +1,8 @@
-use crate::utils::consts;
 #[allow(unused_imports)]
 use crate::{Act, Catch, ModelBase, Timeout, Vars, model::Branch};
+use crate::{Variant, utils::consts};
 use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
+use serde_json::json;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Step {
@@ -17,7 +17,7 @@ pub struct Step {
 
     /// define the step vars
     #[serde(default)]
-    pub vars: Vars,
+    pub vars: Vec<Variant>,
 
     #[serde(default)]
     pub tag: String,
@@ -99,21 +99,43 @@ impl Step {
     where
         T: Serialize + Clone,
     {
-        self.vars.set(name, value);
+        self.vars.push(Variant::create(name, json!(value)));
         self
     }
 
-    pub fn with_output(mut self, name: &str, value: JsonValue) -> Self {
+    pub fn vars(&self) -> Vars {
+        let mut ret = Vars::new();
+        self.vars.iter().for_each(|var| {
+            ret.set(&var.name, var.value.clone());
+        });
+
+        ret
+    }
+
+    pub fn with_expose<T>(mut self, name: &str, value: T) -> Self
+    where
+        T: Serialize + Clone,
+    {
         self.options
             .entry(consts::ACT_EXPOSE)
             .and_modify(|outputs| {
                 if let Some(obj) = outputs.as_object_mut() {
-                    obj.insert(name.to_string(), value.clone());
+                    obj.insert(name.to_string(), json!(value));
                 }
             })
             .or_insert(Vars::new().with(name, value).into());
 
         self
+    }
+
+    pub fn exposes(&self) -> Vars {
+        let mut vars = Vars::new();
+        if let Some(expose) = self.options.get::<Vec<Variant>>(consts::ACT_EXPOSE) {
+            expose.iter().for_each(|var| {
+                vars.set(&var.name, var.value.clone());
+            });
+        }
+        vars
     }
 
     pub fn with_branch(mut self, build: fn(Branch) -> Branch) -> Self {

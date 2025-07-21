@@ -1,5 +1,6 @@
 use crate::{
-    Act, MessageState, TaskState, Workflow,
+    Act, MessageState, TaskState, Vars, Workflow,
+    event::EventAction,
     scheduler::tests::{create_proc, create_proc_signal},
     utils,
 };
@@ -57,7 +58,39 @@ async fn sch_task_step_completed() {
 }
 
 #[tokio::test]
-async fn sch_task_step() {
+async fn sch_task_step_skip_with_inputs_to_next() {
+    let mut workflow = Workflow::new()
+        .with_step(|step| {
+            step.with_id("step1")
+                .with_var("v1", 10)
+                .with_act(Act::irq(|act| act.with_key("act1")))
+        })
+        .with_step(|step| {
+            step.with_id("step2")
+                .with_act(Act::irq(|act| act.with_key("act2")))
+        });
+
+    let (proc, scher, emitter, tx, rx) =
+        create_proc_signal::<Vars>(&mut workflow, &utils::longid());
+    emitter.on_message(move |e| {
+        println!("message: {e:?}");
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
+            e.do_action(&e.pid, &e.tid, EventAction::Skip, Vars::new())
+                .unwrap();
+        }
+
+        if e.is_key("act2") && e.is_state(MessageState::Created) {
+            rx.send(e.inputs.clone());
+        }
+    });
+
+    scher.launch(&proc);
+    let ret = tx.recv().await;
+    assert_eq!(ret.get::<i32>("v1").unwrap(), 10);
+}
+
+#[tokio::test]
+async fn sch_task_step_empty_acts() {
     let mut workflow = Workflow::new().with_step(|step| step.with_name("step1"));
     let id = utils::longid();
     workflow.print();
@@ -188,7 +221,7 @@ async fn sch_task_branch_empty_if() {
 
 #[tokio::test]
 async fn sch_task_branch_if_false_else_success() {
-    let mut workflow = Workflow::new().with_var("v", 1.into()).with_step(|step| {
+    let mut workflow = Workflow::new().with_var("v", 1).with_step(|step| {
         step.with_name("step1")
             .with_branch(|branch| {
                 branch
@@ -221,7 +254,7 @@ async fn sch_task_branch_if_false_else_success() {
 
 #[tokio::test]
 async fn sch_task_branch_if_false_else_running() {
-    let mut workflow = Workflow::new().with_var("v", 1.into()).with_step(|step| {
+    let mut workflow = Workflow::new().with_var("v", 1).with_step(|step| {
         step.with_name("step1")
             .with_branch(|branch| {
                 branch
@@ -276,7 +309,7 @@ async fn sch_task_branch_if_false_else_running() {
 
 #[tokio::test]
 async fn sch_task_branch_if_true_else() {
-    let mut workflow = Workflow::new().with_var("v", 1.into()).with_step(|step| {
+    let mut workflow = Workflow::new().with_var("v", 1).with_step(|step| {
         step.with_id("step1")
             .with_branch(|branch| {
                 branch
@@ -313,7 +346,7 @@ async fn sch_task_branch_if_true_else() {
 
 #[tokio::test]
 async fn sch_task_branch_if_two_no_else() {
-    let mut workflow = Workflow::new().with_var("v", 1.into()).with_step(|step| {
+    let mut workflow = Workflow::new().with_var("v", 1).with_step(|step| {
         step.with_name("step1")
             .with_branch(|branch| {
                 branch
@@ -350,7 +383,7 @@ async fn sch_task_branch_if_two_no_else() {
 
 #[tokio::test]
 async fn sch_task_branch_if_mutli_true() {
-    let mut workflow = Workflow::new().with_var("v", 5.into()).with_step(|step| {
+    let mut workflow = Workflow::new().with_var("v", 5).with_step(|step| {
         step.with_name("step1")
             .with_branch(|branch| {
                 branch
@@ -398,7 +431,7 @@ async fn sch_task_branch_if_mutli_true() {
 
 #[tokio::test]
 async fn sch_task_branch_needs_state() {
-    let mut workflow = Workflow::new().with_var("v", 5.into()).with_step(|step| {
+    let mut workflow = Workflow::new().with_var("v", 5).with_step(|step| {
         step.with_name("step1")
             .with_branch(|branch| {
                 branch
@@ -440,4 +473,31 @@ async fn sch_task_branch_needs_state() {
         proc.task_by_nid("b2").first().unwrap().state(),
         TaskState::Pending
     );
+}
+
+#[tokio::test]
+async fn sch_task_act_skip_with_inputs_to_next() {
+    let mut workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::irq(|act| act.with_key("act1")).with_var("v1", 10))
+            .with_act(Act::irq(|act| act.with_key("act2")))
+    });
+
+    let (proc, scher, emitter, tx, rx) =
+        create_proc_signal::<Vars>(&mut workflow, &utils::longid());
+    emitter.on_message(move |e| {
+        println!("message: {e:?}");
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
+            e.do_action(&e.pid, &e.tid, EventAction::Skip, Vars::new())
+                .unwrap();
+        }
+
+        if e.is_key("act2") && e.is_state(MessageState::Created) {
+            rx.send(e.inputs.clone());
+        }
+    });
+
+    scher.launch(&proc);
+    let ret = tx.recv().await;
+    assert_eq!(ret.get::<i32>("v1").unwrap(), 10);
 }

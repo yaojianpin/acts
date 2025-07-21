@@ -12,15 +12,15 @@ impl ProcEnv {
 #[allow(clippy::module_inception)]
 #[rquickjs::module(rename_vars = "camelCase")]
 mod env {
-    use crate::{Context, Result, env::value::ActValue};
+    use crate::{Context, Result, env::value::ActJsValue};
 
     #[rquickjs::function]
-    pub fn get_env(name: String) -> Option<ActValue> {
-        Context::with(|ctx| ctx.get_env(&name).map(ActValue::new))
+    pub fn get_env(name: String) -> Option<ActJsValue> {
+        Context::with(|ctx| ctx.get_env(&name).map(ActJsValue::new))
     }
 
     #[rquickjs::function]
-    pub fn set_env(name: String, value: ActValue) -> Result<()> {
+    pub fn set_env(name: String, value: ActJsValue) -> Result<()> {
         Context::with(|ctx| {
             ctx.set_env(&name, value.inner());
         });

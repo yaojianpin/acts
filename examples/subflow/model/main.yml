@@ -1,10 +1,12 @@
 name: main
 id: main
 vars:
-  v: 0
+  - name: v
+    value: 0
 options:
   expose:
-    result: '{{ v }}'
+    - name: result
+      value: '{{ v }}'
 steps:
   - name: prepare
     id: prepare

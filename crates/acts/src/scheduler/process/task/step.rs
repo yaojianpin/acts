@@ -117,6 +117,15 @@ impl ActTask for Step {
                         ctx.emit_error()?;
                         return Ok(false);
                     } else {
+                        // if the task is originally error, clean the error data
+                        // and set the task state to completed
+                        if task.is_sign(consts::TASK_SIGN_ERR) {
+                            task.set_data_with(|data| {
+                                data.remove(consts::ACT_ERR_MESSAGE);
+                                data.remove(consts::ACT_ERR_CODE);
+                            });
+                        }
+
                         task.set_state(TaskState::Completed);
                     }
                 }

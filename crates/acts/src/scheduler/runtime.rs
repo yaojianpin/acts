@@ -89,8 +89,8 @@ impl Runtime {
         }
 
         // validate the options
-        if !model.inputs.is_null() {
-            jsonschema::validate(&model.inputs, &(options.to_value()))?;
+        if !model.inputs.is_empty() {
+            model.inputs.validate(&(options.to_value()))?;
         }
 
         let mut model = model.clone();
@@ -197,11 +197,9 @@ impl Runtime {
                         } else if state.is_completed() {
                             let mut is_validation_err = false;
                             let outputs = proc.model().outputs;
-                            if !outputs.is_null() {
+                            if !outputs.is_empty() {
                                 // validate the process outputs
-                                if let Err(e) =
-                                    jsonschema::validate(&outputs, &(message.outputs.to_value()))
-                                {
+                                if let Err(e) = outputs.validate(&(message.outputs.to_value())) {
                                     is_validation_err = true;
                                     let error = e.to_string();
                                     message.set_err("", &error);

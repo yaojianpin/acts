@@ -96,8 +96,8 @@ async fn pack_event_manual_start() {
 async fn pack_event_hook_start() {
     let engine = Engine::new().start();
     let workflow = Workflow::new()
-        .with_var("ret", 0.into())
-        .with_options_expose("ret", json!(null))
+        .with_var("ret", 0)
+        .with_expose("ret", json!(null))
         .with_id("my-event-model")
         .with_on(|act| {
             act.with_id("event1")
@@ -126,8 +126,8 @@ async fn pack_event_hook_start() {
 async fn pack_event_chat_start() {
     let engine = Engine::new().start();
     let workflow = Workflow::new()
-        .with_var("ret", 0.into())
-        .with_options_expose("ret", json!(null))
+        .with_var("ret", 0)
+        .with_expose("ret", json!(null))
         .with_id("my-event-model")
         .with_on(|act| act.with_id("event1").with_uses("acts.event.chat"))
         .with_step(|step| step.with_id("step1"));

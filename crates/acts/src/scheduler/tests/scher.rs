@@ -72,7 +72,7 @@ async fn sch_scher_do_action() {
     let rx = sig.clone();
     let workflow = Workflow::new().with_step(|step| {
         step.with_name("step1").with_act(Act::irq(|act| {
-            act.with_key("act1").with_output("uid", json!(null))
+            act.with_key("act1").with_expose("uid", json!(null))
         }))
     });
     let s = rt.clone();

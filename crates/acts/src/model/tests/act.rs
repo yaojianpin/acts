@@ -1,7 +1,7 @@
 mod catch;
 mod timeout;
 
-use crate::{Act, Vars, utils::consts};
+use crate::{Act, Vars, Workflow, utils::consts};
 use serde_json::json;
 
 #[test]
@@ -85,12 +85,12 @@ fn model_act_set_params() {
 #[test]
 fn model_act_set_var() {
     let act = Act::new().with_var("var1", 1);
-    assert_eq!(act.vars.get::<i32>("var1").unwrap(), 1);
+    assert_eq!(act.vars().get::<i32>("var1").unwrap(), 1);
 }
 
 #[test]
 fn model_act_set_output() {
-    let act = Act::new().with_output("var1", 1.into());
+    let act = Act::new().with_expose("var1", 1);
     assert_eq!(
         act.options
             .get::<Vars>(consts::ACT_EXPOSE)
@@ -134,4 +134,51 @@ fn model_act_set_metadata() {
         vec!["a", "b"]
     );
     assert!(act.metadata.get::<bool>("r4").unwrap());
+}
+
+#[test]
+fn model_act_yml_vars() {
+    let text = r#"
+    name: workflow
+    id: m1
+    steps:
+        - id: step1
+          acts:
+            - id: b1
+              uses: acts.core.irq
+              vars:
+                - name: p1
+                  value: 5
+
+    "#;
+    let m = Workflow::from_yml(text).unwrap();
+
+    let step = m.steps.first().unwrap();
+    let act = step.acts.first().unwrap();
+    assert_eq!(act.vars.len(), 1);
+    assert_eq!(act.vars().get_value("p1"), Some(&json!(5)));
+}
+
+#[test]
+fn model_act_yml_expose() {
+    let text = r#"
+    name: workflow
+    id: m1
+    steps:
+        - id: step1
+          acts:
+            - id: b1
+              uses: acts.core.irq
+              options:
+                expose:
+                    - name: p1
+
+    "#;
+
+    let m = Workflow::from_yml(text).unwrap();
+    let step = m.steps.first().unwrap();
+    let act = step.acts.first().unwrap();
+    let exposes = act.exposes();
+    assert_eq!(exposes.len(), 1);
+    assert_eq!(exposes.get_value("p1"), Some(&json!(null)));
 }

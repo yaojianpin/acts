@@ -150,7 +150,7 @@ impl Process {
     pub fn inputs(&self) -> Vars {
         if let Some(task) = self.root() {
             let ctx = task.create_context();
-            let vars = utils::fill_proc_vars(&task, &self.model().vars, &ctx);
+            let vars = utils::fill_proc_vars(&task, &self.model().vars(), &ctx);
             return vars;
         }
         Vars::new()
@@ -160,8 +160,7 @@ impl Process {
         if self.state().is_completed() {
             return self.end_time() - self.start_time();
         }
-
-        0
+        utils::time::time_millis() - self.start_time()
     }
 
     pub fn id(&self) -> &str {

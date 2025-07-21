@@ -1,4 +1,9 @@
-use crate::{Act, ActError, ActUserVar, Context, Engine, Vars, Workflow, env::Enviroment};
+use std::time::Duration;
+
+use crate::{
+    Act, ActError, ActUserVar, Context, Engine, MessageState, Vars, Workflow, env::Enviroment,
+    event::EventAction, utils::consts,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -209,7 +214,7 @@ async fn env_task_get() {
 
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new()
-        .with_var("a", 10.into())
+        .with_var("a", 10)
         .with_step(|step| step.with_id("step1"));
     let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     engine.channel().on_complete(move |_| s1.close());
@@ -234,7 +239,7 @@ async fn env_task_set() {
 
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new()
-        .with_var("a", 10.into())
+        .with_var("a", 10)
         .with_step(|step| step.with_id("step1"));
     let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     engine.channel().on_complete(move |_| s1.close());
@@ -280,7 +285,7 @@ async fn env_env_get_local() {
 
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new()
-        .with_env("a", 10.into())
+        .with_env("a", 10)
         .with_step(|step| step.with_id("step1"));
     let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     engine.channel().on_complete(move |_| s1.close());
@@ -305,7 +310,7 @@ async fn env_env_set_proc_env() {
 
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new()
-        .with_env("a", 100.into())
+        .with_env("a", 100)
         .with_step(|step| step.with_id("step1"));
     let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     engine.channel().on_complete(move |_| s1.close());
@@ -352,7 +357,7 @@ async fn env_vars_set_num() {
     let s1 = sig.clone();
 
     let workflow = Workflow::new()
-        .with_env("a", 10.into())
+        .with_env("a", 10)
         .with_step(|step| step.with_id("step1"));
     let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     engine.channel().on_complete(move |_| s1.close());
@@ -372,7 +377,7 @@ async fn env_vars_set_str() {
     let s1 = sig.clone();
 
     let workflow = Workflow::new()
-        .with_env("a", "abc".into())
+        .with_env("a", "abc")
         .with_step(|step| step.with_id("step1"));
     let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     engine.channel().on_complete(move |_| s1.close());
@@ -415,7 +420,7 @@ async fn env_vars_update() {
     let s1 = sig.clone();
 
     let workflow = Workflow::new()
-        .with_env("a", 10.into())
+        .with_env("a", 10)
         .with_step(|step| step.with_id("step1"));
     let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     engine.channel().on_complete(move |_| s1.close());
@@ -822,4 +827,105 @@ async fn env_user_var_os_get() {
 
     let result = env.eval::<String>(script);
     assert!(["linux", "windows", "macos"].contains(&result.unwrap().as_str()));
+}
+
+#[tokio::test]
+async fn env_act_cost_get() {
+    let engine = Engine::new().start();
+    let sig = engine.signal(());
+    let s1 = sig.clone();
+
+    let env = engine.runtime().env().clone();
+    let workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::irq(|act| act.with_key("test").with_id("act1")))
+    });
+    engine.channel().on_message(move |e| {
+        if e.is_irq() {
+            s1.close()
+        }
+    });
+    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+    sig.recv().await;
+    let task = proc.task_by_nid("act1").last().cloned().unwrap();
+    let script = r#"
+        $cost()
+    "#;
+
+    let context = task.create_context();
+    Context::scope(context, || {
+        let result = env.eval::<i32>(script).unwrap();
+        proc.print();
+        assert!(result > 0);
+    });
+}
+
+#[tokio::test]
+async fn env_act_cost_in_get() {
+    let engine = Engine::new().start();
+    let sig = engine.signal(());
+    let s1 = sig.clone();
+
+    let env = engine.runtime().env().clone();
+    let workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::irq(|act| act.with_key("act1").with_id("act1")))
+    });
+    engine.channel().on_message(move |e| {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
+            std::thread::sleep(Duration::from_secs(2));
+            s1.close()
+        }
+    });
+    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+    sig.recv().await;
+    let task = proc.task_by_nid("act1").last().cloned().unwrap();
+    let script = r#"
+        $cost_in('1s')
+    "#;
+
+    let context = task.create_context();
+    Context::scope(context, || {
+        let result = env.eval::<bool>(script).unwrap();
+        proc.print();
+        assert!(result);
+    });
+}
+
+#[tokio::test]
+async fn env_act_ecode_get() {
+    let engine = Engine::new().start();
+    let sig = engine.signal(());
+    let s1 = sig.clone();
+
+    let env = engine.runtime().env().clone();
+    let workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_act(Act::irq(|act| act.with_key("act1").with_id("act1")))
+    });
+    engine.channel().on_message(move |e| {
+        if e.is_key("act1") && e.is_state(MessageState::Created) {
+            e.do_action(
+                &e.pid,
+                &e.tid,
+                EventAction::Error,
+                Vars::new().with(consts::ACT_ERR_CODE, "err1"),
+            )
+            .unwrap();
+            s1.close()
+        }
+    });
+    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+    sig.recv().await;
+    let task = proc.task_by_nid("act1").last().cloned().unwrap();
+    let script = r#"
+        $ecode()
+    "#;
+
+    let context = task.create_context();
+    Context::scope(context, || {
+        let result = env.eval::<String>(script).unwrap();
+        proc.print();
+        assert_eq!(result, "err1");
+    });
 }

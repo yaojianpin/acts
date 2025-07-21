@@ -85,11 +85,11 @@ impl ActPackage for BlockPackage {
 
 impl ActPackageFn for BlockPackage {
     fn execute(&self, ctx: &Context) -> Result<Option<Vars>> {
-        let mut option = ctx.task().options();
+        let mut options = ctx.task().options();
         let mut acts = self.acts.clone();
         for act in acts.iter_mut() {
             // append block options to each child act
-            act.options.append(&mut option);
+            act.options.append(&mut options);
         }
         ctx.build_acts(&acts, self.mode == RunningMode::Sequence)?;
         Ok(None)

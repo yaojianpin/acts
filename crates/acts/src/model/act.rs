@@ -5,9 +5,9 @@ mod timeout;
 pub use catch::Catch;
 pub use retry::Retry;
 
-use crate::{ModelBase, Vars, utils::consts};
+use crate::{ModelBase, Variant, Vars, utils::consts};
 use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
+use serde_json::{Value as JsonValue, json};
 
 #[allow(unused_imports)]
 pub use timeout::{Timeout, TimeoutLimit, TimeoutUnit};
@@ -43,7 +43,7 @@ pub struct Act {
 
     /// act variables
     #[serde(default)]
-    pub vars: Vars,
+    pub vars: Vec<Variant>,
 
     #[serde(default)]
     pub catches: Vec<Act>,
@@ -107,8 +107,17 @@ impl Act {
     where
         T: Serialize + Clone,
     {
-        self.vars.set(name, value);
+        self.vars.push(Variant::create(name, json!(value)));
         self
+    }
+
+    pub fn vars(&self) -> Vars {
+        let mut ret = Vars::new();
+        self.vars.iter().for_each(|var| {
+            ret.set(&var.name, var.value.clone());
+        });
+
+        ret
     }
 
     pub fn with_params_data(mut self, v: JsonValue) -> Self {
@@ -123,28 +132,30 @@ impl Act {
         self
     }
 
-    #[cfg(test)]
-    pub fn with_input_acts<T>(mut self, name: &str, f: fn(&mut Vec<T>)) -> Self
+    pub fn with_expose<T>(mut self, name: &str, value: T) -> Self
     where
         T: Serialize + Clone,
     {
-        let mut vec = Vec::new();
-        f(&mut vec);
-        self.vars.set(name, vec);
-        self
-    }
-
-    pub fn with_output(mut self, name: &str, value: JsonValue) -> Self {
         self.options
             .entry(consts::ACT_EXPOSE)
             .and_modify(|outputs| {
                 if let Some(obj) = outputs.as_object_mut() {
-                    obj.insert(name.to_string(), value.clone());
+                    obj.insert(name.to_string(), json!(value));
                 }
             })
             .or_insert(Vars::new().with(name, value).into());
 
         self
+    }
+
+    pub fn exposes(&self) -> Vars {
+        let mut vars = Vars::new();
+        if let Some(expose) = self.options.get::<Vec<Variant>>(consts::ACT_EXPOSE) {
+            expose.iter().for_each(|var| {
+                vars.set(&var.name, var.value.clone());
+            });
+        }
+        vars
     }
 
     pub fn with_catch(mut self, catch: Act) -> Self {

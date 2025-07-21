@@ -1,6 +1,6 @@
-use crate::{ModelBase, Vars, model::Step, utils::consts};
+use crate::{ModelBase, Variant, Vars, model::Step, utils::consts};
 use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
+use serde_json::json;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Branch {
@@ -14,7 +14,7 @@ pub struct Branch {
     pub id: String,
 
     #[serde(default)]
-    pub vars: Vars,
+    pub vars: Vec<Variant>,
 
     #[serde(default)]
     pub tag: String,
@@ -71,22 +71,47 @@ impl Branch {
         self
     }
 
-    pub fn with_var(mut self, name: &str, value: JsonValue) -> Self {
-        self.vars.insert(name.to_string(), value);
+    pub fn with_var<T>(mut self, name: &str, value: T) -> Self
+    where
+        T: Serialize + Clone,
+    {
+        self.vars.push(Variant::create(name, value));
         self
     }
 
-    pub fn with_output(mut self, name: &str, value: JsonValue) -> Self {
+    pub fn vars(&self) -> Vars {
+        let mut ret = Vars::new();
+        self.vars.iter().for_each(|var| {
+            ret.set(&var.name, var.value.clone());
+        });
+
+        ret
+    }
+
+    pub fn with_expose<T>(mut self, name: &str, value: T) -> Self
+    where
+        T: Serialize + Clone,
+    {
         self.options
             .entry(consts::ACT_EXPOSE)
             .and_modify(|outputs| {
                 if let Some(obj) = outputs.as_object_mut() {
-                    obj.insert(name.to_string(), value.clone());
+                    obj.insert(name.to_string(), json!(value));
                 }
             })
             .or_insert(Vars::new().with(name, value).into());
 
         self
+    }
+
+    pub fn exposes(&self) -> Vars {
+        let mut vars = Vars::new();
+        if let Some(expose) = self.options.get::<Vec<Variant>>(consts::ACT_EXPOSE) {
+            expose.iter().for_each(|var| {
+                vars.set(&var.name, var.value.clone());
+            });
+        }
+        vars
     }
 
     pub fn with_next(mut self, next: &str) -> Self {

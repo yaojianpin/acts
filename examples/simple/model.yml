@@ -1,9 +1,12 @@
 name: simple
 id: simple
 vars:
-  input: 4
-  index: 0
-  value:
+  - name: input
+    value: 4
+  - name: index
+    value: 0
+  - name: value
+    value: 0
 options:
   expose:
     result: '{{ value }}'

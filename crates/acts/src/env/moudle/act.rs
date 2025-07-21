@@ -1,5 +1,5 @@
 use super::super::ActModule;
-use crate::{ActError, Context, Result, Vars, env::value::ActValue};
+use crate::{ActError, Context, Result, Vars, env::value::ActJsValue};
 use rquickjs::{CatchResultExt, Module as JsModule};
 
 pub struct ActJsModule;
@@ -21,15 +21,15 @@ impl ActJsModule {
 mod act {
     use crate::{
         Context, TimeoutLimit, Vars,
-        env::value::ActValue,
+        env::value::ActJsValue,
         utils::{self, consts},
     };
 
     #[rquickjs::function]
-    pub fn get_act_value(name: String) -> Option<ActValue> {
+    pub fn get_act_value(name: String) -> Option<ActJsValue> {
         Context::with(|ctx| {
             if let Some(v) = ctx.task().find(&name) {
-                let v = ActValue::new(v);
+                let v = ActJsValue::new(v);
                 return Some(v);
             }
             None
@@ -37,7 +37,7 @@ mod act {
     }
 
     #[rquickjs::function]
-    pub fn set_act_value(name: String, value: ActValue) {
+    pub fn set_act_value(name: String, value: ActJsValue) {
         Context::with(|ctx| {
             let vars = Vars::new().with(&name, value.inner());
             ctx.task().update_data(&vars);
@@ -45,7 +45,7 @@ mod act {
     }
 
     #[rquickjs::function]
-    pub fn set_process_var(name: String, value: ActValue) {
+    pub fn set_process_var(name: String, value: ActJsValue) {
         Context::with(|ctx| {
             let vars = Vars::new().with(&name, value.inner());
             ctx.proc.set_data(&vars);
@@ -53,12 +53,12 @@ mod act {
     }
 
     #[rquickjs::function]
-    pub fn get_act_inputs() -> ActValue {
+    pub fn get_act_inputs() -> ActJsValue {
         Context::with(|ctx| ctx.task().inputs().into())
     }
 
     #[rquickjs::function]
-    pub fn get_act_data() -> ActValue {
+    pub fn get_act_data() -> ActJsValue {
         Context::with(|ctx| ctx.task().data().into())
     }
 
@@ -98,7 +98,7 @@ impl ActModule for ActJsModule {
 
         if let Some(vars) = self.vars() {
             for (key, value) in &vars {
-                ctx.globals().set(&key, ActValue::new(value))?;
+                ctx.globals().set(&key, ActJsValue::new(value))?;
             }
         }
 

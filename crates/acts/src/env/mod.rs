@@ -9,7 +9,7 @@ use rquickjs::{Context as JsContext, Ctx as JsCtx, FromJs, Runtime as JsRuntime}
 use serde::de::DeserializeOwned;
 use std::sync::{Arc, RwLock};
 
-use self::value::ActValue;
+use self::value::ActJsValue;
 
 pub trait ActModule: Send + Sync {
     fn init(&self, ctx: &JsCtx<'_>) -> Result<()>;
@@ -99,7 +99,7 @@ impl Enviroment {
                 m.init(&ctx)?;
             }
 
-            let result = ctx.eval::<ActValue, &str>(expr);
+            let result = ctx.eval::<ActJsValue, &str>(expr);
             if let Err(rquickjs::Error::Exception) = result {
                 let exception = rquickjs::Exception::from_js(&ctx, ctx.catch()).unwrap();
                 eprintln!("error: {exception:?}");

@@ -1,10 +1,12 @@
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use serde_json::{Map as JsonMap, Value as JsonValue, json};
 use std::ops::{Deref, DerefMut};
+
+use super::Variant;
 
 #[derive(Default, Clone)]
 pub struct Vars {
-    inner: Map<String, Value>,
+    inner: JsonMap<String, JsonValue>,
 }
 
 pub struct Iter<'a> {
@@ -36,7 +38,7 @@ impl<'de> Deserialize<'de> for Vars {
 }
 
 impl Deref for Vars {
-    type Target = Map<String, Value>;
+    type Target = JsonMap<String, JsonValue>;
     fn deref(&self) -> &Self::Target {
         &self.inner
     }
@@ -48,16 +50,16 @@ impl DerefMut for Vars {
     }
 }
 
-impl FromIterator<(String, Value)> for Vars {
-    fn from_iter<T: IntoIterator<Item = (String, Value)>>(iter: T) -> Self {
+impl FromIterator<(String, JsonValue)> for Vars {
+    fn from_iter<T: IntoIterator<Item = (String, JsonValue)>>(iter: T) -> Self {
         Self {
-            inner: Map::from_iter(iter),
+            inner: JsonMap::from_iter(iter),
         }
     }
 }
 
 impl<'a> Iterator for Iter<'a> {
-    type Item = (&'a String, &'a Value);
+    type Item = (&'a String, &'a JsonValue);
 
     fn next(&mut self) -> Option<Self::Item> {
         self.iter.next()
@@ -65,7 +67,7 @@ impl<'a> Iterator for Iter<'a> {
 }
 
 impl<'a> Iterator for IterMut<'a> {
-    type Item = (&'a String, &'a mut Value);
+    type Item = (&'a String, &'a mut JsonValue);
 
     fn next(&mut self) -> Option<Self::Item> {
         self.iter.next()
@@ -73,7 +75,7 @@ impl<'a> Iterator for IterMut<'a> {
 }
 
 impl<'a> IntoIterator for &'a mut Vars {
-    type Item = (&'a String, &'a mut Value);
+    type Item = (&'a String, &'a mut JsonValue);
     type IntoIter = IterMut<'a>;
     #[inline]
     fn into_iter(self) -> Self::IntoIter {
@@ -84,7 +86,7 @@ impl<'a> IntoIterator for &'a mut Vars {
 }
 
 impl IntoIterator for &Vars {
-    type Item = (String, Value);
+    type Item = (String, JsonValue);
     type IntoIter = serde_json::map::IntoIter;
     #[inline]
     fn into_iter(self) -> Self::IntoIter {
@@ -106,30 +108,42 @@ impl std::fmt::Display for Vars {
     }
 }
 
-impl From<serde_json::Map<String, Value>> for Vars {
-    fn from(value: serde_json::Map<String, Value>) -> Self {
+impl From<JsonMap<String, JsonValue>> for Vars {
+    fn from(value: JsonMap<String, JsonValue>) -> Self {
         from_json(&value)
     }
 }
 
-impl From<serde_json::Value> for Vars {
-    fn from(value: serde_json::Value) -> Self {
-        if let serde_json::Value::Object(map) = &value {
+impl From<JsonValue> for Vars {
+    fn from(value: JsonValue) -> Self {
+        if let JsonValue::Object(map) = &value {
             return from_json(map);
         }
         Vars::new()
     }
 }
 
-impl From<Vars> for serde_json::Value {
+impl From<Vars> for JsonValue {
     fn from(val: Vars) -> Self {
-        serde_json::Value::Object(val.inner)
+        JsonValue::Object(val.inner)
+    }
+}
+
+impl From<Vec<Variant>> for Vars {
+    fn from(val: Vec<Variant>) -> Self {
+        let mut vars = Vars::new();
+        for var in val {
+            vars.set(&var.name, var.value);
+        }
+        vars
     }
 }
 
 impl Vars {
     pub fn new() -> Self {
-        Self { inner: Map::new() }
+        Self {
+            inner: JsonMap::new(),
+        }
     }
 
     pub fn with<T>(self, name: &str, value: T) -> Self
@@ -166,7 +180,7 @@ impl Vars {
         None
     }
 
-    pub fn get_value(&self, name: &str) -> Option<&Value> {
+    pub fn get_value(&self, name: &str) -> Option<&JsonValue> {
         self.inner.get(name)
     }
 
@@ -192,23 +206,23 @@ impl Vars {
         self.inner.append(&mut vars.inner);
     }
 
-    pub fn to_value(&self) -> Value {
-        Value::Object(self.inner.clone())
+    pub fn to_value(&self) -> JsonValue {
+        JsonValue::Object(self.inner.clone())
     }
 }
 
 #[allow(unused)]
-pub fn from_json(map: &serde_json::Map<String, serde_json::Value>) -> Vars {
+pub fn from_json(map: &JsonMap<String, JsonValue>) -> Vars {
     let mut vars = Vars::new();
 
     for (k, v) in map {
         let value = match v {
-            serde_json::Value::Null => Value::Null,
-            serde_json::Value::Bool(v) => Value::Bool(*v),
-            serde_json::Value::Number(v) => from_json_number(v),
-            serde_json::Value::String(v) => Value::String(v.clone()),
-            serde_json::Value::Array(v) => from_json_array(v),
-            serde_json::Value::Object(v) => from_json_object(v),
+            JsonValue::Null => JsonValue::Null,
+            JsonValue::Bool(v) => JsonValue::Bool(*v),
+            JsonValue::Number(v) => from_json_number(v),
+            JsonValue::String(v) => JsonValue::String(v.clone()),
+            JsonValue::Array(v) => from_json_array(v),
+            JsonValue::Object(v) => from_json_object(v),
         };
 
         vars.insert(k.to_string(), value);
@@ -218,49 +232,49 @@ pub fn from_json(map: &serde_json::Map<String, serde_json::Value>) -> Vars {
 }
 
 #[allow(unused)]
-fn from_json_array(arr: &Vec<serde_json::Value>) -> Value {
+fn from_json_array(arr: &Vec<JsonValue>) -> JsonValue {
     let mut ret = Vec::new();
     for v in arr {
         let value = match v {
-            serde_json::Value::Null => Value::Null,
-            serde_json::Value::Bool(v) => Value::Bool(*v),
-            serde_json::Value::Number(v) => from_json_number(v),
-            serde_json::Value::String(v) => Value::String(v.clone()),
-            serde_json::Value::Array(v) => from_json_array(v),
-            serde_json::Value::Object(v) => from_json_object(v),
+            JsonValue::Null => JsonValue::Null,
+            JsonValue::Bool(v) => JsonValue::Bool(*v),
+            JsonValue::Number(v) => from_json_number(v),
+            JsonValue::String(v) => JsonValue::String(v.clone()),
+            JsonValue::Array(v) => from_json_array(v),
+            JsonValue::Object(v) => from_json_object(v),
         };
         ret.push(value);
     }
 
-    Value::Array(ret)
+    JsonValue::Array(ret)
 }
 
 #[allow(unused)]
-fn from_json_object(o: &serde_json::Map<String, serde_json::Value>) -> Value {
-    let mut map = serde_json::Map::new();
+fn from_json_object(o: &serde_json::Map<String, JsonValue>) -> JsonValue {
+    let mut map = JsonMap::new();
     for (k, v) in o {
         let value = match v {
-            serde_json::Value::Null => Value::Null,
-            serde_json::Value::Bool(v) => Value::Bool(*v),
-            serde_json::Value::Number(v) => from_json_number(v),
-            serde_json::Value::String(v) => Value::String(v.clone()),
-            serde_json::Value::Array(v) => from_json_array(v),
-            serde_json::Value::Object(v) => from_json_object(v),
+            JsonValue::Null => JsonValue::Null,
+            JsonValue::Bool(v) => JsonValue::Bool(*v),
+            JsonValue::Number(v) => from_json_number(v),
+            JsonValue::String(v) => JsonValue::String(v.clone()),
+            JsonValue::Array(v) => from_json_array(v),
+            JsonValue::Object(v) => from_json_object(v),
         };
 
         map.insert(k.to_string(), value);
     }
 
-    Value::Object(map)
+    JsonValue::Object(map)
 }
 
 #[allow(unused)]
-fn from_json_number(n: &serde_json::Number) -> Value {
+fn from_json_number(n: &serde_json::Number) -> JsonValue {
     if n.is_i64() {
-        Value::Number(serde_json::Number::from(n.as_i64().unwrap()))
+        JsonValue::Number(serde_json::Number::from(n.as_i64().unwrap()))
     } else if n.is_u64() {
-        return Value::Number(serde_json::Number::from(n.as_u64().unwrap()));
+        return JsonValue::Number(serde_json::Number::from(n.as_u64().unwrap()));
     } else {
-        return Value::Number(serde_json::Number::from_f64(n.as_f64().unwrap()).unwrap());
+        return JsonValue::Number(serde_json::Number::from_f64(n.as_f64().unwrap()).unwrap());
     }
 }

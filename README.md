@@ -125,22 +125,20 @@ The model is a yaml format file. where there are different type of node, includi
 name: model name
 # workflow default inputs vars
 vars:
-  value: 0
+  - name: value
+    value: 0
 
 # schema for inputs and outputs
 inputs:
-  type: object
-  properties:
-    value: 
-      type: number
-      title: Value
-      desc: Set value when starting workflow
+  - name: value
+    title: Value
+    desc:  Set value when starting workflow
+    type: number
+
 outputs:
+  - name: data
+    title: Output data
     type: object
-    properties:
-      data:
-        type: object
-        title: Output data
 
 # the event to start the workflow
 on:
@@ -188,7 +186,9 @@ In the [`Workflow`], you can set the `vars` to init the workflow vars.
 ```yml
 name: model name
 vars:
-  a: 100
+  - name: a
+    value: 100
+
 steps:
   - name: step1
     acts:
@@ -225,7 +225,7 @@ In the [`Workflow`], you can set the `options.expose` to filter the outputs.
 name: model name
 options:
   expose:
-    output_key:
+    - name: output_key
 steps:
   - name: step1
     acts:
@@ -358,7 +358,7 @@ Use `acts` to create act to interact with client， or finish a special function
 name: model name
 options:
   expose:
-    output_key:
+    - name: output_key
 steps:
   - name: step1
     acts:

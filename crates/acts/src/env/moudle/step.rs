@@ -12,10 +12,10 @@ impl StepModule {
 #[allow(clippy::module_inception)]
 #[rquickjs::module(rename_vars = "camelCase")]
 mod step {
-    use crate::{ActError, Context, Result, Vars, env::value::ActValue};
+    use crate::{ActError, Context, Result, Vars, env::value::ActJsValue};
 
     #[rquickjs::function]
-    pub fn get_step_value(nid: String, name: String) -> ActValue {
+    pub fn get_step_value(nid: String, name: String) -> ActJsValue {
         Context::with(|ctx| {
             let tasks = ctx.task().proc().find_tasks(|task| task.node().id() == nid);
             if !tasks.is_empty() {
@@ -23,15 +23,15 @@ mod step {
 
                 return task
                     .with_data(|data| data.get(&name))
-                    .map(ActValue::new)
-                    .unwrap_or(ActValue::new(serde_json::Value::Null));
+                    .map(ActJsValue::new)
+                    .unwrap_or(ActJsValue::new(serde_json::Value::Null));
             }
-            ActValue::new(serde_json::Value::Null)
+            ActJsValue::new(serde_json::Value::Null)
         })
     }
 
     #[rquickjs::function]
-    pub fn set_step_value(nid: String, name: String, value: ActValue) -> Result<()> {
+    pub fn set_step_value(nid: String, name: String, value: ActJsValue) -> Result<()> {
         Context::with(|ctx| {
             let tasks = ctx.task().proc().find_tasks(|task| task.node().id() == nid);
             if !tasks.is_empty() {
@@ -63,26 +63,26 @@ mod step {
     }
 
     #[rquickjs::function]
-    pub fn get_inputs(nid: String) -> ActValue {
+    pub fn get_inputs(nid: String) -> ActJsValue {
         Context::with(|ctx| {
             let tasks = ctx.task().proc().find_tasks(|task| task.node().id() == nid);
             if !tasks.is_empty() {
                 let task = tasks.last().unwrap();
                 return task.inputs().into();
             }
-            ActValue::new(serde_json::Value::Null)
+            ActJsValue::new(serde_json::Value::Null)
         })
     }
 
     #[rquickjs::function]
-    pub fn get_data(nid: String) -> ActValue {
+    pub fn get_data(nid: String) -> ActJsValue {
         Context::with(|ctx| {
             let tasks = ctx.task().proc().find_tasks(|task| task.node().id() == nid);
             if !tasks.is_empty() {
                 let task = tasks.last().unwrap();
                 return task.data().into();
             }
-            ActValue::new(serde_json::Value::Null)
+            ActJsValue::new(serde_json::Value::Null)
         })
     }
 }

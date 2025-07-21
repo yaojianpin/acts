@@ -81,10 +81,10 @@ impl NodeContent {
 
     pub fn vars(&self) -> Vars {
         match self {
-            NodeContent::Workflow(data) => data.vars.clone(),
-            NodeContent::Branch(data) => data.vars.clone(),
-            NodeContent::Step(data) => data.vars.clone(),
-            NodeContent::Act(data) => data.vars.clone(),
+            NodeContent::Workflow(data) => data.vars(),
+            NodeContent::Branch(data) => data.vars(),
+            NodeContent::Step(data) => data.vars(),
+            NodeContent::Act(data) => data.vars(),
         }
     }
 

@@ -2,7 +2,7 @@ mod act;
 mod branch;
 mod info;
 mod step;
-mod vars;
+mod var;
 mod workflow;
 
 #[cfg(test)]
@@ -12,7 +12,7 @@ pub use act::{Act, Catch, Retry, Timeout, TimeoutLimit};
 pub use branch::Branch;
 pub use info::{EventInfo, MessageInfo, ModelInfo, PackageInfo, ProcInfo, TaskInfo};
 pub use step::Step;
-pub use vars::Vars;
+pub use var::{ActValue, VariantTypes, Variant, Vars};
 pub use workflow::Workflow;
 
 pub trait ModelBase {

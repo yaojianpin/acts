@@ -1,10 +1,11 @@
 name: sub
 id: sub
 vars:
-  v: 0
+  - name: v
+    value: 0
 options:
   expose:
-    v:
+    - name: v
 steps:
   - name: t1
     acts:
@@ -12,7 +13,7 @@ steps:
         key: action1
         options:
           expose:
-            v:
+            - name: v
   - name: t2
 
 

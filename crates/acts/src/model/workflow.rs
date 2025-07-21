@@ -1,6 +1,8 @@
-use crate::{Act, ActError, ModelBase, Result, Step, Vars, scheduler::NodeTree, utils::consts};
+use crate::{
+    Act, ActError, ActValue, ModelBase, Result, Step, Variant, Vars, scheduler::NodeTree, utils::consts,
+};
 use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
+use serde_json::json;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Workflow {
@@ -20,19 +22,19 @@ pub struct Workflow {
     pub steps: Vec<Step>,
 
     #[serde(default)]
-    pub env: Vars,
+    pub env: Vec<Variant>,
 
     /// define the workflow global vars
     #[serde(default)]
-    pub vars: Vars,
+    pub vars: Vec<Variant>,
 
     /// input json schema
     #[serde(default)]
-    pub inputs: JsonValue,
+    pub inputs: ActValue,
 
     /// output json schema
     #[serde(default)]
-    pub outputs: JsonValue,
+    pub outputs: ActValue,
 
     #[serde(default)]
     pub on: Vec<Act>,
@@ -67,22 +69,38 @@ impl Workflow {
         }
     }
 
-    pub fn set_env(&mut self, vars: &Vars) {
-        for (name, value) in vars {
+    pub fn set_env(&mut self, vars: &[Variant]) {
+        for var in vars {
             self.env
-                .entry(name.clone())
-                .and_modify(|v| *v = value.clone())
-                .or_insert(value.clone());
+                .iter_mut()
+                .find(|v| v.name == var.name)
+                .map(|v| v.value = var.value.clone())
+                .unwrap_or_else(|| self.env.push(var.clone()));
         }
     }
 
+    pub fn env(&self) -> Vars {
+        let mut ret = Vars::new();
+        self.env.iter().for_each(|var| {
+            ret.set(&var.name, var.value.clone());
+        });
+
+        ret
+    }
+
     pub fn set_vars(&mut self, vars: &Vars) {
-        for (name, value) in vars {
-            self.vars
-                .entry(name.clone())
-                .and_modify(|v| *v = value.clone())
-                .or_insert(value.clone());
+        for (ref name, value) in vars {
+            self.vars.push(Variant::create(name, value.clone()));
         }
+    }
+
+    pub fn vars(&self) -> Vars {
+        let mut ret = Vars::new();
+        self.vars.iter().for_each(|var| {
+            ret.set(&var.name, var.value.clone());
+        });
+
+        ret
     }
 
     pub fn print(&self) {
@@ -172,37 +190,60 @@ impl Workflow {
         self
     }
 
-    pub fn with_var(mut self, name: &str, value: JsonValue) -> Self {
-        self.vars.insert(name.to_string(), value);
+    pub fn with_var<T>(mut self, name: &str, value: T) -> Self
+    where
+        T: Serialize + Clone,
+    {
+        self.vars.push(Variant::create(name, value));
         self
     }
 
-    pub fn with_env(mut self, name: &str, value: JsonValue) -> Self {
-        self.env.insert(name.to_string(), value);
+    pub fn with_env<T>(mut self, name: &str, value: T) -> Self
+    where
+        T: Serialize + Clone,
+    {
+        self.env
+            .iter_mut()
+            .find(|v| v.name == name)
+            .map(|v| v.value = json!(value))
+            .unwrap_or_else(|| self.env.push(Variant::create(name, value)));
         self
     }
 
-    pub fn with_inputs(mut self, inputs: JsonValue) -> Self {
+    pub fn with_inputs(mut self, inputs: ActValue) -> Self {
         self.inputs = inputs;
         self
     }
 
-    pub fn with_outputs(mut self, outputs: JsonValue) -> Self {
+    pub fn with_outputs(mut self, outputs: ActValue) -> Self {
         self.outputs = outputs;
         self
     }
 
-    pub fn with_options_expose(mut self, name: &str, value: JsonValue) -> Self {
+    pub fn with_expose<T>(mut self, name: &str, value: T) -> Self
+    where
+        T: Serialize + Clone,
+    {
         self.options
             .entry(consts::ACT_EXPOSE)
             .and_modify(|outputs| {
                 if let Some(obj) = outputs.as_object_mut() {
-                    obj.insert(name.to_string(), value.clone());
+                    obj.insert(name.to_string(), json!(value));
                 }
             })
             .or_insert(Vars::new().with(name, value).into());
 
         self
+    }
+
+    pub fn exposes(&self) -> Vars {
+        let mut vars = Vars::new();
+        if let Some(expose) = self.options.get::<Vec<Variant>>(consts::ACT_EXPOSE) {
+            expose.iter().for_each(|var| {
+                vars.set(&var.name, var.value.clone());
+            });
+        }
+        vars
     }
 
     pub fn with_step(mut self, build: fn(Step) -> Step) -> Self {

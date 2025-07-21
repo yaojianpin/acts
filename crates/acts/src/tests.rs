@@ -125,7 +125,7 @@ async fn engine_event_on_error() {
 async fn engine_model_create() {
     let workflow = Workflow::new()
         .with_name("w1")
-        .with_var("v", 0.into())
+        .with_var("v", 0)
         .with_step(|step| {
             step.with_id("step1")
                 .with_name("step1")
