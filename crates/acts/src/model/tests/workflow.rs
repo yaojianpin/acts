@@ -1,4 +1,4 @@
-use crate::{ActValue, Variant, Vars, Workflow, model::var::VariantTypes, utils::consts};
+use crate::{ActSchema, Variant, Vars, Workflow, model::var::VariantTypes};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -82,10 +82,10 @@ fn model_workflow_from_yml_str_vars() {
 }
 
 #[test]
-fn model_workflow_from_yml_str_expose() {
+fn model_workflow_from_yml_str_exposes() {
     let text = r#"
     options:
-        expose:
+        exposes:
             - name: a
               value: 10
             - name: b
@@ -100,24 +100,138 @@ fn model_workflow_from_yml_str_expose() {
                 v2: 2
     "#;
     let m = Workflow::from_yml(text).unwrap();
-    let expose: Vars = m
-        .options
-        .get::<Vec<Variant>>(consts::ACT_EXPOSE)
-        .unwrap()
-        .into();
+    let exposes = m.exposes();
 
     #[derive(Serialize, Deserialize, Clone)]
     struct Obj {
         v1: i32,
         v2: i32,
     }
-    assert_eq!(expose.get::<i32>("a").unwrap(), 10);
-    assert_eq!(expose.get::<String>("b").unwrap(), "abc");
-    assert_eq!(expose.get::<Vec<i32>>("c").unwrap(), vec![1, 2]);
+    assert_eq!(exposes.get::<i32>("a").unwrap(), 10);
+    assert_eq!(exposes.get::<String>("b").unwrap(), "abc");
+    assert_eq!(exposes.get::<Vec<i32>>("c").unwrap(), vec![1, 2]);
 
-    let obj = expose.get::<Obj>("d").unwrap();
+    let obj = exposes.get::<Obj>("d").unwrap();
     assert_eq!(obj.v1, 1);
     assert_eq!(obj.v2, 2);
+}
+
+#[test]
+fn model_workflow_from_yml_inputs_simple() {
+    let text = r#"
+    inputs:
+        name: input
+        type: string
+        title: Input Title
+        desc: Input Description
+        required: true
+        value: default value
+    "#;
+    let m = Workflow::from_yml(text).unwrap();
+    let inputs = m.inputs.simple().unwrap();
+    assert_eq!(inputs.r#type, VariantTypes::String);
+    assert_eq!(inputs.name, "input");
+    assert_eq!(inputs.title, "Input Title");
+    assert_eq!(inputs.desc, "Input Description");
+    assert_eq!(inputs.required, true);
+    assert_eq!(inputs.value, "default value");
+}
+
+#[test]
+fn model_workflow_from_yml_inputs_multiple() {
+    let text = r#"
+    inputs:
+        - name: input1
+          type: string
+          title: Input 1 Title
+          desc: Input 1 Description
+          required: true
+          value: default value 1
+        - name: input2
+          type: number  
+          title: Input 2 Title    
+          desc: Input 2 Description
+          required: false
+          value: 42
+    "#;
+    let m = Workflow::from_yml(text).unwrap();
+    let inputs = m.inputs.multiple().unwrap();
+    assert_eq!(inputs.len(), 2);
+
+    let input = &inputs[0];
+    assert_eq!(input.r#type, VariantTypes::String);
+    assert_eq!(input.name, "input1");
+    assert_eq!(input.title, "Input 1 Title");
+    assert_eq!(input.desc, "Input 1 Description");
+    assert_eq!(input.required, true);
+    assert_eq!(input.value, "default value 1");
+
+    let input = &inputs[1];
+    assert_eq!(input.r#type, VariantTypes::Number);
+    assert_eq!(input.name, "input2");
+    assert_eq!(input.title, "Input 2 Title");
+    assert_eq!(input.desc, "Input 2 Description");
+    assert_eq!(input.required, false);
+    assert_eq!(input.value, 42);
+}
+
+#[test]
+fn model_workflow_from_yml_output_simple() {
+    let text = r#"
+    outputs:
+        name: output
+        type: string
+        title: Output Title
+        desc: Output Description
+        required: true
+        value: default value
+    "#;
+    let m = Workflow::from_yml(text).unwrap();
+    let outputs = m.outputs.simple().unwrap();
+    assert_eq!(outputs.r#type, VariantTypes::String);
+    assert_eq!(outputs.name, "output");
+    assert_eq!(outputs.title, "Output Title");
+    assert_eq!(outputs.desc, "Output Description");
+    assert_eq!(outputs.required, true);
+    assert_eq!(outputs.value, "default value");
+}
+
+#[test]
+fn model_workflow_from_yml_outputs_multiple() {
+    let text = r#"
+    outputs:
+        - name: output1
+          type: string
+          title: Output 1 Title
+          desc: Output 1 Description
+          required: true
+          value: default value 1
+        - name: output2
+          type: number  
+          title: Output 2 Title    
+          desc: Output 2 Description
+          required: false
+          value: 42
+    "#;
+    let m = Workflow::from_yml(text).unwrap();
+    let outputs = m.outputs.multiple().unwrap();
+    assert_eq!(outputs.len(), 2);
+
+    let output = &outputs[0];
+    assert_eq!(output.r#type, VariantTypes::String);
+    assert_eq!(output.name, "output1");
+    assert_eq!(output.title, "Output 1 Title");
+    assert_eq!(output.desc, "Output 1 Description");
+    assert_eq!(output.required, true);
+    assert_eq!(output.value, "default value 1");
+
+    let output = &outputs[1];
+    assert_eq!(output.r#type, VariantTypes::Number);
+    assert_eq!(output.name, "output2");
+    assert_eq!(output.title, "Output 2 Title");
+    assert_eq!(output.desc, "Output 2 Description");
+    assert_eq!(output.required, false);
+    assert_eq!(output.value, 42);
 }
 
 #[test]
@@ -199,18 +313,26 @@ fn model_workflow_desc() {
 
 #[test]
 fn model_workflow_inputs_schema() {
-    let schema = ActValue::Var(Variant::new().name("input").r#type(VariantTypes::String));
+    let schema = ActSchema::Simple(Variant::new().name("input").r#type(VariantTypes::String));
     let m = Workflow::new().with_inputs(schema.clone());
-    assert_eq!(m.inputs, schema);
+
+    let var = m.inputs.simple().unwrap();
+    assert_eq!(var.name, "input");
+    assert_eq!(var.r#type, VariantTypes::String);
 }
 
 #[test]
 fn model_workflow_outputs_schema() {
-    let schema = ActValue::Vars(vec![
+    let schema = ActSchema::Multiple(vec![
         Variant::new().name("data").r#type(VariantTypes::String),
     ]);
     let m = Workflow::new().with_outputs(schema.clone());
-    assert_eq!(m.outputs, schema);
+
+    let vars = m.outputs.multiple().unwrap();
+    assert_eq!(vars.len(), 1);
+    let var = &vars[0];
+    assert_eq!(var.name, "data");
+    assert_eq!(var.r#type, VariantTypes::String);
 }
 
 #[test]
@@ -243,4 +365,10 @@ fn model_workflow_set_metadata() {
     assert_eq!(m.metadata.get::<String>("r2").unwrap(), "abc");
     assert_eq!(m.metadata.get::<Vec<String>>("r3").unwrap(), vec!["a", "b"]);
     assert!(m.metadata.get::<bool>("r4").unwrap());
+}
+
+#[test]
+fn model_workflow_with_expose() {
+    let m = Workflow::new().with_expose("v1", 0);
+    assert!(m.exposes().contains_key("v1"));
 }

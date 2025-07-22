@@ -12,7 +12,7 @@ pub use act::{Act, Catch, Retry, Timeout, TimeoutLimit};
 pub use branch::Branch;
 pub use info::{EventInfo, MessageInfo, ModelInfo, PackageInfo, ProcInfo, TaskInfo};
 pub use step::Step;
-pub use var::{ActValue, VariantTypes, Variant, Vars};
+pub use var::{ActSchema, Variant, VariantTypes, Vars};
 pub use workflow::Workflow;
 
 pub trait ModelBase {

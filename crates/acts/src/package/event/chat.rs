@@ -23,6 +23,7 @@ impl ActPackage for ManualEventPackage {
             doc: "",
             in_schema: json!({
                 "type": "string",
+                "title": "Chat Message",
                 "description": "The chat message to send",
                 "default": "",
             }),

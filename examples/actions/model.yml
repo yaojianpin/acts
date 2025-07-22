@@ -4,7 +4,7 @@ vars:
   - name: v
     value: 0  
 options:
-  expose:
+  exposes:
     - name: result
       value: '{{ v }}'
 steps:

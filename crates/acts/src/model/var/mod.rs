@@ -10,62 +10,58 @@ pub use vars::Vars;
 
 #[derive(Deserialize, Serialize, Debug, Default, Clone)]
 #[serde(untagged)]
-pub enum ActValue {
+pub enum ActSchema {
     #[default]
     None,
-    Var(Variant),
-    Vars(Vec<Variant>),
+    Simple(Variant),
+    Multiple(Vec<Variant>),
 }
 
-impl PartialEq for ActValue {
-    fn eq(&self, other: &Self) -> bool {
-        match (self, other) {
-            (ActValue::None, ActValue::None) => true,
-            (ActValue::Var(v1), ActValue::Var(v2)) => v1.name == v2.name && v1.value == v2.value,
-            (ActValue::Vars(v1), ActValue::Vars(v2)) => {
-                if v1.len() != v2.len() {
-                    return false;
-                }
-                for v in v1 {
-                    if !v2.iter().any(|v2| v2.name == v.name && v2.value == v.value) {
-                        return false;
-                    }
-                }
-                true
-            }
-            _ => false,
-        }
-    }
-}
-
-impl ActValue {
+impl ActSchema {
     pub fn new() -> Self {
-        ActValue::None
+        ActSchema::None
     }
 
     pub fn is_empty(&self) -> bool {
-        matches!(self, ActValue::None)
+        matches!(self, ActSchema::None)
+    }
+
+    pub fn simple(&self) -> Option<&Variant> {
+        if let ActSchema::Simple(var) = self {
+            Some(var)
+        } else {
+            None
+        }
+    }
+
+    pub fn multiple(&self) -> Option<&Vec<Variant>> {
+        if let ActSchema::Multiple(vars) = self {
+            Some(vars)
+        } else {
+            None
+        }
     }
 
     pub fn validate(&self, value: &serde_json::Value) -> Result<()> {
-        let schema = self.to_schema();
+        let schema = self.schema();
         jsonschema::validate(&schema, value)
             .map_err(|e| ActError::Model(format!("Validation error: {e}")))
     }
 
-    fn to_schema(&self) -> serde_json::Value {
+    pub fn schema(&self) -> serde_json::Value {
         match self {
-            ActValue::None => serde_json::json!({}),
-            ActValue::Var(var) => {
+            ActSchema::None => serde_json::json!({}),
+            ActSchema::Simple(var) => {
                 serde_json::json!({
                     "name": var.name,
                     "description": var.desc,
                     "type": json!(var.r#type),
-                    "defaultValue": var.value
+                    "defaultValue": var.value,
                 })
             }
-            ActValue::Vars(vars) => {
+            ActSchema::Multiple(vars) => {
                 let mut properties = serde_json::Map::new();
+                let mut required = vec![];
                 for var in vars {
                     properties.insert(
                         var.name.clone(),
@@ -73,11 +69,15 @@ impl ActValue {
                             "name": var.name,
                             "description": var.desc,
                             "type": json!(var.r#type),
-                            "defaultValue": var.value
+                            "defaultValue": var.value,
                         }),
                     );
+
+                    if var.required {
+                        required.push(var.name.clone());
+                    }
                 }
-                serde_json::json!({ "type": "object", "properties": properties })
+                serde_json::json!({ "type": "object", "properties": properties, "required": required, "additionalProperties": false })
             }
         }
     }

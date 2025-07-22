@@ -219,12 +219,12 @@ async fn main() {
 
 ### Options
 
-In the [`Workflow`], you can set the `options.expose` to filter the outputs.
+In the [`Workflow`], you can set the `options.exposes` to filter the outputs.
 
 ```yml
 name: model name
 options:
-  expose:
+  exposes:
     - name: output_key
 steps:
   - name: step1
@@ -357,7 +357,7 @@ Use `acts` to create act to interact with client， or finish a special function
 ```yml
 name: model name
 options:
-  expose:
+  exposes:
     - name: output_key
 steps:
   - name: step1

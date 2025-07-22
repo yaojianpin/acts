@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum VariantTypes {
     #[default]
@@ -24,6 +24,8 @@ pub struct Variant {
     pub r#type: VariantTypes,
     #[serde(default)]
     pub value: JsonValue,
+    #[serde(default)]
+    pub required: bool,
 }
 
 impl Variant {
@@ -46,6 +48,7 @@ impl Variant {
             desc: String::new(),
             r#type,
             value,
+            required: false,
         }
     }
 
@@ -78,6 +81,11 @@ impl Variant {
         T: Serialize + Clone,
     {
         self.value = json!(v);
+        self
+    }
+
+    pub fn required(mut self, v: bool) -> Self {
+        self.required = v;
         self
     }
 }

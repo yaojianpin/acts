@@ -26,7 +26,7 @@ pub const TASK_SIGN_TIMEOUTS: &str = "timeouts";
 pub const TASK_TIMEOUTS: &str = "__timeouts";
 pub const TASK_COST: &str = "__cost";
 
-pub const ACT_EXPOSE: &str = "expose";
+pub const ACT_EXPOSE: &str = "exposes";
 
 pub const ACT_SUBFLOW_TO: &str = "to";
 

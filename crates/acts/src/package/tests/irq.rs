@@ -760,6 +760,8 @@ async fn pack_irq_do_action_rets() {
         )
     });
 
+    println!("workflow: {workflow:#?}");
+
     let pid = utils::longid();
     let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &pid);
 

@@ -2,7 +2,7 @@ mod acts;
 mod catch;
 mod timeout;
 
-use crate::{Act, Step, Vars, Workflow, utils::consts};
+use crate::{Act, Step, Workflow};
 use serde_json::json;
 
 #[test]
@@ -46,7 +46,7 @@ fn model_step_yml_expose() {
     steps:
         - id: act1
           options:
-            expose:
+            exposes:
                 - name: p1
     "#;
     let m = Workflow::from_yml(text).unwrap();
@@ -89,9 +89,8 @@ fn model_step_set_var() {
 fn model_step_set_output() {
     let step = Step::new().with_expose("p1", json!(5));
 
-    let options = step.options.get::<Vars>(consts::ACT_EXPOSE).unwrap();
-    assert_eq!(options.len(), 1);
-    assert!(options.get_value("p1").is_some());
+    let exposes = step.exposes();
+    assert!(exposes.get_value("p1").is_some());
 }
 
 #[test]
@@ -146,4 +145,10 @@ fn model_step_set_metadata() {
         vec!["a", "b"]
     );
     assert!(step.metadata.get::<bool>("r4").unwrap());
+}
+
+#[test]
+fn model_step_with_expose() {
+    let step = Step::new().with_expose("v1", 0);
+    assert!(step.exposes().contains_key("v1"));
 }

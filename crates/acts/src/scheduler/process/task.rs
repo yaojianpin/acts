@@ -4,6 +4,7 @@ mod branch;
 mod step;
 mod workflow;
 
+use crate::Variant;
 use crate::scheduler::tree::NodeOutputKind;
 use crate::utils::consts::TASK_ROOT_TID;
 use crate::{
@@ -144,13 +145,11 @@ impl Task {
             data.set(consts::TASK_SIGN, sign);
         });
     }
-
     pub fn set_auto_complete(&self, v: bool) {
         self.set_data_with(move |data| {
             data.set(consts::TASK_AUOT_COMPLETE, v);
         });
     }
-
     pub fn create_context(self: &Arc<Self>) -> Context {
         self.proc.create_context(self)
     }
@@ -280,9 +279,14 @@ impl Task {
     pub fn outputs(self: &Arc<Self>) -> Vars {
         let ctx = self.create_context();
         let mut outputs = Vars::new();
-        if let Some(exports) = self.node.content.options().get::<Vars>(consts::ACT_EXPOSE) {
-            for (key, value) in &exports {
-                outputs.set(&key, value);
+        if let Some(exposes) = self
+            .node
+            .content
+            .options()
+            .get::<Vec<Variant>>(consts::ACT_EXPOSE)
+        {
+            for var in &exposes {
+                outputs.set(&var.name, var.value.clone());
             }
         } else {
             // export all data except the private ones
@@ -975,16 +979,16 @@ impl Task {
         }
     }
 
-    pub fn expose(&self, keys: &Vec<&str>) {
-        self.set_data_with(move |data| {
-            data.set(
-                consts::ACT_EXPOSE,
-                keys.iter()
-                    .filter(|v| !consts::is_private_key(v))
-                    .collect::<Vec<_>>(),
-            )
-        });
-    }
+    // pub fn expose(&self, keys: &Vec<&str>) {
+    //     self.set_data_with(move |data| {
+    //         data.set(
+    //             consts::ACT_EXPOSE,
+    //             keys.iter()
+    //                 .filter(|v| !consts::is_private_key(v))
+    //                 .collect::<Vec<_>>(),
+    //         )
+    //     });
+    // }
 
     pub fn update_data_if_exists<F: Fn(&mut Vars) -> bool>(&self, f: F) -> bool {
         let mut data = self.data.write().unwrap();

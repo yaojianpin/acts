@@ -359,7 +359,7 @@ async fn sch_message_act_outputs_by_push_action() {
                 .with("uses", "acts.core.irq")
                 .with(
                     "options",
-                    Vars::new().with(consts::ACT_EXPOSE, Vars::new().with("a", 5)),
+                    Vars::new().with(consts::ACT_EXPOSE, vec![json!({ "name": "a", "value": 5 })]),
                 );
             e.do_action(&e.pid, &e.tid, EventAction::Push, options)
                 .unwrap();

@@ -1,7 +1,7 @@
 id: pack_example
 
 options:
-  expose:
+  exposes:
     - name: result
       value: '{{ input }}'
 

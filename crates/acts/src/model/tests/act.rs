@@ -1,7 +1,7 @@
 mod catch;
 mod timeout;
 
-use crate::{Act, Vars, Workflow, utils::consts};
+use crate::{Act, Workflow};
 use serde_json::json;
 
 #[test]
@@ -91,14 +91,7 @@ fn model_act_set_var() {
 #[test]
 fn model_act_set_output() {
     let act = Act::new().with_expose("var1", 1);
-    assert_eq!(
-        act.options
-            .get::<Vars>(consts::ACT_EXPOSE)
-            .unwrap()
-            .get::<i32>("var1")
-            .unwrap(),
-        1
-    );
+    assert_eq!(act.exposes().get::<i32>("var1").unwrap(), 1);
 }
 
 #[test]
@@ -170,7 +163,7 @@ fn model_act_yml_expose() {
             - id: b1
               uses: acts.core.irq
               options:
-                expose:
+                exposes:
                     - name: p1
 
     "#;
@@ -181,4 +174,10 @@ fn model_act_yml_expose() {
     let exposes = act.exposes();
     assert_eq!(exposes.len(), 1);
     assert_eq!(exposes.get_value("p1"), Some(&json!(null)));
+}
+
+#[test]
+fn model_act_with_expose() {
+    let act = Act::new().with_expose("v1", 0);
+    assert!(act.exposes().contains_key("v1"));
 }

@@ -59,7 +59,6 @@ impl ActPackageFn for SubflowPackage {
     fn execute(&self, ctx: &Context) -> Result<Option<Vars>> {
         let task = ctx.task();
         task.set_auto_complete(false);
-
         let executor = Executor::new(&ctx.runtime);
 
         let mut inputs = utils::fill_inputs(&self.options, ctx);

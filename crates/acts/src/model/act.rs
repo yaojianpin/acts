@@ -139,19 +139,19 @@ impl Act {
         self.options
             .entry(consts::ACT_EXPOSE)
             .and_modify(|outputs| {
-                if let Some(obj) = outputs.as_object_mut() {
-                    obj.insert(name.to_string(), json!(value));
+                if let Some(obj) = outputs.as_array_mut() {
+                    obj.push(json!(Variant::create(name, value.clone())));
                 }
             })
-            .or_insert(Vars::new().with(name, value).into());
+            .or_insert(json!(vec![Variant::create(name, value)]));
 
         self
     }
 
     pub fn exposes(&self) -> Vars {
         let mut vars = Vars::new();
-        if let Some(expose) = self.options.get::<Vec<Variant>>(consts::ACT_EXPOSE) {
-            expose.iter().for_each(|var| {
+        if let Some(exposes) = self.options.get::<Vec<Variant>>(consts::ACT_EXPOSE) {
+            exposes.iter().for_each(|var| {
                 vars.set(&var.name, var.value.clone());
             });
         }

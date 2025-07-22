@@ -1,4 +1,7 @@
-use std::sync::{Arc, Mutex};
+use std::{
+    fmt::Debug,
+    sync::{Arc, Mutex},
+};
 use tokio::sync::Notify;
 
 #[derive(Clone)]
@@ -36,7 +39,10 @@ impl<T: Clone> Signal<T> {
         data.clone()
     }
 
-    pub fn update<F: Fn(&mut T)>(&self, f: F) {
+    pub fn update<F: Fn(&mut T)>(&self, f: F)
+    where
+        T: Debug,
+    {
         if *self.is_closed.lock().unwrap() {
             return;
         }

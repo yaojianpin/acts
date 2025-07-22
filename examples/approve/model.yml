@@ -16,7 +16,7 @@ steps:
         params:
           role_id: pm
         options:
-          expose:
+          exposes:
             - name: pm
       # parse the pm variable from prev act
       # and parallel run multiple acts
@@ -38,7 +38,7 @@ steps:
         params:
           role_id: gm
         options:
-          expose:
+          exposes:
             - name: gm
       # parallel generate multiple acts
       - uses: acts.core.parallel

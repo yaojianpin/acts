@@ -1,5 +1,5 @@
 use crate::{
-    Act, ActValue, ChannelOptions, Engine, Message, Signal, Variant, VariantTypes, Vars, Workflow,
+    Act, ActSchema, ChannelOptions, Engine, Message, Signal, Variant, VariantTypes, Vars, Workflow,
     data::{self, Package},
     event::MessageState,
     scheduler::TaskState,
@@ -212,7 +212,10 @@ async fn export_executor_start_with_inputs_schema_ok() {
     let mid = utils::longid();
     let workflow = Workflow::new()
         .with_id(&mid)
-        .with_inputs(ActValue::Vars(vec![Variant::create("a", json!("string"))]))
+        .with_inputs(ActSchema::Multiple(vec![Variant::create(
+            "a",
+            json!("string"),
+        )]))
         .with_step(|step| step.with_act(Act::irq(|act| act.with_key("test"))));
     engine.executor().model().deploy(&workflow).unwrap();
     let result = executor.proc().start(&mid, Vars::new().with("a", "abc"));
@@ -226,7 +229,10 @@ async fn export_executor_start_with_inputs_schema_err() {
     let mid = utils::longid();
     let workflow = Workflow::new()
         .with_id(&mid)
-        .with_inputs(ActValue::Vars(vec![Variant::create("a", json!("string"))]))
+        .with_inputs(ActSchema::Multiple(vec![Variant::create(
+            "a",
+            json!("string"),
+        )]))
         .with_step(|step| step.with_act(Act::irq(|act| act.with_key("test"))));
     engine.executor().model().deploy(&workflow).unwrap();
     let result = executor.proc().start(&mid, Vars::new().with("a", 100));
@@ -240,7 +246,7 @@ async fn export_executor_start_with_outputs_schema_ok() {
     let mid = utils::longid();
     let workflow = Workflow::new()
         .with_id(&mid)
-        .with_outputs(ActValue::Vars(vec![
+        .with_outputs(ActSchema::Multiple(vec![
             Variant::new().name("a").r#type(VariantTypes::Number),
         ]));
 
@@ -266,7 +272,7 @@ async fn export_executor_start_with_outputs_schema_err() {
     let mid = utils::longid();
     let workflow = Workflow::new()
         .with_id(&mid)
-        .with_outputs(ActValue::Vars(vec![
+        .with_outputs(ActSchema::Multiple(vec![
             Variant::new().name("a").r#type(VariantTypes::Number),
         ]));
     engine.executor().model().deploy(&workflow).unwrap();

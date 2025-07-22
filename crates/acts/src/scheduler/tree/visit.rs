@@ -112,16 +112,6 @@ impl Visitor {
 
     pub fn walk<F: Fn(&Visitor) + Clone>(&mut self, f: &F) {
         f(self);
-
-        self.node
-            .children_in(super::NodeOutputKind::Timeout)
-            .iter()
-            .enumerate()
-            .for_each(|(i, iter)| {
-                let mut node = Visitor::new(&self.root, iter, iter.level + 1, i, false, &self.path);
-                node.walk(f);
-            });
-
         self.visit();
         self.children_visits(f);
         self.next_visit(f);

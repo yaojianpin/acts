@@ -157,5 +157,5 @@
 - feat: add `start_from_model` to export.proc
 - feat: move `message.model` to `message.inputs.model`
 - feat: refactoring `catches` and `timeouts` for `step` and `act`
-- feat: change `vars`, `env` and `options.expose` to `Vec<Variant>`
-- feat: change `workflow.inputs` and `workflow.outputs` to `ActValue`
+- feat: change `vars`, `env` and `options.exposes` to `Vec<Variant>`
+- feat: change `workflow.inputs` and `workflow.outputs` to `ActSchema`

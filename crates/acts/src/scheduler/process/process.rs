@@ -1,3 +1,4 @@
+use crate::Variant;
 use crate::event::EventAction;
 use crate::{
     ActError, Error, NodeKind, ProcInfo, Result, ShareLock, Vars, Workflow, data,
@@ -287,17 +288,17 @@ impl Process {
         }
 
         // filter the data by options.outputs
-        if let Some(outputs) = task.options().get::<Vars>(consts::ACT_EXPOSE) {
+        if let Some(exposes) = task.options().get::<Vec<Variant>>(consts::ACT_EXPOSE) {
             let mut options = Vars::new();
-            for (key, _) in &outputs {
-                if !action.options.contains_key(&key) {
+            for var in &exposes {
+                if !action.options.contains_key(&var.name) {
                     return Err(ActError::Action(format!(
                         "the options is not satisfied with act's outputs '{}' in task({})",
-                        key, action.tid
+                        var.name, action.tid
                     )));
                 }
-                if let Some(value) = action.options.get_value(&key) {
-                    options.set(&key, value.clone());
+                if let Some(value) = action.options.get_value(&var.name) {
+                    options.set(&var.name, value.clone());
                 }
             }
 
