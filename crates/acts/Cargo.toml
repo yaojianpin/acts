@@ -21,7 +21,7 @@ jsonschema = { version = "0.30.0", default-features = false }
 moka = { version = "0.12", features = ["sync"] }
 nanoid = "0.4"
 regex = "1.10"
-rquickjs = { version = "0.9", features = ["full", "parallel"] }
+rquickjs = { version = "0.9", features = ["macro", "parallel"] }
 serde = { features = ["derive"], workspace = true }
 serde_json = { workspace = true }
 serde_repr = "0.1"

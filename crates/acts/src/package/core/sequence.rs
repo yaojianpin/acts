@@ -28,34 +28,24 @@ impl ActPackage for SequencePackage {
                 "type": "object",
                 "properties": {
                     "in": {
-                        "type": "array",
+                        "type": "string",
                         "title": "In",
-                        "items": { "type": "string" },
                         "description": "The input array to create acts from"
                     },
                     "acts": {
                         "type": "array",
-                        "title": "Act List",
-                        "items": { "type": "object"},
-                        "description": "The acts to run in sequence"
+                        "title": "Actions",
+                        "description": "The actions to run in sequence",
+                        "items": {
+                            "type": "object"
+                         },
                     }
                 },
                 "required": ["in", "acts"]
             }),
             ui_schema: Some(json!({
-                "in": {
-                    "ui:widget": "array",
-                    "ui:options": {
-                        "label": false,
-                        "addButtonText": "Add Input"
-                    }
-                },
                 "acts": {
-                    "ui:widget": "acts",
-                    "ui:options": {
-                        "label": false,
-                        "addButtonText": "Add Act"
-                    }
+                    "ui:widget": "actions",
                 }
             })),
             run_as: ActRunAs::Func,
