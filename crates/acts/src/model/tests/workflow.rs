@@ -133,7 +133,7 @@ fn model_workflow_from_yml_inputs_simple() {
     assert_eq!(inputs.name, "input");
     assert_eq!(inputs.title, "Input Title");
     assert_eq!(inputs.desc, "Input Description");
-    assert_eq!(inputs.required, true);
+    assert!(inputs.required);
     assert_eq!(inputs.value, "default value");
 }
 
@@ -163,7 +163,7 @@ fn model_workflow_from_yml_inputs_multiple() {
     assert_eq!(input.name, "input1");
     assert_eq!(input.title, "Input 1 Title");
     assert_eq!(input.desc, "Input 1 Description");
-    assert_eq!(input.required, true);
+    assert!(input.required);
     assert_eq!(input.value, "default value 1");
 
     let input = &inputs[1];
@@ -171,7 +171,7 @@ fn model_workflow_from_yml_inputs_multiple() {
     assert_eq!(input.name, "input2");
     assert_eq!(input.title, "Input 2 Title");
     assert_eq!(input.desc, "Input 2 Description");
-    assert_eq!(input.required, false);
+    assert!(!input.required);
     assert_eq!(input.value, 42);
 }
 
@@ -192,7 +192,7 @@ fn model_workflow_from_yml_output_simple() {
     assert_eq!(outputs.name, "output");
     assert_eq!(outputs.title, "Output Title");
     assert_eq!(outputs.desc, "Output Description");
-    assert_eq!(outputs.required, true);
+    assert!(outputs.required);
     assert_eq!(outputs.value, "default value");
 }
 
@@ -222,7 +222,7 @@ fn model_workflow_from_yml_outputs_multiple() {
     assert_eq!(output.name, "output1");
     assert_eq!(output.title, "Output 1 Title");
     assert_eq!(output.desc, "Output 1 Description");
-    assert_eq!(output.required, true);
+    assert!(output.required);
     assert_eq!(output.value, "default value 1");
 
     let output = &outputs[1];
@@ -230,7 +230,7 @@ fn model_workflow_from_yml_outputs_multiple() {
     assert_eq!(output.name, "output2");
     assert_eq!(output.title, "Output 2 Title");
     assert_eq!(output.desc, "Output 2 Description");
-    assert_eq!(output.required, false);
+    assert!(!output.required);
     assert_eq!(output.value, 42);
 }
 

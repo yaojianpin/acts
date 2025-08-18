@@ -28,9 +28,12 @@ impl ActPackage for SequencePackage {
                 "type": "object",
                 "properties": {
                     "in": {
-                        "type": "string",
+                        "type": "array",
                         "title": "In",
-                        "description": "The input array to create acts from"
+                        "description": "The input array to create acts from",
+                        "items": {
+                            "type": "string"
+                         }
                     },
                     "acts": {
                         "type": "array",
