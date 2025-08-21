@@ -1,11 +1,13 @@
   id: test1
   vars: 
-    a: 100
+    - name: a
+      value: 100
   steps:
     - name: step 1
     - name: step 2
       vars:
-        e: abc
+        - name: e
+          value: abc
       branches:
         - name: branch 1
           if: a >= 100
