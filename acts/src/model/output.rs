@@ -30,13 +30,13 @@ fn get<T>(name: &str, value: &Value) -> Option<T>
 where
     T: for<'de> Deserialize<'de> + Clone,
 {
-    if let Some(v) = value.get(name) {
-        if let Ok(v) = serde_json::from_value::<T>(v.clone()) {
-            return Some(v);
-        }
+    if let Some(v) = value.get(name)
+        && let Ok(v) = serde_json::from_value::<T>(v.clone())
+    {
+        Some(v)
+    } else {
+        None
     }
-
-    None
 }
 
 impl fmt::Display for OutputType {

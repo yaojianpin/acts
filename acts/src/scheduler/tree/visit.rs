@@ -74,12 +74,11 @@ impl Visitor {
             .enumerate()
             .map(|(i, iter)| {
                 let mut is_last = i == len - 1;
-                if iter.kind() == NodeKind::Step {
-                    if let Some(next) = iter.next().upgrade() {
-                        if self.root.visit_count(next.id()) == 0 {
-                            is_last = false;
-                        }
-                    }
+                if iter.kind() == NodeKind::Step
+                    && let Some(next) = iter.next().upgrade()
+                    && self.root.visit_count(next.id()) == 0
+                {
+                    is_last = false;
                 }
                 Visitor::new(&self.root, iter, iter.level, i, is_last, &self.path)
             })
@@ -87,21 +86,21 @@ impl Visitor {
     }
 
     pub fn next_visit(&self) -> Option<Box<Self>> {
-        if let Some(next) = self.node.next().upgrade() {
-            if self.root.visit_count(next.id()) == 0 {
-                let node = Visitor::new(
-                    &self.root,
-                    &next,
-                    next.level,
-                    self.index + 1,
-                    next.next().upgrade().is_none(),
-                    &self.path,
-                );
-                return Some(node);
-            }
+        if let Some(next) = self.node.next().upgrade()
+            && self.root.visit_count(next.id()) == 0
+        {
+            let node = Visitor::new(
+                &self.root,
+                &next,
+                next.level,
+                self.index + 1,
+                next.next().upgrade().is_none(),
+                &self.path,
+            );
+            Some(node)
+        } else {
+            None
         }
-
-        None
     }
 
     pub fn visit(&mut self) {

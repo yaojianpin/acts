@@ -37,7 +37,7 @@ pub enum TaskState {
     /// task is aborted by abort action
     Aborted,
 
-    /// task is skippted by exteral action or internal conditions
+    /// task is skipped by external action or internal conditions
     Skipped,
 
     /// task is removed

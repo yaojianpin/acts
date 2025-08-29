@@ -9,10 +9,6 @@ pub struct Vars {
     inner: Map<String, Value>,
 }
 
-pub struct Iter<'a> {
-    iter: serde_json::map::Iter<'a>,
-}
-
 pub struct IterMut<'a> {
     iter: serde_json::map::IterMut<'a>,
 }
@@ -55,14 +51,6 @@ impl FromIterator<(String, Value)> for Vars {
         Self {
             inner: Map::from_iter(iter),
         }
-    }
-}
-
-impl<'a> Iterator for Iter<'a> {
-    type Item = (&'a String, &'a Value);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next()
     }
 }
 
@@ -163,13 +151,13 @@ impl Vars {
     where
         T: for<'de> Deserialize<'de> + Clone,
     {
-        if let Some(value) = self.inner.get(name) {
-            if let Ok(value) = serde_json::from_value::<T>(value.clone()) {
-                return Some(value);
-            }
+        if let Some(value) = self.inner.get(name)
+            && let Ok(value) = serde_json::from_value::<T>(value.clone())
+        {
+            Some(value)
+        } else {
+            None
         }
-
-        None
     }
 
     pub fn get_value(&self, name: &str) -> Option<&Value> {
@@ -252,8 +240,8 @@ fn from_json_number(n: &serde_json::Number) -> Value {
     if n.is_i64() {
         Value::Number(serde_json::Number::from(n.as_i64().unwrap()))
     } else if n.is_u64() {
-        return Value::Number(serde_json::Number::from(n.as_u64().unwrap()));
+        Value::Number(serde_json::Number::from(n.as_u64().unwrap()))
     } else {
-        return Value::Number(serde_json::Number::from_f64(n.as_f64().unwrap()).unwrap());
+        Value::Number(serde_json::Number::from_f64(n.as_f64().unwrap()).unwrap())
     }
 }

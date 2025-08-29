@@ -128,11 +128,11 @@ impl ActTask for Act {
                     return Ok(true);
                 }
             }
-        } else if state.is_skip() || state.is_success() {
-            if let Some(next) = &task.node.next().upgrade() {
-                ctx.sched_task(next);
-                return Ok(true);
-            }
+        } else if (state.is_skip() || state.is_success())
+            && let Some(next) = &task.node.next().upgrade()
+        {
+            ctx.sched_task(next);
+            return Ok(true);
         }
         Ok(is_next)
     }

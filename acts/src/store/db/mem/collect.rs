@@ -60,7 +60,7 @@ where
         #[allow(unused_assignments)]
         let mut rows = vec![];
         if !q.is_cond() {
-            rows = db.iter().map(|(_, v)| v).collect::<Vec<_>>();
+            rows = db.values().collect::<Vec<_>>();
         } else {
             let mut q = q.clone();
             for cond in q.queries_mut() {

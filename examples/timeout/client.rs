@@ -41,10 +41,10 @@ impl Client {
             }
         }
 
-        if e.is_msg() {
-            if let Some(action) = self.messages.get(&e.key) {
-                action(executor, e);
-            }
+        if e.is_msg()
+            && let Some(action) = self.messages.get(&e.key)
+        {
+            action(executor, e);
         }
 
         Ok(())

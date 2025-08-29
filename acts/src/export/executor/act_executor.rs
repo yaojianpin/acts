@@ -50,6 +50,10 @@ impl ActExecutor {
         self.do_action(pid, tid, EventAction::Remove, options)
     }
 
+    pub fn set_task_vars(&self, pid: &str, tid: &str, options: &Vars) -> Result<()> {
+        self.do_action(pid, tid, EventAction::SetVars, options)
+    }
+
     pub fn set_process_vars(&self, pid: &str, tid: &str, options: &Vars) -> Result<()> {
         self.do_action(pid, tid, EventAction::SetProcessVars, options)
     }

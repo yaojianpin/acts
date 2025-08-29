@@ -256,12 +256,12 @@ impl Task {
     pub fn inputs(self: &Arc<Self>) -> Vars {
         let ctx = self.create_context();
         let mut vars = Vars::new();
-        if let Some(prev) = self.prev() {
-            if let Some(prev_task) = self.proc.task(&prev) {
-                // set the prev task's outputs as current inputs
-                for (ref k, v) in &prev_task.outputs() {
-                    vars.set(k, v.clone());
-                }
+        if let Some(prev) = self.prev()
+            && let Some(prev_task) = self.proc.task(&prev)
+        {
+            // set the prev task's outputs as current inputs
+            for (ref k, v) in &prev_task.outputs() {
+                vars.set(k, v.clone());
             }
         }
 
@@ -568,6 +568,16 @@ impl Task {
                 task.set_err(&err);
                 task.set_data(&ctx.vars());
                 task.error(ctx)?;
+            }
+            EventAction::SetVars => {
+                if self.state().is_completed() {
+                    return Err(ActError::Action(format!(
+                        "task '{}:{}' is already completed",
+                        self.pid, self.id
+                    )));
+                }
+
+                self.set_data(&ctx.vars());
             }
             EventAction::SetProcessVars => {
                 if self.state().is_completed() {

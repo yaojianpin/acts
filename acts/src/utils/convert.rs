@@ -99,20 +99,20 @@ pub fn fill_outputs(outputs: &Vars, ctx: &Context) -> Vars {
     // println!("fill_outputs: outputs={outputs}");
     let mut ret = Vars::new();
     for (ref k, ref v) in outputs {
-        if let JsonValue::String(string) = v {
-            if let Some(expr) = get_expr(string) {
-                let result = Context::scope(ctx.clone(), move || {
-                    ctx.runtime.env().eval::<JsonValue>(&expr)
-                });
-                let new_value = result.unwrap_or_else(|err| {
-                    eprintln!("fill_outputs: expr:{string}, err={err}");
-                    JsonValue::Null
-                });
+        if let JsonValue::String(string) = v
+            && let Some(expr) = get_expr(string)
+        {
+            let result = Context::scope(ctx.clone(), move || {
+                ctx.runtime.env().eval::<JsonValue>(&expr)
+            });
+            let new_value = result.unwrap_or_else(|err| {
+                eprintln!("fill_outputs: expr:{string}, err={err}");
+                JsonValue::Null
+            });
 
-                // satisfies the rule 1
-                ret.insert(k.to_string(), new_value);
-                continue;
-            }
+            // satisfies the rule 1
+            ret.insert(k.to_string(), new_value);
+            continue;
         }
 
         // rule 2
@@ -134,17 +134,16 @@ pub fn fill_outputs(outputs: &Vars, ctx: &Context) -> Vars {
 pub fn fill_proc_vars(task: &Arc<Task>, values: &Vars, ctx: &Context) -> Vars {
     let mut ret = Vars::new();
     for (ref k, ref v) in values {
-        if let JsonValue::String(string) = v {
-            if let Some(expr) = get_expr(string) {
-                let result =
-                    Context::scope(ctx.clone(), || ctx.runtime.env().eval::<JsonValue>(&expr));
-                let new_value = result.unwrap_or(JsonValue::Null);
+        if let JsonValue::String(string) = v
+            && let Some(expr) = get_expr(string)
+        {
+            let result = Context::scope(ctx.clone(), || ctx.runtime.env().eval::<JsonValue>(&expr));
+            let new_value = result.unwrap_or(JsonValue::Null);
 
-                // satisfies the rule 1
-                ret.insert(k.to_string(), new_value);
+            // satisfies the rule 1
+            ret.insert(k.to_string(), new_value);
 
-                continue;
-            }
+            continue;
         }
 
         // rule 2
