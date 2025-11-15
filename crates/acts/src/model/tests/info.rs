@@ -104,7 +104,8 @@ fn model_info_model() {
     let model = data::Model {
         id: utils::longid(),
         name: "test_model".to_string(),
-        ver: 1,
+        desc: "test model desc".to_string(),
+        ver: "0.1.0".to_string(),
         size: 1245,
         create_time: 3333,
         update_time: 0,
@@ -277,7 +278,8 @@ fn model_info_model_arr_to_value() {
     let model = data::Model {
         id: utils::longid(),
         name: "test_model".to_string(),
-        ver: 1,
+        desc: "test model desc".to_string(),
+        ver: "0.1.0".to_string(),
         size: 1245,
         create_time: 3333,
         update_time: 0,
@@ -293,7 +295,7 @@ fn model_info_model_arr_to_value() {
 
     let v = &v[0];
     assert_eq!(v.get("name").unwrap().as_str().unwrap(), model.name);
-    assert_eq!(v.get("ver").unwrap().as_u64().unwrap(), model.ver as u64);
+    assert_eq!(v.get("ver").unwrap().as_str().unwrap(), model.ver);
     assert_eq!(v.get("size").unwrap().as_u64().unwrap(), model.size as u64);
     assert_eq!(
         v.get("create_time").unwrap().as_i64().unwrap(),

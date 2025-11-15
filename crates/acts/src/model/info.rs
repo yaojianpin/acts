@@ -59,7 +59,8 @@ pub struct TaskInfo {
 pub struct ModelInfo {
     pub id: String,
     pub name: String,
-    pub ver: i32,
+    pub desc: String,
+    pub ver: String,
     pub size: i32,
     pub create_time: i64,
     pub update_time: i64,
@@ -92,7 +93,7 @@ pub struct EventInfo {
     pub id: String,
     pub name: String,
     pub mid: String,
-    pub ver: i32,
+    pub ver: String,
 
     pub uses: String,
     pub params: String,
@@ -128,7 +129,7 @@ impl ModelInfo {
         let m = serde_yaml::from_str::<Workflow>(&self.data);
         match m {
             Ok(mut m) => {
-                m.set_ver(self.ver);
+                m.set_ver(&self.ver);
                 Ok(m)
             }
             Err(err) => Err(ActError::Convert(err.to_string())),
@@ -141,6 +142,7 @@ impl From<data::Model> for ModelInfo {
         Self {
             id: m.id,
             name: m.name,
+            desc: m.desc,
             ver: m.ver,
             size: m.size,
             create_time: m.create_time,
@@ -281,7 +283,7 @@ impl From<&data::Event> for EventInfo {
             timestamp: m.timestamp,
             create_time: m.create_time,
             mid: m.mid.clone(),
-            ver: m.ver,
+            ver: m.ver.clone(),
             uses: m.uses.clone(),
             params: m.params.clone(),
         }

@@ -20,6 +20,7 @@ enum CollectionIden {
     Table,
     Id,
     Name,
+    Desc,
     Ver,
     Size,
     CreateTime,
@@ -53,6 +54,7 @@ impl DbCollection for ModelCollection {
             .columns([
                 CollectionIden::Id,
                 CollectionIden::Name,
+                CollectionIden::Desc,
                 CollectionIden::Ver,
                 CollectionIden::Size,
                 CollectionIden::CreateTime,
@@ -81,6 +83,7 @@ impl DbCollection for ModelCollection {
             .columns([
                 CollectionIden::Id,
                 CollectionIden::Name,
+                CollectionIden::Desc,
                 CollectionIden::Ver,
                 CollectionIden::Size,
                 CollectionIden::CreateTime,
@@ -142,6 +145,7 @@ impl DbCollection for ModelCollection {
             .columns([
                 CollectionIden::Id,
                 CollectionIden::Name,
+                CollectionIden::Desc,
                 CollectionIden::Ver,
                 CollectionIden::Size,
                 CollectionIden::CreateTime,
@@ -152,6 +156,7 @@ impl DbCollection for ModelCollection {
             .values([
                 data.id.into(),
                 data.name.into(),
+                data.desc.into(),
                 data.ver.into(),
                 data.size.into(),
                 data.create_time.into(),
@@ -175,6 +180,7 @@ impl DbCollection for ModelCollection {
             .table(CollectionIden::Table)
             .values([
                 (CollectionIden::Name, model.name.into()),
+                (CollectionIden::Desc, model.desc.into()),
                 (CollectionIden::Ver, model.ver.into()),
                 (CollectionIden::Size, model.size.into()),
                 (CollectionIden::CreateTime, model.create_time.into()),
@@ -218,7 +224,8 @@ impl DbRow for data::Model {
         Ok(Self {
             id: row.get("id"),
             name: row.get("name"),
-            ver: row.get::<i32, &str>("ver"),
+            desc: row.get("desc"),
+            ver: row.get("ver"),
             size: row.get::<i32, &str>("size"),
             create_time: row.get("create_time"),
             update_time: row.get("update_time"),

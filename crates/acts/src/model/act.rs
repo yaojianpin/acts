@@ -17,6 +17,10 @@ pub struct Act {
     #[serde(default)]
     pub id: String,
 
+    /// resource name
+    /// used in permission control
+    pub rn: Option<String>,
+
     #[serde(default)]
     pub name: String,
 

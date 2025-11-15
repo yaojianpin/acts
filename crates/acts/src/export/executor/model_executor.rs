@@ -26,7 +26,7 @@ impl ModelExecutor {
 
         let store = self.runtime.cache().store();
         let ret = store.deploy(model)?;
-        self.deploy_event(&model.on, &model.id, model.ver)?;
+        self.deploy_event(&model.on, &model.id, &model.ver)?;
 
         Ok(ret)
     }
@@ -50,10 +50,21 @@ impl ModelExecutor {
         match self.runtime.cache().store().models().find(id) {
             Ok(m) => {
                 let mut model: ModelInfo = m.into();
-                if fmt == "tree" {
-                    let workflow = Workflow::from_yml(&model.data)?;
-                    model.data = workflow.tree_output();
+                match fmt {
+                    "tree" => {
+                        let workflow = Workflow::from_yml(&model.data)?;
+                        model.data = workflow.tree_output();
+                    }
+                    "yaml" => {
+                        let workflow = Workflow::from_yml(&model.data)?;
+                        model.data = workflow.to_yml()?;
+                    }
+                    _ => {
+                        let workflow = Workflow::from_yml(&model.data)?;
+                        model.data = workflow.to_json()?;
+                    }
                 }
+
                 Ok(model)
             }
             Err(err) => Err(err),
@@ -76,7 +87,7 @@ impl ModelExecutor {
         store.models().delete(id)
     }
 
-    fn deploy_event(&self, acts: &[Act], mid: &str, ver: i32) -> Result<()> {
+    fn deploy_event(&self, acts: &[Act], mid: &str, ver: &str) -> Result<()> {
         let store = self.runtime.cache().store();
         for act in acts {
             let event_id = format!("{}:{}", mid, act.id);

@@ -94,20 +94,6 @@ async fn store_model_deploy_ok() {
 }
 
 #[tokio::test]
-async fn store_model_deploy_ver_incr() {
-    let store = store().await;
-    let mut workflow = create_workflow();
-    workflow.id = utils::longid();
-    store.deploy(&workflow).unwrap();
-    let model = store.models().find(&workflow.id).unwrap();
-
-    assert_eq!(model.ver, 1);
-    store.deploy(&workflow).unwrap();
-    let model = store.models().find(&workflow.id).unwrap();
-    assert_eq!(model.ver, 2);
-}
-
-#[tokio::test]
 async fn store_models() {
     let store = store().await;
 
@@ -141,7 +127,8 @@ async fn store_model_query_by_id() {
     let model = Model {
         id: utils::longid(),
         name: "test".to_string(),
-        ver: 1,
+        desc: "test desc".to_string(),
+        ver: "0.1.0".to_string(),
         size: 1245,
         create_time: 3333,
         update_time: 0,
@@ -162,7 +149,8 @@ async fn store_model_query_by_offset_count() {
         let model = Model {
             id: utils::longid(),
             name: format!("test-{}", i + 1),
-            ver: 1,
+            desc: "test desc".to_string(),
+            ver: "0.1.0".to_string(),
             size: 1245,
             create_time,
             update_time: 0,
@@ -197,7 +185,8 @@ async fn store_model_query_by_cond_and() {
         let model = Model {
             id: utils::longid(),
             name: format!("test-{}", i + 1),
-            ver: 1,
+            desc: "test desc".to_string(),
+            ver: "0.1.0".to_string(),
             size: 1234,
             create_time,
             update_time: 0,
@@ -232,7 +221,8 @@ async fn store_model_query_by_cond_or() {
         let model = Model {
             id: utils::longid(),
             name: format!("test-{}", i + 1),
-            ver: 1,
+            desc: "test desc".to_string(),
+            ver: "0.1.0".to_string(),
             size: 1234,
             create_time,
             update_time: 0,
@@ -245,7 +235,8 @@ async fn store_model_query_by_cond_or() {
         let model = Model {
             id: utils::longid(),
             name: format!("test-{}", i + 1),
-            ver: 1,
+            desc: "test desc".to_string(),
+            ver: "0.1.0".to_string(),
             size: 2000,
             create_time,
             update_time: 0,
@@ -276,7 +267,8 @@ async fn store_model_query_by_order() {
         let model = Model {
             id: utils::longid(),
             name: format!("test-{}", i + 1),
-            ver: 1,
+            desc: "test desc".to_string(),
+            ver: "0.1.0".to_string(),
             size: 2000,
             create_time,
             update_time: 0,

@@ -14,6 +14,7 @@ impl DbDocument for Model {
         let mut map = HashMap::new();
         map.insert("id".to_string(), json!(self.id.clone()));
         map.insert("name".to_string(), json!(self.name.clone()));
+        map.insert("desc".to_string(), json!(self.desc.clone()));
         map.insert("ver".to_string(), json!(self.ver));
         map.insert("size".to_string(), json!(self.size));
         map.insert("create_time".to_string(), json!(self.create_time));

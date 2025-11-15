@@ -20,6 +20,7 @@ enum CollectionIden {
     Table,
     Id,
     Name,
+    Desc,
     Ver,
     Size,
     CreateTime,
@@ -54,6 +55,7 @@ impl DbCollection for ModelCollection {
             .columns([
                 CollectionIden::Id,
                 CollectionIden::Name,
+                CollectionIden::Desc,
                 CollectionIden::Ver,
                 CollectionIden::Size,
                 CollectionIden::CreateTime,
@@ -86,6 +88,7 @@ impl DbCollection for ModelCollection {
             .columns([
                 CollectionIden::Id,
                 CollectionIden::Name,
+                CollectionIden::Desc,
                 CollectionIden::Ver,
                 CollectionIden::Size,
                 CollectionIden::CreateTime,
@@ -148,6 +151,7 @@ impl DbCollection for ModelCollection {
             .columns([
                 CollectionIden::Id,
                 CollectionIden::Name,
+                CollectionIden::Desc,
                 CollectionIden::Ver,
                 CollectionIden::Size,
                 CollectionIden::CreateTime,
@@ -158,6 +162,7 @@ impl DbCollection for ModelCollection {
             .values([
                 data.id.into(),
                 data.name.into(),
+                data.desc.into(),
                 data.ver.into(),
                 data.size.into(),
                 data.create_time.into(),
@@ -181,6 +186,7 @@ impl DbCollection for ModelCollection {
             .table(CollectionIden::Table)
             .values([
                 (CollectionIden::Name, model.name.into()),
+                (CollectionIden::Desc, model.desc.into()),
                 (CollectionIden::Ver, model.ver.into()),
                 (CollectionIden::Size, model.size.into()),
                 (CollectionIden::CreateTime, model.create_time.into()),
@@ -223,6 +229,7 @@ impl DbRow for data::Model {
         Ok(Self {
             id: row.get_unwrap("id"),
             name: row.get_unwrap("name"),
+            desc: row.get_unwrap("desc"),
             ver: row.get_unwrap("ver"),
             size: row.get_unwrap("size"),
             create_time: row.get_unwrap("create_time"),
@@ -246,6 +253,7 @@ impl DbInit for ModelCollection {
                         .primary_key(),
                 )
                 .col(ColumnDef::new(CollectionIden::Name).string())
+                .col(ColumnDef::new(CollectionIden::Desc).string())
                 .col(ColumnDef::new(CollectionIden::Ver).integer().default(0))
                 .col(ColumnDef::new(CollectionIden::Size).integer().default(0))
                 .col(ColumnDef::new(CollectionIden::Data).string().not_null())

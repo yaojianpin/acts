@@ -162,3 +162,6 @@
 - fix: fix the audit issues
        1. fix dependencies sqlx-mysql `rsa` issue （Timing Side-Channel Attack）
        2. fix dependencies rquickjs `dlopen_derive` `unmaintained` issue
+- feat: add `rn` resource name to workflow and step
+- feat: update workflow.ver to String type
+- feat: add `desc` to store models

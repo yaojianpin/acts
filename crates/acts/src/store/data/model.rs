@@ -6,7 +6,8 @@ use crate::store::{DbCollectionIden, StoreIden};
 pub struct Model {
     pub id: String,
     pub name: String,
-    pub ver: i32,
+    pub desc: String,
+    pub ver: String,
     pub size: i32,
     pub create_time: i64,
     pub update_time: i64,

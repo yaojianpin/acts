@@ -9,6 +9,7 @@ pub struct Vars {
     inner: JsonMap<String, JsonValue>,
 }
 
+#[allow(dead_code)]
 pub struct Iter<'a> {
     iter: serde_json::map::Iter<'a>,
 }

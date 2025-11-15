@@ -126,8 +126,9 @@ impl Store {
                 let data = Model {
                     id: model.id.clone(),
                     name: model.name.clone(),
+                    desc: model.desc.clone(),
                     data: text.clone(),
-                    ver: m.ver + 1,
+                    ver: m.ver.clone(),
                     size: text.len() as i32,
                     create_time: m.create_time,
                     update_time: utils::time::time_millis(),
@@ -140,8 +141,9 @@ impl Store {
                 let data = Model {
                     id: model.id.clone(),
                     name: model.name.clone(),
+                    desc: model.desc.clone(),
                     data: text.clone(),
-                    ver: 1,
+                    ver: "0.1.0".to_string(),
                     size: text.len() as i32,
                     create_time: utils::time::time_millis(),
                     update_time: 0,

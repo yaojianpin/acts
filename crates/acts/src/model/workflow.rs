@@ -10,6 +10,11 @@ pub struct Workflow {
     #[serde(default)]
     pub id: String,
 
+    /// resource name
+    /// the resource name is also used in permission control, the name seperated in ':'
+    /// just likes 'acts:share:a:b:workflow_a'
+    pub rn: Option<String>,
+
     #[serde(default)]
     pub name: String,
 
@@ -41,7 +46,7 @@ pub struct Workflow {
     pub on: Vec<Act>,
 
     #[serde(default)]
-    pub ver: i32,
+    pub ver: String,
 
     /// extra options to send to client
     #[serde(default)]
@@ -126,8 +131,8 @@ impl Workflow {
         self.id = id.to_string();
     }
 
-    pub fn set_ver(&mut self, ver: i32) {
-        self.ver = ver;
+    pub fn set_ver(&mut self, ver: &str) {
+        self.ver = ver.to_string();
     }
 
     pub fn to_yml(&self) -> Result<String> {

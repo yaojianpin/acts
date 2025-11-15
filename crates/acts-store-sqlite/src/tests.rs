@@ -40,7 +40,8 @@ async fn store_model_create() {
     let model = Model {
         id: utils::longid(),
         name: "test".to_string(),
-        ver: 1,
+        desc: "test desc".to_string(),
+        ver: "0.1.0".to_string(),
         size: 1245,
         create_time: utils::time_millis(),
         update_time: 0,
@@ -58,7 +59,8 @@ async fn store_model_find() {
     let model = Model {
         id: mid.clone(),
         name: "test".to_string(),
-        ver: 1,
+        desc: "test desc".to_string(),
+        ver: "0.1.0".to_string(),
         size: 1245,
         create_time: 3333,
         update_time: 0,
@@ -77,7 +79,8 @@ async fn store_model_query_id() {
         let model = Model {
             id: utils::longid(),
             name: "test_model".to_string(),
-            ver: 1,
+            desc: "test desc".to_string(),
+            ver: "0.1.0".to_string(),
             size: 1245,
             create_time: 3333,
             update_time: 0,
@@ -101,7 +104,8 @@ async fn store_model_query_match_or() {
         let model = Model {
             id: utils::longid(),
             name: format!("test_model {i}"),
-            ver: 1,
+            desc: "test desc".to_string(),
+            ver: "0.1.0".to_string(),
             size: 1000,
             create_time: 3333,
             update_time: 0,
@@ -130,7 +134,8 @@ async fn store_model_query_match_and() {
         let model = Model {
             id: utils::longid(),
             name: format!("test_model {i}"),
-            ver: 1,
+            desc: "test desc".to_string(),
+            ver: "0.1.0".to_string(),
             size: 2000,
             create_time: 3333,
             update_time: 0,
@@ -159,7 +164,8 @@ async fn store_model_update() {
     let mut model = Model {
         id: utils::longid(),
         name: "test".to_string(),
-        ver: 1,
+        desc: "test desc".to_string(),
+        ver: "0.1.0".to_string(),
         size: 1245,
         create_time: 3333,
         update_time: 0,
@@ -168,7 +174,7 @@ async fn store_model_update() {
     };
     store.models().create(&model).unwrap();
 
-    model.ver = 3;
+    model.ver = "0.2.0".to_string();
     model.update_time = utils::time_millis();
     store.models().update(&model).unwrap();
 
@@ -183,7 +189,8 @@ async fn store_model_delete() {
     let model = Model {
         id: utils::longid(),
         name: "test".to_string(),
-        ver: 1,
+        desc: "test desc".to_string(),
+        ver: "0.2.0".to_string(),
         size: 1245,
         create_time: 3333,
         update_time: 0,
@@ -1047,7 +1054,7 @@ async fn store_event_create() {
         id,
         name: "name".to_string(),
         mid: "mid".to_string(),
-        ver: 1,
+        ver: "0.1.0".to_string(),
         uses: "acts.event.manual".to_string(),
         params: "".to_string(),
         create_time: utils::time_millis(),
@@ -1068,7 +1075,7 @@ async fn store_event_query_id() {
         id,
         name: "name".to_string(),
         mid: "mid".to_string(),
-        ver: 1,
+        ver: "0.1.0".to_string(),
         uses: "acts.event.manual".to_string(),
         params: "".to_string(),
         create_time: 0,
@@ -1090,7 +1097,7 @@ async fn store_event_query_match_or() {
             id,
             name: format!("name {idx}"),
             mid: "mid1".to_string(),
-            ver: 1,
+            ver: "0.1.0".to_string(),
             uses: "acts.event.manual".to_string(),
             params: "".to_string(),
             create_time: 0,
@@ -1121,7 +1128,7 @@ async fn store_event_query_match_and() {
             id,
             name: format!("name {idx}"),
             mid: "mid2".to_string(),
-            ver: 1,
+            ver: "0.1.0".to_string(),
             uses: "acts.event.manual".to_string(),
             params: "".to_string(),
             create_time: 0,
@@ -1151,7 +1158,7 @@ async fn store_event_update() {
         id,
         name: "name".to_string(),
         mid: "mid".to_string(),
-        ver: 1,
+        ver: "0.1.0".to_string(),
         uses: "acts.event.manual".to_string(),
         params: "".to_string(),
         create_time: 0,
@@ -1180,7 +1187,7 @@ async fn store_event_remove() {
         id,
         name: "name".to_string(),
         mid: "mid".to_string(),
-        ver: 1,
+        ver: "0.1.0".to_string(),
         uses: "acts.event.manual".to_string(),
         params: "".to_string(),
         create_time: 0,

@@ -15,6 +15,10 @@ pub struct Step {
     #[serde(default)]
     pub id: String,
 
+    /// resource name
+    /// used in permission control
+    pub rn: Option<String>,
+
     /// define the step vars
     #[serde(default)]
     pub vars: Vec<Variant>,
