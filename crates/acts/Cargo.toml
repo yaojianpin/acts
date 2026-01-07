@@ -30,6 +30,7 @@ strum = { features = ["derive"], workspace = true }
 thiserror = "2"
 tracing = "0.1"
 toml = "0.8.22"
+dashmap = "6.1.0"
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }

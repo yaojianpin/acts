@@ -1,0 +1,22 @@
+name: CodeCoverage
+on:
+    push:
+        branches: [ main, develop ]
+    pull_request:
+        branches: [ main, develop ]
+jobs:
+    run-coverage:
+        name: Run coverage analysis
+        runs-on: ubuntu-latest
+        steps:
+            - uses: actions/checkout@v4
+            - uses: dtolnay/rust-toolchain@stable
+            - run: cargo install cargo-tarpaulin
+            - name: Run tests with coverage
+              run: cargo tarpaulin --workspace --out Xml --ignore-tests
+            - name: Upload coverage to Codecov
+              uses: codecov/codecov-action@v4
+              with:
+                token: ${{ secrets.CODECOV_TOKEN }}
+                files: ./cobertura.xml
+                fail_ci_if_error: true

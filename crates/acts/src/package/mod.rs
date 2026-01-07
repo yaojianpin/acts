@@ -9,11 +9,9 @@ use crate::{
     Engine, Result, Vars, data,
     scheduler::{Context, Runtime},
 };
+use dashmap::DashMap;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::sync::Arc;
 use tracing::debug;
 
 #[cfg(test)]
@@ -21,7 +19,7 @@ pub use core::RunningMode;
 
 #[derive(Debug, Clone)]
 pub struct Package {
-    packages: Arc<Mutex<HashMap<String, ActPackageRegister>>>,
+    packages: Arc<DashMap<String, ActPackageRegister>>,
 }
 
 pub trait ActPackage {
@@ -188,18 +186,16 @@ impl Default for Package {
 impl Package {
     pub fn new() -> Self {
         Self {
-            packages: Arc::new(Mutex::new(HashMap::new())),
+            packages: Arc::new(DashMap::new()),
         }
     }
 
     pub fn register(&self, name: &str, register: &ActPackageRegister) {
-        let mut packages = self.packages.lock().unwrap();
-        packages.insert(name.to_string(), register.clone());
+        self.packages.insert(name.to_string(), register.clone());
     }
 
     pub fn get(&self, name: &str) -> Option<ActPackageRegister> {
-        let registrar = self.packages.lock().unwrap();
-        registrar.get(name).cloned()
+        self.packages.get(name).map(|v| v.clone())
     }
 }
 
