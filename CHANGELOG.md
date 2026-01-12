@@ -166,3 +166,4 @@
 - feat: update workflow.ver to String type
 - feat: add `desc` to store models
 - feat: add dashmap for Package mod
+- feat: add safe limit for quickjs runtime

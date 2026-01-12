@@ -7,7 +7,10 @@ use crate::{ActError, Result, ShareLock, Vars};
 use core::fmt;
 use rquickjs::{Context as JsContext, Ctx as JsCtx, FromJs, Runtime as JsRuntime};
 use serde::de::DeserializeOwned;
-use std::sync::{Arc, RwLock};
+use std::{
+    sync::{Arc, RwLock},
+    time::{Duration, Instant},
+};
 
 use self::value::ActJsValue;
 
@@ -91,10 +94,20 @@ impl Enviroment {
     where
         T: DeserializeOwned,
     {
-        let runtime = JsRuntime::new().unwrap();
-        let ctx = JsContext::full(&runtime).unwrap();
+        let runtime = JsRuntime::new()?;
+        runtime.set_memory_limit(10 * 1024 * 1024); // 10M
+        let ctx = JsContext::full(&runtime)?;
+
+        let start = Instant::now();
         ctx.with(|ctx| {
-            let modules = self.modules.read().unwrap();
+            let global = ctx.globals();
+            // remove eval for safe reason
+            global.remove("eval")?;
+
+            let modules = self
+                .modules
+                .read()
+                .map_err(|err| ActError::Script(err.to_string()))?;
             for m in modules.iter() {
                 m.init(&ctx)?;
             }
@@ -107,6 +120,11 @@ impl Enviroment {
                     ecode: "".to_string(),
                     message: exception.message().unwrap_or_default(),
                 });
+            }
+
+            // catches timeout
+            if start.elapsed() > Duration::from_millis(15_000) {
+                return Err(ActError::Script("Execution timeout".into()));
             }
 
             let value = result.map_err(ActError::from)?;
