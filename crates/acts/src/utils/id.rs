@@ -7,7 +7,7 @@ const ALPHABETS: [char; 62] = [
     'V', 'W', 'X', 'Y', 'Z',
 ];
 
-const ID_SEP: &str = ":";
+const ID_SEP: &str = "_";
 
 #[allow(unused)]
 pub fn longid() -> String {

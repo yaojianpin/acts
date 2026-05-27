@@ -1,58 +1,67 @@
-use super::{DbCollection, DbCollectionIden, StoreIden, data, db::MemStore};
+use std::any::Any;
+use std::sync::Arc;
+
+use dashmap::DashMap;
+use serde::Serialize;
+use serde::de::DeserializeOwned;
+use std::fmt::Debug;
+use tracing::trace;
+
 use crate::{
-    ActError, Result, ShareLock, Workflow,
+    ActError, Config, Result, Workflow,
     store::{Model, Package},
     utils,
 };
-use std::{
-    any::Any,
-    collections::HashMap,
-    convert::AsRef,
-    sync::{Arc, RwLock},
-};
-use strum::IntoEnumIterator;
-use tracing::trace;
 
-#[derive(Clone)]
-pub struct DynDbSetRef<T>(Arc<dyn DbCollection<Item = T>>);
+use super::kv::KvStore;
+use super::memory::MemoryStore;
+use super::{DbCollection, DbCollectionIden, StoreIden, collection::KvCollection, data};
 
-pub struct Store {
-    collections: ShareLock<HashMap<StoreIden, Arc<dyn Any + Send + Sync + 'static>>>,
+struct DynCollection<T> {
+    collection: Arc<dyn DbCollection<Item = T>>,
 }
 
-impl Default for Store {
-    fn default() -> Self {
-        Self::new()
-    }
+pub struct Store {
+    kv: Arc<dyn KvStore>,
+    overrides: DashMap<StoreIden, Arc<dyn Any + Send + Sync>>,
 }
 
 impl Store {
-    pub fn new() -> Self {
+    pub fn new(kv: Arc<dyn KvStore>) -> Self {
         Self {
-            collections: Arc::new(RwLock::new(HashMap::new())),
+            kv,
+            overrides: DashMap::new(),
         }
     }
 
-    pub fn collection<DATA>(&self) -> Arc<dyn DbCollection<Item = DATA>>
-    where
-        DATA: DbCollectionIden + Send + Sync + 'static,
-    {
-        let collections = self.collections.read().unwrap();
+    pub fn create(config: &Config) -> crate::Result<Self> {
+        #[allow(unused_mut)]
+        let mut kv: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
 
-        #[allow(clippy::expect_fun_call)]
-        let collection = collections.get(&DATA::iden()).expect(&format!(
-            "fail to get collection: {}",
-            DATA::iden().as_ref()
-        ));
+        #[allow(unused_variables)]
+        if let Some(db) = &config.data.db {
+            #[cfg(feature = "store-sqlite")]
+            {
+                kv = Arc::new(super::SqliteStore::open(&db.database_url)?);
+            }
+            #[cfg(feature = "store-postgres")]
+            {
+                kv = Arc::new(super::PostgresStore::open(&db.database_url)?);
+            }
+            #[cfg(feature = "store-redis")]
+            {
+                kv = Arc::new(super::RedisStore::open(&db.database_url)?);
+            }
+            #[cfg(feature = "store-nats")]
+            {
+                kv = Arc::new(super::NatsStore::open(&db.database_url)?);
+            }
+        }
 
-        #[allow(clippy::expect_fun_call)]
-        collection
-            .downcast_ref::<DynDbSetRef<DATA>>()
-            .map(|v| v.0.clone())
-            .expect(&format!(
-                "fail to get collection: {}",
-                DATA::iden().as_ref()
-            ))
+        Ok(Self {
+            kv,
+            overrides: DashMap::new(),
+        })
     }
 
     pub fn register<DATA>(
@@ -61,8 +70,22 @@ impl Store {
     ) where
         DATA: DbCollectionIden + 'static,
     {
-        let mut collections = self.collections.write().unwrap();
-        collections.insert(DATA::iden(), Arc::new(DynDbSetRef::<DATA>(collection)));
+        let wrapper = DynCollection { collection };
+        self.overrides.insert(DATA::iden(), Arc::new(wrapper));
+    }
+
+    fn collection<DATA>(&self) -> Arc<dyn DbCollection<Item = DATA>>
+    where
+        DATA:
+            DbCollectionIden + Serialize + DeserializeOwned + Send + Sync + Clone + Debug + 'static,
+    {
+        if let Some(ov) = self.overrides.get(&DATA::iden())
+            && let Some(wrapper) = ov.downcast_ref::<DynCollection<DATA>>()
+        {
+            return wrapper.collection.clone();
+        }
+        let prefix = DATA::iden().as_ref().to_string();
+        Arc::new(KvCollection::new(&prefix, self.kv.clone()))
     }
 
     pub fn tasks(&self) -> Arc<dyn DbCollection<Item = data::Task>> {
@@ -114,6 +137,7 @@ impl Store {
             }
         }
     }
+
     pub fn deploy(&self, model: &Workflow) -> Result<bool> {
         trace!("store::deploy({})", model.id);
         if model.id.is_empty() {
@@ -151,24 +175,6 @@ impl Store {
                 };
                 models.create(&data)
             }
-        }
-    }
-
-    pub fn init(&self) {
-        let mem = MemStore::new();
-        let mut collections = self.collections.write().unwrap();
-        for item in StoreIden::iter() {
-            // fill the mem store when there is no collection
-            collections
-                .entry(item.clone())
-                .or_insert_with(|| match item {
-                    StoreIden::Packages => Arc::new(DynDbSetRef(mem.packages())),
-                    StoreIden::Models => Arc::new(DynDbSetRef(mem.models())),
-                    StoreIden::Procs => Arc::new(DynDbSetRef(mem.procs())),
-                    StoreIden::Tasks => Arc::new(DynDbSetRef(mem.tasks())),
-                    StoreIden::Messages => Arc::new(DynDbSetRef(mem.messages())),
-                    StoreIden::Events => Arc::new(DynDbSetRef(mem.events())),
-                });
         }
     }
 }

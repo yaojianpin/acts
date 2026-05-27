@@ -109,7 +109,7 @@ impl EngineBuilder {
     }
 
     pub async fn build(&self) -> Result<Engine> {
-        let engine = Engine::new_with_config(&self.config);
+        let engine = Engine::new_with_config(&self.config)?;
 
         // init the cache store to make sure the plugin can registry package to the store
         engine.runtime().cache().init(&engine);

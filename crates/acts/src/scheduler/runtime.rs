@@ -24,11 +24,11 @@ pub struct Runtime {
 }
 
 impl Runtime {
-    pub fn new(config: &Config) -> Arc<Self> {
-        let runtime = Self::create(config);
+    pub fn new(config: &Config) -> crate::Result<Arc<Self>> {
+        let runtime = Self::create(config)?;
         runtime.event_loop();
 
-        runtime
+        Ok(runtime)
     }
 
     #[allow(unused)]
@@ -161,10 +161,10 @@ impl Runtime {
         });
     }
 
-    fn create(config: &Config) -> Arc<Runtime> {
+    fn create(config: &Config) -> crate::Result<Arc<Runtime>> {
         let scher = Scheduler::new();
         let env = Arc::new(Enviroment::new());
-        let cache = Arc::new(Cache::new(config.cache_cap() as usize));
+        let cache = Arc::new(Cache::new(config)?);
         let emitter = Arc::new(Emitter::new());
         let package = Arc::new(Package::new());
         let runtime = Arc::new(Runtime {
@@ -176,11 +176,11 @@ impl Runtime {
             package,
         });
 
-        runtime.initialize(config);
-        runtime
+        runtime.initialize(config)?;
+        Ok(runtime)
     }
 
-    fn initialize(self: &Arc<Self>, options: &Config) {
+    fn initialize(self: &Arc<Self>, options: &Config) -> crate::Result<()> {
         {
             let cache = self.cache.clone();
             let rt = self.clone();
@@ -312,6 +312,8 @@ impl Runtime {
                 }
             });
         }
+
+        Ok(())
     }
 
     fn return_to_act(self: &Arc<Self>, pid: &str, tid: &str, proc: &Process) {

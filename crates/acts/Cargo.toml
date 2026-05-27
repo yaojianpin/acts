@@ -31,12 +31,20 @@ thiserror = "2"
 tracing = "0.1"
 toml = "0.8.22"
 dashmap = "6.1.0"
+redis = { version = "0.27", optional = true }
+async-nats = { version = "0.36", optional = true }
+futures = { version = "0.3", optional = true }
+sqlx = { version = "0.8", features = ["runtime-tokio"], optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio"] }
 
 [features]
 default = []
+store-nats = ["async-nats", "futures"]
+store-redis = ["redis"]
+store-sqlite = ["sqlx", "sqlx/sqlite"]
+store-postgres = ["sqlx", "sqlx/postgres", "sqlx/tls-rustls"]
 
 [[bench]]
 harness = false

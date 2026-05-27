@@ -47,6 +47,9 @@ impl DbCollectionIden for Message {
     fn iden() -> StoreIden {
         StoreIden::Messages
     }
+    fn indexed_fields() -> &'static [&'static str] {
+        &["pid", "status", "tid"]
+    }
 }
 
 impl fmt::Display for MessageStatus {

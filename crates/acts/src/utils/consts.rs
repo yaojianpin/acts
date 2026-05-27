@@ -35,6 +35,9 @@ pub const TASK_ROOT_TID: &str = "$";
 pub const PROCESS_ID: &str = "pid";
 pub const MODEL_ID: &str = "mid";
 
+#[allow(dead_code)]
+pub const ACTS_STORE_NAME: &str = "acts_store";
+
 /// check if the key is private
 /// these keys can only be as local data
 pub fn is_private_key(key: &str) -> bool {

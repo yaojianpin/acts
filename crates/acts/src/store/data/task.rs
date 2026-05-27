@@ -27,6 +27,9 @@ impl DbCollectionIden for Task {
     fn iden() -> StoreIden {
         StoreIden::Tasks
     }
+    fn indexed_fields() -> &'static [&'static str] {
+        &["pid"]
+    }
 }
 
 impl Task {

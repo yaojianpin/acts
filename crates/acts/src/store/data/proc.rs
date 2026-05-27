@@ -20,4 +20,7 @@ impl DbCollectionIden for Proc {
     fn iden() -> StoreIden {
         StoreIden::Procs
     }
+    fn indexed_fields() -> &'static [&'static str] {
+        &["state", "mid"]
+    }
 }

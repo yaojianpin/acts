@@ -44,15 +44,9 @@ pub struct Engine {
     extender: Arc<Extender>,
 }
 
-impl Default for Engine {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Engine {
     pub fn new() -> Self {
-        Self::new_with_config(&Config::default())
+        Self::new_with_config(&Config::default()).unwrap_or_else(|e| panic!("{}", e))
     }
 
     pub fn config(&self) -> Arc<Config> {
@@ -133,12 +127,12 @@ impl Engine {
         package::init(self);
     }
 
-    pub(crate) fn new_with_config(config: &Config) -> Self {
+    pub(crate) fn new_with_config(config: &Config) -> crate::Result<Self> {
         info!("config: {:?}", config);
-        let runtime = Runtime::new(config);
+        let runtime = Runtime::new(config)?;
 
         let extender = Arc::new(Extender::new(&runtime));
-        Self { runtime, extender }
+        Ok(Self { runtime, extender })
     }
 
     pub fn start(self) -> Self {

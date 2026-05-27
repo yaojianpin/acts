@@ -1,5 +1,5 @@
 use crate::{
-    Engine, Result,
+    Config, Engine, Result,
     scheduler::{Process, Runtime, Task},
     store::Store,
 };
@@ -24,12 +24,12 @@ impl std::fmt::Debug for Cache {
 }
 
 impl Cache {
-    pub fn new(cap: usize) -> Self {
-        Self {
-            cap,
-            procs: MokaCache::new(cap as u64),
-            store: Arc::new(Store::new()),
-        }
+    pub fn new(config: &Config) -> crate::Result<Self> {
+        Ok(Self {
+            cap: config.cache_cap() as usize,
+            procs: MokaCache::new(config.cache_cap() as u64),
+            store: Arc::new(Store::create(config)?),
+        })
     }
 
     pub fn store(&self) -> Arc<Store> {
@@ -47,7 +47,6 @@ impl Cache {
 
     pub fn init(&self, _engine: &Engine) {
         debug!("cache::init");
-        self.store.init();
     }
 
     pub fn close(&self) {}

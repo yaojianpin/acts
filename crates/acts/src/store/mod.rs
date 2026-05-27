@@ -1,6 +1,17 @@
 pub mod data;
-mod db;
+mod collection;
+mod kv;
+mod memory;
 pub mod query;
+
+#[cfg(feature = "store-nats")]
+mod nats;
+#[cfg(feature = "store-redis")]
+mod redis;
+#[cfg(feature = "store-sqlite")]
+mod sqlite;
+#[cfg(feature = "store-postgres")]
+mod postgres;
 
 #[allow(clippy::module_inception)]
 mod store;
@@ -17,6 +28,23 @@ use crate::{ActError, Result};
 use query::*;
 use std::error::Error;
 use strum::{AsRefStr, EnumIter};
+
+pub use kv::KvStore;
+#[allow(unused_imports)]
+pub use memory::MemoryStore;
+
+#[cfg(feature = "store-nats")]
+#[allow(unused_imports)]
+pub use nats::NatsStore;
+#[cfg(feature = "store-redis")]
+#[allow(unused_imports)]
+pub use redis::RedisStore;
+#[cfg(feature = "store-sqlite")]
+#[allow(unused_imports)]
+pub use sqlite::SqliteStore;
+#[cfg(feature = "store-postgres")]
+#[allow(unused_imports)]
+pub use postgres::PostgresStore;
 
 fn map_db_err(err: impl Error) -> ActError {
     ActError::Store(err.to_string())
@@ -49,6 +77,9 @@ pub struct PageData<T> {
 
 pub trait DbCollectionIden {
     fn iden() -> StoreIden;
+    fn indexed_fields() -> &'static [&'static str] {
+        &[]
+    }
 }
 
 pub trait DbCollection: Send + Sync {
