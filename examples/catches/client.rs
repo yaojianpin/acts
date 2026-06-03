@@ -22,7 +22,7 @@ impl Client {
         Self { actions }
     }
 
-    pub fn process(&self, executor: &Executor, e: &Event<Message>) -> Result<()> {
+    pub async fn process(&self, executor: &Executor, e: &Event<Message>) -> Result<()> {
         if e.is_irq() && e.is_state(MessageState::Created) {
             match self.actions.get(&e.key) {
                 Some(action) => {
@@ -36,12 +36,18 @@ impl Client {
         Ok(())
     }
 
-    pub fn init(executor: &Executor, e: &Event<Message>) -> Result<()> {
+    pub fn init<'a>(executor: &'a Executor, e: &'a Event<Message>) -> Result<()> {
+        let executor = executor.clone();
+        let pid = e.pid.clone();
+        let tid = e.tid.clone();
         let mut vars = Vars::new();
         vars.insert("uid".to_string(), json!("u1"));
-        executor.act().complete(&e.pid, &e.tid, vars)
+        executor.act().complete(&pid, &tid, vars)
     }
-    pub fn act1(executor: &Executor, e: &Event<Message>) -> Result<()> {
+    pub fn act1<'a>(executor: &'a Executor, e: &'a Event<Message>) -> Result<()> {
+        let executor = executor.clone();
+        let pid = e.pid.clone();
+        let tid = e.tid.clone();
         let mut vars = Vars::new();
         vars.insert("uid".to_string(), json!("u2"));
 
@@ -49,25 +55,34 @@ impl Client {
         vars.set("ecode", "err1");
 
         // cause the error
-        executor.act().error(&e.pid, &e.tid, vars)
+        executor.act().fail(&pid, &tid, vars)
     }
-    pub fn catch1(executor: &Executor, e: &Event<Message>) -> Result<()> {
+    pub fn catch1<'a>(executor: &'a Executor, e: &'a Event<Message>) -> Result<()> {
+        let executor = executor.clone();
+        let pid = e.pid.clone();
+        let tid = e.tid.clone();
         let mut vars = Vars::new();
         vars.insert("uid".to_string(), json!("u3"));
         vars.set("ecode", "err1");
 
-        executor.act().complete(&e.pid, &e.tid, vars)
+        executor.act().complete(&pid, &tid, vars)
     }
-    pub fn catch2(executor: &Executor, e: &Event<Message>) -> Result<()> {
+    pub fn catch2<'a>(executor: &'a Executor, e: &'a Event<Message>) -> Result<()> {
+        let executor = executor.clone();
+        let pid = e.pid.clone();
+        let tid = e.tid.clone();
         let mut vars = Vars::new();
         vars.insert("uid".to_string(), json!("u4"));
 
-        executor.act().complete(&e.pid, &e.tid, vars)
+        executor.act().complete(&pid, &tid, vars)
     }
 
-    pub fn catch_others(executor: &Executor, e: &Event<Message>) -> Result<()> {
+    pub fn catch_others<'a>(executor: &'a Executor, e: &'a Event<Message>) -> Result<()> {
+        let executor = executor.clone();
+        let pid = e.pid.clone();
+        let tid = e.tid.clone();
         let mut vars = Vars::new();
         vars.insert("uid".to_string(), json!("u5"));
-        executor.act().complete(&e.pid, &e.tid, vars)
+        executor.act().complete(&pid, &tid, vars)
     }
 }

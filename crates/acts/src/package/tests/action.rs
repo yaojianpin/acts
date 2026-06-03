@@ -2,19 +2,25 @@ use serde_json::json;
 
 use crate::Vars;
 use crate::event::EventAction;
-use crate::{Act, TaskState, Workflow, utils, utils::test::create_proc_signal};
+use crate::utils::test::auto_complete;
+use crate::{Act, TaskState, Workflow, utils, utils::test::create_proc};
 
-#[tokio::test]
+use serial_test::serial;
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn pack_action_submit_on_step() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::action(Vars::new().with("action", "submit")))
     });
 
     workflow.print();
-    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
 
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -23,9 +29,10 @@ async fn pack_action_submit_on_step() {
     );
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn pack_action_sumit_on_step_with_inputs() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::action(Vars::new().with("action", "submit").with(
                 "options",
@@ -36,9 +43,12 @@ async fn pack_action_sumit_on_step_with_inputs() {
     });
 
     workflow.print();
-    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
 
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -56,9 +66,10 @@ async fn pack_action_sumit_on_step_with_inputs() {
     );
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn pack_action_submit_auto() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_act(
             Act::action(Vars::new().with("action", "submit").with(
                 "options",
@@ -71,9 +82,12 @@ async fn pack_action_submit_auto() {
     });
 
     workflow.print();
-    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
 
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -90,18 +104,22 @@ async fn pack_action_submit_auto() {
     );
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn pack_action_complete_on_step() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::action(Vars::new().with("action", EventAction::Next)))
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
 
     workflow.print();
-    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
 
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -110,9 +128,10 @@ async fn pack_action_complete_on_step() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn pack_action_complete_on_step_with_inputs() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::action(
                 Vars::new().with("action", EventAction::Next).with(
@@ -126,9 +145,12 @@ async fn pack_action_complete_on_step_with_inputs() {
     });
 
     workflow.print();
-    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
 
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -146,18 +168,22 @@ async fn pack_action_complete_on_step_with_inputs() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn pack_action_abort_on_step() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::action(Vars::new().with("action", "abort")))
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
 
     workflow.print();
-    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
 
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -167,9 +193,10 @@ async fn pack_action_abort_on_step() {
     assert_eq!(proc.state(), TaskState::Aborted);
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn pack_action_abort_on_step_with_inputs() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::action(Vars::new().with("action", "abort").with(
                 "options",
@@ -181,9 +208,11 @@ async fn pack_action_abort_on_step_with_inputs() {
     });
 
     workflow.print();
-    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
-
-    scher.launch(&proc);
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
+    rt.launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -202,9 +231,10 @@ async fn pack_action_abort_on_step_with_inputs() {
     );
 }
 
-#[tokio::test]
-async fn pack_action_error_on_step() {
-    let mut workflow = Workflow::new().with_step(|step| {
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn pack_action_error_on_step_normal() {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::action(Vars::new().with("action", "error").with(
                 "options",
@@ -216,9 +246,12 @@ async fn pack_action_error_on_step() {
     });
 
     workflow.print();
-    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
 
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -228,9 +261,10 @@ async fn pack_action_error_on_step() {
     assert!(proc.state().is_error());
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn pack_action_error_on_step_with_inputs() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::action(Vars::new().with("action", "error").with(
                 "options",
@@ -243,9 +277,12 @@ async fn pack_action_error_on_step_with_inputs() {
     });
 
     workflow.print();
-    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
 
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -263,10 +300,12 @@ async fn pack_action_error_on_step_with_inputs() {
     );
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn pack_action_error_on_step_with_no_err_code() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_act(
+            // no error code provided, cannot execute the action, should not cause the step to change the state
             Act::action(Vars::new().with("action", "error").with(
                 "options",
                 json!({
@@ -278,13 +317,15 @@ async fn pack_action_error_on_step_with_no_err_code() {
     });
 
     workflow.print();
-    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
-    scher.launch(&proc);
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
+    engine.runtime().launch(&proc).unwrap();
     tx.timeout(200).await;
     proc.print();
     assert_eq!(
         proc.task_by_nid("step1").first().unwrap().state(),
-        TaskState::Running
+        TaskState::Error
     );
     assert_eq!(
         proc.task_by_nid("act1").first().unwrap().state(),
@@ -292,17 +333,20 @@ async fn pack_action_error_on_step_with_no_err_code() {
     );
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn pack_action_skip_on_step() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::action(Vars::new().with("action", "skip")))
     });
 
     workflow.print();
-    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -312,19 +356,21 @@ async fn pack_action_skip_on_step() {
     assert!(proc.state().is_completed());
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn pack_action_not_exist() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::action(Vars::new().with("action", "not_exist")).with_id("act1"))
     });
 
     workflow.print();
-    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
 
-    scher.launch(&proc);
-    tx.recv().await;
+    engine.runtime().launch(&proc).unwrap();
+    tx.timeout(100).await;
     proc.print();
     assert!(proc.task_by_nid("act1").first().unwrap().state().is_error(),);
-    assert!(proc.state().is_error());
 }

@@ -1,30 +1,35 @@
 use crate::{
     Act, EngineBuilder, Message, Vars, Workflow,
-    event::EventAction,
-    event::{Action, MessageState},
+    event::{Action, EventAction, MessageState},
     scheduler::TaskState,
-    utils::{self, consts, test::*},
+    utils::{
+        self, consts,
+        test::{auto_complete, create_proc},
+    },
 };
 use serde_json::{Value, json};
-use std::sync::Arc;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 #[tokio::test]
 async fn pack_irq_one() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::irq(|act| act.with_key("act1")).with_id("act1"))
     });
 
     workflow.print();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_type("act") {
             rx.close();
         }
     });
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -41,12 +46,7 @@ async fn pack_irq_multi_threads() {
     });
 
     workflow.print();
-    let engine = EngineBuilder::new()
-        .cache_size(10)
-        .build()
-        .await
-        .unwrap()
-        .start();
+    let engine = EngineBuilder::new().cache_size(10).build().start().unwrap();
     engine.executor().model().deploy(&workflow).unwrap();
     let (s1, s2) = engine.signal(false).double();
     let count = Arc::new(Mutex::new(0));
@@ -82,7 +82,7 @@ async fn pack_irq_multi_threads() {
 
 #[tokio::test]
 async fn pack_irq_many() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::irq(|act| act.with_key("act1")).with_id("act1"))
             .with_act(Act::irq(|act| act.with_key("act2")).with_id("act2"))
@@ -90,14 +90,18 @@ async fn pack_irq_many() {
     });
 
     workflow.print();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_type("act") {
             rx.close();
         }
     });
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -110,21 +114,24 @@ async fn pack_irq_many() {
 
 #[tokio::test]
 async fn pack_irq_with_inputs_value() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::irq(|act| act.with_key("act1").with_var("a", 5)).with_id("act1"))
     });
 
     workflow.print();
-    let (proc, scher, emitter, tx, rx) =
-        create_proc_signal::<Vars>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(Vars::default()).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_irq() && e.is_state(MessageState::Created) {
             rx.send(e.inputs.clone());
         }
     });
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(
@@ -136,7 +143,7 @@ async fn pack_irq_with_inputs_value() {
 
 #[tokio::test]
 async fn pack_irq_with_inputs_var() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_var("a", json!(5))
             .with_act(Act::irq(|act| {
@@ -147,15 +154,18 @@ async fn pack_irq_with_inputs_var() {
     });
 
     workflow.print();
-    let (proc, scher, emitter, tx, rx) =
-        create_proc_signal::<Vars>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(Vars::default()).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_irq() && e.is_state(MessageState::Created) {
             rx.send(e.inputs.clone());
         }
     });
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(
@@ -170,24 +180,24 @@ async fn pack_irq_with_inputs_var() {
 
 #[tokio::test]
 async fn pack_irq_complete() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_name("step1").with_act(Act::irq(|act| {
             act.with_key("fn1").with_var("uid", json!("u1"))
         }))
     });
-    workflow.id = utils::longid();
-    let (proc, scher, emitter, tx, rx) =
-        create_proc_signal::<bool>(&mut workflow, &utils::longid());
-
-    let s = scher.clone();
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(bool::default()).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         if e.is_type("act") && e.state() == MessageState::Created {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!(uid.to_string()));
 
             let action = Action::new(&e.pid, &e.tid, EventAction::Next, options);
-            if let Err(err) = s.do_action(&action) {
+            if let Err(err) = rt.do_action(&action) {
                 println!("error: {err}");
                 rx.send(false);
             } else {
@@ -196,7 +206,7 @@ async fn pack_irq_complete() {
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
 
     proc.print();
@@ -206,7 +216,7 @@ async fn pack_irq_complete() {
 #[tokio::test]
 async fn pack_irq_cancel_normal() {
     let count = Arc::new(Mutex::new(0));
-    let mut workflow = Workflow::new()
+    let workflow = Workflow::new()
         .with_id(&utils::longid())
         .with_step(|step| {
             step.with_name("step1").with_act(Act::irq(|act| {
@@ -220,11 +230,13 @@ async fn pack_irq_cancel_normal() {
         });
 
     workflow.print();
-    let (proc, scher, emitter, tx, rx) =
-        create_proc_signal::<bool>(&mut workflow, &utils::longid());
-    let s = scher.clone();
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(bool::default()).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
     let act_req_id = Arc::new(Mutex::new(None));
-    emitter.on_message(move |e| {
+    channel.on_message(move |e| {
         if e.is_type("act") {
             let mut count = count.lock().unwrap();
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
@@ -238,7 +250,7 @@ async fn pack_irq_cancel_normal() {
                     options.insert("uid".to_string(), json!(uid.to_string()));
 
                     let action = Action::new(&e.pid, tid, EventAction::Next, options);
-                    s.do_action(&action).unwrap();
+                    rt.do_action(&action).unwrap();
                 } else {
                     rx.send(true);
                 }
@@ -252,12 +264,12 @@ async fn pack_irq_cancel_normal() {
                 let act_req_id = &*act_req_id.lock().unwrap();
                 let aid = act_req_id.as_deref().unwrap();
                 let action = Action::new(&e.pid, aid, EventAction::Cancel, options);
-                s.do_action(&action).unwrap();
+                rt.do_action(&action).unwrap();
             }
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert!(ret);
@@ -266,7 +278,7 @@ async fn pack_irq_cancel_normal() {
 #[tokio::test]
 async fn pack_irq_back() {
     let count = Arc::new(Mutex::new(0));
-    let mut workflow = Workflow::new()
+    let workflow = Workflow::new()
         .with_id(&utils::longid())
         .with_step(|step| {
             step.with_id("step1")
@@ -280,11 +292,12 @@ async fn pack_irq_back() {
                 act.with_key("fn2").with_var("uid", json!("b"))
             }))
         });
-    let (proc, scher, emitter, tx, rx) =
-        create_proc_signal::<bool>(&mut workflow, &utils::longid());
-
-    let s = scher.clone();
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(bool::default()).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         let msg = e.inner();
         if msg.is_type("act") {
             let mut count = count.lock().unwrap();
@@ -295,14 +308,14 @@ async fn pack_irq_back() {
                 options.insert("uid".to_string(), json!(uid.to_string()));
 
                 let action = Action::new(&msg.pid, tid, EventAction::Next, options);
-                s.do_action(&action).unwrap();
+                rt.do_action(&action).unwrap();
             } else if uid == "b" {
                 if msg.state() == MessageState::Created {
                     let mut options = Vars::new();
                     options.insert("uid".to_string(), json!("b".to_string()));
                     options.insert("to".to_string(), json!("step1".to_string()));
                     let action = Action::new(&msg.pid, tid, EventAction::Back, options);
-                    s.do_action(&action).unwrap();
+                    rt.do_action(&action).unwrap();
                 }
             } else if msg.state() == MessageState::Created && uid == "a" && *count > 0 {
                 rx.send(uid == "a");
@@ -312,7 +325,7 @@ async fn pack_irq_back() {
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert!(ret);
@@ -320,7 +333,7 @@ async fn pack_irq_back() {
 
 #[tokio::test]
 async fn pack_irq_abort() {
-    let mut workflow = Workflow::new()
+    let workflow = Workflow::new()
         .with_id(&utils::longid())
         .with_step(|step| {
             step.with_id("step1")
@@ -334,37 +347,42 @@ async fn pack_irq_abort() {
                 act.with_key("fn2").with_var("uid", json!("b"))
             }))
         });
-    let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(bool::default()).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
 
-    let s = scher.clone();
-    emitter.on_message(move |e| {
+    channel.on_message(move |e| {
         if e.is_key("fn1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
 
             let message = Action::new(&e.pid, &e.tid, EventAction::Abort, options);
-            s.do_action(&message).unwrap();
+            rt.do_action(&message).unwrap();
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     assert!(proc.state().is_abort());
 }
 
 #[tokio::test]
 async fn pack_irq_submit() {
-    let mut workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
+    let workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
         step.with_id("step1").with_act(
             Act::irq(|act| act.with_key("fn1").with_var("uid", json!("a"))).with_id("fn1"),
         )
     });
 
     let pid = utils::longid();
-    let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &pid);
-
-    let s = scher.clone();
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &pid);
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(bool::default()).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         if e.is_type("act") && e.is_state(MessageState::Created) {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
             if uid == "a" && e.state() == MessageState::Created {
@@ -372,12 +390,12 @@ async fn pack_irq_submit() {
                 options.insert("uid".to_string(), json!(uid.to_string()));
 
                 let action = Action::new(&e.pid, &e.tid, EventAction::Submit, options);
-                s.do_action(&action).unwrap();
+                rt.do_action(&action).unwrap();
             }
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     assert_eq!(
         proc.task_by_nid("fn1").first().unwrap().state(),
@@ -391,16 +409,19 @@ async fn pack_irq_submit() {
 
 #[tokio::test]
 async fn pack_irq_skip() {
-    let mut workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
+    let workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
         step.with_id("step1").with_act(
             Act::irq(|act| act.with_key("fn1").with_var("uid", json!("a"))).with_id("fn1"),
         )
     });
 
     let pid = utils::longid();
-    let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &pid);
-    let s = scher.clone();
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &pid);
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         if e.is_type("act") {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
             if uid == "a" && e.state() == MessageState::Created {
@@ -408,12 +429,12 @@ async fn pack_irq_skip() {
                 options.insert("uid".to_string(), json!(uid.to_string()));
 
                 let action = Action::new(&e.pid, &e.tid, EventAction::Skip, options);
-                s.do_action(&action).unwrap();
+                rt.do_action(&action).unwrap();
             }
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     assert_eq!(
         proc.task_by_nid("fn1").first().unwrap().state(),
@@ -427,7 +448,7 @@ async fn pack_irq_skip() {
 
 #[tokio::test]
 async fn pack_irq_skip_next() {
-    let mut workflow = Workflow::new()
+    let workflow = Workflow::new()
         .with_id(&utils::longid())
         .with_step(|step| {
             step.with_id("step1").with_act(
@@ -437,9 +458,12 @@ async fn pack_irq_skip_next() {
         .with_step(|step| step.with_id("step2"));
 
     let pid = utils::longid();
-    let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &pid);
-    let s = scher.clone();
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &pid);
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         if e.is_key("act1") && e.is_state(MessageState::Created) {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
             if uid == "a" && e.state() == MessageState::Created {
@@ -447,12 +471,12 @@ async fn pack_irq_skip_next() {
                 options.insert("uid".to_string(), json!(uid.to_string()));
 
                 let action = Action::new(&e.pid, &e.tid, EventAction::Skip, options);
-                s.do_action(&action).unwrap();
+                rt.do_action(&action).unwrap();
             }
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     assert_eq!(
         proc.task_by_nid("act1").first().unwrap().state(),
@@ -470,16 +494,19 @@ async fn pack_irq_skip_next() {
 
 #[tokio::test]
 async fn pack_irq_error_action() {
-    let mut workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
+    let workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
         step.with_id("step1").with_act(
             Act::irq(|act| act.with_key("fn1").with_var("uid", json!("a"))).with_id("fn1"),
         )
     });
 
     let pid = utils::longid();
-    let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &pid);
-    let s = scher.clone();
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &pid);
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         if e.is_key("fn1") && e.is_state(MessageState::Created) {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
             if uid == "a" && e.state() == MessageState::Created {
@@ -489,12 +516,12 @@ async fn pack_irq_error_action() {
                 options.set("error", "biz error");
 
                 let action = Action::new(&e.pid, &e.tid, EventAction::Error, options);
-                s.do_action(&action).unwrap();
+                rt.do_action(&action).unwrap();
             }
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     assert!(proc.task_by_nid("fn1").first().unwrap().state().is_error());
     assert!(
@@ -509,16 +536,19 @@ async fn pack_irq_error_action() {
 
 #[tokio::test]
 async fn pack_irq_error_action_without_err_code() {
-    let mut workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
+    let workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
         step.with_id("step1").with_act(Act::irq(|act| {
             act.with_key("fn1").with_var("uid", json!("a"))
         }))
     });
 
     let pid = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &pid);
-    let s = scher.clone();
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &pid);
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(false).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         if e.is_key("fn1") && e.is_state(MessageState::Created) {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
             if uid == "a" && e.state() == MessageState::Created {
@@ -526,21 +556,21 @@ async fn pack_irq_error_action_without_err_code() {
                 options.insert("uid".to_string(), json!(uid.to_string()));
 
                 let action = Action::new(&e.pid, &e.tid, EventAction::Error, options);
-                let result = s.do_action(&action);
+                let result = rt.do_action(&action);
                 rx.update(|data| *data = result.is_err());
                 rx.close();
             }
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     assert!(ret);
 }
 
 #[tokio::test]
 async fn pack_irq_next_by_complete_state() {
-    let mut workflow = Workflow::new()
+    let workflow = Workflow::new()
         .with_id(&utils::longid())
         .with_step(|step| {
             step.with_id("step1")
@@ -554,11 +584,12 @@ async fn pack_irq_next_by_complete_state() {
                 act.with_key("fn2").with_var("uid", json!("b"))
             }))
         });
-    let (proc, scher, emitter, tx, rx) =
-        create_proc_signal::<bool>(&mut workflow, &utils::longid());
-
-    let s = scher.clone();
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(false).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         if e.is_type("act") {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
             let tid = &e.tid;
@@ -566,32 +597,34 @@ async fn pack_irq_next_by_complete_state() {
             options.insert("uid".to_string(), json!(uid.to_string()));
 
             let action = Action::new(&e.pid, tid, EventAction::Next, options);
-            s.do_action(&action).unwrap();
+            rt.do_action(&action).unwrap();
 
             // action again
-            let ret = s.do_action(&action).is_err();
+            let ret = rt.do_action(&action).is_err();
             rx.send(ret);
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     assert!(ret);
 }
 
 #[tokio::test]
 async fn pack_irq_cancel_by_running_state() {
-    let mut workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
+    let workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
         step.with_id("step1")
             .with_name("step1")
             .with_act(Act::irq(|act| {
                 act.with_key("fn1").with_var("uid", json!("a"))
             }))
     });
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, "w1");
-
-    let s = scher.clone();
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &"w1");
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(false).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         if e.is_type("act") {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
             let tid = &e.tid;
@@ -599,19 +632,19 @@ async fn pack_irq_cancel_by_running_state() {
             options.insert("uid".to_string(), json!(uid.to_string()));
 
             let action = Action::new(&e.pid, tid, EventAction::Cancel, options);
-            let ret = s.do_action(&action).is_err();
+            let ret = rt.do_action(&action).is_err();
             rx.send(ret);
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     assert!(ret);
 }
 
 #[tokio::test]
 async fn pack_irq_do_action_complete() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_name("step1")
             .with_act(Act::irq(|act| {
@@ -620,10 +653,13 @@ async fn pack_irq_do_action_complete() {
     });
 
     let pid = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &pid);
+    let (engine, proc) = create_proc(&workflow, &pid);
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(false).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
 
-    let s = scher.clone();
-    emitter.on_message(move |e| {
+    channel.on_message(move |e| {
         if e.state() == MessageState::Created && e.r#type == "act" {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
 
@@ -631,40 +667,43 @@ async fn pack_irq_do_action_complete() {
             options.insert("uid".to_string(), json!(uid.to_string()));
 
             let action = Action::new(&e.pid, &e.tid, EventAction::Next, options);
-            let ret = s.do_action(&action).is_ok();
+            let ret = rt.do_action(&action).is_ok();
 
             rx.send(ret);
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     assert!(ret);
 }
 
 #[tokio::test]
 async fn pack_irq_do_action_remove() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_name("step1")
             .with_act(Act::irq(|act| act.with_key("act1")).with_id("act1"))
     });
 
     let pid = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &pid);
+    let (engine, proc) = create_proc(&workflow, &pid);
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
 
-    let s = scher.clone();
-    emitter.on_message(move |e| {
+    channel.on_message(move |e| {
         println!("message: {e:?}");
         if e.state() == MessageState::Created && e.is_irq() {
             let action = Action::new(&e.pid, &e.tid, EventAction::Remove, Vars::new());
-            s.do_action(&action).unwrap();
+            rt.do_action(&action).unwrap();
 
             rx.close();
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -675,7 +714,7 @@ async fn pack_irq_do_action_remove() {
 
 #[tokio::test]
 async fn pack_irq_do_action_outputs() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_name("step1").with_act(
             Act::irq(|act| {
                 act.with_key("fn1")
@@ -688,10 +727,13 @@ async fn pack_irq_do_action_outputs() {
     });
 
     let pid = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &pid);
+    let (engine, proc) = create_proc(&workflow, &pid);
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
 
-    let s = scher.clone();
-    emitter.on_message(move |e| {
+    channel.on_message(move |e| {
         if e.state() == MessageState::Created && e.is_irq() {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
 
@@ -702,12 +744,12 @@ async fn pack_irq_do_action_outputs() {
             options.insert("c".to_string(), json!(["u1", "u2"]));
 
             let action = Action::new(&e.pid, &e.tid, EventAction::Next, options);
-            s.do_action(&action).unwrap();
+            rt.do_action(&action).unwrap();
             rx.close();
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     assert_eq!(
         proc.task_by_nid("fn1")
@@ -747,7 +789,7 @@ async fn pack_irq_do_action_outputs() {
 
 #[tokio::test]
 async fn pack_irq_do_action_rets() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_name("step1").with_act(
             Act::irq(|act| {
                 act.with_key("fn1")
@@ -763,10 +805,13 @@ async fn pack_irq_do_action_rets() {
     println!("workflow: {workflow:#?}");
 
     let pid = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &pid);
+    let (engine, proc) = create_proc(&workflow, &pid);
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(false).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
 
-    let s = scher.clone();
-    emitter.on_message(move |e| {
+    channel.on_message(move |e| {
         if e.state() == MessageState::Created && e.is_irq() {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
 
@@ -778,12 +823,12 @@ async fn pack_irq_do_action_rets() {
             options.insert("d".to_string(), json!({ "value": "test" } ));
 
             let action = Action::new(&e.pid, &e.tid, EventAction::Next, options);
-            s.do_action(&action).unwrap();
+            rt.do_action(&action).unwrap();
             rx.close();
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -825,7 +870,7 @@ async fn pack_irq_do_action_rets() {
 
 #[tokio::test]
 async fn pack_irq_do_action_no_output() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_name("step1")
             .with_act(Act::irq(|act| {
@@ -834,10 +879,12 @@ async fn pack_irq_do_action_no_output() {
     });
 
     let pid = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &pid);
-
-    let s = scher.clone();
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &pid);
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(false).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         if e.state() == MessageState::Created && e.is_irq() {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
 
@@ -847,19 +894,19 @@ async fn pack_irq_do_action_no_output() {
             options.insert("any".to_string(), json!(100));
 
             let action = Action::new(&e.pid, &e.tid, EventAction::Next, options);
-            let ret = s.do_action(&action).is_ok();
+            let ret = rt.do_action(&action).is_ok();
             rx.send(ret);
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     assert!(ret);
 }
 
 #[tokio::test]
 async fn pack_irq_do_action_output_key_check() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_name("step1")
             .with_act(Act::irq(|act| {
@@ -870,27 +917,29 @@ async fn pack_irq_do_action_output_key_check() {
     });
 
     let pid = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &pid);
-
-    let s = scher.clone();
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &pid);
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(false).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         if e.state() == MessageState::Created && e.is_irq() {
             // create options that not contains uid key
             let options = Vars::new();
             let action = Action::new(&e.pid, &e.tid, EventAction::Next, options);
-            let ret = s.do_action(&action).is_err();
+            let ret = rt.do_action(&action).is_err();
             rx.send(ret);
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     assert!(ret);
 }
 
 #[tokio::test]
 async fn pack_irq_do_action_proc_id_error() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_name("step1")
             .with_act(Act::irq(|act| {
@@ -899,27 +948,29 @@ async fn pack_irq_do_action_proc_id_error() {
     });
 
     let pid = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &pid);
-
-    let s = scher.clone();
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &pid);
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(false).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         if e.state() == MessageState::Created && e.is_irq() {
             // create options that not contains uid key
             let options = Vars::new();
             let action = Action::new("no_exist_proc_id", &e.tid, EventAction::Next, options);
-            let ret = s.do_action(&action).is_err();
+            let ret = rt.do_action(&action).is_err();
             rx.send(ret);
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     assert!(ret);
 }
 
 #[tokio::test]
 async fn pack_irq_do_action_msg_id_error() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_name("step1")
             .with_act(Act::irq(|act| {
@@ -928,54 +979,58 @@ async fn pack_irq_do_action_msg_id_error() {
     });
 
     let pid = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &pid);
-
-    let s = scher.clone();
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &pid);
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(false).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         if e.state() == MessageState::Created && e.r#type == "act" {
             // create options that not contains uid key
             let options = Vars::new();
             let action = Action::new(&e.pid, "no_exist_msg_id", EventAction::Next, options);
-            let ret = s.do_action(&action).is_err();
+            let ret = rt.do_action(&action).is_err();
             rx.send(ret);
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     assert!(ret);
 }
 
 #[tokio::test]
 async fn pack_irq_do_action_not_act_req_task() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_act(Act::irq(|act| {
             act.with_key("fn1").with_var("uid", json!("a"))
         }))
     });
 
     let pid = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &pid);
-
-    let s = scher.clone();
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &pid);
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(false).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         if e.state() == MessageState::Created && e.r#type == "step" {
             // create options that not contains uid key
             let options = Vars::new();
             let action = Action::new(&e.pid, &e.tid, EventAction::Next, options);
-            let ret = s.do_action(&action).is_err();
+            let ret = rt.do_action(&action).is_err();
             rx.send(ret);
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     assert!(ret);
 }
 
 #[tokio::test]
 async fn pack_irq_on_catch_one() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_name("step1").with_act(
             Act::irq(|act| act.with_key("act1"))
                 .with_id("act1")
@@ -987,11 +1042,15 @@ async fn pack_irq_on_catch_one() {
         )
     });
 
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_key("act1") && e.is_state(MessageState::Created) {
-            e.do_action(
+            rt.do_action2(
                 &e.pid,
                 &e.tid,
                 EventAction::Error,
@@ -1004,7 +1063,7 @@ async fn pack_irq_on_catch_one() {
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -1015,7 +1074,7 @@ async fn pack_irq_on_catch_one() {
 
 #[tokio::test]
 async fn pack_irq_on_catch_as_error() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_name("step1").with_act(
             Act::irq(|act| act.with_key("act1"))
                 .with_id("act1")
@@ -1027,11 +1086,15 @@ async fn pack_irq_on_catch_as_error() {
         )
     });
 
-    let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(false).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_key("act1") && e.is_state(MessageState::Created) {
-            e.do_action(
+            rt.do_action2(
                 &e.pid,
                 &e.tid,
                 EventAction::Error,
@@ -1041,7 +1104,7 @@ async fn pack_irq_on_catch_as_error() {
         }
 
         if e.is_key("act2") {
-            e.do_action(
+            rt.do_action2(
                 &e.pid,
                 &e.tid,
                 EventAction::Error,
@@ -1051,7 +1114,7 @@ async fn pack_irq_on_catch_as_error() {
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -1067,7 +1130,7 @@ async fn pack_irq_on_catch_as_error() {
 
 #[tokio::test]
 async fn pack_irq_on_catch_as_skip() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_name("step1").with_act(
             Act::irq(|act| act.with_key("act1"))
                 .with_id("act1")
@@ -1079,11 +1142,15 @@ async fn pack_irq_on_catch_as_skip() {
         )
     });
 
-    let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_key("act1") && e.is_state(MessageState::Created) {
-            e.do_action(
+            rt.do_action2(
                 &e.pid,
                 &e.tid,
                 EventAction::Error,
@@ -1093,12 +1160,12 @@ async fn pack_irq_on_catch_as_skip() {
         }
 
         if e.is_key("act2") {
-            e.do_action(&e.pid, &e.tid, EventAction::Skip, Vars::new())
+            rt.do_action2(&e.pid, &e.tid, EventAction::Skip, Vars::new())
                 .unwrap();
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -1113,7 +1180,7 @@ async fn pack_irq_on_catch_as_skip() {
 
 #[tokio::test]
 async fn pack_irq_on_catch_no_match() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_name("step1").with_act(
             Act::irq(|act| act.with_key("act1"))
                 .with_id("act1")
@@ -1125,11 +1192,15 @@ async fn pack_irq_on_catch_no_match() {
         )
     });
 
-    let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_key("act1") && e.is_state(MessageState::Created) {
-            e.do_action(
+            rt.do_action2(
                 &e.pid,
                 &e.tid,
                 EventAction::Error,
@@ -1139,7 +1210,7 @@ async fn pack_irq_on_catch_no_match() {
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert!(proc.task_by_nid("act1").first().unwrap().state().is_error());
@@ -1148,7 +1219,7 @@ async fn pack_irq_on_catch_no_match() {
 
 #[tokio::test]
 async fn pack_irq_on_catch_match_any() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_name("step1").with_act(
             Act::irq(|act| act.with_key("act1"))
                 .with_id("act1")
@@ -1156,11 +1227,15 @@ async fn pack_irq_on_catch_match_any() {
         )
     });
 
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(false).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_key("act1") && e.is_state(MessageState::Created) {
-            e.do_action(
+            rt.do_action2(
                 &e.pid,
                 &e.tid,
                 EventAction::Error,
@@ -1174,7 +1249,7 @@ async fn pack_irq_on_catch_match_any() {
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -1192,7 +1267,7 @@ async fn pack_irq_on_catch_match_any() {
 
 #[tokio::test]
 async fn pack_irq_on_catch_as_complete() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_name("step1").with_act(
             Act::irq(|act| act.with_key("act1"))
                 .with_id("act1")
@@ -1204,11 +1279,14 @@ async fn pack_irq_on_catch_as_complete() {
         )
     });
 
-    let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
-        println!("message: {e:?}");
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         if e.is_key("act1") && e.is_state(MessageState::Created) {
-            e.do_action(
+            rt.do_action2(
                 &e.pid,
                 &e.tid,
                 EventAction::Error,
@@ -1218,12 +1296,12 @@ async fn pack_irq_on_catch_as_complete() {
         }
 
         if e.is_key("act2") {
-            e.do_action(&e.pid, &e.tid, EventAction::Next, Vars::new())
+            rt.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
                 .unwrap();
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -1238,23 +1316,26 @@ async fn pack_irq_on_catch_as_complete() {
 
 #[tokio::test]
 async fn pack_irq_chain() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_name("step1")
             .with_act(Act::irq(|act| act.with_key("act1")).with_id("act1"))
             .with_act(Act::irq(|act| act.with_key("act2")).with_id("act2"))
     });
 
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
-
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(false).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
     let p = proc.clone();
-    emitter.on_message(move |e| {
+    channel.on_message(move |e| {
         if e.is_key("act1") {
             assert_eq!(
                 p.task_by_nid("act1").first().unwrap().state(),
                 TaskState::Interrupt
             );
             assert!(p.task_by_nid("act2").is_empty());
-            e.do_action(&e.pid, &e.tid, EventAction::Next, Vars::new())
+            rt.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
                 .unwrap();
         }
 
@@ -1263,7 +1344,7 @@ async fn pack_irq_chain() {
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -1278,22 +1359,25 @@ async fn pack_irq_chain() {
 
 #[tokio::test]
 async fn pack_irq_with_key() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::irq(|act| act.with_key("key1")).with_id("act1"))
     });
 
     workflow.print();
-    let (proc, scher, emitter, tx, rx) =
-        create_proc_signal::<Vec<Message>>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(Vec::<Message>::default()).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_irq() && e.is_state(MessageState::Created) {
             rx.update(|data| data.push(e.inner().clone()));
             rx.close();
         }
     });
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(
@@ -1306,7 +1390,7 @@ async fn pack_irq_with_key() {
 
 #[tokio::test]
 async fn pack_irq_on_timeout() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_name("step1").with_act(
             Act::irq(|act| act.with_key("act1"))
                 .with_id("act1")
@@ -1318,15 +1402,18 @@ async fn pack_irq_on_timeout() {
         )
     });
 
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (tx, rx) = engine.signal(false).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_key("act2") {
             rx.close();
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(

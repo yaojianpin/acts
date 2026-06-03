@@ -1,36 +1,31 @@
-use std::any::Any;
 use std::sync::Arc;
+use std::sync::Mutex;
 
-use dashmap::DashMap;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use std::fmt::Debug;
 use tracing::trace;
 
+use crate::store::KvStore;
 use crate::{
     ActError, Config, Result, Workflow,
     store::{Model, Package},
     utils,
 };
 
-use super::kv::KvStore;
 use super::memory::MemoryStore;
-use super::{DbCollection, DbCollectionIden, StoreIden, collection::KvCollection, data};
-
-struct DynCollection<T> {
-    collection: Arc<dyn DbCollection<Item = T>>,
-}
+use super::{DbCollection, DbCollectionIden, collection::KvCollection, data};
 
 pub struct Store {
     kv: Arc<dyn KvStore>,
-    overrides: DashMap<StoreIden, Arc<dyn Any + Send + Sync>>,
+    overrides: Arc<Mutex<Option<Arc<dyn KvStore>>>>,
 }
 
 impl Store {
     pub fn new(kv: Arc<dyn KvStore>) -> Self {
         Self {
             kv,
-            overrides: DashMap::new(),
+            overrides: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -60,18 +55,12 @@ impl Store {
 
         Ok(Self {
             kv,
-            overrides: DashMap::new(),
+            overrides: Arc::new(Mutex::new(None)),
         })
     }
 
-    pub fn register<DATA>(
-        &self,
-        collection: Arc<dyn DbCollection<Item = DATA> + Send + Sync + 'static>,
-    ) where
-        DATA: DbCollectionIden + 'static,
-    {
-        let wrapper = DynCollection { collection };
-        self.overrides.insert(DATA::iden(), Arc::new(wrapper));
+    pub fn register(&self, kv: Arc<dyn KvStore + Send + Sync + 'static>) {
+        *self.overrides.lock().unwrap() = Some(kv);
     }
 
     fn collection<DATA>(&self) -> Arc<dyn DbCollection<Item = DATA>>
@@ -79,12 +68,11 @@ impl Store {
         DATA:
             DbCollectionIden + Serialize + DeserializeOwned + Send + Sync + Clone + Debug + 'static,
     {
-        if let Some(ov) = self.overrides.get(&DATA::iden())
-            && let Some(wrapper) = ov.downcast_ref::<DynCollection<DATA>>()
-        {
-            return wrapper.collection.clone();
-        }
         let prefix = DATA::iden().as_ref().to_string();
+        if let Some(kv) = self.overrides.lock().unwrap().as_ref() {
+            return Arc::new(KvCollection::new(&prefix, kv.clone()));
+        }
+
         Arc::new(KvCollection::new(&prefix, self.kv.clone()))
     }
 

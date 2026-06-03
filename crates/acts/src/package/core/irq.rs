@@ -33,6 +33,7 @@ impl ActPackage for IrqPackage {
     }
 }
 
+#[async_trait::async_trait]
 impl ActPackageFn for IrqPackage {}
 
 inventory::submit!(ActPackageRegister::new::<IrqPackage>());

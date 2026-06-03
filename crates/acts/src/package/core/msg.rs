@@ -33,6 +33,7 @@ impl ActPackage for MsgPackage {
     }
 }
 
+#[async_trait::async_trait]
 impl ActPackageFn for MsgPackage {}
 
 inventory::submit!(ActPackageRegister::new::<MsgPackage>());

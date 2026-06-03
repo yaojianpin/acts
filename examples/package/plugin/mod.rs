@@ -8,15 +8,9 @@ pub struct MyPackagePlugin;
 
 #[async_trait::async_trait]
 impl ActPlugin for MyPackagePlugin {
-    async fn on_init(&self, engine: &Engine) -> Result<()> {
-        engine
-            .extender()
-            .register_package(&pack1::Pack1::meta())
-            .expect("failed to register Pack1");
-        engine
-            .extender()
-            .register_package(&pack2::Pack2::meta())
-            .expect("failed to register Pack2");
+    fn on_init(&self, engine: &Engine) -> Result<()> {
+        engine.extender().register_package(&pack1::Pack1::meta())?;
+        engine.extender().register_package(&pack2::Pack2::meta())?;
 
         let executor = engine.executor();
         engine
@@ -33,12 +27,13 @@ impl ActPlugin for MyPackagePlugin {
                 if e.uses == "pack1" {
                     let pack1: pack1::Pack1 = serde_json::from_value(params.clone()).unwrap();
                     let ret = pack1.execute();
+                    let ex = executor.clone();
                     match ret {
                         Ok(vars) => {
-                            executor.act().complete(&e.pid, &e.tid, vars).unwrap();
+                            ex.act().complete(&e.pid, &e.tid, vars).unwrap();
                         }
                         Err(err) => {
-                            executor.act().error(&e.pid, &e.tid, err.into()).unwrap();
+                            ex.act().fail(&e.pid, &e.tid, err.into()).unwrap();
                         }
                     }
                 }

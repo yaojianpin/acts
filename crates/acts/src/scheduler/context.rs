@@ -9,21 +9,36 @@ use crate::{
     utils::{self, consts, shortid},
 };
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::{any::type_name, cell::RefCell, sync::Arc};
+use std::{
+    any::type_name,
+    sync::{Arc, RwLock},
+};
 use tracing::debug;
 
 tokio::task_local! {
     static CONTEXT: Context;
 }
 
-#[derive(Clone)]
 pub struct Context {
     pub runtime: Arc<Runtime>,
     pub executor: Arc<Executor>,
     pub proc: Arc<Process>,
-    task: RefCell<Arc<Task>>,
-    action: RefCell<Option<Action>>,
-    vars: RefCell<Vars>,
+    task: RwLock<Arc<Task>>,
+    action: RwLock<Option<Action>>,
+    vars: RwLock<Vars>,
+}
+
+impl Clone for Context {
+    fn clone(&self) -> Self {
+        Context {
+            runtime: self.runtime.clone(),
+            executor: self.executor.clone(),
+            proc: self.proc.clone(),
+            task: RwLock::new(self.task.read().unwrap().clone()),
+            action: RwLock::new(self.action.read().unwrap().clone()),
+            vars: RwLock::new(self.vars.read().unwrap().clone()),
+        }
+    }
 }
 
 impl std::fmt::Debug for Context {
@@ -54,9 +69,9 @@ impl Context {
             runtime: task.runtime().clone(),
             executor: Arc::new(Executor::new(task.runtime())),
             proc: proc.clone(),
-            action: RefCell::new(None),
-            task: RefCell::new(task.clone()),
-            vars: RefCell::new(Vars::new()),
+            action: RwLock::new(None),
+            task: RwLock::new(task.clone()),
+            vars: RwLock::new(Vars::new()),
         }
     }
 
@@ -79,13 +94,13 @@ impl Context {
     }
 
     pub fn set_task(&self, task: &Arc<Task>) {
-        if self.task.borrow().id != task.id {
-            *self.task.borrow_mut() = task.clone();
+        if self.task.read().unwrap().id != task.id {
+            *self.task.write().unwrap() = task.clone();
         }
     }
 
     pub fn task(&self) -> Arc<Task> {
-        self.task.borrow().clone()
+        self.task.read().unwrap().clone()
     }
 
     pub fn prepare(&self) {
@@ -93,10 +108,10 @@ impl Context {
     }
 
     pub fn set_action(&self, action: &Action) -> Result<()> {
-        *self.action.borrow_mut() = Some(action.clone());
+        *self.action.write().unwrap() = Some(action.clone());
 
         // set the action options to the context
-        let mut vars = self.vars.borrow_mut();
+        let mut vars = self.vars.write().unwrap();
         for (name, v) in &action.options {
             vars.entry(name.to_string())
                 .and_modify(|i| *i = v.clone())
@@ -107,7 +122,7 @@ impl Context {
     }
 
     pub fn vars(&self) -> Vars {
-        self.vars.borrow().clone()
+        self.vars.read().unwrap().clone()
     }
 
     pub fn set_env<T>(&self, name: &str, value: T)
@@ -146,14 +161,14 @@ impl Context {
     where
         T: Serialize + Clone,
     {
-        self.vars.borrow_mut().set(name, value);
+        self.vars.write().unwrap().set(name, value);
     }
 
     pub fn get_var<T>(&self, name: &str) -> Option<T>
     where
         T: for<'de> Deserialize<'de> + Clone,
     {
-        self.vars.borrow().get::<T>(name)
+        self.vars.read().unwrap().get::<T>(name)
     }
 
     pub fn eval<T: DeserializeOwned + Serialize>(&self, expr: &str) -> Result<T> {
@@ -162,16 +177,17 @@ impl Context {
 
     #[allow(unused)]
     pub(in crate::scheduler) fn action(&self) -> Option<Action> {
-        self.action.borrow().clone()
+        self.action.read().unwrap().clone()
     }
 
-    pub fn sched_task(&self, node: &Arc<Node>) {
+    pub fn sched_task(&self, node: &Arc<Node>) -> Result<()> {
         debug!("sched_task: {}", node.to_string());
         let task = self.proc.create_task(node, Some(self.task()));
-        self.runtime.push(&task);
+        self.runtime.push(&task)?;
+        Ok(())
     }
 
-    pub fn sched_task_with_vars(&self, node: &Arc<Node>, vars: Vars) {
+    pub fn sched_task_with_vars(&self, node: &Arc<Node>, vars: Vars) -> Result<()> {
         debug!("sched_task: {}", node.to_string());
         let task = self.proc.create_task(node, Some(self.task()));
         task.set_data_with(|data| {
@@ -179,7 +195,8 @@ impl Context {
                 data.set(&k, v);
             }
         });
-        self.runtime.push(&task);
+        self.runtime.push(&task)?;
+        Ok(())
     }
 
     pub fn dispatch_act(&self, act: &Act, vars: Vars) -> Result<()> {
@@ -203,7 +220,7 @@ impl Context {
                     data.set(&k, v);
                 }
             });
-            self.runtime.push(&task);
+            self.runtime.push(&task)?;
         }
 
         Ok(())
@@ -234,7 +251,7 @@ impl Context {
         if let Some(prev) = task.prev() {
             if let Some(prev_task) = self.proc.task(&prev) {
                 let task = self.proc.create_task(task.node(), Some(prev_task));
-                self.runtime.push(&task);
+                self.runtime.push(&task)?;
             }
         }
 
@@ -350,10 +367,12 @@ impl Context {
 
     pub fn emit_error(&self) -> Result<()> {
         let task = self.task();
+        println!("emit_error: {task:?}");
         if task.state().is_error() {
             self.emit_task(&task)?;
 
             // after emitting, re-check the task state
+            println!("check error state after emitting {task:?}");
             if task.state().is_error() {
                 if let Some(err) = task.err() {
                     if let Some(parent) = task.parent() {
@@ -376,11 +395,11 @@ impl Context {
                 if self.proc.state().is_none() {
                     self.proc.set_state(TaskState::Running);
                 }
-                self.runtime.scher().emit_proc_event(&self.proc);
+                self.runtime.emitter().emit_proc_event(&self.proc);
             }
         }
 
-        self.runtime.scher().emit_task_event(task)?;
+        self.runtime.emitter().emit_task_event(task)?;
 
         // on workflow complete
         if let NodeContent::Workflow(_) = &task.node().content {
@@ -390,14 +409,14 @@ impl Context {
                     self.proc.set_err(&err);
                 }
 
-                self.runtime.scher().emit_proc_event(&self.proc);
+                self.runtime.emitter().emit_proc_event(&self.proc);
             }
         }
 
         Ok(())
     }
 
-    pub fn emit_message(&self, msg: &Act) -> Result<()> {
+    pub async fn emit_message(&self, msg: &Act) -> Result<()> {
         debug!("emit_message: {:?}", msg);
         let workflow = self.proc.model();
         let mut inputs = utils::fill_inputs(&msg.vars(), self);

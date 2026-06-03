@@ -35,9 +35,11 @@ redis = { version = "0.27", optional = true }
 async-nats = { version = "0.36", optional = true }
 futures = { version = "0.3", optional = true }
 sqlx = { version = "0.8", features = ["runtime-tokio"], optional = true }
+tokio-util = "0.7.18"
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["async_tokio"] }
+criterion = { version = "0.5", features = ["async_tokio", "async_futures"] }
+serial_test = { version = "3", features = ["async"] }
 
 [features]
 default = []

@@ -1,7 +1,6 @@
-use std::collections::HashMap;
-
 use acts::{Event, Executor, Message, MessageState, Result, Vars};
 use serde_json::json;
+use std::collections::HashMap;
 
 type ReqAction = fn(&Executor, &Event<Message>) -> Result<()>;
 type MsgAction = fn(&Executor, &Event<Message>);
@@ -30,7 +29,7 @@ impl Client {
         Self { actions, messages }
     }
 
-    pub fn process(&self, executor: &Executor, e: &Event<Message>) -> Result<()> {
+    pub async fn process(&self, executor: &Executor, e: &Event<Message>) -> Result<()> {
         if e.is_irq() && e.is_state(MessageState::Created) {
             match self.actions.get(&e.key) {
                 Some(action) => {
@@ -50,18 +49,23 @@ impl Client {
         Ok(())
     }
 
-    pub fn init(executor: &Executor, e: &Event<Message>) -> Result<()> {
-        println!("req: {} inputs={}", e.key, e.inputs);
+    pub fn init<'a>(executor: &'a Executor, e: &'a Event<Message>) -> Result<()> {
+        let executor = executor.clone();
+        let pid = e.pid.clone();
+        let tid = e.tid.clone();
+        println!("req: {} inputs={}", pid, e.inputs);
         let mut vars = Vars::new();
         vars.insert("uid".to_string(), json!("u1"));
-        executor.act().complete(&e.pid, &e.tid, vars)
+        executor.act().complete(&pid, &tid, vars)
     }
 
     pub fn timeout_2s(_executor: &Executor, e: &Event<Message>) {
         println!("msg: {} inputs={}", e.key, e.inputs);
     }
-    pub fn timeout_5s(executor: &Executor, e: &Event<Message>) -> Result<()> {
-        println!("req: {} inputs={}", e.key, e.inputs);
-        executor.act().complete(&e.pid, &e.tid, Vars::new())
+    pub fn timeout_5s<'a>(executor: &'a Executor, e: &'a Event<Message>) -> Result<()> {
+        let executor = executor.clone();
+        let pid = e.pid.clone();
+        let tid = e.tid.clone();
+        executor.act().complete(&pid, &tid, Vars::new())
     }
 }

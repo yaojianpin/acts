@@ -19,7 +19,7 @@ impl ActTask for Workflow {
         let children = task.node.children();
         if !children.is_empty() {
             for step in &children {
-                ctx.sched_task(step);
+                ctx.sched_task(step)?;
             }
         } else {
             task.set_state(TaskState::Completed);

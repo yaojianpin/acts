@@ -1,8 +1,16 @@
-use crate::{Act, Message, Workflow, scheduler::tests::create_proc_signal, utils};
+use crate::{
+    Act, Message, Workflow,
+    utils::{
+        self,
+        test::{auto_complete, create_proc},
+    },
+};
 
-#[tokio::test]
+use serial_test::serial;
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn sch_step_timeout_one() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_timeout(Act::msg(|msg| {
                 msg.with_key("msg1").with_if(r#"$cost() >= 1000"#)
@@ -10,23 +18,27 @@ async fn sch_step_timeout_one() {
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
     workflow.print();
-    let (proc, scher, emitter, tx, rx) =
-        create_proc_signal::<bool>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (tx, rx) = engine.signal(false).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+
+    channel.on_message(move |e| {
         if e.is_key("msg1") {
             rx.send(true);
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert!(ret)
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn sch_step_timeout_many() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_timeout(Act::msg(|msg| {
                 msg.with_key("msg1").with_if(r#"$cost() >= 1000"#)
@@ -37,9 +49,11 @@ async fn sch_step_timeout_many() {
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
     workflow.print();
-    let (proc, scher, emitter, tx, rx) =
-        create_proc_signal::<Vec<Message>>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (tx, rx) = engine.signal(Vec::<Message>::default()).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_key("msg1") {
             rx.update(|data| data.push(e.inner().clone()));
@@ -51,7 +65,7 @@ async fn sch_step_timeout_many() {
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(ret.len(), 2)

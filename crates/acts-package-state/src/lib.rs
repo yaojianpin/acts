@@ -18,7 +18,7 @@ pub struct StatePackagePlugin;
 
 #[async_trait::async_trait]
 impl ActPlugin for StatePackagePlugin {
-    async fn on_init(&self, engine: &acts::Engine) -> Result<()> {
+    fn on_init(&self, engine: &acts::Engine) -> Result<()> {
         if !engine.config().has(CONFIG_NAME) {
             println!(
                 "skip the initialization of StatePackagePlugin for no 'state' secion in config file"
@@ -52,11 +52,14 @@ impl ActPlugin for StatePackagePlugin {
         chan.on_message(move |e| {
             // check the params in inputs
             let Some(params) = e.inputs.get::<serde_json::Value>("params") else {
+                let executor = executor.clone();
+                let pid = e.pid.clone();
+                let tid = e.tid.clone();
                 executor
                     .act()
-                    .error(
-                        &e.pid,
-                        &e.tid,
+                    .fail(
+                        &pid,
+                        &tid,
                         ActError::Package("missing 'params' in inputs".to_string()).into(),
                     )
                     .unwrap();
@@ -67,13 +70,22 @@ impl ActPlugin for StatePackagePlugin {
             let pakage: StatePackage = serde_json::from_value(params).unwrap();
             match pakage.run(&client, &e.pid) {
                 Ok(ref vars) => {
-                    executor
-                        .act()
-                        .complete(&e.pid, &e.tid, vars.clone())
-                        .unwrap();
+                    let executor = executor.clone();
+                    let pid = e.pid.clone();
+                    let tid = e.tid.clone();
+                    let vars = vars.clone();
+                    tokio::spawn(async move {
+                        executor.act().complete(&pid, &tid, vars).unwrap();
+                    });
                 }
                 Err(err) => {
-                    executor.act().error(&e.pid, &e.tid, err.into()).unwrap();
+                    let executor = executor.clone();
+                    let pid = e.pid.clone();
+                    let tid = e.tid.clone();
+                    let err: acts::Vars = err.into();
+                    tokio::spawn(async move {
+                        executor.act().fail(&pid, &tid, err).unwrap();
+                    });
                 }
             }
         });

@@ -15,7 +15,8 @@ use std::{
     fmt,
     sync::{Arc, RwLock},
 };
-use tracing::{debug, error, instrument};
+use tokio::runtime::Handle;
+use tracing::{error, instrument};
 
 #[derive(Clone)]
 pub struct Process {
@@ -255,12 +256,16 @@ impl Process {
     }
 
     pub(crate) fn do_tick(&self) {
-        self.find_tasks(|t| t.is_timeouts()).iter().for_each(|t| {
-            let ctx = t.create_context();
-            t.run_hooks_timeout(&ctx).unwrap_or_else(|err| {
-                eprintln!("{err}");
-                error!("{err}");
-            });
+        let tasks = self.find_tasks(|t| t.is_timeouts());
+        Handle::current().spawn(async move {
+            for t in tasks.iter() {
+                let ctx = t.create_context();
+
+                t.run_hooks_timeout(&ctx).await.unwrap_or_else(|err| {
+                    eprintln!("{err}");
+                    error!("{err}");
+                });
+            }
         });
     }
 
@@ -313,35 +318,18 @@ impl Process {
     }
 
     #[instrument()]
-    pub fn do_task(self: &Arc<Self>, tid: &str, ctx: &Context) {
-        debug!("do_task tid={}", tid);
-        //let task = ctx.task();
-        // task.exec(ctx).unwrap_or_else(|err| {
-        //     eprintln!("error: {err}");
-        //     task.set_err(&err.into());
-        //     let _ = ctx.emit_error();
-        // });
-        if let Some(task) = &self.task(tid) {
-            task.exec(ctx).unwrap_or_else(|err| {
-                eprintln!("error: {err}");
-                task.set_err(&err.into());
-                let _ = ctx.emit_error();
-            });
-        } else {
-            println!("cannot find task pid={} tid={}", self.id(), tid);
-            println!("tasks={:?}", self.tasks());
-        }
-    }
-
-    #[instrument()]
-    pub fn start(self: &Arc<Self>) {
+    pub fn start(self: &Arc<Self>) -> Result<()> {
         self.set_state(TaskState::Running);
-        self.runtime.cache().push_proc(self);
+        let cache = self.runtime.cache().clone();
+        let proc = self.clone();
+        cache.push_proc(&proc)?;
         let tr = self.tree();
         if let Some(root) = &tr.root {
             let task = self.create_task(root, None);
-            self.runtime.push(&task);
+            self.runtime.push(&task)?;
         }
+
+        Ok(())
     }
 
     pub fn create_task(
@@ -387,42 +375,9 @@ impl Process {
 
     #[allow(unused)]
     pub fn print(&self) {
-        let ttree = self.tasks.read().unwrap();
-
         println!("Proc({})  state={}", self.id, self.state());
         println!("data={}", self.data());
-        if let Some(root) = ttree.root() {
-            visit(&root, |task| {
-                let mut level = task.node().level;
-                while level > 0 {
-                    print!("  ");
-                    level -= 1;
-                }
-
-                println!(
-                    "Task({}) {}{} nid={} name={} tag={} prev={} state={} err={:?} data={} inputs={}  outputs={}",
-                    task.id,
-                    task.node().kind(),
-                    if task.node().kind() == NodeKind::Act {
-                        format!("({})", task.node().uses())
-                    } else {
-                        "".to_string()
-                    },
-                    task.node().id(),
-                    task.node().name(),
-                    task.node().tag(),
-                    match task.prev() {
-                        Some(v) => v,
-                        None => "nil".to_string(),
-                    },
-                    task.state(),
-                    task.err(),
-                    task.data(),
-                    task.inputs(),
-                    task.outputs(),
-                );
-            })
-        }
+        println!("{}", self.tree_output());
     }
 
     #[allow(unused)]
@@ -432,27 +387,9 @@ impl Process {
         s.borrow_mut()
             .push_str(&format!("Proc({})  state={}\n", self.id, self.state()));
         if let Some(root) = ttree.root() {
-            visit(&root, move |task| {
-                let mut level = task.node().level;
-                while level > 0 {
-                    s.borrow_mut().push_str("  ");
-                    level -= 1;
-                }
-                s.borrow_mut().push_str(&format!(
-                    "Task({}) prev={} kind={} nid={} name={} state={}\n",
-                    task.id,
-                    match task.prev() {
-                        Some(v) => v,
-                        None => "nil".to_string(),
-                    },
-                    task.node().kind(),
-                    task.node().id(),
-                    task.node().content.name(),
-                    task.state(),
-                ));
-            })
+            let path = std::collections::HashMap::new();
+            print_task_string(&root, 0, &path, true, s);
         }
-
         s.clone().into_inner()
     }
 
@@ -473,11 +410,48 @@ impl Process {
     }
 }
 
-pub fn visit<F: Fn(&Arc<Task>) + Clone>(task: &Arc<Task>, f: F) {
-    f(task);
+fn print_task_string(
+    task: &Arc<Task>,
+    depth: usize,
+    path: &std::collections::HashMap<usize, bool>,
+    is_last: bool,
+    s: &RefCell<String>,
+) {
+    // Draw tree connectors
+    if depth > 0 {
+        for idx in 1..depth {
+            if let Some(&true) = path.get(&idx) {
+                s.borrow_mut().push_str("│   ");
+            } else {
+                s.borrow_mut().push_str("    ");
+            }
+        }
+        if is_last {
+            s.borrow_mut().push_str("└── ");
+        } else {
+            s.borrow_mut().push_str("├── ");
+        }
+    }
 
-    let tasks = task.children();
-    for child in tasks {
-        visit(&child, f.clone());
+    s.borrow_mut().push_str(&format!(
+        "Task({}) prev={} kind={} nid={} name={} state={}\n",
+        task.id,
+        match task.prev() {
+            Some(v) => v,
+            None => "nil".to_string(),
+        },
+        task.node().kind(),
+        task.node().id(),
+        task.node().content.name(),
+        task.state(),
+    ));
+
+    let mut child_path = path.clone();
+    child_path.insert(depth, !is_last);
+
+    let children = task.children();
+    let len = children.len();
+    for (i, child) in children.iter().enumerate() {
+        print_task_string(child, depth + 1, &child_path, i == len - 1, s);
     }
 }

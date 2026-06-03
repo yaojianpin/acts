@@ -51,7 +51,7 @@ impl<'a> Client<'a> {
             .or_insert(vec![user.clone()]);
     }
 
-    pub fn process(&self, executor: &Executor, message: &Message) -> Result<()> {
+    pub async fn process(&self, executor: &Executor, message: &Message) -> Result<()> {
         // println!("message: {:?}", message);
         if message.is_key("init") && message.is_state(MessageState::Created) {
             // init the workflow

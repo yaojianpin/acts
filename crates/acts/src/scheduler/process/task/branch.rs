@@ -58,7 +58,7 @@ impl ActTask for Branch {
             let children = task.node.children();
             if !children.is_empty() {
                 for child in &children {
-                    ctx.sched_task(child);
+                    ctx.sched_task(child)?;
                 }
             } else {
                 task.set_state(TaskState::Completed);

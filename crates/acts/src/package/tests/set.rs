@@ -1,6 +1,13 @@
-use crate::{Act, Vars, Workflow, utils, utils::test::create_proc_signal};
+use crate::{
+    Act, Vars, Workflow,
+    utils::{
+        self,
+        test::{auto_complete, create_proc},
+    },
+};
 use serde_json::json;
 
+use serial_test::serial;
 #[test]
 fn pack_set_parse_primary() {
     let text = r#"
@@ -18,17 +25,21 @@ fn pack_set_parse_primary() {
     assert_eq!(params.get::<String>("b").unwrap(), "abc");
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn pack_set_one() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::set(Vars::new().with("a", 5)))
     });
 
     workflow.print();
-    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
 
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -42,17 +53,21 @@ async fn pack_set_one() {
     );
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn pack_set_many() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::set(Vars::new().with("a", 5).with("b", "bb")))
     });
 
     workflow.print();
-    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
 
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -76,18 +91,21 @@ async fn pack_set_many() {
     );
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn pack_set_local_var() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_var("b", json!("abc"))
             .with_act(Act::set(Vars::new().with("a", r#"{{ b }}"#)))
     });
 
     workflow.print();
-    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
-
-    scher.launch(&proc);
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
+    rt.launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -101,18 +119,22 @@ async fn pack_set_local_var() {
     );
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn pack_set_calc_str() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_var("a", json!("a"))
             .with_act(Act::set(Vars::new().with("a", r#"{{ a + "bc" }}"#)))
     });
 
     workflow.print();
-    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
 
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -126,21 +148,26 @@ async fn pack_set_calc_str() {
     );
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn pack_set_calc_int() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_var("a", json!(10))
             .with_act(Act::set(Vars::new().with("a", r#"{{ a + 20 }}"#)))
     });
 
     workflow.print();
-    let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
 
-    emitter.on_message(move |e| {
+    channel.on_message(move |e| {
         println!("message: {e:?}");
     });
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -154,18 +181,22 @@ async fn pack_set_calc_int() {
     );
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn pack_set_update_local() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_var("b", json!("abc"))
             .with_act(Act::set(Vars::new().with("a", r#"123"#)))
     });
 
     workflow.print();
-    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
 
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -179,9 +210,10 @@ async fn pack_set_update_local() {
     );
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn sch_act_get_global_var() {
-    let mut workflow = Workflow::new()
+    let workflow = Workflow::new()
         .with_var("b", json!("abc"))
         .with_step(|step| {
             step.with_id("step1")
@@ -189,9 +221,12 @@ async fn sch_act_get_global_var() {
         });
 
     workflow.print();
-    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
 
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -205,9 +240,10 @@ async fn sch_act_get_global_var() {
     );
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn pack_set_global_var() {
-    let mut workflow = Workflow::new()
+    let workflow = Workflow::new()
         .with_var("b", json!("abc"))
         .with_step(|step| {
             step.with_id("step1")
@@ -215,9 +251,12 @@ async fn pack_set_global_var() {
         });
 
     workflow.print();
-    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
 
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(proc.data().get::<String>("b").unwrap(), "123");

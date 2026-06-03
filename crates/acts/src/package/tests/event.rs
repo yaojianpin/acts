@@ -2,9 +2,12 @@ use crate::{Act, Workflow};
 use crate::{Engine, Vars, query::Query};
 use serde_json::json;
 
-#[tokio::test]
+use serial_test::serial;
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn pack_event_deploy() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let workflow = Workflow::new()
         .with_id("my-event-model")
         .with_on(|act| {
@@ -31,9 +34,10 @@ async fn pack_event_deploy() {
     assert_eq!(ret.count, 2);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn pack_event_get() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let workflow = Workflow::new()
         .with_id("my-event-model")
         .with_on(|act| {
@@ -67,9 +71,10 @@ async fn pack_event_get() {
     assert_eq!(ret.uses, "acts.event.hook");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn pack_event_manual_start() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let workflow = Workflow::new()
         .with_id("my-event-model")
         .with_on(|act| {
@@ -86,15 +91,15 @@ async fn pack_event_manual_start() {
         .executor()
         .evt()
         .start("my-event-model:event1", &Vars::new().into())
-        .await
         .unwrap();
 
     assert!(ret.unwrap().get::<String>("pid").is_some());
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn pack_event_hook_start() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let workflow = Workflow::new()
         .with_var("ret", 0)
         .with_expose("ret", json!(null))
@@ -115,16 +120,16 @@ async fn pack_event_hook_start() {
         .executor()
         .evt()
         .start("my-event-model:event1", &Vars::new().into())
-        .await
         .unwrap();
 
     println!("event ret: {ret:?}");
     assert_eq!(ret.unwrap().get::<i32>("ret").unwrap(), 100);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn pack_event_chat_start() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let workflow = Workflow::new()
         .with_var("ret", 0)
         .with_expose("ret", json!(null))
@@ -138,16 +143,16 @@ async fn pack_event_chat_start() {
         .executor()
         .evt()
         .start("my-event-model:event1", &"hello".into())
-        .await
         .unwrap();
 
     println!("event ret: {ret:?}");
     assert!(ret.unwrap().get::<String>("pid").is_some());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn pack_event_multiple() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let workflow = Workflow::new()
         .with_id("my-event-model")
         .with_on(|act| {
@@ -169,7 +174,6 @@ async fn pack_event_multiple() {
         .executor()
         .evt()
         .start("my-event-model:event1", &Vars::new().into())
-        .await
         .unwrap();
 
     assert!(ret.unwrap().get::<String>("pid").is_some());
@@ -178,15 +182,15 @@ async fn pack_event_multiple() {
         .executor()
         .evt()
         .start("my-event-model:event2", &Vars::new().into())
-        .await
         .unwrap();
 
     assert!(ret.unwrap().get::<String>("pid").is_some());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn pack_event_dup_id() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let workflow = r#"
     id: "my-event-model"
     on:
@@ -206,9 +210,10 @@ async fn pack_event_dup_id() {
     assert!(ret.is_err());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn pack_event_empty_id() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let workflow = r#"
     id: "my-event-model"
     on:

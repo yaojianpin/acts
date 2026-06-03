@@ -7,7 +7,7 @@ pub struct HttpPackagePlugin;
 
 #[async_trait::async_trait]
 impl ActPlugin for HttpPackagePlugin {
-    async fn on_init(&self, engine: &acts::Engine) -> Result<()> {
+    fn on_init(&self, engine: &acts::Engine) -> Result<()> {
         let meta = package::HttpPackage::meta();
         engine.extender().register_package(&meta)?;
 
@@ -25,23 +25,21 @@ impl ActPlugin for HttpPackagePlugin {
             let pid = e.pid.clone();
             let tid = e.tid.clone();
             let executor = executor.clone();
-            tokio::spawn(async move {
-                let pack = package::HttpPackage::create(&inputs);
-                if let Err(err) = pack {
-                    executor.act().error(&pid, &tid, err.into()).unwrap();
-                    return;
-                }
+            let pack = package::HttpPackage::create(&inputs);
+            if let Err(err) = pack {
+                executor.act().fail(&pid, &tid, err.into()).unwrap();
+                return;
+            }
 
-                let pack = pack.unwrap();
-                match pack.run().await {
-                    Ok(data) => {
-                        executor.act().complete(&pid, &tid, data).unwrap();
-                    }
-                    Err(err) => {
-                        executor.act().error(&pid, &tid, err.into()).unwrap();
-                    }
-                };
-            });
+            let pack = pack.unwrap();
+            match pack.run() {
+                Ok(data) => {
+                    executor.act().complete(&pid, &tid, data).unwrap();
+                }
+                Err(err) => {
+                    executor.act().fail(&pid, &tid, err.into()).unwrap();
+                }
+            };
         });
 
         Ok(())

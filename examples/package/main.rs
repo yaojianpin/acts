@@ -7,8 +7,7 @@ async fn main() -> acts::Result<()> {
     let engine = EngineBuilder::new()
         .add_plugin(&plugin::MyPackagePlugin)
         .build()
-        .await?
-        .start();
+        .start()?;
 
     let (s1, s2, sig) = engine.signal(()).triple();
     let executor = engine.executor();
@@ -19,13 +18,10 @@ async fn main() -> acts::Result<()> {
     println!("inputs: {vars:?}");
 
     let text = include_str!("./model.yml");
-    let workflow = Workflow::from_yml(text).unwrap();
-    engine.executor().model().deploy(&workflow).unwrap();
+    let workflow = Workflow::from_yml(text)?;
+    engine.executor().model().deploy(&workflow)?;
 
-    executor
-        .proc()
-        .start(&workflow.id, vars)
-        .expect("start workflow");
+    executor.proc().start(&workflow.id, vars)?;
     let emitter = engine.channel();
 
     emitter.on_complete(move |e| {

@@ -26,7 +26,6 @@ pub trait ActPackage {
     fn meta() -> ActPackageMeta;
 }
 
-#[async_trait::async_trait]
 pub trait ActPackageFn: Send + Sync {
     /// executing with task context
     fn execute(&self, _ctx: &Context) -> Result<Option<Vars>> {
@@ -34,7 +33,7 @@ pub trait ActPackageFn: Send + Sync {
     }
 
     /// start with non-context, such as workflow event
-    async fn start(&self, _rt: &Arc<Runtime>, _options: &Vars) -> Result<Option<Vars>> {
+    fn start(&self, _rt: &Arc<Runtime>, _options: &Vars) -> Result<Option<Vars>> {
         Ok(None)
     }
 }
@@ -225,21 +224,15 @@ impl ActPackageMeta {
 
 inventory::collect!(ActPackageRegister);
 
-pub fn init(engine: &Engine) {
+pub fn init(engine: &Engine) -> Result<()> {
     for register in inventory::iter::<ActPackageRegister> {
         let meta = (register.meta)();
         debug!("package: {}", meta.name);
 
-        let mut pack = meta
-            .into_data()
-            .unwrap_or_else(|_| panic!("cannot convert ActPackageMeta to data::Package"));
+        let mut pack = meta.into_data()?;
         pack.built_in = true;
-
-        engine
-            .executor()
-            .pack()
-            .publish(&pack)
-            .unwrap_or_else(|_| panic!("cannot publish package '{}'", pack.id));
+        engine.executor().pack().publish(&pack)?;
         engine.runtime().package().register(meta.id, register);
     }
+    Ok(())
 }

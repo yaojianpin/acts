@@ -1,7 +1,7 @@
 use crate::Result;
 use dashmap::DashMap;
 
-use super::kv::KvStore;
+use crate::store::KvStore;
 
 #[derive(Debug)]
 pub struct MemoryStore {

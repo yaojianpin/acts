@@ -1,11 +1,11 @@
 #[cfg(test)]
 use crate::config::ConfigData;
-use crate::{ActPlugin, Config, Engine, Result, config::ConfigLog};
-use std::path::Path;
+use crate::{ActPlugin, Config, Engine, config::ConfigLog};
+use std::{path::Path, sync::Arc};
 
 pub struct EngineBuilder {
     config: Config,
-    plugins: Vec<Box<dyn ActPlugin>>,
+    plugins: Vec<Arc<dyn ActPlugin>>,
 }
 
 impl Default for EngineBuilder {
@@ -86,7 +86,7 @@ impl EngineBuilder {
     /// }
     /// #[async_trait::async_trait]
     /// impl ActPlugin for TestPlugin {
-    ///     async fn on_init(&self, engine: &Engine) -> Result<()> {
+    ///     fn on_init(&self, engine: &Engine) -> Result<()> {
     ///         println!("TestPlugin");
     ///         engine.channel().on_start(|e| {});
     ///         engine.channel().on_complete(|e| {});
@@ -97,28 +97,22 @@ impl EngineBuilder {
     ///
     /// #[tokio::main]
     /// async fn main() {
-    ///     let engine = EngineBuilder::new().add_plugin(&TestPlugin::new()).build().await.unwrap().start();
+    ///     let engine = EngineBuilder::new().add_plugin(&TestPlugin::new()).build().start().unwrap();
     /// }
     /// ```
     pub fn add_plugin<T>(mut self, plugin: &T) -> Self
     where
         T: ActPlugin + Clone + 'static,
     {
-        self.plugins.push(Box::new(plugin.clone()));
+        self.plugins.push(Arc::new(plugin.clone()));
         self
     }
 
-    pub async fn build(&self) -> Result<Engine> {
-        let engine = Engine::new_with_config(&self.config)?;
+    pub fn build(self) -> Engine {
+        let engine = Engine::new()
+            .with_config(&self.config)
+            .set_plugins(self.plugins.clone());
 
-        // init the cache store to make sure the plugin can registry package to the store
-        engine.runtime().cache().init(&engine);
-
-        // init plugins
-        for plugin in self.plugins.iter() {
-            plugin.on_init(&engine).await?;
-        }
-
-        Ok(engine)
+        engine
     }
 }

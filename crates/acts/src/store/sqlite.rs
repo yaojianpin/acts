@@ -1,14 +1,16 @@
-use super::kv::KvStore;
-use crate::{ActError, Result, utils::consts};
+use crate::{
+    ActError, KvStore, Result,
+    utils::{consts, sync},
+};
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{Connection, Row};
-use std::future::Future;
-use std::sync::{Arc, Mutex};
-use tokio::runtime::Runtime;
+use std::{
+    future::Future,
+    sync::{Arc, Mutex},
+};
 
 pub struct SqliteStore {
     conn: Arc<Mutex<sqlx::SqliteConnection>>,
-    runtime: Option<Runtime>,
 }
 
 impl SqliteStore {
@@ -39,39 +41,15 @@ impl SqliteStore {
     }
 
     pub fn open(path: &str) -> Result<Self> {
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                let conn = tokio::task::block_in_place(|| handle.block_on(Self::init_conn(path)))?;
-                Ok(Self {
-                    conn: Arc::new(Mutex::new(conn)),
-                    runtime: None,
-                })
-            }
-            Err(_) => {
-                let runtime = Runtime::new().map_err(|e| ActError::Store(e.to_string()))?;
-                let conn = runtime.block_on(Self::init_conn(path))?;
-                Ok(Self {
-                    conn: Arc::new(Mutex::new(conn)),
-                    runtime: Some(runtime),
-                })
-            }
-        }
+        let conn = sync::block_on(Self::init_conn(path))?;
+        Ok(Self {
+            conn: Arc::new(Mutex::new(conn)),
+        })
     }
 
     #[allow(dead_code)]
     pub fn open_in_memory() -> Result<Self> {
         Self::open(":memory:")
-    }
-
-    fn block_on<F: Future>(&self, f: F) -> F::Output {
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => tokio::task::block_in_place(move || handle.block_on(f)),
-            Err(_) => self
-                .runtime
-                .as_ref()
-                .expect("no runtime available")
-                .block_on(f),
-        }
     }
 }
 
@@ -80,7 +58,7 @@ impl KvStore for SqliteStore {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         let key = key.to_string();
         let conn = self.conn.clone();
-        self.block_on(async move {
+        sync::block_on(async move {
             let mut conn = conn.lock().unwrap();
             sqlx::query(&format!(
                 "SELECT value FROM {} WHERE key = ?",
@@ -98,7 +76,7 @@ impl KvStore for SqliteStore {
     fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
         let key = key.to_string();
         let conn = self.conn.clone();
-        self.block_on(async move {
+        sync::block_on(async move {
             let mut conn = conn.lock().unwrap();
             sqlx::query(&format!(
                 "INSERT INTO {} (key, value) VALUES (?, ?)
@@ -118,7 +96,7 @@ impl KvStore for SqliteStore {
     fn delete(&self, key: &str) -> Result<()> {
         let key = key.to_string();
         let conn = self.conn.clone();
-        self.block_on(async move {
+        sync::block_on(async move {
             let mut conn = conn.lock().unwrap();
             sqlx::query(&format!(
                 "DELETE FROM {} WHERE key = ?",
@@ -136,7 +114,7 @@ impl KvStore for SqliteStore {
     fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>> {
         let pattern = format!("{}%", prefix);
         let conn = self.conn.clone();
-        self.block_on(async move {
+        sync::block_on(async move {
             let mut conn = conn.lock().unwrap();
             let rows = sqlx::query(&format!(
                 "SELECT key, value FROM {} WHERE key LIKE ?",

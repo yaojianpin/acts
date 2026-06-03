@@ -1,11 +1,11 @@
 use crate::{
-    Config, Engine, Result,
+    Config, Result,
     scheduler::{Process, Runtime, Task},
     store::Store,
 };
 use moka::sync::Cache as MokaCache;
 use std::sync::Arc;
-use tracing::{debug, error, instrument};
+use tracing::{debug, instrument};
 
 #[derive(Clone)]
 pub struct Cache {
@@ -45,15 +45,13 @@ impl Cache {
         self.procs.entry_count() as usize
     }
 
-    pub fn init(&self, _engine: &Engine) {
-        debug!("cache::init");
-    }
-
     pub fn close(&self) {}
 
     #[instrument]
-    pub fn push_proc(&self, proc: &Arc<Process>) {
-        self.push_proc_pri(proc, true);
+    pub fn push_proc(&self, proc: &Arc<Process>) -> Result<()> {
+        self.push_proc_pri(proc, true)?;
+
+        Ok(())
     }
 
     pub fn procs(&self) -> Vec<Arc<Process>> {
@@ -65,23 +63,19 @@ impl Cache {
     }
 
     #[instrument]
-    pub fn proc(&self, pid: &str, rt: &Arc<Runtime>) -> Option<Arc<Process>> {
+    pub fn proc(&self, pid: &str, rt: &Arc<Runtime>) -> Result<Option<Arc<Process>>> {
         debug!("process: pid={pid}");
         match self.get_proc(pid) {
-            Some(proc) => Some(proc.clone()),
+            Some(proc) => Ok(Some(proc.clone())),
             None => {
-                if let Some(proc) = self.store.load_proc(pid, rt).unwrap_or_else(|err| {
-                    error!("cache.process store.loadproc={err}");
-                    eprintln!("cache.process store.loadproc={err}");
-                    None
-                }) {
+                if let Some(proc) = self.store.load_proc(pid, rt)? {
                     debug!("loaded: {:?}", proc);
                     debug!("tasks: {:?}", proc.tasks());
                     // add to cache
-                    self.push_proc_pri(&proc, false);
-                    return Some(proc);
+                    self.push_proc_pri(&proc, false)?;
+                    return Ok(Some(proc));
                 }
-                None
+                Ok(None)
             }
         }
     }
@@ -94,8 +88,8 @@ impl Cache {
         Ok(true)
     }
 
-    #[instrument(skip(on_load))]
-    pub fn restore<F: Fn(&Arc<Process>)>(&self, rt: &Arc<Runtime>, on_load: F) -> Result<()> {
+    #[instrument(skip())]
+    pub fn restore(&self, rt: &Arc<Runtime>) -> Result<()> {
         debug!("restore");
         let cap = self.cap();
         let count = self.count();
@@ -107,8 +101,10 @@ impl Cache {
             let cap = cap - count;
             for ref proc in self.store.load(cap, rt)? {
                 if !self.procs.contains_key(proc.id()) {
-                    self.push_proc_pri(proc, false);
-                    on_load(proc);
+                    self.push_proc_pri(proc, false)?;
+                    if proc.state().is_none() {
+                        proc.start()?;
+                    }
                 }
             }
         }
@@ -129,14 +125,14 @@ impl Cache {
         self.procs.get(pid)
     }
 
-    pub(super) fn push_proc_pri(&self, proc: &Arc<Process>, save: bool) {
+    pub(super) fn push_proc_pri(&self, proc: &Arc<Process>, save: bool) -> Result<()> {
         debug!("push process pid={}", proc.id());
         if save {
-            self.store
-                .upsert_proc(proc)
-                .expect("fail to upsert process");
+            self.store.upsert_proc(proc)?;
         }
         self.procs.insert(proc.id().to_string(), proc.clone());
+
+        Ok(())
     }
 
     pub(super) fn push_task_pri(&self, task: &Arc<Task>, save: bool) -> Result<()> {

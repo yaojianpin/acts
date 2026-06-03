@@ -22,7 +22,7 @@ impl Client {
         Self { actions }
     }
 
-    pub fn process(&self, executor: &Executor, message: &Message) -> Result<()> {
+    pub async fn process(&self, executor: &Executor, message: &Message) -> Result<()> {
         if message.is_uses("acts.core.irq") && message.is_state(MessageState::Created) {
             match self.actions.get(&message.key) {
                 Some(action) => {

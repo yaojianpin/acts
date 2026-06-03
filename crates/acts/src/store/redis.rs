@@ -1,5 +1,4 @@
-use super::kv::KvStore;
-use crate::{ActError, Result};
+use crate::{ActError, KvStore, Result};
 use redis::{Client, Commands};
 use std::sync::Mutex;
 

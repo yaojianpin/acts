@@ -1,21 +1,18 @@
-use std::cmp::Ordering;
-use std::collections::{HashMap, HashSet};
-use std::fmt::Debug;
-use std::marker::PhantomData;
-use std::sync::Arc;
-
-use serde::Serialize;
-use serde::de::DeserializeOwned;
-use serde_json::Value as JsonValue;
-
 use super::map_db_err;
-use crate::store::query::FilterType;
 use crate::store::{
-    DbCollection, DbCollectionIden, Expr, ExprOp, Filter, FilterExpr, PageData, Query, Sort,
+    DbCollection, DbCollectionIden, Expr, ExprOp, Filter, FilterExpr, KvStore, PageData, Query,
+    Sort, query::FilterType,
 };
 use crate::{ActError, Result};
-
-use super::kv::KvStore;
+use serde::{Serialize, de::DeserializeOwned};
+use serde_json::Value as JsonValue;
+use std::{
+    cmp::Ordering,
+    collections::{HashMap, HashSet},
+    fmt::Debug,
+    marker::PhantomData,
+    sync::Arc,
+};
 
 pub struct KvCollection<T> {
     prefix: String,
@@ -93,6 +90,7 @@ where
     }
 
     fn query(&self, q: &Query) -> crate::Result<PageData<Self::Item>> {
+        // first, query all indexded data by filter
         let indexed = T::indexed_fields();
         let scan_prefix = if let Some(cond) = &q.filter {
             find_index_hint(cond, indexed).map_or_else(
@@ -270,8 +268,6 @@ fn find_index_hint<'a>(filter: &'a Filter, indexed: &[&str]) -> Option<(&'a str,
     }
     None
 }
-
-// --- Filter logic ported from collect.rs ---
 
 impl Filter {
     pub fn calc(

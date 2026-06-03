@@ -19,7 +19,7 @@ impl Client {
         Self { actions }
     }
 
-    pub fn process(&self, executor: &Executor, message: &Message) -> Result<()> {
+    pub async fn process(&self, executor: &Executor, message: &Message) -> Result<()> {
         println!("process: {message:?}");
         if message.is_type("act") && message.is_state(MessageState::Created) {
             match self.actions.get(&message.key) {

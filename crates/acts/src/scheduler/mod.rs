@@ -2,8 +2,6 @@ mod context;
 mod process;
 mod queue;
 mod runtime;
-#[allow(clippy::module_inception)]
-mod scheduler;
 mod state;
 mod tree;
 
@@ -14,7 +12,6 @@ pub use crate::Result;
 pub use context::Context;
 pub use process::{Process, Task};
 pub use runtime::Runtime;
-pub use scheduler::Scheduler;
 pub use state::TaskState;
 
 #[allow(unused_imports)]

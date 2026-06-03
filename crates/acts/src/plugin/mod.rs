@@ -20,7 +20,7 @@ mod tests;
 ///
 /// #[async_trait::async_trait]
 /// impl ActPlugin for TestPlugin {
-///     async fn on_init(&self, engine: &Engine) -> Result<()> {
+///     fn on_init(&self, engine: &Engine) -> Result<()> {
 ///         println!("TestPlugin");
 ///         // engine.register_module("name", module);
 ///         engine.channel().on_start(|e| {});
@@ -32,5 +32,5 @@ mod tests;
 /// ```
 #[async_trait::async_trait]
 pub trait ActPlugin: Send + Sync {
-    async fn on_init(&self, engine: &Engine) -> crate::Result<()>;
+    fn on_init(&self, engine: &Engine) -> crate::Result<()>;
 }

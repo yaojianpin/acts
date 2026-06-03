@@ -8,8 +8,7 @@ async fn main() -> Result<()> {
     let engine = EngineBuilder::new()
         .add_plugin(&plugin::UserVarPlugin)
         .build()
-        .await?
-        .start();
+        .start()?;
 
     let model = r#"
     id: my_model

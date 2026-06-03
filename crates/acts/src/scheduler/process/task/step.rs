@@ -24,7 +24,7 @@ impl ActTask for Step {
         let children = task.node.children();
         if !children.is_empty() {
             for child in &children {
-                ctx.sched_task(child);
+                ctx.sched_task(child)?;
             }
         }
 
@@ -45,7 +45,7 @@ impl ActTask for Step {
                 } else if task.state().is_pending() && task.is_ready() {
                     // resume task
                     task.set_state(TaskState::Running);
-                    ctx.runtime.scher().emit_task_event(task)?;
+                    ctx.runtime.emitter().emit_task_event(task)?;
                     task.exec(ctx)?;
                     is_next = true;
                 }
@@ -60,14 +60,14 @@ impl ActTask for Step {
                 }
 
                 if let Some(next) = &task.node.next().upgrade() {
-                    ctx.sched_task(next);
+                    ctx.sched_task(next)?;
                     return Ok(true);
                 }
             }
         } else if state.is_skip() {
             // if the step is skipped, still find the next to run
             if let Some(next) = task.node.next().upgrade() {
-                ctx.sched_task(&next);
+                ctx.sched_task(&next)?;
                 return Ok(true);
             }
         }
@@ -85,7 +85,7 @@ impl ActTask for Step {
                 if task.state().is_pending() && task.is_ready() {
                     // resume task
                     task.set_state(TaskState::Running);
-                    ctx.runtime.scher().emit_task_event(task)?;
+                    ctx.runtime.emitter().emit_task_event(task)?;
                     task.exec(ctx)?;
                     return Ok(false);
                 }
@@ -131,7 +131,7 @@ impl ActTask for Step {
                 }
 
                 if let Some(next) = &task.node.next().upgrade() {
-                    ctx.sched_task(next);
+                    ctx.sched_task(next)?;
                     return Ok(false);
                 }
                 return Ok(true);
@@ -139,7 +139,7 @@ impl ActTask for Step {
         } else if state.is_skip() {
             // if the step is skipped, still find the next to run
             if let Some(next) = task.node.next().upgrade() {
-                ctx.sched_task(&next);
+                ctx.sched_task(&next)?;
                 return Ok(false);
             }
             return Ok(true);

@@ -2,6 +2,7 @@ pub mod consts;
 mod convert;
 mod id;
 mod json;
+pub mod sync;
 pub mod time;
 
 #[cfg(test)]

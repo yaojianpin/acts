@@ -57,7 +57,7 @@ use acts::{Engine, Vars, Workflow};
 
 #[tokio::main]
 async fn main() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
 
     // create yaml workflow model
     let model = r#"
@@ -206,7 +206,7 @@ use acts::{Engine, Vars, Workflow};
 
 #[tokio::main]
 async fn main() {
-  let engine = Engine::new().start();
+  let engine = Engine::new().start().unwrap();
   let executor = engine.executor();
 
   let mut vars = Vars::new();
@@ -392,7 +392,7 @@ use acts_store_sqlite::SqliteStore;
 
 #[tokio::main]
 async fn main() {
-  let engine = EngineBuilder::new().add_plugin(&SqliteStore).build().await.unwrap().start();
+  let engine = EngineBuilder::new().add_plugin(&SqliteStore).build().start();
 }
 ```
 
@@ -404,7 +404,7 @@ use acts_store_postgres::PostgresStore;
 
 #[tokio::main]
 async fn main() {
-  let engine = EngineBuilder::new().add_plugin(&PostgresStore).build().await.unwrap().start();
+  let engine = EngineBuilder::new().add_plugin(&PostgresStore).build().start();
 }
 ```
 

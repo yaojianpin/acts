@@ -1,27 +1,20 @@
-use crate::{ActPlugin, ActRunAs, Engine, EngineBuilder};
+use crate::{ActPlugin, ActRunAs, Engine};
 use std::sync::{Arc, Mutex};
 
-#[tokio::test]
+use serial_test::serial;
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn plugin_common_register() {
     let test_plugin = TestPlugin::new();
-    EngineBuilder::new()
-        .add_plugin(&test_plugin)
-        .build()
-        .await
-        .unwrap()
-        .start();
+    Engine::new().add_plugin(&test_plugin).start().unwrap();
     assert!(*test_plugin.is_init.lock().unwrap());
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn plugin_package_register() {
     let test_plugin = TestPackagePlugin;
-    let engine = EngineBuilder::new()
-        .add_plugin(&test_plugin)
-        .build()
-        .await
-        .unwrap()
-        .start();
+    let engine = Engine::new().add_plugin(&test_plugin).start().unwrap();
     let pack1 = engine.executor().pack().get("test_package").unwrap();
     assert_eq!(pack1.run_as, ActRunAs::Irq);
 
@@ -44,7 +37,7 @@ impl TestPlugin {
 
 #[async_trait::async_trait]
 impl ActPlugin for TestPlugin {
-    async fn on_init(&self, engine: &Engine) -> crate::Result<()> {
+    fn on_init(&self, engine: &Engine) -> crate::Result<()> {
         println!("TestPlugin");
         *self.is_init.lock().unwrap() = true;
 
@@ -64,60 +57,54 @@ struct TestPackagePlugin;
 
 #[async_trait::async_trait]
 impl ActPlugin for TestPackagePlugin {
-    async fn on_init(&self, engine: &Engine) -> crate::Result<()> {
+    fn on_init(&self, engine: &Engine) -> crate::Result<()> {
         println!("TestPackagePlugin");
 
-        engine
-            .extender()
-            .register_package(&crate::ActPackageMeta {
-                id: "test_package",
-                name: "test_package",
-                desc: "test package description",
-                icon: "test_package_icon",
-                doc: "test package doc",
-                version: "0.1.0",
-                in_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "v1": { "type": "number" }
-                    }
-                }),
-                ui_schema: Some(serde_json::json!({
-                    "v1": {
-                        "ui:widget": "text",
-                    }
-                })),
-                run_as: crate::ActRunAs::Irq,
-                resources: vec![],
-                catalog: crate::ActPackageCatalog::App,
-            })
-            .unwrap();
+        engine.extender().register_package(&crate::ActPackageMeta {
+            id: "test_package",
+            name: "test_package",
+            desc: "test package description",
+            icon: "test_package_icon",
+            doc: "test package doc",
+            version: "0.1.0",
+            in_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "v1": { "type": "number" }
+                }
+            }),
+            ui_schema: Some(serde_json::json!({
+                "v1": {
+                    "ui:widget": "text",
+                }
+            })),
+            run_as: crate::ActRunAs::Irq,
+            resources: vec![],
+            catalog: crate::ActPackageCatalog::App,
+        })?;
 
-        engine
-            .extender()
-            .register_package(&crate::ActPackageMeta {
-                id: "test_package2",
-                name: "test_package2",
-                desc: "test package description",
-                icon: "test_package_icon",
-                doc: "test package doc",
-                version: "0.1.0",
-                in_schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "v1": { "type": "number" }
-                    }
-                }),
-                ui_schema: Some(serde_json::json!({
-                    "v1": {
-                        "ui:widget": "text",
-                    }
-                })),
-                run_as: crate::ActRunAs::Msg,
-                resources: vec![],
-                catalog: crate::ActPackageCatalog::App,
-            })
-            .unwrap();
+        engine.extender().register_package(&crate::ActPackageMeta {
+            id: "test_package2",
+            name: "test_package2",
+            desc: "test package description",
+            icon: "test_package_icon",
+            doc: "test package doc",
+            version: "0.1.0",
+            in_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "v1": { "type": "number" }
+                }
+            }),
+            ui_schema: Some(serde_json::json!({
+                "v1": {
+                    "ui:widget": "text",
+                }
+            })),
+            run_as: crate::ActRunAs::Msg,
+            resources: vec![],
+            catalog: crate::ActPackageCatalog::App,
+        })?;
         Ok(())
     }
 }

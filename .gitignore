@@ -8,3 +8,4 @@ Cargo.lock
 /test
 /acts/test
 /acts.cfg
+.claude

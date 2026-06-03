@@ -1,8 +1,16 @@
-use crate::{Act, TaskState, Vars, Workflow, scheduler::tests::create_proc_signal, utils};
+use crate::{
+    Act, TaskState, Vars, Workflow,
+    utils::{
+        self,
+        test::{auto_complete, create_proc},
+    },
+};
 
-#[tokio::test]
+use serial_test::serial;
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn sch_act_if_true() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::set(Vars::new().with("a", 10)))
             .with_act(Act::msg(|act| {
@@ -12,14 +20,17 @@ async fn sch_act_if_true() {
     });
 
     workflow.print();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
-        println!("message: {e:?}");
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+
+    channel.on_message(move |e| {
         if e.is_msg() {
             rx.close();
         }
     });
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -28,9 +39,10 @@ async fn sch_act_if_true() {
     );
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn sch_act_if_false() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::set(Vars::new().with("a", 10)))
             .with_act(Act::msg(|act| {
@@ -39,8 +51,11 @@ async fn sch_act_if_false() {
     });
 
     workflow.print();
-    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
-    scher.launch(&proc);
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
+    engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -49,25 +64,30 @@ async fn sch_act_if_false() {
     );
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn sch_act_if_null_value() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_act(Act::msg(|act| {
-            act.with_if(r#""$("a") == null"#)
+            act.with_if(r#"$get("not_exists") == null"#)
                 .with_key("msg1")
                 .with_id("msg1")
         }))
     });
 
     workflow.print();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
-        println!("message: {e:?}");
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+
+    channel.on_message(move |e| {
         if e.is_msg() {
+            println!("aaaaaaaaaaaaa: {e:?}");
             rx.close();
         }
     });
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(

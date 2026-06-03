@@ -1,15 +1,18 @@
 use crate::event::EventAction;
+use crate::utils::test::auto_complete;
 use crate::{
     Act, Executor, MessageState, Vars, Workflow,
     scheduler::TaskState,
-    utils::{self, consts, test::create_proc_signal},
+    utils::{self, consts, test::create_proc},
 };
 
 use serde_json::json;
 
-#[tokio::test]
+use serial_test::serial;
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn pack_subflow_start() {
-    let mut main = Workflow::new().with_id("main").with_step(|step| {
+    let main = Workflow::new().with_id("main").with_step(|step| {
         step.with_id("step1").with_act(Act::subflow(json!({
         "to": "w2"
         })))
@@ -19,39 +22,49 @@ async fn pack_subflow_start() {
         .with_id("w2")
         .with_step(|step| step.with_id("step1"));
     main.print();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal(&mut main, &utils::longid());
+    let (engine, proc) = create_proc(&main, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(false).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
 
     // deploy w2 workflow
-    Executor::new(&scher).model().deploy(&w2).unwrap();
-    emitter.on_start(move |e| {
+    Executor::new(&rt).model().deploy(&w2).unwrap();
+    channel.on_start(move |e| {
         if e.mid == "w2" {
             rx.update(|data| *data = true);
         }
     });
 
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert!(ret)
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn pack_subflow_not_found_error() {
-    let mut main = Workflow::new()
+    let main = Workflow::new()
         .with_id("main")
         .with_step(|step| step.with_id("step1").with_act(Act::subflow(json!({}))));
 
     main.print();
-    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut main, &utils::longid());
-    scher.launch(&proc);
+    let (engine, proc) = create_proc(&main, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(false).double();
+    auto_complete(&engine, &rx);
+
+    rt.launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert!(proc.state().is_error())
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn pack_subflow_act_running() {
-    let mut main = Workflow::new().with_id("main").with_step(|step| {
+    let main = Workflow::new().with_id("main").with_step(|step| {
         step.with_id("step1").with_act(
             Act::subflow(json!({
             "to": "w2",
@@ -66,19 +79,24 @@ async fn pack_subflow_act_running() {
     });
 
     main.print();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<String>(&mut main, &utils::longid());
-    Executor::new(&scher).model().deploy(&w2).unwrap();
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&main, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(false).double();
+    auto_complete(&engine, &rx);
+
+    Executor::new(&rt).model().deploy(&w2).unwrap();
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         println!("message: {:?}", e.inner());
     });
 
-    emitter.on_start(move |e| {
+    channel.on_start(move |e| {
         if e.mid == "w2" {
             rx.close();
         }
     });
 
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -87,9 +105,10 @@ async fn pack_subflow_act_running() {
     );
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn pack_subflow_act_complete() {
-    let mut main = Workflow::new().with_id("main").with_step(|step| {
+    let main = Workflow::new().with_id("main").with_step(|step| {
         step.with_id("step1").with_act(
             Act::subflow(json!({
             "to": "w2",
@@ -105,17 +124,21 @@ async fn pack_subflow_act_complete() {
 
     main.print();
     let main_pid = utils::longid();
-    let (proc, scher, emitter, tx, ..) = create_proc_signal::<()>(&mut main, &main_pid);
+    let (engine, proc) = create_proc(&main, &main_pid);
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(false).double();
+    auto_complete(&engine, &rx);
 
-    Executor::new(&scher).model().deploy(&w2).unwrap();
-    emitter.on_message(move |e| {
+    let channel = engine.channel();
+    Executor::new(&rt).model().deploy(&w2).unwrap();
+    channel.on_message(move |e| {
         if e.is_key("act1") && e.is_state(MessageState::Created) {
-            e.do_action(&e.pid, &e.tid, EventAction::Next, Vars::new())
+            rt.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
                 .unwrap();
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -124,9 +147,10 @@ async fn pack_subflow_act_complete() {
     );
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn pack_subflow_act_skip() {
-    let mut main = Workflow::new().with_id("main").with_step(|step| {
+    let main = Workflow::new().with_id("main").with_step(|step| {
         step.with_id("step1").with_act(
             Act::subflow(json!({
             "to":"w2",
@@ -142,17 +166,21 @@ async fn pack_subflow_act_skip() {
 
     main.print();
     let main_pid = utils::longid();
-    let (proc, scher, emitter, tx, ..) = create_proc_signal::<()>(&mut main, &main_pid);
+    let (engine, proc) = create_proc(&main, &main_pid);
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(false).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
 
-    Executor::new(&scher).model().deploy(&w2).unwrap();
-    emitter.on_message(move |e| {
+    Executor::new(&rt).model().deploy(&w2).unwrap();
+    channel.on_message(move |e| {
         if e.is_key("act1") && e.is_state(MessageState::Created) {
-            e.do_action(&e.pid, &e.tid, EventAction::Skip, Vars::new())
+            rt.do_action2(&e.pid, &e.tid, EventAction::Skip, Vars::new())
                 .unwrap();
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
 
@@ -163,9 +191,10 @@ async fn pack_subflow_act_skip() {
     );
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn pack_subflow_act_abort() {
-    let mut main = Workflow::new().with_id("main").with_step(|step| {
+    let main = Workflow::new().with_id("main").with_step(|step| {
         step.with_id("step1").with_act(
             Act::subflow(json!({
                  "to": "w2",
@@ -181,17 +210,21 @@ async fn pack_subflow_act_abort() {
 
     main.print();
     let main_pid = utils::longid();
-    let (proc, scher, emitter, tx, _) = create_proc_signal::<()>(&mut main, &main_pid);
+    let (engine, proc) = create_proc(&main, &main_pid);
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(false).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
 
-    Executor::new(&scher).model().deploy(&w2).unwrap();
-    emitter.on_message(move |e| {
+    Executor::new(&rt).model().deploy(&w2).unwrap();
+    channel.on_message(move |e| {
         println!("message: {:?}", e.inner());
         if e.is_key("act1") && e.is_state(MessageState::Created) {
-            e.do_action(&e.pid, &e.tid, EventAction::Abort, Vars::new())
+            rt.do_action2(&e.pid, &e.tid, EventAction::Abort, Vars::new())
                 .unwrap();
         }
     });
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
 
@@ -201,9 +234,10 @@ async fn pack_subflow_act_abort() {
     );
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn pack_subflow_act_error() {
-    let mut main = Workflow::new().with_id("main").with_step(|step| {
+    let main = Workflow::new().with_id("main").with_step(|step| {
         step.with_id("step1").with_act(
             Act::subflow(json!({
                 "to": "w2",
@@ -219,26 +253,30 @@ async fn pack_subflow_act_error() {
 
     main.print();
     let main_pid = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut main, &main_pid);
+    let (engine, proc) = create_proc(&main, &main_pid);
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(false).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
 
-    Executor::new(&scher).model().deploy(&w2).unwrap();
-    emitter.on_error(move |e| {
+    Executor::new(&rt).model().deploy(&w2).unwrap();
+    channel.on_error(move |e| {
         if e.mid == "main" {
             rx.close();
         }
     });
-    emitter.on_message(move |e| {
+    channel.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.set(consts::ACT_ERR_CODE, "err1");
             options.set(consts::ACT_ERR_MESSAGE, "sub workflow error");
-            e.do_action(&e.pid, &e.tid, EventAction::Error, options)
+            rt.do_action2(&e.pid, &e.tid, EventAction::Error, options)
                 .unwrap();
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert!(

@@ -2,16 +2,22 @@ use serde_json::json;
 
 use crate::{
     Act, Workflow,
-    utils::{self, test::create_proc_signal},
+    utils::{
+        self,
+        test::{auto_complete, create_proc},
+    },
 };
 
-#[tokio::test]
+use serial_test::serial;
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn pack_code_get_inputs() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_act(
             Act::code(
                 r#"
-                let inputs = $act.inputs();
+                let inputs = $inputs();
                 inputs
             "#,
             )
@@ -21,9 +27,11 @@ async fn pack_code_get_inputs() {
     });
 
     workflow.print();
-    let (proc, scher, _emitter, tx, _rx) =
-        create_proc_signal::<()>(&mut workflow, &utils::longid());
-    scher.launch(&proc);
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
+
+    engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
 
@@ -38,9 +46,10 @@ async fn pack_code_get_inputs() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn pack_code_get_data() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_act(
             Act::code(
                 r#"
@@ -54,9 +63,11 @@ async fn pack_code_get_data() {
     });
 
     workflow.print();
-    let (proc, scher, _emitter, tx, _rx) =
-        create_proc_signal::<()>(&mut workflow, &utils::longid());
-    scher.launch(&proc);
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
+
+    engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
 
@@ -71,9 +82,10 @@ async fn pack_code_get_data() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn pack_code_outputs() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_act(
             Act::code(
                 r#"
@@ -86,8 +98,11 @@ async fn pack_code_outputs() {
     });
 
     workflow.print();
-    let (proc, scher, _, tx, _rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
-    scher.launch(&proc);
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
+
+    engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
 

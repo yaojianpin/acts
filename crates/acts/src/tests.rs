@@ -3,15 +3,18 @@ use crate::{Act, Engine, EngineBuilder, MessageState, Vars, Workflow, utils};
 use serde::Deserialize;
 use serde_json::json;
 
-#[tokio::test]
+use serial_test::serial;
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn engine_start() {
     let engine = Engine::new().start();
-    assert!(engine.is_running());
+    assert!(engine.is_ok());
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn engine_event_on_message() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let sig = engine.signal("".to_string());
     let s = sig.clone();
     let mid = utils::longid();
@@ -36,9 +39,10 @@ async fn engine_event_on_message() {
     assert_eq!(ret, "test");
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn engine_event_on_start() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
 
     let sig = engine.signal("".to_string());
     let s = sig.clone();
@@ -61,9 +65,10 @@ async fn engine_event_on_start() {
     assert_eq!(ret, mid);
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn engine_event_on_complete() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let sig = engine.signal(false);
     let s1 = sig.clone();
     let mid = utils::longid();
@@ -85,9 +90,10 @@ async fn engine_event_on_complete() {
     assert!(ret);
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn engine_event_on_error() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let mid = utils::longid();
     let workflow = Workflow::new().with_id(&mid).with_step(|step| {
         step.with_id("step1")
@@ -100,13 +106,14 @@ async fn engine_event_on_error() {
         s1.send(e.mid == mid);
     });
 
+    let rt = engine.runtime();
     engine.channel().on_message(move |e| {
         let mut options = Vars::new();
         options.insert("uid".to_string(), json!("u1"));
         options.set("ecode", "err1");
 
         if e.is_key("act1") && e.is_state(MessageState::Created) {
-            e.do_action(&e.pid, &e.tid, EventAction::Error, options)
+            rt.do_action2(&e.pid, &e.tid, EventAction::Error, options)
                 .unwrap();
         }
     });
@@ -121,7 +128,8 @@ async fn engine_event_on_error() {
     assert!(ret);
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn engine_model_create() {
     let workflow = Workflow::new()
         .with_name("w1")
@@ -148,70 +156,72 @@ async fn engine_model_create() {
     assert_eq!(step.branches.len(), 2);
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn engine_build_cache_size() {
     let engine = EngineBuilder::new()
         .cache_size(100)
         .build()
-        .await
-        .unwrap()
-        .start();
+        .start()
+        .unwrap();
     assert_eq!(engine.config().cache_cap(), 100)
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn engine_build_log_dir() {
     let engine = EngineBuilder::new()
         .log("test", "INFO")
         .build()
-        .await
-        .unwrap()
-        .start();
+        .start()
+        .unwrap();
     assert_eq!(engine.config().log().dir, "test")
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn engine_build_log_level() {
     let engine = EngineBuilder::new()
         .log("log", "DEBUG")
         .build()
-        .await
-        .unwrap()
-        .start();
+        .start()
+        .unwrap();
     assert_eq!(engine.config().log().level, "DEBUG")
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn engine_build_tick_interval_secs() {
     let engine = EngineBuilder::new()
         .tick_interval_secs(10)
         .build()
-        .await
-        .unwrap()
-        .start();
+        .start()
+        .unwrap();
     assert_eq!(engine.config().tick_interval_secs(), 10)
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn engine_build_max_message_retry_times() {
     let engine = EngineBuilder::new()
         .max_message_retry_times(100)
         .build()
-        .await
-        .unwrap()
-        .start();
+        .start()
+        .unwrap();
     assert_eq!(engine.config().max_message_retry_times(), 100)
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn engine_drop() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     drop(engine);
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     drop(engine)
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn engine_build_config_default() {
     if !std::path::Path::new("test").exists() {
         std::fs::create_dir("test").unwrap();
@@ -232,14 +242,15 @@ async fn engine_build_config_default() {
         "#,
     )
     .unwrap();
-    let engine = EngineBuilder::new().build().await.unwrap();
+    let engine = EngineBuilder::new().build();
     assert_eq!(engine.config().cache_cap(), 100);
     assert_eq!(engine.config().log().dir, "data");
     assert_eq!(engine.config().log().level, "INFO");
     assert_eq!(engine.config().tick_interval_secs(), 200);
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn engine_build_config_set_source() {
     if !std::path::Path::new("test").exists() {
         let _ = std::fs::create_dir("test");
@@ -264,18 +275,15 @@ async fn engine_build_config_set_source() {
         "#,
     )
     .unwrap();
-    let engine = EngineBuilder::new()
-        .set_config_source(path)
-        .build()
-        .await
-        .unwrap();
+    let engine = EngineBuilder::new().set_config_source(path).build();
     assert_eq!(engine.config().cache_cap(), 100);
     assert_eq!(engine.config().log().dir, "data");
     assert_eq!(engine.config().log().level, "INFO");
     assert_eq!(engine.config().tick_interval_secs(), 200);
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn engine_get_custom_config() {
     #[derive(Deserialize)]
     struct Custom {
@@ -297,7 +305,7 @@ async fn engine_get_custom_config() {
         "#,
     )
     .unwrap();
-    let engine = EngineBuilder::new().build().await.unwrap();
+    let engine = EngineBuilder::new().build();
     let custom = engine.config().get::<Custom>("custom").unwrap();
     assert_eq!(custom.myint, 100);
     assert_eq!(custom.mystr, "myData");

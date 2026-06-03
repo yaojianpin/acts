@@ -38,19 +38,15 @@ impl ActPackage for ManualEventPackage {
     }
 }
 
-#[async_trait::async_trait]
 impl ActPackageFn for ManualEventPackage {
-    async fn start(
-        &self,
-        rt: &Arc<crate::scheduler::Runtime>,
-        options: &Vars,
-    ) -> Result<Option<Vars>> {
+    fn start(&self, rt: &Arc<crate::scheduler::Runtime>, options: &Vars) -> Result<Option<Vars>> {
         let mid = options
             .get::<String>(consts::MODEL_ID)
             .ok_or(ActError::Runtime(format!(
                 "cannot find '{}' in options",
                 consts::MODEL_ID
             )))?;
+
         let model: ModelInfo = rt.cache().store().models().find(&mid)?.into();
         let workflow = model.workflow()?;
 

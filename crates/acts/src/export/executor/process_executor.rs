@@ -58,7 +58,7 @@ impl ProcessExecutor {
             Ok(ref proc) => {
                 let mut info: ProcInfo = proc.into();
 
-                if let Some(proc) = self.runtime.cache().proc(pid, &self.runtime) {
+                if let Some(proc) = self.runtime.proc(pid)? {
                     let mut tasks: Vec<TaskInfo> =
                         proc.tasks().iter().map(TaskInfo::from).collect();
 
@@ -73,7 +73,7 @@ impl ProcessExecutor {
     }
 
     #[instrument(skip(self))]
-    pub fn get_process(&self, pid: &str) -> Option<Arc<Process>> {
-        self.runtime.cache().proc(pid, &self.runtime)
+    pub fn get_process(&self, pid: &str) -> Result<Option<Arc<Process>>> {
+        self.runtime.proc(pid)
     }
 }

@@ -74,7 +74,7 @@ impl ShellPackage {
         Ok(package)
     }
 
-    pub async fn run(&self) -> Result<Vars> {
+    pub fn run(&self) -> Result<Vars> {
         let mut ret = Vars::new();
         let shell = self.shell.as_ref().unwrap_or(&Shell::Sh);
         let output = Command::new(shell.as_ref())

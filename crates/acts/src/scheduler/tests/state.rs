@@ -1,6 +1,8 @@
 use crate::TaskState;
 
-#[tokio::test]
+use serial_test::serial;
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn sch_state_is_finished() {
     let state = TaskState::Ready;
     assert!(!state.is_completed());
@@ -36,7 +38,8 @@ async fn sch_state_is_finished() {
     assert!(state.is_completed());
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn sch_state_is_error() {
     let state = TaskState::Ready;
     assert!(!state.is_error());
@@ -69,7 +72,8 @@ async fn sch_state_is_error() {
     assert!(!state.is_error());
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn sch_state_to_string() {
     let state = TaskState::None;
     assert_eq!(state.to_string(), "none");
@@ -108,7 +112,8 @@ async fn sch_state_to_string() {
     assert_eq!(state.to_string(), "skipped");
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn sch_state_from_string() {
     let state: TaskState = "none".into();
     assert_eq!(state, TaskState::None);

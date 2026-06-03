@@ -37,7 +37,7 @@ impl EventExecutor {
         Ok(event.into())
     }
 
-    pub async fn start(&self, event_id: &str, params: &serde_json::Value) -> Result<Option<Vars>> {
+    pub fn start(&self, event_id: &str, params: &serde_json::Value) -> Result<Option<Vars>> {
         let event = self.runtime.cache().store().events().find(event_id)?;
 
         let register = self
@@ -57,7 +57,7 @@ impl EventExecutor {
                 .map_err(|err| ActError::Convert(format!("failed to deserialize params: {err}")))?;
         }
         let package = (register.create)(params)?;
-        let ret = package.start(&self.runtime, &options).await?;
+        let ret = package.start(&self.runtime, &options)?;
         Ok(ret)
     }
 }

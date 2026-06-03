@@ -98,7 +98,7 @@ impl Channel {
     ///
     /// #[tokio::main]
     /// async fn main() {
-    ///     let engine = Engine::new().start();
+    ///     let engine = Engine::new().start().unwrap();
     ///     let workflow = Workflow::new().with_id("m1").with_step(|step| {
     ///             step.with_id("step1").with_act(Act::irq(|act| act.with_key("act1")))
     ///     });
@@ -125,7 +125,7 @@ impl Channel {
         let chan_id = self.chan_id.clone();
         let pattern = self.pattern.clone();
         self.runtime.emitter().on_message(&self.chan_id, move |e| {
-            info!("on_message: chan={} {e:?}", chan_id);
+            debug!("on_message: chan={} {e:?}", chan_id);
             if is_match(&glob, e) {
                 store_if(&runtime, ack, &chan_id, &pattern, e);
                 f(e);
@@ -154,6 +154,7 @@ impl Channel {
         let chan_id = self.chan_id.clone();
         let pattern = self.pattern.clone();
         self.runtime.emitter().on_complete(&self.chan_id, move |e| {
+            debug!("on_complete: chan={} {e:?}", chan_id);
             if is_match(&glob, e) {
                 store_if(&runtime, ack, &chan_id, &pattern, e);
                 f(e);
@@ -184,16 +185,12 @@ fn store_if(runtime: &Arc<Runtime>, ack: bool, chan_id: &str, pattern: &str, mes
     if ack && !chan_id.is_empty() && message.retry_times == 0 {
         info!("store: {message:?}");
         let msg = message.into(chan_id, pattern);
-        runtime
-            .cache()
-            .store()
-            .messages()
-            .create(&msg)
-            .unwrap_or_else(|err| {
-                error!("channel.store_if_emit_id: {err}");
-                eprintln!("channel.store_if_emit_id: {err}");
-                false
-            });
+        let store = runtime.cache().store();
+        store.messages().create(&msg).unwrap_or_else(|err| {
+            error!("channel.store_if_emit_id: {err}");
+            eprintln!("channel.store_if_emit_id: {err}");
+            false
+        });
     }
 }
 

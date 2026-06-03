@@ -23,15 +23,25 @@ impl<T: Clone> Signal<T> {
     }
 
     pub fn send(&self, v: T) {
-        if *self.is_closed.lock().unwrap() {
-            return;
+        {
+            let mut is_closed = self.is_closed.lock().unwrap();
+            if *is_closed {
+                return;
+            }
+            *is_closed = true;
         }
         *self.data.lock().unwrap() = v;
-        self.close();
+        self.sig.notify_one();
     }
 
     pub fn close(&self) {
-        *self.is_closed.lock().unwrap() = true;
+        {
+            let mut is_closed = self.is_closed.lock().unwrap();
+            if *is_closed {
+                return;
+            }
+            *is_closed = true;
+        }
         self.sig.notify_one();
     }
     pub fn data(&self) -> T {
@@ -74,6 +84,7 @@ impl<T: Clone> Signal<T> {
 #[cfg(test)]
 mod tests {
     use crate::Signal;
+    use serial_test::serial;
 
     #[test]
     fn engine_signal_new() {
@@ -84,7 +95,8 @@ mod tests {
         assert_eq!(s.data(), "abc");
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial]
     async fn engine_signal_send() {
         let s = Signal::new(0);
         let s2 = s.clone();
@@ -95,7 +107,8 @@ mod tests {
         assert_eq!(ret, 10);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial]
     async fn engine_signal_close() {
         let s = Signal::new(0);
         let s2 = s.clone();
@@ -106,7 +119,8 @@ mod tests {
         assert_eq!(ret, 0);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial]
     async fn engine_signal_update() {
         let s = Signal::new(0);
         let s2 = s.clone();
@@ -118,7 +132,8 @@ mod tests {
         assert_eq!(ret, 100);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial]
     async fn engine_signal_timeout() {
         let s = Signal::new(0);
         let s2 = s.clone();
@@ -129,7 +144,8 @@ mod tests {
         assert_eq!(ret, 100);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial]
     async fn engine_signal_double() {
         let (s1, s2) = Signal::new(0).double();
         tokio::spawn(async move {
@@ -139,7 +155,8 @@ mod tests {
         assert_eq!(ret, 10);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial]
     async fn engine_signal_triple() {
         let (s1, s2, s3) = Signal::new(0).triple();
         tokio::spawn(async move {

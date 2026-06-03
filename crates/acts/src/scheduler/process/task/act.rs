@@ -1,3 +1,5 @@
+use tracing::debug;
+
 use crate::{
     Act, ActError, ActRunAs, ActTask, Error, Result, TaskState, Vars, scheduler::Context,
     utils::consts,
@@ -22,16 +24,22 @@ impl ActTask for Act {
             )));
         }
 
-        // find the package to run
-        let package = ctx.executor.pack().get(&self.uses)?;
-        let schema: serde_json::Value = serde_json::from_str(&package.in_schema)?;
-        match package.run_as {
+        let register = ctx
+            .runtime
+            .package()
+            .get(&self.uses)
+            .ok_or(ActError::Action(format!(
+                "cannot find package '{}'",
+                self.uses
+            )))?;
+        let meta = (register.meta)();
+        match meta.run_as {
             ActRunAs::Irq => {
-                jsonschema::validate(&schema, &task.params())?;
+                jsonschema::validate(&meta.in_schema, &task.params())?;
                 task.set_state(TaskState::Interrupt);
             }
             ActRunAs::Msg => {
-                jsonschema::validate(&schema, &task.params())?;
+                jsonschema::validate(&meta.in_schema, &task.params())?;
                 task.set_emit_disabled(true);
                 task.set_state(TaskState::Ready);
             }
@@ -47,33 +55,42 @@ impl ActTask for Act {
     fn run(&self, ctx: &Context) -> Result<()> {
         let task = ctx.task();
 
-        // find the package to run
-        let package = ctx.executor.pack().get(&self.uses)?;
-        if matches!(package.run_as, ActRunAs::Msg) {
+        let register = ctx
+            .runtime
+            .package()
+            .get(&self.uses)
+            .ok_or(ActError::Runtime(format!(
+                "cannot find the registed package '{}'",
+                self.uses
+            )))?;
+        let meta = (register.meta)();
+        if matches!(meta.run_as, ActRunAs::Msg) {
             // resume the msg emit state
             task.set_emit_disabled(false);
         }
 
-        if matches!(package.run_as, ActRunAs::Func) {
-            let register = ctx
-                .runtime
-                .package()
-                .get(&self.uses)
-                .ok_or(ActError::Runtime(format!(
-                    "cannot find the registed package '{}'",
-                    self.uses
-                )))?;
+        if matches!(meta.run_as, ActRunAs::Func) {
+            let package = (register.create)(ctx.task().params()).inspect_err(|err| {
+                debug!("[{}] create error: {}", meta.id, err);
+                task.set_err(&err.clone().into());
+                ctx.set_task(&task);
+                ctx.emit_error().ok();
+            })?;
 
-            let package = (register.create)(ctx.task().params())?;
-            if let Some(vars) = package.execute(ctx)? {
+            if let Some(vars) = package.execute(ctx).inspect_err(|err| {
+                debug!("[{}] execute error: {}", meta.id, err);
+                task.set_err(&err.clone().into());
+                ctx.set_task(&task);
+                ctx.emit_error().ok();
+            })? {
                 task.update_data(&vars);
-            }
+            };
         }
 
         let children = task.node.children();
         if !children.is_empty() {
             for child in &children {
-                ctx.sched_task(child);
+                ctx.sched_task(child)?;
             }
         }
 
@@ -94,7 +111,7 @@ impl ActTask for Act {
                 } else if task.state().is_pending() && task.is_ready() {
                     // resume task
                     task.set_state(TaskState::Running);
-                    ctx.runtime.scher().emit_task_event(task)?;
+                    ctx.runtime.emitter().emit_task_event(task)?;
 
                     task.exec(ctx)?;
                     is_next = true;
@@ -110,13 +127,13 @@ impl ActTask for Act {
                 }
 
                 if let Some(next) = &task.node.next().upgrade() {
-                    ctx.sched_task(next);
+                    ctx.sched_task(next)?;
                     return Ok(true);
                 }
             }
         } else if state.is_skip() || state.is_success() {
             if let Some(next) = &task.node.next().upgrade() {
-                ctx.sched_task(next);
+                ctx.sched_task(next)?;
                 return Ok(true);
             }
         }
@@ -172,7 +189,7 @@ impl ActTask for Act {
                 }
 
                 if let Some(next) = &task.node.next().upgrade() {
-                    ctx.sched_task(next);
+                    ctx.sched_task(next)?;
                     return Ok(false);
                 }
                 return Ok(true);

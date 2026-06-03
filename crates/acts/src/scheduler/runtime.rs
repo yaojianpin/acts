@@ -1,13 +1,14 @@
 use tokio::{runtime::Handle, time};
 use tracing::{debug, error};
 
-use super::{Process, Scheduler, Task, TaskState};
+use super::{Process, Task, TaskState};
 use crate::{
-    ActError, Action, Config, Engine, Error, Package, Result, Vars, Workflow,
+    ActError, Action, Config, Error, Package, Result, Vars, Workflow,
     cache::Cache,
     data,
     env::Enviroment,
     event::{Emitter, EventAction},
+    scheduler::queue::{Queue, QueueData},
     store::Store,
     utils::{self, consts},
 };
@@ -16,7 +17,7 @@ use std::{sync::Arc, time::Duration};
 #[derive(Debug, Clone)]
 pub struct Runtime {
     config: Arc<Config>,
-    scher: Arc<Scheduler>,
+    queue: Arc<Queue>,
     env: Arc<Enviroment>,
     cache: Arc<Cache>,
     emitter: Arc<Emitter>,
@@ -26,8 +27,6 @@ pub struct Runtime {
 impl Runtime {
     pub fn new(config: &Config) -> crate::Result<Arc<Self>> {
         let runtime = Self::create(config)?;
-        runtime.event_loop();
-
         Ok(runtime)
     }
 
@@ -37,9 +36,10 @@ impl Runtime {
     }
 
     #[allow(unused)]
-    pub fn scher(&self) -> &Arc<Scheduler> {
-        &self.scher
+    pub fn queue(&self) -> &Arc<Queue> {
+        &self.queue
     }
+
     #[allow(unused)]
     pub fn env(&self) -> &Arc<Enviroment> {
         &self.env
@@ -62,15 +62,8 @@ impl Runtime {
         &self.config
     }
 
-    #[allow(unused)]
-    pub fn is_running(&self) -> bool {
-        !self.scher.is_closed()
-    }
-
-    pub fn init(&self, engine: &Engine) {
-        self.scher.init(engine);
-        self.cache.init(engine);
-        self.emitter.init(&engine.runtime());
+    pub fn close(&self) {
+        self.queue.abort();
     }
 
     pub fn start(self: &Arc<Self>, model: &Workflow, options: Vars) -> Result<Arc<Process>> {
@@ -81,7 +74,7 @@ impl Runtime {
             // the pid will use as the proc_id
             proc_id = pid.to_string();
         }
-        let proc = self.cache.proc(&proc_id, self);
+        let proc = self.cache.proc(&proc_id, self)?;
         if proc.is_some() {
             return Err(ActError::Action(format!(
                 "proc_id({proc_id}) is duplicated in running process list"
@@ -98,21 +91,20 @@ impl Runtime {
 
         let proc = Process::new(&proc_id, self);
         proc.load(&model)?;
-        self.launch(&proc);
+        self.launch(&proc)?;
 
         Ok(proc)
     }
 
-    pub fn proc(self: &Arc<Self>, pid: &str) -> Option<Arc<Process>> {
+    pub fn proc(self: &Arc<Self>, pid: &str) -> Result<Option<Arc<Process>>> {
         self.cache.proc(pid, self)
     }
 
-    pub fn launch(self: &Arc<Self>, proc: &Arc<Process>) {
+    pub fn launch(self: &Arc<Self>, proc: &Arc<Process>) -> Result<()> {
         debug!("scheduler::launch");
         let proc = proc.clone();
-        tokio::spawn(async move {
-            proc.start();
-        });
+        proc.start()?;
+        Ok(())
     }
 
     #[allow(unused)]
@@ -122,23 +114,36 @@ impl Runtime {
         proc
     }
 
-    pub fn push(&self, task: &Arc<Task>) {
+    pub fn push(&self, task: &Arc<Task>) -> Result<()> {
         debug!("scheduler::push  task={:?}", task);
-        self.cache
-            .upsert(task)
-            .unwrap_or_else(|err| panic!("fail to upsert task({}): {}", task.id, err));
-        self.scher.push(task);
+        let cache = self.cache.clone();
+        let task_clone = task.clone();
+        cache.upsert(&task_clone)?;
+        self.queue.send(&task_clone)?;
+        Ok(())
     }
 
     pub fn do_action(self: &Arc<Self>, action: &Action) -> Result<()> {
         debug!("scheduler::do_action  action={:?}", action);
-        match self.cache.proc(&action.pid, self) {
+        let proc = self.cache.proc(&action.pid, self)?;
+        match proc {
             Some(proc) => proc.do_action(action),
             None => Err(ActError::Runtime(format!(
                 "cannot find process '{}' when do_action({:?})",
                 action.pid, action
             ))),
         }
+    }
+
+    #[cfg(test)]
+    pub fn do_action2(
+        self: &Arc<Self>,
+        pid: &str,
+        tid: &str,
+        action: EventAction,
+        options: crate::Vars,
+    ) -> Result<()> {
+        self.do_action(&Action::new(pid, tid, action, options))
     }
 
     pub fn ack(&self, id: &str) -> Result<()> {
@@ -148,29 +153,42 @@ impl Runtime {
     }
 
     pub fn event_loop(self: &Arc<Self>) {
-        let scher = self.scher.clone();
-        let cache = self.cache.clone();
+        let queue = self.queue.clone();
         tokio::spawn(async move {
             loop {
-                let ret = scher.next().await;
-                if !ret {
-                    cache.close();
-                    break;
+                match queue.next().await {
+                    Ok(data) => match data {
+                        QueueData::Task(task) => {
+                            let ctx = &task.create_context();
+                            if let Err(err) = task.exec(ctx) {
+                                eprintln!("runtime task.exec error: {}", err);
+                            }
+                        }
+                        QueueData::Abort => {
+                            break;
+                        }
+                    },
+                    Err(err) => {
+                        eprintln!("runtime queue.next error: {}", err);
+                        break;
+                    }
                 }
             }
         });
     }
 
     fn create(config: &Config) -> crate::Result<Arc<Runtime>> {
-        let scher = Scheduler::new();
+        // let scher = Scheduler::new();
         let env = Arc::new(Enviroment::new());
         let cache = Arc::new(Cache::new(config)?);
         let emitter = Arc::new(Emitter::new());
         let package = Arc::new(Package::new());
+        let queue = Queue::new();
         let runtime = Arc::new(Runtime {
             config: Arc::new(config.clone()),
             emitter,
-            scher,
+            // scher,
+            queue,
             env,
             cache,
             package,
@@ -184,16 +202,19 @@ impl Runtime {
         {
             let cache = self.cache.clone();
             let rt = self.clone();
-            self.scher.on_proc(move |proc| {
+            self.emitter.on_proc(move |proc| {
                 debug!("on_proc: {:?}", proc);
                 if let Some(root) = proc.root() {
                     let state = proc.state();
                     let mut message = root.create_message();
                     if state.is_running() || state.is_pending() {
-                        rt.emitter().emit_start_event(&message);
+                        let emitter = rt.emitter().clone();
+                        emitter.emit_start_event(&message);
                     } else {
                         if state.is_error() {
-                            rt.emitter().emit_error(&message);
+                            let emitter = rt.emitter().clone();
+                            let message = message.clone();
+                            emitter.emit_error(&message);
                         } else if state.is_completed() {
                             let mut is_validation_err = false;
                             let outputs = proc.model().outputs;
@@ -204,12 +225,14 @@ impl Runtime {
                                     let error = e.to_string();
                                     message.set_err("", &error);
                                     proc.set_err(&Error::new(&error, ""));
-                                    rt.emitter().emit_error(&message);
+                                    let emitter = rt.emitter().clone();
+                                    emitter.emit_error(&message);
                                 }
                             }
 
                             if !is_validation_err {
-                                rt.emitter().emit_complete_event(&message);
+                                let emitter = rt.emitter().clone();
+                                emitter.emit_complete_event(&message);
                             }
                         }
 
@@ -221,19 +244,18 @@ impl Runtime {
 
                         if !rt.config.keep_processes() {
                             debug!("remove: {:?}", proc.tasks());
-                            cache.remove(proc.id()).unwrap_or_else(|err| {
+                            let cache = cache.clone();
+                            let pid = proc.id().to_string();
+                            cache.remove(&pid).unwrap_or_else(|err| {
                                 error!("scher.initialize remove={}", err);
                                 false
                             });
                         }
 
+                        let cache = cache.clone();
+                        let rt = rt.clone();
                         cache
-                            .restore(&rt, |proc| {
-                                // println!("re-start process={process:?} tasks:{:?}", process.tasks());
-                                if proc.state().is_none() {
-                                    proc.start();
-                                }
-                            })
+                            .restore(&rt)
                             .unwrap_or_else(|err| error!("scher.initialize restore={}", err));
                     }
                 } else {
@@ -245,10 +267,12 @@ impl Runtime {
         {
             let cache = self.cache.clone();
             let rt = self.clone();
-            self.scher.on_task(move |e| {
+            self.emitter.on_task(move |e| {
                 debug!("on_task: task={:?}", e.inner());
+                let cache = cache.clone();
+                let e_clone = e.clone();
                 cache
-                    .upsert(e)
+                    .upsert(&e_clone)
                     .unwrap_or_else(|err| error!("scher.initialize upsert={}", err));
 
                 let ctx = e.create_context();
@@ -262,7 +286,8 @@ impl Runtime {
                 if !e.state().is_pending() && !e.state().is_running() && !e.is_emit_disabled() {
                     let msg = e.create_message();
                     debug!("emit_message:{msg:?}");
-                    rt.emitter().emit_message(&msg);
+                    let emitter = rt.emitter().clone();
+                    emitter.emit_message(&msg);
                 }
             });
         }
@@ -293,11 +318,15 @@ impl Runtime {
                 }
 
                 // re-send the messages if it is neither acked nor completed
+                let cache = cache.clone();
+                let evt = evt.clone();
                 let _ = cache.store().with_no_response_messages(
                     default_interval_millis,
                     max_message_retry_times,
                     |m| {
-                        evt.emit_message(m);
+                        let emitter = evt.clone();
+                        let m = m.clone();
+                        emitter.emit_message(&m);
                     },
                 );
             });
@@ -339,10 +368,8 @@ impl Runtime {
 
         let action = Action::new(pid, tid, event, vars);
         let scher = self.clone();
-        tokio::spawn(async move {
-            let _ = scher
-                .do_action(&action)
-                .map_err(|err| error!("scher::return_to_act {}", err.to_string()));
-        });
+        let _ = scher
+            .do_action(&action)
+            .map_err(|err| error!("scher::return_to_act {}", err.to_string()));
     }
 }

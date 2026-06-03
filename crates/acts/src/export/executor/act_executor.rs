@@ -38,7 +38,7 @@ impl ActExecutor {
         self.do_action(pid, tid, EventAction::Skip, options)
     }
 
-    pub fn error(&self, pid: &str, tid: &str, options: Vars) -> Result<()> {
+    pub fn fail(&self, pid: &str, tid: &str, options: Vars) -> Result<()> {
         self.do_action(pid, tid, EventAction::Error, options)
     }
 

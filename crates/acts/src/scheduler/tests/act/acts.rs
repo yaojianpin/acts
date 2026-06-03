@@ -1,31 +1,37 @@
 use crate::event::EventAction;
+use crate::utils::test::auto_complete;
 use crate::{
     Act, MessageState, Vars, Workflow,
-    utils::{self, test::create_proc_signal},
+    utils::{self, test::create_proc},
 };
 use serde_json::json;
 
-#[tokio::test]
+use serial_test::serial;
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn sch_act_run_in_order() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::irq(|act| act.with_key("act1")))
             .with_act(Act::irq(|act| act.with_key("act2")))
     });
 
     workflow.print();
-    let (proc, scher, emitter, tx, rx) =
-        create_proc_signal::<Vec<(String, i64)>>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (tx, rx) = engine.signal(Vec::<(String, i64)>::default()).double();
+    auto_complete(&engine, &tx);
+    let channel = engine.channel();
+    let rt = engine.runtime();
+    channel.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_irq() && e.is_state(MessageState::Created) {
             rx.update(|data| data.push((e.key.clone(), e.start_time)));
             std::thread::sleep(std::time::Duration::from_millis(1000));
-            e.do_action(&e.pid, &e.tid, EventAction::Next, Vars::new())
+            rt.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
                 .unwrap();
         }
     });
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     proc.print();
 
@@ -33,34 +39,38 @@ async fn sch_act_run_in_order() {
     assert!(ret.get(1).unwrap().1 - ret.first().unwrap().1 >= 1000);
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn sch_act_params_no_expr_line() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_act(Act::irq(|act| {
             act.with_key("act1").with_params_data("hello".into())
         }))
     });
 
     workflow.print();
-    let (proc, scher, emitter, tx, rx) =
-        create_proc_signal::<String>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (tx, rx) = engine.signal(String::default()).double();
+    auto_complete(&engine, &tx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_irq() && e.is_state(MessageState::Created) {
             let params = e.inputs.get::<String>("params").unwrap();
             rx.send(params);
         }
     });
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     proc.print();
 
     assert_eq!(ret, "hello");
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn sch_act_params_expr_full_line() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_act(Act::irq(|act| {
             act.with_key("act1")
                 .with_params_data(json!(r#"{{ "hello" }}"#))
@@ -68,25 +78,28 @@ async fn sch_act_params_expr_full_line() {
     });
 
     workflow.print();
-    let (proc, scher, emitter, tx, rx) =
-        create_proc_signal::<String>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (tx, rx) = engine.signal(String::default()).double();
+    auto_complete(&engine, &tx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_irq() && e.is_state(MessageState::Created) {
             let params = e.inputs.get::<String>("params").unwrap();
             rx.send(params);
         }
     });
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     proc.print();
 
     assert_eq!(ret, "hello");
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn sch_act_params_expr_partial_line() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_act(Act::irq(|act| {
             act.with_key("act1")
                 .with_params_data(json!(r#"{{ "hello" }} world"#))
@@ -94,25 +107,28 @@ async fn sch_act_params_expr_partial_line() {
     });
 
     workflow.print();
-    let (proc, scher, emitter, tx, rx) =
-        create_proc_signal::<String>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (tx, rx) = engine.signal(String::default()).double();
+    auto_complete(&engine, &tx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_irq() && e.is_state(MessageState::Created) {
             let params = e.inputs.get::<String>("params").unwrap();
             rx.send(params);
         }
     });
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     proc.print();
 
     assert_eq!(ret, "hello world");
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn sch_act_params_expr_multi_statements() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_act(Act::irq(|act| {
             act.with_key("act1").with_params_data(json!(
                 r#"{{ let a = "hello";let b = "world"; a + " " + b }}"#
@@ -121,30 +137,33 @@ async fn sch_act_params_expr_multi_statements() {
     });
 
     workflow.print();
-    let (proc, scher, emitter, tx, rx) =
-        create_proc_signal::<String>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (tx, rx) = engine.signal(String::default()).double();
+    auto_complete(&engine, &tx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_irq() && e.is_state(MessageState::Created) {
             let params = e.inputs.get::<String>("params").unwrap();
             rx.send(params);
         }
     });
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     proc.print();
 
     assert_eq!(ret, "hello world");
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn sch_act_params_expr_brace_not_in_same_line_not_support() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_act(Act::irq(|act| {
             act.with_key("act1").with_params_data(json!(
-                r#"{{ 
+                r#"{{
                 let a = "hello";
-                let b = "world"; 
+                let b = "world";
                 a + " " + b
                 }}"#
             ))
@@ -152,25 +171,28 @@ async fn sch_act_params_expr_brace_not_in_same_line_not_support() {
     });
 
     workflow.print();
-    let (proc, scher, emitter, tx, rx) =
-        create_proc_signal::<String>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (tx, rx) = engine.signal(String::default()).double();
+    auto_complete(&engine, &tx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_irq() && e.is_state(MessageState::Created) {
             let params = e.inputs.get::<String>("params").unwrap();
             rx.send(params);
         }
     });
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     proc.print();
 
     assert_ne!(ret, "hello world");
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn sch_act_params_multi_expr_str() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_var("a", "hello")
             .with_var("b", "world")
@@ -186,16 +208,18 @@ async fn sch_act_params_multi_expr_str() {
     });
 
     workflow.print();
-    let (proc, scher, emitter, tx, rx) =
-        create_proc_signal::<String>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (tx, rx) = engine.signal(String::default()).double();
+    auto_complete(&engine, &tx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_irq() && e.is_state(MessageState::Created) {
             let params = e.inputs.get::<String>("params").unwrap();
             rx.send(params);
         }
     });
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     proc.print();
 
@@ -203,9 +227,10 @@ async fn sch_act_params_multi_expr_str() {
     assert!(ret.contains("\"world\""));
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn sch_act_params_multi_expr_bool() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_var("a", true)
             .with_var("b", false)
@@ -221,16 +246,18 @@ async fn sch_act_params_multi_expr_bool() {
     });
 
     workflow.print();
-    let (proc, scher, emitter, tx, rx) =
-        create_proc_signal::<String>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (tx, rx) = engine.signal(String::default()).double();
+    auto_complete(&engine, &tx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_irq() && e.is_state(MessageState::Created) {
             let params = e.inputs.get::<String>("params").unwrap();
             rx.send(params);
         }
     });
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     proc.print();
 
@@ -238,9 +265,10 @@ async fn sch_act_params_multi_expr_bool() {
     assert!(ret.contains("let v2 = false;"));
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn sch_act_params_multi_expr_others() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_var("a", json!({ "v1": 10 }))
             .with_var("b", json!(["v2"]))
@@ -257,16 +285,18 @@ async fn sch_act_params_multi_expr_others() {
     });
 
     workflow.print();
-    let (proc, scher, emitter, tx, rx) =
-        create_proc_signal::<String>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (tx, rx) = engine.signal(String::default()).double();
+    auto_complete(&engine, &tx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_irq() && e.is_state(MessageState::Created) {
             let params = e.inputs.get::<String>("params").unwrap();
             rx.send(params);
         }
     });
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     proc.print();
 

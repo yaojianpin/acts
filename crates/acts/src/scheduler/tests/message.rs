@@ -4,8 +4,8 @@ use crate::{
     config::ConfigData,
     data::MessageStatus,
     event::MessageState,
-    scheduler::tests::{create_proc_signal, create_proc_signal_config, create_proc_signal2},
     store::query::*,
+    utils::test::{create_proc, create_proc_with_config},
     utils::{self, consts},
 };
 use serde_json::json;
@@ -13,24 +13,42 @@ use std::sync::{Arc, Mutex};
 
 #[tokio::test]
 async fn sch_message_workflow_created() {
-    let mut workflow = Workflow::new();
+    let workflow = Workflow::new();
     let id = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id);
+    let rt = engine.runtime();
+    let sig = engine.signal(bool::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
     emitter.on_message(move |msg| {
         if msg.r#type == "workflow" && msg.state() == MessageState::Created {
             rx.send(true);
         }
     });
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     let ret = tx.recv().await;
     assert!(ret);
 }
 
 #[tokio::test]
 async fn sch_message_workflow_name() {
-    let mut workflow = Workflow::new().with_name("my_name");
+    let workflow = Workflow::new().with_name("my_name");
     let id = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<String>(&mut workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id);
+    let rt = engine.runtime();
+    let sig = engine.signal(String::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
     emitter.on_message(move |msg| {
         if msg.r#type == "workflow" && msg.state() == MessageState::Created {
             let name = msg
@@ -42,16 +60,25 @@ async fn sch_message_workflow_name() {
             rx.send(name);
         }
     });
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     let ret = tx.recv().await;
     assert_eq!(ret, "my_name");
 }
 
 #[tokio::test]
 async fn sch_message_workflow_tag() {
-    let mut workflow = Workflow::new().with_tag("my_tag");
+    let workflow = Workflow::new().with_tag("my_tag");
     let id = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<String>(&mut workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id);
+    let rt = engine.runtime();
+    let sig = engine.signal(String::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
     emitter.on_message(move |msg| {
         if msg.r#type == "workflow" && msg.state() == MessageState::Created {
             rx.send(
@@ -64,16 +91,25 @@ async fn sch_message_workflow_tag() {
             );
         }
     });
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     let ret = tx.recv().await;
     assert_eq!(ret, "my_tag");
 }
 
 #[tokio::test]
 async fn sch_message_workflow_id() {
-    let mut workflow = Workflow::new().with_id("my_id");
+    let workflow = Workflow::new().with_id("my_id");
     let id = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<String>(&mut workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id);
+    let rt = engine.runtime();
+    let sig = engine.signal(String::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
     emitter.on_message(move |msg| {
         if msg.r#type == "workflow" && msg.state() == MessageState::Created {
             let id = msg
@@ -85,22 +121,31 @@ async fn sch_message_workflow_id() {
             rx.send(id);
         }
     });
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     let ret = tx.recv().await;
     assert_eq!(ret, "my_id");
 }
 
 #[tokio::test]
 async fn sch_message_workflow_inputs() {
-    let mut workflow = Workflow::new().with_id("my_id").with_var("a", json!(5));
+    let workflow = Workflow::new().with_id("my_id").with_var("a", json!(5));
     let id = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<Message>(&mut workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id);
+    let rt = engine.runtime();
+    let sig = engine.signal(Message::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
     emitter.on_message(move |e| {
         if e.r#type == "workflow" && e.state() == MessageState::Created {
             rx.send(e.inner().clone());
         }
     });
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     let ret = tx.recv().await;
 
     let id = ret
@@ -115,18 +160,27 @@ async fn sch_message_workflow_inputs() {
 
 #[tokio::test]
 async fn sch_message_workflow_outputs() {
-    let mut workflow = Workflow::new()
+    let workflow = Workflow::new()
         .with_id("my_id")
         .with_var("a", json!(5))
         .with_expose("a", json!(null));
     let id = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<Message>(&mut workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id);
+    let rt = engine.runtime();
+    let sig = engine.signal(Message::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
     emitter.on_message(move |e| {
         if e.r#type == "workflow" && e.state() == MessageState::Created {
             rx.send(e.inner().clone());
         }
     });
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     let ret = tx.recv().await;
 
     let id = ret
@@ -141,9 +195,18 @@ async fn sch_message_workflow_outputs() {
 
 #[tokio::test]
 async fn sch_message_time() {
-    let mut workflow = Workflow::new().with_step(|step| step.with_id("step1"));
+    let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
     let id = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<Vec<bool>>(&mut workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id);
+    let rt = engine.runtime();
+    let sig = engine.signal(Vec::<bool>::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
 
     emitter.on_message(move |msg| {
         if msg.state() == MessageState::Created {
@@ -155,7 +218,7 @@ async fn sch_message_time() {
             rx.close();
         }
     });
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     let ret = tx.recv().await;
     for v in ret {
         assert!(v);
@@ -164,67 +227,103 @@ async fn sch_message_time() {
 
 #[tokio::test]
 async fn sch_message_step_created() {
-    let mut workflow = Workflow::new().with_step(|step| step.with_id("step1"));
+    let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
     let id = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id);
+    let rt = engine.runtime();
+    let sig = engine.signal(bool::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
     emitter.on_message(move |msg| {
         if msg.r#type == "step" && msg.state() == MessageState::Created {
             rx.send(true);
         }
     });
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     let ret = tx.recv().await;
     assert!(ret);
 }
 
 #[tokio::test]
 async fn sch_message_step_outputs() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_var("a", json!(5))
             .with_expose("a", json!(null))
     });
     let id = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<Message>(&mut workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id);
+    let rt = engine.runtime();
+    let sig = engine.signal(Message::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
     emitter.on_message(move |e| {
         if e.r#type == "step" && e.state() == MessageState::Created {
             rx.send(e.inner().clone());
         }
     });
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     let ret = tx.recv().await;
     assert_eq!(ret.outputs.get::<i32>("a").unwrap(), 5);
 }
 
 #[tokio::test]
 async fn sch_message_step_completed() {
-    let mut workflow = Workflow::new().with_step(|step| step.with_id("step1"));
+    let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
     let id = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id);
+    let rt = engine.runtime();
+    let sig = engine.signal(bool::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
     emitter.on_message(move |msg| {
         if msg.r#type == "step" && msg.state() == MessageState::Completed {
             rx.send(true);
         }
     });
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     let ret = tx.recv().await;
     assert!(ret);
 }
 
 #[tokio::test]
 async fn sch_message_branch_no_message() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_branch(|b| b.with_id("b1").with_if("false"))
     });
     let id = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id);
+    let rt = engine.runtime();
+    let sig = engine.signal(bool::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
     emitter.on_message(move |e| {
         if e.r#type == "branch" {
             rx.send(true);
         }
     });
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert!(!ret);
@@ -232,30 +331,48 @@ async fn sch_message_branch_no_message() {
 
 #[tokio::test]
 async fn sch_message_act_created() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
     let id = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id);
+    let rt = engine.runtime();
+    let sig = engine.signal(bool::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
     emitter.on_message(move |e| {
         if e.r#type == "act" && e.state() == MessageState::Created {
             rx.send(true);
         }
     });
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     let ret = tx.recv().await;
     assert!(ret);
 }
 
 #[tokio::test]
 async fn sch_message_act_created_by_push_action() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
     let id = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id);
+    let rt = engine.runtime();
+    let sig = engine.signal(bool::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
     emitter.on_message(move |e| {
         println!("message: {e:?}");
         if e.r#type == "step" && e.state() == MessageState::Created {
@@ -264,7 +381,7 @@ async fn sch_message_act_created_by_push_action() {
                 .with("uses", "acts.core.irq")
                 .with("key", "act2")
                 .with("tag", "tag2");
-            e.do_action(&e.pid, &e.tid, EventAction::Push, options)
+            rt.do_action2(&e.pid, &e.tid, EventAction::Push, options)
                 .unwrap();
         }
 
@@ -272,7 +389,7 @@ async fn sch_message_act_created_by_push_action() {
             rx.send(true);
         }
     });
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert!(ret);
@@ -280,12 +397,21 @@ async fn sch_message_act_created_by_push_action() {
 
 #[tokio::test]
 async fn sch_message_act_tag_by_push_action() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
     let id = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id);
+    let rt = engine.runtime();
+    let sig = engine.signal(bool::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
     emitter.on_message(move |e| {
         println!("message: {e:?}");
         if e.r#type == "step" && e.state() == MessageState::Created {
@@ -293,7 +419,7 @@ async fn sch_message_act_tag_by_push_action() {
                 .with("key", "act2")
                 .with("uses", "acts.core.irq")
                 .with("tag", "tag2");
-            e.do_action(&e.pid, &e.tid, EventAction::Push, options)
+            rt.do_action2(&e.pid, &e.tid, EventAction::Push, options)
                 .unwrap();
         }
 
@@ -301,7 +427,7 @@ async fn sch_message_act_tag_by_push_action() {
             rx.send(e.tag == "tag2");
         }
     });
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert!(ret);
@@ -309,12 +435,21 @@ async fn sch_message_act_tag_by_push_action() {
 
 #[tokio::test]
 async fn sch_message_act_inputs_by_push_action() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
     let id = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id);
+    let rt = engine.runtime();
+    let sig = engine.signal(bool::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
     emitter.on_message(move |e| {
         println!("message: {e:?}");
         if e.r#type == "step" && e.state() == MessageState::Created {
@@ -322,7 +457,7 @@ async fn sch_message_act_inputs_by_push_action() {
                 .with("key", "act2")
                 .with("uses", "acts.core.irq")
                 .with("params", Vars::new().with("a", 5));
-            e.do_action(&e.pid, &e.tid, EventAction::Push, options)
+            rt.do_action2(&e.pid, &e.tid, EventAction::Push, options)
                 .unwrap();
         }
 
@@ -337,7 +472,7 @@ async fn sch_message_act_inputs_by_push_action() {
             );
         }
     });
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert!(ret);
@@ -345,12 +480,21 @@ async fn sch_message_act_inputs_by_push_action() {
 
 #[tokio::test]
 async fn sch_message_act_outputs_by_push_action() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
     let id = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id);
+    let rt = engine.runtime();
+    let sig = engine.signal(bool::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
     emitter.on_message(move |e| {
         println!("message: {e:?}");
         if e.r#type == "step" && e.state() == MessageState::Created {
@@ -361,7 +505,7 @@ async fn sch_message_act_outputs_by_push_action() {
                     "options",
                     Vars::new().with(consts::ACT_EXPOSE, vec![json!({ "name": "a", "value": 5 })]),
                 );
-            e.do_action(&e.pid, &e.tid, EventAction::Push, options)
+            rt.do_action2(&e.pid, &e.tid, EventAction::Push, options)
                 .unwrap();
         }
 
@@ -369,7 +513,7 @@ async fn sch_message_act_outputs_by_push_action() {
             rx.send(e.outputs.get::<i32>("a").unwrap() == 5);
         }
     });
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert!(ret);
@@ -377,7 +521,7 @@ async fn sch_message_act_outputs_by_push_action() {
 
 #[tokio::test]
 async fn sch_message_act_outputs() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_act(Act::irq(|act| {
             act.with_key("act1")
                 .with_var("a", json!(5))
@@ -385,26 +529,44 @@ async fn sch_message_act_outputs() {
         }))
     });
     let id = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<Message>(&mut workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id);
+    let rt = engine.runtime();
+    let sig = engine.signal(Message::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
     emitter.on_message(move |e| {
         if e.r#type == "act" && e.state() == MessageState::Created {
             rx.send(e.inner().clone());
         }
     });
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     let ret = tx.recv().await;
     assert_eq!(ret.outputs.get::<i32>("a").unwrap(), 5);
 }
 
 #[tokio::test]
 async fn sch_message_act_completed() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
     let id = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
-    let s = scher.clone();
+    let (engine, proc) = create_proc(&workflow, &id);
+    let rt = engine.runtime();
+    let sig = engine.signal(bool::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
+    let s = rt.clone();
     emitter.on_message(move |msg| {
         if msg.r#type == "act" && msg.state() == MessageState::Created {
             let mut options = Vars::new();
@@ -416,20 +578,29 @@ async fn sch_message_act_completed() {
             rx.send(true);
         }
     });
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     let ret = tx.recv().await;
     assert!(ret);
 }
 
 #[tokio::test]
 async fn sch_message_act_sumitted() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
     let id = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
-    let s = scher.clone();
+    let (engine, proc) = create_proc(&workflow, &id);
+    let rt = engine.runtime();
+    let sig = engine.signal(bool::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
+    let s = rt.clone();
     emitter.on_message(move |msg| {
         if msg.is_key("act1") && msg.state() == MessageState::Created {
             let mut options = Vars::new();
@@ -441,20 +612,29 @@ async fn sch_message_act_sumitted() {
             rx.send(true);
         }
     });
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     let ret = tx.recv().await;
     assert!(ret);
 }
 
 #[tokio::test]
 async fn sch_message_act_skip() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
     let id = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
-    let s = scher.clone();
+    let (engine, proc) = create_proc(&workflow, &id);
+    let rt = engine.runtime();
+    let sig = engine.signal(bool::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
+    let s = rt.clone();
     emitter.on_message(move |msg| {
         if msg.is_key("act1") && msg.state() == MessageState::Created {
             let mut options = Vars::new();
@@ -466,14 +646,14 @@ async fn sch_message_act_skip() {
             rx.send(true);
         }
     });
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     let ret = tx.recv().await;
     assert!(ret);
 }
 
 #[tokio::test]
 async fn sch_message_act_back() {
-    let mut workflow = Workflow::new()
+    let workflow = Workflow::new()
         .with_step(|step| {
             step.with_id("step1")
                 .with_act(Act::irq(|act| act.with_key("act1")))
@@ -483,8 +663,17 @@ async fn sch_message_act_back() {
                 .with_act(Act::irq(|act| act.with_key("act2")))
         });
     let id = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
-    let s = scher.clone();
+    let (engine, proc) = create_proc(&workflow, &id);
+    let rt = engine.runtime();
+    let sig = engine.signal(bool::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
+    let s = rt.clone();
     emitter.on_message(move |msg| {
         if msg.is_key("act1") && msg.is_state(MessageState::Created) {
             let mut options = Vars::new();
@@ -505,7 +694,7 @@ async fn sch_message_act_back() {
             rx.send(true);
         }
     });
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert!(ret);
@@ -514,7 +703,7 @@ async fn sch_message_act_back() {
 #[tokio::test]
 async fn sch_message_act_cancel() {
     let act_req_id = Arc::new(Mutex::new(None));
-    let mut workflow = Workflow::new()
+    let workflow = Workflow::new()
         .with_step(|step| {
             step.with_id("step1")
                 .with_act(Act::irq(|act| act.with_key("act1")))
@@ -524,8 +713,17 @@ async fn sch_message_act_cancel() {
                 .with_act(Act::irq(|act| act.with_key("act2")))
         });
     let id = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
-    let s = scher.clone();
+    let (engine, proc) = create_proc(&workflow, &id);
+    let rt = engine.runtime();
+    let sig = engine.signal(bool::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
+    let s = rt.clone();
     emitter.on_message(move |msg| {
         if msg.is_key("act1") && msg.is_state(MessageState::Created) {
             let mut options = Vars::new();
@@ -561,7 +759,7 @@ async fn sch_message_act_cancel() {
             rx.send(true);
         }
     });
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert!(ret);
@@ -569,13 +767,22 @@ async fn sch_message_act_cancel() {
 
 #[tokio::test]
 async fn sch_message_act_remove() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
     let id = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
-    let s = scher.clone();
+    let (engine, proc) = create_proc(&workflow, &id);
+    let rt = engine.runtime();
+    let sig = engine.signal(bool::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
+    let s = rt.clone();
     emitter.on_message(move |msg| {
         if msg.is_key("act1") && msg.inner().state() == MessageState::Created {
             let mut options = Vars::new();
@@ -592,20 +799,29 @@ async fn sch_message_act_remove() {
             rx.send(true);
         }
     });
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     let ret = tx.recv().await;
     assert!(ret);
 }
 
 #[tokio::test]
 async fn sch_message_act_abort() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
     let id = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
-    let s = scher.clone();
+    let (engine, proc) = create_proc(&workflow, &id);
+    let rt = engine.runtime();
+    let sig = engine.signal(bool::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
+    let s = rt.clone();
     emitter.on_message(move |msg| {
         if msg.is_key("act1") && msg.is_state(MessageState::Created) {
             let mut options = Vars::new();
@@ -618,7 +834,7 @@ async fn sch_message_act_abort() {
             rx.send(true);
         }
     });
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert!(ret);
@@ -626,13 +842,22 @@ async fn sch_message_act_abort() {
 
 #[tokio::test]
 async fn sch_message_act_error() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
     let id = utils::longid();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<bool>(&mut workflow, &id);
-    let s = scher.clone();
+    let (engine, proc) = create_proc(&workflow, &id);
+    let rt = engine.runtime();
+    let sig = engine.signal(bool::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
+    let s = rt.clone();
     emitter.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_key("act1") && e.is_state(MessageState::Created) {
@@ -647,7 +872,7 @@ async fn sch_message_act_error() {
             rx.send(true);
         }
     });
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert!(ret);
@@ -660,8 +885,16 @@ async fn sch_message_act_inputs_with_err() {
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
     workflow.id = utils::longid();
-    let (proc, scher, emitter, tx, rx) =
-        create_proc_signal::<Vars>(&mut workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let sig = engine.signal(Vars::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
 
     emitter.on_message(move |e| {
         println!("message: {e:?}");
@@ -670,7 +903,7 @@ async fn sch_message_act_inputs_with_err() {
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "err1");
             options.set(consts::ACT_ERR_MESSAGE, "abc");
-            e.do_action(&e.pid, &e.tid, EventAction::Error, options)
+            rt.do_action2(&e.pid, &e.tid, EventAction::Error, options)
                 .unwrap();
         }
 
@@ -679,7 +912,7 @@ async fn sch_message_act_inputs_with_err() {
         }
     });
 
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(ret.get::<String>(consts::ACT_ERR_CODE).unwrap(), "err1");
@@ -694,8 +927,16 @@ async fn sch_message_act_inputs_with_step_id() {
             .with_act(Act::irq(|act| act.with_key("test")))
     });
     workflow.id = utils::longid();
-    let (proc, scher, emitter, tx, rx) =
-        create_proc_signal::<Vars>(&mut workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let sig = engine.signal(Vars::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
 
     let step_task_id = Arc::new(Mutex::new("".to_string()));
     let tid = step_task_id.clone();
@@ -708,7 +949,7 @@ async fn sch_message_act_inputs_with_step_id() {
         }
     });
 
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(
@@ -730,7 +971,16 @@ async fn sch_message_act_inputs_with_step_id() {
 async fn sch_message_emit_options_with_id() {
     let workflow = Workflow::new();
     let id = utils::longid();
-    let (engine, proc, tx, rx) = create_proc_signal2::<bool>(&workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id);
+    let _rt = engine.runtime();
+    let sig = engine.signal(bool::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
 
     let chan_options = ChannelOptions {
         id: "e1".to_string(),
@@ -743,7 +993,7 @@ async fn sch_message_emit_options_with_id() {
                 rx.send(true);
             }
         });
-    engine.runtime().launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     assert!(ret);
 }
@@ -752,7 +1002,16 @@ async fn sch_message_emit_options_with_id() {
 async fn sch_message_ack_not_exist_message_in_store() {
     let workflow = Workflow::new();
     let id = utils::longid();
-    let (engine, proc, tx, rx) = create_proc_signal2::<bool>(&workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id);
+    let _rt = engine.runtime();
+    let sig = engine.signal(bool::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
     let e2 = engine.clone();
     engine.channel().on_message(move |msg| {
         if msg.r#type == "workflow" && msg.state() == MessageState::Created {
@@ -760,7 +1019,7 @@ async fn sch_message_ack_not_exist_message_in_store() {
             rx.send(ret.is_ok());
         }
     });
-    e2.runtime().launch(&proc);
+    e2.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     assert!(ret);
 }
@@ -769,7 +1028,16 @@ async fn sch_message_ack_not_exist_message_in_store() {
 async fn sch_message_ack_exist_message_in_store() {
     let workflow = Workflow::new();
     let id = utils::longid();
-    let (engine, proc, tx, rx) = create_proc_signal2::<Message>(&workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id);
+    let _rt = engine.runtime();
+    let sig = engine.signal(Message::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
 
     let chan_options = ChannelOptions {
         id: "e1".to_string(),
@@ -785,7 +1053,7 @@ async fn sch_message_ack_exist_message_in_store() {
                 rx.send(msg.inner().clone());
             }
         });
-    e2.runtime().launch(&proc);
+    e2.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     let message = e2
         .runtime()
@@ -807,7 +1075,16 @@ async fn sch_message_complete_message_in_store() {
         .with_step(|step| step.with_act(Act::irq(|act| act.with_key("act1"))))
         .with_step(|step| step.with_act(Act::irq(|act| act.with_key("act2"))));
     let id = utils::longid();
-    let (engine, proc, tx, rx) = create_proc_signal2::<String>(&workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id);
+    let _rt = engine.runtime();
+    let sig = engine.signal(String::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
 
     let options = ChannelOptions {
         id: "e1".to_string(),
@@ -831,7 +1108,7 @@ async fn sch_message_complete_message_in_store() {
                 rx.close();
             }
         });
-    e2.runtime().launch(&proc);
+    e2.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     let message = e2.runtime().cache().store().messages().find(&ret).unwrap();
     assert_eq!(message.r#type, "act");
@@ -849,7 +1126,16 @@ async fn sch_messages_not_removed_when_completed_in_store() {
         .with_step(|step| step.with_id("step1"))
         .with_step(|step| step.with_id("step2"));
     let id = utils::longid();
-    let (engine, proc, tx, rx) = create_proc_signal2::<()>(&workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id);
+    let _rt = engine.runtime();
+    let sig = engine.signal(());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
 
     let options = ChannelOptions {
         id: "e1".to_string(),
@@ -859,7 +1145,7 @@ async fn sch_messages_not_removed_when_completed_in_store() {
     engine.channel_with_options(&options).on_complete(move |_| {
         rx.close();
     });
-    engine.runtime().launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
 
     let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", id)));
@@ -878,7 +1164,16 @@ async fn sch_message_re_sent_if_not_ack() {
     let workflow =
         Workflow::new().with_step(|step| step.with_act(Act::irq(|act| act.with_key("act1"))));
     let id = utils::longid();
-    let (engine, proc, tx, rx) = create_proc_signal2::<Vec<Message>>(&workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id);
+    let _rt = engine.runtime();
+    let sig = engine.signal(Vec::<Message>::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
 
     let options = ChannelOptions {
         id: "e1".to_string(),
@@ -895,7 +1190,7 @@ async fn sch_message_re_sent_if_not_ack() {
             }
         }
     });
-    engine.runtime().launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     assert!(ret.len() > 1);
 
@@ -926,8 +1221,16 @@ async fn sch_message_error_if_not_ack_and_exceed_max_reties() {
         max_message_retry_times: Some(2),
         ..ConfigData::default()
     };
-    let (engine, proc, sig) =
-        create_proc_signal_config::<Vec<Message>>(&config, &workflow, &id).await;
+    let (engine, proc) = create_proc_with_config(&config, &workflow, &id);
+    let _rt = engine.runtime();
+    let sig = engine.signal(Vec::<Message>::default());
+    let tx = sig.clone();
+    let _rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
     let rx = sig.clone();
     let options = ChannelOptions {
         id: "e1".to_string(),
@@ -943,7 +1246,7 @@ async fn sch_message_error_if_not_ack_and_exceed_max_reties() {
             engine.executor().msg().ack(&e.id).unwrap();
         }
     });
-    e2.runtime().launch(&proc);
+    e2.runtime().launch(&proc).unwrap();
     let ret = sig.timeout(4000).await;
     assert!(ret.len() > 1);
 

@@ -1,6 +1,5 @@
 use crate::{
-    ActError, ActPackageMeta, ActRunAs, DbCollection, Result, env::ActUserVar, scheduler::Runtime,
-    store::DbCollectionIden,
+    ActError, ActPackageMeta, ActRunAs, Result, env::ActUserVar, scheduler::Runtime, store::KvStore,
 };
 use core::fmt;
 use std::sync::Arc;
@@ -42,7 +41,7 @@ impl Extender {
     ///     }
     ///   }
     /// }
-    /// let engine = Engine::new().start();
+    /// let engine = Engine::new().start().unwrap();
     /// let module = test_module::TestModule;
     /// engine.extender().register_var(&module);
     /// ```
@@ -89,8 +88,8 @@ impl Extender {
     ///
     ///  #[tokio::main]
     ///  async fn main() {
-    ///     let engine = acts::Engine::new().start();
-    ///     engine.extender().register_package(&MyPackage::meta());
+    ///     let engine = acts::Engine::new().start().unwrap();
+    ///     engine.extender().register_package(&MyPackage::meta()).unwrap();
     /// }
     pub fn register_package(&self, meta: &ActPackageMeta) -> Result<()> {
         if meta.run_as == ActRunAs::Func {
@@ -108,64 +107,36 @@ impl Extender {
     /// ## Example
     ///
     /// ```no_run
-    /// use acts::{Engine, Result, DbCollection, data};
+    /// use acts::{Engine, Result, KvStore, data};
     /// use std::sync::Arc;
     ///
-    /// pub struct MyCollection;
-    /// impl DbCollection for MyCollection {
-    ///    type Item = data::Event;
-    ///     fn exists(&self, id: &str) -> Result<bool> {
-    ///         Ok(true)
+    /// pub struct MyStore;
+    /// impl KvStore for MyStore {
+    ///     fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    ///         Ok(None)
     ///     }
-    ///     
-    ///     fn find(&self, id: &str) -> Result<Self::Item> {
-    ///         Ok(data::Event {
-    ///             id: todo!(),
-    ///             name: todo!(),
-    ///             mid: todo!(),
-    ///             ver: todo!(),
-    ///             uses: todo!(),
-    ///             params: todo!(),
-    ///             create_time: todo!(),
-    ///             timestamp: todo!(),
-    ///         })
+    ///
+    ///     fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
+    ///         Ok(())
     ///     }
-    ///     
-    ///     fn query(&self, q: &acts::query::Query) -> Result<acts::PageData<Self::Item>> {
-    ///         Ok(acts::PageData {
-    ///             count: 0,
-    ///             page_num: 0,
-    ///             page_count: 0,
-    ///             page_size: 0,
-    ///             rows: vec![],
-    ///         })
+    ///
+    ///     fn delete(&self, key: &str) -> Result<()> {
+    ///         Ok(())
     ///     }
-    ///     
-    ///     fn create(&self, data: &Self::Item) -> Result<bool> {
-    ///         Ok(true)
+    ///
+    ///     fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>> {
+    ///         Ok(vec![])
     ///     }
-    ///     
-    ///     fn update(&self, data: &Self::Item) -> Result<bool> {
-    ///         Ok(true)
-    ///     }
-    ///     
-    ///     fn delete(&self, id: &str) -> Result<bool> {
-    ///         Ok(true)
-    ///     }
+    ///
     /// }
     ///
     ///  #[tokio::main]
     ///  async fn main() {
-    ///     let engine = acts::Engine::new().start();
-    ///     let collection: Arc<dyn DbCollection<Item = data::Event> + Send + Sync> = Arc::new(MyCollection);
-    ///     engine.extender().register_collection(collection);
+    ///     let engine = acts::Engine::new().start().unwrap();
+    ///     let store: Arc<dyn KvStore + 'static> = Arc::new(MyStore);
+    ///     engine.extender().register_store(store);
     /// }
-    pub fn register_collection<DATA>(
-        &self,
-        collection: Arc<dyn DbCollection<Item = DATA> + Send + Sync + 'static>,
-    ) where
-        DATA: DbCollectionIden + 'static,
-    {
-        self.runtime.store().register(collection);
+    pub fn register_store(&self, store: Arc<dyn KvStore + 'static>) {
+        self.runtime.store().register(store);
     }
 }

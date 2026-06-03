@@ -5,7 +5,7 @@ use crate::{
     package::{
         ActPackage, ActPackageCatalog, ActPackageFn, ActPackageMeta, ActPackageRegister, ActRunAs,
     },
-    utils::consts,
+    utils::{self, consts},
 };
 use serde::Serialize;
 use serde_json::json;
@@ -49,13 +49,8 @@ impl ActPackage for HookEventPackage {
     }
 }
 
-#[async_trait::async_trait]
 impl ActPackageFn for HookEventPackage {
-    async fn start(
-        &self,
-        rt: &Arc<crate::scheduler::Runtime>,
-        options: &Vars,
-    ) -> Result<Option<Vars>> {
+    fn start(&self, rt: &Arc<crate::scheduler::Runtime>, options: &Vars) -> Result<Option<Vars>> {
         let mid = options
             .get::<String>(consts::MODEL_ID)
             .ok_or(ActError::Runtime(format!(
@@ -75,8 +70,8 @@ impl ActPackageFn for HookEventPackage {
         });
 
         let params = self.0.clone().unwrap_or_default();
-        rt.start(&workflow, params).unwrap();
-        let ret = s.recv().await;
+        rt.start(&workflow, params)?;
+        let ret = utils::sync::block_on(s.recv());
         Ok(Some(ret))
     }
 }

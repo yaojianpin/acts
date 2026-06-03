@@ -228,9 +228,9 @@ impl Store {
     fn load_tasks(&self, proc: &Arc<scheduler::Process>, rt: &Arc<Runtime>) -> Result<()> {
         debug!("load_tasks pid={}", proc.id());
         let collection = self.tasks();
-        let tree = &proc.tree();
         let query = Query::new().filter(Filter::and().expr(Expr::eq("pid", proc.id())));
         let tasks = collection.query(&query)?;
+        let tree = &proc.tree();
         for t in tasks.rows {
             let state: TaskState = t.state.into();
             let node = Node::from_str(&t.node_data, tree);
@@ -250,8 +250,6 @@ impl Store {
                     serde_json::from_str(&err).map_err(|err| ActError::Store(err.to_string()))?;
                 task.set_pure_err(&err)
             }
-            // cache.push(process)
-            // cache.push_task_pri(&Arc::new(task), false)?;
             proc.push_task(Arc::new(task));
         }
 

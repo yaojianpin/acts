@@ -1,23 +1,17 @@
-use acts::{ChannelOptions, Engine, Vars, Workflow};
+use acts::{ChannelOptions, Engine, Result, Vars, Workflow};
 
 #[tokio::main]
-async fn main() {
-    let engine = Engine::new().start();
+async fn main() -> Result<()> {
+    let engine = Engine::new().start()?;
 
     let executor = engine.executor();
     let (s, sig) = engine.signal(()).double();
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text).unwrap();
     workflow.print();
-    engine
-        .executor()
-        .model()
-        .deploy(&workflow)
-        .expect("deploy model");
-    executor
-        .proc()
-        .start(&workflow.id, Vars::new())
-        .expect("start workflow");
+    engine.executor().model().deploy(&workflow)?;
+
+    executor.proc().start(&workflow.id, Vars::new())?;
 
     // channel messages will store in db
     engine
@@ -36,4 +30,6 @@ async fn main() {
         s.close();
     });
     sig.recv().await;
+
+    Ok(())
 }

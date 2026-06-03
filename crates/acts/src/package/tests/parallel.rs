@@ -4,14 +4,17 @@ use crate::{
     scheduler::TaskState,
     utils::{
         self, consts,
-        test::{create_proc_signal, create_proc_signal_with_auto_clomplete},
+        test::{auto_complete, create_proc},
     },
 };
 use serde_json::json;
 
-#[tokio::test]
+use serial_test::serial;
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn pack_parallel_setup_list() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_act(Act::parallel(json!({
             "in": ["u1", "u2"],
             "acts": vec![
@@ -21,15 +24,19 @@ async fn pack_parallel_setup_list() {
     });
 
     workflow.print();
-    let (proc, scher, emitter, tx, rx) =
-        create_proc_signal_with_auto_clomplete::<()>(&mut workflow, &utils::longid(), false);
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+
+    channel.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_type("act") {
             rx.close();
         }
     });
-    scher.launch(&proc);
+    rt.launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     let tasks = proc.task_by_nid("act1");
@@ -46,9 +53,10 @@ async fn pack_parallel_setup_list() {
     }));
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn pack_parallel_var_exist() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::set(Vars::new().with("a", ["u1", "u2"])))
             .with_act(Act::parallel(json!({
@@ -60,20 +68,23 @@ async fn pack_parallel_var_exist() {
     });
 
     workflow.print();
-    let (proc, scher, emitter, tx, rx) =
-        create_proc_signal::<Vec<Vars>>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(Vec::<Vars>::default()).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_key("act1") && e.is_state(MessageState::Created) {
             rx.update(|data| {
                 let vars = e.inputs.get::<Vars>(consts::ACT_OPTIONS_KEY).unwrap();
                 data.push(vars);
             });
-            e.do_action(&e.pid, &e.tid, EventAction::Next, Vars::new())
+            rt.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
                 .unwrap();
         }
     });
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     proc.print();
     let tasks = proc.task_by_nid("act1");
@@ -89,9 +100,10 @@ async fn pack_parallel_var_exist() {
     }));
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn pack_parallel_in_not_exist() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_act(Act::parallel(json!({
             "in": r#"$("not_exists")"#,
             "acts": vec![
@@ -101,16 +113,21 @@ async fn pack_parallel_in_not_exist() {
     });
 
     workflow.print();
-    let (proc, scher, _, tx, _) = create_proc_signal::<()>(&mut workflow, &utils::longid());
-    scher.launch(&proc);
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
+
+    rt.launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert!(proc.state().is_error());
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn pack_parallel_in_code() {
-    let mut workflow = Workflow::new().with_step(|step| {
+    let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_act(Act::set(Vars::new().with("a", ["u1", "u2"])))
                 .with_act(Act::parallel(json!({
                     "in": r#"{{ let b = ["u3"];let c = [ "u1" ];let d = [ "u3", "u4" ];a.union(b).difference(c).intersection(d) }}"#,
@@ -122,14 +139,17 @@ async fn pack_parallel_in_code() {
     });
 
     workflow.print();
-    let (proc, scher, emitter, tx, rx) = create_proc_signal::<()>(&mut workflow, &utils::longid());
-    emitter.on_message(move |e| {
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_type("act") {
             rx.close();
         }
     });
-    scher.launch(&proc);
+    engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(

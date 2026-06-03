@@ -81,7 +81,7 @@ impl HttpPackage {
         Ok(package)
     }
 
-    pub async fn run(&self) -> Result<Vars> {
+    pub fn run(&self) -> Result<Vars> {
         let mut ret = Vars::new();
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -104,7 +104,7 @@ impl HttpPackage {
             query.push((key.clone(), value.clone()));
         }
 
-        let c = reqwest::Client::new();
+        let c = reqwest::blocking::Client::new();
         let mut request = c
             .request(
                 self.method
@@ -154,7 +154,6 @@ impl HttpPackage {
 
         let res = request
             .send()
-            .await
             .map_err(|err| ActError::Runtime(format!("Http error: {err}")))?;
 
         let default_type = HeaderValue::from_static("application/json");
@@ -170,19 +169,17 @@ impl HttpPackage {
             ContentType::Text | ContentType::Html => {
                 ret.insert(
                     DATA_KEY.to_string(),
-                    res.text().await.map_err(map_package_err)?.into(),
+                    res.text().map_err(map_package_err)?.into(),
                 );
             }
             ContentType::Json => {
                 ret.insert(
                     DATA_KEY.to_string(),
-                    res.json::<serde_json::Value>()
-                        .await
-                        .map_err(map_package_err)?,
+                    res.json::<serde_json::Value>().map_err(map_package_err)?,
                 );
             }
             ContentType::Binary | ContentType::Image | ContentType::Video | ContentType::Audio => {
-                let data = res.bytes().await.map_err(map_package_err)?.to_vec();
+                let data = res.bytes().map_err(map_package_err)?.to_vec();
                 let data = STANDARD.encode(&data);
                 ret.insert(DATA_KEY.to_string(), data.into());
             }

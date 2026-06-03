@@ -7,6 +7,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use serial_test::serial;
 #[test]
 fn env_eval_empty() {
     let env = Enviroment::new();
@@ -104,19 +105,20 @@ fn env_eval_object() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn env_eval_sys_env() {
     unsafe {
         std::env::set_var("TOKEN", "abc");
     }
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     engine.channel().on_complete(move |_| s1.close());
+    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
     let script = r#"
@@ -130,16 +132,17 @@ async fn env_eval_sys_env() {
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn env_eval_null() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     engine.channel().on_complete(move |_| s1.close());
+    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
     let script = r#"
@@ -153,7 +156,8 @@ async fn env_eval_null() {
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn env_console_module() {
     let env = Enviroment::new();
     let script = r#"
@@ -168,6 +172,7 @@ async fn env_console_module() {
 }
 
 #[test]
+#[serial]
 fn env_collection_union() {
     let env = Enviroment::new();
     let script = r#"
@@ -181,6 +186,7 @@ fn env_collection_union() {
 }
 
 #[test]
+#[serial]
 fn env_collection_intersect() {
     let env = Enviroment::new();
     let script = r#"
@@ -194,6 +200,7 @@ fn env_collection_intersect() {
 }
 
 #[test]
+#[serial]
 fn env_collection_difference() {
     let env = Enviroment::new();
     let script = r#"
@@ -206,9 +213,10 @@ fn env_collection_difference() {
     assert_eq!(result, ["a"]);
 }
 
-#[tokio::test]
-async fn env_task_get() {
-    let engine = Engine::new().start();
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn env_task_get_value() {
+    let engine = Engine::new().start().unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -216,8 +224,8 @@ async fn env_task_get() {
     let workflow = Workflow::new()
         .with_var("a", 10)
         .with_step(|step| step.with_id("step1"));
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     engine.channel().on_complete(move |_| s1.close());
+    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
     let script = r#"
@@ -231,9 +239,58 @@ async fn env_task_get() {
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn env_task_get_var_not_exists() {
+    let engine = Engine::new().start().unwrap();
+    let sig = engine.signal(());
+    let s1 = sig.clone();
+
+    let env = engine.runtime().env().clone();
+    let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
+    engine.channel().on_complete(move |_| s1.close());
+    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+    sig.recv().await;
+    let task = proc.root().unwrap();
+    let script = r#"
+        not_exists
+    "#;
+
+    let context = task.create_context();
+    Context::scope(context, || {
+        let result = env.eval::<serde_json::Value>(script);
+        assert!(result.is_err());
+    });
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn env_task_get_fn_not_exists() {
+    let engine = Engine::new().start().unwrap();
+    let sig = engine.signal(());
+    let s1 = sig.clone();
+
+    let env = engine.runtime().env().clone();
+    let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
+    engine.channel().on_complete(move |_| s1.close());
+    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+    sig.recv().await;
+    let task = proc.root().unwrap();
+    let script = r#"
+        $get("not_exists")
+    "#;
+
+    let context = task.create_context();
+    Context::scope(context, || {
+        let result = env.eval::<serde_json::Value>(script);
+        assert_eq!(result.unwrap(), serde_json::Value::Null);
+    });
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn env_task_set() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -241,8 +298,8 @@ async fn env_task_set() {
     let workflow = Workflow::new()
         .with_var("a", 10)
         .with_step(|step| step.with_id("step1"));
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     engine.channel().on_complete(move |_| s1.close());
+    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
     let script = r#"
@@ -255,16 +312,17 @@ async fn env_task_set() {
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn env_task_multi_line() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     engine.channel().on_complete(move |_| s1.close());
+    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
 
@@ -277,9 +335,10 @@ async fn env_task_multi_line() {
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn env_env_get_local() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -287,14 +346,14 @@ async fn env_env_get_local() {
     let workflow = Workflow::new()
         .with_env("a", 10)
         .with_step(|step| step.with_id("step1"));
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+
     engine.channel().on_complete(move |_| s1.close());
+    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
     let script = r#"
     $env.a
     "#;
-
     let context = task.create_context();
     Context::scope(context, || {
         let result = env.eval::<i64>(script);
@@ -302,9 +361,10 @@ async fn env_env_get_local() {
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn env_env_set_proc_env() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -312,8 +372,9 @@ async fn env_env_set_proc_env() {
     let workflow = Workflow::new()
         .with_env("a", 100)
         .with_step(|step| step.with_id("step1"));
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     engine.channel().on_complete(move |_| s1.close());
+    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+
     sig.recv().await;
     let task = proc.root().unwrap();
 
@@ -328,16 +389,17 @@ async fn env_env_set_proc_env() {
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn env_env_multi_line() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     engine.channel().on_complete(move |_| s1.close());
+    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
 
@@ -350,17 +412,18 @@ async fn env_env_multi_line() {
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn env_vars_set_num() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
     let workflow = Workflow::new()
         .with_env("a", 10)
         .with_step(|step| step.with_id("step1"));
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     engine.channel().on_complete(move |_| s1.close());
+    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
 
@@ -370,17 +433,18 @@ async fn env_vars_set_num() {
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn env_vars_set_str() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
     let workflow = Workflow::new()
         .with_env("a", "abc")
         .with_step(|step| step.with_id("step1"));
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     engine.channel().on_complete(move |_| s1.close());
+    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
 
@@ -390,17 +454,18 @@ async fn env_vars_set_str() {
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn env_vars_set_json() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
     let workflow = Workflow::new()
         .with_env("a", json!({ "count": 1 }))
         .with_step(|step| step.with_id("step1"));
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     engine.channel().on_complete(move |_| s1.close());
+    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
 
@@ -413,17 +478,18 @@ async fn env_vars_set_json() {
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn env_vars_update() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
     let workflow = Workflow::new()
         .with_env("a", 10)
         .with_step(|step| step.with_id("step1"));
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     engine.channel().on_complete(move |_| s1.close());
+    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
 
@@ -434,9 +500,10 @@ async fn env_vars_update() {
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn env_step_get_data_by_id() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -444,8 +511,8 @@ async fn env_step_get_data_by_id() {
     let workflow = Workflow::new()
         .with_step(|step| step.with_id("step1").with_var("a", 10))
         .with_step(|step| step.with_id("step2").with_var("b", "abc"));
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     engine.channel().on_complete(move |_| s1.close());
+    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
     let script = r#"
@@ -469,16 +536,17 @@ async fn env_step_get_data_by_id() {
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn env_step_get_data_null() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| step.with_id("step1").with_var("a", 10));
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     engine.channel().on_complete(move |_| s1.close());
+    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
     let script = r#"
@@ -493,16 +561,17 @@ async fn env_step_get_data_null() {
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn env_step_set_data_err_with_completed_state() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| step.with_id("step1").with_var("a", 10));
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     engine.channel().on_complete(move |_| s1.close());
+    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
     let script = r#"
@@ -517,9 +586,10 @@ async fn env_step_set_data_err_with_completed_state() {
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn env_step_set_data_ok_with_running_state() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -557,9 +627,10 @@ async fn env_step_set_data_ok_with_running_state() {
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn env_step_get_data() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -590,9 +661,10 @@ async fn env_step_get_data() {
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn env_step_get_inputs() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -622,9 +694,10 @@ async fn env_step_get_inputs() {
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn env_act_get_inputs() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -654,9 +727,10 @@ async fn env_act_get_inputs() {
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn env_act_get_data() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -686,7 +760,8 @@ async fn env_act_get_data() {
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn env_user_var_get_from_context() {
     #[derive(Clone)]
     struct MyVarPlugin;
@@ -697,7 +772,7 @@ async fn env_user_var_get_from_context() {
         }
     }
 
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -734,7 +809,8 @@ async fn env_user_var_get_from_context() {
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn env_user_var_get_default() {
     #[derive(Clone)]
     struct MyVarPlugin;
@@ -749,7 +825,7 @@ async fn env_user_var_get_default() {
         }
     }
 
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -780,9 +856,10 @@ async fn env_user_var_get_default() {
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn env_user_var_secrets_get() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -817,7 +894,8 @@ async fn env_user_var_secrets_get() {
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn env_user_var_os_get() {
     let env = Enviroment::new();
 
@@ -829,9 +907,10 @@ async fn env_user_var_os_get() {
     assert!(["linux", "windows", "macos"].contains(&result.unwrap().as_str()));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn env_act_cost_get() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -841,6 +920,7 @@ async fn env_act_cost_get() {
             .with_act(Act::irq(|act| act.with_key("test").with_id("act1")))
     });
     engine.channel().on_message(move |e| {
+        println!("aaa: {e:?}");
         if e.is_irq() {
             s1.close()
         }
@@ -860,9 +940,10 @@ async fn env_act_cost_get() {
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn env_act_cost_in_get() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -892,9 +973,10 @@ async fn env_act_cost_in_get() {
     });
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn env_act_ecode_get() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -903,15 +985,18 @@ async fn env_act_ecode_get() {
         step.with_id("step1")
             .with_act(Act::irq(|act| act.with_key("act1").with_id("act1")))
     });
+
+    let runtime = engine.runtime();
     engine.channel().on_message(move |e| {
         if e.is_key("act1") && e.is_state(MessageState::Created) {
-            e.do_action(
-                &e.pid,
-                &e.tid,
-                EventAction::Error,
-                Vars::new().with(consts::ACT_ERR_CODE, "err1"),
-            )
-            .unwrap();
+            runtime
+                .do_action2(
+                    &e.pid,
+                    &e.tid,
+                    EventAction::Error,
+                    Vars::new().with(consts::ACT_ERR_CODE, "err1"),
+                )
+                .unwrap();
             s1.close()
         }
     });

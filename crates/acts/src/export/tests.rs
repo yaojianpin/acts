@@ -4,14 +4,17 @@ use crate::{
     event::MessageState,
     scheduler::TaskState,
     store::query::*,
-    utils::{self, consts},
+    utils::{self, consts, test::auto_complete},
 };
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 
-#[tokio::test]
+use serial_test::serial;
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_publish_ok() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let pack = data::Package {
         id: "pack1".to_string(),
@@ -32,9 +35,10 @@ async fn export_manager_publish_ok() {
     assert!(manager.pack().publish(&pack).is_ok());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_deploy_ok() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let model = Workflow::new()
         .with_id(&utils::longid())
@@ -46,9 +50,10 @@ async fn export_manager_deploy_ok() {
     assert!(manager.model().get(&model.id, "text").is_ok());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_deploy_many_times() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let model = Workflow::new()
         .with_id(&utils::longid())
@@ -62,9 +67,10 @@ async fn export_manager_deploy_many_times() {
     assert!(result);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_deploy_no_model_id_error() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| step.with_id("step1"));
 
@@ -72,9 +78,10 @@ async fn export_manager_deploy_no_model_id_error() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_deploy_dup_id_error() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let executor = engine.executor();
     let model = Workflow::new()
         .with_id(&utils::longid())
@@ -85,9 +92,10 @@ async fn export_manager_deploy_dup_id_error() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn engine_executor_start_no_pid() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let executor = engine.executor();
 
     let mid = utils::longid();
@@ -100,9 +108,10 @@ async fn engine_executor_start_no_pid() {
     assert!(result.is_ok());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn engine_executor_start_with_pid() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let executor = engine.executor();
 
     let mid = utils::longid();
@@ -118,9 +127,10 @@ async fn engine_executor_start_with_pid() {
     assert_eq!(result.unwrap(), "123");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_executor_start_empty_pid() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let executor = engine.executor();
 
     let mid = utils::longid();
@@ -135,9 +145,10 @@ async fn export_executor_start_empty_pid() {
     assert!(result.is_ok());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_executor_start_dup_pid_error() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let executor = engine.executor();
 
     let pid = utils::longid();
@@ -171,9 +182,10 @@ async fn export_executor_start_dup_pid_error() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_executor_start_from_yaml() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let executor = engine.executor();
     let mid = utils::longid();
     let model = Workflow::new()
@@ -188,9 +200,10 @@ async fn export_executor_start_from_yaml() {
     assert!(result.is_ok());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_executor_start_from_json() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let executor = engine.executor();
     let mid = utils::longid();
     let model = Workflow::new()
@@ -205,9 +218,10 @@ async fn export_executor_start_from_json() {
     assert!(result.is_ok());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_executor_start_with_inputs_schema_ok() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let executor = engine.executor();
     let mid = utils::longid();
     let workflow = Workflow::new()
@@ -222,9 +236,10 @@ async fn export_executor_start_with_inputs_schema_ok() {
     assert!(result.is_ok());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_executor_start_with_inputs_schema_err() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let executor = engine.executor();
     let mid = utils::longid();
     let workflow = Workflow::new()
@@ -239,9 +254,10 @@ async fn export_executor_start_with_inputs_schema_err() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_executor_start_with_outputs_schema_ok() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let executor = engine.executor();
     let mid = utils::longid();
     let workflow = Workflow::new()
@@ -253,21 +269,22 @@ async fn export_executor_start_with_outputs_schema_ok() {
     engine.executor().model().deploy(&workflow).unwrap();
 
     let (s1, s2) = Signal::new(0).double();
+    engine.channel().on_complete(move |e| {
+        s2.send(e.outputs.get::<i32>("a").unwrap());
+    });
     executor
         .proc()
         .start(&mid, Vars::new().with("a", 100))
         .unwrap();
-    engine.channel().on_complete(move |e| {
-        s2.send(e.outputs.get::<i32>("a").unwrap());
-    });
 
     let ret = s1.recv().await;
     assert_eq!(ret, 100);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_executor_start_with_outputs_schema_err() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let executor = engine.executor();
     let mid = utils::longid();
     let workflow = Workflow::new()
@@ -278,22 +295,22 @@ async fn export_executor_start_with_outputs_schema_err() {
     engine.executor().model().deploy(&workflow).unwrap();
 
     let (s1, s2) = Signal::new(None).double();
+    engine.channel().on_error(move |e| {
+        s2.send(e.inputs.get::<String>("message"));
+    });
     executor
         .proc()
         .start(&mid, Vars::new().with("a", "abc"))
         .unwrap();
 
-    engine.channel().on_error(move |e| {
-        s2.send(e.inputs.get::<String>("message"));
-    });
-
     let ret = s1.recv().await;
     assert!(ret.is_some());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_executor_start_from_empty_fmt() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let executor = engine.executor();
     let mid = utils::longid();
     let model = Workflow::new()
@@ -306,9 +323,10 @@ async fn export_executor_start_from_empty_fmt() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_executor_start_from_error_fmt() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let executor = engine.executor();
     let mid = utils::longid();
     let model = Workflow::new()
@@ -321,9 +339,10 @@ async fn export_executor_start_from_error_fmt() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_models_get_count() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let mut model = Workflow::new().with_step(|step| step.with_id("step1"));
 
@@ -339,9 +358,10 @@ async fn export_manager_models_get_count() {
     assert_eq!(result.count, 5);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_models_order() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let mut model = Workflow::new().with_step(|step| step.with_id("step1"));
 
@@ -358,9 +378,10 @@ async fn export_manager_models_order() {
     assert_eq!(result.rows.first().unwrap().name, "model-5");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_models_get_rows() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let mut model = Workflow::new().with_step(|step| step.with_id("step1"));
 
@@ -376,9 +397,10 @@ async fn export_manager_models_get_rows() {
     assert_eq!(result.rows.len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_models_query() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let mut model = Workflow::new().with_step(|step| step.with_id("step1"));
 
@@ -396,9 +418,10 @@ async fn export_manager_models_query() {
     assert_eq!(result.rows.first().unwrap().name, "model-3");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_model_get_text() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let mut model = Workflow::new().with_step(|step| step.with_id("step1"));
 
@@ -410,9 +433,10 @@ async fn export_manager_model_get_text() {
     assert!(!result.data.is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_model_get_tree() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let mut model = Workflow::new().with_step(|step| step.with_id("step1"));
 
@@ -424,9 +448,10 @@ async fn export_manager_model_get_tree() {
     assert!(!result.data.is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_model_remove() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let mut model = Workflow::new().with_step(|step| step.with_id("step1"));
 
@@ -444,9 +469,10 @@ async fn export_manager_model_remove() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_model_remove_with_events() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let mut model = Workflow::new()
         .with_on(|act| act.with_id("event1").with_uses("acts.event.manual"))
@@ -484,9 +510,10 @@ async fn export_manager_model_remove_with_events() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_procs_one() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -498,7 +525,7 @@ async fn export_manager_procs_one() {
     let s1 = sig.clone();
     let proc = rt.create_proc(&utils::longid(), &model);
     engine.channel().on_start(move |_| s1.close());
-    rt.launch(&proc);
+    rt.launch(&proc).unwrap();
     sig.recv().await;
 
     assert_eq!(
@@ -511,9 +538,10 @@ async fn export_manager_procs_one() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_procs_count() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -535,7 +563,7 @@ async fn export_manager_procs_count() {
     });
     for _ in 0..5 {
         let proc = rt.create_proc(&utils::longid(), &model);
-        rt.launch(&proc);
+        rt.launch(&proc).unwrap();
     }
     sig.recv().await;
     assert_eq!(
@@ -548,9 +576,10 @@ async fn export_manager_procs_count() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_procs_offset_in_range() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -572,7 +601,7 @@ async fn export_manager_procs_offset_in_range() {
     });
     for _ in 0..5 {
         let proc = rt.create_proc(&utils::longid(), &model);
-        rt.launch(&proc);
+        rt.launch(&proc).unwrap();
     }
     sig.recv().await;
     assert_eq!(
@@ -586,9 +615,10 @@ async fn export_manager_procs_offset_in_range() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_procs_offset_out_range() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -610,7 +640,7 @@ async fn export_manager_procs_offset_out_range() {
     });
     for _ in 0..5 {
         let proc = rt.create_proc(&utils::longid(), &model);
-        rt.launch(&proc);
+        rt.launch(&proc).unwrap();
     }
     sig.recv().await;
     assert_eq!(
@@ -624,9 +654,10 @@ async fn export_manager_procs_offset_out_range() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_procs_query() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -649,7 +680,7 @@ async fn export_manager_procs_query() {
     let pid = utils::longid();
     for i in 0..5 {
         let proc = rt.create_proc(&format!("{pid}-{}", i + 1), &model);
-        rt.launch(&proc);
+        rt.launch(&proc).unwrap();
     }
     sig.recv().await;
 
@@ -662,9 +693,10 @@ async fn export_manager_procs_query() {
     assert_eq!(rows.first().unwrap().id, format!("{pid}-3"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_procs_order() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -687,7 +719,7 @@ async fn export_manager_procs_order() {
     let pid = utils::longid();
     for i in 0..5 {
         let proc = rt.create_proc(&format!("{pid}-{}", i + 1), &model);
-        rt.launch(&proc);
+        rt.launch(&proc).unwrap();
     }
     sig.recv().await;
 
@@ -699,9 +731,10 @@ async fn export_manager_procs_order() {
     assert_eq!(rows.first().unwrap().id, format!("{pid}-5"));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_proc_get() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -714,7 +747,7 @@ async fn export_manager_proc_get() {
     engine.channel().on_start(move |_| s1.close());
     let pid = utils::longid();
     let proc = rt.create_proc(&pid, &model);
-    rt.launch(&proc);
+    rt.launch(&proc).unwrap();
     sig.recv().await;
 
     let info = manager.proc().get(&pid).unwrap();
@@ -722,9 +755,10 @@ async fn export_manager_proc_get() {
     assert!(!info.tasks.is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_tasks_count() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -759,9 +793,10 @@ async fn export_manager_tasks_count() {
     assert_eq!(tasks.count, 3); // 3 means the tasks with workflow step act
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_tasks_offset_in_range() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -796,9 +831,10 @@ async fn export_manager_tasks_offset_in_range() {
     assert_eq!(tasks.rows.len(), 1); // 3 means the tasks with workflow step act
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_tasks_offset_out_range() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -833,9 +869,10 @@ async fn export_manager_tasks_offset_out_range() {
     assert_eq!(tasks.rows.len(), 0); // 3 means the tasks with workflow step act
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_tasks_query() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -872,9 +909,10 @@ async fn export_manager_tasks_query() {
     assert_eq!(tasks.rows.first().unwrap().key, "act1");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_tasks_order() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -908,9 +946,10 @@ async fn export_manager_tasks_order() {
     assert_eq!(tasks.rows.first().unwrap().r#type, "act");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_task_get() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -948,9 +987,10 @@ async fn export_manager_task_get() {
     assert!(result);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_messages_all() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -975,7 +1015,7 @@ async fn export_manager_messages_all() {
     });
     let pid = utils::longid();
     let proc = rt.create_proc(&pid, &model);
-    rt.launch(&proc);
+    rt.launch(&proc).unwrap();
     let count = sig.recv().await;
     assert_eq!(
         manager
@@ -987,35 +1027,36 @@ async fn export_manager_messages_all() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_messages_query() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::irq(|act| act.with_key("act1")))
     });
 
-    let rt = engine.runtime();
-    let (sig, s1) = engine.signal(0).double();
+    let rt: Arc<crate::scheduler::Runtime> = engine.runtime();
+    let (sig, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
     let count = Arc::new(Mutex::new(0));
+    let count2 = count.clone();
     let chan = engine.channel_with_options(&ChannelOptions {
         ack: true,
         ..Default::default()
     });
     chan.on_message(move |e| {
         println!("message:{e:?}");
-        let mut count = count.lock().unwrap();
+        let mut count = count2.lock().unwrap();
         *count += 1;
-
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
-            s1.send(*count);
-        }
     });
     let pid = utils::longid();
     let proc = rt.create_proc(&pid, &model);
-    rt.launch(&proc);
-    let count = sig.recv().await;
+    rt.launch(&proc).unwrap();
+    sig.timeout(100).await;
+
+    let count = count.lock().unwrap();
     assert_eq!(
         manager
             .msg()
@@ -1027,13 +1068,14 @@ async fn export_manager_messages_query() {
             )
             .unwrap()
             .count,
-        count
+        *count as usize
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_messages_order() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -1054,7 +1096,7 @@ async fn export_manager_messages_order() {
     });
     let pid = utils::longid();
     let proc = rt.create_proc(&pid, &model);
-    rt.launch(&proc);
+    rt.launch(&proc).unwrap();
     sig.recv().await;
     assert_eq!(
         manager
@@ -1073,9 +1115,10 @@ async fn export_manager_messages_order() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_messages_count() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -1100,7 +1143,7 @@ async fn export_manager_messages_count() {
     });
     let pid = utils::longid();
     let proc = rt.create_proc(&pid, &model);
-    rt.launch(&proc);
+    rt.launch(&proc).unwrap();
     let _ = sig.recv().await;
     assert_eq!(
         manager
@@ -1118,9 +1161,10 @@ async fn export_manager_messages_count() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_messages_offset_in_range() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -1145,7 +1189,7 @@ async fn export_manager_messages_offset_in_range() {
     });
     let pid = utils::longid();
     let proc = rt.create_proc(&pid, &model);
-    rt.launch(&proc);
+    rt.launch(&proc).unwrap();
     let _ = sig.recv().await;
     assert_eq!(
         manager
@@ -1163,9 +1207,10 @@ async fn export_manager_messages_offset_in_range() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_messages_offset_out_range() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -1190,7 +1235,7 @@ async fn export_manager_messages_offset_out_range() {
     });
     let pid = utils::longid();
     let proc = rt.create_proc(&pid, &model);
-    rt.launch(&proc);
+    rt.launch(&proc).unwrap();
     let _ = sig.recv().await;
     assert_eq!(
         manager
@@ -1208,9 +1253,10 @@ async fn export_manager_messages_offset_out_range() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_message_get() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -1235,7 +1281,7 @@ async fn export_manager_message_get() {
     });
     let pid = utils::longid();
     let proc = rt.create_proc(&pid, &model);
-    rt.launch(&proc);
+    rt.launch(&proc).unwrap();
     sig.recv().await;
 
     let messages = manager
@@ -1254,9 +1300,10 @@ async fn export_manager_message_get() {
     assert_eq!(m.name, message.name);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_message_rm() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -1281,7 +1328,7 @@ async fn export_manager_message_rm() {
     });
     let pid = utils::longid();
     let proc = rt.create_proc(&pid, &model);
-    rt.launch(&proc);
+    rt.launch(&proc).unwrap();
     sig.recv().await;
 
     let messages = manager
@@ -1299,9 +1346,10 @@ async fn export_manager_message_rm() {
     assert!(ret);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_packages_count() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
 
     let count = 5;
@@ -1340,9 +1388,10 @@ async fn export_manager_packages_count() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_packages_order() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
 
     let count = 5;
@@ -1379,9 +1428,10 @@ async fn export_manager_packages_order() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_packages_query() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
 
     let count = 5;
@@ -1414,9 +1464,10 @@ async fn export_manager_packages_query() {
     assert_eq!(rows.first().unwrap().desc, "test-3");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_packages_offset_in_range() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
 
     let count = 5;
@@ -1456,9 +1507,10 @@ async fn export_manager_packages_offset_in_range() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_packages_offset_out_range() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
 
     let count = 5;
@@ -1493,9 +1545,10 @@ async fn export_manager_packages_offset_out_range() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_manager_package_rm() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
 
     let package = Package {
@@ -1519,9 +1572,10 @@ async fn export_manager_package_rm() {
     assert!(manager.pack().rm(&package.id).unwrap());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_executor_start() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let model = Workflow::new()
         .with_id(&utils::longid())
         .with_step(|step| step.with_id("step1"));
@@ -1542,9 +1596,10 @@ async fn export_executor_start() {
     assert!(result.is_ok());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_executor_start_not_found_model() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
     engine.channel().on_complete(move |_| s1.close());
@@ -1558,9 +1613,10 @@ async fn export_executor_start_not_found_model() {
     assert!(result.is_err());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_executor_complete() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::irq(|act| act.with_key("act1")))
@@ -1569,11 +1625,12 @@ async fn export_executor_complete() {
     let rt = engine.runtime();
     let sig = engine.signal(false);
     let s1 = sig.clone();
+    let executor = engine.executor();
     engine.channel().on_message(move |e| {
         if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
-            let ret = engine.executor().act().complete(&e.pid, &e.tid, vars);
+            let ret = executor.act().complete(&e.pid, &e.tid, vars);
             s1.send(ret.is_ok());
         }
     });
@@ -1584,9 +1641,10 @@ async fn export_executor_complete() {
     assert!(ret);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_executor_complete_no_uid() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::irq(|act| act.with_key("act1")))
@@ -1595,12 +1653,12 @@ async fn export_executor_complete_no_uid() {
     let rt = engine.runtime();
     let sig = engine.signal(false);
     let s1 = sig.clone();
-    // scher.emitter().on_complete(|e| rx.close());
+    let executor = engine.executor();
 
     engine.channel().on_message(move |e| {
         if e.is_key("act1") && e.is_state(MessageState::Created) {
             let vars = Vars::new();
-            let ret = engine.executor().act().complete(&e.pid, &e.tid, vars);
+            let ret = executor.act().complete(&e.pid, &e.tid, vars);
 
             // no uid is still ok in version 0.7.0+
             s1.send(ret.is_ok());
@@ -1611,9 +1669,10 @@ async fn export_executor_complete_no_uid() {
     assert!(ret);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_executor_submit() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::irq(|act| act.with_key("act1")))
@@ -1622,13 +1681,13 @@ async fn export_executor_submit() {
     let rt = engine.runtime();
     let sig = engine.signal(false);
     let s1 = sig.clone();
-    // scher.emitter().on_complete(|e| e.close());
+    let executor = engine.executor();
 
     engine.channel().on_message(move |e| {
         if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
-            let ret = engine.executor().act().submit(&e.pid, &e.tid, vars);
+            let ret = executor.act().submit(&e.pid, &e.tid, vars);
             s1.send(ret.is_ok());
         }
     });
@@ -1639,9 +1698,10 @@ async fn export_executor_submit() {
     assert!(ret);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_executor_skip() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::irq(|act| act.with_key("act1")))
@@ -1650,12 +1710,12 @@ async fn export_executor_skip() {
     let rt = engine.runtime();
     let sig = engine.signal(false);
     let s1 = sig.clone();
-    // scher.emitter().on_complete(|e| e.close());
+    let executor = engine.executor();
     engine.channel().on_message(move |e| {
         if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
-            let ret = engine.executor().act().skip(&e.pid, &e.tid, vars);
+            let ret = executor.act().skip(&e.pid, &e.tid, vars);
             s1.send(ret.is_ok());
         }
     });
@@ -1666,9 +1726,10 @@ async fn export_executor_skip() {
     assert!(ret);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_executor_error() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::irq(|act| act.with_key("act1")))
@@ -1677,12 +1738,13 @@ async fn export_executor_error() {
     let rt = engine.runtime();
     let sig = engine.signal(false);
     let s1 = sig.clone();
+    let executor = engine.executor();
     engine.channel().on_message(move |e| {
         if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             vars.insert("ecode".to_string(), json!("code_1"));
-            let ret = engine.executor().act().error(&e.pid, &e.tid, vars);
+            let ret = executor.act().fail(&e.pid, &e.tid, vars);
             s1.send(ret.is_ok());
         }
     });
@@ -1693,9 +1755,10 @@ async fn export_executor_error() {
     assert!(ret);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_executor_abort() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::irq(|act| act.with_key("act1")))
@@ -1704,13 +1767,13 @@ async fn export_executor_abort() {
     let rt = engine.runtime();
     let sig = engine.signal(false);
     let s1 = sig.clone();
-    // scher.emitter().on_complete(|e| e.close());
+    let executor = engine.executor();
     engine.channel().on_message(move |e| {
         println!("message: {:?}", e.inner());
         if e.is_key("act1") && e.is_state(MessageState::Created) {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
-            let ret = engine.executor().act().abort(&e.pid, &e.tid, vars);
+            let ret = executor.act().abort(&e.pid, &e.tid, vars);
             s1.send(ret.is_ok());
         }
     });
@@ -1721,9 +1784,10 @@ async fn export_executor_abort() {
     assert!(ret);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_executor_back() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let model = Workflow::new()
         .with_step(|step| {
             step.with_id("step1")
@@ -1737,7 +1801,7 @@ async fn export_executor_back() {
     let rt = engine.runtime();
     let sig = engine.signal(false);
     let s1 = sig.clone();
-    // scher.emitter().on_complete(|e| e.close());
+    let executor = engine.executor();
 
     let count = Arc::new(Mutex::new(0));
     engine.channel().on_message(move |e| {
@@ -1748,11 +1812,7 @@ async fn export_executor_back() {
             }
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
-            engine
-                .executor()
-                .act()
-                .complete(&e.pid, &e.tid, vars)
-                .unwrap();
+            executor.act().complete(&e.pid, &e.tid, vars).unwrap();
 
             *count += 1;
         }
@@ -1761,7 +1821,7 @@ async fn export_executor_back() {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             vars.insert("to".to_string(), json!("step1"));
-            let ret = engine.executor().act().back(&e.pid, &e.tid, vars);
+            let ret = executor.act().back(&e.pid, &e.tid, vars);
             s1.update(|data| *data = ret.is_ok());
         }
     });
@@ -1772,9 +1832,10 @@ async fn export_executor_back() {
     assert!(ret);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_executor_cancel() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let model = Workflow::new()
         .with_step(|step| {
             step.with_id("step1")
@@ -1788,7 +1849,7 @@ async fn export_executor_cancel() {
     let rt = engine.runtime();
     let sig = engine.signal(false);
     let s1 = sig.clone();
-    // scher.emitter().on_complete(|e| e.close());
+    let executor = engine.executor();
     let count = Arc::new(Mutex::new(0));
     let tid = Arc::new(Mutex::new("".to_string()));
     engine.channel().on_message(move |e| {
@@ -1799,11 +1860,7 @@ async fn export_executor_cancel() {
             }
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
-            engine
-                .executor()
-                .act()
-                .complete(&e.pid, &e.tid, vars)
-                .unwrap();
+            executor.act().complete(&e.pid, &e.tid, vars).unwrap();
 
             *tid.lock().unwrap() = e.tid.clone();
             *count += 1;
@@ -1812,10 +1869,7 @@ async fn export_executor_cancel() {
         if e.is_key("act2") && e.is_state(MessageState::Created) {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
-            let ret = engine
-                .executor()
-                .act()
-                .cancel(&e.pid, &tid.lock().unwrap(), vars);
+            let ret = executor.act().cancel(&e.pid, &tid.lock().unwrap(), vars);
             s1.update(|data| *data = ret.is_ok());
         }
     });
@@ -1826,9 +1880,10 @@ async fn export_executor_cancel() {
     assert!(ret);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_executor_push() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::irq(|act| act.with_key("act1")))
@@ -1837,14 +1892,14 @@ async fn export_executor_push() {
     let rt = engine.runtime();
     let sig = engine.signal(false);
     let s1 = sig.clone();
-    // scher.emitter().on_complete(|e| e.close());
+    let executor = engine.executor();
     engine.channel().on_message(move |e| {
         println!("message: {e:?}");
         if e.is_key("step1") && e.is_state(MessageState::Created) {
             let vars = Vars::new()
                 .with("uses", "acts.core.irq")
                 .with("key", "act2");
-            engine.executor().act().push(&e.pid, &e.tid, vars).unwrap();
+            executor.act().push(&e.pid, &e.tid, vars).unwrap();
         }
 
         if e.is_key("act2") && e.is_state(MessageState::Created) {
@@ -1858,9 +1913,10 @@ async fn export_executor_push() {
     assert!(ret);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_executor_push_no_key_error() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::irq(|act| act.with_key("act1")))
@@ -1869,17 +1925,11 @@ async fn export_executor_push_no_key_error() {
     let rt = engine.runtime();
     let sig = engine.signal(false);
     let s1 = sig.clone();
-    // scher.emitter().on_complete(|e| e.close());
+    let executor = engine.executor();
     engine.channel().on_message(move |e| {
         println!("message: {e:?}");
         if e.is_key("step1") && e.is_state(MessageState::Created) {
-            s1.send(
-                engine
-                    .executor()
-                    .act()
-                    .push(&e.pid, &e.tid, Vars::new())
-                    .is_err(),
-            );
+            s1.send(executor.act().push(&e.pid, &e.tid, Vars::new()).is_err());
         }
     });
     let mut vars = Vars::new();
@@ -1889,9 +1939,10 @@ async fn export_executor_push_no_key_error() {
     assert!(ret);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_executor_push_not_step_id_error() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::irq(|act| act.with_key("act1")))
@@ -1900,12 +1951,12 @@ async fn export_executor_push_not_step_id_error() {
     let rt = engine.runtime();
     let sig = engine.signal(false);
     let s1 = sig.clone();
-    // scher.emitter().on_complete(|e| e.close());
+    let executor = engine.executor();
     engine.channel().on_message(move |e| {
         println!("message: {e:?}");
         if e.is_key("act1") && e.is_state(MessageState::Created) {
             let vars = Vars::new();
-            s1.send(engine.executor().act().push(&e.pid, &e.tid, vars).is_err());
+            s1.send(executor.act().push(&e.pid, &e.tid, vars).is_err());
         }
     });
     let mut vars = Vars::new();
@@ -1915,9 +1966,10 @@ async fn export_executor_push_not_step_id_error() {
     assert!(ret);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_executor_remove() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_act(Act::irq(|act| act.with_key("act1")))
@@ -1926,16 +1978,11 @@ async fn export_executor_remove() {
     let rt = engine.runtime();
     let sig = engine.signal(false);
     let s1 = sig.clone();
+    let executor = engine.executor();
     engine.channel().on_message(move |e| {
         println!("message: {e:?}");
         if e.is_key("act1") && e.is_state(MessageState::Created) {
-            s1.send(
-                engine
-                    .executor()
-                    .act()
-                    .remove(&e.pid, &e.tid, Vars::new())
-                    .is_ok(),
-            );
+            s1.send(executor.act().remove(&e.pid, &e.tid, Vars::new()).is_ok());
         }
     });
     let mut vars = Vars::new();
@@ -1945,9 +1992,10 @@ async fn export_executor_remove() {
     assert!(ret);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_extender_register_module() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let extender = engine.extender();
 
     let before_count = engine.runtime().env().user_env_count();
@@ -1957,9 +2005,10 @@ async fn export_extender_register_module() {
     assert_eq!(count, before_count + 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_emitter_default() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let emitter = engine.channel();
     let sig = engine.signal::<Vec<Message>>(Vec::new());
     let s = sig.clone();
@@ -1974,9 +2023,10 @@ async fn export_emitter_default() {
     assert_eq!(ret.len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_emitter_type_match() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let emitter = engine.channel_with_options(&ChannelOptions {
         r#type: "a*".to_string(),
         ..Default::default()
@@ -1997,9 +2047,10 @@ async fn export_emitter_type_match() {
     assert_eq!(ret.len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_emitter_type_not_match() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let emitter = engine.channel_with_options(&ChannelOptions {
         r#type: "a*".to_string(),
         ..Default::default()
@@ -2020,9 +2071,10 @@ async fn export_emitter_type_not_match() {
     assert_eq!(ret.len(), 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_emitter_state_match() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let emitter = engine.channel_with_options(&ChannelOptions {
         state: "completed".to_string(),
         ..Default::default()
@@ -2043,9 +2095,10 @@ async fn export_emitter_state_match() {
     assert_eq!(ret.len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_emitter_state_not_match() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let emitter = engine.channel_with_options(&ChannelOptions {
         r#type: "error".to_string(),
         ..Default::default()
@@ -2066,9 +2119,10 @@ async fn export_emitter_state_not_match() {
     assert_eq!(ret.len(), 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_emitter_tag_match() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let emitter = engine.channel_with_options(&ChannelOptions {
         tag: "tag*".to_string(),
         ..Default::default()
@@ -2095,9 +2149,10 @@ async fn export_emitter_tag_match() {
     assert_eq!(ret.len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_emitter_tag_not_match() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let emitter = engine.channel_with_options(&ChannelOptions {
         tag: "tag*".to_string(),
         ..Default::default()
@@ -2118,9 +2173,10 @@ async fn export_emitter_tag_not_match() {
     assert_eq!(ret.len(), 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_emitter_key_match() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let emitter = engine.channel_with_options(&ChannelOptions {
         key: "key*".to_string(),
         ..Default::default()
@@ -2141,9 +2197,10 @@ async fn export_emitter_key_match() {
     assert_eq!(ret.len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_emitter_key_not_match() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let emitter = engine.channel_with_options(&ChannelOptions {
         key: "key*".to_string(),
         ..Default::default()
@@ -2164,9 +2221,10 @@ async fn export_emitter_key_not_match() {
     assert_eq!(ret.len(), 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_emitter_on_message_with_dup_id() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let emitter = engine.channel_with_options(&ChannelOptions {
         id: "dup_id".to_string(),
         ..Default::default()
@@ -2198,9 +2256,10 @@ async fn export_emitter_on_message_with_dup_id() {
     assert_eq!(ret.len(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_message_store_with_emit_id() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let emitter = engine.channel_with_options(&ChannelOptions {
         id: "my_emit_id".to_string(),
         ack: true,
@@ -2229,9 +2288,10 @@ async fn export_message_store_with_emit_id() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_message_store_with_emit_id_and_options() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let emitter = engine.channel_with_options(&ChannelOptions {
         id: "my_emit_id".to_string(),
         tag: "tag*".to_string(),
@@ -2263,9 +2323,10 @@ async fn export_message_store_with_emit_id_and_options() {
     assert_eq!(message.chan_pattern, "*:*:tag*:*");
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn export_message_not_store_without_match() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let emitter = engine.channel_with_options(&ChannelOptions {
         id: "my_emit_id".to_string(),
         tag: "tag*".to_string(),
@@ -2294,9 +2355,10 @@ async fn export_message_not_store_without_match() {
     );
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn export_message_not_store_with_empty_emit_id_and_not_match_option() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let emitter = engine.channel_with_options(&ChannelOptions {
         id: "".to_string(),
         ..Default::default()
@@ -2323,9 +2385,10 @@ async fn export_message_not_store_with_empty_emit_id_and_not_match_option() {
     );
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn export_message_clear_error_messages_by_none() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let msg = data::Message {
         id: utils::longid(),
         status: data::MessageStatus::Error,
@@ -2358,9 +2421,10 @@ async fn export_message_clear_error_messages_by_none() {
     );
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn export_message_clear_error_messages_by_pid() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let pid = utils::longid();
     engine
         .runtime()
@@ -2405,9 +2469,10 @@ async fn export_message_clear_error_messages_by_pid() {
     assert_eq!(messages.rows.len(), 0);
 }
 
-#[tokio::test]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
 async fn export_message_resend_error_messages() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().unwrap();
     let msg = data::Message {
         id: utils::longid(),
         status: data::MessageStatus::Error,

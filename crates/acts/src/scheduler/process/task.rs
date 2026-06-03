@@ -20,7 +20,7 @@ use crate::{
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use std::sync::{Arc, RwLock};
-use tracing::{debug, info};
+use tracing::debug;
 
 #[derive(Clone)]
 pub struct Task {
@@ -403,7 +403,7 @@ impl Task {
     }
 
     pub fn update(self: &Arc<Self>, ctx: &Context) -> Result<()> {
-        info!("update task={:?}", ctx.task());
+        debug!("update task={:?}", ctx.task());
         let action = ctx.action().ok_or(ActError::Action(
             "cannot find action in context".to_string(),
         ))?;
@@ -651,17 +651,17 @@ impl Task {
         }
     }
 
-    pub fn resume(self: &Arc<Self>, ctx: &Context) -> Result<()> {
+    pub async fn resume(self: &Arc<Self>, ctx: &Context) -> Result<()> {
         if self.is_ready() {
             self.set_state(TaskState::Running);
-            ctx.runtime.scher().emit_task_event(self)?;
+            ctx.runtime.emitter().emit_task_event(self)?;
             self.exec(ctx)?;
         }
 
         Ok(())
     }
 
-    pub fn run_hooks_timeout(&self, ctx: &Context) -> Result<()> {
+    pub async fn run_hooks_timeout(&self, ctx: &Context) -> Result<()> {
         let children = self.node.children_in(NodeOutputKind::Timeout);
         if !children.is_empty() {
             self.set_sign(consts::TASK_SIGN_TIMEOUTS);
@@ -685,7 +685,7 @@ impl Task {
                         Vars::new()
                             .with(consts::TASK_COST, cost)
                             .with(consts::TASK_SIGN, consts::TASK_SIGN_CATCH),
-                    );
+                    )?;
                 }
             }
         }
@@ -717,7 +717,7 @@ impl Task {
                     ctx.sched_task_with_vars(
                         child,
                         Vars::new().with(consts::TASK_SIGN, consts::TASK_SIGN_CATCH),
-                    );
+                    )?;
                 }
             }
 
@@ -730,7 +730,7 @@ impl Task {
                     ctx.sched_task_with_vars(
                         child,
                         Vars::new().with(consts::TASK_SIGN, consts::TASK_SIGN_CATCH),
-                    );
+                    )?;
                 }
             }
         }
