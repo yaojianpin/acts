@@ -10,6 +10,7 @@ impl SledStore {
         Ok(Self { db })
     }
 
+    #[allow(dead_code)]
     pub fn open_in_memory() -> Result<Self> {
         let db = sled::Config::new()
             .temporary(true)
@@ -52,8 +53,8 @@ impl KvStore for SledStore {
         let mut result = Vec::new();
         for entry in self.db.scan_prefix(prefix.as_bytes()) {
             let (key, value) = entry.map_err(|e| ActError::Store(e.to_string()))?;
-            let key_str = String::from_utf8(key.to_vec())
-                .map_err(|e| ActError::Store(e.to_string()))?;
+            let key_str =
+                String::from_utf8(key.to_vec()).map_err(|e| ActError::Store(e.to_string()))?;
             result.push((key_str, value.to_vec()));
         }
         if is_rev {

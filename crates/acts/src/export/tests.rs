@@ -1157,25 +1157,18 @@ async fn export_manager_messages_offset_in_range() {
     });
 
     let rt = engine.runtime();
-    let (sig, s1) = engine.signal(0).double();
-    let count = Arc::new(Mutex::new(0));
+    let sig = engine.signal(());
     let chan = engine.channel_with_options(&ChannelOptions {
         ack: true,
         ..Default::default()
     });
     chan.on_message(move |e| {
         println!("message:{e:?}");
-        let mut count = count.lock().unwrap();
-        *count += 1;
-
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
-            s1.send(*count);
-        }
     });
     let pid = utils::longid();
     let proc = rt.create_proc(&pid, &model);
     rt.launch(&proc).unwrap();
-    let _ = sig.recv().await;
+    sig.timeout(100).await;
     assert_eq!(
         manager
             .msg()

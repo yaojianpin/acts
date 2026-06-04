@@ -217,6 +217,7 @@ impl Task {
             start_time: self.start_time(),
             end_time: self.end_time(),
             retry_times: 0,
+            timestamp: self.timestamp,
         }
     }
 

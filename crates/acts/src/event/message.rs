@@ -85,6 +85,9 @@ pub struct Message {
 
     /// record the message retry times
     pub retry_times: i32,
+
+    /// message timestamp in microseconds
+    pub timestamp: i64,
 }
 
 impl Message {
@@ -175,7 +178,7 @@ impl Message {
             create_time: utils::time::time_millis(),
             update_time: 0,
             retry_times: 0,
-            timestamp: utils::time::timestamp(),
+            timestamp: value.timestamp,
             status: data::MessageStatus::Created,
         }
     }
@@ -253,6 +256,7 @@ impl From<data::Message> for Message {
             start_time: v.start_time,
             end_time: v.end_time,
             retry_times: v.retry_times,
+            timestamp: v.timestamp,
         }
     }
 }
