@@ -51,6 +51,10 @@ impl Store {
             {
                 kv = Arc::new(super::NatsStore::open(&db.database_url)?);
             }
+            #[cfg(feature = "store-sled")]
+            {
+                kv = Arc::new(super::SledStore::open(&db.database_url)?);
+            }
         }
 
         Ok(Self {

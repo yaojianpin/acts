@@ -48,7 +48,7 @@ impl DbCollectionIden for Message {
         StoreIden::Messages
     }
     fn indexed_fields() -> &'static [&'static str] {
-        &["pid", "status", "tid"]
+        &["pid", "status", "tid", "timestamp"]
     }
 }
 

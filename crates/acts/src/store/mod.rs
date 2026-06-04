@@ -9,6 +9,8 @@ mod nats;
 mod postgres;
 #[cfg(feature = "store-redis")]
 mod redis;
+#[cfg(feature = "store-sled")]
+mod sled;
 #[cfg(feature = "store-sqlite")]
 mod sqlite;
 
@@ -40,6 +42,9 @@ pub use postgres::PostgresStore;
 #[cfg(feature = "store-redis")]
 #[allow(unused_imports)]
 pub use redis::RedisStore;
+#[cfg(feature = "store-sled")]
+#[allow(unused_imports)]
+pub use sled::SledStore;
 #[cfg(feature = "store-sqlite")]
 #[allow(unused_imports)]
 pub use sqlite::SqliteStore;

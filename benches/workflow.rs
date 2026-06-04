@@ -97,7 +97,7 @@ fn act(c: &mut Criterion) {
                     .start(&workflow.id, Vars::new())
                     .unwrap();
             }
-            sig.recv();
+            sig.recv().await;
             let time = time.lock().unwrap();
             *time
         })

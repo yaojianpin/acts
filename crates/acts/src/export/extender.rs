@@ -124,7 +124,7 @@ impl Extender {
     ///         Ok(())
     ///     }
     ///
-    ///     fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>> {
+    ///     fn scan_prefix(&self, prefix: &str, is_rev: bool) -> Result<Vec<(String, Vec<u8>)>> {
     ///         Ok(vec![])
     ///     }
     ///

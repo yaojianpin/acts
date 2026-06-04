@@ -998,32 +998,25 @@ async fn export_manager_messages_all() {
     });
 
     let rt = engine.runtime();
-    let (sig, s1) = engine.signal(0).double();
-    let count = Arc::new(Mutex::new(0));
+    let sig = engine.signal(());
     let chan = engine.channel_with_options(&ChannelOptions {
         ack: true,
         ..Default::default()
     });
     chan.on_message(move |e| {
         println!("message:{e:?}");
-        let mut count = count.lock().unwrap();
-        *count += 1;
-
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
-            s1.send(*count);
-        }
     });
     let pid = utils::longid();
     let proc = rt.create_proc(&pid, &model);
     rt.launch(&proc).unwrap();
-    let count = sig.recv().await;
+    sig.timeout(100).await;
     assert_eq!(
         manager
             .msg()
             .list(&Query::new().offset(0).limit(1000))
             .unwrap()
             .count,
-        count
+        3
     );
 }
 
@@ -1040,23 +1033,18 @@ async fn export_manager_messages_query() {
     let rt: Arc<crate::scheduler::Runtime> = engine.runtime();
     let (sig, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
-    let count = Arc::new(Mutex::new(0));
-    let count2 = count.clone();
     let chan = engine.channel_with_options(&ChannelOptions {
         ack: true,
         ..Default::default()
     });
     chan.on_message(move |e| {
         println!("message:{e:?}");
-        let mut count = count2.lock().unwrap();
-        *count += 1;
     });
     let pid = utils::longid();
     let proc = rt.create_proc(&pid, &model);
     rt.launch(&proc).unwrap();
     sig.timeout(100).await;
 
-    let count = count.lock().unwrap();
     assert_eq!(
         manager
             .msg()
@@ -1068,7 +1056,7 @@ async fn export_manager_messages_query() {
             )
             .unwrap()
             .count,
-        *count as usize
+        3
     );
 }
 
@@ -1083,21 +1071,18 @@ async fn export_manager_messages_order() {
     });
 
     let rt = engine.runtime();
-    let (sig, s1) = engine.signal(0).double();
+    let sig = engine.signal(());
     let chan = engine.channel_with_options(&ChannelOptions {
         ack: true,
         ..Default::default()
     });
     chan.on_message(move |e| {
         println!("message:{e:?}");
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
-            s1.close();
-        }
     });
     let pid = utils::longid();
     let proc = rt.create_proc(&pid, &model);
     rt.launch(&proc).unwrap();
-    sig.recv().await;
+    sig.timeout(100).await;
     assert_eq!(
         manager
             .msg()
