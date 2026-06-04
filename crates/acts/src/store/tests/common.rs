@@ -37,7 +37,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_load_by_limit() {
             let store = store();
 
@@ -64,7 +64,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_load_by_state() {
             let store = store();
 
@@ -113,7 +113,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_model_deploy_ok() {
             let store = store();
             let workflow = create_workflow();
@@ -122,7 +122,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_models() {
             let store = store();
 
@@ -140,7 +140,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_model_get() {
             let store = store();
             let mut workflow = create_workflow();
@@ -152,7 +152,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_model_query_by_id() {
             let store = store();
             let model = Model {
@@ -173,7 +173,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_model_query_by_offset_count() {
             let store = store();
             let create_time = 100;
@@ -219,7 +219,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_model_query_by_cond_and() {
             let store = store();
             let create_time = 200;
@@ -259,7 +259,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_model_query_by_cond_or() {
             let store = store();
             let create_time = 300;
@@ -308,7 +308,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_model_query_by_order() {
             let store = store();
             let create_time = 400;
@@ -354,7 +354,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_model_remove() {
             let store = store();
 
@@ -372,7 +372,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_model_deploy_id_error() {
             let store = store();
             let mut workflow = create_workflow();
@@ -383,7 +383,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_proc_create() {
             let store = store();
             let id = utils::longid();
@@ -398,7 +398,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_proc_find() {
             let store = store();
 
@@ -411,7 +411,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_proc_query_by_id() {
             let store = store();
 
@@ -436,7 +436,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_proc_query_by_offset_count() {
             let store = store();
             let mid = utils::longid();
@@ -474,7 +474,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_proc_query_by_cond_and() {
             let store = store();
             let mid = utils::longid();
@@ -512,7 +512,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_proc_query_by_cond_or() {
             let store = store();
             let mid = utils::longid();
@@ -561,7 +561,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_proc_query_by_order() {
             let store = store();
             let mid = utils::longid();
@@ -599,7 +599,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_proc_update() {
             let store = store();
 
@@ -618,7 +618,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_proc_remove() {
             let store = store();
 
@@ -637,7 +637,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_task_create() {
             let store = store();
 
@@ -645,7 +645,7 @@ macro_rules! gen_store_tests {
             let tid = utils::shortid();
             let nid = utils::shortid();
             let task = Task {
-                id: format!("{pid}_{tid}"),
+                id: format!("{pid}{}{tid}", utils::consts::KEY_SEP),
                 name: "test".to_string(),
                 prev: None,
                 kind: NodeKind::Step.to_string(),
@@ -668,14 +668,14 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_task_query_by_id() {
             let store = store();
 
             let pid = utils::longid();
             let tid = utils::shortid();
             let task = Task {
-                id: format!("{pid}_{tid}"),
+                id: format!("{pid}{}{tid}", utils::consts::KEY_SEP),
                 name: "test".to_string(),
                 prev: None,
                 kind: NodeKind::Step.to_string(),
@@ -699,7 +699,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_task_query_by_offset_count() {
             let store = store();
             let pid = utils::longid();
@@ -741,7 +741,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_task_query_by_cond_and() {
             let store = store();
             let pid = utils::longid();
@@ -783,7 +783,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_task_query_by_cond_or() {
             let store = store();
             let pid = utils::longid();
@@ -839,7 +839,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_task_query_by_order() {
             let store = store();
             let pid = utils::longid();
@@ -881,7 +881,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_task_update() {
             let store = store();
 
@@ -889,7 +889,7 @@ macro_rules! gen_store_tests {
             let tid = utils::shortid();
             let nid = utils::shortid();
             let task = Task {
-                id: format!("{pid}_{tid}"),
+                id: format!("{pid}{}{tid}", utils::consts::KEY_SEP),
                 name: "test".to_string(),
                 prev: None,
                 kind: NodeKind::Step.to_string(),
@@ -916,7 +916,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_task_remove() {
             let store = store();
 
@@ -924,7 +924,7 @@ macro_rules! gen_store_tests {
             let tid = utils::shortid();
             let nid = utils::shortid();
             let task = Task {
-                id: format!("{pid}_{tid}"),
+                id: format!("{pid}{}{tid}", utils::consts::KEY_SEP),
                 name: "test".to_string(),
                 prev: None,
                 kind: NodeKind::Step.to_string(),
@@ -947,14 +947,14 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_message_create() {
             let store = store();
 
             let pid = utils::longid();
             let tid = utils::shortid();
             let msg = Message {
-                id: format!("{pid}_{tid}"),
+                id: format!("{pid}{}{tid}", utils::consts::KEY_SEP),
                 name: "test".to_string(),
                 pid: pid.clone(),
                 tid: tid.clone(),
@@ -986,14 +986,14 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_message_query_by_id() {
             let store = store();
 
             let pid = utils::longid();
             let tid = utils::shortid();
             let msg = Message {
-                id: format!("{pid}_{tid}"),
+                id: format!("{pid}{}{tid}", utils::consts::KEY_SEP),
                 name: "test".to_string(),
                 pid: pid.clone(),
                 tid: tid.clone(),
@@ -1026,7 +1026,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_message_query_by_offset_count() {
             let store = store();
 
@@ -1079,7 +1079,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_message_query_by_cond_and() {
             let store = store();
 
@@ -1132,7 +1132,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_message_query_by_cond_or() {
             let store = store();
 
@@ -1207,7 +1207,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_message_query_by_order() {
             let store = store();
 
@@ -1260,14 +1260,14 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_message_update() {
             let store = store();
 
             let pid = utils::longid();
             let tid = utils::shortid();
             let msg = Message {
-                id: format!("{pid}_{tid}"),
+                id: format!("{pid}{}{tid}", utils::consts::KEY_SEP),
                 name: "test".to_string(),
                 pid: pid.clone(),
                 tid: tid.clone(),
@@ -1307,14 +1307,14 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_message_remove() {
             let store = store();
 
             let pid = utils::longid();
             let tid = utils::shortid();
             let msg = Message {
-                id: format!("{pid}_{tid}"),
+                id: format!("{pid}{}{tid}", utils::consts::KEY_SEP),
                 name: "test".to_string(),
                 pid: pid.clone(),
                 tid: tid.clone(),
@@ -1346,7 +1346,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_package_create() {
             let store = store();
 
@@ -1375,7 +1375,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_package_query_by_id() {
             let store = store();
 
@@ -1404,7 +1404,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_package_query_by_offset_count() {
             let store = store();
             let name = utils::shortid();
@@ -1455,7 +1455,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_package_query_by_cond_and() {
             let store = store();
             let name = utils::shortid();
@@ -1502,7 +1502,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_package_query_by_cond_or() {
             let store = store();
             let name = utils::shortid();
@@ -1563,7 +1563,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_package_query_by_order() {
             let store = store();
             let name = utils::shortid();
@@ -1616,7 +1616,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_package_update() {
             let store = store();
 
@@ -1650,7 +1650,7 @@ macro_rules! gen_store_tests {
         }
 
         #[tokio::test(flavor = "multi_thread")]
-        #[serial]
+        #[serial(store_tests)]
         async fn store_package_remove() {
             let store = store();
 

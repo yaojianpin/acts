@@ -35,6 +35,12 @@ pub const TASK_ROOT_TID: &str = "$";
 pub const PROCESS_ID: &str = "pid";
 pub const MODEL_ID: &str = "mid";
 
+/// Key delimiter for constructing store keys and composite IDs.
+/// Must be valid across all backends (NATS KV, SQL LIKE, Redis).
+/// NATS KV allows: [-/_=\.a-zA-Z0-9]
+/// SQL LIKE wildcards are _ and %, so these must be escaped or avoided.
+pub const KEY_SEP: &str = "-";
+
 #[allow(dead_code)]
 pub const ACTS_STORE_NAME: &str = "acts_store";
 

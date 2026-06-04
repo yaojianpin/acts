@@ -4,10 +4,16 @@ use crate::{
 };
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{Connection, Row};
-use std::{
-    future::Future,
-    sync::{Arc, Mutex},
-};
+use std::sync::{Arc, Mutex};
+
+/// Escape special characters in a string for SQL LIKE pattern matching.
+/// Escapes backslash, percent, and underscore to prevent them from being
+/// treated as wildcards.
+fn escape_like(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('%', "\\%")
+        .replace('_', "\\_")
+}
 
 pub struct SqliteStore {
     conn: Arc<Mutex<sqlx::SqliteConnection>>,
@@ -111,14 +117,15 @@ impl KvStore for SqliteStore {
     }
 
     #[allow(clippy::await_holding_lock)]
-    fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>> {
-        let pattern = format!("{}%", prefix);
+    fn scan_prefix(&self, prefix: &str, is_rev: bool) -> Result<Vec<(String, Vec<u8>)>> {
+        let pattern = format!("{}%", escape_like(prefix));
         let conn = self.conn.clone();
         sync::block_on(async move {
             let mut conn = conn.lock().unwrap();
+            let order = if is_rev { "DESC" } else { "ASC" };
             let rows = sqlx::query(&format!(
-                "SELECT key, value FROM {} WHERE key LIKE ?",
-                consts::ACTS_STORE_NAME
+                "SELECT key, value FROM {} WHERE key LIKE ? ORDER BY key {}",
+                consts::ACTS_STORE_NAME, order
             ))
             .bind(&pattern)
             .fetch_all(&mut *conn)

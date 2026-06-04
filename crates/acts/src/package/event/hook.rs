@@ -71,7 +71,8 @@ impl ActPackageFn for HookEventPackage {
 
         let params = self.0.clone().unwrap_or_default();
         rt.start(&workflow, params)?;
-        let ret = utils::sync::block_on(s.recv());
+        let s_clone = s.clone();
+        let ret = utils::sync::block_on(async move { s_clone.recv().await });
         Ok(Some(ret))
     }
 }

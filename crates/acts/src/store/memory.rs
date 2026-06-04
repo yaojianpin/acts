@@ -37,12 +37,16 @@ impl KvStore for MemoryStore {
         Ok(())
     }
 
-    fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>> {
-        Ok(self
+    fn scan_prefix(&self, prefix: &str, is_rev: bool) -> Result<Vec<(String, Vec<u8>)>> {
+        let mut entries: Vec<(String, Vec<u8>)> = self
             .data
             .iter()
             .filter(|entry| entry.key().starts_with(prefix))
             .map(|entry| (entry.key().clone(), entry.value().clone()))
-            .collect())
+            .collect();
+        if is_rev {
+            entries.reverse();
+        }
+        Ok(entries)
     }
 }

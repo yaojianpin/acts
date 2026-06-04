@@ -36,9 +36,9 @@ impl NatsStore {
 impl KvStore for NatsStore {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         let key = key.to_string();
-        sync::block_on(async {
-            self.kv
-                .get(&key)
+        let kv = self.kv.clone();
+        sync::block_on(async move {
+            kv.get(&key)
                 .await
                 .map(|entry| entry.map(|e| e.to_vec()))
                 .map_err(|e| ActError::Store(e.to_string()))
@@ -59,17 +59,17 @@ impl KvStore for NatsStore {
     fn delete(&self, key: &str) -> Result<()> {
         let key = key.to_string();
         let kv = self.kv.clone();
-        sync::block_on(async {
+        sync::block_on(async move {
             kv.delete(&key)
                 .await
                 .map_err(|e| ActError::Store(e.to_string()))
         })
     }
 
-    fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>> {
+    fn scan_prefix(&self, prefix: &str, is_rev: bool) -> Result<Vec<(String, Vec<u8>)>> {
         let prefix = prefix.to_string();
         let kv = self.kv.clone();
-        sync::block_on(async {
+        sync::block_on(async move {
             let keys = kv
                 .keys()
                 .await
@@ -79,8 +79,7 @@ impl KvStore for NatsStore {
             while let Some(key) = keys.next().await {
                 let key = key.map_err(|e| ActError::Store(e.to_string()))?;
                 if key.starts_with(&prefix) {
-                    if let Some(entry) = self
-                        .kv
+                    if let Some(entry) = kv
                         .get(&key)
                         .await
                         .map_err(|e| ActError::Store(e.to_string()))?
@@ -88,6 +87,9 @@ impl KvStore for NatsStore {
                         result.push((key, entry.to_vec()));
                     }
                 }
+            }
+            if is_rev {
+                result.reverse();
             }
             Ok(result)
         })

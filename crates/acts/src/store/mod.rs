@@ -84,7 +84,7 @@ pub trait KvStore: Send + Sync {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>>;
     fn put(&self, key: &str, value: Vec<u8>) -> Result<()>;
     fn delete(&self, key: &str) -> Result<()>;
-    fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>>;
+    fn scan_prefix(&self, prefix: &str, is_rev: bool) -> Result<Vec<(String, Vec<u8>)>>;
 }
 
 pub trait DbCollection: Send + Sync {

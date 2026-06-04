@@ -3,6 +3,7 @@ use crate::store::{
     DbCollection, DbCollectionIden, Expr, ExprOp, Filter, FilterExpr, KvStore, PageData, Query,
     Sort, query::FilterType,
 };
+use crate::utils::consts::KEY_SEP;
 use crate::{ActError, Result};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value as JsonValue;
@@ -30,7 +31,7 @@ impl<T> KvCollection<T> {
     }
 
     fn data_key(&self, id: &str) -> String {
-        format!("{}_id_{}", self.prefix, id)
+        format!("{}{}id{}{}", self.prefix, KEY_SEP, KEY_SEP, id)
     }
 
     fn index_keys(&self, json: &JsonValue, id: &str) -> Vec<String>
@@ -45,7 +46,10 @@ impl<T> KvCollection<T> {
         for field in fields {
             if let Some(val) = json.get(field) {
                 let val_str = json_value_to_key_str(val);
-                keys.push(format!("{}_{}_{}_{}", self.prefix, field, val_str, id));
+                keys.push(format!(
+                    "{}{}{}{}{}{}{}",
+                    self.prefix, KEY_SEP, field, KEY_SEP, val_str, KEY_SEP, id
+                ));
             }
         }
         keys
@@ -57,6 +61,79 @@ impl<T> KvCollection<T> {
             .get(&key)?
             .map(|data| serde_json::from_slice(&data).map_err(map_db_err))
             .transpose()
+    }
+
+    /// Compute the set of IDs matching a single expression.
+    fn expr_ids(&self, expr: &Expr, indexed: &[&str], is_rev: bool) -> Result<HashSet<String>> {
+        if expr.op == ExprOp::EQ && indexed.contains(&expr.key.as_str()) {
+            // Use index scan: keys are {prefix}-{field}-{value}-{id}
+            let value_str = json_value_to_key_str(&expr.value);
+            let scan_key = format!(
+                "{}{}{}{}{}{}",
+                self.prefix, KEY_SEP, expr.key, KEY_SEP, value_str, KEY_SEP
+            );
+            let entries = self.kv.scan_prefix(&scan_key, is_rev)?;
+            let ids: HashSet<String> = entries
+                .iter()
+                .filter_map(|(key, _)| {
+                    // Key format: {prefix}-{field}-{value}-{id}
+                    key.strip_prefix(&scan_key).map(|s| s.to_string())
+                })
+                .collect();
+            Ok(ids)
+        } else {
+            // Scan all data entries and filter in-memory
+            let scan_key = format!("{}{}id{}", self.prefix, KEY_SEP, KEY_SEP);
+            let entries = self.kv.scan_prefix(&scan_key, is_rev)?;
+            let ids: HashSet<String> = entries
+                .iter()
+                .filter_map(|(_, bytes)| {
+                    let v: JsonValue = serde_json::from_slice(bytes).ok()?;
+                    let id = v.get("id")?.as_str()?.to_string();
+                    if let Some(field_val) = v.get(&expr.key) {
+                        if expr.op(field_val, &expr.value) {
+                            return Some(id);
+                        }
+                    }
+                    None
+                })
+                .collect();
+            Ok(ids)
+        }
+    }
+
+    /// Walk a single FilterExpr node and return matching IDs.
+    fn filter_expr_ids(
+        &self,
+        filter_expr: &FilterExpr,
+        indexed: &[&str],
+        is_rev: bool,
+    ) -> Result<HashSet<String>> {
+        match filter_expr {
+            FilterExpr::Expr(expr) => self.expr_ids(expr, indexed, is_rev),
+            FilterExpr::Filter(filter) => self.filter_ids(filter, indexed, is_rev),
+        }
+    }
+
+    /// Walk the filter tree and combine ID sets using AND/OR.
+    fn filter_ids(
+        &self,
+        filter: &Filter,
+        indexed: &[&str],
+        is_rev: bool,
+    ) -> Result<HashSet<String>> {
+        let mut result: Option<HashSet<String>> = None;
+        for cond in &filter.exprs {
+            let ids = self.filter_expr_ids(cond, indexed, is_rev)?;
+            result = Some(match result {
+                None => ids,
+                Some(existing) => match filter.r#type {
+                    FilterType::And => existing.intersection(&ids).cloned().collect(),
+                    FilterType::Or => existing.union(&ids).cloned().collect(),
+                },
+            });
+        }
+        Ok(result.unwrap_or_default())
     }
 }
 
@@ -90,59 +167,56 @@ where
     }
 
     fn query(&self, q: &Query) -> crate::Result<PageData<Self::Item>> {
-        // first, query all indexded data by filter
         let indexed = T::indexed_fields();
-        let scan_prefix = if let Some(cond) = &q.filter {
-            find_index_hint(cond, indexed).map_or_else(
-                || format!("{}_id_", self.prefix),
-                |(field, value)| {
-                    format!("{}_{}_{}", self.prefix, field, json_value_to_key_str(value))
-                },
-            )
+
+        // Determine is_rev from the first order_by key direction
+        let is_rev = q
+            .get_order_by()
+            .first()
+            .map(|ob| ob.order == Sort::Desc)
+            .unwrap_or(false);
+
+        // Step 1 & 2: Compute matching ID set from filter and combine with AND/OR
+        let id_set: HashSet<String> = if let Some(filter) = &q.filter {
+            self.filter_ids(filter, indexed, is_rev)?
         } else {
-            format!("{}_id_", self.prefix)
-        };
-
-        let all = self.kv.scan_prefix(&scan_prefix)?;
-
-        // Deserialize into (key, doc_map) pairs
-        let docs: Vec<(String, HashMap<String, JsonValue>)> = all
-            .iter()
-            .filter_map(|(key, bytes)| {
-                serde_json::from_slice::<JsonValue>(bytes)
-                    .ok()
-                    .and_then(|v| {
-                        v.as_object().map(|obj| {
-                            let map: HashMap<String, JsonValue> =
-                                obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                            (key.clone(), map)
-                        })
-                    })
-            })
-            .collect();
-
-        // Apply filter
-        let filtered: Vec<&HashMap<String, JsonValue>> = if let Some(cond) = &q.filter {
-            let refs: Vec<(&String, &HashMap<String, JsonValue>)> =
-                docs.iter().map(|(k, v)| (k, v)).collect();
-            let matching_keys = cond.calc(&self.prefix, &refs)?;
-            docs.iter()
-                .filter_map(|(k, v)| {
-                    if matching_keys.contains(k.as_bytes()) {
-                        Some(v)
-                    } else {
-                        None
-                    }
+            // No filter – scan all data entries to collect all IDs
+            let scan_key = format!("{}{}id{}", self.prefix, KEY_SEP, KEY_SEP);
+            let entries = self.kv.scan_prefix(&scan_key, is_rev)?;
+            entries
+                .iter()
+                .filter_map(|(_, bytes)| {
+                    let v: JsonValue = serde_json::from_slice(bytes).ok()?;
+                    v.get("id")?.as_str().map(|s| s.to_string())
                 })
                 .collect()
-        } else {
-            docs.iter().map(|(_, v)| v).collect()
         };
 
-        // Sort
-        let mut sorted: Vec<&HashMap<String, JsonValue>> = filtered;
+        // Step 3: Sort the IDs and apply pagination
+        let mut ids: Vec<String> = id_set.into_iter().collect();
+        if is_rev {
+            ids.sort_by(|a, b| b.cmp(a));
+        } else {
+            ids.sort();
+        }
+
+        let count = ids.len();
+        let page_ids: Vec<String> = ids.into_iter().skip(q.offset).take(q.limit).collect();
+
+        // Step 4: Fetch full data for paginated IDs and sort by order_by
+        let mut docs: Vec<HashMap<String, JsonValue>> = Vec::with_capacity(page_ids.len());
+        for id in &page_ids {
+            if let Some(json) = self.read_json(id)? {
+                if let Some(obj) = json.as_object() {
+                    let map: HashMap<String, JsonValue> =
+                        obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                    docs.push(map);
+                }
+            }
+        }
+
         if !q.get_order_by().is_empty() {
-            sorted.sort_by(|a, b| {
+            docs.sort_by(|a, b| {
                 let mut ret = Ordering::Equal;
                 for ob in q.get_order_by() {
                     let cmp = a
@@ -159,14 +233,11 @@ where
             });
         }
 
-        let count = sorted.len();
         let page_count = count.div_ceil(q.limit);
         let page_num = q.offset.checked_div(q.limit).map_or(1, |n| n + 1);
 
-        let rows: Vec<T> = sorted
+        let rows: Vec<T> = docs
             .iter()
-            .skip(q.offset)
-            .take(q.limit)
             .map(|row| map_to_model(row))
             .collect::<Result<Vec<T>>>()?;
 
@@ -189,7 +260,7 @@ where
 
         // Write index entries
         for idx_key in self.index_keys(&json, &id) {
-            self.kv.put(&idx_key, bytes.clone())?;
+            self.kv.put(&idx_key, vec![])?;
         }
 
         Ok(true)
@@ -245,53 +316,6 @@ fn map_to_model<T: DeserializeOwned>(map: &HashMap<String, JsonValue>) -> crate:
         obj.insert(k.to_string(), v.clone());
     }
     serde_json::from_value(JsonValue::Object(obj)).map_err(map_db_err)
-}
-
-/// Walk the filter tree looking for an EQ condition on an indexed field.
-/// Only returns a hint for AND-type filters (a single index prefix cannot satisfy OR).
-fn find_index_hint<'a>(filter: &'a Filter, indexed: &[&str]) -> Option<(&'a str, &'a JsonValue)> {
-    if filter.r#type != FilterType::And {
-        return None;
-    }
-    for expr in &filter.exprs {
-        match expr {
-            FilterExpr::Expr(e) if e.op == ExprOp::EQ && indexed.contains(&e.key.as_str()) => {
-                return Some((&e.key, &e.value));
-            }
-            FilterExpr::Filter(sub) => {
-                if let Some(hint) = find_index_hint(sub, indexed) {
-                    return Some(hint);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-impl Filter {
-    pub fn calc(
-        &self,
-        name: &str,
-        iters: &[(&String, &HashMap<String, serde_json::Value>)],
-    ) -> crate::Result<HashSet<Box<[u8]>>> {
-        let mut result = HashSet::new();
-
-        for cond in &self.exprs {
-            let v = cond.calc(name, iters)?;
-            if result.is_empty() {
-                result = v;
-            } else {
-                match self.r#type {
-                    FilterType::And => {
-                        result = result.intersection(&v).cloned().collect::<HashSet<_>>()
-                    }
-                    FilterType::Or => result = result.union(&v).cloned().collect::<HashSet<_>>(),
-                }
-            }
-        }
-        Ok(result)
-    }
 }
 
 impl Expr {
@@ -354,35 +378,6 @@ impl Expr {
                 };
                 l.to_string().contains(value)
             }
-        }
-    }
-}
-
-impl FilterExpr {
-    pub fn calc(
-        &self,
-        name: &str,
-        iters: &[(&String, &HashMap<String, serde_json::Value>)],
-    ) -> crate::Result<HashSet<Box<[u8]>>> {
-        let get_expr_ret = |expr: &Expr| -> crate::Result<HashSet<Box<[u8]>>> {
-            let mut result = HashSet::new();
-            for (k, v) in iters {
-                let prop_value = v.get(expr.key()).ok_or(ActError::Store(format!(
-                    "cannot find key `{}` in {}",
-                    expr.key(),
-                    name
-                )))?;
-                let cond_value = expr.value();
-
-                if expr.op(prop_value, cond_value) {
-                    result.insert(k.as_bytes().to_vec().into_boxed_slice());
-                }
-            }
-            Ok(result)
-        };
-        match self {
-            FilterExpr::Filter(cond) => cond.calc(name, iters),
-            FilterExpr::Expr(expr) => get_expr_ret(expr),
         }
     }
 }

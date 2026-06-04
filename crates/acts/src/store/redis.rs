@@ -44,7 +44,7 @@ impl KvStore for RedisStore {
         conn.del(key).map_err(|e| ActError::Store(e.to_string()))
     }
 
-    fn scan_prefix(&self, prefix: &str) -> Result<Vec<(String, Vec<u8>)>> {
+    fn scan_prefix(&self, prefix: &str, is_rev: bool) -> Result<Vec<(String, Vec<u8>)>> {
         let mut conn = self
             .conn
             .lock()
@@ -60,6 +60,9 @@ impl KvStore for RedisStore {
             if let Some(v) = val {
                 result.push((key, v));
             }
+        }
+        if is_rev {
+            result.reverse();
         }
         Ok(result)
     }

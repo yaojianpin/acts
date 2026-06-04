@@ -1,13 +1,13 @@
 use nanoid::nanoid;
 
+use crate::utils::consts::KEY_SEP;
+
 const ALPHABETS: [char; 62] = [
     '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i',
     'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', 'A', 'B',
     'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U',
     'V', 'W', 'X', 'Y', 'Z',
 ];
-
-const ID_SEP: &str = "_";
 
 #[allow(unused)]
 pub fn longid() -> String {
@@ -31,7 +31,7 @@ impl<'a> Id<'a> {
 
     #[allow(unused)]
     pub fn from(id: &'a str) -> Self {
-        let parts: Vec<&str> = id.split(ID_SEP).collect();
+        let parts: Vec<&str> = id.split(KEY_SEP).collect();
         let pid = parts.first().unwrap();
         let mut tid = "";
         if parts.len() > 1 {
@@ -44,7 +44,7 @@ impl<'a> Id<'a> {
     pub fn id(&self) -> String {
         let mut id = String::from(self.pid);
         if !self.tid.is_empty() {
-            id.push_str(ID_SEP);
+            id.push_str(KEY_SEP);
             id.push_str(self.tid);
         }
 
