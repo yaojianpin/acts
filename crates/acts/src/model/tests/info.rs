@@ -23,6 +23,7 @@ fn model_info_package() {
         resources: "[]".to_string(),
         catalog: crate::package::ActPackageCatalog::Core,
         built_in: false,
+        v: 0,
     };
     let info: PackageInfo = package.into();
     assert_eq!(info.id, package.id);
@@ -53,6 +54,7 @@ fn model_info_proc() {
         model: "{}".to_string(),
         env: "".to_string(),
         err: None,
+        v: 0,
     };
     let info: ProcInfo = proc.into();
     assert_eq!(info.id, proc.id);
@@ -85,6 +87,7 @@ fn model_info_task() {
         timestamp: 0,
         data: "{}".to_string(),
         err: None,
+        v: 0,
     };
     let info: TaskInfo = task.clone().into();
     assert_eq!(info.id, task.tid);
@@ -111,6 +114,7 @@ fn model_info_model() {
         update_time: 0,
         data: "{}".to_string(),
         timestamp: 0,
+        v: 0,
     };
     let info: ModelInfo = model.clone().into();
     assert_eq!(info.id, model.id);
@@ -140,6 +144,7 @@ fn model_info_package_arr_to_value() {
         update_time: 0,
         timestamp: 0,
         built_in: false,
+        v: 0,
     };
     let info: PackageInfo = package.into();
 
@@ -197,6 +202,7 @@ fn model_info_proc_arr_to_value() {
         model: "{}".to_string(),
         env: "".to_string(),
         err: None,
+        v: 0,
     };
     let info: ProcInfo = proc.into();
 
@@ -246,6 +252,7 @@ fn model_info_task_arr_to_value() {
         timestamp: 0,
         data: "{}".to_string(),
         err: None,
+        v: 0,
     };
     let info: TaskInfo = task.clone().into();
 
@@ -285,6 +292,7 @@ fn model_info_model_arr_to_value() {
         update_time: 0,
         data: "{}".to_string(),
         timestamp: 0,
+        v: 0,
     };
 
     let arr: Vec<ModelInfo> = vec![model.clone().into()];

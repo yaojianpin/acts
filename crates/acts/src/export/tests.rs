@@ -169,6 +169,7 @@ async fn export_executor_start_dup_pid_error() {
         model: model.to_json().unwrap(),
         env: "{}".to_string(),
         err: None,
+        v: 0,
     };
     store.procs().create(&proc).expect("create process");
     engine
@@ -1348,6 +1349,7 @@ async fn export_manager_packages_count() {
             update_time: 0,
             timestamp: utils::time::timestamp(),
             built_in: false,
+            v: 0,
         };
         manager.pack().publish(&package).unwrap();
     }
@@ -1390,6 +1392,7 @@ async fn export_manager_packages_order() {
             update_time: 0,
             timestamp: utils::time::timestamp(),
             built_in: false,
+            v: 0,
         };
         manager.pack().publish(&package).unwrap();
     }
@@ -1430,6 +1433,7 @@ async fn export_manager_packages_query() {
             update_time: 0,
             timestamp: utils::time::timestamp(),
             built_in: false,
+            v: 0,
         };
         manager.pack().publish(&package).unwrap();
     }
@@ -1466,6 +1470,7 @@ async fn export_manager_packages_offset_in_range() {
             update_time: 0,
             timestamp: utils::time::timestamp(),
             built_in: false,
+            v: 0,
         };
         manager.pack().publish(&package).unwrap();
     }
@@ -1509,6 +1514,7 @@ async fn export_manager_packages_offset_out_range() {
             update_time: 0,
             timestamp: utils::time::timestamp(),
             built_in: false,
+            v: 0,
         };
         manager.pack().publish(&package).unwrap();
     }
@@ -1545,6 +1551,7 @@ async fn export_manager_package_rm() {
         update_time: 0,
         timestamp: utils::time::timestamp(),
         built_in: false,
+        v: 0,
     };
     manager.pack().publish(&package).unwrap();
     assert!(manager.pack().rm(&package.id).unwrap());

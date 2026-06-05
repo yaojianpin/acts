@@ -2,106 +2,155 @@ use acts::{Engine, MessageState, Vars, Workflow};
 use criterion::async_executor::FuturesExecutor;
 use criterion::*;
 use std::sync::{Arc, Mutex};
-use tokio::{
-    runtime::Runtime,
-    time::{Duration, Instant},
-};
 
+/// Benchmark: parse workflow YAML — average time + QPS.
 fn load(c: &mut Criterion) {
-    c.bench_function("load", |b| {
+    let mut group = c.benchmark_group("load");
+    group.throughput(Throughput::Elements(1));
+    group.sample_size(10);
+
+    group.bench_function("from_yml", |b| {
         let text = include_str!("./start.yml");
-        b.iter(move || {
-            Workflow::from_yml(text).unwrap();
+        b.iter_custom(move |iters| {
+            let start = std::time::Instant::now();
+            for _ in 0..iters {
+                Workflow::from_yml(text).unwrap();
+            }
+            start.elapsed()
         })
     });
+
+    group.finish();
 }
 
+/// Benchmark: deploy workflow — average time + QPS.
 fn deploy(c: &mut Criterion) {
-    c.bench_function("deploy", |b| {
-        let rt = Runtime::new().unwrap();
-        rt.block_on(async move {
-            let engine = Engine::new().start().expect("failed to create engine");
-            let text = include_str!("./start.yml");
-            let workflow = Workflow::from_yml(text).unwrap();
-            b.to_async(FuturesExecutor).iter(|| async {
-                engine.executor().model().deploy(&workflow).unwrap();
-            });
-        });
-    });
-}
+    let mut group = c.benchmark_group("deploy");
+    group.throughput(Throughput::Elements(1));
+    group.sample_size(10);
 
-fn start(c: &mut Criterion) {
-    c.bench_function("start", |b| {
-        let rt = Runtime::new().unwrap();
-        rt.block_on(async move {
-            let engine = Engine::new().start().expect("failed to start engine");
-            let text = include_str!("./start.yml");
-            let workflow = Workflow::from_yml(text).unwrap();
-            engine.executor().model().deploy(&workflow).unwrap();
-            b.to_async(FuturesExecutor).iter(|| async {
-                engine
-                    .executor()
-                    .proc()
-                    .start(&workflow.id, Vars::new())
-                    .unwrap();
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async move {
+        let engine = Engine::new().start().expect("failed to start engine");
+        let text = include_str!("./start.yml");
+        let workflow = Workflow::from_yml(text).unwrap();
+
+        group.bench_function("model", |b| {
+            let engine = engine.clone();
+            let workflow = workflow.clone();
+            b.to_async(FuturesExecutor).iter_custom(move |iters| {
+                let engine = engine.clone();
+                let workflow = workflow.clone();
+                async move {
+                    let start = std::time::Instant::now();
+                    for _ in 0..iters {
+                        engine.executor().model().deploy(&workflow).unwrap();
+                    }
+                    start.elapsed()
+                }
             })
         });
+        group.finish();
     });
 }
 
-fn act(c: &mut Criterion) {
-    c.bench_function("act", |b| {
-        let rt = Runtime::new().unwrap();
+/// Benchmark: start process — average time + QPS.
+fn start(c: &mut Criterion) {
+    let mut group = c.benchmark_group("start");
+    group.throughput(Throughput::Elements(1));
+    group.sample_size(10);
 
-        b.to_async(rt).iter_custom(|iters| async move {
-            // println!("act: iters={iters}");
-            let engine = Engine::new().start().expect("failed to start engine");
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async move {
+        let engine = Engine::new().start().expect("failed to start engine");
+        let text = include_str!("./start.yml");
+        let workflow = Workflow::from_yml(text).unwrap();
+        engine.executor().model().deploy(&workflow).unwrap();
 
-            let (s, sig) = engine.signal(()).double();
-            let text = include_str!("./act.yml");
-            let workflow = Workflow::from_yml(text).unwrap();
-            engine.executor().model().deploy(&workflow).unwrap();
-
-            let time = Arc::new(Mutex::new(Duration::new(0, 0)));
-            let count = Arc::new(Mutex::new(0));
-            let t = time.clone();
-            let e2 = engine.clone();
-            let chan = engine.channel();
-            chan.on_message(move |e| {
-                if e.is_key("act1") && e.is_state(MessageState::Created) {
-                    let start = Instant::now();
-                    let eng = engine.clone();
-                    let pid = e.pid.clone();
-                    let tid = e.tid.clone();
-                    tokio::spawn(async move {
-                        eng.executor()
-                            .act()
-                            .complete(&pid, &tid, Vars::new())
+        group.bench_function("proc", |b| {
+            let engine = engine.clone();
+            let workflow_id = workflow.id.clone();
+            b.to_async(FuturesExecutor).iter_custom(move |iters| {
+                let engine = engine.clone();
+                let workflow_id = workflow_id.clone();
+                async move {
+                    let start = std::time::Instant::now();
+                    for _ in 0..iters {
+                        engine
+                            .executor()
+                            .proc()
+                            .start(&workflow_id, Vars::new())
                             .unwrap();
-                    });
-                    let elapsed = start.elapsed();
-                    *t.lock().unwrap() += elapsed;
-
-                    let mut count = count.lock().unwrap();
-                    *count += 1;
-                    if *count >= iters {
-                        s.close();
                     }
+                    start.elapsed()
                 }
-            });
+            })
+        });
+        group.finish();
+    });
+}
 
-            for _ in 0..iters {
-                let _ = e2
-                    .executor()
-                    .proc()
-                    .start(&workflow.id, Vars::new())
-                    .unwrap();
+/// Benchmark: act().complete() — average time + QPS.
+///
+/// Pre-creates tasks via proc.start(), then only times the complete() calls.
+fn act(c: &mut Criterion) {
+    let mut group = c.benchmark_group("act");
+    group.throughput(Throughput::Elements(1));
+    group.sample_size(10);
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let text = include_str!("./act.yml");
+    let workflow = Workflow::from_yml(text).unwrap();
+
+    group.bench_function("act", |b| {
+        let workflow = workflow.clone();
+        b.to_async(&rt).iter_custom(move |iters| {
+            let workflow = workflow.clone();
+            async move {
+                let engine = Engine::new().start().expect("failed to start engine");
+                engine.executor().model().deploy(&workflow).unwrap();
+
+                let (s, sig) = engine.signal(()).double();
+                let tasks = Arc::new(Mutex::new(Vec::new()));
+                let tasks2 = tasks.clone();
+
+                let chan = engine.channel();
+                chan.on_message(move |e| {
+                    if e.is_key("act1") && e.is_state(MessageState::Created) {
+                        let mut t = tasks2.lock().unwrap();
+                        t.push((e.pid.clone(), e.tid.clone()));
+                        if t.len() >= iters as usize {
+                            s.close();
+                        }
+                    }
+                });
+
+                // Pre-create tasks
+                for _ in 0..iters {
+                    engine
+                        .executor()
+                        .proc()
+                        .start(&workflow.id, Vars::new())
+                        .unwrap();
+                }
+                sig.recv().await;
+
+                let tasks = tasks.lock().unwrap();
+
+                // Only time the act().complete() calls
+                let bench_start = std::time::Instant::now();
+                for (pid, tid) in tasks.iter() {
+                    engine
+                        .executor()
+                        .act()
+                        .complete(pid, tid, Vars::new())
+                        .unwrap();
+                }
+                bench_start.elapsed()
             }
-            sig.recv().await;
-            let time = time.lock().unwrap();
-            *time
         })
     });
+    group.finish();
 }
 
 criterion_group!(benches, load, deploy, start, act);

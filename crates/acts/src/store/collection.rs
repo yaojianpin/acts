@@ -7,13 +7,7 @@ use crate::utils::consts::KEY_SEP;
 use crate::{ActError, Result};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value as JsonValue;
-use std::{
-    cmp::Ordering,
-    collections::{HashMap, HashSet},
-    fmt::Debug,
-    marker::PhantomData,
-    sync::Arc,
-};
+use std::{cmp::Ordering, collections::HashSet, fmt::Debug, marker::PhantomData, sync::Arc};
 
 pub struct KvCollection<T> {
     prefix: String,
@@ -157,13 +151,12 @@ where
 
     fn find(&self, id: &str) -> crate::Result<Self::Item> {
         let key = self.data_key(id);
-        self.kv
-            .get(&key)?
-            .map(|data| serde_json::from_slice(&data).map_err(map_db_err))
-            .ok_or(ActError::Store(format!(
-                "cannot find {} by '{}'",
-                self.prefix, id
-            )))?
+        let data = self.kv.get(&key)?.ok_or(ActError::Store(format!(
+            "cannot find {} by '{}'",
+            self.prefix, id
+        )))?;
+        let json: JsonValue = serde_json::from_slice(&data).map_err(map_db_err)?;
+        T::upcast(json)
     }
 
     fn query(&self, q: &Query) -> crate::Result<PageData<Self::Item>> {
@@ -204,14 +197,10 @@ where
         let page_ids: Vec<String> = ids.into_iter().skip(q.offset).take(q.limit).collect();
 
         // Step 4: Fetch full data for paginated IDs and sort by order_by
-        let mut docs: Vec<HashMap<String, JsonValue>> = Vec::with_capacity(page_ids.len());
+        let mut docs: Vec<JsonValue> = Vec::with_capacity(page_ids.len());
         for id in &page_ids {
             if let Some(json) = self.read_json(id)? {
-                if let Some(obj) = json.as_object() {
-                    let map: HashMap<String, JsonValue> =
-                        obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-                    docs.push(map);
-                }
+                docs.push(json);
             }
         }
 
@@ -238,7 +227,7 @@ where
 
         let rows: Vec<T> = docs
             .iter()
-            .map(|row| map_to_model(row))
+            .map(|row| T::upcast(row.clone()))
             .collect::<Result<Vec<T>>>()?;
 
         Ok(PageData {
@@ -308,14 +297,6 @@ fn extract_id(json: &JsonValue) -> crate::Result<String> {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .ok_or_else(|| ActError::Store("missing id field".to_string()))
-}
-
-fn map_to_model<T: DeserializeOwned>(map: &HashMap<String, JsonValue>) -> crate::Result<T> {
-    let mut obj = serde_json::Map::new();
-    for (k, v) in map {
-        obj.insert(k.to_string(), v.clone());
-    }
-    serde_json::from_value(JsonValue::Object(obj)).map_err(map_db_err)
 }
 
 impl Expr {

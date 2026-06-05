@@ -21,7 +21,8 @@ mod store;
 mod tests;
 
 use data::*;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde_json::Value as JsonValue;
 #[allow(unused_imports)]
 pub use store::Store;
 
@@ -82,6 +83,30 @@ pub trait DbCollectionIden {
     fn iden() -> StoreIden;
     fn indexed_fields() -> &'static [&'static str] {
         &[]
+    }
+    fn version() -> i32 {
+        0
+    }
+
+    /// Default deserialization for the current version — can be called by
+    /// overriding `upcast` impls when the version matches [`Self::version()`].
+    fn upcast_current(mut value: JsonValue) -> Result<Self>
+    where
+        Self: DeserializeOwned,
+    {
+        // Ensure v field exists for backward compatibility with older records
+        if let JsonValue::Object(ref mut map) = value {
+            map.entry("v".to_string())
+                .or_insert_with(|| JsonValue::Number(serde_json::Number::from(0)));
+        }
+        serde_json::from_value(value).map_err(map_db_err)
+    }
+
+    fn upcast(value: JsonValue) -> Result<Self>
+    where
+        Self: DeserializeOwned,
+    {
+        Self::upcast_current(value)
     }
 }
 

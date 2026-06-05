@@ -1,8 +1,10 @@
+use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
+
 use crate::{
-    TaskState,
+    Result, TaskState,
     store::{DbCollectionIden, StoreIden},
 };
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Task {
@@ -19,8 +21,8 @@ pub struct Task {
     pub err: Option<String>,
     pub start_time: i64,
     pub end_time: i64,
-    // pub hooks: String,
     pub timestamp: i64,
+    pub v: i32,
 }
 
 impl DbCollectionIden for Task {
@@ -29,6 +31,22 @@ impl DbCollectionIden for Task {
     }
     fn indexed_fields() -> &'static [&'static str] {
         &["pid"]
+    }
+    fn version() -> i32 {
+        0
+    }
+
+    fn upcast(value: JsonValue) -> Result<Self> {
+        let v = value.get("v").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        if v == Self::version() {
+            return Self::upcast_current(value);
+        }
+        match v {
+            _ => Err(crate::ActError::Store(format!(
+                "unsupported task version: {}",
+                v
+            ))),
+        }
     }
 }
 

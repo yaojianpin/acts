@@ -1,5 +1,6 @@
 use crate::Variant;
 use crate::event::EventAction;
+use crate::store::DbCollectionIden;
 use crate::{
     ActError, Error, NodeKind, ProcInfo, Result, ShareLock, Vars, Workflow, data,
     event::Action,
@@ -406,6 +407,7 @@ impl Process {
             timestamp: self.timestamp(),
             env: self.env().to_string(),
             err: self.err().map(|err| err.to_string()),
+            v: data::Proc::version(),
         })
     }
 }

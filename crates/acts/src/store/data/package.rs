@@ -1,9 +1,11 @@
+use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
+
 use crate::{
-    ActRunAs,
+    ActRunAs, Result,
     package::ActPackageCatalog,
     store::{DbCollectionIden, StoreIden},
 };
-use serde::{Deserialize, Serialize};
 
 #[derive(Default, Deserialize, Serialize, Debug, Clone)]
 pub struct Package {
@@ -23,10 +25,27 @@ pub struct Package {
     pub create_time: i64,
     pub update_time: i64,
     pub timestamp: i64,
+    pub v: i32,
 }
 
 impl DbCollectionIden for Package {
     fn iden() -> StoreIden {
         StoreIden::Packages
+    }
+    fn version() -> i32 {
+        0
+    }
+
+    fn upcast(value: JsonValue) -> Result<Self> {
+        let v = value.get("v").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        if v == Self::version() {
+            return Self::upcast_current(value);
+        }
+        match v {
+            _ => Err(crate::ActError::Store(format!(
+                "unsupported package version: {}",
+                v
+            ))),
+        }
     }
 }

@@ -55,6 +55,11 @@ harness = false
 name = "workflow"
 path = "../../benches/workflow.rs"
 
+[[bench]]
+harness = false
+name = "store"
+path = "../../benches/store.rs"
+
 [[example]]
 name = "simple"
 path = "../../examples/simple/main.rs"

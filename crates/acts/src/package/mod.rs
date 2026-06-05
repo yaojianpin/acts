@@ -8,6 +8,7 @@ mod tests;
 use crate::{
     Engine, Result, Vars, data,
     scheduler::{Context, Runtime},
+    store::DbCollectionIden,
 };
 use dashmap::DashMap;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -218,6 +219,7 @@ impl ActPackageMeta {
             update_time: 0,
             timestamp: 0,
             built_in: false,
+            v: data::Package::version(),
         })
     }
 }

@@ -1,10 +1,12 @@
-use crate::{
-    MessageState,
-    store::{DbCollectionIden, StoreIden},
-};
 use core::fmt;
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use serde_repr::{Deserialize_repr, Serialize_repr};
+
+use crate::{
+    MessageState, Result,
+    store::{DbCollectionIden, StoreIden},
+};
 
 #[derive(Default, Debug, Copy, PartialEq, Clone, Serialize_repr, Deserialize_repr)]
 #[repr(i8)]
@@ -41,6 +43,7 @@ pub struct Message {
     pub retry_times: i32,
     pub status: MessageStatus,
     pub timestamp: i64,
+    pub v: i32,
 }
 
 impl DbCollectionIden for Message {
@@ -49,6 +52,22 @@ impl DbCollectionIden for Message {
     }
     fn indexed_fields() -> &'static [&'static str] {
         &["pid", "status", "tid", "timestamp"]
+    }
+    fn version() -> i32 {
+        0
+    }
+
+    fn upcast(value: JsonValue) -> Result<Self> {
+        let v = value.get("v").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        if v == Self::version() {
+            return Self::upcast_current(value);
+        }
+        match v {
+            _ => Err(crate::ActError::Store(format!(
+                "unsupported message version: {}",
+                v
+            ))),
+        }
     }
 }
 

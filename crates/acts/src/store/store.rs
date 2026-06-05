@@ -149,6 +149,7 @@ impl Store {
                     create_time: m.create_time,
                     update_time: utils::time::time_millis(),
                     timestamp: utils::time::timestamp(),
+                    v: Model::version(),
                 };
                 models.update(&data)
             }
@@ -164,6 +165,7 @@ impl Store {
                     create_time: utils::time::time_millis(),
                     update_time: 0,
                     timestamp: utils::time::timestamp(),
+                    v: Model::version(),
                 };
                 models.create(&data)
             }

@@ -33,6 +33,7 @@ macro_rules! gen_store_tests {
                 model: model.to_json().unwrap(),
                 env: "{}".to_string(),
                 err: None,
+                v: 0,
             }
         }
 
@@ -165,6 +166,7 @@ macro_rules! gen_store_tests {
                 update_time: 0,
                 data: "{}".to_string(),
                 timestamp: 0,
+                v: 0,
             };
             store.models().create(&model).expect("create model");
             let q = Query::new().filter(Filter::and().expr(Expr::eq("id", model.id)));
@@ -189,6 +191,7 @@ macro_rules! gen_store_tests {
                     update_time: 0,
                     data: "{}".to_string(),
                     timestamp: utils::time::timestamp(),
+                    v: 0,
                 };
                 store.models().create(&model).expect("create model");
             }
@@ -235,6 +238,7 @@ macro_rules! gen_store_tests {
                     update_time: 0,
                     data: "{}".to_string(),
                     timestamp: utils::time::timestamp(),
+                    v: 0,
                 };
                 store.models().create(&model).expect("create model");
             }
@@ -275,6 +279,7 @@ macro_rules! gen_store_tests {
                     update_time: 0,
                     data: "{}".to_string(),
                     timestamp: utils::time::timestamp(),
+                    v: 0,
                 };
                 store.models().create(&model).expect("create model");
             }
@@ -289,6 +294,7 @@ macro_rules! gen_store_tests {
                     update_time: 0,
                     data: "{}".to_string(),
                     timestamp: utils::time::timestamp(),
+                    v: 0,
                 };
                 store.models().create(&model).expect("create model");
             }
@@ -324,6 +330,7 @@ macro_rules! gen_store_tests {
                     update_time: 0,
                     data: "{}".to_string(),
                     timestamp: utils::time::timestamp(),
+                    v: 0,
                 };
                 store.models().create(&model).expect("create model");
             }
@@ -427,6 +434,7 @@ macro_rules! gen_store_tests {
                 model: "{}".to_string(),
                 env: "{}".to_string(),
                 err: None,
+                v: 0,
             };
 
             store.procs().create(&proc).expect("create process");
@@ -452,6 +460,7 @@ macro_rules! gen_store_tests {
                     model: "{}".to_string(),
                     env: "{}".to_string(),
                     err: None,
+                    v: 0,
                 };
                 store.procs().create(&proc).expect("create process");
             }
@@ -490,6 +499,7 @@ macro_rules! gen_store_tests {
                     model: "{}".to_string(),
                     env: "{}".to_string(),
                     err: None,
+                    v: 0,
                 };
                 store.procs().create(&proc).expect("create process");
             }
@@ -528,6 +538,7 @@ macro_rules! gen_store_tests {
                     model: "{}".to_string(),
                     env: "{}".to_string(),
                     err: None,
+                    v: 0,
                 };
                 store.procs().create(&proc).expect("create process");
             }
@@ -544,6 +555,7 @@ macro_rules! gen_store_tests {
                     model: "{}".to_string(),
                     env: "{}".to_string(),
                     err: None,
+                    v: 0,
                 };
                 store.procs().create(&proc).expect("create process");
             }
@@ -577,6 +589,7 @@ macro_rules! gen_store_tests {
                     model: "{}".to_string(),
                     env: "{}".to_string(),
                     err: None,
+                    v: 0,
                 };
                 store.procs().create(&proc).expect("create process");
             }
@@ -658,6 +671,7 @@ macro_rules! gen_store_tests {
                 timestamp: 0,
                 data: "{}".to_string(),
                 err: None,
+                v: 0,
             };
 
             store.tasks().create(&task).expect("create task");
@@ -688,6 +702,7 @@ macro_rules! gen_store_tests {
                 timestamp: 0,
                 data: "{}".to_string(),
                 err: None,
+                v: 0,
             };
 
             store.tasks().create(&task).expect("create task");
@@ -719,6 +734,7 @@ macro_rules! gen_store_tests {
                     timestamp: 0,
                     data: "{}".to_string(),
                     err: None,
+                    v: 0,
                 };
                 store.tasks().create(&task).expect("create task");
             }
@@ -761,6 +777,7 @@ macro_rules! gen_store_tests {
                     timestamp: 0,
                     data: "{}".to_string(),
                     err: None,
+                    v: 0,
                 };
                 store.tasks().create(&task).expect("create task");
             }
@@ -803,6 +820,7 @@ macro_rules! gen_store_tests {
                     timestamp: 0,
                     data: "{}".to_string(),
                     err: None,
+                    v: 0,
                 };
                 store.tasks().create(&task).expect("create task");
             }
@@ -823,6 +841,7 @@ macro_rules! gen_store_tests {
                     timestamp: 0,
                     data: "{}".to_string(),
                     err: None,
+                    v: 0,
                 };
                 store.tasks().create(&task).expect("create task");
             }
@@ -859,6 +878,7 @@ macro_rules! gen_store_tests {
                     timestamp: utils::time::timestamp(),
                     data: "{}".to_string(),
                     err: None,
+                    v: 0,
                 };
                 store.tasks().create(&task).expect("create task");
             }
@@ -902,6 +922,7 @@ macro_rules! gen_store_tests {
                 timestamp: 0,
                 data: "{}".to_string(),
                 err: None,
+                v: 0,
             };
 
             store.tasks().create(&task).expect("create task");
@@ -937,6 +958,7 @@ macro_rules! gen_store_tests {
                 timestamp: 0,
                 data: "{}".to_string(),
                 err: None,
+                v: 0,
             };
 
             store.tasks().create(&task).expect("create task");
@@ -976,6 +998,7 @@ macro_rules! gen_store_tests {
                 retry_times: 0,
                 timestamp: 0,
                 status: MessageStatus::Created,
+                v: 0,
             };
 
             store.messages().create(&msg).expect("create message");
@@ -1015,6 +1038,7 @@ macro_rules! gen_store_tests {
                 retry_times: 0,
                 timestamp: 0,
                 status: MessageStatus::Created,
+                v: 0,
             };
 
             store.messages().create(&msg).unwrap();
@@ -1057,6 +1081,7 @@ macro_rules! gen_store_tests {
                     retry_times: 0,
                     timestamp: 0,
                     status: MessageStatus::Created,
+                    v: 0,
                 };
                 store.messages().create(&msg).unwrap();
             }
@@ -1110,6 +1135,7 @@ macro_rules! gen_store_tests {
                     retry_times: 0,
                     timestamp: 0,
                     status: MessageStatus::Created,
+                    v: 0,
                 };
                 store.messages().create(&msg).unwrap();
             }
@@ -1163,6 +1189,7 @@ macro_rules! gen_store_tests {
                     retry_times: 0,
                     timestamp: 0,
                     status: MessageStatus::Created,
+                    v: 0,
                 };
                 store.messages().create(&msg).unwrap();
             }
@@ -1191,6 +1218,7 @@ macro_rules! gen_store_tests {
                     retry_times: 0,
                     timestamp: 0,
                     status: MessageStatus::Created,
+                    v: 0,
                 };
                 store.messages().create(&msg).unwrap();
             }
@@ -1238,6 +1266,7 @@ macro_rules! gen_store_tests {
                     retry_times: 0,
                     timestamp: utils::time::timestamp(),
                     status: MessageStatus::Created,
+                    v: 0,
                 };
                 store.messages().create(&msg).unwrap();
             }
@@ -1289,6 +1318,7 @@ macro_rules! gen_store_tests {
                 retry_times: 0,
                 timestamp: 0,
                 status: MessageStatus::Created,
+                v: 0,
             };
 
             store.messages().create(&msg).unwrap();
@@ -1336,6 +1366,7 @@ macro_rules! gen_store_tests {
                 retry_times: 0,
                 timestamp: 0,
                 status: MessageStatus::Created,
+                v: 0,
             };
 
             store.messages().create(&msg).unwrap();
@@ -1367,6 +1398,7 @@ macro_rules! gen_store_tests {
                 update_time: 0,
                 timestamp: 0,
                 built_in: false,
+                v: 0,
             };
 
             store.packages().create(&package).unwrap();
@@ -1396,6 +1428,7 @@ macro_rules! gen_store_tests {
                 update_time: 0,
                 timestamp: 0,
                 built_in: false,
+                v: 0,
             };
             store.packages().create(&package).unwrap();
             let q = Query::new().filter(Filter::and().expr(Expr::eq("id", package.id)));
@@ -1425,6 +1458,7 @@ macro_rules! gen_store_tests {
                     update_time: 0,
                     timestamp: 0,
                     built_in: false,
+                    v: 0,
                 };
                 store.packages().create(&package).unwrap();
             }
@@ -1476,6 +1510,7 @@ macro_rules! gen_store_tests {
                     update_time: 100,
                     timestamp: 0,
                     built_in: false,
+                    v: 0,
                 };
                 store.packages().create(&package).unwrap();
             }
@@ -1523,6 +1558,7 @@ macro_rules! gen_store_tests {
                     update_time: 0,
                     timestamp: 0,
                     built_in: false,
+                    v: 0,
                 };
                 store.packages().create(&package).unwrap();
             }
@@ -1544,6 +1580,7 @@ macro_rules! gen_store_tests {
                     update_time: 0,
                     timestamp: 0,
                     built_in: false,
+                    v: 0,
                 };
                 store.packages().create(&package).unwrap();
             }
@@ -1584,6 +1621,7 @@ macro_rules! gen_store_tests {
                     update_time: 0,
                     timestamp: utils::time::timestamp(),
                     built_in: false,
+                    v: 0,
                 };
                 store.packages().create(&package).unwrap();
             }
@@ -1637,6 +1675,7 @@ macro_rules! gen_store_tests {
                 update_time: 0,
                 timestamp: 0,
                 built_in: false,
+                v: 0,
             };
             store.packages().create(&package).unwrap();
             let mut p = store.packages().find(&package.id).unwrap();
@@ -1671,12 +1710,202 @@ macro_rules! gen_store_tests {
                 update_time: 0,
                 timestamp: 0,
                 built_in: false,
+                v: 0,
             };
             store.packages().create(&package).unwrap();
             store.packages().delete(&package.id).unwrap();
 
             let ret = store.packages().find(&package.id);
             assert!(ret.is_err());
+        }
+
+        // ========== upcast version migration tests ==========
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[serial(store_tests)]
+        async fn store_upcast_model_version() {
+            let store = store();
+            let model = Model {
+                id: utils::longid(),
+                name: "upcast-test".to_string(),
+                desc: "test upcast".to_string(),
+                ver: "0.1.0".to_string(),
+                size: 100,
+                create_time: 500,
+                update_time: 0,
+                data: "{}".to_string(),
+                timestamp: utils::time::timestamp(),
+                v: 0,
+            };
+            store.models().create(&model).expect("create model");
+
+            // find goes through upcast now
+            let found = store.models().find(&model.id).unwrap();
+            assert_eq!(found.id, model.id);
+            assert_eq!(found.name, model.name);
+            assert_eq!(found.v, 0); // version preserved
+
+            // query goes through upcast now
+            let q = Query::new()
+                .filter(Filter::and().expr(Expr::eq("id", model.id.clone())))
+                .limit(1);
+            let page = store.models().query(&q).unwrap();
+            assert_eq!(page.rows.len(), 1);
+            assert_eq!(page.rows[0].v, 0);
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[serial(store_tests)]
+        async fn store_upcast_proc_version() {
+            let store = store();
+            let proc = Proc {
+                id: utils::shortid(),
+                name: "upcast-proc".to_string(),
+                mid: utils::longid(),
+                state: "running".to_string(),
+                start_time: 0,
+                end_time: 0,
+                timestamp: utils::time::timestamp(),
+                model: "{}".to_string(),
+                env: "{}".to_string(),
+                err: None,
+                v: 0,
+            };
+            store.procs().create(&proc).expect("create proc");
+
+            // find goes through upcast
+            let found = store.procs().find(&proc.id).unwrap();
+            assert_eq!(found.id, proc.id);
+            assert_eq!(found.v, 0);
+
+            // query goes through upcast
+            let q = Query::new()
+                .filter(Filter::and().expr(Expr::eq("id", proc.id.clone())))
+                .limit(1);
+            let page = store.procs().query(&q).unwrap();
+            assert_eq!(page.rows.len(), 1);
+            assert_eq!(page.rows[0].v, 0);
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[serial(store_tests)]
+        async fn store_upcast_task_version() {
+            let store = store();
+            let pid = utils::longid();
+            let tid = utils::shortid();
+            let task = Task {
+                id: utils::shortid(),
+                name: "upcast-task".to_string(),
+                prev: None,
+                kind: $crate::scheduler::NodeKind::Step.to_string(),
+                pid: pid.clone(),
+                tid: tid.clone(),
+                node_data: "{}".to_string(),
+                state: TaskState::None.to_string(),
+                start_time: 0,
+                end_time: 0,
+                timestamp: utils::time::timestamp(),
+                data: "{}".to_string(),
+                err: None,
+                v: 0,
+            };
+            store.tasks().create(&task).expect("create task");
+
+            // find goes through upcast
+            let found = store.tasks().find(&task.id).unwrap();
+            assert_eq!(found.id, task.id);
+            assert_eq!(found.v, 0);
+
+            // query goes through upcast
+            let q = Query::new()
+                .filter(Filter::and().expr(Expr::eq("id", task.id.clone())))
+                .limit(1);
+            let page = store.tasks().query(&q).unwrap();
+            assert_eq!(page.rows.len(), 1);
+            assert_eq!(page.rows[0].v, 0);
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[serial(store_tests)]
+        async fn store_upcast_message_version() {
+            let store = store();
+            let msg = Message {
+                id: utils::shortid(),
+                name: "upcast-msg".to_string(),
+                pid: utils::longid(),
+                tid: utils::shortid(),
+                nid: utils::shortid(),
+                mid: utils::shortid(),
+                state: MessageState::Created,
+                start_time: 0,
+                end_time: 0,
+                r#type: "step".to_string(),
+                key: "test".to_string(),
+                uses: "package".to_string(),
+                inputs: json!({}).to_string(),
+                outputs: json!({}).to_string(),
+                tag: "tag1".to_string(),
+                chan_id: "test1".to_string(),
+                chan_pattern: "*:*:*:*".to_string(),
+                create_time: 0,
+                update_time: 0,
+                retry_times: 0,
+                timestamp: 0,
+                status: MessageStatus::Created,
+                v: 0,
+            };
+            store.messages().create(&msg).expect("create message");
+
+            // find goes through upcast
+            let found = store.messages().find(&msg.id).unwrap();
+            assert_eq!(found.id, msg.id);
+            assert_eq!(found.v, 0);
+
+            // query goes through upcast
+            let q = Query::new()
+                .filter(Filter::and().expr(Expr::eq("id", msg.id.clone())))
+                .limit(1);
+            let page = store.messages().query(&q).unwrap();
+            assert_eq!(page.rows.len(), 1);
+            assert_eq!(page.rows[0].v, 0);
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[serial(store_tests)]
+        async fn store_upcast_package_version() {
+            let store = store();
+            let package = Package {
+                id: utils::longid(),
+                name: "upcast-pkg".to_string(),
+                desc: "desc".to_string(),
+                icon: "icon".to_string(),
+                doc: "doc".to_string(),
+                version: "0.1.0".to_string(),
+                in_schema: "{}".to_string(),
+                ui_schema: None,
+                run_as: $crate::ActRunAs::Func,
+                resources: "[]".to_string(),
+                catalog: $crate::ActPackageCatalog::Core,
+                create_time: 0,
+                update_time: 0,
+                timestamp: 0,
+                built_in: false,
+                v: 0,
+            };
+            store.packages().create(&package).expect("create package");
+
+            // find goes through upcast
+            let found = store.packages().find(&package.id).unwrap();
+            assert_eq!(found.id, package.id);
+            assert_eq!(found.v, 0);
+
+            // query goes through upcast
+            let q = Query::new()
+                .filter(Filter::and().expr(Expr::eq("id", package.id.clone())))
+                .limit(1);
+            let page = store.packages().query(&q).unwrap();
+            assert_eq!(page.rows.len(), 1);
+            assert_eq!(page.rows[0].v, 0);
         }
     };
 }

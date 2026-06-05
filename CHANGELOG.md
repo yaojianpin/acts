@@ -167,3 +167,5 @@
 - feat: add `desc` to store models
 - feat: add dashmap for Package mod
 - feat: add safe limit for quickjs runtime
+- feat: change db store to kv store
+        add db with sqlite, postgres, nats, redis, sled

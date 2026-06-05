@@ -6,6 +6,7 @@ mod workflow;
 
 use crate::Variant;
 use crate::scheduler::tree::NodeOutputKind;
+use crate::store::DbCollectionIden;
 use crate::utils::consts::TASK_ROOT_TID;
 use crate::{
     Act, ActError, ActTask, Error, Message, MessageState, NodeKind, Result, ShareLock, Vars,
@@ -755,6 +756,7 @@ impl Task {
             end_time: self.end_time(),
             timestamp: self.timestamp,
             err: self.err().map(|err| err.to_string()),
+            v: data::Task::version(),
         })
     }
 

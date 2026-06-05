@@ -1,5 +1,6 @@
 use crate::{
     TaskState, Vars, data,
+    store::DbCollectionIden,
     utils::{self, consts},
 };
 use core::fmt;
@@ -180,6 +181,7 @@ impl Message {
             retry_times: 0,
             timestamp: value.timestamp,
             status: data::MessageStatus::Created,
+            v: data::Message::version(),
         }
     }
 
