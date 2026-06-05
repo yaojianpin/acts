@@ -131,9 +131,22 @@ impl<T> KvCollection<T> {
     }
 }
 
+/// Convert a JSON value to a string suitable for use as an index-key segment.
+///
+/// Integers (i64, u64) are zero-padded to 20 digits so that lexicographic
+/// ordering matches numeric ordering (otherwise "10" < "5").
 fn json_value_to_key_str(v: &JsonValue) -> String {
     match v {
         JsonValue::String(s) => s.clone(),
+        JsonValue::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                format!("{:020}", i)
+            } else if let Some(u) = n.as_u64() {
+                format!("{:020}", u)
+            } else {
+                n.to_string()
+            }
+        }
         other => other.to_string(),
     }
 }
@@ -162,10 +175,13 @@ where
     fn query(&self, q: &Query) -> crate::Result<PageData<Self::Item>> {
         let indexed = T::indexed_fields();
 
-        // Determine is_rev from the first order_by key direction
+        // Determine is_rev by finding an order_by entry whose field
+        // matches an indexed field, so the index scan direction aligns
+        // with the requested sort order.
         let is_rev = q
             .get_order_by()
-            .first()
+            .iter()
+            .find(|ob| indexed.contains(&ob.field.as_str()))
             .map(|ob| ob.order == Sort::Desc)
             .unwrap_or(false);
 
@@ -360,5 +376,74 @@ impl Expr {
                 l.to_string().contains(value)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::json_value_to_key_str;
+    use serde_json::json;
+
+    #[test]
+    fn json_value_to_key_str_string() {
+        assert_eq!(json_value_to_key_str(&json!("hello")), "hello");
+    }
+
+    #[test]
+    fn json_value_to_key_str_i64_zero_pads() {
+        assert_eq!(json_value_to_key_str(&json!(5)), "00000000000000000005");
+        assert_eq!(json_value_to_key_str(&json!(10)), "00000000000000000010");
+        assert_eq!(json_value_to_key_str(&json!(100)), "00000000000000000100");
+    }
+
+    #[test]
+    fn json_value_to_key_str_i64_negative() {
+        assert_eq!(
+            json_value_to_key_str(&json!(-5)),
+            "-0000000000000000005"
+        );
+    }
+
+    #[test]
+    fn json_value_to_key_str_u64_zero_pads() {
+        let big: u64 = u64::MAX;
+        assert_eq!(
+            json_value_to_key_str(&json!(big)),
+            "18446744073709551615"
+        );
+    }
+
+    #[test]
+    fn json_value_to_key_str_lexicographic_order() {
+        // Verify that zero-padded integers sort correctly lexicographically:
+        // after zero-padding, "000000000...5" < "000000000...10"
+        let key1 = json_value_to_key_str(&json!(1));
+        let key2 = json_value_to_key_str(&json!(2));
+        let key5 = json_value_to_key_str(&json!(5));
+        let key10 = json_value_to_key_str(&json!(10));
+        let key100 = json_value_to_key_str(&json!(100));
+
+        let mut sorted = vec![&key10, &key100, &key1, &key5, &key2];
+        sorted.sort();
+        assert_eq!(sorted, vec![&key1, &key2, &key5, &key10, &key100]);
+    }
+
+    #[test]
+    fn json_value_to_key_str_float_no_padding() {
+        // Floats are not padded — they can't be ordered lexicographically anyway
+        let v = json!(3.14);
+        let s = json_value_to_key_str(&v);
+        assert!(s.contains("3.14"));
+    }
+
+    #[test]
+    fn json_value_to_key_str_bool() {
+        assert_eq!(json_value_to_key_str(&json!(true)), "true");
+        assert_eq!(json_value_to_key_str(&json!(false)), "false");
+    }
+
+    #[test]
+    fn json_value_to_key_str_null() {
+        assert_eq!(json_value_to_key_str(&json!(null)), "null");
     }
 }

@@ -3,6 +3,7 @@ macro_rules! gen_store_tests {
     ($init:expr) => {
         use serde_json::json;
         use serial_test::serial;
+        use std::collections::HashSet;
         use std::sync::OnceLock;
         use $crate::store::data::{Message, MessageStatus, Model, Package, Proc, Task};
         use $crate::store::query::{Expr, Sort};
@@ -1906,6 +1907,448 @@ macro_rules! gen_store_tests {
             let page = store.packages().query(&q).unwrap();
             assert_eq!(page.rows.len(), 1);
             assert_eq!(page.rows[0].v, 0);
+        }
+
+        // ========== order_by indexed-field matching tests ==========
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[serial(store_tests)]
+        async fn store_query_order_by_matches_indexed_field_asc() {
+            // When order_by field matches an indexed field, the scan direction
+            // should be determined by that field's direction (not .first()).
+            let store = store();
+            let pid = utils::longid();
+            let tid = utils::shortid();
+
+            // Create messages with different status values (indexed field on Message)
+            let statuses = [
+                MessageStatus::Completed, // 2
+                MessageStatus::Created,   // 0
+                MessageStatus::Acked,     // 1
+                MessageStatus::Error,     // 3
+            ];
+            for &status in &statuses {
+                for i in 0..5 {
+                    let msg = Message {
+                        id: utils::shortid(),
+                        name: format!("msg-{:02}-{:02}", status as i8, i),
+                        pid: pid.clone(),
+                        tid: tid.clone(),
+                        nid: utils::shortid(),
+                        mid: utils::shortid(),
+                        state: MessageState::Created,
+                        start_time: 0,
+                        end_time: 0,
+                        r#type: "step".to_string(),
+                        key: "test".to_string(),
+                        uses: "package".to_string(),
+                        inputs: json!({}).to_string(),
+                        outputs: json!({}).to_string(),
+                        tag: "tag1".to_string(),
+                        chan_id: "test1".to_string(),
+                        chan_pattern: "*:*:*:*".to_string(),
+                        create_time: 0,
+                        update_time: 0,
+                        retry_times: 0,
+                        timestamp: utils::time::timestamp(),
+                        status,
+                        v: 0,
+                    };
+                    store.messages().create(&msg).unwrap();
+                }
+            }
+
+            // Order by status ascending (indexed field) — should scan forward
+            let q = Query::new()
+                .filter(Filter::and().expr(Expr::eq("pid", pid.clone())))
+                .order("status", Sort::Asc)
+                .offset(0)
+                .limit(100);
+            let ret = store.messages().query(&q).unwrap();
+            assert_eq!(ret.count, 20);
+            for i in 1..ret.rows.len() {
+                let prev: i64 = ret.rows[i - 1].status.into();
+                let curr: i64 = ret.rows[i].status.into();
+                assert!(
+                    prev <= curr,
+                    "expected ascending status: prev={prev} curr={curr} at index {i}"
+                );
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[serial(store_tests)]
+        async fn store_query_order_by_matches_indexed_field_desc() {
+            let store = store();
+            let pid = utils::longid();
+            let tid = utils::shortid();
+
+            let statuses = [
+                MessageStatus::Created,   // 0
+                MessageStatus::Acked,     // 1
+                MessageStatus::Completed, // 2
+                MessageStatus::Error,     // 3
+            ];
+            for &status in &statuses {
+                for i in 0..5 {
+                    let msg = Message {
+                        id: utils::shortid(),
+                        name: format!("msg-{:02}-{:02}", status as i8, i),
+                        pid: pid.clone(),
+                        tid: tid.clone(),
+                        nid: utils::shortid(),
+                        mid: utils::shortid(),
+                        state: MessageState::Created,
+                        start_time: 0,
+                        end_time: 0,
+                        r#type: "step".to_string(),
+                        key: "test".to_string(),
+                        uses: "package".to_string(),
+                        inputs: json!({}).to_string(),
+                        outputs: json!({}).to_string(),
+                        tag: "tag1".to_string(),
+                        chan_id: "test1".to_string(),
+                        chan_pattern: "*:*:*:*".to_string(),
+                        create_time: 0,
+                        update_time: 0,
+                        retry_times: 0,
+                        timestamp: utils::time::timestamp(),
+                        status,
+                        v: 0,
+                    };
+                    store.messages().create(&msg).unwrap();
+                }
+            }
+
+            // Order by status descending — is_rev should be true
+            let q = Query::new()
+                .filter(Filter::and().expr(Expr::eq("pid", pid.clone())))
+                .order("status", Sort::Desc)
+                .offset(0)
+                .limit(100);
+            let ret = store.messages().query(&q).unwrap();
+            assert_eq!(ret.count, 20);
+            for i in 1..ret.rows.len() {
+                let prev: i64 = ret.rows[i - 1].status.into();
+                let curr: i64 = ret.rows[i].status.into();
+                assert!(
+                    prev >= curr,
+                    "expected descending status: prev={prev} curr={curr} at index {i}"
+                );
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[serial(store_tests)]
+        async fn store_query_order_by_multi_fields_indexed_match() {
+            // When order_by has multiple entries and a non-first one matches
+            // an indexed field, the scan direction is taken from the first
+            // matching indexed field, not from the first order_by entry.
+            let store = store();
+            let pid = utils::longid();
+            let tid = utils::shortid();
+
+            for i in 0..20 {
+                let status = if i < 5 {
+                    MessageStatus::Created
+                } else if i < 10 {
+                    MessageStatus::Acked
+                } else if i < 15 {
+                    MessageStatus::Completed
+                } else {
+                    MessageStatus::Error
+                };
+                let msg = Message {
+                    id: utils::shortid(),
+                    name: format!("msg-{:02}", i),
+                    pid: pid.clone(),
+                    tid: tid.clone(),
+                    nid: utils::shortid(),
+                    mid: utils::shortid(),
+                    state: MessageState::Created,
+                    start_time: 0,
+                    end_time: 0,
+                    r#type: "step".to_string(),
+                    key: "test".to_string(),
+                    uses: "package".to_string(),
+                    inputs: json!({}).to_string(),
+                    outputs: json!({}).to_string(),
+                    tag: "tag1".to_string(),
+                    chan_id: "test1".to_string(),
+                    chan_pattern: "*:*:*:*".to_string(),
+                    create_time: 0,
+                    update_time: 0,
+                    retry_times: 0,
+                    timestamp: utils::time::timestamp(),
+                    status,
+                    v: 0,
+                };
+                store.messages().create(&msg).unwrap();
+            }
+
+            // name is NOT indexed, status IS indexed.
+            // The fix should match "status" (indexed) not "name" (unindexed).
+            let q = Query::new()
+                .filter(Filter::and().expr(Expr::eq("pid", pid.clone())))
+                .order("name", Sort::Asc)   // NOT indexed — should be skipped
+                .order("status", Sort::Asc) // IS indexed — should determine is_rev
+                .offset(0)
+                .limit(100);
+            let ret = store.messages().query(&q).unwrap();
+            assert_eq!(ret.count, 20);
+            for i in 1..ret.rows.len() {
+                let prev: i64 = ret.rows[i - 1].status.into();
+                let curr: i64 = ret.rows[i].status.into();
+                assert!(
+                    prev <= curr,
+                    "expected ascending status (multi-field): prev={prev} curr={curr} at index {i}"
+                );
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[serial(store_tests)]
+        async fn store_query_pagination_with_indexed_order_by() {
+            // Verify that pagination metadata (count, page sizes) is correct
+            // when order_by uses an indexed field.
+            let store = store();
+            let pid = utils::longid();
+            let tid = utils::shortid();
+
+            // Insert 20 messages with status 0..3, 5 of each
+            for &status in &[
+                MessageStatus::Created,
+                MessageStatus::Acked,
+                MessageStatus::Completed,
+                MessageStatus::Error,
+            ] {
+                for i in 0..5 {
+                    let msg = Message {
+                        id: utils::shortid(),
+                        name: format!("pg-{:02}-{:02}", status as i8, i),
+                        pid: pid.clone(),
+                        tid: tid.clone(),
+                        nid: utils::shortid(),
+                        mid: utils::shortid(),
+                        state: MessageState::Created,
+                        start_time: 0,
+                        end_time: 0,
+                        r#type: "step".to_string(),
+                        key: "test".to_string(),
+                        uses: "package".to_string(),
+                        inputs: json!({}).to_string(),
+                        outputs: json!({}).to_string(),
+                        tag: "tag1".to_string(),
+                        chan_id: "test1".to_string(),
+                        chan_pattern: "*:*:*:*".to_string(),
+                        create_time: 0,
+                        update_time: 0,
+                        retry_times: 0,
+                        timestamp: utils::time::timestamp(),
+                        status,
+                        v: 0,
+                    };
+                    store.messages().create(&msg).unwrap();
+                }
+            }
+
+            // Ascending: verify within-page ordering and pagination metadata.
+            let mut seen_ids = HashSet::new();
+            {
+                let q = Query::new()
+                    .filter(Filter::and().expr(Expr::eq("pid", pid.clone())))
+                    .order("status", Sort::Asc)
+                    .offset(0)
+                    .limit(7);
+                let page = store.messages().query(&q).unwrap();
+                assert_eq!(page.count, 20);
+                assert_eq!(page.rows.len(), 7);
+                assert_eq!(page.page_size, 7);
+                assert_eq!(page.page_num, 1);
+                assert_eq!(page.page_count, 3); // 20 / 7 = 3 pages
+                // Within-page ordering must be ascending
+                for i in 1..page.rows.len() {
+                    let prev: i64 = page.rows[i - 1].status.into();
+                    let curr: i64 = page.rows[i].status.into();
+                    assert!(prev <= curr, "asc within page: prev={prev} curr={curr}");
+                }
+                for row in &page.rows {
+                    seen_ids.insert(row.id.clone());
+                }
+            }
+
+            // Second page (offset=7, limit=7)
+            {
+                let q = Query::new()
+                    .filter(Filter::and().expr(Expr::eq("pid", pid.clone())))
+                    .order("status", Sort::Asc)
+                    .offset(7)
+                    .limit(7);
+                let page = store.messages().query(&q).unwrap();
+                assert_eq!(page.count, 20);
+                assert_eq!(page.rows.len(), 7);
+                assert_eq!(page.page_num, 2);
+                for row in &page.rows {
+                    assert!(
+                        seen_ids.insert(row.id.clone()),
+                        "duplicate id across pages: {}",
+                        row.id
+                    );
+                }
+                for i in 1..page.rows.len() {
+                    let prev: i64 = page.rows[i - 1].status.into();
+                    let curr: i64 = page.rows[i].status.into();
+                    assert!(prev <= curr, "asc within page 2: prev={prev} curr={curr}");
+                }
+            }
+
+            // Third page (offset=14, limit=7 → only 6 left)
+            {
+                let q = Query::new()
+                    .filter(Filter::and().expr(Expr::eq("pid", pid.clone())))
+                    .order("status", Sort::Asc)
+                    .offset(14)
+                    .limit(7);
+                let page = store.messages().query(&q).unwrap();
+                assert_eq!(page.count, 20);
+                assert_eq!(page.rows.len(), 6);
+                assert_eq!(page.page_num, 3);
+                for row in &page.rows {
+                    assert!(
+                        seen_ids.insert(row.id.clone()),
+                        "duplicate id across pages: {}",
+                        row.id
+                    );
+                }
+            }
+            // All 20 unique IDs collected
+            assert_eq!(seen_ids.len(), 20);
+
+            // Descending: verify within-page ordering
+            {
+                let q = Query::new()
+                    .filter(Filter::and().expr(Expr::eq("pid", pid.clone())))
+                    .order("status", Sort::Desc)
+                    .offset(0)
+                    .limit(7);
+                let page = store.messages().query(&q).unwrap();
+                assert_eq!(page.count, 20);
+                assert_eq!(page.rows.len(), 7);
+                for i in 1..page.rows.len() {
+                    let prev: i64 = page.rows[i - 1].status.into();
+                    let curr: i64 = page.rows[i].status.into();
+                    assert!(prev >= curr, "desc within page: prev={prev} curr={curr}");
+                }
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[serial(store_tests)]
+        async fn store_query_indexed_integer_filter() {
+            // Verify that filtering by integer indexed fields works correctly
+            // (tests zero-padded index key construction and scan_key matching).
+            let store = store();
+            let pid = utils::longid();
+            let tid = utils::shortid();
+
+            let timestamps: Vec<i64> = vec![500, 1, 100, 5, 50, 10];
+            for &ts in &timestamps {
+                let msg = Message {
+                    id: utils::shortid(),
+                    name: format!("ts-{}", ts),
+                    pid: pid.clone(),
+                    tid: tid.clone(),
+                    nid: utils::shortid(),
+                    mid: utils::shortid(),
+                    state: MessageState::Created,
+                    start_time: 0,
+                    end_time: 0,
+                    r#type: "step".to_string(),
+                    key: "test".to_string(),
+                    uses: "package".to_string(),
+                    inputs: json!({}).to_string(),
+                    outputs: json!({}).to_string(),
+                    tag: "tag1".to_string(),
+                    chan_id: "test1".to_string(),
+                    chan_pattern: "*:*:*:*".to_string(),
+                    create_time: 0,
+                    update_time: 0,
+                    retry_times: 0,
+                    timestamp: ts,
+                    status: MessageStatus::Created,
+                    v: 0,
+                };
+                store.messages().create(&msg).unwrap();
+            }
+
+            // Filter by timestamp=1 (tests zero-padded scan key "00000000000000000001")
+            let q = Query::new()
+                .filter(
+                    Filter::and()
+                        .expr(Expr::eq("pid", pid.clone()))
+                        .expr(Expr::eq("timestamp", 1)),
+                )
+                .order("timestamp", Sort::Asc)
+                .offset(0)
+                .limit(100);
+            let ret = store.messages().query(&q).unwrap();
+            assert_eq!(ret.count, 1);
+            assert_eq!(ret.rows[0].timestamp, 1);
+            assert_eq!(ret.rows[0].name, "ts-1");
+
+            // Filter by timestamp=100 (three digits — tests padding handles mixed widths)
+            let q = Query::new()
+                .filter(
+                    Filter::and()
+                        .expr(Expr::eq("pid", pid.clone()))
+                        .expr(Expr::eq("timestamp", 100)),
+                )
+                .order("timestamp", Sort::Asc)
+                .offset(0)
+                .limit(100);
+            let ret = store.messages().query(&q).unwrap();
+            assert_eq!(ret.count, 1);
+            assert_eq!(ret.rows[0].timestamp, 100);
+
+            // Filter by timestamp=500 (three digits)
+            let q = Query::new()
+                .filter(
+                    Filter::and()
+                        .expr(Expr::eq("pid", pid.clone()))
+                        .expr(Expr::eq("timestamp", 500)),
+                )
+                .order("timestamp", Sort::Asc)
+                .offset(0)
+                .limit(100);
+            let ret = store.messages().query(&q).unwrap();
+            assert_eq!(ret.count, 1);
+            assert_eq!(ret.rows[0].timestamp, 500);
+
+            // Filter by status=Created (indexed integer field, value=0).
+            // All 6 messages were created with status=Created, so count should be 6.
+            let q = Query::new()
+                .filter(
+                    Filter::and()
+                        .expr(Expr::eq("pid", pid.clone()))
+                        .expr(Expr::eq("status", MessageStatus::Created as i32)),
+                )
+                .order("timestamp", Sort::Asc)
+                .offset(0)
+                .limit(100);
+            let ret = store.messages().query(&q).unwrap();
+            assert_eq!(ret.count, 6);
+            // Double-check: filter for a status that no message has
+            let q = Query::new()
+                .filter(
+                    Filter::and()
+                        .expr(Expr::eq("pid", pid.clone()))
+                        .expr(Expr::eq("status", MessageStatus::Error as i32)),
+                )
+                .order("timestamp", Sort::Asc)
+                .offset(0)
+                .limit(100);
+            let ret = store.messages().query(&q).unwrap();
+            assert_eq!(ret.count, 0);
         }
     };
 }
