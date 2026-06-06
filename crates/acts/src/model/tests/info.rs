@@ -220,10 +220,7 @@ fn model_info_proc_arr_to_value() {
         v.get("start_time").unwrap().as_i64().unwrap(),
         info.start_time
     );
-    assert_eq!(
-        v.get("end_time").unwrap().as_i64().unwrap(),
-        info.end_time
-    );
+    assert_eq!(v.get("end_time").unwrap().as_i64().unwrap(), info.end_time);
     assert_eq!(
         v.get("timestamp").unwrap().as_i64().unwrap(),
         info.timestamp
@@ -273,10 +270,7 @@ fn model_info_task_arr_to_value() {
         v.get("start_time").unwrap().as_i64().unwrap(),
         info.start_time
     );
-    assert_eq!(
-        v.get("end_time").unwrap().as_i64().unwrap(),
-        info.end_time
-    );
+    assert_eq!(v.get("end_time").unwrap().as_i64().unwrap(), info.end_time);
     assert_eq!(v.get("data").unwrap().as_str().unwrap(), info.data);
 }
 
