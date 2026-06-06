@@ -383,32 +383,41 @@ For more acts example, please see [`examples`](https://github.com/yaojianpin/act
 
 ## Store
 
-You can add more store support by store plugins. The avaliable store plugins are as follow:
-- acts-sqlite
+Current, the supported store features:  store-sqlite, store-postgres, store-sled, store-redis, store-nats
+
+You can add custom store support as follow:
 
 ```rust,ignore
-use acts::EngineBuilder;
-use acts_store_sqlite::SqliteStore;
+use acts::{Engine, Result, KvStore, ScanOptions, data};
+use std::sync::Arc;
+
+pub struct MyStore;
+impl KvStore for MyStore {
+    fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        Ok(None)
+    }
+
+    fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
+        Ok(())
+    }
+
+    fn delete(&self, key: &str) -> Result<()> {
+        Ok(())
+    }
+
+    fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>> {
+        Ok(vec![])
+    }
+
+}
 
 #[tokio::main]
 async fn main() {
-  let engine = EngineBuilder::new().add_plugin(&SqliteStore).build().start();
+    let engine = acts::Engine::new().start().unwrap();
+    let store: Arc<dyn KvStore + 'static> = Arc::new(MyStore);
+    engine.extender().register_store(store);
 }
 ```
-
-- acts-postgres
-
-```rust,ignore
-use acts::EngineBuilder;
-use acts_store_postgres::PostgresStore;
-
-#[tokio::main]
-async fn main() {
-  let engine = EngineBuilder::new().add_plugin(&PostgresStore).build().start();
-}
-```
-
-How to create custom store plugin, please see the code under `store/`
 
 ## Package
 
@@ -441,6 +450,11 @@ acts:
 
 - store
   - [x] memory
+  - [x] sqlite
+  - [x] postgres
+  - [x] nats
+  - [x] redis
+  - [x] sled
 
 - packages
 
