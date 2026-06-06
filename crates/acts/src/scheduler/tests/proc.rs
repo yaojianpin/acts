@@ -23,10 +23,10 @@ async fn sch_proc_send() {
 
 #[tokio::test]
 async fn sch_proc_state() {
-    let mut workflow = Workflow::default();
+    let workflow = Workflow::default();
 
     let id = utils::longid();
-    let (_, proc) = create_proc(&mut workflow, &id);
+    let (_, proc) = create_proc(&workflow, &id);
 
     proc.set_state(TaskState::Skipped);
     assert_eq!(proc.state(), TaskState::Skipped)
@@ -34,9 +34,9 @@ async fn sch_proc_state() {
 
 #[tokio::test]
 async fn sch_proc_cost() {
-    let mut workflow = Workflow::default();
+    let workflow = Workflow::default();
     let id = utils::longid();
-    let (_, proc) = create_proc(&mut workflow, &id);
+    let (_, proc) = create_proc(&workflow, &id);
 
     proc.set_state(TaskState::Completed);
     proc.set_start_time(100);
@@ -65,7 +65,7 @@ async fn sch_proc_task() {
 
     let pid = utils::longid();
     let tr = NodeTree::build(&mut workflow).unwrap();
-    let (_, proc) = create_proc(&mut workflow, &pid);
+    let (_, proc) = create_proc(&workflow, &pid);
 
     let node = tr.root.as_ref().unwrap();
     let task = proc.create_task(node, None);

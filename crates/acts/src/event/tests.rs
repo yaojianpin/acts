@@ -132,11 +132,11 @@ async fn event_action_parse() {
 
 #[tokio::test]
 async fn event_on_proc() {
-    let mut workflow = Workflow::new()
+    let workflow = Workflow::new()
         .with_id("m1")
         .with_step(|step| step.with_id("step1"));
 
-    let (engine, proc) = create_proc(&mut workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
     let evt = Emitter::new();
     let workflow2 = workflow.clone();
     evt.on_proc(move |e| {
@@ -149,11 +149,11 @@ async fn event_on_proc() {
 
 #[tokio::test]
 async fn event_on_task() {
-    let mut workflow = Workflow::new()
+    let workflow = Workflow::new()
         .with_id("m1")
         .with_step(|step| step.with_id("step1"));
 
-    let (engine, proc) = create_proc(&mut workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
     let evt = Emitter::new();
     evt.on_task(move |e| {
         assert_eq!(e.inner().state(), TaskState::Running);
@@ -185,10 +185,10 @@ async fn event_start() {
 
 #[tokio::test]
 async fn event_finished() {
-    let mut workflow = Workflow::new()
+    let workflow = Workflow::new()
         .with_id("m1")
         .with_step(|step| step.with_id("step1"));
-    let (_, proc) = create_proc(&mut workflow, &utils::longid());
+    let (_, proc) = create_proc(&workflow, &utils::longid());
     let evt = Emitter::new();
     let workflow2 = workflow.clone();
     evt.on_complete("k1", move |e| {
@@ -204,11 +204,11 @@ async fn event_finished() {
 
 #[tokio::test]
 async fn event_error() {
-    let mut workflow = Workflow::new()
+    let workflow = Workflow::new()
         .with_id("m1")
         .with_step(|step| step.with_id("step1"));
     let workflow_id = workflow.id.clone();
-    let (_, proc) = create_proc(&mut workflow, &utils::longid());
+    let (_, proc) = create_proc(&workflow, &utils::longid());
 
     let evt = Emitter::new();
     evt.on_error("k1", move |e| {
@@ -224,11 +224,11 @@ async fn event_error() {
 
 #[tokio::test]
 async fn event_message_default() {
-    let mut workflow = Workflow::new()
+    let workflow = Workflow::new()
         .with_id("m1")
         .with_step(|step| step.with_id("step1"));
     let workflow_id = workflow.id.clone();
-    let (engine, proc) = create_proc(&mut workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
 
     let (s1, s2) = engine.signal(false).double();
     let evt = Emitter::new();
@@ -247,11 +247,11 @@ async fn event_message_default() {
 
 #[tokio::test]
 async fn event_message_dup_key() {
-    let mut workflow = Workflow::new()
+    let workflow = Workflow::new()
         .with_id("m1")
         .with_step(|step| step.with_id("step1"));
     let workflow_id = workflow.id.clone();
-    let (engine, proc) = create_proc(&mut workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
 
     let (s1, s2) = engine.signal(false).double();
     let evt = Emitter::new();

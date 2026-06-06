@@ -623,9 +623,9 @@ mod tests {
     #[test]
     fn json_value_to_key_str_float_no_padding() {
         // Floats are not padded — they can't be ordered lexicographically anyway
-        let v = json!(3.14);
+        let v = json!(2.71);
         let s = json_value_to_key_str(&v);
-        assert!(s.contains("3.14"));
+        assert!(s.contains("2.71"));
     }
 
     #[test]

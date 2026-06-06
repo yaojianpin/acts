@@ -33,7 +33,7 @@ impl Store {
         #[allow(unused_mut)]
         let mut kv: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
 
-        #[allow(unused_variables)]
+        #[allow(unused_variables, unused_assignments)]
         if let Some(db) = &config.data.db {
             #[cfg(feature = "store-sqlite")]
             {

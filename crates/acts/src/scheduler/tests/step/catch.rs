@@ -638,7 +638,7 @@ async fn sch_step_catch_as_back() {
 
 #[tokio::test]
 async fn sch_step_catch_and_continue() {
-    let mut workflow = Workflow::new()
+    let workflow = Workflow::new()
         .with_step(|step| {
             step.with_id("step1")
                 .with_catch(Act::msg(|msg| msg.with_key("msg1")))
@@ -649,7 +649,7 @@ async fn sch_step_catch_and_continue() {
                 .with_act(Act::irq(|act| act.with_key("act2")))
         });
     workflow.print();
-    let (engine, proc) = create_proc(&mut workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
     let rt = engine.runtime();
     let (rx, s) = engine.signal(false).double();
     auto_complete(&engine, &rx);

@@ -116,14 +116,13 @@ impl KvStore for NatsStore {
             let mut result = Vec::new();
             while let Some(k) = keys.next().await {
                 let k = k.map_err(|e| ActError::Store(e.to_string()))?;
-                if key_matches(&k, &key, &prefix, &op) {
-                    if let Some(entry) = kv
+                if key_matches(&k, &key, &prefix, &op)
+                    && let Some(entry) = kv
                         .get(&k)
                         .await
                         .map_err(|e| ActError::Store(e.to_string()))?
-                    {
-                        result.push((k, entry.to_vec()));
-                    }
+                {
+                    result.push((k, entry.to_vec()));
                 }
             }
             if is_rev {

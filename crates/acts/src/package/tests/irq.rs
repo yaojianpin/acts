@@ -619,7 +619,7 @@ async fn pack_irq_cancel_by_running_state() {
                 act.with_key("fn1").with_var("uid", json!("a"))
             }))
     });
-    let (engine, proc) = create_proc(&workflow, &"w1");
+    let (engine, proc) = create_proc(&workflow, "w1");
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(false).double();
     auto_complete(&engine, &rx);

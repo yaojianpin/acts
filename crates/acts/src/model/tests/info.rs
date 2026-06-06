@@ -177,15 +177,15 @@ fn model_info_package_arr_to_value() {
     );
     assert_eq!(
         v.get("create_time").unwrap().as_i64().unwrap(),
-        info.create_time as i64
+        info.create_time
     );
     assert_eq!(
         v.get("update_time").unwrap().as_i64().unwrap(),
-        info.update_time as i64
+        info.update_time
     );
     assert_eq!(
         v.get("timestamp").unwrap().as_i64().unwrap(),
-        info.timestamp as i64
+        info.timestamp
     );
 }
 
@@ -218,15 +218,15 @@ fn model_info_proc_arr_to_value() {
     assert_eq!(v.get("state").unwrap().as_str().unwrap(), info.state);
     assert_eq!(
         v.get("start_time").unwrap().as_i64().unwrap(),
-        info.start_time as i64
+        info.start_time
     );
     assert_eq!(
         v.get("end_time").unwrap().as_i64().unwrap(),
-        info.end_time as i64
+        info.end_time
     );
     assert_eq!(
         v.get("timestamp").unwrap().as_i64().unwrap(),
-        info.timestamp as i64
+        info.timestamp
     );
 }
 
@@ -271,11 +271,11 @@ fn model_info_task_arr_to_value() {
 
     assert_eq!(
         v.get("start_time").unwrap().as_i64().unwrap(),
-        info.start_time as i64
+        info.start_time
     );
     assert_eq!(
         v.get("end_time").unwrap().as_i64().unwrap(),
-        info.end_time as i64
+        info.end_time
     );
     assert_eq!(v.get("data").unwrap().as_str().unwrap(), info.data);
 }
@@ -307,11 +307,11 @@ fn model_info_model_arr_to_value() {
     assert_eq!(v.get("size").unwrap().as_u64().unwrap(), model.size as u64);
     assert_eq!(
         v.get("create_time").unwrap().as_i64().unwrap(),
-        model.create_time as i64
+        model.create_time
     );
     assert_eq!(
         v.get("update_time").unwrap().as_i64().unwrap(),
-        model.update_time as i64
+        model.update_time
     );
     assert_eq!(v.get("data").unwrap().as_str().unwrap(), model.data);
 }
