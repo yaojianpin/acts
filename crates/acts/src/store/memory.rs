@@ -69,7 +69,11 @@ impl KvStore for MemoryStore {
     }
 
     fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>> {
-        let ScanOptions { is_rev, op, ref prefix } = options;
+        let ScanOptions {
+            is_rev,
+            op,
+            ref prefix,
+        } = options;
         let mut entries: Vec<(String, Vec<u8>)> = self
             .data
             .iter()

@@ -16,8 +16,6 @@ pub fn block_on<F: Future>(f: F) -> F::Output {
             // so that sqlx pool operations don't compete with the parent runtime.
             tokio::task::block_in_place(|| runtime().block_on(f))
         }
-        Err(_) => {
-            runtime().block_on(f)
-        }
+        Err(_) => runtime().block_on(f),
     }
 }

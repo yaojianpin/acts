@@ -75,9 +75,10 @@ impl Visitor {
                 let mut is_last = i == len - 1;
                 if iter.kind() == NodeKind::Step
                     && let Some(next) = iter.next().upgrade()
-                        && self.root.visit_count(next.id()) == 0 {
-                            is_last = false;
-                        }
+                    && self.root.visit_count(next.id()) == 0
+                {
+                    is_last = false;
+                }
 
                 let mut node = Visitor::new(&self.root, iter, iter.level, i, is_last, &self.path);
                 node.walk(f);
@@ -86,17 +87,18 @@ impl Visitor {
 
     pub fn next_visit<F: Fn(&Visitor) + Clone>(&self, f: &F) {
         if let Some(next) = self.node.next().upgrade()
-            && self.root.visit_count(next.id()) == 0 {
-                let mut node = Visitor::new(
-                    &self.root,
-                    &next,
-                    next.level,
-                    self.index + 1,
-                    next.next().upgrade().is_none(),
-                    &self.path,
-                );
-                node.walk(f);
-            }
+            && self.root.visit_count(next.id()) == 0
+        {
+            let mut node = Visitor::new(
+                &self.root,
+                &next,
+                next.level,
+                self.index + 1,
+                next.next().upgrade().is_none(),
+                &self.path,
+            );
+            node.walk(f);
+        }
     }
 
     pub fn visit(&mut self) {

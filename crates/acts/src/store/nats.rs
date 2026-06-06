@@ -99,7 +99,11 @@ impl KvStore for NatsStore {
     }
 
     fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>> {
-        let ScanOptions { is_rev, op, ref prefix } = options;
+        let ScanOptions {
+            is_rev,
+            op,
+            ref prefix,
+        } = options;
         let prefix = prefix.clone();
         let key = key.to_string();
         let kv = self.kv.clone();

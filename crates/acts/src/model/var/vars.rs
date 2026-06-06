@@ -173,9 +173,10 @@ impl Vars {
         T: for<'de> Deserialize<'de> + Clone,
     {
         if let Some(value) = self.inner.get(name)
-            && let Ok(value) = serde_json::from_value::<T>(value.clone()) {
-                return Some(value);
-            }
+            && let Ok(value) = serde_json::from_value::<T>(value.clone())
+        {
+            return Some(value);
+        }
 
         None
     }
@@ -189,9 +190,10 @@ impl Vars {
         T: for<'de> Deserialize<'de> + Clone,
     {
         if let Some(value) = self.inner.remove(name)
-            && let Ok(value) = serde_json::from_value::<T>(value) {
-                return Some(value);
-            }
+            && let Ok(value) = serde_json::from_value::<T>(value)
+        {
+            return Some(value);
+        }
 
         None
     }

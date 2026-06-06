@@ -16,9 +16,10 @@ impl UserVars {
 
     pub fn get_data(&self, key: &str) -> Option<Vars> {
         if let Ok(ctx) = Context::current()
-            && let Some(v) = ctx.task().find::<Vars>(key) {
-                return Some(v);
-            }
+            && let Some(v) = ctx.task().find::<Vars>(key)
+        {
+            return Some(v);
+        }
         None
     }
 }
@@ -37,7 +38,8 @@ impl ActModule for UserVars {
                     data.set(k, v);
                 }
             }
-            ctx.globals().set(env.name(), ActJsValue::new(data.into()))?;
+            ctx.globals()
+                .set(env.name(), ActJsValue::new(data.into()))?;
         }
         Ok(())
     }

@@ -149,7 +149,11 @@ impl KvStore for SqliteStore {
 
     #[allow(clippy::await_holding_lock)]
     fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>> {
-        let ScanOptions { is_rev, op, ref prefix } = options;
+        let ScanOptions {
+            is_rev,
+            op,
+            ref prefix,
+        } = options;
         let pattern = format!("{}%", prefix);
         let (extra_sql, extra_binds) = op_conditions(&op, key);
         let conn = self.conn.clone();
@@ -158,7 +162,9 @@ impl KvStore for SqliteStore {
             let order = if is_rev { "DESC" } else { "ASC" };
             let sql = format!(
                 "SELECT key, value FROM {} WHERE key LIKE ?{} ORDER BY key {}",
-                consts::ACTS_STORE_NAME, extra_sql, order
+                consts::ACTS_STORE_NAME,
+                extra_sql,
+                order
             );
             let mut query = sqlx::query(&sql).bind(&pattern);
             for bind_val in &extra_binds {

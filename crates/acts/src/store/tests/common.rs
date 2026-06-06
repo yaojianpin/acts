@@ -2090,7 +2090,7 @@ macro_rules! gen_store_tests {
             // The fix should match "status" (indexed) not "name" (unindexed).
             let q = Query::new()
                 .filter(Filter::and().expr(Expr::eq("pid", pid.clone())))
-                .order("name", Sort::Asc)   // NOT indexed — should be skipped
+                .order("name", Sort::Asc) // NOT indexed — should be skipped
                 .order("status", Sort::Asc) // IS indexed — should determine is_rev
                 .offset(0)
                 .limit(100);
@@ -2488,14 +2488,11 @@ macro_rules! gen_store_tests {
             // Between "a" and "f" on indexed string field — end bound past
             // actual data to avoid InclusiveRange boundary exclusion
             let q = Query::new()
-                .filter(
-                    Filter::and()
-                        .expr(Expr::between(
-                            "state",
-                            format!("{}-between-a", prefix),
-                            format!("{}-between-f", prefix),
-                        )),
-                )
+                .filter(Filter::and().expr(Expr::between(
+                    "state",
+                    format!("{}-between-a", prefix),
+                    format!("{}-between-f", prefix),
+                )))
                 .offset(0)
                 .limit(100);
             let ret = store.procs().query(&q).unwrap();
@@ -2572,8 +2569,7 @@ macro_rules! gen_store_tests {
             // Verify all results have the correct status
             for row in &ret.rows {
                 assert!(
-                    row.status == MessageStatus::Created
-                        || row.status == MessageStatus::Completed
+                    row.status == MessageStatus::Created || row.status == MessageStatus::Completed
                 );
             }
 
@@ -2627,16 +2623,10 @@ macro_rules! gen_store_tests {
 
             // In with two states
             let q = Query::new()
-                .filter(
-                    Filter::and()
-                        .expr(Expr::r#in(
-                            "state",
-                            vec![
-                                format!("{}-in-a", prefix),
-                                format!("{}-in-b", prefix),
-                            ],
-                        )),
-                )
+                .filter(Filter::and().expr(Expr::r#in(
+                    "state",
+                    vec![format!("{}-in-a", prefix), format!("{}-in-b", prefix)],
+                )))
                 .offset(0)
                 .limit(100);
             let ret = store.procs().query(&q).unwrap();
@@ -2836,10 +2826,7 @@ macro_rules! gen_store_tests {
                         .expr(Expr::eq("pid", pid.clone()))
                         .expr(Expr::r#in(
                             "status",
-                            vec![
-                                MessageStatus::Created as i32,
-                                MessageStatus::Acked as i32,
-                            ],
+                            vec![MessageStatus::Created as i32, MessageStatus::Acked as i32],
                         )),
                 )
                 .order("status", Sort::Asc)
@@ -2871,10 +2858,7 @@ macro_rules! gen_store_tests {
                         .expr(Expr::eq("pid", pid.clone()))
                         .expr(Expr::r#in(
                             "status",
-                            vec![
-                                MessageStatus::Created as i32,
-                                MessageStatus::Acked as i32,
-                            ],
+                            vec![MessageStatus::Created as i32, MessageStatus::Acked as i32],
                         )),
                 )
                 .order("status", Sort::Asc)
@@ -3721,10 +3705,7 @@ macro_rules! gen_store_tests {
                 .filter(
                     Filter::and()
                         .expr(Expr::eq("mid", workflow.id.clone()))
-                        .expr(Expr::matches(
-                            "state",
-                            &format!("{}-m-a1", prefix),
-                        )),
+                        .expr(Expr::matches("state", &format!("{}-m-a1", prefix))),
                 )
                 .offset(0)
                 .limit(100);
@@ -4110,12 +4091,7 @@ macro_rules! gen_store_tests {
                 .with_step(|step| step.with_id("step1"));
 
             // Create procs with special character names (non-indexed)
-            let names = vec![
-                "hello_world",
-                "50%off",
-                "a|b|c",
-                "normal_name%extra",
-            ];
+            let names = vec!["hello_world", "50%off", "a|b|c", "normal_name%extra"];
             for name in &names {
                 let mut proc = create_proc(&utils::shortid(), TaskState::None, &workflow);
                 proc.name = name.to_string();

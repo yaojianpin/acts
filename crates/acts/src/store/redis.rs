@@ -79,7 +79,11 @@ impl KvStore for RedisStore {
     }
 
     fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>> {
-        let ScanOptions { is_rev, op, ref prefix } = options;
+        let ScanOptions {
+            is_rev,
+            op,
+            ref prefix,
+        } = options;
         let mut conn = self
             .conn
             .lock()
@@ -100,8 +104,9 @@ impl KvStore for RedisStore {
                 if !key_matches(&key_str, key, prefix, &op) {
                     continue;
                 }
-                let val: Option<Vec<u8>> =
-                    conn.get(&key_str).map_err(|e| ActError::Store(e.to_string()))?;
+                let val: Option<Vec<u8>> = conn
+                    .get(&key_str)
+                    .map_err(|e| ActError::Store(e.to_string()))?;
                 if let Some(v) = val {
                     result.push((key_str, v));
                 }

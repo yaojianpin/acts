@@ -266,12 +266,13 @@ impl Task {
         let ctx = self.create_context();
         let mut inputs = Vars::new();
         if let Some(prev) = self.prev()
-            && let Some(prev_task) = self.proc.task(&prev) {
-                // set the prev task's outputs as current inputs
-                for (ref k, v) in &prev_task.outputs() {
-                    inputs.set(k, v.clone());
-                }
+            && let Some(prev_task) = self.proc.task(&prev)
+        {
+            // set the prev task's outputs as current inputs
+            for (ref k, v) in &prev_task.outputs() {
+                inputs.set(k, v.clone());
             }
+        }
         // merge the node vars
         let vars = utils::fill_inputs(&self.node.content.vars(), &ctx);
         inputs.extend(vars)

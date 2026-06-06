@@ -75,8 +75,7 @@ impl<T> KvCollection<T> {
                 .unwrap_or(false);
 
             // field_prefix bounds the scan to this field: {prefix}-{field}-
-            let field_prefix =
-                format!("{}{}{}{}", self.prefix, KEY_SEP, expr.key, KEY_SEP);
+            let field_prefix = format!("{}{}{}{}", self.prefix, KEY_SEP, expr.key, KEY_SEP);
             let value_str = json_value_to_key_str(&expr.value);
             let value_key = format!(
                 "{}{}{}{}{}{}",
@@ -115,12 +114,7 @@ impl<T> KvCollection<T> {
                             let v_str = json_value_to_key_str(val);
                             format!(
                                 "{}{}{}{}{}{}",
-                                self.prefix,
-                                KEY_SEP,
-                                expr.key,
-                                KEY_SEP,
-                                v_str,
-                                KEY_SEP
+                                self.prefix, KEY_SEP, expr.key, KEY_SEP, v_str, KEY_SEP
                             )
                         })
                         .collect();
@@ -141,9 +135,7 @@ impl<T> KvCollection<T> {
                 // For Eq/Match, returned keys all start with value_key
                 ExprOp::EQ | ExprOp::Match => entries
                     .iter()
-                    .filter_map(|(key, _)| {
-                        key.strip_prefix(&value_key).map(|s| s.to_string())
-                    })
+                    .filter_map(|(key, _)| key.strip_prefix(&value_key).map(|s| s.to_string()))
                     .collect(),
                 // For other ops, extract ID from the index key by skipping
                 // past the field_prefix and the value segment
@@ -604,19 +596,13 @@ mod tests {
 
     #[test]
     fn json_value_to_key_str_i64_negative() {
-        assert_eq!(
-            json_value_to_key_str(&json!(-5)),
-            "-0000000000000000005"
-        );
+        assert_eq!(json_value_to_key_str(&json!(-5)), "-0000000000000000005");
     }
 
     #[test]
     fn json_value_to_key_str_u64_zero_pads() {
         let big: u64 = u64::MAX;
-        assert_eq!(
-            json_value_to_key_str(&json!(big)),
-            "18446744073709551615"
-        );
+        assert_eq!(json_value_to_key_str(&json!(big)), "18446744073709551615");
     }
 
     #[test]
@@ -756,7 +742,10 @@ mod tests {
         use std::cmp::Ordering;
         assert_eq!(cmp_json_val(&json!("abc"), &json!("abc")), Ordering::Equal);
         assert_eq!(cmp_json_val(&json!("abc"), &json!("def")), Ordering::Less);
-        assert_eq!(cmp_json_val(&json!("def"), &json!("abc")), Ordering::Greater);
+        assert_eq!(
+            cmp_json_val(&json!("def"), &json!("abc")),
+            Ordering::Greater
+        );
     }
 
     #[test]

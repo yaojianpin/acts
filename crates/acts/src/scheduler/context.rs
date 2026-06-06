@@ -249,10 +249,11 @@ impl Context {
     /// redo the task and dispatch directly
     pub fn redo_task(&self, task: &Arc<Task>) -> Result<()> {
         if let Some(prev) = task.prev()
-            && let Some(prev_task) = self.proc.task(&prev) {
-                let task = self.proc.create_task(task.node(), Some(prev_task));
-                self.runtime.push(&task)?;
-            }
+            && let Some(prev_task) = self.proc.task(&prev)
+        {
+            let task = self.proc.create_task(task.node(), Some(prev_task));
+            self.runtime.push(&task)?;
+        }
 
         Ok(())
     }
@@ -374,10 +375,11 @@ impl Context {
             println!("check error state after emitting {task:?}");
             if task.state().is_error()
                 && let Some(err) = task.err()
-                    && let Some(parent) = task.parent() {
-                        parent.set_err(&err);
-                        return parent.error(self);
-                    }
+                && let Some(parent) = task.parent()
+            {
+                parent.set_err(&err);
+                return parent.error(self);
+            }
         }
 
         Ok(())
@@ -388,25 +390,27 @@ impl Context {
 
         // on workflow start
         if let NodeContent::Workflow(_) = &task.node().content
-            && task.state().is_created() {
-                if self.proc.state().is_none() {
-                    self.proc.set_state(TaskState::Running);
-                }
-                self.runtime.emitter().emit_proc_event(&self.proc);
+            && task.state().is_created()
+        {
+            if self.proc.state().is_none() {
+                self.proc.set_state(TaskState::Running);
             }
+            self.runtime.emitter().emit_proc_event(&self.proc);
+        }
 
         self.runtime.emitter().emit_task_event(task)?;
 
         // on workflow complete
         if let NodeContent::Workflow(_) = &task.node().content
-            && task.state().is_completed() {
-                self.proc.set_state(task.state());
-                if let Some(err) = task.err() {
-                    self.proc.set_err(&err);
-                }
-
-                self.runtime.emitter().emit_proc_event(&self.proc);
+            && task.state().is_completed()
+        {
+            self.proc.set_state(task.state());
+            if let Some(err) = task.err() {
+                self.proc.set_err(&err);
             }
+
+            self.runtime.emitter().emit_proc_event(&self.proc);
+        }
 
         Ok(())
     }

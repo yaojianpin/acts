@@ -82,7 +82,11 @@ impl KvStore for SledStore {
     }
 
     fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>> {
-        let ScanOptions { is_rev, op, ref prefix } = options;
+        let ScanOptions {
+            is_rev,
+            op,
+            ref prefix,
+        } = options;
         // Sled's scan_prefix returns keys in ascending order, bounded by prefix
         let mut result = Vec::new();
         for entry in self.db.scan_prefix(prefix.as_bytes()) {
