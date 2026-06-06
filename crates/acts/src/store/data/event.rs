@@ -35,12 +35,10 @@ impl DbCollectionIden for Event {
         if v == Self::version() {
             return Self::upcast_current(value);
         }
-        match v {
-            _ => Err(crate::ActError::Store(format!(
-                "unsupported event version: {}",
-                v
-            ))),
-        }
+        Err(crate::ActError::Store(format!(
+            "unsupported event version: {}",
+            v
+        )))
     }
 }
 

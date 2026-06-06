@@ -216,7 +216,7 @@ impl Process {
             .filter(|iter| iter.prev() == Some(tid.to_string()))
             .collect::<Vec<_>>();
 
-        tasks.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+        tasks.sort_by_key(|a| a.timestamp);
         tasks
     }
 

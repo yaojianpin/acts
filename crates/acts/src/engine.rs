@@ -43,6 +43,12 @@ pub struct Engine {
     runtime: Option<Arc<Runtime>>,
 }
 
+impl Default for Engine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Engine {
     pub fn new() -> Self {
         Self {

@@ -172,11 +172,10 @@ impl Vars {
     where
         T: for<'de> Deserialize<'de> + Clone,
     {
-        if let Some(value) = self.inner.get(name) {
-            if let Ok(value) = serde_json::from_value::<T>(value.clone()) {
+        if let Some(value) = self.inner.get(name)
+            && let Ok(value) = serde_json::from_value::<T>(value.clone()) {
                 return Some(value);
             }
-        }
 
         None
     }
@@ -189,11 +188,10 @@ impl Vars {
     where
         T: for<'de> Deserialize<'de> + Clone,
     {
-        if let Some(value) = self.inner.remove(name) {
-            if let Ok(value) = serde_json::from_value::<T>(value) {
+        if let Some(value) = self.inner.remove(name)
+            && let Ok(value) = serde_json::from_value::<T>(value) {
                 return Some(value);
             }
-        }
 
         None
     }
@@ -274,8 +272,8 @@ fn from_json_number(n: &serde_json::Number) -> JsonValue {
     if n.is_i64() {
         JsonValue::Number(serde_json::Number::from(n.as_i64().unwrap()))
     } else if n.is_u64() {
-        return JsonValue::Number(serde_json::Number::from(n.as_u64().unwrap()));
+        JsonValue::Number(serde_json::Number::from(n.as_u64().unwrap()))
     } else {
-        return JsonValue::Number(serde_json::Number::from_f64(n.as_f64().unwrap()).unwrap());
+        JsonValue::Number(serde_json::Number::from_f64(n.as_f64().unwrap()).unwrap())
     }
 }

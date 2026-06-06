@@ -265,14 +265,13 @@ impl Task {
     pub fn inputs(self: &Arc<Self>) -> Vars {
         let ctx = self.create_context();
         let mut inputs = Vars::new();
-        if let Some(prev) = self.prev() {
-            if let Some(prev_task) = self.proc.task(&prev) {
+        if let Some(prev) = self.prev()
+            && let Some(prev_task) = self.proc.task(&prev) {
                 // set the prev task's outputs as current inputs
                 for (ref k, v) in &prev_task.outputs() {
                     inputs.set(k, v.clone());
                 }
             }
-        }
         // merge the node vars
         let vars = utils::fill_inputs(&self.node.content.vars(), &ctx);
         inputs.extend(vars)
@@ -814,7 +813,7 @@ impl Task {
                     }
 
                     // find the next follows
-                    ret.extend(task.follows(predicate, path).into_iter());
+                    ret.extend(task.follows(predicate, path));
                 }
             }
         }

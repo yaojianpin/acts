@@ -24,7 +24,7 @@ impl DbCollectionIden for Proc {
         StoreIden::Procs
     }
     fn indexed_fields() -> &'static [&'static str] {
-        &["state", "mid"]
+        &["state", "mid", "timestamp", "start_time", "end_time"]
     }
     fn version() -> i32 {
         0
@@ -35,12 +35,10 @@ impl DbCollectionIden for Proc {
         if v == Self::version() {
             return Self::upcast_current(value);
         }
-        match v {
-            _ => Err(crate::ActError::Store(format!(
-                "unsupported proc version: {}",
-                v
-            ))),
-        }
+        Err(crate::ActError::Store(format!(
+            "unsupported proc version: {}",
+            v
+        )))
     }
 }
 

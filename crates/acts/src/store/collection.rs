@@ -1,7 +1,7 @@
 use super::map_db_err;
 use crate::store::{
-    DbCollection, DbCollectionIden, Expr, ExprOp, Filter, FilterExpr, KvStore, PageData, Query,
-    Sort, query::FilterType,
+    DbCollection, DbCollectionIden, Expr, ExprOp, Filter, FilterExpr, KvStore, OrderBy, PageData,
+    Query, ScanOperation, ScanOptions, Sort, query::FilterType,
 };
 use crate::utils::consts::KEY_SEP;
 use crate::{ActError, Result};
@@ -58,36 +58,119 @@ impl<T> KvCollection<T> {
     }
 
     /// Compute the set of IDs matching a single expression.
-    fn expr_ids(&self, expr: &Expr, indexed: &[&str], is_rev: bool) -> Result<HashSet<String>> {
-        if expr.op == ExprOp::EQ && indexed.contains(&expr.key.as_str()) {
-            // Use index scan: keys are {prefix}-{field}-{value}-{id}
+    fn expr_ids(
+        &self,
+        expr: &Expr,
+        indexed: &[&str],
+        order_by: &[OrderBy],
+    ) -> Result<HashSet<String>> {
+        // Match uses contains() for substring matching, which can't be served
+        // by index prefix scan (starts_with). Fall through to non-indexed path.
+        if indexed.contains(&expr.key.as_str()) && expr.op != ExprOp::Match {
+            // Determine scan direction from order_by for this expression's field
+            let is_rev = order_by
+                .iter()
+                .find(|ob| ob.field == expr.key)
+                .map(|ob| ob.order == Sort::Desc)
+                .unwrap_or(false);
+
+            // field_prefix bounds the scan to this field: {prefix}-{field}-
+            let field_prefix =
+                format!("{}{}{}{}", self.prefix, KEY_SEP, expr.key, KEY_SEP);
             let value_str = json_value_to_key_str(&expr.value);
-            let scan_key = format!(
+            let value_key = format!(
                 "{}{}{}{}{}{}",
                 self.prefix, KEY_SEP, expr.key, KEY_SEP, value_str, KEY_SEP
             );
-            let entries = self.kv.scan_prefix(&scan_key, is_rev)?;
-            let ids: HashSet<String> = entries
-                .iter()
-                .filter_map(|(key, _)| {
-                    // Key format: {prefix}-{field}-{value}-{id}
-                    key.strip_prefix(&scan_key).map(|s| s.to_string())
-                })
-                .collect();
+
+            let scan_op = match expr.op {
+                ExprOp::EQ => ScanOperation::Eq,
+                ExprOp::NE => ScanOperation::Ne,
+                ExprOp::GT => ScanOperation::Gt,
+                ExprOp::GE => ScanOperation::Ge,
+                ExprOp::LT => ScanOperation::Lt,
+                ExprOp::LE => ScanOperation::Le,
+                ExprOp::Match => ScanOperation::Match,
+                ExprOp::Between => {
+                    let empty = vec![];
+                    let arr = expr.value.as_array().unwrap_or(&empty);
+                    let from = if arr.len() > 1 {
+                        json_value_to_key_str(&arr[0])
+                    } else {
+                        "".to_string()
+                    };
+                    let to = if arr.len() > 1 {
+                        json_value_to_key_str(&arr[1])
+                    } else {
+                        "".to_string()
+                    };
+                    ScanOperation::InclusiveRange { from, to }
+                }
+                ExprOp::In => {
+                    let empty = vec![];
+                    let arr = expr.value.as_array().unwrap_or(&empty);
+                    let values: Vec<String> = arr
+                        .iter()
+                        .map(|val| {
+                            let v_str = json_value_to_key_str(val);
+                            format!(
+                                "{}{}{}{}{}{}",
+                                self.prefix,
+                                KEY_SEP,
+                                expr.key,
+                                KEY_SEP,
+                                v_str,
+                                KEY_SEP
+                            )
+                        })
+                        .collect();
+                    ScanOperation::In { values }
+                }
+            };
+
+            let scan_key = match expr.op {
+                // For range/In ops, `key` equals `prefix` (field-level prefix)
+                ExprOp::Between | ExprOp::In => field_prefix.clone(),
+                _ => value_key.clone(),
+            };
+
+            let options = ScanOptions::new(scan_op, field_prefix.clone(), is_rev);
+            let entries = self.kv.scan_prefix(&scan_key, options)?;
+
+            let ids: HashSet<String> = match expr.op {
+                // For Eq/Match, returned keys all start with value_key
+                ExprOp::EQ | ExprOp::Match => entries
+                    .iter()
+                    .filter_map(|(key, _)| {
+                        key.strip_prefix(&value_key).map(|s| s.to_string())
+                    })
+                    .collect(),
+                // For other ops, extract ID from the index key by skipping
+                // past the field_prefix and the value segment
+                _ => entries
+                    .iter()
+                    .filter_map(|(key, _)| {
+                        let rest = key.strip_prefix(&field_prefix)?;
+                        let sep_pos = rest.rfind(KEY_SEP)?;
+                        Some(rest[sep_pos + KEY_SEP.len()..].to_string())
+                    })
+                    .collect(),
+            };
             Ok(ids)
         } else {
-            // Scan all data entries and filter in-memory
+            // Fallback: scan all data entries and filter in-memory
             let scan_key = format!("{}{}id{}", self.prefix, KEY_SEP, KEY_SEP);
-            let entries = self.kv.scan_prefix(&scan_key, is_rev)?;
+            let options = ScanOptions::new(ScanOperation::Eq, scan_key.clone(), false);
+            let entries = self.kv.scan_prefix(&scan_key, options)?;
             let ids: HashSet<String> = entries
                 .iter()
                 .filter_map(|(_, bytes)| {
                     let v: JsonValue = serde_json::from_slice(bytes).ok()?;
                     let id = v.get("id")?.as_str()?.to_string();
-                    if let Some(field_val) = v.get(&expr.key) {
-                        if expr.op(field_val, &expr.value) {
-                            return Some(id);
-                        }
+                    if let Some(field_val) = v.get(&expr.key)
+                        && expr.op(field_val, &expr.value)
+                    {
+                        return Some(id);
                     }
                     None
                 })
@@ -101,11 +184,11 @@ impl<T> KvCollection<T> {
         &self,
         filter_expr: &FilterExpr,
         indexed: &[&str],
-        is_rev: bool,
+        order_by: &[OrderBy],
     ) -> Result<HashSet<String>> {
         match filter_expr {
-            FilterExpr::Expr(expr) => self.expr_ids(expr, indexed, is_rev),
-            FilterExpr::Filter(filter) => self.filter_ids(filter, indexed, is_rev),
+            FilterExpr::Expr(expr) => self.expr_ids(expr, indexed, order_by),
+            FilterExpr::Filter(filter) => self.filter_ids(filter, indexed, order_by),
         }
     }
 
@@ -114,11 +197,11 @@ impl<T> KvCollection<T> {
         &self,
         filter: &Filter,
         indexed: &[&str],
-        is_rev: bool,
+        order_by: &[OrderBy],
     ) -> Result<HashSet<String>> {
         let mut result: Option<HashSet<String>> = None;
         for cond in &filter.exprs {
-            let ids = self.filter_expr_ids(cond, indexed, is_rev)?;
+            let ids = self.filter_expr_ids(cond, indexed, order_by)?;
             result = Some(match result {
                 None => ids,
                 Some(existing) => match filter.r#type {
@@ -135,9 +218,56 @@ impl<T> KvCollection<T> {
 ///
 /// Integers (i64, u64) are zero-padded to 20 digits so that lexicographic
 /// ordering matches numeric ordering (otherwise "10" < "5").
+/// Compare two JsonValues for ordering.
+///
+/// Numbers are compared as f64; everything else is compared as a string.
+fn cmp_json_val(a: &JsonValue, b: &JsonValue) -> Ordering {
+    if let (JsonValue::Number(na), JsonValue::Number(nb)) = (a, b) {
+        let fa = na.as_f64().unwrap_or_default();
+        let fb = nb.as_f64().unwrap_or_default();
+        if fa < fb {
+            Ordering::Less
+        } else if fa > fb {
+            Ordering::Greater
+        } else {
+            Ordering::Equal
+        }
+    } else {
+        a.to_string().cmp(&b.to_string())
+    }
+}
+
+/// Encode a string so it contains only characters valid for all KV store keys
+/// and safe for SQL LIKE patterns (i.e. no `%`, `_`, or `\`).
+///
+/// Characters in `[a-zA-Z0-9-]` pass through unchanged. Every other character
+/// — including `%`, `_`, `\`, `|`, `=`, `.` — is encoded as `=XX` (2-digit
+/// uppercase hex for code points 0–255, 6-digit for code points above 255).
+/// The `=` escape-prefix is itself valid in NATS KV keys (the strictest
+/// backend), and the encoding is applied identically during key creation and
+/// query scan-key construction so that lookups always match.
+fn encode_key_str(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' => result.push(c),
+            other => {
+                result.push('=');
+                let code = other as u32;
+                if code <= 0xFF {
+                    result.push_str(&format!("{:02X}", code));
+                } else {
+                    result.push_str(&format!("{:06X}", code));
+                }
+            }
+        }
+    }
+    result
+}
+
 fn json_value_to_key_str(v: &JsonValue) -> String {
     match v {
-        JsonValue::String(s) => s.clone(),
+        JsonValue::String(s) => encode_key_str(s),
         JsonValue::Number(n) => {
             if let Some(i) = n.as_i64() {
                 format!("{:020}", i)
@@ -175,9 +305,7 @@ where
     fn query(&self, q: &Query) -> crate::Result<PageData<Self::Item>> {
         let indexed = T::indexed_fields();
 
-        // Determine is_rev by finding an order_by entry whose field
-        // matches an indexed field, so the index scan direction aligns
-        // with the requested sort order.
+        // Determine global is_rev for no-filter fallback and final ID sort
         let is_rev = q
             .get_order_by()
             .iter()
@@ -187,11 +315,12 @@ where
 
         // Step 1 & 2: Compute matching ID set from filter and combine with AND/OR
         let id_set: HashSet<String> = if let Some(filter) = &q.filter {
-            self.filter_ids(filter, indexed, is_rev)?
+            self.filter_ids(filter, indexed, q.get_order_by())?
         } else {
             // No filter – scan all data entries to collect all IDs
             let scan_key = format!("{}{}id{}", self.prefix, KEY_SEP, KEY_SEP);
-            let entries = self.kv.scan_prefix(&scan_key, is_rev)?;
+            let options = ScanOptions::new(ScanOperation::Eq, scan_key.clone(), is_rev);
+            let entries = self.kv.scan_prefix(&scan_key, options)?;
             entries
                 .iter()
                 .filter_map(|(_, bytes)| {
@@ -369,11 +498,32 @@ impl Expr {
                 false
             }
             ExprOp::Match => {
-                let value = match r {
-                    JsonValue::String(v) => v,
-                    v => &v.to_string(),
+                // Extract raw strings for comparison (not JSON-encoded to_string,
+                // which would escape \ as \\ and cause false negatives)
+                let l_str: String = match l {
+                    JsonValue::String(v) => v.clone(),
+                    other => other.to_string(),
                 };
-                l.to_string().contains(value)
+                let r_str: String = match r {
+                    JsonValue::String(v) => v.clone(),
+                    other => other.to_string(),
+                };
+                l_str.contains(&r_str)
+            }
+            ExprOp::Between => {
+                let arr = match r.as_array() {
+                    Some(a) if a.len() >= 2 => a,
+                    _ => return false,
+                };
+                cmp_json_val(l, &arr[0]) != Ordering::Less
+                    && cmp_json_val(l, &arr[1]) != Ordering::Greater
+            }
+            ExprOp::In => {
+                let arr = match r.as_array() {
+                    Some(a) => a,
+                    None => return false,
+                };
+                arr.iter().any(|v| cmp_json_val(l, v) == Ordering::Equal)
             }
         }
     }
@@ -381,12 +531,68 @@ impl Expr {
 
 #[cfg(test)]
 mod tests {
-    use super::json_value_to_key_str;
+    use super::{encode_key_str, json_value_to_key_str};
+    use crate::store::Expr;
     use serde_json::json;
+
+    #[test]
+    fn encode_key_str_passthrough() {
+        // Characters in the safe set pass through unchanged
+        assert_eq!(encode_key_str("hello"), "hello");
+        assert_eq!(encode_key_str("abcABC123"), "abcABC123");
+        assert_eq!(encode_key_str("hello-world"), "hello-world");
+        assert_eq!(encode_key_str("with_underscore"), "with=5Funderscore");
+        assert_eq!(encode_key_str(""), "");
+    }
+
+    #[test]
+    fn encode_key_str_percent() {
+        assert_eq!(encode_key_str("50%off"), "50=25off");
+    }
+
+    #[test]
+    fn encode_key_str_pipe() {
+        assert_eq!(encode_key_str("a|b|c"), "a=7Cb=7Cc");
+    }
+
+    #[test]
+    fn encode_key_str_backslash() {
+        assert_eq!(encode_key_str(r"a\b"), "a=5Cb");
+    }
+
+    #[test]
+    fn encode_key_str_equals() {
+        // = itself is encoded so it never appears un-escaped in the output
+        assert_eq!(encode_key_str("a=b"), "a=3Db");
+    }
+
+    #[test]
+    fn encode_key_str_dot() {
+        assert_eq!(encode_key_str("file.txt"), "file=2Etxt");
+    }
+
+    #[test]
+    fn encode_key_str_mixed_special() {
+        assert_eq!(encode_key_str("a%b|c\\d"), "a=25b=7Cc=5Cd");
+    }
+
+    #[test]
+    fn encode_key_str_emoji() {
+        // Non-BMP character encoded with 6-digit hex
+        let s = encode_key_str("hi😀");
+        assert!(s.starts_with("hi="));
+        assert!(s.len() > 4);
+    }
 
     #[test]
     fn json_value_to_key_str_string() {
         assert_eq!(json_value_to_key_str(&json!("hello")), "hello");
+    }
+
+    #[test]
+    fn json_value_to_key_str_string_with_special() {
+        // Special characters are encoded via encode_key_str
+        assert_eq!(json_value_to_key_str(&json!("a%b")), "a=25b");
     }
 
     #[test]
@@ -445,5 +651,229 @@ mod tests {
     #[test]
     fn json_value_to_key_str_null() {
         assert_eq!(json_value_to_key_str(&json!(null)), "null");
+    }
+
+    // ========== Expr::op() Between / In / cmp_json_val tests ==========
+
+    #[test]
+    fn store_expr_op_between_numbers_inside() {
+        let expr = Expr::between("field", 10, 20);
+        assert!(expr.op(&json!(10), &json!([10, 20])));
+        assert!(expr.op(&json!(15), &json!([10, 20])));
+        assert!(expr.op(&json!(20), &json!([10, 20])));
+    }
+
+    #[test]
+    fn store_expr_op_between_numbers_outside() {
+        let expr = Expr::between("field", 10, 20);
+        assert!(!expr.op(&json!(9), &json!([10, 20])));
+        assert!(!expr.op(&json!(21), &json!([10, 20])));
+        assert!(!expr.op(&json!(100), &json!([10, 20])));
+    }
+
+    #[test]
+    fn store_expr_op_between_strings() {
+        let expr = Expr::between("field", "b", "d");
+        assert!(!expr.op(&json!("a"), &json!(["b", "d"])));
+        assert!(expr.op(&json!("b"), &json!(["b", "d"])));
+        assert!(expr.op(&json!("c"), &json!(["b", "d"])));
+        assert!(expr.op(&json!("d"), &json!(["b", "d"])));
+        assert!(!expr.op(&json!("e"), &json!(["b", "d"])));
+    }
+
+    #[test]
+    fn store_expr_op_between_invalid_array() {
+        let expr = Expr::between("field", 1, 9);
+        // Not an array — returns false
+        assert!(!expr.op(&json!(5), &json!("not_array")));
+        // Array with single element — returns false
+        assert!(!expr.op(&json!(5), &json!([1])));
+        // Empty array — returns false
+        assert!(!expr.op(&json!(5), &json!([])));
+    }
+
+    #[test]
+    fn store_expr_op_between_float() {
+        let expr = Expr::between("field", 1.5, 3.5);
+        assert!(!expr.op(&json!(1.0), &json!([1.5, 3.5])));
+        assert!(expr.op(&json!(1.5), &json!([1.5, 3.5])));
+        assert!(expr.op(&json!(2.0), &json!([1.5, 3.5])));
+        assert!(expr.op(&json!(3.5), &json!([1.5, 3.5])));
+        assert!(!expr.op(&json!(4.0), &json!([1.5, 3.5])));
+    }
+
+    #[test]
+    fn store_expr_op_in_numbers() {
+        let expr = Expr::r#in("field", vec![1, 3, 5]);
+        assert!(expr.op(&json!(1), &json!([1, 3, 5])));
+        assert!(expr.op(&json!(3), &json!([1, 3, 5])));
+        assert!(expr.op(&json!(5), &json!([1, 3, 5])));
+        assert!(!expr.op(&json!(0), &json!([1, 3, 5])));
+        assert!(!expr.op(&json!(2), &json!([1, 3, 5])));
+        assert!(!expr.op(&json!(6), &json!([1, 3, 5])));
+    }
+
+    #[test]
+    fn store_expr_op_in_strings() {
+        let expr = Expr::r#in("field", vec!["running", "completed"]);
+        assert!(expr.op(&json!("running"), &json!(["running", "completed"])));
+        assert!(expr.op(&json!("completed"), &json!(["running", "completed"])));
+        assert!(!expr.op(&json!("pending"), &json!(["running", "completed"])));
+        assert!(!expr.op(&json!("none"), &json!(["running", "completed"])));
+    }
+
+    #[test]
+    fn store_expr_op_in_invalid() {
+        let expr = Expr::r#in("field", vec![1, 2]);
+        // Not an array — returns false
+        assert!(!expr.op(&json!(1), &json!("not_array")));
+        // Null — returns false
+        assert!(!expr.op(&json!(1), &json!(null)));
+    }
+
+    #[test]
+    fn store_expr_op_in_empty() {
+        let expr = Expr::r#in("field", Vec::<i32>::new());
+        // No values to match, always false
+        assert!(!expr.op(&json!(1), &json!([])));
+        assert!(!expr.op(&json!("a"), &json!([])));
+    }
+
+    // ========== cmp_json_val comparison tests ==========
+
+    #[test]
+    fn store_cmp_json_val_numbers() {
+        use super::cmp_json_val;
+        use std::cmp::Ordering;
+        assert_eq!(cmp_json_val(&json!(10), &json!(5)), Ordering::Greater);
+        assert_eq!(cmp_json_val(&json!(5), &json!(10)), Ordering::Less);
+        assert_eq!(cmp_json_val(&json!(5), &json!(5)), Ordering::Equal);
+    }
+
+    #[test]
+    fn store_cmp_json_val_strings() {
+        use super::cmp_json_val;
+        use std::cmp::Ordering;
+        assert_eq!(cmp_json_val(&json!("abc"), &json!("abc")), Ordering::Equal);
+        assert_eq!(cmp_json_val(&json!("abc"), &json!("def")), Ordering::Less);
+        assert_eq!(cmp_json_val(&json!("def"), &json!("abc")), Ordering::Greater);
+    }
+
+    #[test]
+    fn store_cmp_json_val_mixed_types() {
+        use super::cmp_json_val;
+        use std::cmp::Ordering;
+        // number vs string — compared via to_string()
+        // json!(10).to_string() = "10", json!("5").to_string() = "\"5\""
+        // "10" > "\"5\"" because '1' (49) > '"' (34)
+        let result = cmp_json_val(&json!(10), &json!("5"));
+        assert_eq!(result, Ordering::Greater); // "10" > "\"5\"" lexicographically
+    }
+
+    #[test]
+    fn store_cmp_json_val_floats() {
+        use super::cmp_json_val;
+        use std::cmp::Ordering;
+        assert_eq!(cmp_json_val(&json!(1.5), &json!(1.5)), Ordering::Equal);
+        assert_eq!(cmp_json_val(&json!(1.5), &json!(2.0)), Ordering::Less);
+        assert_eq!(cmp_json_val(&json!(3.0), &json!(2.5)), Ordering::Greater);
+    }
+
+    // ========== Expr::op() NE / LT / LE / GT / GE / Match tests ==========
+
+    #[test]
+    fn store_expr_op_ne_numbers() {
+        let expr = Expr::ne("field", 10);
+        assert!(!expr.op(&json!(10), &json!(10)));
+        assert!(expr.op(&json!(5), &json!(10)));
+        assert!(expr.op(&json!(20), &json!(10)));
+    }
+
+    #[test]
+    fn store_expr_op_ne_strings() {
+        let expr = Expr::ne("field", "hello");
+        assert!(!expr.op(&json!("hello"), &json!("hello")));
+        assert!(expr.op(&json!("world"), &json!("hello")));
+        assert!(expr.op(&json!(""), &json!("hello")));
+    }
+
+    #[test]
+    fn store_expr_op_ne_mixed_types() {
+        let expr = Expr::ne("field", 10);
+        // NE returns true when types differ (l != r)
+        assert!(expr.op(&json!("10"), &json!(10)));
+    }
+
+    #[test]
+    fn store_expr_op_lt_numbers() {
+        let expr = Expr::lt("field", 10);
+        assert!(expr.op(&json!(5), &json!(10)));
+        assert!(!expr.op(&json!(10), &json!(10)));
+        assert!(!expr.op(&json!(15), &json!(10)));
+    }
+
+    #[test]
+    fn store_expr_op_lt_non_number_returns_false() {
+        let expr = Expr::lt("field", 10);
+        // LT only works for numbers; non-numbers always return false
+        assert!(!expr.op(&json!("5"), &json!(10)));
+        assert!(!expr.op(&json!(null), &json!(10)));
+    }
+
+    #[test]
+    fn store_expr_op_le_numbers() {
+        let expr = Expr::le("field", 10);
+        assert!(expr.op(&json!(5), &json!(10)));
+        assert!(expr.op(&json!(10), &json!(10)));
+        assert!(!expr.op(&json!(15), &json!(10)));
+    }
+
+    #[test]
+    fn store_expr_op_le_non_number_returns_false() {
+        let expr = Expr::le("field", 10);
+        assert!(!expr.op(&json!("5"), &json!(10)));
+    }
+
+    #[test]
+    fn store_expr_op_gt_numbers() {
+        let expr = Expr::gt("field", 10);
+        assert!(!expr.op(&json!(5), &json!(10)));
+        assert!(!expr.op(&json!(10), &json!(10)));
+        assert!(expr.op(&json!(15), &json!(10)));
+    }
+
+    #[test]
+    fn store_expr_op_gt_non_number_returns_false() {
+        let expr = Expr::gt("field", 10);
+        assert!(!expr.op(&json!("15"), &json!(10)));
+    }
+
+    #[test]
+    fn store_expr_op_ge_numbers() {
+        let expr = Expr::ge("field", 10);
+        assert!(!expr.op(&json!(5), &json!(10)));
+        assert!(expr.op(&json!(10), &json!(10)));
+        assert!(expr.op(&json!(15), &json!(10)));
+    }
+
+    #[test]
+    fn store_expr_op_ge_non_number_returns_false() {
+        let expr = Expr::ge("field", 10);
+        assert!(!expr.op(&json!("15"), &json!(10)));
+    }
+
+    #[test]
+    fn store_expr_op_match_contains() {
+        let expr = Expr::matches("field", "ello");
+        assert!(expr.op(&json!("hello"), &json!("ello")));
+        assert!(!expr.op(&json!("hello"), &json!("xyz")));
+    }
+
+    #[test]
+    fn store_expr_op_match_number_is_substring_of_to_string() {
+        // Match converts both sides to string and checks contains
+        let expr = Expr::matches("field", "2");
+        assert!(expr.op(&json!(12), &json!("2")));
+        assert!(!expr.op(&json!(10), &json!("2")));
     }
 }

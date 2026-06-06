@@ -32,6 +32,11 @@ impl DbCollectionIden for Package {
     fn iden() -> StoreIden {
         StoreIden::Packages
     }
+
+    fn indexed_fields() -> &'static [&'static str] {
+        &["timestamp", "create_time", "update_time"]
+    }
+
     fn version() -> i32 {
         0
     }
@@ -41,11 +46,9 @@ impl DbCollectionIden for Package {
         if v == Self::version() {
             return Self::upcast_current(value);
         }
-        match v {
-            _ => Err(crate::ActError::Store(format!(
-                "unsupported package version: {}",
-                v
-            ))),
-        }
+        Err(crate::ActError::Store(format!(
+            "unsupported package version: {}",
+            v
+        )))
     }
 }

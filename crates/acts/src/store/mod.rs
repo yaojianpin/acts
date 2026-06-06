@@ -110,11 +110,72 @@ pub trait DbCollectionIden {
     }
 }
 
+pub struct ScanOptions {
+    /// list is in reverse order
+    pub is_rev: bool,
+    /// scan operation
+    pub op: ScanOperation,
+    /// The prefix that bounds the scan. All returned keys must start with this prefix.
+    /// For point ops (Eq/Gt/Lt/Ge/Le/Ne/Match) this is the field-level prefix
+    /// (e.g., "tasks|state|"), and `key` is the full value prefix.
+    /// For range ops this equals the `key` parameter.
+    pub prefix: String,
+}
+
+impl ScanOptions {
+    pub fn new(op: ScanOperation, prefix: String, is_rev: bool) -> Self {
+        Self { is_rev, op, prefix }
+    }
+}
+
+pub enum ScanOperation {
+    /// Not equal — keys that start with the parent prefix but NOT the given key
+    Ne,
+
+    /// Equal — keys that start with the given key
+    Eq,
+
+    /// Less than — keys less than the given key
+    Lt,
+
+    /// Greater than — keys greater than the given key
+    Gt,
+
+    /// Greater and equal — keys greater than or equal to the given key
+    Ge,
+
+    /// Less and equal — keys less than or equal to the given key
+    Le,
+
+    /// Start with the key (substring match on the value)
+    Match,
+
+    /// Key is in the range
+    /// The key >= key + SEP + from,
+    ///         < key + SEP + to
+    Range { from: String, to: String },
+
+    /// Key is in the range
+    /// The key > key + SEP + from,
+    ///         < key + SEP + to
+    ExclusiveRange { from: String, to: String },
+
+    /// Key is in the range
+    /// The key >= key + SEP + from,
+    ///         <= key + SEP + to
+    InclusiveRange { from: String, to: String },
+
+    /// Key starts with any one of the given value keys.
+    /// Each entry in `values` is a full value-key prefix (e.g.,
+    /// "tasks|state|Completed|").
+    In { values: Vec<String> },
+}
+
 pub trait KvStore: Send + Sync {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>>;
     fn put(&self, key: &str, value: Vec<u8>) -> Result<()>;
     fn delete(&self, key: &str) -> Result<()>;
-    fn scan_prefix(&self, prefix: &str, is_rev: bool) -> Result<Vec<(String, Vec<u8>)>>;
+    fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>>;
 }
 
 pub trait DbCollection: Send + Sync {

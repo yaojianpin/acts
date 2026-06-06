@@ -22,7 +22,7 @@ pub fn build_workflow(workflow: &mut Workflow, tree: &mut NodeTree) -> Result<()
         build_step(step, tree, &root, &mut prev, level + 1)?;
     }
 
-    tree.model = Box::new(workflow.clone());
+    *tree.model = workflow.clone();
     tree.set_root(&root);
 
     Ok(())

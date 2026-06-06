@@ -51,7 +51,7 @@ impl DbCollectionIden for Message {
         StoreIden::Messages
     }
     fn indexed_fields() -> &'static [&'static str] {
-        &["pid", "status", "tid", "timestamp"]
+        &["pid", "status", "tid", "nid", "timestamp"]
     }
     fn version() -> i32 {
         0
@@ -62,12 +62,10 @@ impl DbCollectionIden for Message {
         if v == Self::version() {
             return Self::upcast_current(value);
         }
-        match v {
-            _ => Err(crate::ActError::Store(format!(
-                "unsupported message version: {}",
-                v
-            ))),
-        }
+        Err(crate::ActError::Store(format!(
+            "unsupported message version: {}",
+            v
+        )))
     }
 }
 

@@ -30,7 +30,7 @@ impl DbCollectionIden for Task {
         StoreIden::Tasks
     }
     fn indexed_fields() -> &'static [&'static str] {
-        &["pid"]
+        &["pid", "tid", "state", "timestamp", "start_time", "end_time"]
     }
     fn version() -> i32 {
         0
@@ -41,12 +41,10 @@ impl DbCollectionIden for Task {
         if v == Self::version() {
             return Self::upcast_current(value);
         }
-        match v {
-            _ => Err(crate::ActError::Store(format!(
-                "unsupported task version: {}",
-                v
-            ))),
-        }
+        Err(crate::ActError::Store(format!(
+            "unsupported task version: {}",
+            v
+        )))
     }
 }
 

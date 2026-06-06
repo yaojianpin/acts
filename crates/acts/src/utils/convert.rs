@@ -99,8 +99,8 @@ pub fn fill_outputs(outputs: &Vars, ctx: &Context) -> Vars {
     // println!("fill_outputs: outputs={outputs}");
     let mut ret = Vars::new();
     for (ref k, ref v) in outputs {
-        if let JsonValue::String(string) = v {
-            if let Some(expr) = get_expr(string) {
+        if let JsonValue::String(string) = v
+            && let Some(expr) = get_expr(string) {
                 let result = Context::scope(ctx.clone(), move || {
                     ctx.runtime.env().eval::<JsonValue>(&expr)
                 });
@@ -113,7 +113,6 @@ pub fn fill_outputs(outputs: &Vars, ctx: &Context) -> Vars {
                 ret.insert(k.to_string(), new_value);
                 continue;
             }
-        }
 
         // rule 2
         if v.is_null() {
@@ -134,8 +133,8 @@ pub fn fill_outputs(outputs: &Vars, ctx: &Context) -> Vars {
 pub fn fill_proc_vars(task: &Arc<Task>, values: &Vars, ctx: &Context) -> Vars {
     let mut ret = Vars::new();
     for (ref k, ref v) in values {
-        if let JsonValue::String(string) = v {
-            if let Some(expr) = get_expr(string) {
+        if let JsonValue::String(string) = v
+            && let Some(expr) = get_expr(string) {
                 let result =
                     Context::scope(ctx.clone(), || ctx.runtime.env().eval::<JsonValue>(&expr));
                 let new_value = result.unwrap_or(JsonValue::Null);
@@ -145,7 +144,6 @@ pub fn fill_proc_vars(task: &Arc<Task>, values: &Vars, ctx: &Context) -> Vars {
 
                 continue;
             }
-        }
 
         // rule 2
         match task.find::<JsonValue>(k) {

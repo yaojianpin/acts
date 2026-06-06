@@ -80,6 +80,13 @@ pub enum ExprOp {
     /// match the input
     #[serde(rename = "match")]
     Match,
+
+    /// value is between two values (inclusive), `value` is a JSON array `[from, to]`
+    Between,
+
+    /// value is in a set, `value` is a JSON array `[v1, v2, ...]`
+    #[serde(rename = "in")]
+    In,
 }
 
 impl Expr {
@@ -143,6 +150,22 @@ impl Expr {
             op: ExprOp::Match,
             key: key.to_string(),
             value: json!(v),
+        }
+    }
+
+    pub fn between<T: Serialize, U: Serialize>(key: &str, from: T, to: U) -> Self {
+        Self {
+            op: ExprOp::Between,
+            key: key.to_string(),
+            value: json!([from, to]),
+        }
+    }
+
+    pub fn r#in<T: Serialize>(key: &str, values: Vec<T>) -> Self {
+        Self {
+            op: ExprOp::In,
+            key: key.to_string(),
+            value: json!(values),
         }
     }
 }
@@ -379,5 +402,64 @@ mod tests {
         let ob: OrderBy = "-field1".parse().unwrap();
         assert_eq!(ob.field, "field1");
         assert_eq!(ob.order, Sort::Desc);
+    }
+
+    // ========== Between / In factory method tests ==========
+
+    #[test]
+    fn store_query_expr_between_numbers() {
+        let expr = Expr::between("timestamp", 100, 200);
+        assert_eq!(expr.key(), "timestamp");
+        assert_eq!(expr.op, ExprOp::Between);
+        assert_eq!(expr.value(), &json!([100, 200]));
+    }
+
+    #[test]
+    fn store_query_expr_between_strings() {
+        let expr = Expr::between("name", "alpha", "omega");
+        assert_eq!(expr.key(), "name");
+        assert_eq!(expr.op, ExprOp::Between);
+        assert_eq!(expr.value(), &json!(["alpha", "omega"]));
+    }
+
+    #[test]
+    fn store_query_expr_between_mixed_types() {
+        // Between supports heterogeneous types via JSON
+        let expr = Expr::between("field", 10, "z");
+        assert_eq!(expr.key(), "field");
+        assert_eq!(expr.op, ExprOp::Between);
+        assert_eq!(expr.value(), &json!([10, "z"]));
+    }
+
+    #[test]
+    fn store_query_expr_in_numbers() {
+        let expr = Expr::r#in("status", vec![0, 1, 2]);
+        assert_eq!(expr.key(), "status");
+        assert_eq!(expr.op, ExprOp::In);
+        assert_eq!(expr.value(), &json!([0, 1, 2]));
+    }
+
+    #[test]
+    fn store_query_expr_in_strings() {
+        let expr = Expr::r#in("state", vec!["running", "completed"]);
+        assert_eq!(expr.key(), "state");
+        assert_eq!(expr.op, ExprOp::In);
+        assert_eq!(expr.value(), &json!(["running", "completed"]));
+    }
+
+    #[test]
+    fn store_query_expr_in_empty() {
+        let expr: Expr = Expr::r#in("field", Vec::<i32>::new());
+        assert_eq!(expr.key(), "field");
+        assert_eq!(expr.op, ExprOp::In);
+        assert_eq!(expr.value(), &json!([]));
+    }
+
+    #[test]
+    fn store_query_expr_in_single() {
+        let expr = Expr::r#in("field", vec!["only"]);
+        assert_eq!(expr.key(), "field");
+        assert_eq!(expr.op, ExprOp::In);
+        assert_eq!(expr.value(), &json!(["only"]));
     }
 }

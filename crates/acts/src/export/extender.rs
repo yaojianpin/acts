@@ -107,7 +107,7 @@ impl Extender {
     /// ## Example
     ///
     /// ```no_run
-    /// use acts::{Engine, Result, KvStore, data};
+    /// use acts::{Engine, Result, KvStore, ScanOptions, data};
     /// use std::sync::Arc;
     ///
     /// pub struct MyStore;
@@ -124,7 +124,7 @@ impl Extender {
     ///         Ok(())
     ///     }
     ///
-    ///     fn scan_prefix(&self, prefix: &str, is_rev: bool) -> Result<Vec<(String, Vec<u8>)>> {
+    ///     fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>> {
     ///         Ok(vec![])
     ///     }
     ///

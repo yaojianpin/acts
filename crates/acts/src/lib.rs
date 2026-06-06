@@ -38,7 +38,7 @@ pub use package::{
 pub use plugin::ActPlugin;
 pub use scheduler::Context;
 pub use signal::Signal;
-pub use store::{DbCollection, KvStore, MemoryStore, PageData, Store, data, query};
+pub use store::{DbCollection, KvStore, MemoryStore, PageData, ScanOptions, Store, data, query};
 pub type Result<T> = std::result::Result<T, ActError>;
 
 pub(crate) use scheduler::NodeKind;

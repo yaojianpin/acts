@@ -23,6 +23,10 @@ impl DbCollectionIden for Model {
         StoreIden::Models
     }
 
+    fn indexed_fields() -> &'static [&'static str] {
+        &["name", "timestamp", "create_time", "update_time"]
+    }
+
     fn version() -> i32 {
         0
     }
@@ -32,12 +36,10 @@ impl DbCollectionIden for Model {
         if v == Self::version() {
             return Self::upcast_current(value);
         }
-        match v {
-            _ => Err(crate::ActError::Store(format!(
-                "unsupported model version: {}",
-                v
-            ))),
-        }
+        Err(crate::ActError::Store(format!(
+            "unsupported model version: {}",
+            v
+        )))
     }
 }
 

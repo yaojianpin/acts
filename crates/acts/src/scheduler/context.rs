@@ -248,12 +248,11 @@ impl Context {
 
     /// redo the task and dispatch directly
     pub fn redo_task(&self, task: &Arc<Task>) -> Result<()> {
-        if let Some(prev) = task.prev() {
-            if let Some(prev_task) = self.proc.task(&prev) {
+        if let Some(prev) = task.prev()
+            && let Some(prev_task) = self.proc.task(&prev) {
                 let task = self.proc.create_task(task.node(), Some(prev_task));
                 self.runtime.push(&task)?;
             }
-        }
 
         Ok(())
     }
@@ -373,14 +372,12 @@ impl Context {
 
             // after emitting, re-check the task state
             println!("check error state after emitting {task:?}");
-            if task.state().is_error() {
-                if let Some(err) = task.err() {
-                    if let Some(parent) = task.parent() {
+            if task.state().is_error()
+                && let Some(err) = task.err()
+                    && let Some(parent) = task.parent() {
                         parent.set_err(&err);
                         return parent.error(self);
                     }
-                }
-            }
         }
 
         Ok(())
@@ -390,20 +387,19 @@ impl Context {
         debug!("ctx::emit_task, task={:?}", task);
 
         // on workflow start
-        if let NodeContent::Workflow(_) = &task.node().content {
-            if task.state().is_created() {
+        if let NodeContent::Workflow(_) = &task.node().content
+            && task.state().is_created() {
                 if self.proc.state().is_none() {
                     self.proc.set_state(TaskState::Running);
                 }
                 self.runtime.emitter().emit_proc_event(&self.proc);
             }
-        }
 
         self.runtime.emitter().emit_task_event(task)?;
 
         // on workflow complete
-        if let NodeContent::Workflow(_) = &task.node().content {
-            if task.state().is_completed() {
+        if let NodeContent::Workflow(_) = &task.node().content
+            && task.state().is_completed() {
                 self.proc.set_state(task.state());
                 if let Some(err) = task.err() {
                     self.proc.set_err(&err);
@@ -411,7 +407,6 @@ impl Context {
 
                 self.runtime.emitter().emit_proc_event(&self.proc);
             }
-        }
 
         Ok(())
     }

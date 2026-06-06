@@ -109,10 +109,8 @@ impl EngineBuilder {
     }
 
     pub fn build(self) -> Engine {
-        let engine = Engine::new()
+        Engine::new()
             .with_config(&self.config)
-            .set_plugins(self.plugins.clone());
-
-        engine
+            .set_plugins(self.plugins.clone())
     }
 }

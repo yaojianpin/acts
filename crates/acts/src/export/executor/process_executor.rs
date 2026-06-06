@@ -62,7 +62,7 @@ impl ProcessExecutor {
                     let mut tasks: Vec<TaskInfo> =
                         proc.tasks().iter().map(TaskInfo::from).collect();
 
-                    tasks.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+                    tasks.sort_by_key(|a| a.timestamp);
                     info.tasks = tasks;
                 }
 

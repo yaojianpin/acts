@@ -1,5 +1,6 @@
 use crate::{
     ActError, KvStore, Result,
+    store::{ScanOperation, ScanOptions},
     utils::{consts, sync},
 };
 use sqlx::{Row, postgres::PgPoolOptions};
@@ -10,15 +11,6 @@ static POOL: OnceLock<sqlx::PgPool> = OnceLock::new();
 
 fn pool() -> &'static sqlx::PgPool {
     POOL.get().expect("Postgres pool not initialized")
-}
-
-/// Escape special characters in a string for SQL LIKE pattern matching.
-/// Escapes backslash, percent, and underscore to prevent them from being
-/// treated as wildcards.
-fn escape_like(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_")
 }
 
 pub struct PostgresStore;
@@ -118,25 +110,95 @@ impl KvStore for PostgresStore {
         })
     }
 
-    fn scan_prefix(&self, prefix: &str, is_rev: bool) -> Result<Vec<(String, Vec<u8>)>> {
-        let pattern = format!("{}%", escape_like(prefix));
+    fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>> {
+        let ScanOptions { is_rev, op, ref prefix } = options;
+        let pattern = format!("{}%", prefix);
         sync::block_on(async move {
             let order = if is_rev { "DESC" } else { "ASC" };
-            let rows = sqlx::query(&format!(
-                "SELECT key, value FROM {} WHERE key LIKE $1 ORDER BY key {}",
-                consts::ACTS_STORE_NAME, order
-            ))
-            .bind(&pattern)
-            .fetch_all(pool())
-            .await
-            .map_err(|e| ActError::Store(e.to_string()))?;
-            let mut result = Vec::with_capacity(rows.len());
-            for row in rows {
-                let key: String = row.get(0);
-                let value: Vec<u8> = row.get(1);
-                result.push((key, value));
+            let mut sql = format!(
+                "SELECT key, value FROM {} WHERE key LIKE $1",
+                consts::ACTS_STORE_NAME
+            );
+            let mut binds: Vec<String> = vec![pattern];
+            let mut param_idx = 2;
+            match &op {
+                ScanOperation::Eq | ScanOperation::Match => {}
+                ScanOperation::Gt => {
+                    sql.push_str(&format!(" AND key > ${}", param_idx));
+                    binds.push(key.to_string());
+                }
+                ScanOperation::Ge => {
+                    sql.push_str(&format!(" AND key >= ${}", param_idx));
+                    binds.push(key.to_string());
+                }
+                ScanOperation::Lt => {
+                    sql.push_str(&format!(" AND key < ${}", param_idx));
+                    binds.push(key.to_string());
+                }
+                ScanOperation::Le => {
+                    sql.push_str(&format!(" AND key <= ${}", param_idx));
+                    binds.push(key.to_string());
+                }
+                ScanOperation::Ne => {
+                    sql.push_str(&format!(" AND key NOT LIKE ${}", param_idx));
+                    binds.push(format!("{}%", key));
+                }
+                ScanOperation::Range { from, to } => {
+                    let start = format!("{}{}", key, from);
+                    let end = format!("{}{}", key, to);
+                    sql.push_str(&format!(
+                        " AND key >= ${} AND key < ${}",
+                        param_idx,
+                        param_idx + 1
+                    ));
+                    binds.push(start);
+                    binds.push(end);
+                }
+                ScanOperation::ExclusiveRange { from, to } => {
+                    let start = format!("{}{}", key, from);
+                    let end = format!("{}{}", key, to);
+                    sql.push_str(&format!(
+                        " AND key > ${} AND key < ${}",
+                        param_idx,
+                        param_idx + 1
+                    ));
+                    binds.push(start);
+                    binds.push(end);
+                }
+                ScanOperation::InclusiveRange { from, to } => {
+                    let start = format!("{}{}", key, from);
+                    let end = format!("{}{}", key, to);
+                    sql.push_str(&format!(
+                        " AND key >= ${} AND key <= ${}",
+                        param_idx,
+                        param_idx + 1
+                    ));
+                    binds.push(start);
+                    binds.push(end);
+                }
+                ScanOperation::In { values } => {
+                    sql.push_str(" AND (");
+                    for (i, v) in values.iter().enumerate() {
+                        if i > 0 {
+                            sql.push_str(" OR ");
+                        }
+                        sql.push_str(&format!("key LIKE ${}", param_idx));
+                        binds.push(format!("{}%", v));
+                        param_idx += 1;
+                    }
+                    sql.push(')');
+                }
             }
-            Ok(result)
+            sql.push_str(&format!(" ORDER BY key {}", order));
+            let mut query = sqlx::query_as::<_, (String, Vec<u8>)>(&sql);
+            for bind_val in &binds {
+                query = query.bind(bind_val);
+            }
+            let rows = query
+                .fetch_all(pool())
+                .await
+                .map_err(|e| ActError::Store(e.to_string()))?;
+            Ok(rows)
         })
     }
 }

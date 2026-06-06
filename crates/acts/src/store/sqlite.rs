@@ -1,19 +1,11 @@
 use crate::{
     ActError, KvStore, Result,
+    store::{ScanOperation, ScanOptions},
     utils::{consts, sync},
 };
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{Connection, Row};
 use std::sync::{Arc, Mutex};
-
-/// Escape special characters in a string for SQL LIKE pattern matching.
-/// Escapes backslash, percent, and underscore to prevent them from being
-/// treated as wildcards.
-fn escape_like(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('%', "\\%")
-        .replace('_', "\\_")
-}
 
 pub struct SqliteStore {
     conn: Arc<Mutex<sqlx::SqliteConnection>>,
@@ -56,6 +48,45 @@ impl SqliteStore {
     #[allow(dead_code)]
     pub fn open_in_memory() -> Result<Self> {
         Self::open(":memory:")
+    }
+}
+
+/// Build extra WHERE conditions for scan operations.
+fn op_conditions(op: &ScanOperation, key: &str) -> (String, Vec<String>) {
+    match op {
+        ScanOperation::Eq | ScanOperation::Match => {
+            // keys LIKE 'key%' — handled by the LIKE pattern on prefix
+            (String::new(), vec![])
+        }
+        ScanOperation::Gt => (" AND key > ?".to_string(), vec![key.to_string()]),
+        ScanOperation::Ge => (" AND key >= ?".to_string(), vec![key.to_string()]),
+        ScanOperation::Lt => (" AND key < ?".to_string(), vec![key.to_string()]),
+        ScanOperation::Le => (" AND key <= ?".to_string(), vec![key.to_string()]),
+        ScanOperation::Ne => (" AND key NOT LIKE ?".to_string(), vec![format!("{}%", key)]),
+        ScanOperation::Range { from, to } => {
+            let start = format!("{}{}", key, from);
+            let end = format!("{}{}", key, to);
+            (" AND key >= ? AND key < ?".to_string(), vec![start, end])
+        }
+        ScanOperation::ExclusiveRange { from, to } => {
+            let start = format!("{}{}", key, from);
+            let end = format!("{}{}", key, to);
+            (" AND key > ? AND key < ?".to_string(), vec![start, end])
+        }
+        ScanOperation::InclusiveRange { from, to } => {
+            let start = format!("{}{}", key, from);
+            let end = format!("{}{}", key, to);
+            (" AND key >= ? AND key <= ?".to_string(), vec![start, end])
+        }
+        ScanOperation::In { values } => {
+            let mut conditions = String::from(" AND (key LIKE ?");
+            for _ in 1..values.len() {
+                conditions.push_str(" OR key LIKE ?");
+            }
+            conditions.push(')');
+            let binds: Vec<String> = values.iter().map(|v| format!("{}%", v)).collect();
+            (conditions, binds)
+        }
     }
 }
 
@@ -117,20 +148,26 @@ impl KvStore for SqliteStore {
     }
 
     #[allow(clippy::await_holding_lock)]
-    fn scan_prefix(&self, prefix: &str, is_rev: bool) -> Result<Vec<(String, Vec<u8>)>> {
-        let pattern = format!("{}%", escape_like(prefix));
+    fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>> {
+        let ScanOptions { is_rev, op, ref prefix } = options;
+        let pattern = format!("{}%", prefix);
+        let (extra_sql, extra_binds) = op_conditions(&op, key);
         let conn = self.conn.clone();
         sync::block_on(async move {
             let mut conn = conn.lock().unwrap();
             let order = if is_rev { "DESC" } else { "ASC" };
-            let rows = sqlx::query(&format!(
-                "SELECT key, value FROM {} WHERE key LIKE ? ORDER BY key {}",
-                consts::ACTS_STORE_NAME, order
-            ))
-            .bind(&pattern)
-            .fetch_all(&mut *conn)
-            .await
-            .map_err(|e| ActError::Store(e.to_string()))?;
+            let sql = format!(
+                "SELECT key, value FROM {} WHERE key LIKE ?{} ORDER BY key {}",
+                consts::ACTS_STORE_NAME, extra_sql, order
+            );
+            let mut query = sqlx::query(&sql).bind(&pattern);
+            for bind_val in &extra_binds {
+                query = query.bind(bind_val);
+            }
+            let rows = query
+                .fetch_all(&mut *conn)
+                .await
+                .map_err(|e| ActError::Store(e.to_string()))?;
             let mut result = Vec::with_capacity(rows.len());
             for row in rows {
                 let key: String = row.get(0);

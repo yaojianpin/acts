@@ -1,5 +1,6 @@
 use crate::{
     ActError, KvStore, Result,
+    store::{ScanOperation, ScanOptions},
     utils::{consts, sync},
 };
 use async_nats::jetstream;
@@ -30,6 +31,37 @@ impl NatsStore {
             };
             Ok(Self { kv })
         })
+    }
+}
+
+/// Return true if `k` matches the scan operation given `key` and `prefix`.
+fn key_matches(k: &str, key: &str, prefix: &str, op: &ScanOperation) -> bool {
+    if !k.starts_with(prefix) {
+        return false;
+    }
+    match op {
+        ScanOperation::Eq | ScanOperation::Match => k.starts_with(key),
+        ScanOperation::Gt => k > key,
+        ScanOperation::Ge => k >= key,
+        ScanOperation::Lt => k < key,
+        ScanOperation::Le => k <= key,
+        ScanOperation::Ne => !k.starts_with(key),
+        ScanOperation::Range { from, to } => {
+            let start = format!("{}{}", key, from);
+            let end = format!("{}{}", key, to);
+            k >= start.as_str() && k < end.as_str()
+        }
+        ScanOperation::ExclusiveRange { from, to } => {
+            let start = format!("{}{}", key, from);
+            let end = format!("{}{}", key, to);
+            k > start.as_str() && k < end.as_str()
+        }
+        ScanOperation::InclusiveRange { from, to } => {
+            let start = format!("{}{}", key, from);
+            let end = format!("{}{}", key, to);
+            k >= start.as_str() && k <= end.as_str()
+        }
+        ScanOperation::In { values } => values.iter().any(|v| k.starts_with(v.as_str())),
     }
 }
 
@@ -66,8 +98,10 @@ impl KvStore for NatsStore {
         })
     }
 
-    fn scan_prefix(&self, prefix: &str, is_rev: bool) -> Result<Vec<(String, Vec<u8>)>> {
-        let prefix = prefix.to_string();
+    fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>> {
+        let ScanOptions { is_rev, op, ref prefix } = options;
+        let prefix = prefix.clone();
+        let key = key.to_string();
         let kv = self.kv.clone();
         sync::block_on(async move {
             let keys = kv
@@ -76,15 +110,15 @@ impl KvStore for NatsStore {
                 .map_err(|e| ActError::Store(e.to_string()))?;
             futures::pin_mut!(keys);
             let mut result = Vec::new();
-            while let Some(key) = keys.next().await {
-                let key = key.map_err(|e| ActError::Store(e.to_string()))?;
-                if key.starts_with(&prefix) {
+            while let Some(k) = keys.next().await {
+                let k = k.map_err(|e| ActError::Store(e.to_string()))?;
+                if key_matches(&k, &key, &prefix, &op) {
                     if let Some(entry) = kv
-                        .get(&key)
+                        .get(&k)
                         .await
                         .map_err(|e| ActError::Store(e.to_string()))?
                     {
-                        result.push((key, entry.to_vec()));
+                        result.push((k, entry.to_vec()));
                     }
                 }
             }
