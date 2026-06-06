@@ -21,6 +21,8 @@ jobs:
         run: cargo test --workspace --verbose
       - name: Run Publish
         run: |
-          cp README.md ./acts/ &&
-          sed -i 's|include_str!("../../../README.md")|include_str!("../README.md")|' acts/src/lib.rs
+          cp README.md crates/acts/ &&
+          cp LICENSE crates/acts/ &&
+          sed -i 's|include_str!("../../../README.md")|include_str!("../README.md")|' crates/acts/src/lib.rs &&
+          sed -i 's|"../LICENSE", "../README.md"|"LICENSE", "README.md"|' crates/acts/Cargo.toml
           cargo ws publish --publish-as-is --token=${{secrets.CARGO_TOKEN}} --allow-dirty
