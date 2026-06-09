@@ -162,6 +162,9 @@ impl Runtime {
                             let ctx = &task.create_context();
                             if let Err(err) = task.exec(ctx) {
                                 eprintln!("runtime task.exec error: {}", err);
+                                task.set_err(&err.clone().into());
+                                ctx.set_task(&task);
+                                ctx.emit_error().ok();
                             }
                         }
                         QueueData::Abort => {

@@ -4,23 +4,27 @@ use crate::event::EventAction;
 use crate::utils::test::auto_complete;
 use crate::{
     Act, MessageState, Vars, Workflow,
-    utils::{self, consts, test::create_proc},
+    utils::{
+        self, consts,
+        test::{USES_SEQUENCE, create_proc},
+    },
 };
 
 use serial_test::serial;
 
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn sch_act_chain_list() {
+async fn pack_sequence_chain_list() {
     let main = Workflow::new().with_id("main").with_step(|step| {
-        step.with_id("step1").with_act({
-            Act::sequence(json!({
+        step.with_id("step1").with_uses(
+            USES_SEQUENCE,
+            Vars::from(json!({
                 "in": ["u1", "u2"],
                 "acts": vec![
-                    Act::irq(|act| act.with_key("act1"))
+                    Act::irq(|act| act.with_params_vars(|v| v.with("key", "act1")))
                 ]
-            }))
-        })
+            })),
+        )
     });
 
     main.print();
@@ -30,8 +34,7 @@ async fn sch_act_chain_list() {
     auto_complete(&engine, &rx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        println!("message: {:?}", e.inner());
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             rx.update(|data| {
                 let vars = e.inputs.get::<Vars>(consts::ACT_OPTIONS_KEY).unwrap();
                 data.push(vars.get::<String>(consts::ACT_VALUE).unwrap());
@@ -49,16 +52,17 @@ async fn sch_act_chain_list() {
 
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn sch_act_chain_order() {
+async fn pack_sequence_chain_order() {
     let main = Workflow::new().with_id("main").with_step(|step| {
-        step.with_id("step1").with_act({
-            Act::sequence(json!({
+        step.with_id("step1").with_uses(
+            USES_SEQUENCE,
+            Vars::from(json!({
                 "in": ["u1", "u2"],
                 "acts": vec![
-                    Act::irq(|act| act.with_key("act1"))
+                    Act::irq(|act| act.with_params_vars(|v| v.with("key", "act1")))
                 ]
-            }))
-        })
+            })),
+        )
     });
 
     main.print();
@@ -70,7 +74,7 @@ async fn sch_act_chain_order() {
 
     channel.on_message(move |e| {
         println!("message: {:?}", e.inner());
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             rx.update(|data| data.push(e.start_time));
             std::thread::sleep(std::time::Duration::from_secs(1));
             rt.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
@@ -88,16 +92,19 @@ async fn sch_act_chain_order() {
 
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn sch_act_chain_var() {
+async fn pack_sequence_chain_var() {
     let main = Workflow::new().with_id("main").with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::set(Vars::new().with("a", ["u1", "u2"])))
-            .with_act(Act::sequence(json!({
-                "in": r#"{{ a }}"#,
-                "acts": vec![
-                    Act::irq(|act| act.with_key("act1"))
-                ]
-            })))
+            .with_var("a", json!(["u1", "u2"]))
+            .with_uses(
+                USES_SEQUENCE,
+                Vars::from(json!({
+                    "in": r#"{{ a }}"#,
+                    "acts": vec![
+                        Act::irq(|act| act.with_params_vars(|v| v.with("key", "act1")))
+                    ]
+                })),
+            )
     });
 
     main.print();
@@ -108,7 +115,7 @@ async fn sch_act_chain_var() {
     let channel = engine.channel();
     channel.on_message(move |e| {
         println!("message: {:?}", e.inner());
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             rx.update(|data| {
                 let vars = e.inputs.get::<Vars>(consts::ACT_OPTIONS_KEY).unwrap();
                 data.push(vars.get::<String>(consts::ACT_VALUE).unwrap());
@@ -126,14 +133,17 @@ async fn sch_act_chain_var() {
 
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn sch_act_chain_var_not_exist() {
+async fn pack_sequence_chain_var_not_exist() {
     let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_act(Act::sequence(json!({
-            "in": r#"$("a")"#,
-            "acts": vec![
-                Act::irq(|act| act.with_key("act1"))
-            ]
-        })))
+        step.with_id("step1").with_uses(
+            USES_SEQUENCE,
+            Vars::from(json!({
+                "in": r#"$("a")"#,
+                "acts": vec![
+                    Act::irq(|act| act.with_params_vars(|v| v.with("key", "act1")))
+                ]
+            })),
+        )
     });
 
     workflow.print();

@@ -1,51 +1,22 @@
-use crate::event::EventAction;
-use crate::utils::test::auto_complete;
 use crate::{
-    Act, MessageState, Vars, Workflow,
-    utils::{self, test::create_proc},
+    MessageState, Vars, Workflow,
+    utils::{
+        self,
+        test::{USES_IRQ, auto_complete, create_proc},
+    },
 };
 use serde_json::json;
 
 use serial_test::serial;
-#[serial]
-#[tokio::test(flavor = "multi_thread")]
-async fn sch_act_run_in_order() {
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
-            .with_act(Act::irq(|act| act.with_key("act2")))
-    });
-
-    workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
-    let (tx, rx) = engine.signal(Vec::<(String, i64)>::default()).double();
-    auto_complete(&engine, &tx);
-    let channel = engine.channel();
-    let rt = engine.runtime();
-    channel.on_message(move |e| {
-        println!("message: {e:?}");
-        if e.is_irq() && e.is_state(MessageState::Created) {
-            rx.update(|data| data.push((e.key.clone(), e.start_time)));
-            std::thread::sleep(std::time::Duration::from_millis(1000));
-            rt.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
-                .unwrap();
-        }
-    });
-    engine.runtime().launch(&proc).unwrap();
-    let ret = tx.recv().await;
-    proc.print();
-
-    assert_eq!(ret.len(), 2);
-    assert!(ret.get(1).unwrap().1 - ret.first().unwrap().1 >= 1000);
-}
 
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_act_params_no_expr_line() {
     let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_act(Act::irq(|act| {
-            act.with_key("act1").with_params_data("hello".into())
-        }))
+        step.with_id("step1").with_uses(
+            USES_IRQ,
+            Vars::new().with("key", "act1").with("data", "hello"),
+        )
     });
 
     workflow.print();
@@ -54,9 +25,8 @@ async fn sch_act_params_no_expr_line() {
     auto_complete(&engine, &tx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        println!("message: {e:?}");
-        if e.is_irq() && e.is_state(MessageState::Created) {
-            let params = e.inputs.get::<String>("params").unwrap();
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+            let params = e.params().unwrap().get::<String>("data").unwrap();
             rx.send(params);
         }
     });
@@ -71,10 +41,12 @@ async fn sch_act_params_no_expr_line() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_act_params_expr_full_line() {
     let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_act(Act::irq(|act| {
-            act.with_key("act1")
-                .with_params_data(json!(r#"{{ "hello" }}"#))
-        }))
+        step.with_id("step1").with_uses(
+            USES_IRQ,
+            Vars::new()
+                .with("key", "act1")
+                .with("data", json!(r#"{{ "hello" }}"#)),
+        )
     });
 
     workflow.print();
@@ -83,9 +55,8 @@ async fn sch_act_params_expr_full_line() {
     auto_complete(&engine, &tx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        println!("message: {e:?}");
-        if e.is_irq() && e.is_state(MessageState::Created) {
-            let params = e.inputs.get::<String>("params").unwrap();
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+            let params = e.params().unwrap().get::<String>("data").unwrap();
             rx.send(params);
         }
     });
@@ -100,10 +71,12 @@ async fn sch_act_params_expr_full_line() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_act_params_expr_partial_line() {
     let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_act(Act::irq(|act| {
-            act.with_key("act1")
-                .with_params_data(json!(r#"{{ "hello" }} world"#))
-        }))
+        step.with_id("step1").with_uses(
+            USES_IRQ,
+            Vars::new()
+                .with("key", "act1")
+                .with("data", json!(r#"{{ "hello" }} world"#)),
+        )
     });
 
     workflow.print();
@@ -112,9 +85,8 @@ async fn sch_act_params_expr_partial_line() {
     auto_complete(&engine, &tx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        println!("message: {e:?}");
-        if e.is_irq() && e.is_state(MessageState::Created) {
-            let params = e.inputs.get::<String>("params").unwrap();
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+            let params = e.params().unwrap().get::<String>("data").unwrap();
             rx.send(params);
         }
     });
@@ -129,11 +101,13 @@ async fn sch_act_params_expr_partial_line() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_act_params_expr_multi_statements() {
     let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_act(Act::irq(|act| {
-            act.with_key("act1").with_params_data(json!(
-                r#"{{ let a = "hello";let b = "world"; a + " " + b }}"#
-            ))
-        }))
+        step.with_id("step1").with_uses(
+            USES_IRQ,
+            Vars::new().with("key", "act1").with(
+                "data",
+                json!(r#"{{ let a = "hello";let b = "world"; a + " " + b }}"#),
+            ),
+        )
     });
 
     workflow.print();
@@ -142,9 +116,8 @@ async fn sch_act_params_expr_multi_statements() {
     auto_complete(&engine, &tx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        println!("message: {e:?}");
-        if e.is_irq() && e.is_state(MessageState::Created) {
-            let params = e.inputs.get::<String>("params").unwrap();
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+            let params = e.params().unwrap().get::<String>("data").unwrap();
             rx.send(params);
         }
     });
@@ -157,17 +130,21 @@ async fn sch_act_params_expr_multi_statements() {
 
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn sch_act_params_expr_brace_not_in_same_line_not_support() {
+async fn sch_act_params_expr_multi_line() {
     let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_act(Act::irq(|act| {
-            act.with_key("act1").with_params_data(json!(
-                r#"{{
+        step.with_id("step1").with_uses(
+            USES_IRQ,
+            Vars::new().with("key", "act1").with(
+                "data",
+                json!(
+                    r#"{{
                 let a = "hello";
                 let b = "world";
                 a + " " + b
                 }}"#
-            ))
-        }))
+                ),
+            ),
+        )
     });
 
     workflow.print();
@@ -176,9 +153,8 @@ async fn sch_act_params_expr_brace_not_in_same_line_not_support() {
     auto_complete(&engine, &tx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        println!("message: {e:?}");
-        if e.is_irq() && e.is_state(MessageState::Created) {
-            let params = e.inputs.get::<String>("params").unwrap();
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+            let params = e.params().unwrap().get::<String>("data").unwrap();
             rx.send(params);
         }
     });
@@ -196,15 +172,19 @@ async fn sch_act_params_multi_expr_str() {
         step.with_id("step1")
             .with_var("a", "hello")
             .with_var("b", "world")
-            .with_act(Act::irq(|act| {
-                act.with_key("act1").with_params_data(json!(
-                    r#"
+            .with_uses(
+                USES_IRQ,
+                Vars::new().with("key", "act1").with(
+                    "data",
+                    json!(
+                        r#"
                     let v1 = "{{ a }}";
                     let v2 = "{{ b }}";
                     v1 + " " +  v2
                 "#
-                ))
-            }))
+                    ),
+                ),
+            )
     });
 
     workflow.print();
@@ -213,9 +193,8 @@ async fn sch_act_params_multi_expr_str() {
     auto_complete(&engine, &tx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        println!("message: {e:?}");
-        if e.is_irq() && e.is_state(MessageState::Created) {
-            let params = e.inputs.get::<String>("params").unwrap();
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+            let params = e.params().unwrap().get::<String>("data").unwrap();
             rx.send(params);
         }
     });
@@ -234,15 +213,19 @@ async fn sch_act_params_multi_expr_bool() {
         step.with_id("step1")
             .with_var("a", true)
             .with_var("b", false)
-            .with_act(Act::irq(|act| {
-                act.with_key("act1").with_params_data(json!(
-                    r#"
+            .with_uses(
+                USES_IRQ,
+                Vars::new().with("key", "act1").with(
+                    "data",
+                    json!(
+                        r#"
                     let v1 = {{ a }};
                     let v2 = {{ b }};
                     v1 && v2
                 "#
-                ))
-            }))
+                    ),
+                ),
+            )
     });
 
     workflow.print();
@@ -251,9 +234,8 @@ async fn sch_act_params_multi_expr_bool() {
     auto_complete(&engine, &tx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        println!("message: {e:?}");
-        if e.is_irq() && e.is_state(MessageState::Created) {
-            let params = e.inputs.get::<String>("params").unwrap();
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+            let params = e.params().unwrap().get::<String>("data").unwrap();
             rx.send(params);
         }
     });
@@ -273,15 +255,19 @@ async fn sch_act_params_multi_expr_others() {
             .with_var("a", json!({ "v1": 10 }))
             .with_var("b", json!(["v2"]))
             .with_var("c", json!(null))
-            .with_act(Act::irq(|act| {
-                act.with_key("act1").with_params_data(json!(
-                    r#"
+            .with_uses(
+                USES_IRQ,
+                Vars::new().with("key", "act1").with(
+                    "data",
+                    json!(
+                        r#"
                     let v1 = {{ a }};
                     let v2 = {{ b }};
                     let v3 = {{ c }};
                 "#
-                ))
-            }))
+                    ),
+                ),
+            )
     });
 
     workflow.print();
@@ -290,9 +276,8 @@ async fn sch_act_params_multi_expr_others() {
     auto_complete(&engine, &tx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        println!("message: {e:?}");
-        if e.is_irq() && e.is_state(MessageState::Created) {
-            let params = e.inputs.get::<String>("params").unwrap();
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+            let params = e.params().unwrap().get::<String>("data").unwrap();
             rx.send(params);
         }
     });

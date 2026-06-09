@@ -28,7 +28,6 @@ pub struct Message {
     pub pid: String,
     pub nid: String,
     pub mid: String,
-    pub key: String,
     pub uses: String,
     pub inputs: String,
     pub outputs: String,

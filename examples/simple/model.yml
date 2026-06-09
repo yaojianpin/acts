@@ -14,11 +14,10 @@ options:
 steps:
   - name: init
     id: init
-    acts:
-      - uses: acts.transform.code
-        params: |
-          $set("value", 0);
-          $set("index", 0);
+    uses: acts.transform.code
+    params: |
+      $set("value", 0);
+      $set("index", 0);
 
   - name: cond
     id: cond
@@ -31,11 +30,10 @@ steps:
           - name: add
             id: add
             next: cond
-            acts:
-              - uses: acts.transform.code
-                params: |
-                  $set("value", value + index);
-                  $set("index", index + 1);
+            uses: acts.transform.code
+            params: |
+              $set("value", value + index);
+              $set("index", index + 1);
 
       - name: ">input"
         id: ">input"

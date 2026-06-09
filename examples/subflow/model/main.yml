@@ -10,21 +10,22 @@ options:
 steps:
   - name: prepare
     id: prepare
-    acts:
-      - uses: acts.core.irq
-        key: init
+    uses: acts.core.irq
+    params: 
+      key: init
+
   - name: enter sub workflow
-    acts:
-      - uses: acts.core.subflow
-        params:
-            to: sub
-            extra:
-              v: '{{ v }}'
+    uses: acts.core.subflow
+    params:
+        to: sub
+        extra:
+          v: '{{ v }}'
+
   - name: final
     id: final
-    acts:
-      - uses: acts.core.irq
-        key: action2
-        params:
-          v: '{{ v }}'
+    uses: acts.core.irq
+    params:
+      key: action2
+      v: '{{ v }}'
+
     

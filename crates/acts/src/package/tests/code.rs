@@ -1,12 +1,11 @@
-use serde_json::json;
-
 use crate::{
-    Act, Workflow,
+    Workflow,
     utils::{
         self,
-        test::{auto_complete, create_proc},
+        test::{USES_CODE, auto_complete, create_proc},
     },
 };
+use serde_json::json;
 
 use serial_test::serial;
 
@@ -14,16 +13,15 @@ use serial_test::serial;
 #[serial]
 async fn pack_code_get_inputs() {
     let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_act(
-            Act::code(
+        step.with_id("step1")
+            .with_var("abc", "test")
+            .with_uses_code(
+                USES_CODE,
                 r#"
                 let inputs = $inputs();
                 inputs
             "#,
             )
-            .with_id("code1")
-            .with_var("abc", "test"),
-        )
     });
 
     workflow.print();
@@ -36,7 +34,7 @@ async fn pack_code_get_inputs() {
     proc.print();
 
     assert_eq!(
-        proc.task_by_nid("code1")
+        proc.task_by_uses(USES_CODE)
             .first()
             .unwrap()
             .inputs()
@@ -50,16 +48,15 @@ async fn pack_code_get_inputs() {
 #[serial]
 async fn pack_code_get_data() {
     let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_act(
-            Act::code(
+        step.with_id("step1")
+            .with_var("my_value", "abc")
+            .with_uses_code(
+                USES_CODE,
                 r#"
                 let data = $data();
                 return { data: data.my_value }
             "#,
             )
-            .with_id("code1")
-            .with_var("my_value", "abc"),
-        )
     });
 
     workflow.print();
@@ -72,7 +69,7 @@ async fn pack_code_get_data() {
     proc.print();
 
     assert_eq!(
-        proc.task_by_nid("code1")
+        proc.task_by_uses(USES_CODE)
             .first()
             .unwrap()
             .outputs()
@@ -86,15 +83,14 @@ async fn pack_code_get_data() {
 #[serial]
 async fn pack_code_outputs() {
     let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_act(
-            Act::code(
+        step.with_id("step1")
+            .with_expose("my_output", json!(null))
+            .with_uses_code(
+                USES_CODE,
                 r#"
                 return { "my_output": "abc" };
             "#,
             )
-            .with_id("code1")
-            .with_expose("my_output", json!(null)),
-        )
     });
 
     workflow.print();
@@ -107,7 +103,7 @@ async fn pack_code_outputs() {
     proc.print();
 
     assert_eq!(
-        proc.task_by_nid("code1")
+        proc.task_by_uses(USES_CODE)
             .first()
             .unwrap()
             .outputs()

@@ -28,7 +28,7 @@ pub const TASK_COST: &str = "__cost";
 
 pub const ACT_EXPOSE: &str = "exposes";
 
-pub const ACT_SUBFLOW_TO: &str = "to";
+pub const ACT_TO: &str = "to";
 
 pub const TASK_ROOT_TID: &str = "$";
 

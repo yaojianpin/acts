@@ -1,8 +1,8 @@
 use std::time::Duration;
 
 use crate::{
-    Act, ActError, ActUserVar, Context, Engine, MessageState, Vars, Workflow, env::Enviroment,
-    event::EventAction, utils::consts,
+    ActError, ActUserVar, Context, Engine, MessageState, Vars, Workflow, env::Enviroment,
+    event::EventAction, utils::consts, utils::test::USES_IRQ,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -597,7 +597,7 @@ async fn env_step_set_data_ok_with_running_state() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_var("a", 10)
-            .with_act(Act::irq(|act| act.with_key("test")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "test"))
     });
     engine.channel().on_message(move |e| {
         if e.is_irq() {
@@ -638,7 +638,7 @@ async fn env_step_get_data() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_var("a", 10)
-            .with_act(Act::irq(|act| act.with_key("test")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "test"))
     });
     engine.channel().on_message(move |e| {
         if e.is_irq() {
@@ -672,7 +672,7 @@ async fn env_step_get_inputs() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_var("a", 10)
-            .with_act(Act::irq(|act| act.with_key("test")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     engine.channel().on_message(move |e| {
         if e.is_irq() {
@@ -703,9 +703,9 @@ async fn env_act_get_inputs() {
 
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_act(Act::irq(|act| {
-            act.with_key("test").with_id("act1").with_var("a", 10)
-        }))
+        step.with_id("step1")
+            .with_var("a", json!(10))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     engine.channel().on_message(move |e| {
         if e.is_irq() {
@@ -714,7 +714,7 @@ async fn env_act_get_inputs() {
     });
     let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     sig.recv().await;
-    let task = proc.task_by_nid("act1").last().cloned().unwrap();
+    let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
     let script = r#"
         $inputs()
     "#;
@@ -737,7 +737,7 @@ async fn env_act_get_data() {
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("test").with_id("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     engine.channel().on_message(move |e| {
         if e.is_irq() {
@@ -746,7 +746,7 @@ async fn env_act_get_data() {
     });
     let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     sig.recv().await;
-    let task = proc.task_by_nid("act1").last().cloned().unwrap();
+    let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
     let script = r#"
         $set("my_value", 20)
         $data()
@@ -781,7 +781,7 @@ async fn env_user_var_get_from_context() {
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("test").with_id("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     engine.channel().on_message(move |e| {
         if e.is_irq() {
@@ -796,7 +796,7 @@ async fn env_user_var_get_from_context() {
         )
         .unwrap();
     sig.recv().await;
-    let task = proc.task_by_nid("act1").last().cloned().unwrap();
+    let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
     let script = r#"
         test.var1
     "#;
@@ -834,7 +834,7 @@ async fn env_user_var_get_default() {
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("test").with_id("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     engine.channel().on_message(move |e| {
         if e.is_irq() {
@@ -843,7 +843,7 @@ async fn env_user_var_get_default() {
     });
     let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     sig.recv().await;
-    let task = proc.task_by_nid("act1").last().cloned().unwrap();
+    let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
     let script = r#"
         test.var1
     "#;
@@ -866,7 +866,7 @@ async fn env_user_var_secrets_get() {
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("test").with_id("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     engine.channel().on_message(move |e| {
         if e.is_irq() {
@@ -881,7 +881,7 @@ async fn env_user_var_secrets_get() {
         )
         .unwrap();
     sig.recv().await;
-    let task = proc.task_by_nid("act1").last().cloned().unwrap();
+    let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
     let script = r#"
         secrets.TOKEN
     "#;
@@ -917,17 +917,16 @@ async fn env_act_cost_get() {
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("test").with_id("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     engine.channel().on_message(move |e| {
-        println!("aaa: {e:?}");
         if e.is_irq() {
             s1.close()
         }
     });
     let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     sig.recv().await;
-    let task = proc.task_by_nid("act1").last().cloned().unwrap();
+    let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
     let script = r#"
         $cost()
     "#;
@@ -950,17 +949,19 @@ async fn env_act_cost_in_get() {
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1").with_id("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
+            && e.is_state(MessageState::Created)
+        {
             std::thread::sleep(Duration::from_secs(2));
             s1.close()
         }
     });
     let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     sig.recv().await;
-    let task = proc.task_by_nid("act1").last().cloned().unwrap();
+    let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
     let script = r#"
         $cost_in('1s')
     "#;
@@ -983,12 +984,14 @@ async fn env_act_ecode_get() {
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1").with_id("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let runtime = engine.runtime();
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
+            && e.is_state(MessageState::Created)
+        {
             runtime
                 .do_action2(
                     &e.pid,
@@ -1002,7 +1005,7 @@ async fn env_act_ecode_get() {
     });
     let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
     sig.recv().await;
-    let task = proc.task_by_nid("act1").last().cloned().unwrap();
+    let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
     let script = r#"
         $ecode()
     "#;

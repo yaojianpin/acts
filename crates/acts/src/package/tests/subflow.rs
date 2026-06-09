@@ -1,9 +1,12 @@
 use crate::event::EventAction;
 use crate::utils::test::auto_complete;
 use crate::{
-    Act, Executor, MessageState, Vars, Workflow,
+    Executor, MessageState, Vars, Workflow,
     scheduler::TaskState,
-    utils::{self, consts, test::create_proc},
+    utils::{
+        self, consts,
+        test::{USES_IRQ, USES_SUBFLOW, create_proc},
+    },
 };
 
 use serde_json::json;
@@ -13,9 +16,12 @@ use serial_test::serial;
 #[tokio::test(flavor = "multi_thread")]
 async fn pack_subflow_start() {
     let main = Workflow::new().with_id("main").with_step(|step| {
-        step.with_id("step1").with_act(Act::subflow(json!({
-        "to": "w2"
-        })))
+        step.with_id("step1").with_uses(
+            USES_SUBFLOW,
+            Vars::from(json!({
+            "to": "w2"
+            })),
+        )
     });
 
     let w2 = Workflow::new()
@@ -45,9 +51,10 @@ async fn pack_subflow_start() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn pack_subflow_not_found_error() {
-    let main = Workflow::new()
-        .with_id("main")
-        .with_step(|step| step.with_id("step1").with_act(Act::subflow(json!({}))));
+    let main = Workflow::new().with_id("main").with_step(|step| {
+        step.with_id("step1")
+            .with_uses(USES_SUBFLOW, Vars::from(json!({})))
+    });
 
     main.print();
     let (engine, proc) = create_proc(&main, &utils::longid());
@@ -65,17 +72,17 @@ async fn pack_subflow_not_found_error() {
 #[tokio::test(flavor = "multi_thread")]
 async fn pack_subflow_act_running() {
     let main = Workflow::new().with_id("main").with_step(|step| {
-        step.with_id("step1").with_act(
-            Act::subflow(json!({
-            "to": "w2",
-            }))
-            .with_id("call1"),
+        step.with_id("step1").with_uses(
+            USES_SUBFLOW,
+            Vars::from(json!({
+                "to": "w2",
+            })),
         )
     });
 
     let w2 = Workflow::new().with_id("w2").with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")).with_id("act1"))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     main.print();
@@ -100,7 +107,7 @@ async fn pack_subflow_act_running() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("call1").first().unwrap().state(),
+        proc.task_by_nid("step1").first().unwrap().state(),
         TaskState::Running
     );
 }
@@ -109,17 +116,17 @@ async fn pack_subflow_act_running() {
 #[tokio::test(flavor = "multi_thread")]
 async fn pack_subflow_act_complete() {
     let main = Workflow::new().with_id("main").with_step(|step| {
-        step.with_id("step1").with_act(
-            Act::subflow(json!({
-            "to": "w2",
-            }))
-            .with_id("call1"),
+        step.with_id("step1").with_uses(
+            USES_SUBFLOW,
+            Vars::from(json!({
+                "to": "w2",
+            })),
         )
     });
 
     let w2 = Workflow::new().with_id("w2").with_step(|step| {
         step.with_id("s1")
-            .with_act(Act::irq(|act| act.with_key("act1")).with_id("act1"))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     main.print();
@@ -127,12 +134,16 @@ async fn pack_subflow_act_complete() {
     let (engine, proc) = create_proc(&main, &main_pid);
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(false).double();
-    auto_complete(&engine, &rx);
 
     let channel = engine.channel();
+    channel.on_complete(move |e| {
+        if e.mid == "main" {
+            rx.close();
+        }
+    });
     Executor::new(&rt).model().deploy(&w2).unwrap();
     channel.on_message(move |e| {
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             rt.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
                 .unwrap();
         }
@@ -142,7 +153,7 @@ async fn pack_subflow_act_complete() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("call1").first().unwrap().state(),
+        proc.task_by_nid("step1").first().unwrap().state(),
         TaskState::Completed
     );
 }
@@ -151,17 +162,17 @@ async fn pack_subflow_act_complete() {
 #[tokio::test(flavor = "multi_thread")]
 async fn pack_subflow_act_skip() {
     let main = Workflow::new().with_id("main").with_step(|step| {
-        step.with_id("step1").with_act(
-            Act::subflow(json!({
-            "to":"w2",
-            }))
-            .with_id("call1"),
+        step.with_id("step1").with_uses(
+            USES_SUBFLOW,
+            Vars::from(json!({
+                "to":"w2",
+            })),
         )
     });
 
     let w2 = Workflow::new().with_id("w2").with_step(|step| {
         step.with_id("s1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     main.print();
@@ -169,12 +180,15 @@ async fn pack_subflow_act_skip() {
     let (engine, proc) = create_proc(&main, &main_pid);
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(false).double();
-    auto_complete(&engine, &rx);
     let channel = engine.channel();
-
+    channel.on_complete(move |e| {
+        if e.mid == "main" {
+            rx.close();
+        }
+    });
     Executor::new(&rt).model().deploy(&w2).unwrap();
     channel.on_message(move |e| {
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             rt.do_action2(&e.pid, &e.tid, EventAction::Skip, Vars::new())
                 .unwrap();
         }
@@ -186,7 +200,7 @@ async fn pack_subflow_act_skip() {
 
     // sub workflow's skip does not affect the parent act state
     assert_eq!(
-        proc.task_by_nid("call1").first().unwrap().state(),
+        proc.task_by_nid("step1").first().unwrap().state(),
         TaskState::Completed
     );
 }
@@ -195,17 +209,17 @@ async fn pack_subflow_act_skip() {
 #[tokio::test(flavor = "multi_thread")]
 async fn pack_subflow_act_abort() {
     let main = Workflow::new().with_id("main").with_step(|step| {
-        step.with_id("step1").with_act(
-            Act::subflow(json!({
-                 "to": "w2",
-            }))
-            .with_id("call1"),
+        step.with_id("step1").with_uses(
+            USES_SUBFLOW,
+            Vars::from(json!({
+                     "to": "w2",
+            })),
         )
     });
 
     let w2 = Workflow::new().with_id("w2").with_step(|step| {
         step.with_id("s1")
-            .with_act(Act::irq(|act| act.with_key("act1")).with_id("act1"))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     main.print();
@@ -213,15 +227,19 @@ async fn pack_subflow_act_abort() {
     let (engine, proc) = create_proc(&main, &main_pid);
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(false).double();
-    auto_complete(&engine, &rx);
+    // auto_complete(&engine, &rx);
     let channel = engine.channel();
 
     Executor::new(&rt).model().deploy(&w2).unwrap();
     channel.on_message(move |e| {
-        println!("message: {:?}", e.inner());
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             rt.do_action2(&e.pid, &e.tid, EventAction::Abort, Vars::new())
                 .unwrap();
+        }
+    });
+    channel.on_complete(move |e| {
+        if e.mid == "main" {
+            rx.close();
         }
     });
     engine.runtime().launch(&proc).unwrap();
@@ -229,7 +247,7 @@ async fn pack_subflow_act_abort() {
     proc.print();
 
     assert_eq!(
-        proc.task_by_nid("call1").first().unwrap().state(),
+        proc.task_by_nid("step1").first().unwrap().state(),
         TaskState::Aborted
     );
 }
@@ -238,17 +256,17 @@ async fn pack_subflow_act_abort() {
 #[tokio::test(flavor = "multi_thread")]
 async fn pack_subflow_act_error() {
     let main = Workflow::new().with_id("main").with_step(|step| {
-        step.with_id("step1").with_act(
-            Act::subflow(json!({
-                "to": "w2",
-            }))
-            .with_id("call1"),
+        step.with_id("step1").with_uses(
+            USES_SUBFLOW,
+            Vars::from(json!({
+                    "to": "w2",
+            })),
         )
     });
 
     let w2 = Workflow::new().with_id("w2").with_step(|step| {
         step.with_id("s1")
-            .with_act(Act::irq(|act| act.with_key("act1")).with_id("act1"))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     main.print();
@@ -256,7 +274,6 @@ async fn pack_subflow_act_error() {
     let (engine, proc) = create_proc(&main, &main_pid);
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(false).double();
-    auto_complete(&engine, &rx);
     let channel = engine.channel();
 
     Executor::new(&rt).model().deploy(&w2).unwrap();
@@ -267,7 +284,7 @@ async fn pack_subflow_act_error() {
     });
     channel.on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.set(consts::ACT_ERR_CODE, "err1");
             options.set(consts::ACT_ERR_MESSAGE, "sub workflow error");
@@ -280,7 +297,7 @@ async fn pack_subflow_act_error() {
     tx.recv().await;
     proc.print();
     assert!(
-        proc.task_by_nid("call1")
+        proc.task_by_nid("step1")
             .first()
             .unwrap()
             .state()

@@ -16,10 +16,7 @@ async fn main() -> Result<()> {
     engine.executor().model().deploy(&workflow)?;
 
     engine.channel().on_message(move |e| {
-        println!(
-            "on_message: key={} state={} inputs={}",
-            e.key, e.state, e.inputs
-        );
+        println!("on_message: state={} inputs={}", e.state, e.inputs);
         let ret = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current().block_on(client.process(&executor, e))
         });

@@ -1,10 +1,13 @@
 use crate::{
-    Act, ActSchema, ChannelOptions, Engine, Message, Signal, Variant, VariantTypes, Vars, Workflow,
+    ActSchema, ChannelOptions, Engine, Message, Signal, Variant, VariantTypes, Vars, Workflow,
     data::{self, Package},
     event::MessageState,
     scheduler::TaskState,
     store::query::*,
-    utils::{self, consts, test::auto_complete},
+    utils::{
+        self, consts,
+        test::{USES_IRQ, auto_complete},
+    },
 };
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -42,7 +45,7 @@ async fn export_manager_deploy_ok() {
     let manager = engine.executor();
     let model = Workflow::new()
         .with_id(&utils::longid())
-        .with_step(|step| step.with_act(Act::irq(|act| act.with_key("test"))));
+        .with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "test")));
 
     let result = manager.model().deploy(&model);
 
@@ -101,7 +104,7 @@ async fn engine_executor_start_no_pid() {
     let mid = utils::longid();
     let workflow = Workflow::new()
         .with_id(&mid)
-        .with_step(|step| step.with_act(Act::irq(|act| act.with_key("test"))));
+        .with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "test")));
     engine.executor().model().deploy(&workflow).unwrap();
     let options = Vars::new();
     let result = executor.proc().start(&workflow.id, options);
@@ -117,7 +120,7 @@ async fn engine_executor_start_with_pid() {
     let mid = utils::longid();
     let workflow = Workflow::new()
         .with_id(&mid)
-        .with_step(|step| step.with_act(Act::irq(|act| act.with_key("test"))));
+        .with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "test")));
     engine.executor().model().deploy(&workflow).unwrap();
     let mut options = Vars::new();
     options.insert("pid".to_string(), "123".into());
@@ -136,7 +139,7 @@ async fn export_executor_start_empty_pid() {
     let mid = utils::longid();
     let workflow = Workflow::new()
         .with_id(&mid)
-        .with_step(|step| step.with_act(Act::irq(|act| act.with_key("test"))));
+        .with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "test")));
 
     engine.executor().model().deploy(&workflow).unwrap();
     let mut options = Vars::new();
@@ -155,7 +158,7 @@ async fn export_executor_start_dup_pid_error() {
     let mid = utils::longid();
     let model = Workflow::new()
         .with_id(&mid)
-        .with_step(|step| step.with_act(Act::irq(|act| act.with_key("test"))));
+        .with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "test")));
 
     let store = engine.runtime().cache().store();
     let proc = data::Proc {
@@ -191,7 +194,7 @@ async fn export_executor_start_from_yaml() {
     let mid = utils::longid();
     let model = Workflow::new()
         .with_id(&mid)
-        .with_step(|step| step.with_act(Act::irq(|act| act.with_key("test"))))
+        .with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "test")))
         .to_yml()
         .unwrap();
 
@@ -209,7 +212,7 @@ async fn export_executor_start_from_json() {
     let mid = utils::longid();
     let model = Workflow::new()
         .with_id(&mid)
-        .with_step(|step| step.with_act(Act::irq(|act| act.with_key("test"))))
+        .with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "test")))
         .to_json()
         .unwrap();
 
@@ -231,7 +234,7 @@ async fn export_executor_start_with_inputs_schema_ok() {
             "a",
             json!("string"),
         )]))
-        .with_step(|step| step.with_act(Act::irq(|act| act.with_key("test"))));
+        .with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "test")));
     engine.executor().model().deploy(&workflow).unwrap();
     let result = executor.proc().start(&mid, Vars::new().with("a", "abc"));
     assert!(result.is_ok());
@@ -249,7 +252,7 @@ async fn export_executor_start_with_inputs_schema_err() {
             "a",
             json!("string"),
         )]))
-        .with_step(|step| step.with_act(Act::irq(|act| act.with_key("test"))));
+        .with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "test")));
     engine.executor().model().deploy(&workflow).unwrap();
     let result = executor.proc().start(&mid, Vars::new().with("a", 100));
     assert!(result.is_err());
@@ -316,7 +319,7 @@ async fn export_executor_start_from_empty_fmt() {
     let mid = utils::longid();
     let model = Workflow::new()
         .with_id(&mid)
-        .with_step(|step| step.with_act(Act::irq(|act| act.with_key("test"))))
+        .with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "test")))
         .to_json()
         .unwrap();
 
@@ -332,7 +335,7 @@ async fn export_executor_start_from_error_fmt() {
     let mid = utils::longid();
     let model = Workflow::new()
         .with_id(&mid)
-        .with_step(|step| step.with_act(Act::irq(|act| act.with_key("test"))))
+        .with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "test")))
         .to_json()
         .unwrap();
 
@@ -518,7 +521,7 @@ async fn export_manager_procs_one() {
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let rt = engine.runtime();
@@ -546,7 +549,7 @@ async fn export_manager_procs_count() {
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let rt = engine.runtime();
@@ -584,7 +587,7 @@ async fn export_manager_procs_offset_in_range() {
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let rt = engine.runtime();
@@ -623,7 +626,7 @@ async fn export_manager_procs_offset_out_range() {
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let rt = engine.runtime();
@@ -662,7 +665,7 @@ async fn export_manager_procs_query() {
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let rt = engine.runtime();
@@ -701,7 +704,7 @@ async fn export_manager_procs_order() {
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let rt = engine.runtime();
@@ -739,7 +742,7 @@ async fn export_manager_proc_get() {
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let rt = engine.runtime();
@@ -763,14 +766,14 @@ async fn export_manager_tasks_count() {
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let rt = engine.runtime();
     let sig = engine.signal(());
     let s1 = sig.clone();
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") {
+        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1") {
             s1.close()
         }
     });
@@ -801,14 +804,14 @@ async fn export_manager_tasks_offset_in_range() {
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let rt = engine.runtime();
     let sig = engine.signal(());
     let s1 = sig.clone();
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") {
+        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1") {
             s1.close()
         }
     });
@@ -839,14 +842,14 @@ async fn export_manager_tasks_offset_out_range() {
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let rt = engine.runtime();
     let sig = engine.signal(());
     let s1 = sig.clone();
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") {
+        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1") {
             s1.close()
         }
     });
@@ -877,14 +880,14 @@ async fn export_manager_tasks_query() {
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let rt = engine.runtime();
     let sig = engine.signal(());
     let s1 = sig.clone();
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") {
+        if e.is_params_key("act1") {
             s1.close()
         }
     });
@@ -907,7 +910,6 @@ async fn export_manager_tasks_query() {
         )
         .unwrap();
     assert_eq!(tasks.rows.first().unwrap().r#type, "act");
-    assert_eq!(tasks.rows.first().unwrap().key, "act1");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -917,14 +919,14 @@ async fn export_manager_tasks_order() {
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let rt = engine.runtime();
     let sig = engine.signal(());
     let s1 = sig.clone();
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") {
+        if e.is_params_key("act1") {
             s1.close()
         }
     });
@@ -954,14 +956,14 @@ async fn export_manager_task_get() {
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let rt = engine.runtime();
     let sig = engine.signal(());
     let s1 = sig.clone();
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") {
+        if e.is_params_key("act1") {
             s1.close()
         }
     });
@@ -995,7 +997,7 @@ async fn export_manager_messages_all() {
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let rt = engine.runtime();
@@ -1028,7 +1030,7 @@ async fn export_manager_messages_query() {
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let rt: Arc<crate::scheduler::Runtime> = engine.runtime();
@@ -1068,7 +1070,7 @@ async fn export_manager_messages_order() {
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let rt = engine.runtime();
@@ -1108,7 +1110,7 @@ async fn export_manager_messages_count() {
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let rt = engine.runtime();
@@ -1123,7 +1125,7 @@ async fn export_manager_messages_count() {
         let mut count = count.lock().unwrap();
         *count += 1;
 
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             s1.send(*count);
         }
     });
@@ -1154,7 +1156,7 @@ async fn export_manager_messages_offset_in_range() {
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let rt = engine.runtime();
@@ -1193,7 +1195,7 @@ async fn export_manager_messages_offset_out_range() {
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let rt = engine.runtime();
@@ -1208,7 +1210,7 @@ async fn export_manager_messages_offset_out_range() {
         let mut count = count.lock().unwrap();
         *count += 1;
 
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             s1.send(*count);
         }
     });
@@ -1239,7 +1241,7 @@ async fn export_manager_message_get() {
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let rt = engine.runtime();
@@ -1254,7 +1256,7 @@ async fn export_manager_message_get() {
         let mut count = count.lock().unwrap();
         *count += 1;
 
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             s1.send(*count);
         }
     });
@@ -1286,7 +1288,7 @@ async fn export_manager_message_rm() {
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let rt = engine.runtime();
@@ -1301,7 +1303,7 @@ async fn export_manager_message_rm() {
         let mut count = count.lock().unwrap();
         *count += 1;
 
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_type("act") && e.is_params_key("act1") && e.is_state(MessageState::Created) {
             s1.send(*count);
         }
     });
@@ -1604,7 +1606,7 @@ async fn export_executor_complete() {
     let engine = Engine::new().start().unwrap();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let rt = engine.runtime();
@@ -1612,7 +1614,9 @@ async fn export_executor_complete() {
     let s1 = sig.clone();
     let executor = engine.executor();
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
+            && e.is_state(MessageState::Created)
+        {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             let ret = executor.act().complete(&e.pid, &e.tid, vars);
@@ -1632,7 +1636,7 @@ async fn export_executor_complete_no_uid() {
     let engine = Engine::new().start().unwrap();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let rt = engine.runtime();
@@ -1641,7 +1645,9 @@ async fn export_executor_complete_no_uid() {
     let executor = engine.executor();
 
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
+            && e.is_state(MessageState::Created)
+        {
             let vars = Vars::new();
             let ret = executor.act().complete(&e.pid, &e.tid, vars);
 
@@ -1660,7 +1666,7 @@ async fn export_executor_submit() {
     let engine = Engine::new().start().unwrap();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let rt = engine.runtime();
@@ -1669,7 +1675,9 @@ async fn export_executor_submit() {
     let executor = engine.executor();
 
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
+            && e.is_state(MessageState::Created)
+        {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             let ret = executor.act().submit(&e.pid, &e.tid, vars);
@@ -1689,7 +1697,7 @@ async fn export_executor_skip() {
     let engine = Engine::new().start().unwrap();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let rt = engine.runtime();
@@ -1697,7 +1705,9 @@ async fn export_executor_skip() {
     let s1 = sig.clone();
     let executor = engine.executor();
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
+            && e.is_state(MessageState::Created)
+        {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             let ret = executor.act().skip(&e.pid, &e.tid, vars);
@@ -1717,7 +1727,7 @@ async fn export_executor_error() {
     let engine = Engine::new().start().unwrap();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let rt = engine.runtime();
@@ -1725,7 +1735,9 @@ async fn export_executor_error() {
     let s1 = sig.clone();
     let executor = engine.executor();
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
+            && e.is_state(MessageState::Created)
+        {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             vars.insert("ecode".to_string(), json!("code_1"));
@@ -1746,7 +1758,7 @@ async fn export_executor_abort() {
     let engine = Engine::new().start().unwrap();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let rt = engine.runtime();
@@ -1755,7 +1767,9 @@ async fn export_executor_abort() {
     let executor = engine.executor();
     engine.channel().on_message(move |e| {
         println!("message: {:?}", e.inner());
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
+            && e.is_state(MessageState::Created)
+        {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             let ret = executor.act().abort(&e.pid, &e.tid, vars);
@@ -1776,11 +1790,11 @@ async fn export_executor_back() {
     let model = Workflow::new()
         .with_step(|step| {
             step.with_id("step1")
-                .with_act(Act::irq(|act| act.with_key("act1")))
+                .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
         })
         .with_step(|step| {
             step.with_id("step2")
-                .with_act(Act::irq(|act| act.with_key("act2")))
+                .with_uses(USES_IRQ, Vars::new().with("key", "act2"))
         });
 
     let rt = engine.runtime();
@@ -1790,7 +1804,9 @@ async fn export_executor_back() {
 
     let count = Arc::new(Mutex::new(0));
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
+            && e.is_state(MessageState::Created)
+        {
             let mut count = count.lock().unwrap();
             if *count == 1 {
                 s1.close();
@@ -1802,7 +1818,9 @@ async fn export_executor_back() {
             *count += 1;
         }
 
-        if e.is_key("act2") && e.is_state(MessageState::Created) {
+        if e.params().unwrap().get::<String>("key").as_deref() == Some("act2")
+            && e.is_state(MessageState::Created)
+        {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             vars.insert("to".to_string(), json!("step1"));
@@ -1824,11 +1842,11 @@ async fn export_executor_cancel() {
     let model = Workflow::new()
         .with_step(|step| {
             step.with_id("step1")
-                .with_act(Act::irq(|act| act.with_key("act1")))
+                .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
         })
         .with_step(|step| {
             step.with_id("step2")
-                .with_act(Act::irq(|act| act.with_key("act2")))
+                .with_uses(USES_IRQ, Vars::new().with("key", "act2"))
         });
 
     let rt = engine.runtime();
@@ -1838,7 +1856,7 @@ async fn export_executor_cancel() {
     let count = Arc::new(Mutex::new(0));
     let tid = Arc::new(Mutex::new("".to_string()));
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             let mut count = count.lock().unwrap();
             if *count == 1 {
                 s1.close();
@@ -1851,7 +1869,9 @@ async fn export_executor_cancel() {
             *count += 1;
         }
 
-        if e.is_key("act2") && e.is_state(MessageState::Created) {
+        if e.params().unwrap().get::<String>("key").as_deref() == Some("act2")
+            && e.is_state(MessageState::Created)
+        {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             let ret = executor.act().cancel(&e.pid, &tid.lock().unwrap(), vars);
@@ -1871,7 +1891,7 @@ async fn export_executor_push() {
     let engine = Engine::new().start().unwrap();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let rt = engine.runtime();
@@ -1880,14 +1900,14 @@ async fn export_executor_push() {
     let executor = engine.executor();
     engine.channel().on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_key("step1") && e.is_state(MessageState::Created) {
+        if e.is_type("step") && e.is_state(MessageState::Created) {
             let vars = Vars::new()
                 .with("uses", "acts.core.irq")
-                .with("key", "act2");
+                .with("params", Vars::new().with("key", "act2"));
             executor.act().push(&e.pid, &e.tid, vars).unwrap();
         }
 
-        if e.is_key("act2") && e.is_state(MessageState::Created) {
+        if e.is_type("act") && e.is_params_key("act2") && e.is_state(MessageState::Created) {
             s1.send(true);
         }
     });
@@ -1904,7 +1924,7 @@ async fn export_executor_push_no_key_error() {
     let engine = Engine::new().start().unwrap();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let rt = engine.runtime();
@@ -1913,7 +1933,7 @@ async fn export_executor_push_no_key_error() {
     let executor = engine.executor();
     engine.channel().on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_key("step1") && e.is_state(MessageState::Created) {
+        if e.is_type("step") && e.is_state(MessageState::Created) {
             s1.send(executor.act().push(&e.pid, &e.tid, Vars::new()).is_err());
         }
     });
@@ -1930,7 +1950,7 @@ async fn export_executor_push_not_step_id_error() {
     let engine = Engine::new().start().unwrap();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let rt = engine.runtime();
@@ -1939,7 +1959,10 @@ async fn export_executor_push_not_step_id_error() {
     let executor = engine.executor();
     engine.channel().on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_type("act")
+            && e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
+            && e.is_state(MessageState::Created)
+        {
             let vars = Vars::new();
             s1.send(executor.act().push(&e.pid, &e.tid, vars).is_err());
         }
@@ -1957,7 +1980,7 @@ async fn export_executor_remove() {
     let engine = Engine::new().start().unwrap();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let rt = engine.runtime();
@@ -1966,7 +1989,9 @@ async fn export_executor_remove() {
     let executor = engine.executor();
     engine.channel().on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
+            && e.is_state(MessageState::Created)
+        {
             s1.send(executor.act().remove(&e.pid, &e.tid, Vars::new()).is_ok());
         }
     });
@@ -2160,54 +2185,6 @@ async fn export_emitter_tag_not_match() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
-async fn export_emitter_key_match() {
-    let engine = Engine::new().start().unwrap();
-    let emitter = engine.channel_with_options(&ChannelOptions {
-        key: "key*".to_string(),
-        ..Default::default()
-    });
-    let sig = engine.signal::<Vec<Message>>(Vec::new());
-    let s = sig.clone();
-    emitter.on_message(move |e| {
-        s.update(|data| data.push(e.inner().clone()));
-        s.close();
-    });
-
-    let msg = Message {
-        key: "key1".to_string(),
-        ..Message::default()
-    };
-    engine.runtime().emitter().emit_message(&msg);
-    let ret = sig.recv().await;
-    assert_eq!(ret.len(), 1);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn export_emitter_key_not_match() {
-    let engine = Engine::new().start().unwrap();
-    let emitter = engine.channel_with_options(&ChannelOptions {
-        key: "key*".to_string(),
-        ..Default::default()
-    });
-    let sig = engine.signal::<Vec<Message>>(Vec::new());
-    let s = sig.clone();
-    emitter.on_message(move |e| {
-        s.update(|data| data.push(e.inner().clone()));
-        s.close();
-    });
-
-    let msg = Message {
-        key: "aaaa".to_string(),
-        ..Message::default()
-    };
-    engine.runtime().emitter().emit_message(&msg);
-    let ret = sig.timeout(100).await;
-    assert_eq!(ret.len(), 0);
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
 async fn export_emitter_on_message_with_dup_id() {
     let engine = Engine::new().start().unwrap();
     let emitter = engine.channel_with_options(&ChannelOptions {
@@ -2233,7 +2210,7 @@ async fn export_emitter_on_message_with_dup_id() {
     });
 
     let msg = Message {
-        key: "aaaa".to_string(),
+        tag: "aaaa".to_string(),
         ..Message::default()
     };
     engine.runtime().emitter().emit_message(&msg);

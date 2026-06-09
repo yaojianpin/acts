@@ -53,74 +53,77 @@ impl<'a> Client<'a> {
 
     pub async fn process(&self, executor: &Executor, message: &Message) -> Result<()> {
         // println!("message: {:?}", message);
-        if message.is_key("init") && message.is_state(MessageState::Created) {
-            // init the workflow
-            println!("do init work");
-            let mut options = Vars::new();
-            options.insert("uid".to_string(), json!("u1"));
+        if let Some(params) = message.inputs.get::<Vars>("params")
+            && let Some(key) = params.get::<String>("key")
+        {
+            println!("do work: {key}, state={}", message.state());
+            if key == "init" && message.is_state(MessageState::Created) {
+                // init the workflow
+                let mut options = Vars::new();
+                options.insert("uid".to_string(), json!("u1"));
 
-            executor
-                .act()
-                .complete(&message.pid, &message.tid, options)?;
-            println!(
-                "action state: id={} key={} inputs={}",
-                &message.tid, &message.key, &message.inputs,
-            );
-        } else if message.is_key("pm_act") && message.is_state(MessageState::Created) {
-            let mut options = Vars::new();
-            options.insert("uid".to_string(), json!("u1"));
+                executor
+                    .act()
+                    .complete(&message.pid, &message.tid, options)?;
+                println!(
+                    "action state: id={} inputs={}",
+                    &message.tid, message.inputs,
+                );
+            } else if key == "pm_act" && message.is_state(MessageState::Created) {
+                let mut options = Vars::new();
+                options.insert("uid".to_string(), json!("u1"));
 
-            executor
-                .act()
-                .complete(&message.pid, &message.tid, options)?;
-            println!(
-                "action state: id={} key={} inputs={}",
-                &message.tid, &message.key, &message.inputs,
-            );
-        } else if message.is_key("gm_act") && message.is_state(MessageState::Created) {
-            let mut options = Vars::new();
-            options.insert("uid".to_string(), json!("u2"));
+                executor
+                    .act()
+                    .complete(&message.pid, &message.tid, options)?;
+                println!(
+                    "action state: id={} inputs={}",
+                    &message.tid, &message.inputs,
+                );
+            } else if key == "gm_act" && message.is_state(MessageState::Created) {
+                let mut options = Vars::new();
+                options.insert("uid".to_string(), json!("u2"));
 
-            executor
-                .act()
-                .complete(&message.pid, &message.tid, options)?;
-            println!(
-                "action state: id={} key={} inputs={}",
-                &message.tid, &message.key, &message.inputs,
-            );
-        } else if message.is_key("pm") && message.is_state(MessageState::Created) {
-            let params = message.inputs.get::<Vars>("params").unwrap();
-            let mut options = Vars::new();
-            options.insert("uid".into(), "admin".into());
-            options.insert(
-                "pm".into(),
-                json!(self.role(&params.get::<String>("role_id").unwrap())),
-            );
-            executor
-                .act()
-                .complete(&message.pid, &message.tid, options)?;
-            println!(
-                "action state: id={} key={} inputs={}",
-                &message.tid, &message.key, &message.inputs,
-            );
-        } else if message.is_key("gm") && message.is_state(MessageState::Created) {
-            let mut options = Vars::new();
-            let params = message.inputs.get::<Vars>("params").unwrap();
-            options.insert("uid".into(), "admin".into());
-            options.insert(
-                "gm".into(),
-                json!(self.role(&params.get::<String>("role_id").unwrap())),
-            );
+                executor
+                    .act()
+                    .complete(&message.pid, &message.tid, options)?;
+                println!(
+                    "action state: id={} inputs={}",
+                    &message.tid, &message.inputs,
+                );
+            } else if key == "pm" && message.is_state(MessageState::Created) {
+                let params = message.inputs.get::<Vars>("params").unwrap();
+                let mut options = Vars::new();
+                options.insert("uid".into(), "admin".into());
+                options.insert(
+                    "pm".into(),
+                    json!(self.role(&params.get::<String>("role_id").unwrap())),
+                );
+                executor
+                    .act()
+                    .complete(&message.pid, &message.tid, options)?;
+                println!(
+                    "action state: id={} inputs={}",
+                    &message.tid, &message.inputs,
+                );
+            } else if key == "gm" && message.is_state(MessageState::Created) {
+                let mut options = Vars::new();
+                let params = message.inputs.get::<Vars>("params").unwrap();
+                options.insert("uid".into(), "admin".into());
+                options.insert(
+                    "gm".into(),
+                    json!(self.role(&params.get::<String>("role_id").unwrap())),
+                );
 
-            executor
-                .act()
-                .complete(&message.pid, &message.tid, options)?;
-            println!("action state: id={} key={}", &message.tid, &message.key,);
-        } else if message.is_type("msg") {
-            println!(
-                "msg: id={} key={} inputs={}",
-                message.tid, message.key, message.inputs
-            );
+                executor
+                    .act()
+                    .complete(&message.pid, &message.tid, options)?;
+                println!("action state: id={}", &message.tid);
+            }
+        }
+
+        if message.is_type("msg") {
+            println!("msg: id={} inputs={}", message.tid, message.inputs);
         }
 
         Ok(())

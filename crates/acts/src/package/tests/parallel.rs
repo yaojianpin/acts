@@ -4,24 +4,24 @@ use crate::{
     scheduler::TaskState,
     utils::{
         self, consts,
-        test::{auto_complete, create_proc},
+        test::{USES_PARALLEL, auto_complete, create_proc},
     },
 };
 use serde_json::json;
-
 use serial_test::serial;
 
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn pack_parallel_setup_list() {
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_act(Act::parallel(json!({
+    let workflow =
+        Workflow::new().with_step(|step| {
+            step.with_id("step1").with_uses(USES_PARALLEL, Vars::from(json!({
             "in": ["u1", "u2"],
             "acts": vec![
-                Act::irq(|act| act.with_key("act1").with_id("act1"))
+                Act::irq(|act| act.with_params_vars(|v| v.with("key", "act1")).with_id("act1"))
             ]
         })))
-    });
+        });
 
     workflow.print();
     let (engine, proc) = create_proc(&workflow, &utils::longid());
@@ -31,7 +31,6 @@ async fn pack_parallel_setup_list() {
     let channel = engine.channel();
 
     channel.on_message(move |e| {
-        println!("message: {e:?}");
         if e.is_type("act") {
             rx.close();
         }
@@ -58,11 +57,11 @@ async fn pack_parallel_setup_list() {
 async fn pack_parallel_var_exist() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::set(Vars::new().with("a", ["u1", "u2"])))
-            .with_act(Act::parallel(json!({
+            .with_var("a", json!(["u1", "u2"]))
+            .with_uses(USES_PARALLEL, Vars::from(json!({
                 "in": r#"{{ a }}"#,
                 "acts": vec![
-                    Act::irq(|act| act.with_key("act1").with_id("act1"))
+                    Act::irq(|act| act.with_params_vars(|v| v.with("key", "act1")).with_id("act1"))
                 ]
             })))
     });
@@ -75,7 +74,7 @@ async fn pack_parallel_var_exist() {
     let channel = engine.channel();
     channel.on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             rx.update(|data| {
                 let vars = e.inputs.get::<Vars>(consts::ACT_OPTIONS_KEY).unwrap();
                 data.push(vars);
@@ -104,12 +103,15 @@ async fn pack_parallel_var_exist() {
 #[tokio::test(flavor = "multi_thread")]
 async fn pack_parallel_in_not_exist() {
     let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_act(Act::parallel(json!({
-            "in": r#"$("not_exists")"#,
-            "acts": vec![
-                Act::irq(|act| act.with_key("act1"))
-            ]
-        })))
+        step.with_id("step1").with_uses(
+            USES_PARALLEL,
+            Vars::from(json!({
+                "in": r#"$("not_exists")"#,
+                "acts": vec![
+                    Act::irq(|act| act.with_params_vars(|v| v.with("key", "act1")))
+                ]
+            })),
+        )
     });
 
     workflow.print();
@@ -128,11 +130,11 @@ async fn pack_parallel_in_not_exist() {
 #[tokio::test(flavor = "multi_thread")]
 async fn pack_parallel_in_code() {
     let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_act(Act::set(Vars::new().with("a", ["u1", "u2"])))
-                .with_act(Act::parallel(json!({
-                    "in": r#"{{ let b = ["u3"];let c = [ "u1" ];let d = [ "u3", "u4" ];a.union(b).difference(c).intersection(d) }}"#,
+        step.with_id("step1")
+                .with_uses(USES_PARALLEL, Vars::from(json!({
+                    "in": r#"{{ let a = ["u1", "u2"]; let b = ["u3"];let c = [ "u1" ];let d = [ "u3", "u4" ];a.union(b).difference(c).intersection(d) }}"#,
                     "acts": vec![
-                        Act::irq(|act| act.with_key("act1").with_id("act1"))
+                        Act::irq(|act| act.with_params_vars(|v| v.with("key", "act1")).with_id("act1"))
                     ]
                 })))
 

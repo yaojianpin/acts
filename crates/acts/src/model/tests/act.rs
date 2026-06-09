@@ -36,14 +36,18 @@ fn model_act_to_json() {
       in: "[\"a\", \"b\"]"
       acts:
           - uses: acts.core.msg
-            key: msg1
+            params:
+                key: msg1
           - uses: acts.transform.parallel
-            in: "[\"a\", \"b\"]"
-            acts:
-              - uses: acts.core.msg
-                key: msg2
+            params:
+                in: "[\"a\", \"b\"]"
+                acts:
+                    - uses: acts.core.msg
+                      params:
+                        key: msg2
     - uses: acts.core.msg
-      key: msg2
+      params:
+        key: msg2
     "#;
 
     let stms: Vec<Act> = serde_yaml::from_str(text).unwrap();
@@ -107,9 +111,9 @@ fn model_act_set_tag() {
 }
 
 #[test]
-fn model_act_set_key() {
-    let b = Act::new().with_key("key1");
-    assert_eq!(b.key, "key1");
+fn model_act_set_params_key() {
+    let b = Act::new().with_params_vars(|v| v.with("key", "key1"));
+    assert_eq!(b.params.get("key").unwrap(), "key1");
 }
 
 #[test]
@@ -136,20 +140,17 @@ fn model_act_yml_vars() {
     id: m1
     steps:
         - id: step1
-          acts:
-            - id: b1
-              uses: acts.core.irq
-              vars:
-                - name: p1
-                  value: 5
+          uses: acts.core.irq
+          vars:
+            - name: p1
+              value: 5
 
     "#;
     let m = Workflow::from_yml(text).unwrap();
 
     let step = m.steps.first().unwrap();
-    let act = step.acts.first().unwrap();
-    assert_eq!(act.vars.len(), 1);
-    assert_eq!(act.vars().get_value("p1"), Some(&json!(5)));
+    assert_eq!(step.vars.len(), 1);
+    assert_eq!(step.vars().get_value("p1"), Some(&json!(5)));
 }
 
 #[test]
@@ -159,19 +160,16 @@ fn model_act_yml_expose() {
     id: m1
     steps:
         - id: step1
-          acts:
-            - id: b1
-              uses: acts.core.irq
-              options:
-                exposes:
-                    - name: p1
+          uses: acts.core.irq
+          options:
+            exposes:
+                - name: p1
 
     "#;
 
     let m = Workflow::from_yml(text).unwrap();
     let step = m.steps.first().unwrap();
-    let act = step.acts.first().unwrap();
-    let exposes = act.exposes();
+    let exposes = step.exposes();
     assert_eq!(exposes.len(), 1);
     assert_eq!(exposes.get_value("p1"), Some(&json!(null)));
 }

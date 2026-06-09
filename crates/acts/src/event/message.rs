@@ -61,10 +61,6 @@ pub struct Message {
     /// model id
     pub mid: String,
 
-    /// node id or act
-    /// if the key is empty, just using nid as the key
-    pub key: String,
-
     /// used package name
     pub uses: String,
 
@@ -96,20 +92,20 @@ impl Message {
         self.state
     }
 
-    pub fn is_key(&self, key: &str) -> bool {
-        self.key == key
+    pub fn is_nid(&self, nid: &str) -> bool {
+        self.nid == nid
     }
 
     pub fn is_uses(&self, uses: &str) -> bool {
-        self.uses == uses
+        self.uses == uses && self.r#type == "act"
     }
 
     pub fn is_irq(&self) -> bool {
-        self.uses == "acts.core.irq"
+        self.uses == "acts.core.irq" && self.r#type == "act"
     }
 
     pub fn is_msg(&self) -> bool {
-        self.uses == "acts.core.msg"
+        self.uses == "acts.core.msg" && self.r#type == "act"
     }
 
     pub fn is_state(&self, state: MessageState) -> bool {
@@ -139,14 +135,6 @@ impl Message {
         None
     }
 
-    pub fn key_of(&self, key: &str) -> Option<&Self> {
-        if key == self.key {
-            return Some(self);
-        }
-
-        None
-    }
-
     /// workflow cost in million seconds
     pub fn cost(&self) -> i64 {
         if self.state().is_completed() {
@@ -154,6 +142,25 @@ impl Message {
         }
 
         0
+    }
+
+    pub fn params(&self) -> Option<Vars> {
+        self.inputs.get::<Vars>("params")
+    }
+
+    pub fn options(&self) -> Option<Vars> {
+        self.inputs.get::<Vars>("options")
+    }
+
+    #[cfg(test)]
+    pub fn is_params_key(&self, key: &str) -> bool {
+        if let Some(params) = self.inputs.get::<Vars>("params")
+            && let Some(k) = params.get::<String>("key")
+        {
+            return k == key;
+        }
+
+        false
     }
 
     pub fn into(&self, emit_id: &str, pat: &str) -> data::Message {
@@ -167,7 +174,6 @@ impl Message {
             pid: value.pid,
             nid: value.nid,
             mid: value.mid,
-            key: value.key,
             uses: value.uses,
             inputs: value.inputs.to_string(),
             outputs: value.outputs.to_string(),
@@ -250,7 +256,6 @@ impl From<data::Message> for Message {
             pid: v.pid,
             nid: v.nid,
             mid: v.mid,
-            key: v.key,
             uses: v.uses,
             inputs: serde_json::from_str(&v.inputs).unwrap_or_default(),
             outputs: serde_json::from_str(&v.outputs).unwrap_or_default(),

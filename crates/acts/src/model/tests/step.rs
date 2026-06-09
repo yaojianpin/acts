@@ -2,7 +2,7 @@ mod acts;
 mod catch;
 mod timeout;
 
-use crate::{Act, Step, Workflow};
+use crate::{Step, Vars, Workflow, utils::test::USES_IRQ};
 use serde_json::json;
 
 #[test]
@@ -120,14 +120,10 @@ fn model_step_branches() {
 }
 
 #[test]
-fn model_step_acts() {
-    let mut step = Step::new();
-    assert_eq!(step.acts.len(), 0);
-
-    step = step
-        .with_act(Act::irq(|act| act.with_key("act1")))
-        .with_act(Act::irq(|act| act.with_key("act2")));
-    assert_eq!(step.acts.len(), 2);
+fn model_step_uses() {
+    let step = Step::new().with_uses(USES_IRQ, Vars::new().with("key", "act1"));
+    assert_eq!(step.uses, Some(USES_IRQ.to_string()));
+    assert_eq!(step.params.get("key").unwrap(), "act1");
 }
 
 #[test]

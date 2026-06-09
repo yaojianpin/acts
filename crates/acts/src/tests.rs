@@ -1,5 +1,5 @@
 use crate::event::EventAction;
-use crate::{Act, Engine, EngineBuilder, MessageState, Vars, Workflow, utils};
+use crate::{Engine, EngineBuilder, MessageState, Vars, Workflow, utils, utils::test::USES_IRQ};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -20,11 +20,11 @@ async fn engine_event_on_message() {
     let mid = utils::longid();
     let workflow = Workflow::new()
         .with_id(&mid)
-        .with_step(|step| step.with_act(Act::irq(|act| act.with_key("test"))));
+        .with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "test")));
 
     engine.channel().on_message(move |e| {
         if e.is_type("act") {
-            s.update(|data| *data = e.key.clone());
+            s.update(|data| *data = e.params().unwrap().get::<String>("key").unwrap());
             s.close();
         }
     });
@@ -49,7 +49,7 @@ async fn engine_event_on_start() {
     let mid = utils::longid();
     let workflow = Workflow::new()
         .with_id(&mid)
-        .with_step(|step| step.with_act(Act::irq(|act| act.with_key("test"))));
+        .with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "test")));
 
     engine.channel().on_start(move |e| {
         s.send(e.mid.clone());
@@ -97,7 +97,7 @@ async fn engine_event_on_error() {
     let mid = utils::longid();
     let workflow = Workflow::new().with_id(&mid).with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|a| a.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let sig = engine.signal(false);
@@ -112,7 +112,9 @@ async fn engine_event_on_error() {
         options.insert("uid".to_string(), json!("u1"));
         options.set("ecode", "err1");
 
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
+            && e.is_state(MessageState::Created)
+        {
             rt.do_action2(&e.pid, &e.tid, EventAction::Error, options)
                 .unwrap();
         }

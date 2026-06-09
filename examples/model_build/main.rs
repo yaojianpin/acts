@@ -1,4 +1,4 @@
-use acts::{Act, Engine, Result, Vars, Workflow};
+use acts::{Engine, Result, Vars, Workflow};
 use nanoid::nanoid;
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -13,12 +13,13 @@ async fn main() -> Result<()> {
             step.with_id("cond")
                 .with_branch(|b| {
                     b.with_if(r#"index <= count"#).with_step(|step| {
-                        step.with_next("cond").with_act(Act::code(
+                        step.with_next("cond").with_uses_code(
+                            "acts.transform.code",
                             r#"
                             $set("index", index + 1);
                             $set("result", result + index);
                             "#,
-                        ))
+                        )
                     })
                 })
                 .with_branch(|b| b.with_if(r#"index > count"#))

@@ -21,7 +21,7 @@ async fn main() -> Result<()> {
         })
         .on_message(move |message| {
             if message.is_type("act") {
-                println!("on_message: key={} inputs={}", message.key, message.inputs);
+                println!("on_message: inputs={}", message.inputs);
             }
         });
 

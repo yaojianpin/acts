@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::{
     Act, NodeKind, Workflow,
     scheduler::{
@@ -7,6 +5,7 @@ use crate::{
         tree::{NodeContent, NodeTree},
     },
 };
+use std::sync::Arc;
 
 const SIMPLE_WORKFLOW: &str = r#"
 id: m1
@@ -187,26 +186,6 @@ async fn sch_tree_branch_steps() {
 }
 
 #[tokio::test]
-async fn sch_tree_acts() {
-    let mut workflow = Workflow::new().with_id("w1").with_step(|step| {
-        step.with_id("step1")
-            .with_act(Act::new().with_id("act1"))
-            .with_act(Act::new().with_id("act2"))
-    });
-
-    let tree = NodeTree::build(&mut workflow).unwrap();
-    let step = tree.node("step1").unwrap();
-    let act1 = tree.node("act1").unwrap();
-    let act2 = tree.node("act2").unwrap();
-
-    // act1 and act2 will run in order
-    assert_eq!(step.children().len(), 1);
-    assert_eq!(act1.parent().unwrap().id(), "step1");
-    assert_eq!(act2.parent().unwrap().id(), "step1");
-    assert_eq!(act2.prev().upgrade().unwrap().id(), "act1");
-}
-
-#[tokio::test]
 async fn sch_tree_node_workflow_ser_de() {
     let mut workflow = Workflow::new()
         .with_id("w1")
@@ -272,7 +251,7 @@ async fn sch_tree_node_act_ser_de() {
     let step1 = tree.node("step1").unwrap();
     let act1 = Arc::new(Node::new(
         "act_id_1",
-        NodeContent::Act(Act::irq(|r| r.with_key("act1"))),
+        NodeContent::Act(Act::irq(|r| r.with_params_vars(|v| v.with("key", "act1")))),
         step1.level + 1,
     ));
 
@@ -298,13 +277,13 @@ async fn sch_tree_node_act2_ser_de() {
     let step1 = tree.node("step1").unwrap();
     let act1 = Arc::new(Node::new(
         "act_id_1",
-        NodeContent::Act(Act::irq(|r| r.with_key("act1"))),
+        NodeContent::Act(Act::irq(|r| r.with_params_vars(|v| v.with("key", "act1")))),
         step1.level + 1,
     ));
 
     let act2 = Arc::new(Node::new(
         "act_id_2",
-        NodeContent::Act(Act::irq(|r| r.with_key("act2"))),
+        NodeContent::Act(Act::irq(|r| r.with_params_vars(|v| v.with("key", "act2")))),
         act1.level + 1,
     ));
 

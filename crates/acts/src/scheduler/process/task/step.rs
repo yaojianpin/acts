@@ -1,5 +1,5 @@
 use crate::{
-    ActTask, Error, Result,
+    Act, ActTask, Error, Result,
     model::Step,
     scheduler::{Context, TaskState},
     utils::consts,
@@ -21,6 +21,18 @@ impl ActTask for Step {
 
     fn run(&self, ctx: &Context) -> Result<()> {
         let task = ctx.task();
+
+        if let Some(uses) = &self.uses {
+            ctx.dispatch_act(
+                &Act {
+                    uses: uses.to_string(),
+                    params: task.params(),
+                    ..Default::default()
+                },
+                self.vars(),
+            )?;
+        }
+
         let children = task.node.children();
         if !children.is_empty() {
             for child in &children {

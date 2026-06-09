@@ -24,12 +24,13 @@ impl Client {
 
     pub async fn process(&self, executor: &Executor, e: &Event<Message>) -> Result<()> {
         if e.is_irq() && e.is_state(MessageState::Created) {
-            match self.actions.get(&e.key) {
+            let key = e.params().unwrap().get::<String>("key").unwrap();
+            match self.actions.get(&key) {
                 Some(action) => {
-                    println!("action:{} inputs={:?}", &e.key, e.inputs);
+                    println!("action:{} inputs={:?}", &key, e.inputs);
                     action(executor, e)?;
                 }
-                None => eprintln!("cannot find action '{}'", e.key),
+                None => eprintln!("cannot find action '{}'", key),
             }
         }
 

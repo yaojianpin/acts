@@ -1,5 +1,6 @@
 use crate::{Act, Branch, Step, Vars, Workflow};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::sync::{Arc, RwLock, Weak};
 
 use super::{node_tree, visit::VisitRoot};
@@ -21,7 +22,7 @@ pub enum NodeKind {
     Act,
 }
 
-#[derive(PartialEq, Default, Debug, Clone, Serialize, Deserialize)]
+#[derive(PartialEq, Default, Copy, Debug, Clone, Serialize, Deserialize)]
 pub enum NodeOutputKind {
     #[default]
     Normal,
@@ -99,6 +100,7 @@ impl NodeContent {
 
     pub fn params(&self) -> serde_json::Value {
         match self {
+            NodeContent::Step(node) => node.params.clone(),
             NodeContent::Act(node) => node.params.clone(),
             _ => serde_json::Value::Null,
         }
@@ -110,14 +112,6 @@ impl NodeContent {
             NodeContent::Branch(node) => node.tag.clone(),
             NodeContent::Step(node) => node.tag.clone(),
             NodeContent::Act(node) => node.tag.clone(),
-        }
-    }
-
-    /// only the act has the key
-    pub fn key(&self) -> String {
-        match self {
-            NodeContent::Act(node) => node.key.clone(),
-            _ => "".to_string(),
         }
     }
 
@@ -227,21 +221,19 @@ impl Node {
         &self.id
     }
 
-    pub fn key(&self) -> String {
-        let key = self.content.key();
-        if key.is_empty() {
-            // if the key is empty, use the id as key
-            return self.id.clone();
+    pub fn uses(&self) -> String {
+        match &self.content {
+            NodeContent::Step(step) => step.uses.clone().unwrap_or_default(),
+            NodeContent::Act(act) => act.uses.to_string(),
+            _ => "".to_string(),
         }
-
-        key
     }
 
-    pub fn uses(&self) -> String {
-        if let NodeContent::Act(act) = &self.content {
-            act.uses.to_string()
-        } else {
-            "".to_string()
+    pub fn params(&self) -> Value {
+        match &self.content {
+            NodeContent::Step(step) => step.params.clone(),
+            NodeContent::Act(act) => act.params.clone(),
+            _ => Value::Null,
         }
     }
 
@@ -331,23 +323,15 @@ impl Node {
 
             if n.kind() == NodeKind::Act {
                 println!(
-                    "{}:{} key={} uses={} name={}  next={}",
+                    "{}:{} uses={} name={}  next={}",
                     n.kind(),
                     n.id(),
-                    n.content.key(),
                     n.uses(),
                     n.name(),
                     next,
                 );
             } else {
-                println!(
-                    "{}:{} key={} name={}  next={}",
-                    n.kind(),
-                    n.id(),
-                    n.content.key(),
-                    n.name(),
-                    next,
-                );
+                println!("{}:{} name={}  next={}", n.kind(), n.id(), n.name(), next);
             }
         });
     }

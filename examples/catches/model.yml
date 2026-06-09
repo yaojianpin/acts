@@ -3,23 +3,26 @@ id: catches
 steps:
   - name: prepare
     id: prepare
-    acts:
-      - uses: acts.core.irq
-        key: init
+    uses: acts.core.irq
+    params:
+      key: init
   - name: step1
     id: step1
-    acts:
-      - uses: acts.core.irq
-        key: act1
+    uses: acts.core.irq
+    params:
+      key: act1
     catches:
       - uses: acts.core.msg
         if: $ecode() == 'err1'
-        key: catch1
+        params:
+          key: catch1
       - uses: acts.core.msg
         if: $ecode() == 'err2'
-        key: catch2
+        params:
+          key: catch2
       - uses: acts.core.msg
-        key: others
+        params:
+          key: others
 
   - name: final
     id: final

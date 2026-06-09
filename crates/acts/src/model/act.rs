@@ -17,15 +17,14 @@ pub struct Act {
     #[serde(default)]
     pub id: String,
 
-    /// resource name
-    /// used in permission control
-    pub rn: Option<String>,
-
     #[serde(default)]
     pub name: String,
 
     #[serde(default)]
     pub desc: String,
+
+    #[serde(default)]
+    pub tag: String,
 
     // to use a package, such as 'acts.transform.set'
     #[serde(default)]
@@ -38,22 +37,9 @@ pub struct Act {
     #[serde(default)]
     pub r#if: Option<String>,
 
-    /// act key for req and msg
-    #[serde(default)]
-    pub key: String,
-
-    #[serde(default)]
-    pub tag: String,
-
     /// act variables
     #[serde(default)]
     pub vars: Vec<Variant>,
-
-    #[serde(default)]
-    pub catches: Vec<Act>,
-
-    #[serde(default)]
-    pub timeouts: Vec<Act>,
 
     // package extra options to send to client
     // such as ACT_INDEX, ACT_VALUE
@@ -94,11 +80,6 @@ impl Act {
 
     pub fn with_desc(mut self, desc: &str) -> Self {
         self.desc = desc.to_string();
-        self
-    }
-
-    pub fn with_key(mut self, key: &str) -> Self {
-        self.key = key.to_string();
         self
     }
 
@@ -162,26 +143,8 @@ impl Act {
         vars
     }
 
-    pub fn with_catch(mut self, catch: Act) -> Self {
-        self.catches.push(catch);
-        self
-    }
-
-    pub fn with_timeout(mut self, timeout: Act) -> Self {
-        self.timeouts.push(timeout);
-        self
-    }
-
     pub fn with_if(mut self, v: &str) -> Self {
         self.r#if = Some(v.to_string());
-        self
-    }
-
-    pub fn with_metadata<T>(mut self, name: &str, value: T) -> Self
-    where
-        T: Serialize + Clone,
-    {
-        self.metadata.set(name, value);
         self
     }
 
@@ -256,5 +219,13 @@ impl Act {
             uses: "acts.transform.code".to_string(),
             ..Default::default()
         }
+    }
+
+    pub fn with_metadata<T>(mut self, name: &str, value: T) -> Self
+    where
+        T: Serialize + Clone,
+    {
+        self.metadata.set(name, value);
+        self
     }
 }

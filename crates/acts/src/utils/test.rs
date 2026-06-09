@@ -1,6 +1,17 @@
 use crate::{Engine, EngineBuilder, Signal, Workflow, config::ConfigData, scheduler::Process};
 use std::sync::Arc;
 
+// Package uses constants
+pub const USES_IRQ: &str = "acts.core.irq";
+pub const USES_MSG: &str = "acts.core.msg";
+pub const USES_SET: &str = "acts.transform.set";
+pub const USES_PARALLEL: &str = "acts.core.parallel";
+pub const USES_SUBFLOW: &str = "acts.core.subflow";
+pub const USES_SEQUENCE: &str = "acts.core.sequence";
+pub const USES_ACTION: &str = "acts.core.action";
+pub const USES_BLOCK: &str = "acts.core.block";
+pub const USES_CODE: &str = "acts.transform.code";
+
 /// Unified test helper. Creates an Engine and a Process from a workflow.
 /// Returns `(Engine, Arc<Process>)`.
 ///

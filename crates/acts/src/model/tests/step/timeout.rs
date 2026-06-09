@@ -1,6 +1,7 @@
 use crate::{
-    Act, Step, Workflow,
+    Step, Vars, Workflow,
     model::act::{TimeoutLimit, TimeoutUnit},
+    utils::test::USES_MSG,
 };
 
 #[test]
@@ -108,12 +109,16 @@ fn model_step_timeout() {
     assert_eq!(step.timeouts.len(), 0);
 
     step = step
-        .with_timeout(Act::msg(|msg| {
-            msg.with_key("msg1").with_if(r#"$cost_in('1h')"#)
-        }))
-        .with_timeout(Act::msg(|msg| {
-            msg.with_key("msg2").with_if(r#"$cost_in('2d')"#)
-        }));
+        .with_timeout(|step| {
+            step.with_id("timout1")
+                .with_if(r#"$cost_in('1h')"#)
+                .with_uses(USES_MSG, Vars::new().with("key", "msg1"))
+        })
+        .with_timeout(|step| {
+            step.with_id("timout2")
+                .with_if(r#"$cost_in('2d')"#)
+                .with_uses(USES_MSG, Vars::new().with("key", "msg2"))
+        });
 
     assert_eq!(step.timeouts.len(), 2);
     assert_eq!(

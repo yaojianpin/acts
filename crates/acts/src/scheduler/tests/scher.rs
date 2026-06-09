@@ -1,8 +1,8 @@
 use crate::cache::Cache;
 use crate::event::EventAction;
 use crate::scheduler::Runtime;
-use crate::utils::test::auto_complete;
-use crate::{Act, Action, Config, Engine, MessageState, TaskState, Vars, Workflow, utils};
+use crate::utils::test::{USES_IRQ, auto_complete};
+use crate::{Action, Config, Engine, MessageState, TaskState, Vars, Workflow, utils};
 use serde_json::json;
 
 use serial_test::serial;
@@ -75,13 +75,15 @@ async fn sch_scher_do_action() {
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     let workflow = Workflow::new().with_step(|step| {
-        step.with_name("step1").with_act(Act::irq(|act| {
-            act.with_key("act1").with_expose("uid", json!(null))
-        }))
+        step.with_name("step1")
+            .with_expose("uid", json!(null))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     auto_complete(&engine, &rx);
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
+            && e.is_state(MessageState::Created)
+        {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             let action = Action::new(&e.pid, &e.tid, EventAction::Next, options);

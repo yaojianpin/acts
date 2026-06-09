@@ -10,9 +10,10 @@ options:
 steps:
   - name: prepare
     id: prepare
-    acts:
-      - uses: acts.core.irq
-        key: init
+    uses: acts.core.irq
+    params:
+      key: init
+
   - name: condition
     id: condition
     branches:
@@ -22,33 +23,33 @@ steps:
         steps:
           - name: step1
             id: step1
-            acts:
-              - uses: acts.core.irq
-                key: action1
-                params:
-                  v: '{{ v }}'
+            uses: acts.core.irq
+            params:
+              key: action1 
+              v: '{{ v }}'
+
           - name: step2
             id: step2
-            acts:
-              - uses: acts.core.irq
+            uses: acts.core.irq
+            params:
                 key: action2
-                params:
-                  v: '{{ v }}'      
+                v: '{{ v }}'   
+   
       - name: cond 2
         id: cond2
         else: true
         steps:
           - id: step3
             name: step3
-            acts:
-              - uses: acts.core.irq
-                key: action3
+            uses: acts.core.irq
+            params:
+              key: action3
+
   - name: final
     id: final
-    acts:
-      - uses: acts.core.irq
-        key: action4
-        params:
-          v: '{{ v }}'
+    uses: acts.core.irq
+    params:
+      key: action4
+      v: '{{ v }}'
   
 

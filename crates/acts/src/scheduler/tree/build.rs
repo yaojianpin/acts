@@ -19,7 +19,14 @@ pub fn build_workflow(workflow: &mut Workflow, tree: &mut NodeTree) -> Result<()
 
     let mut prev = root.clone();
     for step in workflow.steps.iter_mut() {
-        build_step(step, tree, &root, &mut prev, level + 1)?;
+        build_step(
+            step,
+            tree,
+            &root,
+            &mut prev,
+            level + 1,
+            NodeOutputKind::Normal,
+        )?;
     }
 
     *tree.model = workflow.clone();
@@ -34,6 +41,7 @@ pub fn build_step(
     parent: &Arc<Node>,
     prev: &mut Arc<Node>,
     level: usize,
+    typ: NodeOutputKind,
 ) -> Result<()> {
     if step.id.is_empty() {
         step.id = shortid();
@@ -44,7 +52,7 @@ pub fn build_step(
     if node.level == prev.level {
         prev.set_next(&node, true);
     } else {
-        node.set_parent(parent);
+        node.set_parent_in(typ, parent);
     }
 
     match &step.next {
@@ -66,31 +74,15 @@ pub fn build_step(
         }
     }
 
-    if !step.acts.is_empty() {
-        let mut act_prev = node.clone();
-        for act in step.acts.iter_mut() {
-            build_act(
-                act,
-                tree,
-                &node,
-                &mut act_prev,
-                level + 1,
-                true,
-                NodeOutputKind::Normal,
-            )?;
-        }
-    }
-
     if !step.catches.is_empty() {
         let mut catch_prev = node.clone();
         for catch in step.catches.iter_mut() {
-            build_act(
+            build_step(
                 catch,
                 tree,
                 &node,
                 &mut catch_prev,
                 level + 1,
-                false,
                 NodeOutputKind::Catch,
             )?;
         }
@@ -98,19 +90,20 @@ pub fn build_step(
     if !step.timeouts.is_empty() {
         let mut timeout_prev = node.clone();
         for timeout in step.timeouts.iter_mut() {
-            build_act(
+            build_step(
                 timeout,
                 tree,
                 &node,
                 &mut timeout_prev,
                 level + 1,
-                false,
                 NodeOutputKind::Timeout,
             )?;
         }
     }
 
-    *prev = node.clone();
+    if typ == NodeOutputKind::Normal {
+        *prev = node.clone();
+    }
 
     Ok(())
 }
@@ -132,7 +125,14 @@ pub fn build_branch(
     let parent = node.clone();
     let mut step_prev = node.clone();
     for step in branch.steps.iter_mut() {
-        build_step(step, tree, &parent, &mut step_prev, level + 1)?;
+        build_step(
+            step,
+            tree,
+            &parent,
+            &mut step_prev,
+            level + 1,
+            NodeOutputKind::Normal,
+        )?;
     }
 
     *prev = node.clone();
@@ -140,66 +140,37 @@ pub fn build_branch(
     Ok(())
 }
 
-pub fn build_act(
-    act: &mut Act,
-    tree: &mut NodeTree,
-    parent: &Arc<Node>,
-    prev: &mut Arc<Node>,
-    level: usize,
-    is_sequence: bool,
-    typ: NodeOutputKind,
-) -> Result<()> {
-    if act.id.is_empty() {
-        act.id = shortid();
-    }
+// pub fn build_act(
+//     act: &mut Act,
+//     tree: &mut NodeTree,
+//     parent: &Arc<Node>,
+//     prev: &mut Arc<Node>,
+//     level: usize,
+//     is_sequence: bool,
+//     typ: NodeOutputKind,
+// ) -> Result<()> {
+//     if act.id.is_empty() {
+//         act.id = shortid();
+//     }
 
-    let data = NodeContent::Act(act.clone());
+//     let data = NodeContent::Act(act.clone());
 
-    let node = tree.make(&act.id, data, level)?;
+//     let node = tree.make(&act.id, data, level)?;
 
-    if is_sequence {
-        // set the act order one by one
-        if node.level == prev.level {
-            prev.set_next(&node, true);
-        } else {
-            node.set_parent_in(typ, parent);
-        }
-        *prev = node.clone();
-    } else {
-        node.set_parent_in(typ, parent);
-    }
+//     if is_sequence {
+//         // set the act order one by one
+//         if node.level == prev.level {
+//             prev.set_next(&node, true);
+//         } else {
+//             node.set_parent_in(typ, parent);
+//         }
+//         *prev = node.clone();
+//     } else {
+//         node.set_parent_in(typ, parent);
+//     }
 
-    if !act.catches.is_empty() {
-        let mut catch_prev = node.clone();
-        for catch in act.catches.iter_mut() {
-            build_act(
-                catch,
-                tree,
-                &node,
-                &mut catch_prev,
-                level + 1,
-                false,
-                NodeOutputKind::Catch,
-            )?;
-        }
-    }
-    if !act.timeouts.is_empty() {
-        let mut timeout_prev = node.clone();
-        for timeout in act.timeouts.iter_mut() {
-            build_act(
-                timeout,
-                tree,
-                &node,
-                &mut timeout_prev,
-                level + 1,
-                false,
-                NodeOutputKind::Timeout,
-            )?;
-        }
-    }
-
-    Ok(())
-}
+//     Ok(())
+// }
 
 pub fn dyn_build_act(
     act: &mut Act,

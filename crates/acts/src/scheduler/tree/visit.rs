@@ -1,5 +1,6 @@
 use super::Node;
 use crate::NodeKind;
+use crate::scheduler::tree::NodeOutputKind;
 use std::collections::HashMap;
 use std::ops::Deref;
 use std::sync::Arc;
@@ -65,24 +66,21 @@ impl Visitor {
     }
 
     #[allow(clippy::vec_box)]
-    pub fn children_visits<F: Fn(&Visitor) + Clone>(&self, f: &F) {
-        let len = self.node.children().len();
-        self.node
-            .children()
-            .iter()
-            .enumerate()
-            .for_each(|(i, iter)| {
-                let mut is_last = i == len - 1;
-                if iter.kind() == NodeKind::Step
-                    && let Some(next) = iter.next().upgrade()
-                    && self.root.visit_count(next.id()) == 0
-                {
-                    is_last = false;
-                }
+    pub fn children_visits<F: Fn(&Visitor) + Clone>(&self, ty: NodeOutputKind, f: &F) {
+        let children = self.node.children_in(ty);
+        let len = children.len();
+        children.iter().enumerate().for_each(|(i, iter)| {
+            let mut is_last = i == len - 1;
+            if iter.kind() == NodeKind::Step
+                && let Some(next) = iter.next().upgrade()
+                && self.root.visit_count(next.id()) == 0
+            {
+                is_last = false;
+            }
 
-                let mut node = Visitor::new(&self.root, iter, iter.level, i, is_last, &self.path);
-                node.walk(f);
-            });
+            let mut node = Visitor::new(&self.root, iter, iter.level, i, is_last, &self.path);
+            node.walk(f);
+        });
     }
 
     pub fn next_visit<F: Fn(&Visitor) + Clone>(&self, f: &F) {
@@ -112,7 +110,9 @@ impl Visitor {
     pub fn walk<F: Fn(&Visitor) + Clone>(&mut self, f: &F) {
         f(self);
         self.visit();
-        self.children_visits(f);
+        self.children_visits(NodeOutputKind::Normal, f);
+        self.children_visits(NodeOutputKind::Catch, f);
+        self.children_visits(NodeOutputKind::Timeout, f);
         self.next_visit(f);
     }
 }

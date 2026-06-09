@@ -2,7 +2,7 @@ use crate::{
     Act, Vars, Workflow,
     utils::{
         self,
-        test::{auto_complete, create_proc},
+        test::{USES_SET, auto_complete, create_proc},
     },
 };
 use serde_json::json;
@@ -30,7 +30,7 @@ fn pack_set_parse_primary() {
 async fn pack_set_one() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::set(Vars::new().with("a", 5)))
+            .with_uses(USES_SET, Vars::new().with("a", 5))
     });
 
     workflow.print();
@@ -58,7 +58,7 @@ async fn pack_set_one() {
 async fn pack_set_many() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::set(Vars::new().with("a", 5).with("b", "bb")))
+            .with_uses(USES_SET, Vars::new().with("a", 5).with("b", "bb"))
     });
 
     workflow.print();
@@ -97,7 +97,7 @@ async fn pack_set_local_var() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_var("b", json!("abc"))
-            .with_act(Act::set(Vars::new().with("a", r#"{{ b }}"#)))
+            .with_uses(USES_SET, Vars::new().with("a", r#"{{ b }}"#))
     });
 
     workflow.print();
@@ -125,7 +125,7 @@ async fn pack_set_calc_str() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_var("a", json!("a"))
-            .with_act(Act::set(Vars::new().with("a", r#"{{ a + "bc" }}"#)))
+            .with_uses(USES_SET, Vars::new().with("a", r#"{{ a + "bc" }}"#))
     });
 
     workflow.print();
@@ -154,7 +154,7 @@ async fn pack_set_calc_int() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_var("a", json!(10))
-            .with_act(Act::set(Vars::new().with("a", r#"{{ a + 20 }}"#)))
+            .with_uses(USES_SET, Vars::new().with("a", r#"{{ a + 20 }}"#))
     });
 
     workflow.print();
@@ -187,7 +187,7 @@ async fn pack_set_update_local() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_var("b", json!("abc"))
-            .with_act(Act::set(Vars::new().with("a", r#"123"#)))
+            .with_uses(USES_SET, Vars::new().with("a", r#"123"#))
     });
 
     workflow.print();
@@ -217,7 +217,7 @@ async fn sch_act_get_global_var() {
         .with_var("b", json!("abc"))
         .with_step(|step| {
             step.with_id("step1")
-                .with_act(Act::set(Vars::new().with("a", r#"{{ b }}"#)))
+                .with_uses(USES_SET, Vars::new().with("a", r#"{{ b }}"#))
         });
 
     workflow.print();
@@ -247,7 +247,7 @@ async fn pack_set_global_var() {
         .with_var("b", json!("abc"))
         .with_step(|step| {
             step.with_id("step1")
-                .with_act(Act::set(Vars::new().with("b", r#"123"#)))
+                .with_uses(USES_SET, Vars::new().with("b", r#"123"#))
         });
 
     workflow.print();

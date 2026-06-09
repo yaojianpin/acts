@@ -1,7 +1,11 @@
 use crate::event::EventAction;
+use crate::utils::test::auto_complete;
 use crate::{
-    Act, Action, MessageState, Vars, Workflow,
-    utils::{self, test::create_proc},
+    Action, MessageState, Vars, Workflow,
+    utils::{
+        self,
+        test::{USES_IRQ, USES_SET, create_proc},
+    },
 };
 use serde_json::json;
 
@@ -562,7 +566,8 @@ async fn sch_vars_branch_two_steps_outputs() {
 async fn sch_vars_act_inputs() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1").with_var("var1", 10)))
+            .with_var("var1", 10)
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     let (engine, proc) = create_proc(&workflow, &utils::longid());
     let rt = engine.runtime();
@@ -589,9 +594,9 @@ async fn sch_vars_act_inputs() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_vars_act_data() {
     let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_act(
-            Act::irq(|act| act.with_key("act1").with_expose("var1", json!(null))).with_id("act1"),
-        )
+        step.with_id("step1")
+            .with_expose("var1", json!(null))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     let (engine, proc) = create_proc(&workflow, &utils::longid());
     let rt = engine.runtime();
@@ -615,7 +620,7 @@ async fn sch_vars_act_data() {
     rt.launch(&proc).unwrap();
     sig.recv().await;
     assert_eq!(
-        proc.task_by_nid("act1")
+        proc.task_by_params("key", "act1")
             .first()
             .unwrap()
             .data()
@@ -630,7 +635,7 @@ async fn sch_vars_act_data() {
 async fn sch_vars_act_default_expose() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")).with_id("act1"))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     let (engine, proc) = create_proc(&workflow, &utils::longid());
     let rt = engine.runtime();
@@ -654,7 +659,7 @@ async fn sch_vars_act_default_expose() {
     sig.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act1")
+        proc.task_by_params("key", "act1")
             .first()
             .unwrap()
             .outputs()
@@ -666,26 +671,19 @@ async fn sch_vars_act_default_expose() {
 
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn sch_vars_act_expose_options() {
+async fn sch_vars_act_expose() {
     let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_act(
-            Act::irq(|act| act.with_key("act1"))
-                .with_id("act1")
-                .with_expose("var1", json!(null)),
-        )
+        step.with_id("step1")
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (tx, _) = engine.signal(()).double();
+    auto_complete(&engine, &tx);
     let rt = engine.runtime();
-    let sig = engine.signal(());
-    let emitter = engine.channel();
-    let tx_close = sig.clone();
-    let tx_close2 = sig.clone();
-    emitter.on_complete(move |_| tx_close.close());
-    emitter.on_error(move |_| tx_close2.close());
-
+    let channel = engine.channel();
     let s = rt.clone();
-    emitter.on_message(move |e| {
-        if e.inner().is_type("act") && e.inner().is_state(MessageState::Created) {
+    channel.on_message(move |e| {
+        if e.is_type("act") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("var1".to_string(), 10.into());
             options.insert("var2".to_string(), 20.into());
@@ -694,10 +692,11 @@ async fn sch_vars_act_expose_options() {
         }
     });
     rt.launch(&proc).unwrap();
-    sig.recv().await;
+    tx.recv().await;
     proc.print();
+
     assert_eq!(
-        proc.task_by_nid("act1")
+        proc.task_by_params("key", "act1")
             .first()
             .unwrap()
             .outputs()
@@ -706,12 +705,13 @@ async fn sch_vars_act_expose_options() {
         10
     );
     assert_eq!(
-        proc.task_by_nid("act1")
+        proc.task_by_params("key", "act1")
             .first()
             .unwrap()
             .outputs()
-            .get::<i64>("var2"),
-        None
+            .get::<i64>("var2")
+            .unwrap(),
+        20
     );
 }
 
@@ -720,7 +720,7 @@ async fn sch_vars_act_expose_options() {
 async fn sch_vars_act_options() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")).with_id("act1"))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     let (engine, proc) = create_proc(&workflow, &utils::longid());
     let rt = engine.runtime();
@@ -733,7 +733,9 @@ async fn sch_vars_act_options() {
 
     let s = rt.clone();
     emitter.on_message(move |e| {
-        if e.is_key("act1") && e.inner().is_state(MessageState::Created) {
+        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
+            && e.inner().is_state(MessageState::Created)
+        {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.insert("var1".to_string(), 10.into());
@@ -745,7 +747,7 @@ async fn sch_vars_act_options() {
     rt.launch(&proc).unwrap();
     sig.recv().await;
     assert_eq!(
-        proc.task_by_nid("act1")
+        proc.task_by_params("key", "act1")
             .first()
             .unwrap()
             .data()
@@ -761,9 +763,9 @@ async fn sch_vars_get_global_vars() {
     let workflow = Workflow::new()
         .with_var("a", json!("abc"))
         .with_step(|step| {
-            step.with_id("step1").with_act(Act::irq(|act| {
-                act.with_key("act1").with_expose("var1", json!(null))
-            }))
+            step.with_id("step1")
+                .with_expose("var1", json!(null))
+                .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
         });
     let (engine, proc) = create_proc(&workflow, &utils::longid());
     let rt = engine.runtime();
@@ -798,23 +800,17 @@ async fn sch_vars_get_global_vars() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_vars_act_inputs_from_step() {
     let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_var("a", json!("abc")).with_act(
-            Act::irq(|act| act.with_key("act1").with_var("a", json!(r#"{{ a }}"#))).with_id("act1"),
-        )
+        step.with_id("step1")
+            .with_var("a", json!("abc"))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &tx);
     let rt = engine.runtime();
-    let sig = engine.signal(());
-    let tx = sig.clone();
-    let rx = sig.clone();
-    let emitter = engine.channel();
-    let tx_close = tx.clone();
-    let tx_close2 = tx.clone();
-    emitter.on_complete(move |_| tx_close.close());
-    emitter.on_error(move |_| tx_close2.close());
-    emitter.on_message(move |e| {
-        println!("message: {e:?}");
-        if e.inner().is_type("act") && e.inner().is_state(MessageState::Created) {
+    let channel = engine.channel();
+    channel.on_message(move |e| {
+        if e.is_type("act") && e.is_state(MessageState::Created) {
             rx.close();
         }
     });
@@ -822,7 +818,7 @@ async fn sch_vars_act_inputs_from_step() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act1")
+        proc.task_by_params("key", "act1")
             .first()
             .unwrap()
             .inputs()
@@ -838,9 +834,9 @@ async fn sch_vars_override_global_vars() {
     let workflow = Workflow::new()
         .with_var("a", json!("abc"))
         .with_step(|step| {
-            step.with_id("step1").with_act(Act::irq(|act| {
-                act.with_key("act1").with_expose("var1", json!(null))
-            }))
+            step.with_id("step1")
+                .with_expose("var1", json!(null))
+                .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
         });
     let (engine, proc) = create_proc(&workflow, &utils::longid());
     let rt = engine.runtime();
@@ -872,9 +868,10 @@ async fn sch_vars_override_global_vars() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_vars_override_step_vars() {
     let workflow = Workflow::new().with_step(|step| {
-        step.with_var("a", json!("abc")).with_id("step1").with_act(
-            Act::irq(|act| act.with_key("act1").with_expose("var1", json!(null))).with_id("act1"),
-        )
+        step.with_var("a", json!("abc"))
+            .with_id("step1")
+            .with_expose("var1", json!(null))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     let (engine, proc) = create_proc(&workflow, &utils::longid());
     let rt = engine.runtime();
@@ -895,7 +892,7 @@ async fn sch_vars_override_step_vars() {
     tx.recv().await;
     proc.print();
 
-    proc.task_by_nid("act1")
+    proc.task_by_params("key", "act1")
         .first()
         .unwrap()
         .update_data(&Vars::new().with("a", 10));
@@ -915,7 +912,7 @@ async fn sch_vars_private_vars() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_var("__a", json!("abc"))
             .with_id("step1")
-            .with_act(Act::set(Vars::new().with("__a", "xyz")))
+            .with_uses(USES_SET, Vars::new().with("__a", "xyz"))
     });
     let (engine, proc) = create_proc(&workflow, &utils::longid());
     let rt = engine.runtime();

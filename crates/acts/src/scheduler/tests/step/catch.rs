@@ -1,7 +1,7 @@
 use crate::event::EventAction;
-use crate::utils::test::auto_complete;
+use crate::utils::test::{USES_IRQ, USES_MSG, auto_complete};
 use crate::{
-    Act, Action, MessageState, Vars, Workflow,
+    Action, MessageState, Vars, Workflow,
     scheduler::TaskState,
     utils::{self, consts, test::create_proc},
 };
@@ -11,8 +11,8 @@ use serde_json::json;
 async fn sch_step_catch_by_any_error() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(Act::irq(|act| act.with_key("catch1")))
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_catch(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "catch1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     workflow.print();
     let (engine, proc) = create_proc(&workflow, &utils::longid());
@@ -28,7 +28,7 @@ async fn sch_step_catch_by_any_error() {
 
     let s = rt.clone();
     emitter.on_message(move |e| {
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "aaaaaaaaa");
@@ -36,7 +36,7 @@ async fn sch_step_catch_by_any_error() {
             s.do_action(&action).unwrap();
         }
 
-        if e.is_key("catch1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("catch1") && e.is_state(MessageState::Created) {
             rx.send(true);
         }
     });
@@ -51,8 +51,11 @@ async fn sch_step_catch_by_any_error() {
 async fn sch_step_catch_by_msg() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(Act::msg(|msg| msg.with_key("msg1")))
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_catch(|step| {
+                step.with_id("catch1")
+                    .with_uses(USES_MSG, Vars::new().with("key", "msg1"))
+            })
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     workflow.print();
     let (engine, proc) = create_proc(&workflow, &utils::longid());
@@ -60,7 +63,7 @@ async fn sch_step_catch_by_msg() {
     let channel = engine.channel();
     let (tx, s) = engine.signal(false).double();
     channel.on_message(move |e| {
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "aaaaaaaa");
@@ -68,7 +71,7 @@ async fn sch_step_catch_by_msg() {
             rt.do_action(&action).unwrap();
         }
 
-        if e.is_key("msg1") {
+        if e.is_params_key("msg1") {
             s.send(true);
         }
     });
@@ -84,8 +87,8 @@ async fn sch_step_catch_by_msg() {
 async fn sch_step_catch_empty_default() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(Act::msg(|act| act))
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_catch(|step| step)
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     workflow.print();
     let (engine, proc) = create_proc(&workflow, &utils::longid());
@@ -100,7 +103,7 @@ async fn sch_step_catch_empty_default() {
     emitter.on_error(move |_| tx_close2.close());
 
     emitter.on_message(move |e| {
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.set(consts::ACT_ERR_CODE, "err1");
             let action = Action::new(&e.pid, &e.tid, EventAction::Error, options);
@@ -118,10 +121,11 @@ async fn sch_step_catch_empty_default() {
 async fn sch_step_catch_by_err_code() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(Act::irq(|act| {
-                act.with_key("catch1").with_if(r#"$ecode() == "123""#)
-            }))
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_catch(|step| {
+                step.with_if(r#"$ecode() == "123""#)
+                    .with_uses(USES_IRQ, Vars::new().with("key", "catch1"))
+            })
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     workflow.print();
     let (engine, proc) = create_proc(&workflow, &utils::longid());
@@ -137,7 +141,7 @@ async fn sch_step_catch_by_err_code() {
     emitter.on_error(move |_| tx_close2.close());
 
     emitter.on_message(move |e| {
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "123");
@@ -147,7 +151,7 @@ async fn sch_step_catch_by_err_code() {
             rt.do_action(&action).unwrap();
         }
 
-        if e.is_key("catch1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("catch1") && e.is_state(MessageState::Created) {
             rx.send(true);
         }
     });
@@ -162,12 +166,11 @@ async fn sch_step_catch_by_err_code() {
 async fn sch_step_catch_by_wrong_code() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(Act::irq(|act| {
-                act.with_key("catch1")
-                    .with_if(r#"$ecode() == "wrong_code""#)
-                    .with_id("catch1")
-            }))
-            .with_act(Act::irq(|act| act.with_key("act1")).with_id("act1"))
+            .with_catch(|step| {
+                step.with_if(r#"$ecode() == "wrong_code""#)
+                    .with_uses(USES_IRQ, Vars::new().with("key", "catch1"))
+            })
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     workflow.print();
     let (engine, proc) = create_proc(&workflow, &utils::longid());
@@ -183,7 +186,7 @@ async fn sch_step_catch_by_wrong_code() {
 
     let s = rt.clone();
     emitter.on_message(move |e| {
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
 
@@ -205,8 +208,8 @@ async fn sch_step_catch_by_wrong_code() {
 async fn sch_step_catch_by_no_err_code() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(Act::irq(|act| act.with_key("catch1")))
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_catch(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "catch1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     workflow.print();
     let (engine, proc) = create_proc(&workflow, &utils::longid());
@@ -222,7 +225,7 @@ async fn sch_step_catch_by_no_err_code() {
 
     let s = rt.clone();
     emitter.on_message(move |e| {
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             let action = Action::new(&e.pid, &e.tid, EventAction::Error, options);
@@ -242,18 +245,16 @@ async fn sch_step_catch_many_if() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_var("v1", 10)
-            .with_act(Act::irq(|act| act.with_key("act1")))
-            .with_catch(Act::irq(|act| {
-                act.with_key("catch1")
-                    .with_id("catch1")
-                    .with_if(r#"v1 > 0"#)
-            }))
-            .with_catch(Act::irq(|act| {
-                act.with_key("catch2")
-                    .with_id("catch2")
-                    .with_if(r#"v1 == 0"#)
-            }))
-            .with_catch(Act::irq(|act| act.with_key("catch3").with_id("catch3")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+            .with_catch(|step| {
+                step.with_if(r#"v1 > 0"#)
+                    .with_uses(USES_IRQ, Vars::new().with("key", "catch1"))
+            })
+            .with_catch(|step| {
+                step.with_if(r#"v1 = 0"#)
+                    .with_uses(USES_IRQ, Vars::new().with("key", "catch2"))
+            })
+            .with_catch(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "catch3")))
     });
     workflow.print();
     let (engine, proc) = create_proc(&workflow, &utils::longid());
@@ -269,14 +270,14 @@ async fn sch_step_catch_many_if() {
 
     let s = rt.clone();
     emitter.on_message(move |e| {
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.set(consts::ACT_ERR_CODE, "err1");
             let action = Action::new(&e.pid, &e.tid, EventAction::Error, options);
             s.do_action(&action).unwrap();
         }
 
-        if e.is_key("catch1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("catch1") && e.is_state(MessageState::Created) {
             rx.send(true);
         }
     });
@@ -294,18 +295,18 @@ async fn sch_step_catch_many_else() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_var("v1", 10)
-            .with_act(Act::irq(|act| act.with_key("act1")))
-            .with_catch(Act::irq(|act| {
-                act.with_key("catch1")
-                    .with_id("catch1")
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+            .with_catch(|step| {
+                step.with_id("catch_step1")
                     .with_if(r#"v1 < 0"#)
-            }))
-            .with_catch(Act::irq(|act| {
-                act.with_key("catch2")
-                    .with_id("catch2")
+                    .with_uses(USES_IRQ, Vars::new().with("key", "catch1"))
+            })
+            .with_catch(|step| {
+                step.with_id("catch_step2")
                     .with_if(r#"v1 == 0"#)
-            }))
-            .with_catch(Act::irq(|act| act.with_key("catch3").with_id("catch3")))
+                    .with_uses(USES_IRQ, Vars::new().with("key", "catch2"))
+            })
+            .with_catch(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "catch3")))
     });
     workflow.print();
     let (engine, proc) = create_proc(&workflow, &utils::longid());
@@ -314,14 +315,14 @@ async fn sch_step_catch_many_else() {
     auto_complete(&engine, &rx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.set(consts::ACT_ERR_CODE, "err1");
             let action = Action::new(&e.pid, &e.tid, EventAction::Error, options);
             rt.do_action(&action).unwrap();
         }
 
-        if e.is_key("catch3") && e.is_state(MessageState::Created) {
+        if e.is_params_key("catch3") && e.is_state(MessageState::Created) {
             rx.send(true);
         }
     });
@@ -330,16 +331,16 @@ async fn sch_step_catch_many_else() {
     let ret = tx.recv().await;
     proc.print();
     assert!(ret);
-    assert!(proc.task_by_nid("catch1").is_empty());
-    assert!(proc.task_by_nid("catch2").is_empty());
+    assert!(proc.task_by_nid("catch_step1").is_empty());
+    assert!(proc.task_by_nid("catch_step2").is_empty());
 }
 
 #[tokio::test]
 async fn sch_step_catch_as_complete() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(Act::irq(|act| act.with_key("catch1")))
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_catch(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "catch1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     workflow.print();
     let (engine, proc) = create_proc(&workflow, &utils::longid());
@@ -358,7 +359,7 @@ async fn sch_step_catch_as_complete() {
 
     emitter.on_message(move |e| {
         println!("message: {:?}", e.inner());
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "123");
@@ -368,7 +369,7 @@ async fn sch_step_catch_as_complete() {
             s.do_action(&action).unwrap();
         }
 
-        if e.is_key("catch1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("catch1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
 
@@ -392,8 +393,8 @@ async fn sch_step_catch_as_complete() {
 async fn sch_step_catch_as_error() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(Act::irq(|act| act.with_key("catch1")))
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_catch(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "catch1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     workflow.print();
     let (engine, proc) = create_proc(&workflow, &utils::longid());
@@ -403,7 +404,7 @@ async fn sch_step_catch_as_error() {
     let channel = engine.channel();
     let p = proc.clone();
     channel.on_message(move |e| {
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "1");
@@ -413,7 +414,7 @@ async fn sch_step_catch_as_error() {
             rt.do_action(&action).unwrap();
         }
 
-        if e.is_key("catch1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("catch1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "2");
@@ -436,8 +437,11 @@ async fn sch_step_catch_as_skip() {
     let workflow = Workflow::new()
         .with_step(|step| {
             step.with_id("step1")
-                .with_catch(Act::irq(|act| act.with_key("catch1")).with_id("catch1"))
-                .with_act(Act::irq(|act| act.with_key("act1")).with_id("act1"))
+                .with_catch(|step| {
+                    step.with_id("catch_step1")
+                        .with_uses(USES_IRQ, Vars::new().with("key", "catch1"))
+                })
+                .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
         })
         .with_step(|step| step.with_id("step2"));
     workflow.print();
@@ -447,7 +451,7 @@ async fn sch_step_catch_as_skip() {
     auto_complete(&engine, &rx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "1");
@@ -457,7 +461,7 @@ async fn sch_step_catch_as_skip() {
             rt.do_action(&action).unwrap();
         }
 
-        if e.is_key("catch1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("catch1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
 
@@ -470,23 +474,39 @@ async fn sch_step_catch_as_skip() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("catch1").first().unwrap().state(),
+        proc.task_by_nid("catch_step1").first().unwrap().state(),
+        TaskState::Completed
+    );
+    assert_eq!(
+        proc.task_by_params("key", "catch1")
+            .first()
+            .unwrap()
+            .state(),
         TaskState::Skipped
     );
-    assert!(proc.task_by_nid("act1").first().unwrap().state().is_error());
+    assert!(
+        proc.task_by_params("key", "act1")
+            .first()
+            .unwrap()
+            .state()
+            .is_error()
+    );
     assert_eq!(
         proc.task_by_nid("step1").first().unwrap().state(),
-        TaskState::Error
+        TaskState::Completed
     );
-    assert!(proc.task_by_nid("step2").is_empty());
+    assert_eq!(
+        proc.task_by_nid("step2").first().unwrap().state(),
+        TaskState::Completed
+    );
 }
 
 #[tokio::test]
 async fn sch_step_catch_as_abort() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(Act::irq(|act| act.with_key("catch1")))
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_catch(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "catch1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     workflow.print();
     let (engine, proc) = create_proc(&workflow, &utils::longid());
@@ -495,7 +515,7 @@ async fn sch_step_catch_as_abort() {
     auto_complete(&engine, &rx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "1");
@@ -505,7 +525,7 @@ async fn sch_step_catch_as_abort() {
             rt.do_action(&action).unwrap();
         }
 
-        if e.is_key("catch1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("catch1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
 
@@ -524,8 +544,11 @@ async fn sch_step_catch_as_abort() {
 async fn sch_step_catch_as_submit() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(Act::irq(|act| act.with_key("catch1")).with_id("catch1"))
-            .with_act(Act::irq(|act| act.with_key("act1")).with_id("act1"))
+            .with_catch(|step| {
+                step.with_id("catch_step1")
+                    .with_uses(USES_IRQ, Vars::new().with("key", "catch1"))
+            })
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     workflow.print();
     let (engine, proc) = create_proc(&workflow, &utils::longid());
@@ -534,7 +557,7 @@ async fn sch_step_catch_as_submit() {
     auto_complete(&engine, &rx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "1");
@@ -544,7 +567,7 @@ async fn sch_step_catch_as_submit() {
             rt.do_action(&action).unwrap();
         }
 
-        if e.is_key("catch1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("catch1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
 
@@ -557,10 +580,23 @@ async fn sch_step_catch_as_submit() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("catch1").first().unwrap().state(),
+        proc.task_by_params("key", "catch1")
+            .first()
+            .unwrap()
+            .state(),
         TaskState::Submitted
     );
-    assert!(proc.task_by_nid("act1").first().unwrap().state().is_error(),);
+    assert_eq!(
+        proc.task_by_nid("catch_step1").first().unwrap().state(),
+        TaskState::Completed
+    );
+    assert!(
+        proc.task_by_params("key", "act1")
+            .first()
+            .unwrap()
+            .state()
+            .is_error(),
+    );
     assert_eq!(
         proc.task_by_nid("step1").first().unwrap().state(),
         TaskState::Completed
@@ -572,12 +608,15 @@ async fn sch_step_catch_as_back() {
     let workflow = Workflow::new()
         .with_step(|step| {
             step.with_id("step1")
-                .with_act(Act::irq(|act| act.with_key("act1")).with_id("act1"))
+                .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
         })
         .with_step(|step| {
             step.with_id("step2")
-                .with_catch(Act::irq(|act| act.with_key("catch2")).with_id("catch2"))
-                .with_act(Act::irq(|act| act.with_key("act2")).with_id("act2"))
+                .with_catch(|step| {
+                    step.with_id("catch_step1")
+                        .with_uses(USES_IRQ, Vars::new().with("key", "catch1"))
+                })
+                .with_uses(USES_IRQ, Vars::new().with("key", "act2"))
         });
     workflow.print();
     let (engine, proc) = create_proc(&workflow, &utils::longid());
@@ -587,7 +626,7 @@ async fn sch_step_catch_as_back() {
     let channel = engine.channel();
 
     channel.on_message(move |e| {
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             let count = rx.data();
             if count == 1 {
                 rx.close();
@@ -602,7 +641,7 @@ async fn sch_step_catch_as_back() {
             rx.update(|data| *data += 1);
         }
 
-        if e.is_key("act2") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act2") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "1");
@@ -612,7 +651,7 @@ async fn sch_step_catch_as_back() {
             rt.do_action(&action).unwrap();
         }
 
-        if e.is_key("catch2") && e.is_state(MessageState::Created) {
+        if e.is_params_key("catch1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.insert("to".to_string(), json!("step1"));
@@ -626,10 +665,23 @@ async fn sch_step_catch_as_back() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("catch2").first().unwrap().state(),
+        proc.task_by_params("key", "catch1")
+            .first()
+            .unwrap()
+            .state(),
         TaskState::Backed
     );
-    assert!(proc.task_by_nid("act2").first().unwrap().state().is_error());
+    assert_eq!(
+        proc.task_by_nid("catch_step1").first().unwrap().state(),
+        TaskState::Completed
+    );
+    assert!(
+        proc.task_by_params("key", "act2")
+            .first()
+            .unwrap()
+            .state()
+            .is_error()
+    );
     assert_eq!(
         proc.task_by_nid("step1").get(1).unwrap().state(),
         TaskState::Running
@@ -641,12 +693,12 @@ async fn sch_step_catch_and_continue() {
     let workflow = Workflow::new()
         .with_step(|step| {
             step.with_id("step1")
-                .with_catch(Act::msg(|msg| msg.with_key("msg1")))
-                .with_act(Act::irq(|act| act.with_key("act1")))
+                .with_catch(|step| step.with_uses(USES_MSG, Vars::new().with("key", "msg1")))
+                .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
         })
         .with_step(|step| {
             step.with_id("step2")
-                .with_act(Act::irq(|act| act.with_key("act2")))
+                .with_uses(USES_IRQ, Vars::new().with("key", "act2"))
         });
     workflow.print();
     let (engine, proc) = create_proc(&workflow, &utils::longid());
@@ -656,7 +708,7 @@ async fn sch_step_catch_and_continue() {
     let channel = engine.channel();
     channel.on_message(move |e| {
         println!("message: {:?}", e.inner());
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "aaaaaaaaaa");
@@ -665,7 +717,7 @@ async fn sch_step_catch_and_continue() {
             rt.do_action(&action).unwrap();
         }
 
-        if e.is_key("act2") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act2") && e.is_state(MessageState::Created) {
             s.send(true);
         }
     });

@@ -1,11 +1,17 @@
 use std::collections::HashMap;
 
-use acts::{Executor, Message, MessageState, Result, Vars};
+use acts::{ActError, Executor, Message, MessageState, Result, Vars};
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 type Action = fn(&Vars) -> Vars;
 pub struct Client {
     actions: HashMap<String, Box<Action>>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct Params {
+    key: String,
 }
 
 impl Client {
@@ -24,18 +30,24 @@ impl Client {
 
     pub async fn process(&self, executor: &Executor, message: &Message) -> Result<()> {
         if message.is_uses("acts.core.irq") && message.is_state(MessageState::Created) {
-            match self.actions.get(&message.key) {
+            let params = message
+                .inputs
+                .get::<Params>("params")
+                .ok_or(ActError::Action(
+                    "message.inputs.params is null".to_string(),
+                ))?;
+            match self.actions.get(&params.key) {
                 Some(action) => {
                     let outputs = action(&message.inputs);
                     executor
                         .act()
                         .complete(&message.pid, &message.tid, outputs.clone())?;
-                    println!("action state: key={}", &message.key);
+                    println!("action state: key={}", &params.key);
                     println!("inputs:{:?}", &message.inputs);
                     println!("outputs:{outputs:?}");
                     println!();
                 }
-                None => eprintln!("cannot find action '{}'", message.key),
+                None => eprintln!("cannot find action '{}'", params.key),
             }
         }
 

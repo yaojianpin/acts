@@ -1,8 +1,8 @@
 use crate::{
-    Act, Message, Workflow,
+    Message, Vars, Workflow,
     utils::{
         self,
-        test::{auto_complete, create_proc},
+        test::{USES_IRQ, USES_MSG, auto_complete, create_proc},
     },
 };
 
@@ -12,10 +12,12 @@ use serial_test::serial;
 async fn sch_step_timeout_one() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_timeout(Act::msg(|msg| {
-                msg.with_key("msg1").with_if(r#"$cost() >= 1000"#)
-            }))
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_timeout(|step| {
+                step.with_id("timout1")
+                    .with_if(r#"$cost() >= 1000"#)
+                    .with_uses(USES_MSG, Vars::new().with("key", "msg1"))
+            })
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     workflow.print();
     let (engine, proc) = create_proc(&workflow, &utils::longid());
@@ -24,7 +26,7 @@ async fn sch_step_timeout_one() {
     let channel = engine.channel();
 
     channel.on_message(move |e| {
-        if e.is_key("msg1") {
+        if e.is_params_key("msg1") {
             rx.send(true);
         }
     });
@@ -40,13 +42,17 @@ async fn sch_step_timeout_one() {
 async fn sch_step_timeout_many() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_timeout(Act::msg(|msg| {
-                msg.with_key("msg1").with_if(r#"$cost() >= 1000"#)
-            }))
-            .with_timeout(Act::msg(|msg| {
-                msg.with_key("msg2").with_if(r#"$cost() >= 2000"#)
-            }))
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_timeout(|step| {
+                step.with_id("timout1")
+                    .with_if(r#"$cost() >= 1000"#)
+                    .with_uses(USES_MSG, Vars::new().with("key", "msg1"))
+            })
+            .with_timeout(|step| {
+                step.with_id("timout2")
+                    .with_if(r#"$cost() >= 2000"#)
+                    .with_uses(USES_MSG, Vars::new().with("key", "msg2"))
+            })
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     workflow.print();
     let (engine, proc) = create_proc(&workflow, &utils::longid());
@@ -54,12 +60,11 @@ async fn sch_step_timeout_many() {
     auto_complete(&engine, &rx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        println!("message: {e:?}");
-        if e.is_key("msg1") {
+        if e.is_params_key("msg1") {
             rx.update(|data| data.push(e.inner().clone()));
         }
 
-        if e.is_key("msg2") {
+        if e.is_params_key("msg2") {
             rx.update(|data| data.push(e.inner().clone()));
             rx.close();
         }

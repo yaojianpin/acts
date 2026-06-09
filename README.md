@@ -65,15 +65,13 @@ async fn main() {
     name: my model
     steps:
       - name: step 1
-        acts:
-          - uses: acts.transform.set
-            params:
-              a: 10
+        uses: acts.transform.set
+          params:
+            a: 10
       - name: step 2
-        acts:
-          - uses: acts.transform.code
-            params: |
-                return { data: a + 10 };
+        uses: acts.transform.code
+          params: |
+            return { data: a + 10 };
     "#;
     let workflow = Workflow::from_yml(model).unwrap();
 
@@ -83,10 +81,10 @@ async fn main() {
     let mut vars = Vars::new();
 
     // set the input value
-    vars.insert("a".into(), 0.into());
+    vars.set("a", 0);
 
     // set the pid or auto generate by engine
-    vars.insert("pid".to_string(), "w1".into());
+    vars.set("pid", "w1");
 
     // start workflow by model id
     executor.proc().start(&workflow.id, vars).expect("fail to start workflow");
@@ -118,7 +116,7 @@ Please see [`examples`](https://github.com/yaojianpin/acts/tree/main/examples)
 
 ## Model Usage
 
-The model is a yaml format file. where there are different type of node, including [`Workflow`], [`Branch`], [`Step`] and [`Act`]. 
+The model is a yaml format file. where there are different type of node, including [`Workflow`], [`Branch`], [`Step`]. 
 
 
 ```yml
@@ -147,11 +145,9 @@ on:
 # workflow steps
 steps:
   - name: step 1
-    acts:
-        # init with interrupt request to client
-        # and make sure complete the action with 'list' var
-      - name: init
-        uses: acts.core.irq
+    # init with interrupt request to client
+    # and make sure complete the action with 'list' var
+    uses: acts.core.irq
 
   - name: step 2
     # workflow branches to run by condition
@@ -160,21 +156,17 @@ steps:
         if: value > 100
         steps:
           - name: step 3
-            acts:
-              - name: send a message
-                uses: acts.core.msg
+            uses: acts.core.msg
 
       - name: branch 2
         if: value <= 100
         steps:
           - name: step 4
-            acts:
-              - name: parallel send irq request
-                uses: acts.core.parallel
-                params:
-                  in: '{{ list }}'
-                  acts:
-                    - uses: acts.core.irq
+            uses: acts.core.parallel
+            params:
+              in: '{{ list }}'
+              acts:
+                - uses: acts.core.irq
   - name: final step
 
 ```
@@ -191,12 +183,11 @@ vars:
 
 steps:
   - name: step1
-    acts:
-      - uses: acts.transform.code
-        params: |
-          // get the a variable
-          let v = a + 100;
-          // do somthing else
+    uses: acts.transform.code
+    params: |
+      // get the a variable
+      let v = a + 100;
+      // do somthing else
 ```
 
 The vars can also be set by starting the workflow.
@@ -210,8 +201,8 @@ async fn main() {
   let executor = engine.executor();
 
   let mut vars = Vars::new();
-  vars.insert("input".into(), 3.into());
-  vars.insert("pid".to_string(), "w2".into());
+  vars.set("input", 3);
+  vars.set("pid", "w2");
 
   executor.proc().start("m1", vars);
 }
@@ -228,10 +219,9 @@ options:
     - name: output_key
 steps:
   - name: step1
-    acts:
-      - uses: acts.transform.set
-        params:
-          output_key: 100
+    uses: acts.transform.set
+    params:
+      output_key: 100
 ```
 
 
@@ -260,31 +250,24 @@ id: catches
 steps:
   - name: prepare
     id: prepare
-    acts:
-      - uses: acts.core.irq
-        key: init
+    uses: acts.core.irq
   - name: step1
     id: step1
-    acts:
-      - uses: acts.core.irq
-        key: act1
+    uses: acts.core.irq
+
     # catch the step errors
     catches:
       - id: catch1
         on: err1
         steps:
           - name: catch step 1
-            acts:
-              - uses: acts.core.irq
-                key: act2
+            uses: acts.core.irq
 
       - id: catch2
         on: err2
         steps:
           - name: catch step 2
-            acts:
-              - uses: acts.core.irq
-                key: act3
+            uses: acts.core.irq
 
   - name: final
     id: final
@@ -300,14 +283,12 @@ id: timeout
 steps:
   - name: prepare
     id: prepare
-    acts:
-      - uses: acts.core.irq
-        key: init
+    uses: acts.core.irq
+
   - name: step1
     id: step1
-    acts:
-      - uses: acts.core.irq
-        key: act1
+    uses: acts.core.irq
+
     # check timeout rules
     timeouts:
       # 1d means one day
@@ -348,35 +329,6 @@ steps:
           - name: step d
   - id: step2
     name: step 2
-```
-
-### Acts
-
-Use `acts` to create act to interact with client， or finish a special function through several act type.
-
-```yml
-name: model name
-options:
-  exposes:
-    - name: output_key
-steps:
-  - name: step1
-    acts:
-      # send message to client
-      - uses: acts.core.msg
-        key: msg1
-        params:
-          a: 1
-
-      # irq is an act to send a request from acts server
-      # the client can complete the act and pass data to serever
-      - uses: acts.core.irq
-        key: init
-        name: my act init
-
-        # passes data to the act
-        params:
-          a: 6
 ```
 
 For more acts example, please see [`examples`](https://github.com/yaojianpin/acts/tree/main/examples)

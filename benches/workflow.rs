@@ -116,7 +116,7 @@ fn act(c: &mut Criterion) {
 
                 let chan = engine.channel();
                 chan.on_message(move |e| {
-                    if e.is_key("act1") && e.is_state(MessageState::Created) {
+                    if e.is_nid("act1") && e.is_state(MessageState::Created) {
                         let mut t = tasks2.lock().unwrap();
                         t.push((e.pid.clone(), e.tid.clone()));
                         if t.len() >= iters as usize {

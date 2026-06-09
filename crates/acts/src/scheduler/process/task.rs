@@ -210,7 +210,6 @@ impl Task {
             pid: self.pid.clone(),
             nid: self.node.id().to_string(),
             mid: workflow.id.clone(),
-            key: self.node.key(),
             uses: self.node.uses(),
             tag: self.node.tag().to_string(),
             inputs,
@@ -376,7 +375,6 @@ impl Task {
     pub fn is_timeouts(&self) -> bool {
         match &self.node.content {
             NodeContent::Step(step) => !step.timeouts.is_empty(),
-            NodeContent::Act(act) => !act.timeouts.is_empty(),
             _ => false,
         }
     }
@@ -384,7 +382,6 @@ impl Task {
     pub fn is_catches(&self) -> bool {
         match &self.node.content {
             NodeContent::Step(step) => !step.catches.is_empty(),
-            NodeContent::Act(act) => !act.catches.is_empty(),
             _ => false,
         }
     }
@@ -413,12 +410,10 @@ impl Task {
         match action.event {
             EventAction::Push => {
                 let package = ctx.get_var::<String>("uses").unwrap_or_default();
-                let key = ctx.get_var::<String>("key").unwrap_or_default();
                 let act = Act {
                     id: ctx.get_var::<String>("id").unwrap_or_default(),
                     name: ctx.get_var::<String>("name").unwrap_or_default(),
                     tag: ctx.get_var::<String>("tag").unwrap_or_default(),
-                    key: key.clone(),
                     uses: package.clone(),
                     params: ctx.get_var("params").unwrap_or_default(),
                     options: ctx.get_var("options").unwrap_or_default(),
@@ -460,7 +455,7 @@ impl Task {
                     )));
                 }
                 let nid = ctx
-                    .get_var::<String>(consts::ACT_SUBFLOW_TO)
+                    .get_var::<String>(consts::ACT_TO)
                     .ok_or(ActError::Action(
                         "cannot find 'to' value in options".to_string(),
                     ))?;
@@ -670,15 +665,18 @@ impl Task {
             let mut timeouts = self
                 .with_data(|data| data.get::<Vec<String>>(consts::TASK_TIMEOUTS))
                 .unwrap_or_default();
+
             let cost = self.cost();
             for child in &children {
                 if timeouts.contains(&child.id) {
                     continue;
                 }
+
                 let mut is_timeout = false;
                 if let Some(expr) = &child.content.r#if() {
                     is_timeout = ctx.eval::<bool>(expr)?;
                 }
+
                 if is_timeout {
                     timeouts.push(child.id.clone());
                     self.set_data_with(|data| data.set(consts::TASK_TIMEOUTS, timeouts.clone()));
@@ -686,7 +684,7 @@ impl Task {
                         child,
                         Vars::new()
                             .with(consts::TASK_COST, cost)
-                            .with(consts::TASK_SIGN, consts::TASK_SIGN_CATCH),
+                            .with(consts::TASK_SIGN, consts::TASK_SIGN_TIMEOUTS),
                     )?;
                 }
             }

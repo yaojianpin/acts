@@ -1,4 +1,4 @@
-use crate::{Act, Step, Workflow};
+use crate::{Step, Vars, Workflow, utils::test::USES_MSG};
 
 #[test]
 fn model_step_catch() {
@@ -6,8 +6,11 @@ fn model_step_catch() {
     assert_eq!(step.catches.len(), 0);
 
     step = step
-        .with_catch(Act::default().with_if(r#"$ecode() == "err1""#))
-        .with_catch(Act::default());
+        .with_catch(|step| {
+            step.with_if(r#"$ecode() == "err1""#)
+                .with_uses(USES_MSG, Vars::new().with("key", "msg1"))
+        })
+        .with_catch(|step| step);
     assert_eq!(step.catches.len(), 2);
 
     assert_eq!(

@@ -2,7 +2,7 @@
 use crate::{Act, Catch, ModelBase, Timeout, Vars, model::Branch};
 use crate::{Variant, utils::consts};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value as JsonValue, json};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Step {
@@ -35,14 +35,19 @@ pub struct Step {
     #[serde(default)]
     pub next: Option<String>,
 
+    // to use a package, such as 'acts.transform.set'
     #[serde(default)]
-    pub acts: Vec<Act>,
+    pub uses: Option<String>,
+
+    // package params
+    #[serde(default)]
+    pub params: JsonValue,
 
     #[serde(default)]
-    pub catches: Vec<Act>,
+    pub catches: Vec<Step>,
 
     #[serde(default)]
-    pub timeouts: Vec<Act>,
+    pub timeouts: Vec<Step>,
 
     /// extra options to send to client
     #[serde(default)]
@@ -84,8 +89,15 @@ impl Step {
         self
     }
 
-    pub fn with_act(mut self, act: Act) -> Self {
-        self.acts.push(act);
+    pub fn with_uses(mut self, uses: &str, params: Vars) -> Self {
+        self.uses = Some(uses.to_string());
+        self.params = params.into();
+        self
+    }
+
+    pub fn with_uses_code(mut self, uses: &str, code: &str) -> Self {
+        self.uses = Some(uses.to_string());
+        self.params = code.into();
         self
     }
 
@@ -148,13 +160,15 @@ impl Step {
         self
     }
 
-    pub fn with_catch(mut self, catch: Act) -> Self {
-        self.catches.push(catch);
+    pub fn with_catch(mut self, build: fn(Step) -> Step) -> Self {
+        let step = Step::default();
+        self.catches.push(build(step));
         self
     }
 
-    pub fn with_timeout(mut self, timeout: Act) -> Self {
-        self.timeouts.push(timeout);
+    pub fn with_timeout(mut self, build: fn(Step) -> Step) -> Self {
+        let step = Step::default();
+        self.timeouts.push(build(step));
         self
     }
 

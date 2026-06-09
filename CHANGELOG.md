@@ -169,3 +169,10 @@
 - feat: add safe limit for quickjs runtime
 - feat: change db store to kv store
         add db with sqlite, postgres, nats, redis, sled
+
+# 0.19.0
+- feat: remove `acts` from step struct
+- feat: add `uses` and `params` to step struct
+- feat: remove `catches` and `timeouts` from act struct
+- feat: change `catches` and `timeouts` list from `Vec<Act>` to `Vec<Step>` in step 
+- feat: remove `key` from message struct, the `key` info should be migrate to `params` properties

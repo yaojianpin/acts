@@ -1,20 +1,20 @@
 use crate::{
-    Act, EngineBuilder, Message, Vars, Workflow,
+    EngineBuilder, Message, Vars, Workflow,
     event::{Action, EventAction, MessageState},
     scheduler::TaskState,
     utils::{
-        self, consts,
-        test::{auto_complete, create_proc},
+        self,
+        test::{USES_IRQ, USES_MSG, auto_complete, create_proc},
     },
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use std::sync::{Arc, Mutex};
 
 #[tokio::test]
 async fn pack_irq_one() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")).with_id("act1"))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     workflow.print();
@@ -33,7 +33,7 @@ async fn pack_irq_one() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act1").first().unwrap().state(),
+        proc.task_by_params("key", "act1").first().unwrap().state(),
         TaskState::Interrupt
     );
 }
@@ -42,7 +42,7 @@ async fn pack_irq_one() {
 async fn pack_irq_multi_threads() {
     let workflow = Workflow::new().with_id("m1").with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     workflow.print();
@@ -53,7 +53,7 @@ async fn pack_irq_multi_threads() {
     let len = 1000;
     let e2 = engine.clone();
     engine.channel().on_message(move |e| {
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             let ret = engine
                 .executor()
                 .act()
@@ -81,42 +81,10 @@ async fn pack_irq_multi_threads() {
 }
 
 #[tokio::test]
-async fn pack_irq_many() {
+async fn pack_irq_with_params_value() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")).with_id("act1"))
-            .with_act(Act::irq(|act| act.with_key("act2")).with_id("act2"))
-            .with_act(Act::irq(|act| act.with_key("act3")).with_id("act3"))
-    });
-
-    workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
-    let rt = engine.runtime();
-    let (tx, rx) = engine.signal(()).double();
-    auto_complete(&engine, &rx);
-    let channel = engine.channel();
-    channel.on_message(move |e| {
-        println!("message: {e:?}");
-        if e.is_type("act") {
-            rx.close();
-        }
-    });
-    rt.launch(&proc).unwrap();
-    tx.recv().await;
-    proc.print();
-    assert_eq!(
-        proc.task_by_nid("act1").first().unwrap().state(),
-        TaskState::Interrupt
-    );
-    assert_eq!(proc.task_by_nid("act2").len(), 0);
-    assert_eq!(proc.task_by_nid("act3").len(), 0);
-}
-
-#[tokio::test]
-async fn pack_irq_with_inputs_value() {
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1").with_var("a", 5)).with_id("act1"))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1").with("a", 5))
     });
 
     workflow.print();
@@ -128,29 +96,26 @@ async fn pack_irq_with_inputs_value() {
     channel.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_irq() && e.is_state(MessageState::Created) {
-            rx.send(e.inputs.clone());
+            rx.send(e.params().unwrap());
         }
     });
     rt.launch(&proc).unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act1").first().unwrap().state(),
+        proc.task_by_params("key", "act1").first().unwrap().state(),
         TaskState::Interrupt
     );
     assert_eq!(ret.get::<i32>("a").unwrap(), 5);
 }
 
 #[tokio::test]
-async fn pack_irq_with_inputs_var() {
+async fn pack_irq_with_params_var() {
     let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_var("a", json!(5))
-            .with_act(Act::irq(|act| {
-                act.with_key("act1")
-                    .with_params_vars(|vars| vars.with("a", r#"{{ a }}"#))
-                    .with_id("act1")
-            }))
+        step.with_id("step1").with_var("a", json!(5)).with_uses(
+            USES_IRQ,
+            Vars::new().with("key", "act1").with("a", r#"{{ a }}"#),
+        )
     });
 
     workflow.print();
@@ -162,28 +127,24 @@ async fn pack_irq_with_inputs_var() {
     channel.on_message(move |e| {
         println!("message: {e:?}");
         if e.is_irq() && e.is_state(MessageState::Created) {
-            rx.send(e.inputs.clone());
+            rx.send(e.params().unwrap());
         }
     });
     rt.launch(&proc).unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("act1").first().unwrap().state(),
+        proc.task_by_params("key", "act1").first().unwrap().state(),
         TaskState::Interrupt
     );
-    assert_eq!(
-        ret.get::<Vars>("params").unwrap().get::<i32>("a").unwrap(),
-        5
-    );
+    assert_eq!(ret.get::<i32>("a").unwrap(), 5);
 }
 
 #[tokio::test]
 async fn pack_irq_complete() {
     let workflow = Workflow::new().with_step(|step| {
-        step.with_name("step1").with_act(Act::irq(|act| {
-            act.with_key("fn1").with_var("uid", json!("u1"))
-        }))
+        step.with_name("step1")
+            .with_uses(USES_IRQ, Vars::new().with("key", "fn1"))
     });
     let (engine, proc) = create_proc(&workflow, &utils::longid());
     let rt = engine.runtime();
@@ -192,17 +153,11 @@ async fn pack_irq_complete() {
     let channel = engine.channel();
     channel.on_message(move |e| {
         if e.is_type("act") && e.state() == MessageState::Created {
-            let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
             let mut options = Vars::new();
-            options.insert("uid".to_string(), json!(uid.to_string()));
+            options.insert("uid".to_string(), json!("u1".to_string()));
 
             let action = Action::new(&e.pid, &e.tid, EventAction::Next, options);
-            if let Err(err) = rt.do_action(&action) {
-                println!("error: {err}");
-                rx.send(false);
-            } else {
-                rx.send(true);
-            }
+            rx.send(rt.do_action(&action).is_ok())
         }
     });
 
@@ -219,14 +174,12 @@ async fn pack_irq_cancel_normal() {
     let workflow = Workflow::new()
         .with_id(&utils::longid())
         .with_step(|step| {
-            step.with_name("step1").with_act(Act::irq(|act| {
-                act.with_key("fn1").with_var("uid", json!("a"))
-            }))
+            step.with_name("step1")
+                .with_uses(USES_IRQ, Vars::new().with("key", "fn1").with("uid", "a"))
         })
         .with_step(|step| {
-            step.with_name("step2").with_act(Act::irq(|act| {
-                act.with_key("fn2").with_var("uid", json!("b"))
-            }))
+            step.with_name("step2")
+                .with_uses(USES_IRQ, Vars::new().with("key", "fn2").with("uid", "b"))
         });
 
     workflow.print();
@@ -239,7 +192,7 @@ async fn pack_irq_cancel_normal() {
     channel.on_message(move |e| {
         if e.is_type("act") {
             let mut count = count.lock().unwrap();
-            let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
+            let uid = e.params().unwrap().get::<String>("uid").unwrap();
             let tid = &e.tid;
 
             if uid == "a" && e.state() == MessageState::Created {
@@ -283,14 +236,13 @@ async fn pack_irq_back() {
         .with_step(|step| {
             step.with_id("step1")
                 .with_name("step1")
-                .with_act(Act::irq(|act| {
-                    act.with_key("fn1").with_var("uid", json!("a"))
-                }))
+                .with_var("uid", json!("a"))
+                .with_uses(USES_IRQ, Vars::new().with("key", "fn1"))
         })
         .with_step(|step| {
-            step.with_name("step2").with_act(Act::irq(|act| {
-                act.with_key("fn2").with_var("uid", json!("b"))
-            }))
+            step.with_name("step2")
+                .with_var("uid", json!("b"))
+                .with_uses(USES_IRQ, Vars::new().with("key", "fn2"))
         });
     let (engine, proc) = create_proc(&workflow, &utils::longid());
     let rt = engine.runtime();
@@ -338,14 +290,13 @@ async fn pack_irq_abort() {
         .with_step(|step| {
             step.with_id("step1")
                 .with_name("step1")
-                .with_act(Act::irq(|act| {
-                    act.with_key("fn1").with_var("uid", json!("a"))
-                }))
+                .with_var("uid", json!("a"))
+                .with_uses(USES_IRQ, Vars::new().with("key", "fn1"))
         })
         .with_step(|step| {
-            step.with_name("step2").with_act(Act::irq(|act| {
-                act.with_key("fn2").with_var("uid", json!("b"))
-            }))
+            step.with_name("step2")
+                .with_var("uid", json!("b"))
+                .with_uses(USES_IRQ, Vars::new().with("key", "fn2"))
         });
     let (engine, proc) = create_proc(&workflow, &utils::longid());
     let rt = engine.runtime();
@@ -354,7 +305,7 @@ async fn pack_irq_abort() {
     let channel = engine.channel();
 
     channel.on_message(move |e| {
-        if e.is_key("fn1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("fn1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
 
@@ -371,9 +322,8 @@ async fn pack_irq_abort() {
 #[tokio::test]
 async fn pack_irq_submit() {
     let workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
-        step.with_id("step1").with_act(
-            Act::irq(|act| act.with_key("fn1").with_var("uid", json!("a"))).with_id("fn1"),
-        )
+        step.with_id("step1")
+            .with_uses(USES_IRQ, Vars::new().with("key", "fn1"))
     });
 
     let pid = utils::longid();
@@ -384,21 +334,15 @@ async fn pack_irq_submit() {
     let channel = engine.channel();
     channel.on_message(move |e| {
         if e.is_type("act") && e.is_state(MessageState::Created) {
-            let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
-            if uid == "a" && e.state() == MessageState::Created {
-                let mut options = Vars::new();
-                options.insert("uid".to_string(), json!(uid.to_string()));
-
-                let action = Action::new(&e.pid, &e.tid, EventAction::Submit, options);
-                rt.do_action(&action).unwrap();
-            }
+            let action = Action::new(&e.pid, &e.tid, EventAction::Submit, Vars::new());
+            rt.do_action(&action).unwrap();
         }
     });
 
     engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     assert_eq!(
-        proc.task_by_nid("fn1").first().unwrap().state(),
+        proc.task_by_params("key", "fn1").first().unwrap().state(),
         TaskState::Submitted
     );
     assert_eq!(
@@ -410,9 +354,8 @@ async fn pack_irq_submit() {
 #[tokio::test]
 async fn pack_irq_skip() {
     let workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
-        step.with_id("step1").with_act(
-            Act::irq(|act| act.with_key("fn1").with_var("uid", json!("a"))).with_id("fn1"),
-        )
+        step.with_id("step1")
+            .with_uses(USES_IRQ, Vars::new().with("key", "fn1"))
     });
 
     let pid = utils::longid();
@@ -422,22 +365,17 @@ async fn pack_irq_skip() {
     auto_complete(&engine, &rx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        if e.is_type("act") {
-            let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
-            if uid == "a" && e.state() == MessageState::Created {
-                let mut options = Vars::new();
-                options.insert("uid".to_string(), json!(uid.to_string()));
-
-                let action = Action::new(&e.pid, &e.tid, EventAction::Skip, options);
-                rt.do_action(&action).unwrap();
-            }
+        if e.is_type("act") && e.is_state(MessageState::Created) {
+            let options = Vars::new();
+            let action = Action::new(&e.pid, &e.tid, EventAction::Skip, options);
+            rt.do_action(&action).unwrap();
         }
     });
 
     engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     assert_eq!(
-        proc.task_by_nid("fn1").first().unwrap().state(),
+        proc.task_by_params("key", "fn1").first().unwrap().state(),
         TaskState::Skipped
     );
     assert_eq!(
@@ -451,9 +389,9 @@ async fn pack_irq_skip_next() {
     let workflow = Workflow::new()
         .with_id(&utils::longid())
         .with_step(|step| {
-            step.with_id("step1").with_act(
-                Act::irq(|act| act.with_key("act1").with_var("uid", json!("a"))).with_id("act1"),
-            )
+            step.with_id("step1")
+                .with_var("uid", json!("a"))
+                .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
         })
         .with_step(|step| step.with_id("step2"));
 
@@ -464,7 +402,7 @@ async fn pack_irq_skip_next() {
     auto_complete(&engine, &rx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
             if uid == "a" && e.state() == MessageState::Created {
                 let mut options = Vars::new();
@@ -479,7 +417,7 @@ async fn pack_irq_skip_next() {
     engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     assert_eq!(
-        proc.task_by_nid("act1").first().unwrap().state(),
+        proc.task_by_params("key", "act1").first().unwrap().state(),
         TaskState::Skipped
     );
     assert_eq!(
@@ -495,9 +433,8 @@ async fn pack_irq_skip_next() {
 #[tokio::test]
 async fn pack_irq_error_action() {
     let workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
-        step.with_id("step1").with_act(
-            Act::irq(|act| act.with_key("fn1").with_var("uid", json!("a"))).with_id("fn1"),
-        )
+        step.with_id("step1")
+            .with_uses(USES_IRQ, Vars::new().with("key", "fn1"))
     });
 
     let pid = utils::longid();
@@ -507,23 +444,25 @@ async fn pack_irq_error_action() {
     auto_complete(&engine, &rx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        if e.is_key("fn1") && e.is_state(MessageState::Created) {
-            let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
-            if uid == "a" && e.state() == MessageState::Created {
-                let mut options = Vars::new();
-                options.insert("uid".to_string(), json!(uid.to_string()));
-                options.set("ecode", "1");
-                options.set("error", "biz error");
+        if e.is_params_key("fn1") && e.is_state(MessageState::Created) {
+            let mut options = Vars::new();
+            options.set("ecode", "1");
+            options.set("error", "biz error");
 
-                let action = Action::new(&e.pid, &e.tid, EventAction::Error, options);
-                rt.do_action(&action).unwrap();
-            }
+            let action = Action::new(&e.pid, &e.tid, EventAction::Error, options);
+            rt.do_action(&action).unwrap();
         }
     });
 
     engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
-    assert!(proc.task_by_nid("fn1").first().unwrap().state().is_error());
+    assert!(
+        proc.task_by_params("key", "fn1")
+            .first()
+            .unwrap()
+            .state()
+            .is_error()
+    );
     assert!(
         proc.task_by_nid("step1")
             .first()
@@ -537,9 +476,9 @@ async fn pack_irq_error_action() {
 #[tokio::test]
 async fn pack_irq_error_action_without_err_code() {
     let workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
-        step.with_id("step1").with_act(Act::irq(|act| {
-            act.with_key("fn1").with_var("uid", json!("a"))
-        }))
+        step.with_id("step1")
+            .with_var("uid", json!("a"))
+            .with_uses(USES_IRQ, Vars::new().with("key", "fn1"))
     });
 
     let pid = utils::longid();
@@ -549,7 +488,7 @@ async fn pack_irq_error_action_without_err_code() {
     auto_complete(&engine, &rx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        if e.is_key("fn1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("fn1") && e.is_state(MessageState::Created) {
             let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
             if uid == "a" && e.state() == MessageState::Created {
                 let mut options = Vars::new();
@@ -575,14 +514,13 @@ async fn pack_irq_next_by_complete_state() {
         .with_step(|step| {
             step.with_id("step1")
                 .with_name("step1")
-                .with_act(Act::irq(|act| {
-                    act.with_key("fn1").with_var("uid", json!("a"))
-                }))
+                .with_var("uid", json!("a"))
+                .with_uses(USES_IRQ, Vars::new().with("key", "fn1"))
         })
         .with_step(|step| {
-            step.with_name("step2").with_act(Act::irq(|act| {
-                act.with_key("fn2").with_var("uid", json!("b"))
-            }))
+            step.with_name("step2")
+                .with_var("uid", json!("b"))
+                .with_uses(USES_IRQ, Vars::new().with("key", "fn2"))
         });
     let (engine, proc) = create_proc(&workflow, &utils::longid());
     let rt = engine.runtime();
@@ -615,9 +553,8 @@ async fn pack_irq_cancel_by_running_state() {
     let workflow = Workflow::new().with_id(&utils::longid()).with_step(|step| {
         step.with_id("step1")
             .with_name("step1")
-            .with_act(Act::irq(|act| {
-                act.with_key("fn1").with_var("uid", json!("a"))
-            }))
+            .with_var("uid", json!("a"))
+            .with_uses(USES_IRQ, Vars::new().with("key", "fn1"))
     });
     let (engine, proc) = create_proc(&workflow, "w1");
     let rt = engine.runtime();
@@ -647,9 +584,8 @@ async fn pack_irq_do_action_complete() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_name("step1")
-            .with_act(Act::irq(|act| {
-                act.with_key("fn1").with_var("uid", json!("a"))
-            }))
+            .with_var("uid", json!("a"))
+            .with_uses(USES_IRQ, Vars::new().with("key", "fn1"))
     });
 
     let pid = utils::longid();
@@ -683,7 +619,7 @@ async fn pack_irq_do_action_remove() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_name("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")).with_id("act1"))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
 
     let pid = utils::longid();
@@ -706,103 +642,24 @@ async fn pack_irq_do_action_remove() {
     engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
-    assert_eq!(
-        proc.task_by_nid("act1").first().unwrap().state(),
-        TaskState::Removed
-    );
-}
 
-#[tokio::test]
-async fn pack_irq_do_action_outputs() {
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_name("step1").with_act(
-            Act::irq(|act| {
-                act.with_key("fn1")
-                    .with_expose("a", json!(null))
-                    .with_expose("b", json!(null))
-                    .with_var("uid", json!("a"))
-            })
-            .with_id("fn1"),
-        )
-    });
-
-    let pid = utils::longid();
-    let (engine, proc) = create_proc(&workflow, &pid);
-    let rt = engine.runtime();
-    let (tx, rx) = engine.signal(()).double();
-    auto_complete(&engine, &rx);
-    let channel = engine.channel();
-
-    channel.on_message(move |e| {
-        if e.state() == MessageState::Created && e.is_irq() {
-            let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
-
-            let mut options = Vars::new();
-            options.insert("uid".to_string(), json!(uid.to_string()));
-            options.insert("a".to_string(), json!("abc"));
-            options.insert("b".to_string(), json!(5));
-            options.insert("c".to_string(), json!(["u1", "u2"]));
-
-            let action = Action::new(&e.pid, &e.tid, EventAction::Next, options);
-            rt.do_action(&action).unwrap();
-            rx.close();
-        }
-    });
-
-    engine.runtime().launch(&proc).unwrap();
-    tx.recv().await;
-    assert_eq!(
-        proc.task_by_nid("fn1")
-            .first()
-            .unwrap()
-            .data()
-            .get::<String>("a")
-            .unwrap(),
-        "abc"
-    );
-    assert_eq!(
-        proc.task_by_nid("fn1")
-            .first()
-            .unwrap()
-            .data()
-            .get::<i32>("b")
-            .unwrap(),
-        5
-    );
-    assert_eq!(
-        proc.task_by_nid("step1")
-            .first()
-            .unwrap()
-            .data()
-            .get::<Vec<String>>("c"),
-        None
-    );
-    assert_eq!(
-        proc.task_by_nid("fn1")
-            .first()
-            .unwrap()
-            .data()
-            .get::<Vec<String>>("c"),
-        None
-    );
+    let acts = proc.task_by_params("key", "act1");
+    assert_eq!(acts.first().unwrap().state(), TaskState::Removed);
 }
 
 #[tokio::test]
 async fn pack_irq_do_action_rets() {
     let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_name("step1").with_act(
-            Act::irq(|act| {
-                act.with_key("fn1")
-                    .with_expose("a", json!(null))
-                    .with_expose("b", json!(null))
-                    .with_expose("c", json!(null))
-                    .with_var("uid", json!("a"))
-            })
-            .with_id("fn1"),
-        )
+        step.with_id("step1")
+            .with_name("step1")
+            .with_var("uid", json!("a"))
+            .with_uses(
+                USES_IRQ,
+                Vars::new().with("key", "fn1").with("uid", "{{ uid }}"),
+            )
     });
 
-    println!("workflow: {workflow:#?}");
+    workflow.print();
 
     let pid = utils::longid();
     let (engine, proc) = create_proc(&workflow, &pid);
@@ -813,7 +670,7 @@ async fn pack_irq_do_action_rets() {
 
     channel.on_message(move |e| {
         if e.state() == MessageState::Created && e.is_irq() {
-            let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
+            let uid = e.params().unwrap().get::<String>("uid").unwrap();
 
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!(uid.to_string()));
@@ -831,110 +688,18 @@ async fn pack_irq_do_action_rets() {
     engine.runtime().launch(&proc).unwrap();
     tx.recv().await;
     proc.print();
+
+    let data = proc.task_by_nid("step1").first().unwrap().data();
+    assert_eq!(data.get::<String>("a").unwrap(), "abc");
+    assert_eq!(data.get::<i32>("b").unwrap(), 5);
+    assert_eq!(data.get::<Vec<String>>("c").unwrap(), ["u1", "u2"]);
     assert_eq!(
-        proc.task_by_nid("fn1")
-            .first()
+        data.get::<Vars>("d")
             .unwrap()
-            .data()
-            .get::<String>("a")
+            .get::<String>("value")
             .unwrap(),
-        "abc"
+        "test"
     );
-    assert_eq!(
-        proc.task_by_nid("fn1")
-            .first()
-            .unwrap()
-            .data()
-            .get::<i32>("b")
-            .unwrap(),
-        5
-    );
-    assert_eq!(
-        proc.task_by_nid("fn1")
-            .first()
-            .unwrap()
-            .data()
-            .get::<Vec<String>>("c")
-            .unwrap(),
-        ["u1", "u2"]
-    );
-    assert_eq!(
-        proc.task_by_nid("fn1")
-            .first()
-            .unwrap()
-            .data()
-            .get::<Value>("d"),
-        None
-    );
-}
-
-#[tokio::test]
-async fn pack_irq_do_action_no_output() {
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_name("step1")
-            .with_act(Act::irq(|act| {
-                act.with_key("fn1").with_var("uid", json!("a"))
-            }))
-    });
-
-    let pid = utils::longid();
-    let (engine, proc) = create_proc(&workflow, &pid);
-    let rt = engine.runtime();
-    let (tx, rx) = engine.signal(false).double();
-    auto_complete(&engine, &rx);
-    let channel = engine.channel();
-    channel.on_message(move |e| {
-        if e.state() == MessageState::Created && e.is_irq() {
-            let uid = e.inputs.get_value("uid").unwrap().as_str().unwrap();
-
-            // create options that not satisfy the outputs
-            let mut options = Vars::new();
-            options.insert("uid".to_string(), json!(uid.to_string()));
-            options.insert("any".to_string(), json!(100));
-
-            let action = Action::new(&e.pid, &e.tid, EventAction::Next, options);
-            let ret = rt.do_action(&action).is_ok();
-            rx.send(ret);
-        }
-    });
-
-    engine.runtime().launch(&proc).unwrap();
-    let ret = tx.recv().await;
-    assert!(ret);
-}
-
-#[tokio::test]
-async fn pack_irq_do_action_output_key_check() {
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_name("step1")
-            .with_act(Act::irq(|act| {
-                act.with_key("fn1")
-                    .with_expose("abc", json!(null))
-                    .with_var("uid", json!("a"))
-            }))
-    });
-
-    let pid = utils::longid();
-    let (engine, proc) = create_proc(&workflow, &pid);
-    let rt = engine.runtime();
-    let (tx, rx) = engine.signal(false).double();
-    auto_complete(&engine, &rx);
-    let channel = engine.channel();
-    channel.on_message(move |e| {
-        if e.state() == MessageState::Created && e.is_irq() {
-            // create options that not contains uid key
-            let options = Vars::new();
-            let action = Action::new(&e.pid, &e.tid, EventAction::Next, options);
-            let ret = rt.do_action(&action).is_err();
-            rx.send(ret);
-        }
-    });
-
-    engine.runtime().launch(&proc).unwrap();
-    let ret = tx.recv().await;
-    assert!(ret);
 }
 
 #[tokio::test]
@@ -942,9 +707,8 @@ async fn pack_irq_do_action_proc_id_error() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_name("step1")
-            .with_act(Act::irq(|act| {
-                act.with_key("fn1").with_var("uid", json!("a"))
-            }))
+            .with_var("uid", json!("a"))
+            .with_uses(USES_IRQ, Vars::new().with("key", "fn1"))
     });
 
     let pid = utils::longid();
@@ -955,7 +719,6 @@ async fn pack_irq_do_action_proc_id_error() {
     let channel = engine.channel();
     channel.on_message(move |e| {
         if e.state() == MessageState::Created && e.is_irq() {
-            // create options that not contains uid key
             let options = Vars::new();
             let action = Action::new("no_exist_proc_id", &e.tid, EventAction::Next, options);
             let ret = rt.do_action(&action).is_err();
@@ -973,9 +736,7 @@ async fn pack_irq_do_action_msg_id_error() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_name("step1")
-            .with_act(Act::irq(|act| {
-                act.with_key("fn1").with_var("uid", json!("a"))
-            }))
+            .with_uses(USES_MSG, Vars::new().with("key", "fn1"))
     });
 
     let pid = utils::longid();
@@ -985,8 +746,7 @@ async fn pack_irq_do_action_msg_id_error() {
     auto_complete(&engine, &rx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        if e.state() == MessageState::Created && e.r#type == "act" {
-            // create options that not contains uid key
+        if e.state() == MessageState::Completed && e.r#type == "act" {
             let options = Vars::new();
             let action = Action::new(&e.pid, "no_exist_msg_id", EventAction::Next, options);
             let ret = rt.do_action(&action).is_err();
@@ -1000,11 +760,11 @@ async fn pack_irq_do_action_msg_id_error() {
 }
 
 #[tokio::test]
-async fn pack_irq_do_action_not_act_req_task() {
+async fn pack_irq_do_action_not_act_task() {
     let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_act(Act::irq(|act| {
-            act.with_key("fn1").with_var("uid", json!("a"))
-        }))
+        step.with_id("step1")
+            .with_var("uid", json!("a"))
+            .with_uses(USES_IRQ, Vars::new().with("key", "fn1"))
     });
 
     let pid = utils::longid();
@@ -1029,339 +789,10 @@ async fn pack_irq_do_action_not_act_req_task() {
 }
 
 #[tokio::test]
-async fn pack_irq_on_catch_one() {
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_name("step1").with_act(
-            Act::irq(|act| act.with_key("act1"))
-                .with_id("act1")
-                .with_catch(Act::irq(|act| {
-                    act.with_key("act2")
-                        .with_id("act2")
-                        .with_if(r#"$ecode() == "err1""#)
-                })),
-        )
-    });
-
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
-    let rt = engine.runtime();
-    let (tx, rx) = engine.signal(()).double();
-    auto_complete(&engine, &rx);
-    let channel = engine.channel();
-    channel.on_message(move |e| {
-        println!("message: {e:?}");
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
-            rt.do_action2(
-                &e.pid,
-                &e.tid,
-                EventAction::Error,
-                Vars::new().with(consts::ACT_ERR_CODE, "err1"),
-            )
-            .unwrap();
-        }
-        if e.is_key("act2") {
-            rx.close();
-        }
-    });
-
-    engine.runtime().launch(&proc).unwrap();
-    tx.recv().await;
-    proc.print();
-    assert_eq!(
-        proc.task_by_nid("act2").first().unwrap().state(),
-        TaskState::Interrupt
-    );
-}
-
-#[tokio::test]
-async fn pack_irq_on_catch_as_error() {
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_name("step1").with_act(
-            Act::irq(|act| act.with_key("act1"))
-                .with_id("act1")
-                .with_catch(Act::irq(|act| {
-                    act.with_key("act2")
-                        .with_id("act2")
-                        .with_if(r#"$ecode() == "err1""#)
-                })),
-        )
-    });
-
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
-    let rt = engine.runtime();
-    let (tx, rx) = engine.signal(false).double();
-    auto_complete(&engine, &rx);
-    let channel = engine.channel();
-    channel.on_message(move |e| {
-        println!("message: {e:?}");
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
-            rt.do_action2(
-                &e.pid,
-                &e.tid,
-                EventAction::Error,
-                Vars::new().with(consts::ACT_ERR_CODE, "err1"),
-            )
-            .unwrap();
-        }
-
-        if e.is_key("act2") {
-            rt.do_action2(
-                &e.pid,
-                &e.tid,
-                EventAction::Error,
-                Vars::new().with(consts::ACT_ERR_CODE, "err2"),
-            )
-            .unwrap();
-        }
-    });
-
-    engine.runtime().launch(&proc).unwrap();
-    tx.recv().await;
-    proc.print();
-    assert_eq!(
-        proc.task_by_nid("act1").first().unwrap().state(),
-        TaskState::Error
-    );
-    assert_eq!(
-        proc.task_by_nid("act2").first().unwrap().state(),
-        TaskState::Error
-    );
-    assert!(proc.state().is_error());
-}
-
-#[tokio::test]
-async fn pack_irq_on_catch_as_skip() {
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_name("step1").with_act(
-            Act::irq(|act| act.with_key("act1"))
-                .with_id("act1")
-                .with_catch(Act::irq(|act| {
-                    act.with_key("act2")
-                        .with_id("act2")
-                        .with_if(r#"$ecode() == "err1""#)
-                })),
-        )
-    });
-
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
-    let rt = engine.runtime();
-    let (tx, rx) = engine.signal(()).double();
-    auto_complete(&engine, &rx);
-    let channel = engine.channel();
-    channel.on_message(move |e| {
-        println!("message: {e:?}");
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
-            rt.do_action2(
-                &e.pid,
-                &e.tid,
-                EventAction::Error,
-                Vars::new().with(consts::ACT_ERR_CODE, "err1"),
-            )
-            .unwrap();
-        }
-
-        if e.is_key("act2") {
-            rt.do_action2(&e.pid, &e.tid, EventAction::Skip, Vars::new())
-                .unwrap();
-        }
-    });
-
-    engine.runtime().launch(&proc).unwrap();
-    tx.recv().await;
-    proc.print();
-    assert_eq!(
-        proc.task_by_nid("act1").first().unwrap().state(),
-        TaskState::Error
-    );
-    assert_eq!(
-        proc.task_by_nid("act2").first().unwrap().state(),
-        TaskState::Skipped
-    );
-}
-
-#[tokio::test]
-async fn pack_irq_on_catch_no_match() {
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_name("step1").with_act(
-            Act::irq(|act| act.with_key("act1"))
-                .with_id("act1")
-                .with_catch(Act::irq(|act| {
-                    act.with_key("act2")
-                        .with_id("act2")
-                        .with_if(r#"$ecode() == "err1""#)
-                })),
-        )
-    });
-
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
-    let rt = engine.runtime();
-    let (tx, rx) = engine.signal(()).double();
-    auto_complete(&engine, &rx);
-    let channel = engine.channel();
-    channel.on_message(move |e| {
-        println!("message: {e:?}");
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
-            rt.do_action2(
-                &e.pid,
-                &e.tid,
-                EventAction::Error,
-                Vars::new().with(consts::ACT_ERR_CODE, "err2"),
-            )
-            .unwrap();
-        }
-    });
-
-    engine.runtime().launch(&proc).unwrap();
-    tx.recv().await;
-    proc.print();
-    assert!(proc.task_by_nid("act1").first().unwrap().state().is_error());
-    assert!(proc.task_by_nid("act2").is_empty());
-}
-
-#[tokio::test]
-async fn pack_irq_on_catch_match_any() {
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_name("step1").with_act(
-            Act::irq(|act| act.with_key("act1"))
-                .with_id("act1")
-                .with_catch(Act::irq(|act| act.with_key("act2")).with_id("act2")),
-        )
-    });
-
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
-    let rt = engine.runtime();
-    let (tx, rx) = engine.signal(false).double();
-    auto_complete(&engine, &rx);
-    let channel = engine.channel();
-    channel.on_message(move |e| {
-        println!("message: {e:?}");
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
-            rt.do_action2(
-                &e.pid,
-                &e.tid,
-                EventAction::Error,
-                Vars::new().with(consts::ACT_ERR_CODE, "err2"),
-            )
-            .unwrap();
-        }
-
-        if e.is_key("act2") && e.is_state(MessageState::Created) {
-            rx.close();
-        }
-    });
-
-    engine.runtime().launch(&proc).unwrap();
-    tx.recv().await;
-    proc.print();
-    assert_eq!(
-        proc.task_by_nid("act1").first().unwrap().state(),
-        TaskState::Running
-    );
-    assert!(
-        proc.task_by_nid("act2")
-            .first()
-            .unwrap()
-            .state()
-            .is_interrupted()
-    );
-}
-
-#[tokio::test]
-async fn pack_irq_on_catch_as_complete() {
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_name("step1").with_act(
-            Act::irq(|act| act.with_key("act1"))
-                .with_id("act1")
-                .with_catch(Act::irq(|act| {
-                    act.with_key("act2")
-                        .with_id("act2")
-                        .with_if(r#"$ecode() == 'err1'"#)
-                })),
-        )
-    });
-
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
-    let rt = engine.runtime();
-    let (tx, rx) = engine.signal(()).double();
-    auto_complete(&engine, &rx);
-    let channel = engine.channel();
-    channel.on_message(move |e| {
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
-            rt.do_action2(
-                &e.pid,
-                &e.tid,
-                EventAction::Error,
-                Vars::new().with(consts::ACT_ERR_CODE, "err1"),
-            )
-            .unwrap();
-        }
-
-        if e.is_key("act2") {
-            rt.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
-                .unwrap();
-        }
-    });
-
-    engine.runtime().launch(&proc).unwrap();
-    tx.recv().await;
-    proc.print();
-    assert_eq!(
-        proc.task_by_nid("act2").first().unwrap().state(),
-        TaskState::Completed
-    );
-    assert_eq!(
-        proc.task_by_nid("act1").first().unwrap().state(),
-        TaskState::Completed
-    );
-}
-
-#[tokio::test]
-async fn pack_irq_chain() {
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_name("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")).with_id("act1"))
-            .with_act(Act::irq(|act| act.with_key("act2")).with_id("act2"))
-    });
-
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
-    let rt = engine.runtime();
-    let (tx, rx) = engine.signal(false).double();
-    auto_complete(&engine, &rx);
-    let channel = engine.channel();
-    let p = proc.clone();
-    channel.on_message(move |e| {
-        if e.is_key("act1") {
-            assert_eq!(
-                p.task_by_nid("act1").first().unwrap().state(),
-                TaskState::Interrupt
-            );
-            assert!(p.task_by_nid("act2").is_empty());
-            rt.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
-                .unwrap();
-        }
-
-        if e.is_key("act2") {
-            rx.close();
-        }
-    });
-
-    engine.runtime().launch(&proc).unwrap();
-    tx.recv().await;
-    proc.print();
-    assert_eq!(
-        proc.task_by_nid("act2").first().unwrap().state(),
-        TaskState::Interrupt
-    );
-    assert_eq!(
-        proc.task_by_nid("act1").first().unwrap().state(),
-        TaskState::Completed
-    );
-}
-
-#[tokio::test]
 async fn pack_irq_with_key() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("key1")).with_id("act1"))
+            .with_uses(USES_IRQ, Vars::new().with("key", "key1"))
     });
 
     workflow.print();
@@ -1372,7 +803,7 @@ async fn pack_irq_with_key() {
     let channel = engine.channel();
     channel.on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_irq() && e.is_state(MessageState::Created) {
+        if e.is_params_key("key1") && e.is_state(MessageState::Created) {
             rx.update(|data| data.push(e.inner().clone()));
             rx.close();
         }
@@ -1380,44 +811,14 @@ async fn pack_irq_with_key() {
     rt.launch(&proc).unwrap();
     let ret = tx.recv().await;
     proc.print();
-    assert_eq!(
-        proc.task_by_nid("act1").first().unwrap().state(),
-        TaskState::Interrupt
-    );
     assert_eq!(ret.len(), 1);
-    assert_eq!(ret.first().unwrap().key, "key1");
-}
-
-#[tokio::test]
-async fn pack_irq_on_timeout() {
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_name("step1").with_act(
-            Act::irq(|act| act.with_key("act1"))
-                .with_id("act1")
-                .with_timeout(Act::irq(|act| {
-                    act.with_key("act2")
-                        .with_id("act2")
-                        .with_if(r#"$cost() > 2000"#)
-                })),
-        )
-    });
-
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
-    let (tx, rx) = engine.signal(false).double();
-    auto_complete(&engine, &rx);
-    let channel = engine.channel();
-    channel.on_message(move |e| {
-        println!("message: {e:?}");
-        if e.is_key("act2") {
-            rx.close();
-        }
-    });
-
-    engine.runtime().launch(&proc).unwrap();
-    tx.recv().await;
-    proc.print();
     assert_eq!(
-        proc.task_by_nid("act2").first().unwrap().state(),
-        TaskState::Interrupt
+        ret.first()
+            .unwrap()
+            .params()
+            .unwrap()
+            .get::<String>("key")
+            .unwrap(),
+        "key1"
     );
 }

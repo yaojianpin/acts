@@ -44,7 +44,6 @@ pub struct TaskInfo {
     pub prev: Option<String>,
     pub name: String,
     pub tag: String,
-    pub key: String,
     pub pid: String,
     pub nid: String,
     pub r#type: String,
@@ -76,7 +75,6 @@ pub struct MessageInfo {
     pub r#type: String,
     pub pid: String,
     pub nid: String,
-    pub key: String,
     pub inputs: String,
     pub outputs: String,
     pub tag: String,
@@ -188,7 +186,6 @@ impl From<data::Task> for TaskInfo {
             start_time: t.start_time,
             end_time: t.end_time,
             timestamp: t.timestamp,
-            key: node_data.content.key(),
             tag: node_data.content.tag(),
         }
     }
@@ -215,7 +212,6 @@ impl From<&Arc<scheduler::Task>> for TaskInfo {
             end_time: t.end_time(),
             timestamp: t.timestamp,
             tag: t.node().tag(),
-            key: t.node().key(),
         }
     }
 }
@@ -233,7 +229,6 @@ impl From<&data::Message> for MessageInfo {
             update_time: m.update_time,
             state: m.state,
             r#type: m.r#type.clone(),
-            key: m.key.clone(),
             tag: m.tag.clone(),
 
             inputs: m.inputs.clone(),

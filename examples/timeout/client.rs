@@ -30,20 +30,22 @@ impl Client {
     }
 
     pub async fn process(&self, executor: &Executor, e: &Event<Message>) -> Result<()> {
-        if e.is_irq() && e.is_state(MessageState::Created) {
-            match self.actions.get(&e.key) {
-                Some(action) => {
-                    action(executor, e)?;
-                    println!("action state: key={}", &e.key);
+        if let Some(key) = e.params().unwrap().get::<String>("key") {
+            if e.is_irq() && e.is_state(MessageState::Created) {
+                match self.actions.get(&key) {
+                    Some(action) => {
+                        action(executor, e)?;
+                        println!("action state: key={}", &key);
+                    }
+                    None => println!("'{}' is waitting for timeout", key),
                 }
-                None => println!("'{}' is waitting for timeout", e.key),
             }
-        }
 
-        if e.is_msg()
-            && let Some(action) = self.messages.get(&e.key)
-        {
-            action(executor, e);
+            if e.is_msg()
+                && let Some(action) = self.messages.get(&key)
+            {
+                action(executor, e);
+            }
         }
 
         Ok(())
@@ -60,7 +62,7 @@ impl Client {
     }
 
     pub fn timeout_2s(_executor: &Executor, e: &Event<Message>) {
-        println!("msg: {} inputs={}", e.key, e.inputs);
+        println!("msg: {} inputs={}", e.name, e.inputs);
     }
     pub fn timeout_5s<'a>(executor: &'a Executor, e: &'a Event<Message>) -> Result<()> {
         let executor = executor.clone();

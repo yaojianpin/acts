@@ -1,11 +1,11 @@
 use crate::event::EventAction;
 use crate::{
-    Act, Action, ChannelOptions, Message, Vars, Workflow,
+    Action, ChannelOptions, Message, Vars, Workflow,
     config::ConfigData,
     data::MessageStatus,
     event::MessageState,
     store::query::*,
-    utils::test::{create_proc, create_proc_with_config},
+    utils::test::{USES_IRQ, create_proc, create_proc_with_config},
     utils::{self, consts},
 };
 use serde_json::json;
@@ -333,7 +333,7 @@ async fn sch_message_branch_no_message() {
 async fn sch_message_act_created() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     let id = utils::longid();
     let (engine, proc) = create_proc(&workflow, &id);
@@ -360,7 +360,7 @@ async fn sch_message_act_created() {
 async fn sch_message_act_created_by_push_action() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     let id = utils::longid();
     let (engine, proc) = create_proc(&workflow, &id);
@@ -379,13 +379,13 @@ async fn sch_message_act_created_by_push_action() {
             let options = Vars::new()
                 .with("name", "act 2")
                 .with("uses", "acts.core.irq")
-                .with("key", "act2")
+                .with("params", Vars::new().with("key", "act2"))
                 .with("tag", "tag2");
             rt.do_action2(&e.pid, &e.tid, EventAction::Push, options)
                 .unwrap();
         }
 
-        if e.is_key("act2") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act2") && e.is_state(MessageState::Created) {
             rx.send(true);
         }
     });
@@ -399,7 +399,7 @@ async fn sch_message_act_created_by_push_action() {
 async fn sch_message_act_tag_by_push_action() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     let id = utils::longid();
     let (engine, proc) = create_proc(&workflow, &id);
@@ -416,14 +416,14 @@ async fn sch_message_act_tag_by_push_action() {
         println!("message: {e:?}");
         if e.r#type == "step" && e.state() == MessageState::Created {
             let options = Vars::new()
-                .with("key", "act2")
                 .with("uses", "acts.core.irq")
+                .with("params", Vars::new().with("key", "act2"))
                 .with("tag", "tag2");
             rt.do_action2(&e.pid, &e.tid, EventAction::Push, options)
                 .unwrap();
         }
 
-        if e.is_key("act2") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act2") && e.is_state(MessageState::Created) {
             rx.send(e.tag == "tag2");
         }
     });
@@ -437,7 +437,7 @@ async fn sch_message_act_tag_by_push_action() {
 async fn sch_message_act_inputs_by_push_action() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     let id = utils::longid();
     let (engine, proc) = create_proc(&workflow, &id);
@@ -454,14 +454,13 @@ async fn sch_message_act_inputs_by_push_action() {
         println!("message: {e:?}");
         if e.r#type == "step" && e.state() == MessageState::Created {
             let options = Vars::new()
-                .with("key", "act2")
                 .with("uses", "acts.core.irq")
-                .with("params", Vars::new().with("a", 5));
+                .with("params", Vars::new().with("key", "act2").with("a", 5));
             rt.do_action2(&e.pid, &e.tid, EventAction::Push, options)
                 .unwrap();
         }
 
-        if e.is_key("act2") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act2") && e.is_state(MessageState::Created) {
             rx.send(
                 e.inputs
                     .get::<Vars>("params")
@@ -482,7 +481,7 @@ async fn sch_message_act_inputs_by_push_action() {
 async fn sch_message_act_outputs_by_push_action() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     let id = utils::longid();
     let (engine, proc) = create_proc(&workflow, &id);
@@ -499,8 +498,8 @@ async fn sch_message_act_outputs_by_push_action() {
         println!("message: {e:?}");
         if e.r#type == "step" && e.state() == MessageState::Created {
             let options = Vars::new()
-                .with("key", "act2")
                 .with("uses", "acts.core.irq")
+                .with("params", Vars::new().with("key", "act2"))
                 .with(
                     "options",
                     Vars::new().with(consts::ACT_EXPOSE, vec![json!({ "name": "a", "value": 5 })]),
@@ -509,7 +508,7 @@ async fn sch_message_act_outputs_by_push_action() {
                 .unwrap();
         }
 
-        if e.is_key("act2") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act2") && e.is_state(MessageState::Created) {
             rx.send(e.outputs.get::<i32>("a").unwrap() == 5);
         }
     });
@@ -522,11 +521,10 @@ async fn sch_message_act_outputs_by_push_action() {
 #[tokio::test]
 async fn sch_message_act_outputs() {
     let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_act(Act::irq(|act| {
-            act.with_key("act1")
-                .with_var("a", json!(5))
-                .with_expose("a", json!(null))
-        }))
+        step.with_id("step1")
+            .with_var("a", json!(5))
+            .with_expose("a", json!(null))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     let id = utils::longid();
     let (engine, proc) = create_proc(&workflow, &id);
@@ -553,7 +551,7 @@ async fn sch_message_act_outputs() {
 async fn sch_message_act_completed() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     let id = utils::longid();
     let (engine, proc) = create_proc(&workflow, &id);
@@ -587,7 +585,7 @@ async fn sch_message_act_completed() {
 async fn sch_message_act_sumitted() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     let id = utils::longid();
     let (engine, proc) = create_proc(&workflow, &id);
@@ -602,13 +600,13 @@ async fn sch_message_act_sumitted() {
     emitter.on_error(move |_| tx_close2.close());
     let s = rt.clone();
     emitter.on_message(move |msg| {
-        if msg.is_key("act1") && msg.state() == MessageState::Created {
+        if msg.is_params_key("act1") && msg.state() == MessageState::Created {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             let action = Action::new(&msg.pid, &msg.tid, EventAction::Submit, options);
             s.do_action(&action).unwrap();
         }
-        if msg.is_key("act1") && msg.state() == MessageState::Submitted {
+        if msg.is_params_key("act1") && msg.state() == MessageState::Submitted {
             rx.send(true);
         }
     });
@@ -621,7 +619,7 @@ async fn sch_message_act_sumitted() {
 async fn sch_message_act_skip() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     let id = utils::longid();
     let (engine, proc) = create_proc(&workflow, &id);
@@ -636,13 +634,13 @@ async fn sch_message_act_skip() {
     emitter.on_error(move |_| tx_close2.close());
     let s = rt.clone();
     emitter.on_message(move |msg| {
-        if msg.is_key("act1") && msg.state() == MessageState::Created {
+        if msg.is_params_key("act1") && msg.state() == MessageState::Created {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             let action = Action::new(&msg.pid, &msg.tid, EventAction::Skip, options);
             s.do_action(&action).unwrap();
         }
-        if msg.is_key("act1") && msg.state() == MessageState::Skipped {
+        if msg.is_params_key("act1") && msg.state() == MessageState::Skipped {
             rx.send(true);
         }
     });
@@ -656,11 +654,11 @@ async fn sch_message_act_back() {
     let workflow = Workflow::new()
         .with_step(|step| {
             step.with_id("step1")
-                .with_act(Act::irq(|act| act.with_key("act1")))
+                .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
         })
         .with_step(|step| {
             step.with_id("step2")
-                .with_act(Act::irq(|act| act.with_key("act2")))
+                .with_uses(USES_IRQ, Vars::new().with("key", "act2"))
         });
     let id = utils::longid();
     let (engine, proc) = create_proc(&workflow, &id);
@@ -675,14 +673,14 @@ async fn sch_message_act_back() {
     emitter.on_error(move |_| tx_close2.close());
     let s = rt.clone();
     emitter.on_message(move |msg| {
-        if msg.is_key("act1") && msg.is_state(MessageState::Created) {
+        if msg.is_params_key("act1") && msg.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             let action = Action::new(&msg.pid, &msg.tid, EventAction::Next, options);
             s.do_action(&action).unwrap();
         }
 
-        if msg.is_key("act2") && msg.is_state(MessageState::Created) {
+        if msg.is_params_key("act2") && msg.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.insert("to".to_string(), json!("step1"));
@@ -690,7 +688,7 @@ async fn sch_message_act_back() {
             s.do_action(&action).unwrap();
         }
 
-        if msg.is_key("act2") && msg.state() == MessageState::Backed {
+        if msg.is_params_key("act2") && msg.state() == MessageState::Backed {
             rx.send(true);
         }
     });
@@ -706,11 +704,11 @@ async fn sch_message_act_cancel() {
     let workflow = Workflow::new()
         .with_step(|step| {
             step.with_id("step1")
-                .with_act(Act::irq(|act| act.with_key("act1")))
+                .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
         })
         .with_step(|step| {
             step.with_id("step2")
-                .with_act(Act::irq(|act| act.with_key("act2")))
+                .with_uses(USES_IRQ, Vars::new().with("key", "act2"))
         });
     let id = utils::longid();
     let (engine, proc) = create_proc(&workflow, &id);
@@ -725,14 +723,14 @@ async fn sch_message_act_cancel() {
     emitter.on_error(move |_| tx_close2.close());
     let s = rt.clone();
     emitter.on_message(move |msg| {
-        if msg.is_key("act1") && msg.is_state(MessageState::Created) {
+        if msg.is_params_key("act1") && msg.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             let action = Action::new(&msg.pid, &msg.tid, EventAction::Next, options);
             s.do_action(&action).unwrap();
         }
 
-        if msg.is_key("act1") && msg.is_state(MessageState::Completed) {
+        if msg.is_params_key("act1") && msg.is_state(MessageState::Completed) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
 
@@ -741,7 +739,7 @@ async fn sch_message_act_cancel() {
             s.do_action(&action).unwrap();
         }
 
-        if msg.is_key("act2") && msg.is_state(MessageState::Created) {
+        if msg.is_params_key("act2") && msg.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
 
@@ -755,7 +753,7 @@ async fn sch_message_act_cancel() {
             s.do_action(&action).unwrap();
         }
 
-        if msg.is_key("act2") && msg.state() == MessageState::Cancelled {
+        if msg.is_params_key("act2") && msg.state() == MessageState::Cancelled {
             rx.send(true);
         }
     });
@@ -769,7 +767,7 @@ async fn sch_message_act_cancel() {
 async fn sch_message_act_remove() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     let id = utils::longid();
     let (engine, proc) = create_proc(&workflow, &id);
@@ -784,7 +782,7 @@ async fn sch_message_act_remove() {
     emitter.on_error(move |_| tx_close2.close());
     let s = rt.clone();
     emitter.on_message(move |msg| {
-        if msg.is_key("act1") && msg.inner().state() == MessageState::Created {
+        if msg.is_params_key("act1") && msg.inner().state() == MessageState::Created {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             let action = Action::new(
@@ -795,7 +793,7 @@ async fn sch_message_act_remove() {
             );
             s.do_action(&action).unwrap();
         }
-        if msg.is_key("act1") && msg.state() == MessageState::Removed {
+        if msg.is_params_key("act1") && msg.state() == MessageState::Removed {
             rx.send(true);
         }
     });
@@ -808,7 +806,7 @@ async fn sch_message_act_remove() {
 async fn sch_message_act_abort() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     let id = utils::longid();
     let (engine, proc) = create_proc(&workflow, &id);
@@ -823,14 +821,14 @@ async fn sch_message_act_abort() {
     emitter.on_error(move |_| tx_close2.close());
     let s = rt.clone();
     emitter.on_message(move |msg| {
-        if msg.is_key("act1") && msg.is_state(MessageState::Created) {
+        if msg.is_params_key("act1") && msg.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             let action = Action::new(&msg.pid, &msg.tid, EventAction::Abort, options);
             s.do_action(&action).unwrap();
         }
 
-        if msg.is_key("act1") && msg.state() == MessageState::Aborted {
+        if msg.is_params_key("act1") && msg.state() == MessageState::Aborted {
             rx.send(true);
         }
     });
@@ -844,7 +842,7 @@ async fn sch_message_act_abort() {
 async fn sch_message_act_error() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     let id = utils::longid();
     let (engine, proc) = create_proc(&workflow, &id);
@@ -860,7 +858,7 @@ async fn sch_message_act_error() {
     let s = rt.clone();
     emitter.on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "err1");
@@ -868,7 +866,7 @@ async fn sch_message_act_error() {
             s.do_action(&action).unwrap();
         }
 
-        if e.is_key("act1") && e.state() == MessageState::Error {
+        if e.is_params_key("act1") && e.state() == MessageState::Error {
             rx.send(true);
         }
     });
@@ -882,7 +880,7 @@ async fn sch_message_act_error() {
 async fn sch_message_act_inputs_with_err() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     workflow.id = utils::longid();
     let (engine, proc) = create_proc(&workflow, &utils::longid());
@@ -898,7 +896,7 @@ async fn sch_message_act_inputs_with_err() {
 
     emitter.on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
             options.set(consts::ACT_ERR_CODE, "err1");
@@ -907,7 +905,7 @@ async fn sch_message_act_inputs_with_err() {
                 .unwrap();
         }
 
-        if e.is_key("act1") && e.state() == MessageState::Error {
+        if e.is_params_key("act1") && e.state() == MessageState::Error {
             rx.send(e.inputs.clone());
         }
     });
@@ -924,7 +922,7 @@ async fn sch_message_act_inputs_with_step_id() {
     let mut workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_name("my step")
-            .with_act(Act::irq(|act| act.with_key("test")))
+            .with_uses(USES_IRQ, Vars::new().with("key", "test"))
     });
     workflow.id = utils::longid();
     let (engine, proc) = create_proc(&workflow, &utils::longid());
@@ -941,7 +939,7 @@ async fn sch_message_act_inputs_with_step_id() {
     let step_task_id = Arc::new(Mutex::new("".to_string()));
     let tid = step_task_id.clone();
     emitter.on_message(move |e| {
-        if e.is_key("step1") {
+        if e.is_nid("step1") {
             *tid.lock().unwrap() = e.tid.to_string();
         }
         if e.is_type("act") && e.is_state(MessageState::Created) {
@@ -1072,8 +1070,8 @@ async fn sch_message_ack_exist_message_in_store() {
 #[tokio::test]
 async fn sch_message_complete_message_in_store() {
     let workflow = Workflow::new()
-        .with_step(|step| step.with_act(Act::irq(|act| act.with_key("act1"))))
-        .with_step(|step| step.with_act(Act::irq(|act| act.with_key("act2"))));
+        .with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "act1")))
+        .with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "act2")));
     let id = utils::longid();
     let (engine, proc) = create_proc(&workflow, &id);
     let _rt = engine.runtime();
@@ -1095,7 +1093,7 @@ async fn sch_message_complete_message_in_store() {
     engine
         .channel_with_options(&options)
         .on_message(move |msg| {
-            if msg.is_key("act1") && msg.state() == MessageState::Created {
+            if msg.is_params_key("act1") && msg.state() == MessageState::Created {
                 engine
                     .executor()
                     .act()
@@ -1104,7 +1102,7 @@ async fn sch_message_complete_message_in_store() {
                 rx.update(|data| *data = msg.id.clone());
             }
 
-            if msg.is_key("act2") && msg.state() == MessageState::Created {
+            if msg.is_params_key("act2") && msg.state() == MessageState::Created {
                 rx.close();
             }
         });
@@ -1162,7 +1160,7 @@ async fn sch_messages_not_removed_when_completed_in_store() {
 #[tokio::test]
 async fn sch_message_re_sent_if_not_ack() {
     let workflow =
-        Workflow::new().with_step(|step| step.with_act(Act::irq(|act| act.with_key("act1"))));
+        Workflow::new().with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "act1")));
     let id = utils::longid();
     let (engine, proc) = create_proc(&workflow, &id);
     let _rt = engine.runtime();
@@ -1214,7 +1212,7 @@ async fn sch_message_re_sent_if_not_ack() {
 #[tokio::test]
 async fn sch_message_error_if_not_ack_and_exceed_max_reties() {
     let workflow =
-        Workflow::new().with_step(|step| step.with_act(Act::irq(|act| act.with_key("act1"))));
+        Workflow::new().with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "act1")));
     let id = utils::longid();
 
     let config = ConfigData {

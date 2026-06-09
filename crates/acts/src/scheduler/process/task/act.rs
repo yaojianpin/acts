@@ -1,5 +1,3 @@
-use tracing::debug;
-
 use crate::{
     Act, ActError, ActRunAs, ActTask, Error, Result, TaskState, Vars, scheduler::Context,
     utils::consts,
@@ -18,13 +16,12 @@ impl ActTask for Act {
 
         if self.uses.is_empty() {
             return Err(crate::ActError::Action(format!(
-                "cannot find 'uses' in act '{}' with key '{}'",
+                "cannot find 'uses' in act '{}'",
                 task.node.id,
-                task.node.content.key()
             )));
         }
 
-        let register = ctx
+        let package = ctx
             .runtime
             .package()
             .get(&self.uses)
@@ -32,7 +29,7 @@ impl ActTask for Act {
                 "cannot find package '{}'",
                 self.uses
             )))?;
-        let meta = (register.meta)();
+        let meta = (package.meta)();
         match meta.run_as {
             ActRunAs::Irq => {
                 jsonschema::validate(&meta.in_schema, &task.params())?;
@@ -70,19 +67,8 @@ impl ActTask for Act {
         }
 
         if matches!(meta.run_as, ActRunAs::Func) {
-            let package = (register.create)(ctx.task().params()).inspect_err(|err| {
-                debug!("[{}] create error: {}", meta.id, err);
-                task.set_err(&err.clone().into());
-                ctx.set_task(&task);
-                ctx.emit_error().ok();
-            })?;
-
-            if let Some(vars) = package.execute(ctx).inspect_err(|err| {
-                debug!("[{}] execute error: {}", meta.id, err);
-                task.set_err(&err.clone().into());
-                ctx.set_task(&task);
-                ctx.emit_error().ok();
-            })? {
+            let package = (register.create)(ctx.task().params())?;
+            if let Some(vars) = package.execute(ctx)? {
                 task.update_data(&vars);
             };
         }

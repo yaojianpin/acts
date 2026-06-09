@@ -1,22 +1,28 @@
 use crate::{
     Act, TaskState, Vars, Workflow,
+    package::RunningMode,
     utils::{
         self,
-        test::{auto_complete, create_proc},
+        test::{USES_BLOCK, auto_complete, create_proc},
     },
 };
 
 use serial_test::serial;
+
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_act_if_true() {
     let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_act(Act::set(Vars::new().with("a", 10)))
-            .with_act(Act::msg(|act| {
-                act.with_if(r#"a > 0"#).with_key("msg1").with_id("msg1")
-            }))
-            .with_act(Act::irq(|act| act.with_key("act1")))
+        step.with_id("step1").with_uses(
+            USES_BLOCK,
+            Vars::new().with("mode", RunningMode::Sequence).with(
+                "acts",
+                vec![
+                    Act::set(Vars::new().with("a", 10)),
+                    Act::msg(|act| act.with_id("msg1")),
+                ],
+            ),
+        )
     });
 
     workflow.print();
@@ -43,11 +49,16 @@ async fn sch_act_if_true() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_act_if_false() {
     let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_act(Act::set(Vars::new().with("a", 10)))
-            .with_act(Act::msg(|act| {
-                act.with_if(r#"a < 0"#).with_key("msg1").with_id("msg1")
-            }))
+        step.with_id("step1").with_uses(
+            USES_BLOCK,
+            Vars::new().with("mode", RunningMode::Sequence).with(
+                "acts",
+                vec![
+                    Act::set(Vars::new().with("a", 10)),
+                    Act::msg(|act| act.with_id("msg1").with_if("false")),
+                ],
+            ),
+        )
     });
 
     workflow.print();
@@ -66,13 +77,18 @@ async fn sch_act_if_false() {
 
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn sch_act_if_null_value() {
+async fn sch_act_if_null_error() {
     let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_act(Act::msg(|act| {
-            act.with_if(r#"$get("not_exists") == null"#)
-                .with_key("msg1")
-                .with_id("msg1")
-        }))
+        step.with_id("step1").with_uses(
+            USES_BLOCK,
+            Vars::new().with("mode", RunningMode::Sequence).with(
+                "acts",
+                vec![
+                    Act::set(Vars::new().with("a", 10)),
+                    Act::msg(|act| act.with_id("msg1").with_if("null")),
+                ],
+            ),
+        )
     });
 
     workflow.print();
@@ -83,7 +99,6 @@ async fn sch_act_if_null_value() {
 
     channel.on_message(move |e| {
         if e.is_msg() {
-            println!("aaaaaaaaaaaaa: {e:?}");
             rx.close();
         }
     });
@@ -91,7 +106,7 @@ async fn sch_act_if_null_value() {
     tx.recv().await;
     proc.print();
     assert_eq!(
-        proc.task_by_nid("msg1").first().unwrap().node().key(),
-        "msg1"
+        proc.task_by_nid("msg1").first().unwrap().state(),
+        TaskState::Error
     );
 }

@@ -224,6 +224,29 @@ impl Process {
         self.find_tasks(|t| t.node().id() == nid)
     }
 
+    #[cfg(test)]
+    pub fn task_by_params(&self, key: &str, value: &str) -> Vec<Arc<Task>> {
+        self.find_tasks(|t| {
+            use serde_json::Value;
+
+            let params = t.node().params();
+            if t.is_kind(NodeKind::Act)
+                && params != Value::Null
+                && let Some(v) = params.get::<&str>(key)
+                && let Some(s) = v.as_str()
+            {
+                return value == s;
+            }
+
+            false
+        })
+    }
+
+    #[cfg(test)]
+    pub fn task_by_uses(&self, uses: &str) -> Vec<Arc<Task>> {
+        self.find_tasks(|t| t.node().uses() == uses)
+    }
+
     pub fn create_context(self: &Arc<Self>, task: &Arc<Task>) -> Context {
         Context::new(self, task)
     }
@@ -436,7 +459,7 @@ fn print_task_string(
     }
 
     s.borrow_mut().push_str(&format!(
-        "Task({}) prev={} kind={} nid={} name={} state={}\n",
+        "Task({}) prev={} kind={} nid={} name={} state={}  {}\n",
         task.id,
         match task.prev() {
             Some(v) => v,
@@ -446,6 +469,15 @@ fn print_task_string(
         task.node().id(),
         task.node().content.name(),
         task.state(),
+        if task.is_kind(NodeKind::Act) {
+            format!(
+                "uses={}  params={}",
+                task.node().uses(),
+                task.node().params()
+            )
+        } else {
+            "".to_string()
+        },
     ));
 
     let mut child_path = path.clone();

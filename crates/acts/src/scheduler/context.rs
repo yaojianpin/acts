@@ -1,6 +1,6 @@
 use super::{ActTask, Runtime};
 use crate::{
-    Act, ActError, Executor, Message, MessageState, NodeKind, Result, TaskState, Vars,
+    Act, ActError, Executor, Message, MessageState, Result, TaskState, Vars,
     event::Action,
     scheduler::{
         Node, Process, Task,
@@ -270,19 +270,6 @@ impl Context {
         task.set_state(TaskState::Backed);
         self.emit_task(task)?;
 
-        // find parent util to the step task and marks it as backed
-        if task.is_kind(NodeKind::Act) {
-            let mut parent = task.parent();
-            while let Some(p) = parent {
-                if p.is_kind(NodeKind::Step) || p.is_kind(NodeKind::Act) {
-                    p.set_state(TaskState::Backed);
-                    self.emit_task(&p)?;
-                    break;
-                }
-                parent = p.parent();
-            }
-        }
-
         // marks the state in the paths
         for p in paths {
             if p.state().is_running() {
@@ -367,12 +354,11 @@ impl Context {
 
     pub fn emit_error(&self) -> Result<()> {
         let task = self.task();
-        println!("emit_error: {task:?}");
+        debug!("emit_error: {task:?}");
         if task.state().is_error() {
             self.emit_task(&task)?;
 
             // after emitting, re-check the task state
-            println!("check error state after emitting {task:?}");
             if task.state().is_error()
                 && let Some(err) = task.err()
                 && let Some(parent) = task.parent()
@@ -449,7 +435,6 @@ impl Context {
             state,
             pid: task.pid.clone(),
             tid: task.id.clone(),
-            key: msg.key.clone(),
             name: task.node().name(),
             uses: msg.uses.clone(),
             tag: msg.tag.to_string(),

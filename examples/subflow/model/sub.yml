@@ -8,12 +8,13 @@ options:
     - name: v
 steps:
   - name: t1
-    acts:
-      - uses: acts.core.irq
-        key: action1
-        options:
-          exposes:
-            - name: v
+    uses: acts.core.irq
+    params:
+      key: action1
+      options:
+        exposes:
+          - name: v
+
   - name: t2
 
 

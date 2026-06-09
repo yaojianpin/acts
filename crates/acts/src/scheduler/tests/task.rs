@@ -1,7 +1,7 @@
 use crate::{
-    Act, MessageState, TaskState, Vars, Workflow,
+    MessageState, TaskState, Vars, Workflow,
     event::EventAction,
-    utils::{self, test::create_proc},
+    utils::{self, test::USES_IRQ, test::create_proc},
 };
 
 use serial_test::serial;
@@ -89,11 +89,11 @@ async fn sch_task_step_skip_with_inputs_to_next() {
         .with_step(|step| {
             step.with_id("step1")
                 .with_var("v1", 10)
-                .with_act(Act::irq(|act| act.with_key("act1")))
+                .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
         })
         .with_step(|step| {
             step.with_id("step2")
-                .with_act(Act::irq(|act| act.with_key("act2")))
+                .with_uses(USES_IRQ, Vars::new().with("key", "act2"))
         });
 
     let (engine, proc) = create_proc(&workflow, &utils::longid());
@@ -104,12 +104,16 @@ async fn sch_task_step_skip_with_inputs_to_next() {
     let emitter = engine.channel();
     emitter.on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
+            && e.is_state(MessageState::Created)
+        {
             rt2.do_action2(&e.pid, &e.tid, EventAction::Skip, Vars::new())
                 .unwrap();
         }
 
-        if e.is_key("act2") && e.is_state(MessageState::Created) {
+        if e.params().unwrap().get::<String>("key").as_deref() == Some("act2")
+            && e.is_state(MessageState::Created)
+        {
             rx.send(e.inputs.clone());
         }
     });
@@ -385,7 +389,7 @@ async fn sch_task_branch_if_false_else_running() {
                     .with_name("branch 1")
                     .with_step(|step| {
                         step.with_name("step11")
-                            .with_act(Act::irq(|act| act.with_key("act1")))
+                            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
                     })
             })
             .with_branch(|branch| {
@@ -405,7 +409,7 @@ async fn sch_task_branch_if_false_else_running() {
     let emitter = engine.channel();
     // process.tree().print();
     emitter.on_message(move |e| {
-        if e.is_key("act1") {
+        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1") {
             rx.close();
         }
     });
@@ -602,7 +606,7 @@ async fn sch_task_branch_needs_state() {
                     .with_name("branch 1")
                     .with_step(|step| {
                         step.with_id("step11")
-                            .with_act(Act::irq(|act| act.with_key("act1")))
+                            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
                     })
             })
             .with_branch(|branch| {
@@ -646,8 +650,9 @@ async fn sch_task_branch_needs_state() {
 async fn sch_task_act_skip_with_inputs_to_next() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_act(Act::irq(|act| act.with_key("act1")).with_var("v1", 10))
-            .with_act(Act::irq(|act| act.with_key("act2")))
+            .with_var("v1", 10)
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act2"))
     });
 
     let (engine, proc) = create_proc(&workflow, &utils::longid());
@@ -658,12 +663,16 @@ async fn sch_task_act_skip_with_inputs_to_next() {
     let emitter = engine.channel();
     emitter.on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_key("act1") && e.is_state(MessageState::Created) {
+        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
+            && e.is_state(MessageState::Created)
+        {
             rt2.do_action2(&e.pid, &e.tid, EventAction::Skip, Vars::new())
                 .unwrap();
         }
 
-        if e.is_key("act2") && e.is_state(MessageState::Created) {
+        if e.params().unwrap().get::<String>("key").as_deref() == Some("act2")
+            && e.is_state(MessageState::Created)
+        {
             rx.send(e.inputs.clone());
         }
     });

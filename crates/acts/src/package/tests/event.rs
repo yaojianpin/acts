@@ -1,5 +1,5 @@
-use crate::{Act, Workflow};
-use crate::{Engine, Vars, query::Query};
+use crate::{Engine, query::Query};
+use crate::{Vars, Workflow, utils::test::USES_SET};
 use serde_json::json;
 
 use serial_test::serial;
@@ -111,7 +111,7 @@ async fn pack_event_hook_start() {
         })
         .with_step(|step| {
             step.with_id("step1")
-                .with_act(Act::set(Vars::new().with("ret", 100)))
+                .with_uses(USES_SET, Vars::new().with("ret", 100))
         });
 
     workflow.print();
