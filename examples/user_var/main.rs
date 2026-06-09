@@ -15,20 +15,20 @@ async fn main() -> Result<()> {
     name: my model
     steps:
       - name: step 1
-        acts:
-          - uses: acts.core.msg
-            vars:
-                test:
-                    var1: "changed_var1"
-            params:
-                var1: '{{ test.var1 }}'
+        uses: acts.core.msg
+        vars:
+            - name: test
+              value:
+                var1: "changed_var1"
+
+        params:
+            var1: '{{ test.var1 }}'
       - name: step 2
-        acts:
-          - uses: acts.transform.code
-            params: |
-                let var2 = test.var2;
-                console.log("test.var2 = " + var2)
-                return { data: var2 }
+        uses: acts.transform.code
+        params: |
+            let var2 = test.var2;
+            console.log("test.var2 = " + var2)
+            return { data: var2 }
     "#;
     let workflow = Workflow::from_yml(model).unwrap();
 

@@ -1,17 +1,10 @@
 use acts::{ActError, Executor, Message, MessageState, Result, Vars};
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashMap;
 
-type Action = fn(&Parmas) -> Vars;
+type Action = fn(&Vars) -> Vars;
 pub struct Client {
     actions: HashMap<String, Box<Action>>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct Parmas {
-    key: String,
-    v: i64,
 }
 
 impl Client {
@@ -30,45 +23,45 @@ impl Client {
         println!("process: {message:?}");
         if message.is_type("act") && message.is_state(MessageState::Created) {
             let params = message
-                .inputs
-                .get::<Parmas>("params")
+                .params()
                 .ok_or(ActError::Action("message.params is null".to_string()))?;
-            match self.actions.get(&params.key) {
+            let key = params.get::<String>("key").unwrap_or_default();
+            match self.actions.get(&key) {
                 Some(action) => {
                     let outputs = action(&params);
                     executor
                         .act()
                         .complete(&message.pid, &message.tid, outputs.clone())?;
-                    println!("action state: key={}", &params.key);
+                    println!("action state: key={}", &key);
                     println!("inputs:{:?}", &message.inputs);
                     println!("outputs:{outputs:?}");
                     println!();
                 }
-                None => eprintln!("cannot find action '{}'", params.key),
+                None => eprintln!("cannot find action '{}'", key),
             }
         }
 
         Ok(())
     }
 
-    fn init(_params: &Parmas) -> Vars {
+    fn init(_params: &Vars) -> Vars {
         println!("init");
         let mut vars = Vars::new();
         vars.insert("v".to_string(), json!(10));
         vars
     }
-    fn action1(_params: &Parmas) -> Vars {
+    fn action1(_params: &Vars) -> Vars {
         println!("action1");
         let mut vars = Vars::new();
         vars.insert("v".to_string(), json!(100));
 
         vars
     }
-    fn action2(params: &Parmas) -> Vars {
+    fn action2(params: &Vars) -> Vars {
         println!("action2: {params:?}");
-
+        let v = params.get::<i64>("v").unwrap();
         let mut vars = Vars::new();
-        vars.insert("v".to_string(), json!(params.v * 2));
+        vars.insert("v".to_string(), json!(v * 2));
 
         vars
     }

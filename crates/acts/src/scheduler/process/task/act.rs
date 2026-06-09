@@ -2,6 +2,7 @@ use crate::{
     Act, ActError, ActRunAs, ActTask, Error, Result, TaskState, Vars, scheduler::Context,
     utils::consts,
 };
+use serde_json::Value as JsonValue;
 
 impl ActTask for Act {
     fn init(&self, ctx: &Context) -> Result<()> {
@@ -21,22 +22,15 @@ impl ActTask for Act {
             )));
         }
 
-        let package = ctx
-            .runtime
-            .package()
-            .get(&self.uses)
-            .ok_or(ActError::Action(format!(
-                "cannot find package '{}'",
-                self.uses
-            )))?;
-        let meta = (package.meta)();
-        match meta.run_as {
+        let package = ctx.runtime.store().packages().find(&self.uses)?;
+        let in_scheam = serde_json::from_str::<JsonValue>(&package.in_schema)?;
+        match package.run_as {
             ActRunAs::Irq => {
-                jsonschema::validate(&meta.in_schema, &task.params())?;
+                jsonschema::validate(&in_scheam, &task.params())?;
                 task.set_state(TaskState::Interrupt);
             }
             ActRunAs::Msg => {
-                jsonschema::validate(&meta.in_schema, &task.params())?;
+                jsonschema::validate(&in_scheam, &task.params())?;
                 task.set_emit_disabled(true);
                 task.set_state(TaskState::Ready);
             }
@@ -52,21 +46,20 @@ impl ActTask for Act {
     fn run(&self, ctx: &Context) -> Result<()> {
         let task = ctx.task();
 
-        let register = ctx
-            .runtime
-            .package()
-            .get(&self.uses)
-            .ok_or(ActError::Runtime(format!(
-                "cannot find the registed package '{}'",
-                self.uses
-            )))?;
-        let meta = (register.meta)();
-        if matches!(meta.run_as, ActRunAs::Msg) {
-            // resume the msg emit state
+        let package = ctx.runtime.store().packages().find(&self.uses)?;
+        if matches!(package.run_as, ActRunAs::Msg) {
             task.set_emit_disabled(false);
         }
 
-        if matches!(meta.run_as, ActRunAs::Func) {
+        if matches!(package.run_as, ActRunAs::Func) {
+            let register = ctx
+                .runtime
+                .package()
+                .get(&package.id)
+                .ok_or(ActError::Runtime(format!(
+                    "cannot find Func package '{}'",
+                    package.id
+                )))?;
             let package = (register.create)(ctx.task().params())?;
             if let Some(vars) = package.execute(ctx)? {
                 task.update_data(&vars);

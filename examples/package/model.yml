@@ -8,20 +8,15 @@ options:
 steps:
   - name: step 1
     id: step1
-    acts:
-      - uses: pack1
-        params:
-          # set the inputs variable from global 'input'
-          # the input variable will be set when the process is starting
-          v1: '{{ input }}'
+    uses: pack1
+    params:
+      v1: '{{ input }}'
   - name: step 2
     id: step2
-    acts:
-        # use pack2
-      - uses: pack2
-        params:
-          a: '{{ input }}'
-          b: [ "a", "b" ]
+    uses: pack2
+    params:
+      a: '{{ input }}'
+      b: [ "a", "b" ]
 
 
 

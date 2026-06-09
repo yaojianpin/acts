@@ -190,12 +190,12 @@ impl Package {
         }
     }
 
-    pub fn register(&self, name: &str, register: &ActPackageRegister) {
-        self.packages.insert(name.to_string(), register.clone());
+    pub fn register(&self, id: &str, register: &ActPackageRegister) {
+        self.packages.insert(id.to_string(), register.clone());
     }
 
-    pub fn get(&self, name: &str) -> Option<ActPackageRegister> {
-        self.packages.get(name).map(|v| v.clone())
+    pub fn get(&self, id: &str) -> Option<ActPackageRegister> {
+        self.packages.get(id).map(|v| v.clone())
     }
 }
 
@@ -213,7 +213,7 @@ impl ActPackageMeta {
             ui_schema: pack.ui_schema.map(|v| v.to_string()),
             run_as: pack.run_as,
             resources: serde_json::to_string(&pack.resources)
-                .expect("cannot convert ActPackageMeta.group to json"),
+                .expect("cannot convert ActPackageMeta.resources to json"),
             catalog: pack.catalog,
             create_time: 0,
             update_time: 0,

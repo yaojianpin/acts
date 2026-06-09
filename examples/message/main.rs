@@ -20,9 +20,10 @@ async fn main() -> Result<()> {
             ..Default::default()
         })
         .on_message(move |message| {
-            if message.is_type("act") {
-                println!("on_message: inputs={}", message.inputs);
-            }
+            println!(
+                "on_message: node id={} type={} state={} inputs={}",
+                message.nid, message.r#type, message.state, message.inputs
+            );
         });
 
     engine.channel().on_complete(move |e| {

@@ -1,45 +1,30 @@
 name: event_test
 id: m1
 vars:
-  value: 0
-setup:
-  - uses: acts.core.msg
-    on: created
-    key: fn1
-    params:
-      a: '{{ value }}'
-  - uses: acts.core.msg
-    on: step
-    key: fn_on_step
-  - uses: acts.core.msg
-    on: completed
-    key: fn2
+  - name: value
+    value: 0
 
 steps:
   - name: step 1
     id: step1
   - name: step 2
     id: step2
-    setup:
-      - uses: acts.core.msg
-        on: completed
-        key: fn3
-    acts:
-      - uses: acts.transform.set
-        params:
-          value: 100
+    uses: acts.transform.set
+    params:
+      value: 100
   - name: step 3
     id: step3
-    setup:
-      - uses: acts.core.block
-        on: completed
-        params:
-          mode: sequence
-          acts:
-            - uses: acts.core.msg
-              key: fn4
-              vars:
-                a: '{{ value }}'
-
+    uses: acts.core.block
+    params:
+      mode: sequence
+      acts:
+        - uses: acts.core.msg
+          params:
+            key: msg1
+            a: '{{ value + 10 }}'
+        - uses: acts.core.msg
+          params:
+            key: msg2
+            b: '{{ value + 20 }}'
   - name: step 4
     

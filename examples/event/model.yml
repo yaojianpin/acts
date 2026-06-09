@@ -19,8 +19,7 @@ on:
 steps:
   - name: step 1
   - name: step 2
-    acts:
-      - uses: acts.transform.set
-        params:
-          result: 100
+    uses: acts.transform.set
+    params:
+      result: 100
     

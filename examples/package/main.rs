@@ -19,12 +19,13 @@ async fn main() -> acts::Result<()> {
 
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text)?;
+    workflow.print();
     engine.executor().model().deploy(&workflow)?;
 
     executor.proc().start(&workflow.id, vars)?;
-    let emitter = engine.channel();
+    let chan = engine.channel();
 
-    emitter.on_complete(move |e| {
+    chan.on_complete(move |e| {
         println!(
             "on_workflow_complete: state={} cost={}ms output={:?}",
             e.state,
@@ -33,7 +34,7 @@ async fn main() -> acts::Result<()> {
         );
         s1.close();
     });
-    emitter.on_error(move |e| {
+    chan.on_error(move |e| {
         println!("on_error: state={}", e.state,);
         s2.close();
     });
