@@ -16,13 +16,13 @@ impl ActPackage for Pack1 {
             icon: "",
             doc: "",
             version: "0.1.0",
-            in_schema: json!({
+            schema: json!({
                 "type": "object",
                 "properties": {
                     "v1": { "type": "number" }
                 }
             }),
-            ui_schema: None,
+            options: None,
             run_as: acts::ActRunAs::Irq,
             resources: vec![],
             catalog: acts::ActPackageCatalog::App,

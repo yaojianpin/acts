@@ -23,7 +23,7 @@ impl ActTask for Act {
         }
 
         let package = ctx.runtime.store().packages().find(&self.uses)?;
-        let in_scheam = serde_json::from_str::<JsonValue>(&package.in_schema)?;
+        let in_scheam = serde_json::from_str::<JsonValue>(&package.schema)?;
         match package.run_as {
             ActRunAs::Irq => {
                 jsonschema::validate(&in_scheam, &task.params())?;

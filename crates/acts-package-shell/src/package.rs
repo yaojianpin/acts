@@ -51,8 +51,8 @@ impl ActPackage for ShellPackage {
             version: "0.1.0",
             icon: r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-square-chevron-right-icon lucide-square-chevron-right"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="m10 8 4 4-4 4"/></svg>"#,
             doc: "",
-            in_schema: include_json!("./schema.json"),
-            ui_schema: Some(json!({
+            schema: include_json!("./schema.json"),
+            options: Some(json!({
                 "ui:order": ["shell", "script", "content-type"],
                 "script": {
                     "ui:widget": "textarea",

@@ -70,7 +70,7 @@ impl Extender {
     ///             icon: "",
     ///             doc: "",
     ///             version: "0.1.0",
-    ///             in_schema: json!({
+    ///             schema: json!({
     ///                 "type": "object",
     ///                 "properties": {
     ///                     "a": { "type": "number" },
@@ -78,7 +78,7 @@ impl Extender {
     ///                 }
     ///             }),
     ///             // refers to https://github.com/rjsf-team/react-jsonschema-form
-    ///             ui_schema: None,
+    ///             options: None,
     ///             run_as: acts::ActRunAs::Irq,
     ///             resources: vec![],
     ///             catalog: acts::ActPackageCatalog::App,

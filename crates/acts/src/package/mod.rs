@@ -121,18 +121,19 @@ pub struct ActPackageMeta {
     pub version: &'static str,
 
     /// json schema for package params
-    pub in_schema: serde_json::Value,
+    pub schema: serde_json::Value,
 
-    /// ui-schema for package
-    /// please refer to https://github.com/rjsf-team/react-jsonschema-form#readme
-    pub ui_schema: Option<serde_json::Value>,
+    /// extra options
+    #[serde(default)]
+    pub options: Option<serde_json::Value>,
 
     /// package run as Irq, Msg or Func
     /// Func is only used internally
     pub run_as: ActRunAs,
 
-    /// package resources to the orgnize multiple operations
-    /// it is used for the editor ui to search and select the operations
+    /// package resources to the orgnize multiple resources
+    /// it is used for the editor ui to search and select the resources
+    /// each resource value can fill the special value into the UI
     pub resources: Vec<ActResource>,
 
     /// package catalog
@@ -143,14 +144,7 @@ pub struct ActPackageMeta {
 pub struct ActResource {
     pub name: String,
     pub desc: String,
-    pub operations: Vec<ActOperation>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ActOperation {
-    pub name: String,
-    pub desc: String,
-    pub value: String,
+    pub value: serde_json::Value,
 }
 
 #[derive(Debug, Clone)]
@@ -169,7 +163,7 @@ impl ActPackageRegister {
             create: (|params: serde_json::Value| {
                 let meta = T::meta();
 
-                jsonschema::validate(&meta.in_schema, &params)?;
+                jsonschema::validate(&meta.schema, &params)?;
                 let ret = serde_json::from_value::<T>(params)?;
                 Ok(Box::new(ret) as Box<dyn ActPackageFn>)
             }),
@@ -209,8 +203,8 @@ impl ActPackageMeta {
             icon: pack.icon.to_string(),
             doc: pack.doc.to_string(),
             version: pack.version.to_string(),
-            in_schema: pack.in_schema.to_string(),
-            ui_schema: pack.ui_schema.map(|v| v.to_string()),
+            schema: pack.schema.to_string(),
+            options: pack.options.map(|v| v.to_string()),
             run_as: pack.run_as,
             resources: serde_json::to_string(&pack.resources)
                 .expect("cannot convert ActPackageMeta.resources to json"),

@@ -24,7 +24,7 @@ impl ActPackage for ParallelPackage {
             version: "0.1.0",
             icon: r#"<svg viewBox="0 0 1024 1024" version="1.1" xmlns="http://www.w3.org/2000/svg" width="24" height="24"><path d="M822.656 649.344l128 128v45.312l-128 128-45.312-45.312L850.752 832H250.496a96 96 0 1 1 0-64h600.256l-73.408-73.344z m0-640l-45.312 45.312L850.752 128H250.496a96 96 0 1 0 0 64h600.256l-73.408 73.344 45.312 45.312 128-128v-45.312z m-45.312 365.312L850.752 448H250.496a96 96 0 1 0 0 64h600.256l-73.408 73.344 45.312 45.312 128-128v-45.312l-128-128z" fill="currentColor"></path></svg>"#,
             doc: "",
-            in_schema: json!({
+            schema: json!({
                 "type": "object",
                 "properties": {
                     "in": {
@@ -42,7 +42,7 @@ impl ActPackage for ParallelPackage {
                 },
                 "required": ["in", "acts"]
             }),
-            ui_schema: Some(json!({
+            options: Some(json!({
                 "in": {
                     "ui:widget": "array",
                     "ui:options": {
@@ -110,6 +110,6 @@ mod tests {
 
         let value = serde_yaml::from_str::<serde_json::Value>(params).unwrap();
         let meta = super::ParallelPackage::meta();
-        jsonschema::validate(&meta.in_schema, &value).unwrap()
+        jsonschema::validate(&meta.schema, &value).unwrap()
     }
 }

@@ -67,13 +67,13 @@ impl ActPlugin for TestPackagePlugin {
             icon: "test_package_icon",
             doc: "test package doc",
             version: "0.1.0",
-            in_schema: serde_json::json!({
+            schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "v1": { "type": "number" }
                 }
             }),
-            ui_schema: Some(serde_json::json!({
+            options: Some(serde_json::json!({
                 "v1": {
                     "ui:widget": "text",
                 }
@@ -90,13 +90,13 @@ impl ActPlugin for TestPackagePlugin {
             icon: "test_package_icon",
             doc: "test package doc",
             version: "0.1.0",
-            in_schema: serde_json::json!({
+            schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "v1": { "type": "number" }
                 }
             }),
-            ui_schema: Some(serde_json::json!({
+            options: Some(serde_json::json!({
                 "v1": {
                     "ui:widget": "text",
                 }

@@ -1,6 +1,5 @@
 use acts::{
-    ActError, ActOperation, ActPackage, ActPackageCatalog, ActPackageMeta, ActResource, ActRunAs,
-    Result, Vars,
+    ActError, ActPackage, ActPackageCatalog, ActPackageMeta, ActResource, ActRunAs, Result, Vars,
 };
 use serde::Serialize;
 use serde_json::json;
@@ -20,7 +19,7 @@ impl ActPackage for StatePackage {
             version: "0.1.0",
             icon: "icon-app-state",
             doc: "",
-            in_schema: json!({
+            schema: json!({
                 "type": "object",
                 "properties": {
                     "op": { "type": "string", "enum": ["GET", "SET" ] },
@@ -29,7 +28,7 @@ impl ActPackage for StatePackage {
                 },
                 "required": ["op", "key"],
             }),
-            ui_schema: Some(json!({
+            options: Some(json!({
                 "ui:order": ["op", "key", "value"],
                 "op": {
                     "ui:widget": "select",
@@ -54,22 +53,18 @@ impl ActPackage for StatePackage {
                 }
             })),
             run_as: ActRunAs::Irq,
-            resources: vec![ActResource {
-                name: "Get or set state store".to_string(),
-                desc: "get or set a state from the state store".to_string(),
-                operations: vec![
-                    ActOperation {
-                        name: "GET state".to_string(),
-                        desc: "get a state from the state store".to_string(),
-                        value: "GET".to_string(),
-                    },
-                    ActOperation {
-                        name: "SET state".to_string(),
-                        desc: "set a state to the state store".to_string(),
-                        value: "SET".to_string(),
-                    },
-                ],
-            }],
+            resources: vec![
+                ActResource {
+                    name: "Get state store".to_string(),
+                    desc: "get a state from the state store".to_string(),
+                    value: json!({ "op": "GET"}),
+                },
+                ActResource {
+                    name: "Set state store".to_string(),
+                    desc: "set a state from the state store".to_string(),
+                    value: json!({ "op": "SET"}),
+                },
+            ],
             catalog: ActPackageCatalog::App,
         }
     }

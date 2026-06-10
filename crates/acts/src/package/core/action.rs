@@ -26,7 +26,7 @@ impl ActPackage for ActionPackage {
             version: "0.1.0",
             icon: r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="lucide lucide-check-icon lucide-check"><path d="M20 6 9 17l-5-5"/></svg>"#,
             doc: "",
-            in_schema: json!({
+            schema: json!({
                 "type": "object",
                 "properties": {
                     "action": {
@@ -44,7 +44,7 @@ impl ActPackage for ActionPackage {
                 },
                 "required": ["action"]
             }),
-            ui_schema: Some(json!({
+            options: Some(json!({
                 "ui:order": ["action", "options"],
                 "action": {
                     "ui:widget": "select",
@@ -136,7 +136,7 @@ mod tests {
 
         let meta = super::ActionPackage::meta();
         serde_json::from_value::<super::ActionPackage>(params.clone()).unwrap();
-        jsonschema::validate(&meta.in_schema, &params).unwrap()
+        jsonschema::validate(&meta.schema, &params).unwrap()
     }
 
     #[cfg(test)]
@@ -149,6 +149,6 @@ mod tests {
 
         let meta = super::ActionPackage::meta();
         serde_json::from_value::<super::ActionPackage>(params.clone()).unwrap();
-        jsonschema::validate(&meta.in_schema, &params).unwrap()
+        jsonschema::validate(&meta.schema, &params).unwrap()
     }
 }

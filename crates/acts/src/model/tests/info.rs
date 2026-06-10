@@ -17,8 +17,8 @@ fn model_info_package() {
         icon: "icon".to_string(),
         doc: "doc".to_string(),
         version: "0.1.0".to_string(),
-        in_schema: "{}".to_string(),
-        ui_schema: None,
+        schema: "{}".to_string(),
+        options: None,
         run_as: crate::ActRunAs::Func,
         resources: "[]".to_string(),
         catalog: crate::package::ActPackageCatalog::Core,
@@ -32,7 +32,7 @@ fn model_info_package() {
     assert_eq!(info.icon, package.icon);
     assert_eq!(info.doc, package.doc);
     assert_eq!(info.version, package.version);
-    assert_eq!(info.in_schema, package.in_schema);
+    assert_eq!(info.schema, package.schema);
     assert_eq!(info.run_as, package.run_as);
     assert_eq!(info.resources, package.resources);
     assert_eq!(info.catalog, package.catalog);
@@ -135,8 +135,8 @@ fn model_info_package_arr_to_value() {
         icon: "icon".to_string(),
         doc: "doc".to_string(),
         version: "0.1.0".to_string(),
-        in_schema: "{}".to_string(),
-        ui_schema: None,
+        schema: "{}".to_string(),
+        options: None,
         run_as: crate::ActRunAs::Func,
         resources: "[]".to_string(),
         catalog: crate::package::ActPackageCatalog::Core,
@@ -159,10 +159,7 @@ fn model_info_package_arr_to_value() {
     assert_eq!(v.get("icon").unwrap().as_str().unwrap(), info.icon);
     assert_eq!(v.get("doc").unwrap().as_str().unwrap(), info.doc);
     assert_eq!(v.get("version").unwrap().as_str().unwrap(), info.version);
-    assert_eq!(
-        v.get("in_schema").unwrap().as_str().unwrap(),
-        info.in_schema
-    );
+    assert_eq!(v.get("in_schema").unwrap().as_str().unwrap(), info.schema);
     assert_eq!(
         serde_json::from_value::<ActRunAs>(v.get("run_as").unwrap().clone()).unwrap(),
         info.run_as

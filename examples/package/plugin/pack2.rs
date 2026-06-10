@@ -17,14 +17,14 @@ impl ActPackage for Pack2 {
             icon: "",
             doc: "",
             version: "0.1.0",
-            in_schema: json!({
+            schema: json!({
                 "type": "object",
                 "properties": {
                     "a": { "type": "number" },
                     "b": { "type": "array" }
                 }
             }),
-            ui_schema: Some(json!({
+            options: Some(json!({
                 "ui:order": ["a", "b"]
             })),
             run_as: acts::ActRunAs::Msg,
