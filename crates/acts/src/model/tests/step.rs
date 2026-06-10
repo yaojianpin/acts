@@ -1,8 +1,8 @@
-mod acts;
-mod catch;
-mod timeout;
-
-use crate::{Step, Vars, Workflow, utils::test::USES_IRQ};
+use crate::{
+    Step, TimeoutLimit, Vars, Workflow,
+    model::act::TimeoutUnit,
+    utils::test::{USES_IRQ, USES_MSG},
+};
 use serde_json::json;
 
 #[test]
@@ -109,6 +109,33 @@ fn model_step_next() {
 }
 
 #[test]
+fn model_step_if() {
+    let mut step = Step::new();
+    assert!(step.r#if.is_none());
+
+    step = step.with_if("true");
+    assert_eq!(step.r#if.unwrap(), "true");
+}
+
+#[test]
+fn model_step_rn() {
+    let mut step = Step::new();
+    assert!(step.rn.is_none());
+
+    step = step.with_rn("a:b:c");
+    assert_eq!(step.rn.unwrap(), "a:b:c");
+}
+
+#[test]
+fn model_step_options() {
+    let mut step = Step::new();
+    assert!(step.options.is_empty());
+
+    step = step.with_options("max_limit", 5);
+    assert_eq!(step.options.get::<i32>("max_limit").unwrap(), 5);
+}
+
+#[test]
 fn model_step_branches() {
     let mut step = Step::new();
     assert_eq!(step.branches.len(), 0);
@@ -147,4 +174,253 @@ fn model_step_set_metadata() {
 fn model_step_with_expose() {
     let step = Step::new().with_expose("v1", 0);
     assert!(step.exposes().contains_key("v1"));
+}
+
+#[test]
+fn model_step_yml_uses() {
+    let text = r#"
+    name: workflow
+    id: m1
+    steps:
+        - id: step1
+          uses: acts.core.irq
+          params:
+            a: 5
+        - id: step2
+          uses: acts.core.msg
+          params:
+            b: '{{ a }}'
+    "#;
+    let m = Workflow::from_yml(text).unwrap();
+    assert_eq!(m.steps.len(), 2);
+}
+
+#[test]
+fn model_step_step_catch() {
+    let mut step = Step::new();
+    assert_eq!(step.catches.len(), 0);
+
+    step = step
+        .with_catch(|step| {
+            step.with_if(r#"$ecode() == "err1""#)
+                .with_uses(USES_MSG, Vars::new().with("key", "msg1"))
+        })
+        .with_catch(|step| step);
+    assert_eq!(step.catches.len(), 2);
+
+    assert_eq!(
+        step.catches.first().unwrap().r#if,
+        Some(r#"$ecode() == "err1""#.to_string())
+    );
+    assert_eq!(step.catches.get(1).unwrap().r#if, None);
+}
+
+#[test]
+fn model_step_yml_catches_err() {
+    let text = r#"
+    name: workflow
+    id: m1
+    steps:
+        - id: act1
+          catches:
+            - key: act1
+              if: $ecode() == "err1"
+            - act: acts.core.irq
+              key: act2
+              if: $ecode() == "err2"
+    "#;
+    let m = Workflow::from_yml(text).unwrap();
+    let step = m.steps.first().unwrap();
+    assert_eq!(step.catches.len(), 2);
+
+    let catch = step.catches.get(1).unwrap();
+    assert_eq!(catch.r#if.as_ref().unwrap(), r#"$ecode() == "err2""#);
+}
+
+#[test]
+fn model_step_yml_catches_all() {
+    let text = r#"
+    name: workflow
+    id: m1
+    steps:
+        - id: act1
+          catches:
+            - key: act1
+              if: $ecode() == "err1"
+            - key: act2
+    "#;
+    let m = Workflow::from_yml(text).unwrap();
+    let step = m.steps.first().unwrap();
+    assert_eq!(step.catches.len(), 2);
+
+    let catch = step.catches.first().unwrap();
+    assert_eq!(catch.r#if.as_ref().unwrap(), r#"$ecode() == "err1""#);
+
+    let catch = step.catches.get(1).unwrap();
+    assert_eq!(catch.r#if, None);
+}
+
+#[test]
+fn model_step_timeout_parse_seconds() {
+    let timeout = TimeoutLimit::parse("1s").unwrap();
+
+    assert_eq!(timeout.value, 1);
+    assert_eq!(timeout.unit, TimeoutUnit::Second);
+    assert_eq!(timeout.as_secs(), 1);
+
+    let timeout = TimeoutLimit::parse("100s").unwrap();
+
+    assert_eq!(timeout.value, 100);
+    assert_eq!(timeout.unit, TimeoutUnit::Second);
+    assert_eq!(timeout.as_secs(), 100);
+}
+
+#[test]
+fn model_step_timeout_parse_minutes() {
+    let timeout = TimeoutLimit::parse("1m").unwrap();
+
+    assert_eq!(timeout.value, 1);
+    assert_eq!(timeout.unit, TimeoutUnit::Minute);
+    assert_eq!(timeout.as_secs(), 60);
+
+    let timeout = TimeoutLimit::parse("100m").unwrap();
+
+    assert_eq!(timeout.value, 100);
+    assert_eq!(timeout.unit, TimeoutUnit::Minute);
+    assert_eq!(timeout.as_secs(), 100 * 60);
+}
+
+#[test]
+fn model_step_timeout_parse_hours() {
+    let timeout = TimeoutLimit::parse("1h").unwrap();
+
+    assert_eq!(timeout.value, 1);
+    assert_eq!(timeout.unit, TimeoutUnit::Hour);
+    assert_eq!(timeout.as_secs(), 60 * 60);
+
+    let timeout = TimeoutLimit::parse("100h").unwrap();
+
+    assert_eq!(timeout.value, 100);
+    assert_eq!(timeout.unit, TimeoutUnit::Hour);
+    assert_eq!(timeout.as_secs(), 100 * 60 * 60);
+}
+
+#[test]
+fn model_step_timeout_parse_days() {
+    let timeout = TimeoutLimit::parse("1d").unwrap();
+
+    assert_eq!(timeout.value, 1);
+    assert_eq!(timeout.unit, TimeoutUnit::Day);
+    assert_eq!(timeout.as_secs(), 60 * 60 * 24);
+
+    let timeout = TimeoutLimit::parse("100d").unwrap();
+
+    assert_eq!(timeout.value, 100);
+    assert_eq!(timeout.unit, TimeoutUnit::Day);
+    assert_eq!(timeout.as_secs(), 100 * 60 * 60 * 24);
+}
+
+#[test]
+fn model_step_timeout_parse_error() {
+    let timeout = TimeoutLimit::parse("");
+
+    assert!(timeout.is_err());
+
+    let timeout = TimeoutLimit::parse("100x");
+    assert!(timeout.is_err());
+
+    let timeout = TimeoutLimit::parse("xxd");
+    assert!(timeout.is_err());
+
+    let timeout = TimeoutLimit::parse("100");
+    assert!(timeout.is_err());
+}
+
+#[test]
+fn model_timeout_to_string() {
+    let timeout = TimeoutLimit::parse("2d").unwrap();
+    assert_eq!(timeout.to_string(), "2d");
+}
+
+#[test]
+fn model_step_timeout_ser() {
+    let timeout = TimeoutLimit {
+        value: 2,
+        unit: TimeoutUnit::Day,
+    };
+    assert_eq!(serde_json::ser::to_string(&timeout).unwrap(), r#""2d""#);
+}
+
+#[test]
+fn model_step_timeout_deser() {
+    let timeout: TimeoutLimit = serde_json::de::from_str(r#""2d""#).unwrap();
+    assert_eq!(timeout.value, 2);
+    assert_eq!(timeout.unit, TimeoutUnit::Day);
+    assert_eq!(timeout.as_secs(), 2 * 60 * 60 * 24);
+}
+
+#[test]
+fn model_step_timeout() {
+    let mut step = Step::new();
+    assert_eq!(step.timeouts.len(), 0);
+
+    step = step
+        .with_timeout(|step| {
+            step.with_id("timout1")
+                .with_if(r#"$cost_in('1h')"#)
+                .with_uses(USES_MSG, Vars::new().with("key", "msg1"))
+        })
+        .with_timeout(|step| {
+            step.with_id("timout2")
+                .with_if(r#"$cost_in('2d')"#)
+                .with_uses(USES_MSG, Vars::new().with("key", "msg2"))
+        });
+
+    assert_eq!(step.timeouts.len(), 2);
+    assert_eq!(
+        step.timeouts
+            .first()
+            .as_ref()
+            .unwrap()
+            .r#if
+            .as_ref()
+            .unwrap(),
+        "$cost_in('1h')"
+    );
+    assert_eq!(
+        step.timeouts
+            .get(1)
+            .as_ref()
+            .unwrap()
+            .r#if
+            .as_ref()
+            .unwrap(),
+        "$cost_in('2d')"
+    );
+}
+
+#[test]
+fn model_step_yml_timeout() {
+    let text = r#"
+    name: workflow
+    id: m1
+    steps:
+        - id: act1
+          timeouts:
+            - uses: acts.core.irq
+              key: act2
+              if: $cost_in('2d')
+            - uses: acts.core.irq
+              key: act3
+              if: $cost_in('3m')
+    "#;
+    let m = Workflow::from_yml(text).unwrap();
+    let step = m.steps.first().unwrap();
+    assert_eq!(step.timeouts.len(), 2);
+
+    let timeout = step.timeouts.first().unwrap();
+    assert_eq!(timeout.r#if.as_ref().unwrap(), "$cost_in('2d')");
+
+    let timeout = step.timeouts.get(1).unwrap();
+    assert_eq!(timeout.r#if.as_ref().unwrap(), "$cost_in('3m')");
 }

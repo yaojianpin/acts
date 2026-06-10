@@ -1,0 +1,12 @@
+[book]
+authors = ["Yao jianping"]
+language = "zh"
+multilingual = false
+src = "src"
+title = "acts 服务指南"
+
+[build]
+build-dir = "book/zh"
+
+[output.html]
+additional-css = ["styles/style.css"]

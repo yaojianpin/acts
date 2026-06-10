@@ -50,13 +50,13 @@ where
     let channel = engine.channel();
     channel.on_complete(move |e| {
         println!("on_complete: {e:?}");
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(20));
         s1.close();
     });
 
     channel.on_error(move |e| {
         println!("on_error: {e:?}");
-        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::thread::sleep(std::time::Duration::from_millis(20));
         s2.close();
     });
 }

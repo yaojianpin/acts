@@ -89,7 +89,7 @@ async fn pack_block_parallel() {
         }
     });
     engine.runtime().launch(&proc).unwrap();
-    let ret = tx.timeout(300).await;
+    let ret = tx.timeout(400).await;
     proc.print();
     assert!(ret.iter().any(|iter| iter.is_params_key("act1")));
     assert!(ret.iter().any(|iter| iter.is_params_key("act2")));

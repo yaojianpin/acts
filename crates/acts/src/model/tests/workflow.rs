@@ -312,6 +312,12 @@ fn model_workflow_desc() {
 }
 
 #[test]
+fn model_workflow_rn() {
+    let m = Workflow::new().with_rn("a:b:c");
+    assert_eq!(m.rn.unwrap(), "a:b:c");
+}
+
+#[test]
 fn model_workflow_inputs_schema() {
     let schema = ActSchema::Simple(Variant::new().name("input").r#type(VariantTypes::String));
     let m = Workflow::new().with_inputs(schema.clone());

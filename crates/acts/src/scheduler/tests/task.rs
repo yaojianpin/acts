@@ -1,18 +1,11 @@
 use crate::{
     MessageState, TaskState, Vars, Workflow,
     event::EventAction,
-    utils::{self, test::USES_IRQ, test::create_proc},
+    scheduler::NodeContent,
+    utils::{self, test::USES_IRQ, test::auto_complete, test::create_proc},
 };
 
 use serial_test::serial;
-
-#[serial]
-#[tokio::test(flavor = "multi_thread")]
-async fn sch_task_state() {
-    let workflow = Workflow::new();
-    let (_engine, proc) = create_proc(&workflow, "w1");
-    assert!(proc.state() == TaskState::None);
-}
 
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
@@ -64,161 +57,6 @@ async fn sch_task_steps() {
 
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn sch_task_step_completed() {
-    let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
-    let rt = engine.runtime();
-    let sig = engine.signal(false);
-    let tx = sig.clone();
-    let rx = sig.clone();
-    let emitter = engine.channel();
-    emitter.on_message(move |msg| {
-        if msg.inner().r#type == "step" && msg.inner().state() == MessageState::Completed {
-            rx.send(true);
-        }
-    });
-    rt.launch(&proc).unwrap();
-    let ret = tx.recv().await;
-    assert!(ret)
-}
-
-#[serial]
-#[tokio::test(flavor = "multi_thread")]
-async fn sch_task_step_skip_with_inputs_to_next() {
-    let workflow = Workflow::new()
-        .with_step(|step| {
-            step.with_id("step1")
-                .with_var("v1", 10)
-                .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-        })
-        .with_step(|step| {
-            step.with_id("step2")
-                .with_uses(USES_IRQ, Vars::new().with("key", "act2"))
-        });
-
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
-    let rt = engine.runtime();
-    let sig = engine.signal(Vars::new());
-    let rx = sig.clone();
-    let rt2 = rt.clone();
-    let emitter = engine.channel();
-    emitter.on_message(move |e| {
-        println!("message: {e:?}");
-        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
-            && e.is_state(MessageState::Created)
-        {
-            rt2.do_action2(&e.pid, &e.tid, EventAction::Skip, Vars::new())
-                .unwrap();
-        }
-
-        if e.params().unwrap().get::<String>("key").as_deref() == Some("act2")
-            && e.is_state(MessageState::Created)
-        {
-            rx.send(e.inputs.clone());
-        }
-    });
-
-    rt.launch(&proc).unwrap();
-    let ret = sig.recv().await;
-    assert_eq!(ret.get::<i32>("v1").unwrap(), 10);
-}
-
-#[serial]
-#[tokio::test(flavor = "multi_thread")]
-async fn sch_task_step_empty_acts() {
-    let workflow = Workflow::new().with_step(|step| step.with_name("step1"));
-    let id = utils::longid();
-    workflow.print();
-    let (engine, proc) = create_proc(&workflow, &id);
-    let rt = engine.runtime();
-    let sig = engine.signal(());
-    let emitter = engine.channel();
-    emitter.on_complete({
-        let sig = sig.clone();
-        move |_| sig.close()
-    });
-    emitter.on_error({
-        let sig = sig.clone();
-        move |_| sig.close()
-    });
-
-    rt.launch(&proc).unwrap();
-    let _ = sig.recv().await;
-    assert_eq!(proc.state(), TaskState::Completed);
-}
-
-#[serial]
-#[tokio::test(flavor = "multi_thread")]
-async fn sch_task_step_if_false() {
-    let workflow = Workflow::new()
-        .with_step(|step| step.with_id("step1").with_if("false"))
-        .with_step(|step| step.with_id("step2"));
-    workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
-    let rt = engine.runtime();
-    let sig = engine.signal(());
-    let emitter = engine.channel();
-    emitter.on_complete({
-        let sig = sig.clone();
-        move |_| sig.close()
-    });
-    emitter.on_error({
-        let sig = sig.clone();
-        move |_| sig.close()
-    });
-
-    rt.launch(&proc).unwrap();
-    let _ = sig.recv().await;
-
-    proc.print();
-
-    assert_eq!(
-        proc.task_by_nid("step1").first().unwrap().state(),
-        TaskState::Skipped
-    );
-
-    assert_eq!(
-        proc.task_by_nid("step2").first().unwrap().state(),
-        TaskState::Completed
-    );
-}
-
-#[serial]
-#[tokio::test(flavor = "multi_thread")]
-async fn sch_task_step_if_true() {
-    let workflow = Workflow::new()
-        .with_step(|step| step.with_id("step1").with_if("true"))
-        .with_step(|step| step.with_id("step2"));
-    workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
-    let rt = engine.runtime();
-    let sig = engine.signal(());
-    let emitter = engine.channel();
-    emitter.on_complete({
-        let sig = sig.clone();
-        move |_| sig.close()
-    });
-    emitter.on_error({
-        let sig = sig.clone();
-        move |_| sig.close()
-    });
-
-    rt.launch(&proc).unwrap();
-    let _ = sig.recv().await;
-
-    proc.print();
-    assert_eq!(
-        proc.task_by_nid("step1").first().unwrap().state(),
-        TaskState::Completed
-    );
-    assert_eq!(
-        proc.task_by_nid("step2").first().unwrap().state(),
-        TaskState::Completed
-    );
-}
-
-#[serial]
-#[tokio::test(flavor = "multi_thread")]
 async fn sch_task_branch_basic() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_name("step1")
@@ -257,396 +95,6 @@ async fn sch_task_branch_basic() {
 
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn sch_task_branch_skip() {
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_name("step1").with_branch(|branch| {
-            branch
-                .with_id("b1")
-                .with_if("false")
-                .with_name("branch 1")
-                .with_step(|step| step.with_id("step11"))
-                .with_step(|step| step.with_id("step12"))
-                .with_step(|step| step.with_id("step13"))
-        })
-    });
-
-    let id = utils::longid();
-    let (engine, proc) = create_proc(&workflow, &id);
-    let rt = engine.runtime();
-    let sig = engine.signal(());
-    let emitter = engine.channel();
-    emitter.on_complete({
-        let sig = sig.clone();
-        move |_| sig.close()
-    });
-    emitter.on_error({
-        let sig = sig.clone();
-        move |_| sig.close()
-    });
-
-    rt.launch(&proc).unwrap();
-    let _ = sig.recv().await;
-
-    assert_eq!(
-        proc.task_by_nid("b1").first().unwrap().state(),
-        TaskState::Skipped
-    );
-    assert!(proc.task_by_nid("step11").is_empty());
-}
-
-#[serial]
-#[tokio::test(flavor = "multi_thread")]
-async fn sch_task_branch_empty_if() {
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_name("step1").with_branch(|branch| {
-            branch
-                .with_id("b1")
-                .with_name("branch 1")
-                .with_step(|step| step.with_name("step11"))
-                .with_step(|step| step.with_name("step12"))
-                .with_step(|step| step.with_name("step13"))
-        })
-    });
-
-    let id = utils::longid();
-    let (engine, proc) = create_proc(&workflow, &id);
-    let rt = engine.runtime();
-    let sig = engine.signal(());
-    let emitter = engine.channel();
-    emitter.on_complete({
-        let sig = sig.clone();
-        move |_| sig.close()
-    });
-    emitter.on_error({
-        let sig = sig.clone();
-        move |_| sig.close()
-    });
-
-    rt.launch(&proc).unwrap();
-    let _ = sig.recv().await;
-
-    assert_eq!(
-        proc.task_by_nid("b1").first().unwrap().state(),
-        TaskState::Skipped
-    );
-}
-
-#[serial]
-#[tokio::test(flavor = "multi_thread")]
-async fn sch_task_branch_if_false_else_success() {
-    let workflow = Workflow::new().with_var("v", 1).with_step(|step| {
-        step.with_name("step1")
-            .with_branch(|branch| {
-                branch
-                    .with_id("b1")
-                    .with_else(true)
-                    .with_name("branch 1")
-                    .with_step(|step| step.with_name("step11"))
-                    .with_step(|step| step.with_name("step12"))
-                    .with_step(|step| step.with_name("step13"))
-            })
-            .with_branch(|branch| {
-                branch
-                    .with_id("b2")
-                    .with_if(r#"v < 0"#)
-                    .with_name("branch 2")
-                    .with_step(|step| step.with_id("step21"))
-            })
-    });
-
-    let id = utils::longid();
-    let (engine, proc) = create_proc(&workflow, &id);
-    let rt = engine.runtime();
-    let sig = engine.signal(());
-    let emitter = engine.channel();
-    emitter.on_complete({
-        let sig = sig.clone();
-        move |_| sig.close()
-    });
-    emitter.on_error({
-        let sig = sig.clone();
-        move |_| sig.close()
-    });
-
-    rt.launch(&proc).unwrap();
-    let _ = sig.recv().await;
-    proc.print();
-    assert_eq!(
-        proc.task_by_nid("b1").first().unwrap().state(),
-        TaskState::Completed
-    );
-}
-
-#[serial]
-#[tokio::test(flavor = "multi_thread")]
-async fn sch_task_branch_if_false_else_running() {
-    let workflow = Workflow::new().with_var("v", 1).with_step(|step| {
-        step.with_name("step1")
-            .with_branch(|branch| {
-                branch
-                    .with_id("b1")
-                    .with_else(true)
-                    .with_name("branch 1")
-                    .with_step(|step| {
-                        step.with_name("step11")
-                            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-                    })
-            })
-            .with_branch(|branch| {
-                branch
-                    .with_id("b2")
-                    .with_if(r#"v < 0"#)
-                    .with_name("branch 2")
-                    .with_step(|step| step.with_id("step21"))
-            })
-    });
-
-    let id = utils::longid();
-    let (engine, proc) = create_proc(&workflow, &id);
-    let rt = engine.runtime();
-    let sig = engine.signal(());
-    let rx = sig.clone();
-    let emitter = engine.channel();
-    // process.tree().print();
-    emitter.on_message(move |e| {
-        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1") {
-            rx.close();
-        }
-    });
-
-    rt.launch(&proc).unwrap();
-    let _ = sig.recv().await;
-
-    assert_eq!(
-        proc.task_by_nid("b1").first().unwrap().state(),
-        TaskState::Running
-    );
-
-    // check the branch state is updated to store
-    let task = proc.task_by_nid("b1").first().unwrap().clone();
-    let task_id = utils::Id::new(&task.pid, &task.id);
-    assert_eq!(
-        rt.cache()
-            .store()
-            .tasks()
-            .find(&task_id.id())
-            .unwrap()
-            .state,
-        "running"
-    );
-}
-
-#[serial]
-#[tokio::test(flavor = "multi_thread")]
-async fn sch_task_branch_if_true_else() {
-    let workflow = Workflow::new().with_var("v", 1).with_step(|step| {
-        step.with_id("step1")
-            .with_branch(|branch| {
-                branch
-                    .with_id("b1")
-                    .with_if(r#"v > 0"#)
-                    .with_name("branch 1")
-                    .with_step(|step| step.with_id("step11"))
-            })
-            .with_branch(|branch| {
-                branch
-                    .with_id("b2")
-                    .with_else(true)
-                    .with_name("branch 2")
-                    .with_step(|step| step.with_id("step21"))
-            })
-    });
-
-    let id = utils::longid();
-    let (engine, proc) = create_proc(&workflow, &id);
-    let rt = engine.runtime();
-    let sig = engine.signal(());
-    let emitter = engine.channel();
-    emitter.on_complete({
-        let sig = sig.clone();
-        move |_| sig.close()
-    });
-    emitter.on_error({
-        let sig = sig.clone();
-        move |_| sig.close()
-    });
-    // process.tree().print();
-
-    rt.launch(&proc).unwrap();
-    let _ = sig.recv().await;
-
-    assert_eq!(
-        proc.task_by_nid("b1").first().unwrap().state(),
-        TaskState::Completed
-    );
-    assert_eq!(
-        proc.task_by_nid("b2").first().unwrap().state(),
-        TaskState::Skipped
-    );
-}
-
-#[serial]
-#[tokio::test(flavor = "multi_thread")]
-async fn sch_task_branch_if_two_no_else() {
-    let workflow = Workflow::new().with_var("v", 1).with_step(|step| {
-        step.with_name("step1")
-            .with_branch(|branch| {
-                branch
-                    .with_id("b1")
-                    .with_if(r#"v > 0"#)
-                    .with_name("branch 1")
-                    .with_step(|step| step.with_id("step11"))
-            })
-            .with_branch(|branch| {
-                branch
-                    .with_id("b2")
-                    .with_if(r#"v <= 0"#)
-                    .with_name("branch 2")
-                    .with_step(|step| step.with_id("step21"))
-            })
-    });
-
-    let id = utils::longid();
-    let (engine, proc) = create_proc(&workflow, &id);
-    let rt = engine.runtime();
-    let sig = engine.signal(());
-    let emitter = engine.channel();
-    emitter.on_complete({
-        let sig = sig.clone();
-        move |_| sig.close()
-    });
-    emitter.on_error({
-        let sig = sig.clone();
-        move |_| sig.close()
-    });
-    // process.tree().print();
-
-    rt.launch(&proc).unwrap();
-    let _ = sig.recv().await;
-
-    assert_eq!(
-        proc.task_by_nid("b1").first().unwrap().state(),
-        TaskState::Completed
-    );
-    assert_eq!(
-        proc.task_by_nid("b2").first().unwrap().state(),
-        TaskState::Skipped
-    );
-}
-
-#[serial]
-#[tokio::test(flavor = "multi_thread")]
-async fn sch_task_branch_if_mutli_true() {
-    let workflow = Workflow::new().with_var("v", 5).with_step(|step| {
-        step.with_name("step1")
-            .with_branch(|branch| {
-                branch
-                    .with_id("b1")
-                    .with_if(r#"v > 0"#)
-                    .with_name("branch 1")
-                    .with_step(|step| step.with_id("step11"))
-            })
-            .with_branch(|branch| {
-                branch
-                    .with_id("b2")
-                    .with_if(r#"v <= 0"#)
-                    .with_name("branch 2")
-                    .with_step(|step| step.with_id("step21"))
-            })
-            .with_branch(|branch| {
-                branch
-                    .with_id("b3")
-                    .with_if(r#"v > 2"#)
-                    .with_name("branch 3")
-                    .with_step(|step| step.with_id("step31"))
-            })
-    });
-
-    let id = utils::longid();
-    let (engine, proc) = create_proc(&workflow, &id);
-    let rt = engine.runtime();
-    let sig = engine.signal(());
-    let emitter = engine.channel();
-    emitter.on_complete({
-        let sig = sig.clone();
-        move |_| sig.close()
-    });
-    emitter.on_error({
-        let sig = sig.clone();
-        move |_| sig.close()
-    });
-    // process.tree().print();
-
-    rt.launch(&proc).unwrap();
-    let _ = sig.recv().await;
-
-    assert_eq!(
-        proc.task_by_nid("b1").first().unwrap().state(),
-        TaskState::Completed
-    );
-    assert_eq!(
-        proc.task_by_nid("b3").first().unwrap().state(),
-        TaskState::Completed
-    );
-    assert_eq!(
-        proc.task_by_nid("b2").first().unwrap().state(),
-        TaskState::Skipped
-    );
-}
-
-#[serial]
-#[tokio::test(flavor = "multi_thread")]
-async fn sch_task_branch_needs_state() {
-    let workflow = Workflow::new().with_var("v", 5).with_step(|step| {
-        step.with_name("step1")
-            .with_branch(|branch| {
-                branch
-                    .with_id("b1")
-                    .with_if(r#"v > 0"#)
-                    .with_name("branch 1")
-                    .with_step(|step| {
-                        step.with_id("step11")
-                            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-                    })
-            })
-            .with_branch(|branch| {
-                branch
-                    .with_id("b2")
-                    .with_if(r#"v > 2"#)
-                    .with_name("branch 2")
-                    .with_need("b1")
-                    .with_step(|step| step.with_id("step21"))
-            })
-    });
-
-    workflow.print();
-    let id = utils::longid();
-    let (engine, proc) = create_proc(&workflow, &id);
-    let rt = engine.runtime();
-    let sig = engine.signal(());
-    let rx = sig.clone();
-    let emitter = engine.channel();
-    emitter.on_message(move |e| {
-        println!("message: {:?}", e.inner());
-        if e.inner().is_type("act") {
-            rx.close();
-        }
-    });
-    rt.launch(&proc).unwrap();
-    let _ = sig.recv().await;
-    proc.print();
-    assert_eq!(
-        proc.task_by_nid("b1").first().unwrap().state(),
-        TaskState::Running
-    );
-    assert_eq!(
-        proc.task_by_nid("b2").first().unwrap().state(),
-        TaskState::Pending
-    );
-}
-
-#[serial]
-#[tokio::test(flavor = "multi_thread")]
 async fn sch_task_act_skip_with_inputs_to_next() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -680,4 +128,134 @@ async fn sch_task_act_skip_with_inputs_to_next() {
     rt.launch(&proc).unwrap();
     let ret = sig.recv().await;
     assert_eq!(ret.get::<i32>("v1").unwrap(), 10);
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_task_step_name() {
+    let workflow = Workflow::new()
+        .with_step(|step| step.with_id("step1").with_name("my_step_name"))
+        .with_step(|step| step.with_id("step2"));
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
+    rt.launch(&proc).unwrap();
+    tx.recv().await;
+    assert_eq!(proc.state(), TaskState::Completed);
+    // verify the step name is preserved on the task node
+    let tasks = proc.task_by_nid("step1");
+    let task = tasks.first().unwrap();
+    assert_eq!(task.node().name(), "my_step_name");
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_task_step_desc() {
+    let workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_name("step1_name")
+            .with_desc("this is a step description")
+    });
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
+    rt.launch(&proc).unwrap();
+    tx.recv().await;
+    assert_eq!(proc.state(), TaskState::Completed);
+    // verify the step desc is preserved on the task node
+    let tasks = proc.task_by_nid("step1");
+    let task = tasks.first().unwrap();
+    if let NodeContent::Step(step) = &task.node().content {
+        assert_eq!(step.desc, "this is a step description");
+    } else {
+        panic!("expected step node content");
+    }
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_task_step_id() {
+    let workflow = Workflow::new()
+        .with_step(|step| step.with_id("step_100").with_name("step one"))
+        .with_step(|step| step.with_id("step_200").with_name("step two"));
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
+    rt.launch(&proc).unwrap();
+    tx.recv().await;
+    assert_eq!(proc.state(), TaskState::Completed);
+    // verify task lookup by step id works correctly
+    let tasks = proc.task_by_nid("step_100");
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks.first().unwrap().node().name(), "step one");
+    let tasks = proc.task_by_nid("step_200");
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks.first().unwrap().node().name(), "step two");
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_task_step_options() {
+    let workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_options("timeout", 30)
+            .with_options("retry", 3)
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+    });
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vars::new()));
+    let captured2 = captured.clone();
+    let rt2 = rt.clone();
+    engine.channel().on_message(move |e| {
+        if e.is_type("step") && e.is_state(MessageState::Created) {
+            *captured2.lock().unwrap() = e.inner().inputs.clone();
+        }
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+            rt2.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
+                .unwrap();
+        }
+    });
+    rt.launch(&proc).unwrap();
+    tx.recv().await;
+    assert_eq!(proc.state(), TaskState::Completed);
+    // verify step options set via with_options are in message.inputs
+    let inputs = captured.lock().unwrap();
+    let options: serde_json::Value = inputs.get("options").unwrap();
+    assert_eq!(options["timeout"].as_i64().unwrap(), 30);
+    assert_eq!(options["retry"].as_i64().unwrap(), 3);
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_task_step_metadata() {
+    let workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_name("meta_step")
+            .with_metadata("color", "blue")
+            .with_metadata("width", 200)
+    });
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
+    rt.launch(&proc).unwrap();
+    tx.recv().await;
+    assert_eq!(proc.state(), TaskState::Completed);
+    // verify step metadata is preserved on the task node
+    let tasks = proc.task_by_nid("step1");
+    let task = tasks.first().unwrap();
+    if let NodeContent::Step(step) = &task.node().content {
+        let color: String = step.metadata.get("color").unwrap_or_default();
+        assert_eq!(color, "blue");
+        let width: i32 = step.metadata.get("width").unwrap_or_default();
+        assert_eq!(width, 200);
+    } else {
+        panic!("expected step node content");
+    }
 }

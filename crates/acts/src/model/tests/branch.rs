@@ -79,6 +79,15 @@ fn model_branch_steps() {
 }
 
 #[test]
+fn model_step_options() {
+    let mut b = Branch::new();
+    assert!(b.options.is_empty());
+
+    b = b.with_options("max_limit", 5);
+    assert_eq!(b.options.get::<i32>("max_limit").unwrap(), 5);
+}
+
+#[test]
 fn model_branch_set_metadata() {
     let b = Branch::new()
         .with_metadata("r1", 1)

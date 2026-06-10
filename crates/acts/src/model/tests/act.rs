@@ -1,7 +1,4 @@
-mod catch;
-mod timeout;
-
-use crate::{Act, Workflow};
+use crate::{Act, Step, Vars, Workflow, utils::test::USES_MSG};
 use serde_json::json;
 
 #[test]
@@ -178,4 +175,112 @@ fn model_act_yml_expose() {
 fn model_act_with_expose() {
     let act = Act::new().with_expose("v1", 0);
     assert!(act.exposes().contains_key("v1"));
+}
+
+#[test]
+fn model_act_timeout() {
+    let mut step = Step::new();
+    assert_eq!(step.timeouts.len(), 0);
+
+    step = step
+        .with_timeout(|step| {
+            step.with_if(r#"$cost_in('1h')"#)
+                .with_uses(USES_MSG, Vars::new())
+        })
+        .with_timeout(|step| {
+            step.with_if(r#"$cost_in('2d')"#)
+                .with_uses(USES_MSG, Vars::new())
+        });
+
+    assert_eq!(step.timeouts.len(), 2);
+
+    let timeout = step.timeouts.first().unwrap();
+    assert_eq!(timeout.r#if.as_ref().unwrap(), "$cost_in('1h')");
+
+    let timeout = step.timeouts.get(1).unwrap();
+    assert_eq!(timeout.r#if.as_ref().unwrap(), "$cost_in('2d')");
+}
+
+#[test]
+fn model_act_yml_timeout() {
+    let text = r#"
+    name: workflow
+    id: m1
+    steps:
+        - id: step1
+          uses: acts.core.irq
+          timeouts:
+            - uses: acts.core.irq
+              if: $cost_in('2d')
+            - uses: acts.core.irq
+              if: $cost_in('3m')
+    "#;
+    let m = Workflow::from_yml(text).unwrap();
+    let step = m.steps.first().unwrap();
+    assert_eq!(step.timeouts.len(), 2);
+
+    let timeout = step.timeouts.first().unwrap();
+    assert_eq!(timeout.r#if.as_ref().unwrap(), "$cost_in('2d')");
+
+    let timeout = step.timeouts.get(1).unwrap();
+    assert_eq!(timeout.r#if.as_ref().unwrap(), "$cost_in('3m')");
+}
+
+#[test]
+fn model_act_catch() {
+    let mut step = Step::new();
+    assert_eq!(step.catches.len(), 0);
+
+    step = step
+        .with_catch(|step| step.with_if(r#"$ecode() == "err1""#))
+        .with_catch(|step| step);
+    assert_eq!(step.catches.len(), 2);
+    assert_eq!(
+        step.catches.first().unwrap().r#if,
+        Some(r#"$ecode() == "err1""#.to_string())
+    );
+    assert_eq!(step.catches.get(1).unwrap().r#if, None);
+}
+
+#[test]
+fn model_act_yml_catches_err() {
+    let text = r#"
+    name: workflow
+    id: m1
+    steps:
+        - id: step1
+          uses: acts.core.irq
+          catches:
+            - uses: acts.core.irq
+              if: $ecode() == 'err1'
+            - uses: acts.core.irq
+              if: $ecode() == 'err2'
+
+    "#;
+    let m = Workflow::from_yml(text).unwrap();
+    let step = m.steps.first().unwrap();
+    assert_eq!(step.catches.len(), 2);
+
+    let catch = step.catches.get(1).unwrap();
+    assert_eq!(catch.r#if.as_ref().unwrap(), "$ecode() == 'err2'");
+}
+
+#[test]
+fn model_act_yml_catches_all() {
+    let text = r#"
+    name: workflow
+    id: m1
+    steps:
+        - id: step1
+          uses: acts.core.irq
+          catches:
+            - uses: acts.core.irq
+              if: $ecode() == 'err1'
+    "#;
+    let m = Workflow::from_yml(text).unwrap();
+    let step = m.steps.first().unwrap();
+    assert_eq!(step.catches.len(), 1);
+
+    let catch = step.catches.first().unwrap();
+    assert_eq!(catch.r#if.as_ref().unwrap(), "$ecode() == 'err1'");
 }

@@ -88,6 +88,14 @@ impl Branch {
         ret
     }
 
+    pub fn with_options<T>(mut self, name: &str, value: T) -> Self
+    where
+        T: Serialize + Clone,
+    {
+        self.options.set(name, value);
+        self
+    }
+
     pub fn with_expose<T>(mut self, name: &str, value: T) -> Self
     where
         T: Serialize + Clone,

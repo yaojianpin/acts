@@ -1,0 +1,12 @@
+[book]
+authors = ["Yao jianping"]
+language = "en"
+multilingual = false
+src = "src-en"
+title = "acts Workflow Engine Guide"
+
+[build]
+build-dir = "book/en"
+
+[output.html]
+additional-css = ["styles/style.css"]

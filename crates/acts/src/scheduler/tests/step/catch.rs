@@ -93,16 +93,10 @@ async fn sch_step_catch_empty_default() {
     workflow.print();
     let (engine, proc) = create_proc(&workflow, &utils::longid());
     let rt = engine.runtime();
-    let sig = engine.signal(());
-    let tx = sig.clone();
-    let _rx = sig.clone();
-    let emitter = engine.channel();
-    let tx_close = tx.clone();
-    let tx_close2 = tx_close.clone();
-    emitter.on_complete(move |_| tx_close.close());
-    emitter.on_error(move |_| tx_close2.close());
-
-    emitter.on_message(move |e| {
+    let (sig, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
+    let channel = engine.channel();
+    channel.on_message(move |e| {
         if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.set(consts::ACT_ERR_CODE, "err1");
@@ -112,7 +106,7 @@ async fn sch_step_catch_empty_default() {
     });
 
     engine.runtime().launch(&proc).unwrap();
-    tx.recv().await;
+    sig.recv().await;
     proc.print();
     assert_eq!(proc.state(), TaskState::Completed);
 }
@@ -130,15 +124,9 @@ async fn sch_step_catch_by_err_code() {
     workflow.print();
     let (engine, proc) = create_proc(&workflow, &utils::longid());
     let rt = engine.runtime();
-
-    let sig = engine.signal(false);
-    let tx = sig.clone();
-    let rx = sig.clone();
     let emitter = engine.channel();
-    let tx_close = tx.clone();
-    let tx_close2 = tx_close.clone();
-    emitter.on_complete(move |_| tx_close.close());
-    emitter.on_error(move |_| tx_close2.close());
+    let (tx, rx) = engine.signal(false).double();
+    auto_complete(&engine, &rx);
 
     emitter.on_message(move |e| {
         if e.is_params_key("act1") && e.is_state(MessageState::Created) {
@@ -175,14 +163,9 @@ async fn sch_step_catch_by_wrong_code() {
     workflow.print();
     let (engine, proc) = create_proc(&workflow, &utils::longid());
     let rt = engine.runtime();
-    let sig = engine.signal(());
-    let tx = sig.clone();
-    let _rx = sig.clone();
     let emitter = engine.channel();
-    let tx_close = tx.clone();
-    let tx_close2 = tx_close.clone();
-    emitter.on_complete(move |_| tx_close.close());
-    emitter.on_error(move |_| tx_close2.close());
+    let (tx, rx) = engine.signal(false).double();
+    auto_complete(&engine, &rx);
 
     let s = rt.clone();
     emitter.on_message(move |e| {
@@ -214,14 +197,9 @@ async fn sch_step_catch_by_no_err_code() {
     workflow.print();
     let (engine, proc) = create_proc(&workflow, &utils::longid());
     let rt = engine.runtime();
-    let sig = engine.signal(bool::default());
-    let tx = sig.clone();
-    let rx = sig.clone();
     let emitter = engine.channel();
-    let tx_close = tx.clone();
-    let tx_close2 = tx_close.clone();
-    emitter.on_complete(move |_| tx_close.close());
-    emitter.on_error(move |_| tx_close2.close());
+    let (tx, rx) = engine.signal(false).double();
+    auto_complete(&engine, &rx);
 
     let s = rt.clone();
     emitter.on_message(move |e| {
@@ -259,14 +237,9 @@ async fn sch_step_catch_many_if() {
     workflow.print();
     let (engine, proc) = create_proc(&workflow, &utils::longid());
     let rt = engine.runtime();
-    let sig = engine.signal(bool::default());
-    let tx = sig.clone();
-    let rx = sig.clone();
     let emitter = engine.channel();
-    let tx_close = tx.clone();
-    let tx_close2 = tx_close.clone();
-    emitter.on_complete(move |_| tx_close.close());
-    emitter.on_error(move |_| tx_close2.close());
+    let (tx, rx) = engine.signal(false).double();
+    auto_complete(&engine, &rx);
 
     let s = rt.clone();
     emitter.on_message(move |e| {
@@ -345,17 +318,11 @@ async fn sch_step_catch_as_complete() {
     workflow.print();
     let (engine, proc) = create_proc(&workflow, &utils::longid());
     let rt = engine.runtime();
-    let sig = engine.signal(bool::default());
-    let tx = sig.clone();
-    let rx = sig.clone();
     let emitter = engine.channel();
-    let tx_close = tx.clone();
-    let tx_close2 = tx_close.clone();
-    emitter.on_complete(move |_| tx_close.close());
-    emitter.on_error(move |_| tx_close2.close());
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
 
     let s = rt.clone();
-    let p = proc.clone();
 
     emitter.on_message(move |e| {
         println!("message: {:?}", e.inner());
@@ -375,18 +342,23 @@ async fn sch_step_catch_as_complete() {
 
             let action = Action::new(&e.pid, &e.tid, EventAction::Next, options);
             s.do_action(&action).unwrap();
-            p.print();
         }
     });
 
-    emitter.on_complete(move |_p| {
-        rx.send(true);
-    });
-
     rt.launch(&proc).unwrap();
-    let ret = tx.recv().await;
+    tx.recv().await;
     proc.print();
-    assert!(ret)
+    assert_eq!(
+        proc.task_by_params("key", "catch1")
+            .first()
+            .unwrap()
+            .state(),
+        TaskState::Completed
+    );
+    assert_eq!(
+        proc.task_by_nid("step1").first().unwrap().state(),
+        TaskState::Completed
+    );
 }
 
 #[tokio::test]

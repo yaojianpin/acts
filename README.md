@@ -431,11 +431,6 @@ acts:
 
 - [ ] doc (doc/)
 
-- store extension
-
-  - [x] sqlite
-  - [x] postgres
-
 - package extension
   - [ ] form (plugins/form)
   - [ ] ai (plugins/ai)

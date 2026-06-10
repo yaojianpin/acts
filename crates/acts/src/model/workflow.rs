@@ -191,6 +191,11 @@ impl Workflow {
         self
     }
 
+    pub fn with_rn(mut self, rn: &str) -> Self {
+        self.rn = Some(rn.to_string());
+        self
+    }
+
     pub fn with_tag(mut self, tag: &str) -> Self {
         self.tag = tag.to_string();
         self
