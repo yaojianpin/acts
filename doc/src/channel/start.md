@@ -5,10 +5,9 @@
 ## 启动工作流
 
 ```rust
-use acts_channel::{Client, ChannelOptions};
+use acts_channel::{ActsChannel, ChannelOptions};
 
-let mut client = Client::new("http://localhost:8080", &ChannelOptions::default());
-client.connect().await?;
+let mut client = ActsChannel::connect("http://localhost:8080");
 
 // 启动工作流
 let mut vars = Vars::new();
@@ -26,16 +25,4 @@ vars.set("input_value", 42);
 vars.set("user_name", "admin");
 
 client.start("my_workflow", vars).await?;
-```
-
-## 事件触发启动
-
-如果工作流定义了 `on` 事件，也可以通过事件触发：
-
-```rust
-use acts::executor::Executor;
-
-let mut vars = Vars::new();
-vars.set("data", "event_data");
-executor.evt().start("model-id:event-id", &vars)?;
 ```

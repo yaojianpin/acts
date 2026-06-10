@@ -26,11 +26,15 @@ impl ActTask for Act {
         let in_scheam = serde_json::from_str::<JsonValue>(&package.schema)?;
         match package.run_as {
             ActRunAs::Irq => {
-                jsonschema::validate(&in_scheam, &task.params())?;
+                jsonschema::validate(&in_scheam, &task.params()).map_err(|err| {
+                    ActError::Package(format!("package({}) validation error: {}", package.id, err))
+                })?;
                 task.set_state(TaskState::Interrupt);
             }
             ActRunAs::Msg => {
-                jsonschema::validate(&in_scheam, &task.params())?;
+                jsonschema::validate(&in_scheam, &task.params()).map_err(|err| {
+                    ActError::Package(format!("package({}) validation error: {}", package.id, err))
+                })?;
                 task.set_emit_disabled(true);
                 task.set_state(TaskState::Ready);
             }

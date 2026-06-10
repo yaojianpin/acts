@@ -6,7 +6,7 @@ pub mod transform;
 mod tests;
 
 use crate::{
-    Engine, Result, Vars, data,
+    ActError, Engine, Result, Vars, data,
     scheduler::{Context, Runtime},
     store::DbCollectionIden,
 };
@@ -163,7 +163,12 @@ impl ActPackageRegister {
             create: (|params: serde_json::Value| {
                 let meta = T::meta();
 
-                jsonschema::validate(&meta.schema, &params)?;
+                jsonschema::validate(&meta.schema, &params).map_err(|err| {
+                    ActError::Package(format!(
+                        "package({}) schema validation error: {}",
+                        meta.id, err
+                    ))
+                })?;
                 let ret = serde_json::from_value::<T>(params)?;
                 Ok(Box::new(ret) as Box<dyn ActPackageFn>)
             }),

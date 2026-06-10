@@ -1,7 +1,10 @@
 use crate::{
     MessageState, TaskState, Vars, Workflow,
     event::EventAction,
-    utils::{self, test::{USES_IRQ, auto_complete, create_proc}},
+    utils::{
+        self,
+        test::{USES_IRQ, auto_complete, create_proc},
+    },
 };
 
 use serial_test::serial;
@@ -221,11 +224,10 @@ async fn sch_act_state_interrupt() {
         if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             // IRQ act task should be in Interrupt state
             let tasks = proc2.task_by_nid(&e.nid);
-            if let Some(task) = tasks.first() {
-                if task.state() == TaskState::Interrupt {
+            if let Some(task) = tasks.first()
+                && task.state() == TaskState::Interrupt {
                     tx2.send(true);
                 }
-            }
             // Complete the act so workflow can finish
             rt2.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
                 .unwrap();

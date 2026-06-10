@@ -65,7 +65,11 @@ impl Config {
     where
         T: Deserialize<'de>,
     {
-        let value = self.table[name].clone();
+        let value = self
+            .table
+            .get(name)
+            .ok_or_else(|| crate::ActError::Config(format!("config '{name}' does not exist")))?
+            .clone();
         T::deserialize(value)
             .map_err(|err| crate::ActError::Config(format!("failed to get '{name}' config: {err}")))
     }

@@ -159,7 +159,7 @@ fn model_info_package_arr_to_value() {
     assert_eq!(v.get("icon").unwrap().as_str().unwrap(), info.icon);
     assert_eq!(v.get("doc").unwrap().as_str().unwrap(), info.doc);
     assert_eq!(v.get("version").unwrap().as_str().unwrap(), info.version);
-    assert_eq!(v.get("in_schema").unwrap().as_str().unwrap(), info.schema);
+    assert_eq!(v.get("schema").unwrap().as_str().unwrap(), info.schema);
     assert_eq!(
         serde_json::from_value::<ActRunAs>(v.get("run_as").unwrap().clone()).unwrap(),
         info.run_as

@@ -1,28 +1,21 @@
-# 连接
 
-应用服务通过 `Client` 创建并连接到服务。
+# 安装 acts-channel client库
 
-```rust
-use acts_channel::{Client, ChannelOptions};
+通过 `cargo` 命令安装：
 
-let mut client = Client::new("http://localhost:8080", &ChannelOptions::default());
-
-// 连接到 acts-server
-client.connect().await?;
+```bash
+cargo add acts-channel
 ```
 
-## 连接选项
+# 连接
+
+应用服务通过 `ActsChannel` 创建并连接到服务。
 
 ```rust
-use acts_channel::ChannelOptions;
+use acts_channel::ActsChannel;
 
-let options = ChannelOptions {
-    // 客户端标识
-    client_id: Some("my_client".to_string()),
-    // 其他配置
-    ..ChannelOptions::default()
-};
+let mut client = ActsChannel::new("http://localhost:8080");
 
-let mut client = Client::new("http://localhost:8080", &options);
+// 连接到 acts-server
 client.connect().await?;
 ```

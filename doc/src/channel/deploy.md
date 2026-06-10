@@ -5,14 +5,14 @@
 ## 部署模型
 
 ```rust
-use acts_channel::{Client, ChannelOptions};
+use acts_channel::ActsChannel;
 
-let mut client = Client::new("http://localhost:8080", &ChannelOptions::default());
-client.connect().await?;
+let mut client = ActsChannel::connect("http://localhost:8080");
 
 // 从文件加载模型并部署
 let model = std::fs::read_to_string("workflow.yml").unwrap();
-client.deploy(&model).await?;
+let resp = client
+    .deploy(yml, Some("custom_model_id")).await?;
 ```
 
 ## 动态构建模型
@@ -20,13 +20,13 @@ client.deploy(&model).await?;
 也可以通过 Rust 代码动态构建模型后部署：
 
 ```rust
-use acts::Workflow;
+use acts::{Workflow, Vars};
 
 let workflow = Workflow::new("my_model", "my workflow")
-    .add_step(|step| {
-        step.set_uses("acts.core.irq")
+    .with_step(|step| {
+        step.with_uses("acts.core.irq", Vars::new().with("key", "my_key"))
     });
 
 let model_str = serde_yaml::to_string(&workflow).unwrap();
-client.deploy(&model_str).await?;
+client.deploy(&model_str, Some("custom_model_id")).await?;
 ```

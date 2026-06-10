@@ -83,7 +83,15 @@ impl Runtime {
 
         // validate the options
         if !model.inputs.is_empty() {
-            model.inputs.validate(&(options.to_value()))?;
+            model
+                .inputs
+                .validate(&(options.to_value()))
+                .map_err(|err| {
+                    ActError::Model(format!(
+                        "model({}) inputs validation error: {}",
+                        model.id, err
+                    ))
+                })?;
         }
 
         let mut model = model.clone();
@@ -223,7 +231,16 @@ impl Runtime {
                             let outputs = proc.model().outputs;
                             if !outputs.is_empty() {
                                 // validate the process outputs
-                                if let Err(e) = outputs.validate(&(message.outputs.to_value())) {
+                                if let Err(e) = outputs
+                                    .validate(&(message.outputs.to_value()))
+                                    .map_err(|err| {
+                                        ActError::Model(format!(
+                                            "model({}) outputs validation error: {}",
+                                            proc.model().id,
+                                            err
+                                        ))
+                                    })
+                                {
                                     is_validation_err = true;
                                     let error = e.to_string();
                                     message.set_err("", &error);
