@@ -173,7 +173,10 @@ impl ModelBase for Workflow {
 /// for builder
 impl Workflow {
     pub fn new() -> Self {
-        Default::default()
+        Self {
+            ver: "0.1.0".to_string(),
+            ..Default::default()
+        }
     }
 
     pub fn with_id(mut self, id: &str) -> Self {
@@ -188,6 +191,11 @@ impl Workflow {
 
     pub fn with_desc(mut self, desc: &str) -> Self {
         self.desc = desc.to_string();
+        self
+    }
+
+    pub fn with_ver(mut self, ver: &str) -> Self {
+        self.ver = ver.to_string();
         self
     }
 

@@ -24,7 +24,7 @@ impl DbCollectionIden for Model {
     }
 
     fn indexed_fields() -> &'static [&'static str] {
-        &["name", "timestamp", "create_time", "update_time"]
+        &["name", "timestamp", "create_time", "update_time", "ver"]
     }
 
     fn version() -> i32 {

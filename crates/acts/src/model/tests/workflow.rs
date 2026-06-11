@@ -312,6 +312,18 @@ fn model_workflow_desc() {
 }
 
 #[test]
+fn model_workflow_default_ver() {
+    let m = Workflow::new();
+    assert_eq!(m.ver, "0.1.0");
+}
+
+#[test]
+fn model_workflow_set_ver() {
+    let m = Workflow::new().with_ver("0.2.0");
+    assert_eq!(m.ver, "0.2.0");
+}
+
+#[test]
 fn model_workflow_rn() {
     let m = Workflow::new().with_rn("a:b:c");
     assert_eq!(m.rn.unwrap(), "a:b:c");

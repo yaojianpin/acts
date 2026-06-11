@@ -177,3 +177,4 @@
 - feat: change `catches` and `timeouts` list from `Vec<Act>` to `Vec<Step>` in step 
 - feat: remove `key` from message struct, the `key` info should be migrate to `params` properties
 - feat: add document for english and chinese language
+- feat: add default workflow version

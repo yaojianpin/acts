@@ -135,6 +135,9 @@ impl Store {
         if model.id.is_empty() {
             return Err(ActError::Model("missing id in model".into()));
         }
+        if model.ver.is_empty() {
+            return Err(ActError::Model("missing ver in model".into()));
+        }
         let models = self.models();
         match models.find(&model.id) {
             Ok(m) => {
