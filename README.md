@@ -31,7 +31,7 @@ The lib size is about 4.6mb now.
 ### Extensiable
 
 - store collection extension
-  support creating external store, please refer to the code under `store/sqlite`.
+  support creating external store, please refer to the code under `crates/src/store/postgres`.
 
 - pakcage extension
   support creating custom package, please refer to the code under `example/pakcage`.
@@ -66,11 +66,11 @@ async fn main() {
     steps:
       - name: step 1
         uses: acts.transform.set
-          params:
+        params:
             a: 10
       - name: step 2
         uses: acts.transform.code
-          params: |
+        params: |
             return { data: a + 10 };
     "#;
     let workflow = Workflow::from_yml(model).unwrap();
@@ -429,7 +429,7 @@ acts:
     - [x] set
     - [x] code
 
-- [ ] doc (doc/)
+- [x] doc (doc/)
 
 - package extension
   - [ ] form (plugins/form)
