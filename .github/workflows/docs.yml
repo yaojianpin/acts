@@ -35,7 +35,7 @@ jobs:
       - name: Setup mdBook
         uses: peaceiris/actions-mdbook@v2
         with:
-          mdbook-version: "0.4.x"
+          mdbook-version: "latest"
 
       - name: Build Chinese docs
         working-directory: doc

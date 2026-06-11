@@ -62,9 +62,10 @@ async fn sch_step_state_pending() {
         if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             // branch b1 should be Running and b2 should be Pending
             if let Some(task) = proc2.task_by_nid("b2").first()
-                && task.state() == TaskState::Pending {
-                    tx2.send(true);
-                }
+                && task.state() == TaskState::Pending
+            {
+                tx2.send(true);
+            }
             // Complete the act so workflow can finish
             rt2.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
                 .unwrap();
@@ -94,9 +95,10 @@ async fn sch_step_state_running() {
         if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             // step task should be Running while act is being processed
             if let Some(task) = proc2.task_by_nid("step1").first()
-                && task.state() == TaskState::Running {
-                    tx2.send(true);
-                }
+                && task.state() == TaskState::Running
+            {
+                tx2.send(true);
+            }
             // Complete the act so workflow can finish
             rt2.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
                 .unwrap();
@@ -150,9 +152,10 @@ async fn sch_step_state_aborted() {
             // act task should be Aborted
             let tasks = proc2.task_by_nid(&e.nid);
             if let Some(task) = tasks.first()
-                && task.state() == TaskState::Aborted {
-                    tx2.send(true);
-                }
+                && task.state() == TaskState::Aborted
+            {
+                tx2.send(true);
+            }
         }
     });
     rt.launch(&proc).unwrap();
@@ -187,9 +190,10 @@ async fn sch_step_state_error() {
             // act task should be Error
             let tasks = proc2.task_by_nid(&e.nid);
             if let Some(task) = tasks.first()
-                && task.state() == TaskState::Error {
-                    tx2.send(true);
-                }
+                && task.state() == TaskState::Error
+            {
+                tx2.send(true);
+            }
         }
     });
     rt.launch(&proc).unwrap();

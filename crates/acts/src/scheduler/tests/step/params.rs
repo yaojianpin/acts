@@ -24,10 +24,12 @@ async fn sch_step_params_basic() {
     auto_complete(&engine, &rx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created)
-            && let Some(params) = e.params() {
-                rx.send(params);
-            }
+        if e.is_params_key("act1")
+            && e.is_state(MessageState::Created)
+            && let Some(params) = e.params()
+        {
+            rx.send(params);
+        }
     });
     rt.launch(&proc).unwrap();
     let ret = tx.recv().await;
