@@ -138,14 +138,19 @@ impl Cache {
     pub(super) fn push_task_pri(&self, task: &Arc<Task>, save: bool) -> Result<()> {
         let p = task.proc();
         if save {
-            // update process when updating the task
-            let collection = self.store.procs();
-            let mut proc = collection.find(&task.pid)?;
-            proc.end_time = p.end_time();
-            proc.state = p.state().into();
-
-            collection.update(&proc)?;
             self.store.upsert_task(task)?;
+            // update root task data when updating task
+            if let Some(root) = p.root() {
+                self.store.upsert_task(&root)?;
+            }
+            // update process to store when process state is completed
+            if p.state().is_completed() {
+                let collection = self.store.procs();
+                let mut proc = collection.find(&task.pid)?;
+                proc.end_time = p.end_time();
+                proc.state = p.state().into();
+                collection.update(&proc)?;
+            }
         }
 
         if let Some(proc) = self.procs.get(&task.pid) {

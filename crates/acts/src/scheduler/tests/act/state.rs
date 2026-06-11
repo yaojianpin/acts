@@ -225,9 +225,10 @@ async fn sch_act_state_interrupt() {
             // IRQ act task should be in Interrupt state
             let tasks = proc2.task_by_nid(&e.nid);
             if let Some(task) = tasks.first()
-                && task.state() == TaskState::Interrupt {
-                    tx2.send(true);
-                }
+                && task.state() == TaskState::Interrupt
+            {
+                tx2.send(true);
+            }
             // Complete the act so workflow can finish
             rt2.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
                 .unwrap();
@@ -293,4 +294,56 @@ async fn sch_act_state_removed() {
     rt.launch(&proc).unwrap();
     let ret = tx.recv().await;
     assert!(ret);
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_act_state_set_process_var() {
+    let workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+    });
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(false).double();
+    auto_complete(&engine, &rx);
+    engine.channel().on_message(move |e| {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+            rt.do_action2(
+                &e.pid,
+                &e.tid,
+                EventAction::SetProcessVars,
+                Vars::new().with("var1", 1),
+            )
+            .unwrap();
+            rx.send(true);
+        }
+    });
+    engine.runtime().launch(&proc).unwrap();
+    let ret = tx.recv().await;
+    assert!(ret);
+    assert_eq!(
+        proc.task_by_params("key", "act1").first().unwrap().state(),
+        TaskState::Interrupt
+    );
+    assert_eq!(
+        proc.task_by_params("key", "act1")
+            .first()
+            .unwrap()
+            .vars()
+            .get::<i32>("var1")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        proc.task_by_nid("step1").first().unwrap().state(),
+        TaskState::Running
+    );
+    proc.print();
+    // test the new var is stored
+    let id = utils::Id::new(proc.id(), utils::consts::TASK_ROOT_TID);
+    let task_root = engine.runtime().store().tasks().find(&id.id()).unwrap();
+    let data: Vars = serde_json::from_str(&task_root.data).unwrap();
+    println!("data {}", data);
+    assert_eq!(data.get::<i32>("var1").unwrap(), 1);
 }

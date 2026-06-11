@@ -594,6 +594,8 @@ impl Task {
                 }
 
                 self.proc.set_data(&ctx.vars());
+                // emit the task change (issue #)
+                ctx.emit_task(self)?;
             }
         };
 

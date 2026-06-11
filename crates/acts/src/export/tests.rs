@@ -2004,6 +2004,39 @@ async fn export_executor_remove() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
+async fn export_extender_set_process_var() {
+    let engine = Engine::new().start().unwrap();
+    let model = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+    });
+
+    let rt = engine.runtime();
+    let sig = engine.signal(false);
+    let s1 = sig.clone();
+    let executor = engine.executor();
+    engine.channel().on_message(move |e| {
+        println!("message: {e:?}");
+        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
+            && e.is_state(MessageState::Created)
+        {
+            s1.send(
+                executor
+                    .act()
+                    .set_process_vars(&e.pid, &e.tid, Vars::new().with("var1", 1))
+                    .is_ok(),
+            );
+        }
+    });
+    let mut vars = Vars::new();
+    vars.set("var1", 0);
+    rt.start(&model, vars).unwrap();
+    let ret = sig.recv().await;
+    assert!(ret);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_extender_register_module() {
     let engine = Engine::new().start().unwrap();
     let extender = engine.extender();

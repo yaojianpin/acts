@@ -459,7 +459,7 @@ fn print_task_string(
     }
 
     s.borrow_mut().push_str(&format!(
-        "Task({}) prev={} kind={} nid={} name={} state={}  {}\n",
+        "Task({}) prev={} kind={} nid={} name={} state={}  uses={}  data={}\n",
         task.id,
         match task.prev() {
             Some(v) => v,
@@ -469,15 +469,8 @@ fn print_task_string(
         task.node().id(),
         task.node().content.name(),
         task.state(),
-        if task.is_kind(NodeKind::Act) {
-            format!(
-                "uses={}  params={}",
-                task.node().uses(),
-                task.node().params()
-            )
-        } else {
-            "".to_string()
-        },
+        task.node().uses(),
+        task.data()
     ));
 
     let mut child_path = path.clone();
