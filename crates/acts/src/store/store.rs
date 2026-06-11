@@ -163,7 +163,7 @@ impl Store {
                     name: model.name.clone(),
                     desc: model.desc.clone(),
                     data: text.clone(),
-                    ver: "0.1.0".to_string(),
+                    ver: model.ver.to_string(),
                     size: text.len() as i32,
                     create_time: utils::time::time_millis(),
                     update_time: 0,
