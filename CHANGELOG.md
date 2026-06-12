@@ -179,3 +179,6 @@
 - feat: add document for english and chinese language
 - feat: add default workflow version
 - fix: fix issue #16 not save the data after setting the process vars
+
+# 0.19.1
+- fix: fix sch_task_start and pack_parallel_setup_list run fail

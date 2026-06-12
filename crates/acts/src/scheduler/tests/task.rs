@@ -10,7 +10,8 @@ use serial_test::serial;
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_task_start() {
-    let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
+    let workflow =
+        Workflow::new().with_step(|step| step.with_id("step1").with_uses(USES_IRQ, Vars::new()));
     let (engine, proc) = create_proc(&workflow, "w1");
     let rt = engine.runtime();
     let sig = engine.signal(TaskState::default());
@@ -21,6 +22,7 @@ async fn sch_task_start() {
     rt.emitter().on_proc(move |e| rx.send(e.state()));
 
     let ret = tx.recv().await;
+    proc.print();
     assert_eq!(ret, TaskState::Running);
 }
 

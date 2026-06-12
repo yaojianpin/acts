@@ -28,15 +28,9 @@ async fn pack_parallel_setup_list() {
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
-    let channel = engine.channel();
 
-    channel.on_message(move |e| {
-        if e.is_type("act") {
-            rx.close();
-        }
-    });
     rt.launch(&proc).unwrap();
-    tx.recv().await;
+    tx.timeout(300).await;
     proc.print();
     let tasks = proc.task_by_nid("act1");
     assert_eq!(tasks.first().unwrap().state(), TaskState::Interrupt);
