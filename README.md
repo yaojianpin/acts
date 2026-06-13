@@ -44,13 +44,17 @@ The easiest way to get the latest version of `acts` is to install it via `cargo`
 cargo add acts
 ```
 
+## Documents
+[`Chinese`](https://yaojianpin.github.io/acts/zh/)
+[`English`](https://yaojianpin.github.io/acts/en/)
+
 ## Quickstart
 
 1. Create and start the workflow engine by `engine.new()`.
 2. Load a yaml model to create a `workflow`.
 3. Deploy the model in step 2 by `engine.executor().model()`.
 4. Config events by `engine.channel()`.
-5. Start the workflow by `engine.executor().model()`.
+5. Start the workflow by `engine.executor().proc()`.
 
 ```rust,no_run
 use acts::{Engine, Vars, Workflow};

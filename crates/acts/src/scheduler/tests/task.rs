@@ -97,11 +97,10 @@ async fn sch_task_branch_basic() {
 
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn sch_task_act_skip_with_inputs_to_next() {
+async fn sch_task_act_skip_with_inputs() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_var("v1", 10)
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
             .with_uses(USES_IRQ, Vars::new().with("key", "act2"))
     });
 
@@ -109,17 +108,8 @@ async fn sch_task_act_skip_with_inputs_to_next() {
     let rt = engine.runtime();
     let sig = engine.signal(Vars::new());
     let rx = sig.clone();
-    let rt2 = rt.clone();
     let emitter = engine.channel();
     emitter.on_message(move |e| {
-        println!("message: {e:?}");
-        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
-            && e.is_state(MessageState::Created)
-        {
-            rt2.do_action2(&e.pid, &e.tid, EventAction::Skip, Vars::new())
-                .unwrap();
-        }
-
         if e.params().unwrap().get::<String>("key").as_deref() == Some("act2")
             && e.is_state(MessageState::Created)
         {

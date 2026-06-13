@@ -85,7 +85,7 @@ async fn sch_step_uses_irq() {
 
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn esch_step_uses_set() {
+async fn sch_step_uses_set() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_var("a", json!(0))
@@ -112,7 +112,7 @@ async fn esch_step_uses_set() {
 
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn esch_step_uses_if_true() {
+async fn sch_step_uses_if_true() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_var("a", json!(10))
             .with_id("step1")
@@ -146,7 +146,7 @@ async fn esch_step_uses_if_true() {
 
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn esch_step_uses_if_false() {
+async fn sch_step_uses_if_false() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_var("a", json!(10))
             .with_id("step1")
@@ -177,7 +177,7 @@ async fn esch_step_uses_if_false() {
 
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn esch_step_uses_action() {
+async fn sch_step_uses_action() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_var("a", json!(10))
             .with_id("step1")
