@@ -4,12 +4,12 @@ mod branch;
 mod step;
 mod workflow;
 
-use crate::Variant;
 use crate::scheduler::tree::NodeOutputKind;
 use crate::store::DbCollectionIden;
 use crate::utils::consts::TASK_ROOT_TID;
 use crate::{
-    Act, ActError, ActTask, Error, Message, MessageState, NodeKind, Result, ShareLock, Vars,
+    Act, ActError, ActTask, Error, Message, MessageState, NodeKind, Result, ShareLock, Variant,
+    Vars,
     data::{self, MessageStatus},
     event::EventAction,
     scheduler::{
@@ -191,7 +191,13 @@ impl Task {
             Vars::new()
                 .with("id", workflow.id.clone())
                 .with("name", workflow.name)
-                .with("tag", workflow.tag),
+                .with(
+                    "tag",
+                    workflow
+                        .options
+                        .get::<String>(consts::OPTION_TAG)
+                        .unwrap_or_default(),
+                ),
         );
 
         // add error to inputs
@@ -211,7 +217,6 @@ impl Task {
             nid: self.node.id().to_string(),
             mid: workflow.id.clone(),
             uses: self.node.uses(),
-            tag: self.node.tag().to_string(),
             inputs,
             outputs: self.outputs(),
             start_time: self.start_time(),
@@ -280,12 +285,14 @@ impl Task {
     pub fn outputs(self: &Arc<Self>) -> Vars {
         let ctx = self.create_context();
         let mut outputs = Vars::new();
-        if let Some(exposes) = self
-            .node
-            .content
-            .options()
-            .get::<Vec<Variant>>(consts::ACT_EXPOSE)
-        {
+        let mut exposes = self.node.content.exposes().clone();
+        if exposes.is_empty() {
+            // fallback: check options for exposes (runtime push actions)
+            if let Some(opt_exposes) = self.options().get::<Vec<Variant>>("exposes") {
+                exposes = opt_exposes;
+            }
+        }
+        if !exposes.is_empty() {
             for var in &exposes {
                 outputs.set(&var.name, var.value.clone());
             }
@@ -413,10 +420,13 @@ impl Task {
                 let act = Act {
                     id: ctx.get_var::<String>("id").unwrap_or_default(),
                     name: ctx.get_var::<String>("name").unwrap_or_default(),
-                    tag: ctx.get_var::<String>("tag").unwrap_or_default(),
+                    desc: ctx.get_var::<String>("desc").unwrap_or_default(),
+                    r#if: ctx.get_var::<String>("if"),
+                    vars: ctx.get_var::<Vec<Variant>>("vars").unwrap_or_default(),
                     uses: package.clone(),
                     params: ctx.get_var("params").unwrap_or_default(),
                     options: ctx.get_var("options").unwrap_or_default(),
+                    exposes: ctx.get_var("exposes").unwrap_or_default(),
                     ..Default::default()
                 };
 

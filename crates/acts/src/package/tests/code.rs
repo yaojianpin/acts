@@ -1,5 +1,5 @@
 use crate::{
-    Workflow,
+    Variant, Workflow,
     utils::{
         self,
         test::{USES_CODE, auto_complete, create_proc},
@@ -84,7 +84,7 @@ async fn pack_code_get_data() {
 async fn pack_code_outputs() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_expose("my_output", json!(null))
+            .with_expose(Variant::create("my_output", json!(null)))
             .with_uses_code(
                 USES_CODE,
                 r#"

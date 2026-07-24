@@ -1,7 +1,7 @@
 use crate::{
-    Step, TimeoutLimit, Vars, Workflow,
+    Step, TimeoutLimit, Vars, Variant, Workflow,
     model::act::TimeoutUnit,
-    utils::test::{USES_IRQ, USES_MSG},
+    utils::{consts, test::{USES_IRQ, USES_MSG}},
 };
 use serde_json::json;
 
@@ -45,9 +45,8 @@ fn model_step_yml_expose() {
     id: m1
     steps:
         - id: act1
-          options:
-            exposes:
-                - name: p1
+          exposes:
+            - name: p1
     "#;
     let m = Workflow::from_yml(text).unwrap();
     assert_eq!(m.steps.len(), 1);
@@ -87,7 +86,7 @@ fn model_step_set_var() {
 
 #[test]
 fn model_step_set_output() {
-    let step = Step::new().with_expose("p1", json!(5));
+    let step = Step::new().with_expose(Variant::create("p1", json!(5)));
 
     let exposes = step.exposes();
     assert!(exposes.get_value("p1").is_some());
@@ -96,7 +95,7 @@ fn model_step_set_output() {
 #[test]
 fn model_step_tag() {
     let step = Step::new().with_tag("tag1");
-    assert_eq!(step.tag, "tag1");
+    assert_eq!(step.options.get::<String>(consts::OPTION_TAG).unwrap(), "tag1");
 }
 
 #[test]
@@ -120,10 +119,10 @@ fn model_step_if() {
 #[test]
 fn model_step_rn() {
     let mut step = Step::new();
-    assert!(step.rn.is_none());
+    assert!(step.options.get::<String>(consts::OPTION_RN).is_none());
 
     step = step.with_rn("a:b:c");
-    assert_eq!(step.rn.unwrap(), "a:b:c");
+    assert_eq!(step.options.get::<String>(consts::OPTION_RN).unwrap(), "a:b:c");
 }
 
 #[test]
@@ -172,7 +171,7 @@ fn model_step_set_metadata() {
 
 #[test]
 fn model_step_with_expose() {
-    let step = Step::new().with_expose("v1", 0);
+    let step = Step::new().with_expose(Variant::create("v1", 0));
     assert!(step.exposes().contains_key("v1"));
 }
 

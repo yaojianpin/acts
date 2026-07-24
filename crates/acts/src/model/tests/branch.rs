@@ -1,4 +1,4 @@
-use crate::{Branch, Workflow};
+use crate::{Branch, Variant, Workflow, utils::consts};
 use serde_json::json;
 
 #[test]
@@ -22,7 +22,7 @@ fn model_branch_vars() {
 
 #[test]
 fn model_branch_outputs() {
-    let b = Branch::new().with_expose("p1", json!(5));
+    let b = Branch::new().with_expose(Variant::create("p1", json!(5)));
 
     let options = b.exposes();
     assert!(options.get_value("p1").is_some());
@@ -31,7 +31,7 @@ fn model_branch_outputs() {
 #[test]
 fn model_branch_tag() {
     let b = Branch::new().with_tag("tag1");
-    assert_eq!(b.tag, "tag1");
+    assert_eq!(b.options.get::<String>(consts::OPTION_TAG).unwrap(), "tag1");
 }
 
 #[test]
@@ -134,9 +134,8 @@ fn model_branch_yml_expose() {
           branches:
             - id: b1
               if: true
-              options:
-                exposes:
-                    - name: p1
+              exposes:
+                - name: p1
 
     "#;
 
@@ -150,6 +149,6 @@ fn model_branch_yml_expose() {
 
 #[test]
 fn model_branch_with_expose() {
-    let b = Branch::new().with_expose("v1", 0);
+    let b = Branch::new().with_expose(Variant::create("v1", 0));
     assert!(b.exposes().contains_key("v1"));
 }

@@ -26,14 +26,17 @@ pub const TASK_SIGN_TIMEOUTS: &str = "timeouts";
 pub const TASK_TIMEOUTS: &str = "__timeouts";
 pub const TASK_COST: &str = "__cost";
 
-pub const ACT_EXPOSE: &str = "exposes";
-
 pub const ACT_TO: &str = "to";
 
 pub const TASK_ROOT_TID: &str = "$";
 
 pub const PROCESS_ID: &str = "pid";
 pub const MODEL_ID: &str = "mid";
+
+/// option tag
+pub const OPTION_TAG: &str = "tag";
+/// option with resource name
+pub const OPTION_RN: &str = "rn";
 
 /// Key delimiter for constructing store keys and composite IDs.
 /// Must be valid across all backends (NATS KV, SQL LIKE, Redis).

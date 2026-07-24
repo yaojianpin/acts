@@ -22,10 +22,7 @@ impl ActPackage for SetPackage {
             schema: json!({
                 "type": "object",
                 "description": "The key-value pairs to set in the act data",
-                "default": {},
-                "additionalProperties": {
-                    "type": ["string", "number", "array", "boolean", "null"]
-                }
+                "default": {}
             }),
             options: Some(json!({
                 "ui:options": {

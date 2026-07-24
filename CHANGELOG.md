@@ -182,3 +182,8 @@
 
 # 0.19.1
 - fix: fix sch_task_start and pack_parallel_setup_list run fail
+
+# 0.20.0
+- remove `tag` and `rn` from workflow, step, branch and act
+- use `options` to support the user custom extension, such as `tag`, `rn`
+- add `exposes` to workflow, step, branch and act instead of options.exposes

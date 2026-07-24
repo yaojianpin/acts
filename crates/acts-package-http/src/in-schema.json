@@ -103,5 +103,6 @@
                 }
             ]
         }
-    }
+    },
+    "required": ["url", "method", "content-type"]
 }

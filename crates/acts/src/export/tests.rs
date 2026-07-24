@@ -266,9 +266,7 @@ async fn export_executor_start_with_outputs_schema_ok() {
     let mid = utils::longid();
     let workflow = Workflow::new()
         .with_id(&mid)
-        .with_outputs(ActSchema::Multiple(vec![
-            Variant::new().name("a").r#type(VariantTypes::Number),
-        ]));
+        .with_expose(Variant::new().name("a").r#type(VariantTypes::Number));
 
     engine.executor().model().deploy(&workflow).unwrap();
 
@@ -293,9 +291,7 @@ async fn export_executor_start_with_outputs_schema_err() {
     let mid = utils::longid();
     let workflow = Workflow::new()
         .with_id(&mid)
-        .with_outputs(ActSchema::Multiple(vec![
-            Variant::new().name("a").r#type(VariantTypes::Number),
-        ]));
+        .with_expose(Variant::new().name("a").r#type(VariantTypes::Number));
     engine.executor().model().deploy(&workflow).unwrap();
 
     let (s1, s2) = Signal::new(None).double();
@@ -2167,7 +2163,7 @@ async fn export_emitter_state_not_match() {
 async fn export_emitter_tag_match() {
     let engine = Engine::new().start().unwrap();
     let emitter = engine.channel_with_options(&ChannelOptions {
-        tag: "tag*".to_string(),
+        options: Vars::new().with("tag", "tag*"),
         ..Default::default()
     });
     let sig = engine.signal::<Vec<Message>>(Vec::new());
@@ -2177,13 +2173,13 @@ async fn export_emitter_tag_match() {
     });
 
     let msg = Message {
-        tag: "tag1".to_string(),
+        inputs: Vars::new().with("options", Vars::new().with("tag", "tag1")),
         ..Message::default()
     };
     engine.runtime().emitter().emit_message(&msg);
 
     let msg = Message {
-        tag: "aaaa".to_string(),
+        inputs: Vars::new().with("options", Vars::new().with("tag", "aaaa")),
         ..Message::default()
     };
     engine.runtime().emitter().emit_message(&msg);
@@ -2197,7 +2193,7 @@ async fn export_emitter_tag_match() {
 async fn export_emitter_tag_not_match() {
     let engine = Engine::new().start().unwrap();
     let emitter = engine.channel_with_options(&ChannelOptions {
-        tag: "tag*".to_string(),
+        options: Vars::new().with("tag", "tag*"),
         ..Default::default()
     });
     let sig = engine.signal::<Vec<Message>>(Vec::new());
@@ -2208,7 +2204,7 @@ async fn export_emitter_tag_not_match() {
     });
 
     let msg = Message {
-        tag: "aaaa".to_string(),
+        inputs: Vars::new().with("options", Vars::new().with("tag", "aaaa")),
         ..Message::default()
     };
     engine.runtime().emitter().emit_message(&msg);
@@ -2243,7 +2239,7 @@ async fn export_emitter_on_message_with_dup_id() {
     });
 
     let msg = Message {
-        tag: "aaaa".to_string(),
+        inputs: Vars::new().with("options", Vars::new().with("tag", "aaaa")),
         ..Message::default()
     };
     engine.runtime().emitter().emit_message(&msg);
@@ -2289,7 +2285,7 @@ async fn export_message_store_with_emit_id_and_options() {
     let engine = Engine::new().start().unwrap();
     let emitter = engine.channel_with_options(&ChannelOptions {
         id: "my_emit_id".to_string(),
-        tag: "tag*".to_string(),
+        options: Vars::new().with("tag", "tag*"),
         ack: true,
         ..Default::default()
     });
@@ -2300,7 +2296,7 @@ async fn export_message_store_with_emit_id_and_options() {
 
     let msg = Message {
         id: utils::longid(),
-        tag: "tagaaaa".to_string(),
+        inputs: Vars::new().with("options", Vars::new().with("tag", "tagaaaa")),
         ..Message::default()
     };
     engine.runtime().emitter().emit_message(&msg);
@@ -2313,18 +2309,19 @@ async fn export_message_store_with_emit_id_and_options() {
         .messages()
         .find(&msg.id)
         .unwrap();
-    assert_eq!(message.tag, msg.tag);
-    assert_eq!(message.chan_id, "my_emit_id");
-    assert_eq!(message.chan_pattern, "*:*:tag*:*");
-}
 
+    let pattern = serde_json::from_str::<Vars>(&message.chan_pattern).unwrap();
+    assert_eq!(message.chan_id, "my_emit_id");
+    assert_eq!(pattern.get::<String>("tag").unwrap(), "tag*");
+    assert_eq!(pattern.get::<bool>("ack").unwrap(), true);
+}
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn export_message_not_store_without_match() {
     let engine = Engine::new().start().unwrap();
     let emitter = engine.channel_with_options(&ChannelOptions {
         id: "my_emit_id".to_string(),
-        tag: "tag*".to_string(),
+        options: Vars::new().with("tag", "tag*"),
         ..Default::default()
     });
     let (s1, s2) = engine.signal::<Message>(Message::default()).double();
@@ -2334,7 +2331,7 @@ async fn export_message_not_store_without_match() {
 
     let msg = Message {
         id: utils::longid(),
-        tag: "not_match_tag".to_string(),
+        inputs: Vars::new().with("options", Vars::new().with("tag", "not_match_tag")),
         ..Message::default()
     };
     engine.runtime().emitter().emit_message(&msg);
@@ -2515,4 +2512,110 @@ mod test_module {
             Some(Vars::new().with("a", 10))
         }
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn export_emitter_options_multi_key() {
+    let engine = Engine::new().start().unwrap();
+    let emitter = engine.channel_with_options(&ChannelOptions {
+        options: Vars::new()
+            .with("tag", "tag*")
+            .with("rn", "a:*"),
+        ..Default::default()
+    });
+    let sig = engine.signal::<Vec<Message>>(Vec::new());
+    let s = sig.clone();
+    emitter.on_message(move |e| {
+        s.update(|data| data.push(e.inner().clone()));
+    });
+
+    // both keys match
+    let msg = Message {
+        inputs: Vars::new().with(
+            "options",
+            Vars::new().with("tag", "tag1").with("rn", "a:b:c"),
+        ),
+        ..Message::default()
+    };
+    engine.runtime().emitter().emit_message(&msg);
+
+    // only tag matches, rn doesn't
+    let msg = Message {
+        inputs: Vars::new().with(
+            "options",
+            Vars::new().with("tag", "tag2").with("rn", "b:x:y"),
+        ),
+        ..Message::default()
+    };
+    engine.runtime().emitter().emit_message(&msg);
+
+    let ret = sig.timeout(100).await;
+    assert_eq!(ret.len(), 1);
+    let tag = ret[0]
+        .options()
+        .and_then(|o| o.get::<String>("tag"))
+        .unwrap_or_default();
+    assert_eq!(tag, "tag1");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn export_emitter_options_custom_key() {
+    let engine = Engine::new().start().unwrap();
+    let emitter = engine.channel_with_options(&ChannelOptions {
+        options: Vars::new().with("priority", "high"),
+        ..Default::default()
+    });
+    let sig = engine.signal::<Vec<Message>>(Vec::new());
+    let s = sig.clone();
+    emitter.on_message(move |e| {
+        s.update(|data| data.push(e.inner().clone()));
+    });
+
+    let msg = Message {
+        inputs: Vars::new().with(
+            "options",
+            Vars::new().with("priority", "high"),
+        ),
+        ..Message::default()
+    };
+    engine.runtime().emitter().emit_message(&msg);
+
+    let msg = Message {
+        inputs: Vars::new().with(
+            "options",
+            Vars::new().with("priority", "low"),
+        ),
+        ..Message::default()
+    };
+    engine.runtime().emitter().emit_message(&msg);
+
+    let ret = sig.timeout(100).await;
+    assert_eq!(ret.len(), 1);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn export_emitter_options_missing_key() {
+    let engine = Engine::new().start().unwrap();
+    let emitter = engine.channel_with_options(&ChannelOptions {
+        options: Vars::new().with("nonexistent", "value"),
+        ..Default::default()
+    });
+    let sig = engine.signal::<Vec<Message>>(Vec::new());
+    let s = sig.clone();
+    emitter.on_message(move |e| {
+        s.update(|data| data.push(e.inner().clone()));
+    });
+
+    // message has options but no "nonexistent" key
+    let msg = Message {
+        inputs: Vars::new().with("options", Vars::new().with("tag", "tag1")),
+        ..Message::default()
+    };
+    engine.runtime().emitter().emit_message(&msg);
+
+    let ret = sig.timeout(100).await;
+    assert_eq!(ret.len(), 0);
 }

@@ -48,17 +48,7 @@ impl ActPackage for ActionPackage {
                 "ui:order": ["action", "options"],
                 "action": {
                     "ui:widget": "select",
-                    "ui:options": {
-                        "label": false,
-                        "placeholder": "Select an action"
-                    }
                 },
-                "options": {
-                    "ui:widget": "object",
-                    "ui:options": {
-                        "label": false
-                    }
-                }
             })),
             run_as: ActRunAs::Func,
             resources: vec![],

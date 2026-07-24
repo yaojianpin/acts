@@ -2,7 +2,7 @@ use crate::cache::Cache;
 use crate::event::EventAction;
 use crate::scheduler::Runtime;
 use crate::utils::test::{USES_IRQ, auto_complete};
-use crate::{Action, Config, Engine, MessageState, TaskState, Vars, Workflow, utils};
+use crate::{Action, Config, Engine, MessageState, TaskState, Variant, Vars, Workflow, utils};
 use serde_json::json;
 
 use serial_test::serial;
@@ -76,7 +76,7 @@ async fn sch_scher_do_action() {
     let (tx, rx) = engine.signal(()).double();
     let workflow = Workflow::new().with_step(|step| {
         step.with_name("step1")
-            .with_expose("uid", json!(null))
+            .with_expose(Variant::create("uid", json!(null)))
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     auto_complete(&engine, &rx);

@@ -10,19 +10,11 @@ pub struct Workflow {
     #[serde(default)]
     pub id: String,
 
-    /// resource name
-    /// the resource name is also used in permission control, the name seperated in ':'
-    /// just likes 'acts:share:a:b:workflow_a'
-    pub rn: Option<String>,
-
     #[serde(default)]
     pub name: String,
 
     #[serde(default)]
     pub desc: String,
-
-    #[serde(default)]
-    pub tag: String,
 
     #[serde(default)]
     pub steps: Vec<Step>,
@@ -38,10 +30,6 @@ pub struct Workflow {
     #[serde(default)]
     pub inputs: ActSchema,
 
-    /// output json schema
-    #[serde(default)]
-    pub outputs: ActSchema,
-
     #[serde(default)]
     pub on: Vec<Act>,
 
@@ -56,6 +44,10 @@ pub struct Workflow {
     /// don't send to client
     #[serde(default)]
     pub metadata: Vars,
+
+    /// variables to expose
+    #[serde(default)]
+    pub exposes: Vec<Variant>,
 }
 
 impl Workflow {
@@ -199,13 +191,19 @@ impl Workflow {
         self
     }
 
-    pub fn with_rn(mut self, rn: &str) -> Self {
-        self.rn = Some(rn.to_string());
-        self
+    pub fn with_rn(self, rn: &str) -> Self {
+        self.with_option(consts::OPTION_RN, rn)
     }
 
-    pub fn with_tag(mut self, tag: &str) -> Self {
-        self.tag = tag.to_string();
+    pub fn with_tag(self, tag: &str) -> Self {
+        self.with_option(consts::OPTION_TAG, tag)
+    }
+
+    pub fn with_option<T>(mut self, name: &str, value: T) -> Self
+    where
+        T: Serialize + Clone,
+    {
+        self.options.set(name, value);
         self
     }
 
@@ -234,34 +232,16 @@ impl Workflow {
         self
     }
 
-    pub fn with_outputs(mut self, outputs: ActSchema) -> Self {
-        self.outputs = outputs;
-        self
-    }
-
-    pub fn with_expose<T>(mut self, name: &str, value: T) -> Self
-    where
-        T: Serialize + Clone,
-    {
-        self.options
-            .entry(consts::ACT_EXPOSE)
-            .and_modify(|outputs| {
-                if let Some(obj) = outputs.as_array_mut() {
-                    obj.push(json!(Variant::create(name, value.clone())));
-                }
-            })
-            .or_insert(json!(vec![Variant::create(name, value)]));
-
+    pub fn with_expose(mut self, var: Variant) -> Self {
+        self.exposes.push(var);
         self
     }
 
     pub fn exposes(&self) -> Vars {
         let mut vars = Vars::new();
-        if let Some(exposes) = self.options.get::<Vec<Variant>>(consts::ACT_EXPOSE) {
-            exposes.iter().for_each(|var| {
-                vars.set(&var.name, var.value.clone());
-            });
-        }
+        self.exposes.iter().for_each(|var| {
+            vars.set(&var.name, var.value.clone());
+        });
         vars
     }
 

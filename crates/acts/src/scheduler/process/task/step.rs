@@ -25,14 +25,15 @@ impl ActTask for Step {
         if let Some(uses) = &self.uses {
             ctx.dispatch_act(
                 &Act {
+                    name: self.name.clone(),
                     uses: uses.to_string(),
                     params: task.params(),
+                    options: self.options.clone(),
                     ..Default::default()
                 },
                 self.vars(),
             )?;
         }
-
         let children = task.node.children();
         if !children.is_empty() {
             for child in &children {

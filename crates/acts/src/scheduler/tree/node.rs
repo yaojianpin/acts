@@ -1,4 +1,4 @@
-use crate::{Act, Branch, Step, Vars, Workflow};
+use crate::{Act, Branch, Step, Variant, Vars, Workflow, utils::consts};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::{Arc, RwLock, Weak};
@@ -98,6 +98,15 @@ impl NodeContent {
         }
     }
 
+    pub fn exposes(&self) -> &Vec<Variant> {
+        match self {
+            NodeContent::Workflow(node) => &node.exposes,
+            NodeContent::Branch(node) => &node.exposes,
+            NodeContent::Step(node) => &node.exposes,
+            NodeContent::Act(node) => &node.exposes,
+        }
+    }
+
     pub fn params(&self) -> serde_json::Value {
         match self {
             NodeContent::Step(node) => node.params.clone(),
@@ -108,10 +117,22 @@ impl NodeContent {
 
     pub fn tag(&self) -> String {
         match self {
-            NodeContent::Workflow(node) => node.tag.clone(),
-            NodeContent::Branch(node) => node.tag.clone(),
-            NodeContent::Step(node) => node.tag.clone(),
-            NodeContent::Act(node) => node.tag.clone(),
+            NodeContent::Workflow(node) => node
+                .options
+                .get::<String>(consts::OPTION_TAG)
+                .unwrap_or_default(),
+            NodeContent::Branch(node) => node
+                .options
+                .get::<String>(consts::OPTION_TAG)
+                .unwrap_or_default(),
+            NodeContent::Step(node) => node
+                .options
+                .get::<String>(consts::OPTION_TAG)
+                .unwrap_or_default(),
+            NodeContent::Act(node) => node
+                .options
+                .get::<String>(consts::OPTION_TAG)
+                .unwrap_or_default(),
         }
     }
 

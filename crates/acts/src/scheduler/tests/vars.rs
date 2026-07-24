@@ -1,7 +1,7 @@
 use crate::event::EventAction;
 use crate::utils::test::auto_complete;
 use crate::{
-    Action, MessageState, Vars, Workflow,
+    Action, MessageState, Variant, VariantTypes, Vars, Workflow,
     utils::{
         self,
         test::{USES_IRQ, USES_SET, create_proc},
@@ -30,7 +30,7 @@ async fn sch_vars_workflow_inputs() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_vars_workflow_outputs_value() {
-    let workflow = Workflow::new().with_expose("var1", 10);
+    let workflow = Workflow::new().with_expose(Variant::create("var1", 10));
     let (engine, proc) = create_proc(&workflow, &utils::longid());
     let rt = engine.runtime();
     let sig = engine.signal(Vars::default());
@@ -52,7 +52,7 @@ async fn sch_vars_workflow_outputs_value() {
 async fn sch_vars_workflow_outputs_script() {
     let workflow = Workflow::new()
         .with_var("a", json!(10))
-        .with_expose("var1", json!(r#"{{ a }}"#));
+        .with_expose(Variant::new().name("var1").r#type(VariantTypes::Number).value(json!(r#"{{ a }}"#)));
     let (engine, proc) = create_proc(&workflow, &utils::longid());
     let rt = engine.runtime();
     let sig = engine.signal(Vars::default());
@@ -98,7 +98,7 @@ async fn sch_vars_workflow_expose_options() {
     let workflow = Workflow::new()
         .with_var("var1", 10)
         .with_var("var2", 20)
-        .with_expose("var1", json!(null));
+        .with_expose(Variant::new().name("var1").r#type(VariantTypes::Number));
 
     let (engine, proc) = create_proc(&workflow, &utils::longid());
     let rt = engine.runtime();
@@ -179,7 +179,7 @@ async fn sch_vars_output_only_key_name() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_var("var1", 10)
-            .with_expose("var1", json!(null))
+            .with_expose(Variant::create("var1", json!(null)))
     });
     let (engine, proc) = create_proc(&workflow, &utils::longid());
     let rt = engine.runtime();
@@ -230,7 +230,10 @@ async fn sch_vars_step_inputs() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_vars_one_step_outputs() {
-    let workflow = Workflow::new().with_step(|step| step.with_id("step1").with_expose("var1", 10));
+    let workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_expose(Variant::create("var1", 10))
+    });
 
     let (engine, proc) = create_proc(&workflow, &utils::longid());
     let rt = engine.runtime();
@@ -286,7 +289,7 @@ async fn sch_vars_step_expose_options() {
         step.with_id("step1")
             .with_var("var1", 10)
             .with_var("var2", 20)
-            .with_expose("var1", json!(null))
+            .with_expose(Variant::create("var1", json!(null)))
     });
     let (engine, proc) = create_proc(&workflow, &utils::longid());
     let rt = engine.runtime();
@@ -322,8 +325,14 @@ async fn sch_vars_step_expose_options() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_vars_two_steps_outputs() {
     let workflow = Workflow::new()
-        .with_step(|step| step.with_id("step1").with_expose("var1", 10))
-        .with_step(|step| step.with_id("step2").with_expose("var1", 20));
+        .with_step(|step| {
+            step.with_id("step1")
+                .with_expose(Variant::create("var1", 10))
+        })
+        .with_step(|step| {
+            step.with_id("step2")
+                .with_expose(Variant::create("var1", 20))
+        });
 
     let (engine, proc) = create_proc(&workflow, &utils::longid());
     let rt = engine.runtime();
@@ -389,8 +398,11 @@ async fn sch_vars_branch_inputs() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_vars_branch_outputs() {
     let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_branch(|b| b.with_id("b1").with_if("true").with_expose("var1", 10))
+        step.with_id("step1").with_branch(|b| {
+            b.with_id("b1")
+                .with_if("true")
+                .with_expose(Variant::create("var1", 10))
+        })
     });
     let (engine, proc) = create_proc(&workflow, &utils::longid());
     let rt = engine.runtime();
@@ -452,7 +464,7 @@ async fn sch_vars_branch_expose_options() {
                 .with_if("true")
                 .with_var("var1", 10)
                 .with_var("var2", 20)
-                .with_expose("var1", json!(null))
+                .with_expose(Variant::create("var1", json!(null)))
         })
     });
     let (engine, proc) = create_proc(&workflow, &utils::longid());
@@ -493,7 +505,10 @@ async fn sch_vars_branch_one_step_outputs() {
             b.with_id("b1")
                 .with_if("true")
                 .with_var("var1", json!(10))
-                .with_step(|step| step.with_id("step1").with_expose("var1", json!(100)))
+                .with_step(|step| {
+                    step.with_id("step1")
+                        .with_expose(Variant::create("var1", json!(100)))
+                })
         })
     });
     let (engine, proc) = create_proc(&workflow, &utils::longid());
@@ -526,8 +541,14 @@ async fn sch_vars_branch_two_steps_outputs() {
             b.with_id("b1")
                 .with_if("true")
                 .with_var("var1", json!(10))
-                .with_step(|step| step.with_id("step1").with_expose("var1", json!(100)))
-                .with_step(|step| step.with_id("step2").with_expose("var1", json!(200)))
+                .with_step(|step| {
+                    step.with_id("step1")
+                        .with_expose(Variant::create("var1", json!(100)))
+                })
+                .with_step(|step| {
+                    step.with_id("step2")
+                        .with_expose(Variant::create("var1", json!(200)))
+                })
         })
     });
     let (engine, proc) = create_proc(&workflow, &utils::longid());
@@ -595,7 +616,7 @@ async fn sch_vars_act_inputs() {
 async fn sch_vars_act_data() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_expose("var1", json!(null))
+            .with_expose(Variant::create("var1", json!(null)))
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     let (engine, proc) = create_proc(&workflow, &utils::longid());
@@ -764,7 +785,7 @@ async fn sch_vars_get_global_vars() {
         .with_var("a", json!("abc"))
         .with_step(|step| {
             step.with_id("step1")
-                .with_expose("var1", json!(null))
+                .with_expose(Variant::create("var1", json!(null)))
                 .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
         });
     let (engine, proc) = create_proc(&workflow, &utils::longid());
@@ -835,7 +856,7 @@ async fn sch_vars_override_global_vars() {
         .with_var("a", json!("abc"))
         .with_step(|step| {
             step.with_id("step1")
-                .with_expose("var1", json!(null))
+                .with_expose(Variant::create("var1", json!(null)))
                 .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
         });
     let (engine, proc) = create_proc(&workflow, &utils::longid());
@@ -870,7 +891,7 @@ async fn sch_vars_override_step_vars() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_var("a", json!("abc"))
             .with_id("step1")
-            .with_expose("var1", json!(null))
+            .with_expose(Variant::create("var1", json!(null)))
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     let (engine, proc) = create_proc(&workflow, &utils::longid());

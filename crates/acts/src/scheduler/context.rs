@@ -412,7 +412,13 @@ impl Context {
             Vars::new()
                 .with("id", workflow.id)
                 .with("name", workflow.name)
-                .with("tag", workflow.tag),
+                .with(
+                    "tag",
+                    workflow
+                        .options
+                        .get::<String>(consts::OPTION_TAG)
+                        .unwrap_or_default(),
+                ),
         );
 
         // append act.optins to inputs
@@ -437,7 +443,6 @@ impl Context {
             tid: task.id.clone(),
             name: task.node().name(),
             uses: msg.uses.clone(),
-            tag: msg.tag.to_string(),
             inputs,
             ..Default::default()
         };

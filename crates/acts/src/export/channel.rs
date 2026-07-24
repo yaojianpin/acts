@@ -1,4 +1,4 @@
-use crate::{Event, Message, scheduler::Runtime, utils};
+use crate::{Event, Message, Vars, scheduler::Runtime, utils};
 use std::sync::Arc;
 use tracing::{debug, error, info};
 
@@ -15,12 +15,12 @@ pub struct ChannelOptions {
     /// use the glob pattern to match the message state
     /// eg. {created,completed}
     pub state: String,
-    /// use the glob pattern to match the message tag or model tag
-    /// eg. *tag1*
-    pub tag: String,
 
     /// use the glob pattern to match the message uses
     pub uses: String,
+
+    /// use the custom glob pattern
+    pub options: Vars,
 }
 
 impl Default for ChannelOptions {
@@ -30,15 +30,24 @@ impl Default for ChannelOptions {
             ack: false,
             r#type: "*".to_string(),
             state: "*".to_string(),
-            tag: "*".to_string(),
             uses: "*".to_string(),
+            options: Vars::new(),
         }
     }
 }
 
 impl ChannelOptions {
     pub fn pattern(&self) -> String {
-        format!("{}:{}:{}:{}", self.r#type, self.state, self.tag, self.uses)
+        let mut options = Vars::new()
+            .with("ack", self.ack)
+            .with("type", self.r#type.clone())
+            .with("state", self.state.clone())
+            .with("uses", self.uses.clone());
+
+        for (key, value) in self.options.iter() {
+            options.set(key, value);
+        }
+        options.to_string()
     }
 }
 
@@ -53,7 +62,7 @@ pub struct Channel {
         globset::GlobMatcher,
         globset::GlobMatcher,
         globset::GlobMatcher,
-        globset::GlobMatcher,
+        Vec<(String, globset::GlobMatcher)>,
     ),
 }
 
@@ -73,14 +82,22 @@ impl Channel {
         let pat_state = globset::Glob::new(&options.state)
             .unwrap()
             .compile_matcher();
-        let pat_tag = globset::Glob::new(&options.tag).unwrap().compile_matcher();
         let pat_uses = globset::Glob::new(&options.uses).unwrap().compile_matcher();
+        let opt_globs: Vec<(String, globset::GlobMatcher)> = options
+            .options
+            .iter()
+            .filter_map(|(k, v)| {
+                v.as_str()
+                    .and_then(|pattern| globset::Glob::new(pattern).ok())
+                    .map(|g| (k.clone(), g.compile_matcher()))
+            })
+            .collect();
         Self {
             runtime: rt.clone(),
             ack: options.ack,
             chan_id: options.id.clone(),
             pattern: options.pattern(),
-            glob: (pat_type, pat_state, pat_tag, pat_uses),
+            glob: (pat_type, pat_state, pat_uses, opt_globs),
         }
     }
 
@@ -193,13 +210,27 @@ fn is_match(
         globset::GlobMatcher,
         globset::GlobMatcher,
         globset::GlobMatcher,
-        globset::GlobMatcher,
+        Vec<(String, globset::GlobMatcher)>,
     ),
     e: &Event<Message>,
 ) -> bool {
-    let (pat_type, pat_state, pat_tag, pat_uses) = glob;
-    pat_type.is_match(&e.r#type)
-        && pat_state.is_match(e.state.as_ref())
-        && pat_tag.is_match(&e.tag)
-        && pat_uses.is_match(&e.uses)
+    let (pat_type, pat_state, pat_uses, pat_options) = glob;
+    if !pat_type.is_match(&e.r#type)
+        || !pat_state.is_match(e.state.as_ref())
+        || !pat_uses.is_match(&e.uses)
+    {
+        return false;
+    }
+
+    let msg_options = e.options();
+    for (key, pat) in pat_options {
+        let value = msg_options
+            .as_ref()
+            .and_then(|o| o.get::<String>(key))
+            .unwrap_or_default();
+        if !pat.is_match(&value) {
+            return false;
+        }
+    }
+    true
 }

@@ -1,6 +1,6 @@
 use crate::event::EventAction;
 use crate::{
-    Action, ChannelOptions, Message, Vars, Workflow,
+    Action, ChannelOptions, Message, Variant, Vars, Workflow,
     config::ConfigData,
     data::MessageStatus,
     event::MessageState,
@@ -163,7 +163,7 @@ async fn sch_message_workflow_outputs() {
     let workflow = Workflow::new()
         .with_id("my_id")
         .with_var("a", json!(5))
-        .with_expose("a", json!(null));
+        .with_expose(Variant::create("a", json!(null)));
     let id = utils::longid();
     let (engine, proc) = create_proc(&workflow, &id);
     let rt = engine.runtime();
@@ -254,7 +254,7 @@ async fn sch_message_step_outputs() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_var("a", json!(5))
-            .with_expose("a", json!(null))
+            .with_expose(Variant::create("a", json!(null)))
     });
     let id = utils::longid();
     let (engine, proc) = create_proc(&workflow, &id);
@@ -299,6 +299,68 @@ async fn sch_message_step_completed() {
     rt.launch(&proc).unwrap();
     let ret = tx.recv().await;
     assert!(ret);
+}
+
+#[tokio::test]
+async fn sch_message_step_tag() {
+    let workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1").with_tag("my_step_tag")
+    });
+    let id = utils::longid();
+    let (engine, proc) = create_proc(&workflow, &id);
+    let rt = engine.runtime();
+    let sig = engine.signal(String::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
+    emitter.on_message(move |msg| {
+        if msg.r#type == "step" && msg.state() == MessageState::Created {
+            let tag = msg
+                .options()
+                .and_then(|o| o.get::<String>("tag"))
+                .unwrap_or_default();
+            rx.send(tag);
+        }
+    });
+    rt.launch(&proc).unwrap();
+    let ret = tx.recv().await;
+    assert_eq!(ret, "my_step_tag");
+}
+
+#[tokio::test]
+async fn sch_message_act_tag() {
+    let workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_tag("my_act_tag")
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+    });
+    let id = utils::longid();
+    let (engine, proc) = create_proc(&workflow, &id);
+    let rt = engine.runtime();
+    let sig = engine.signal(String::default());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
+    emitter.on_message(move |msg| {
+        if msg.r#type == "act" && msg.state() == MessageState::Created {
+            let tag = msg
+                .options()
+                .and_then(|o| o.get::<String>("tag"))
+                .unwrap_or_default();
+            rx.send(tag);
+        }
+    });
+    rt.launch(&proc).unwrap();
+    let ret = tx.recv().await;
+    assert_eq!(ret, "my_act_tag");
 }
 
 #[tokio::test]
@@ -418,13 +480,18 @@ async fn sch_message_act_tag_by_push_action() {
             let options = Vars::new()
                 .with("uses", "acts.core.irq")
                 .with("params", Vars::new().with("key", "act2"))
-                .with("tag", "tag2");
+                .with("options", Vars::new().with("tag", "tag2"));
             rt.do_action2(&e.pid, &e.tid, EventAction::Push, options)
                 .unwrap();
         }
 
         if e.is_params_key("act2") && e.is_state(MessageState::Created) {
-            rx.send(e.tag == "tag2");
+            rx.send(
+                e.options()
+                    .and_then(|o| o.get::<String>("tag"))
+                    .unwrap_or_default()
+                    == "tag2",
+            );
         }
     });
     engine.runtime().launch(&proc).unwrap();
@@ -502,7 +569,7 @@ async fn sch_message_act_outputs_by_push_action() {
                 .with("params", Vars::new().with("key", "act2"))
                 .with(
                     "options",
-                    Vars::new().with(consts::ACT_EXPOSE, vec![json!({ "name": "a", "value": 5 })]),
+                    Vars::new().with("exposes", vec![json!({ "name": "a", "value": 5 })]),
                 );
             rt.do_action2(&e.pid, &e.tid, EventAction::Push, options)
                 .unwrap();
@@ -523,7 +590,7 @@ async fn sch_message_act_outputs() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_var("a", json!(5))
-            .with_expose("a", json!(null))
+            .with_expose(Variant::create("a", json!(null)))
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     let id = utils::longid();
@@ -1257,4 +1324,39 @@ async fn sch_message_error_if_not_ack_and_exceed_max_reties() {
     assert!(message.create_time > 0);
     assert!(message.update_time > 0);
     assert_eq!(message.retry_times, config.max_message_retry_times.unwrap());
+}
+
+#[tokio::test]
+async fn sch_message_channel_options_match() {
+    let workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1").with_tag("important")
+    });
+    let id = utils::longid();
+    let (engine, proc) = create_proc(&workflow, &id);
+    let rt = engine.runtime();
+    let sig = engine.signal::<Vec<Message>>(Vec::new());
+    let s = sig.clone();
+    let emitter = engine.channel_with_options(&ChannelOptions {
+        options: Vars::new().with("tag", "important"),
+        ..Default::default()
+    });
+    let tx_close = sig.clone();
+    let tx_close2 = tx_close.clone();
+    emitter.on_complete(move |_| tx_close.close());
+    emitter.on_error(move |_| tx_close2.close());
+    emitter.on_message(move |e| {
+        s.update(|data| data.push(e.inner().clone()));
+    });
+    rt.launch(&proc).unwrap();
+    let ret = sig.timeout(500).await;
+    // should receive step created + step completed + workflow created + workflow completed
+    // all have options.tag = "important"
+    assert!(ret.len() >= 2, "expected at least 2 messages, got {}", ret.len());
+    for msg in &ret {
+        let tag = msg
+            .options()
+            .and_then(|o| o.get::<String>("tag"))
+            .unwrap_or_default();
+        assert_eq!(tag, "important");
+    }
 }

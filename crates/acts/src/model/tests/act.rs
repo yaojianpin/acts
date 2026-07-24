@@ -1,4 +1,4 @@
-use crate::{Act, Step, Vars, Workflow, utils::test::USES_MSG};
+use crate::{Act, Step, Vars, Variant, Workflow, utils::{consts, test::USES_MSG}};
 use serde_json::json;
 
 #[test]
@@ -91,7 +91,7 @@ fn model_act_set_var() {
 
 #[test]
 fn model_act_set_output() {
-    let act = Act::new().with_expose("var1", 1);
+    let act = Act::new().with_expose(Variant::create("var1", 1));
     assert_eq!(act.exposes().get::<i32>("var1").unwrap(), 1);
 }
 
@@ -104,7 +104,16 @@ fn model_act_set_if() {
 #[test]
 fn model_act_set_tag() {
     let b = Act::new().with_tag("tag1");
-    assert_eq!(b.tag, "tag1");
+    assert_eq!(b.options.get::<String>(consts::OPTION_TAG).unwrap(), "tag1");
+}
+
+#[test]
+fn model_act_options() {
+    let mut b = Act::new();
+    assert!(b.options.is_empty());
+
+    b = b.with_options("max_limit", 5);
+    assert_eq!(b.options.get::<i32>("max_limit").unwrap(), 5);
 }
 
 #[test]
@@ -158,10 +167,8 @@ fn model_act_yml_expose() {
     steps:
         - id: step1
           uses: acts.core.irq
-          options:
-            exposes:
-                - name: p1
-
+          exposes:
+            - name: p1
     "#;
 
     let m = Workflow::from_yml(text).unwrap();
@@ -173,7 +180,7 @@ fn model_act_yml_expose() {
 
 #[test]
 fn model_act_with_expose() {
-    let act = Act::new().with_expose("v1", 0);
+    let act = Act::new().with_expose(Variant::create("v1", 0));
     assert!(act.exposes().contains_key("v1"));
 }
 

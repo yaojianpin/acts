@@ -1,4 +1,3 @@
-use crate::Variant;
 use crate::event::EventAction;
 use crate::store::DbCollectionIden;
 use crate::{
@@ -316,10 +315,11 @@ impl Process {
             )));
         }
 
-        // filter the data by options.outputs
-        if let Some(exposes) = task.options().get::<Vec<Variant>>(consts::ACT_EXPOSE) {
+        // filter the data by exposes
+        let exposes = task.node().content.exposes();
+        if !exposes.is_empty() {
             let mut options = Vars::new();
-            for var in &exposes {
+            for var in exposes {
                 if !action.options.contains_key(&var.name) {
                     return Err(ActError::Action(format!(
                         "the options is not satisfied with act's outputs '{}' in task({})",
@@ -331,7 +331,7 @@ impl Process {
                 }
             }
 
-            // retset the options by rets defination
+            // reset the options by rets definition
             action.options = options;
         }
 

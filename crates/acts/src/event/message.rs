@@ -70,10 +70,6 @@ pub struct Message {
     /// set the outputs vars when complete the action
     pub outputs: Vars,
 
-    /// tag to distinguish different message
-    /// it is from node tag or group tag
-    pub tag: String,
-
     /// task start time in million second
     pub start_time: i64,
 
@@ -117,22 +113,12 @@ impl Message {
     }
 
     pub fn is_tag(&self, tag: &str) -> bool {
-        self.tag == tag
-    }
-
-    pub fn type_of(&self, mtype: &str) -> Option<&Self> {
-        if self.r#type == mtype {
-            return Some(self);
+        if let Some(options) = self.options()
+            && let Some(option_tag) = options.get::<String>("tag")
+        {
+            return option_tag == tag;
         }
-        None
-    }
-
-    pub fn tag_of(&self, tag: &str) -> Option<&Self> {
-        if tag == self.tag {
-            return Some(self);
-        }
-
-        None
+        false
     }
 
     /// workflow cost in million seconds
@@ -177,7 +163,6 @@ impl Message {
             uses: value.uses,
             inputs: value.inputs.to_string(),
             outputs: value.outputs.to_string(),
-            tag: value.tag,
             start_time: value.start_time,
             end_time: value.end_time,
             chan_id: emit_id.to_string(),
@@ -244,7 +229,6 @@ impl From<MessageState> for String {
         state.as_ref().to_string()
     }
 }
-
 impl From<data::Message> for Message {
     fn from(v: data::Message) -> Self {
         Self {
@@ -259,7 +243,6 @@ impl From<data::Message> for Message {
             uses: v.uses,
             inputs: serde_json::from_str(&v.inputs).unwrap_or_default(),
             outputs: serde_json::from_str(&v.outputs).unwrap_or_default(),
-            tag: v.tag,
             start_time: v.start_time,
             end_time: v.end_time,
             retry_times: v.retry_times,

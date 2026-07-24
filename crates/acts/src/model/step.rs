@@ -15,16 +15,9 @@ pub struct Step {
     #[serde(default)]
     pub id: String,
 
-    /// resource name
-    /// used in permission control
-    pub rn: Option<String>,
-
     /// define the step vars
     #[serde(default)]
     pub vars: Vec<Variant>,
-
-    #[serde(default)]
-    pub tag: String,
 
     #[serde(default)]
     pub r#if: Option<String>,
@@ -57,6 +50,10 @@ pub struct Step {
     /// don't send to client
     #[serde(default)]
     pub metadata: Vars,
+
+    /// variables to expose
+    #[serde(default)]
+    pub exposes: Vec<Variant>,
 }
 
 impl ModelBase for Step {
@@ -84,9 +81,8 @@ impl Step {
         self
     }
 
-    pub fn with_tag(mut self, tag: &str) -> Self {
-        self.tag = tag.to_string();
-        self
+    pub fn with_tag(self, tag: &str) -> Self {
+        self.with_options(consts::OPTION_TAG, tag)
     }
 
     pub fn with_uses(mut self, uses: &str, params: Vars) -> Self {
@@ -111,9 +107,8 @@ impl Step {
         self
     }
 
-    pub fn with_rn(mut self, rn: &str) -> Self {
-        self.rn = Some(rn.to_string());
-        self
+    pub fn with_rn(self, rn: &str) -> Self {
+        self.with_options(consts::OPTION_RN, rn)
     }
 
     pub fn with_var<T>(mut self, name: &str, value: T) -> Self
@@ -141,29 +136,16 @@ impl Step {
         self
     }
 
-    pub fn with_expose<T>(mut self, name: &str, value: T) -> Self
-    where
-        T: Serialize + Clone,
-    {
-        self.options
-            .entry(consts::ACT_EXPOSE)
-            .and_modify(|outputs| {
-                if let Some(obj) = outputs.as_array_mut() {
-                    obj.push(json!(Variant::create(name, value.clone())));
-                }
-            })
-            .or_insert(json!(vec![Variant::create(name, value)]));
-
+    pub fn with_expose(mut self, var: Variant) -> Self {
+        self.exposes.push(var);
         self
     }
 
     pub fn exposes(&self) -> Vars {
         let mut vars = Vars::new();
-        if let Some(exposes) = self.options.get::<Vec<Variant>>(consts::ACT_EXPOSE) {
-            exposes.iter().for_each(|var| {
-                vars.set(&var.name, var.value.clone());
-            });
-        }
+        self.exposes.iter().for_each(|var| {
+            vars.set(&var.name, var.value.clone());
+        });
         vars
     }
 

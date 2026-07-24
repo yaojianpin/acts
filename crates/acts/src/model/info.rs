@@ -77,7 +77,6 @@ pub struct MessageInfo {
     pub nid: String,
     pub inputs: String,
     pub outputs: String,
-    pub tag: String,
     pub create_time: i64,
     pub update_time: i64,
     pub retry_times: i32,
@@ -229,7 +228,6 @@ impl From<&data::Message> for MessageInfo {
             update_time: m.update_time,
             state: m.state,
             r#type: m.r#type.clone(),
-            tag: m.tag.clone(),
 
             inputs: m.inputs.clone(),
             outputs: m.outputs.clone(),

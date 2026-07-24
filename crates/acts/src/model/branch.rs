@@ -1,6 +1,5 @@
 use crate::{ModelBase, Variant, Vars, model::Step, utils::consts};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Branch {
@@ -15,9 +14,6 @@ pub struct Branch {
 
     #[serde(default)]
     pub vars: Vec<Variant>,
-
-    #[serde(default)]
-    pub tag: String,
 
     #[serde(default)]
     pub run: Option<String>,
@@ -44,6 +40,10 @@ pub struct Branch {
     /// don't send to client
     #[serde(default)]
     pub metadata: Vars,
+
+    /// variables to expose
+    #[serde(default)]
+    pub exposes: Vec<Variant>,
 }
 
 impl ModelBase for Branch {
@@ -66,9 +66,8 @@ impl Branch {
         self
     }
 
-    pub fn with_tag(mut self, tag: &str) -> Self {
-        self.tag = tag.to_string();
-        self
+    pub fn with_tag(self, tag: &str) -> Self {
+        self.with_options(consts::OPTION_TAG, tag)
     }
 
     pub fn with_var<T>(mut self, name: &str, value: T) -> Self
@@ -96,29 +95,15 @@ impl Branch {
         self
     }
 
-    pub fn with_expose<T>(mut self, name: &str, value: T) -> Self
-    where
-        T: Serialize + Clone,
-    {
-        self.options
-            .entry(consts::ACT_EXPOSE)
-            .and_modify(|outputs| {
-                if let Some(obj) = outputs.as_array_mut() {
-                    obj.push(json!(Variant::create(name, value.clone())));
-                }
-            })
-            .or_insert(json!(vec![Variant::create(name, value)]));
-
+    pub fn with_expose(mut self, var: Variant) -> Self {
+        self.exposes.push(var);
         self
     }
-
     pub fn exposes(&self) -> Vars {
         let mut vars = Vars::new();
-        if let Some(expose) = self.options.get::<Vec<Variant>>(consts::ACT_EXPOSE) {
-            expose.iter().for_each(|var| {
-                vars.set(&var.name, var.value.clone());
-            });
-        }
+        self.exposes.iter().for_each(|var| {
+            vars.set(&var.name, var.value.clone());
+        });
         vars
     }
 

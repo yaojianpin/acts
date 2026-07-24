@@ -228,10 +228,11 @@ impl Runtime {
                             emitter.emit_error(&message);
                         } else if state.is_completed() {
                             let mut is_validation_err = false;
-                            let outputs = proc.model().outputs;
-                            if !outputs.is_empty() {
+                            let exposes = &proc.model().exposes;
+                            if !exposes.is_empty() {
                                 // validate the process outputs
-                                if let Err(e) = outputs
+                                let schema = crate::ActSchema::Multiple(exposes.clone());
+                                if let Err(e) = schema
                                     .validate(&(message.outputs.to_value()))
                                     .map_err(|err| {
                                         ActError::Model(format!(

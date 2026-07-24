@@ -1,3 +1,4 @@
+use crate::Variant;
 use crate::{Engine, query::Query};
 use crate::{Vars, Workflow, utils::test::USES_SET};
 use serde_json::json;
@@ -102,7 +103,7 @@ async fn pack_event_hook_start() {
     let engine = Engine::new().start().unwrap();
     let workflow = Workflow::new()
         .with_var("ret", 0)
-        .with_expose("ret", json!(null))
+        .with_expose(Variant::create("ret", json!(null)))
         .with_id("my-event-model")
         .with_on(|act| {
             act.with_id("event1")
@@ -132,7 +133,7 @@ async fn pack_event_chat_start() {
     let engine = Engine::new().start().unwrap();
     let workflow = Workflow::new()
         .with_var("ret", 0)
-        .with_expose("ret", json!(null))
+        .with_expose(Variant::create("ret", json!(null)))
         .with_id("my-event-model")
         .with_on(|act| act.with_id("event1").with_uses("acts.event.chat"))
         .with_step(|step| step.with_id("step1"));

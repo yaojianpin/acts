@@ -133,7 +133,7 @@ impl Engine {
     ///     r#type: "step".to_string(),
     ///     state: "{created, completed}".to_string(),
     ///     uses: "my_package".to_string(),
-    ///     tag: "*".to_string()  
+    ///     ..Default::default()
     /// });
     /// chan.on_message(|e| {
     ///     // do something

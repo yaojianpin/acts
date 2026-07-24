@@ -1,4 +1,4 @@
-use crate::{ActSchema, Variant, Vars, Workflow, model::var::VariantTypes};
+use crate::{ActSchema, Variant, Vars, Workflow, model::var::VariantTypes, utils::consts};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -84,20 +84,19 @@ fn model_workflow_from_yml_str_vars() {
 #[test]
 fn model_workflow_from_yml_str_exposes() {
     let text = r#"
-    options:
-        exposes:
-            - name: a
-              value: 10
-            - name: b
-              value: abc
-            - name: c
-              value: 
-                - 1
-                - 2
-            - name: d
-              value: 
-                v1: 1
-                v2: 2
+    exposes:
+        - name: a
+          value: 10
+        - name: b
+          value: abc
+        - name: c
+          value: 
+            - 1
+            - 2
+        - name: d
+          value: 
+            v1: 1
+            v2: 2
     "#;
     let m = Workflow::from_yml(text).unwrap();
     let exposes = m.exposes();
@@ -178,16 +177,16 @@ fn model_workflow_from_yml_inputs_multiple() {
 #[test]
 fn model_workflow_from_yml_output_simple() {
     let text = r#"
-    outputs:
-        name: output
-        type: string
-        title: Output Title
-        desc: Output Description
-        required: true
-        value: default value
+    exposes:
+        - name: output
+          type: string
+          title: Output Title
+          desc: Output Description
+          required: true
+          value: default value
     "#;
     let m = Workflow::from_yml(text).unwrap();
-    let outputs = m.outputs.simple().unwrap();
+    let outputs = m.exposes.first().unwrap();
     assert_eq!(outputs.r#type, VariantTypes::String);
     assert_eq!(outputs.name, "output");
     assert_eq!(outputs.title, "Output Title");
@@ -199,7 +198,7 @@ fn model_workflow_from_yml_output_simple() {
 #[test]
 fn model_workflow_from_yml_outputs_multiple() {
     let text = r#"
-    outputs:
+    exposes:
         - name: output1
           type: string
           title: Output 1 Title
@@ -214,7 +213,7 @@ fn model_workflow_from_yml_outputs_multiple() {
           value: 42
     "#;
     let m = Workflow::from_yml(text).unwrap();
-    let outputs = m.outputs.multiple().unwrap();
+    let outputs = &m.exposes;
     assert_eq!(outputs.len(), 2);
 
     let output = &outputs[0];
@@ -302,7 +301,7 @@ fn model_workflow_steps() {
 #[test]
 fn model_workflow_tag() {
     let m = Workflow::new().with_tag("tag1");
-    assert_eq!(m.tag, "tag1");
+    assert_eq!(m.options.get::<String>(consts::OPTION_TAG).unwrap(), "tag1");
 }
 
 #[test]
@@ -326,7 +325,16 @@ fn model_workflow_set_ver() {
 #[test]
 fn model_workflow_rn() {
     let m = Workflow::new().with_rn("a:b:c");
-    assert_eq!(m.rn.unwrap(), "a:b:c");
+    assert_eq!(m.options.get::<String>(consts::OPTION_RN).unwrap(), "a:b:c");
+}
+
+#[test]
+fn model_workflow_options() {
+    let mut m = Workflow::new();
+    assert!(m.options.is_empty());
+
+    m = m.with_option("max_limit", 5);
+    assert_eq!(m.options.get::<i32>("max_limit").unwrap(), 5);
 }
 
 #[test]
@@ -341,14 +349,9 @@ fn model_workflow_inputs_schema() {
 
 #[test]
 fn model_workflow_outputs_schema() {
-    let schema = ActSchema::Multiple(vec![
-        Variant::new().name("data").r#type(VariantTypes::String),
-    ]);
-    let m = Workflow::new().with_outputs(schema.clone());
-
-    let vars = m.outputs.multiple().unwrap();
-    assert_eq!(vars.len(), 1);
-    let var = &vars[0];
+    let mut m = Workflow::new();
+    m.exposes.push(Variant::new().name("data").r#type(VariantTypes::String));
+    let var = &m.exposes[0];
     assert_eq!(var.name, "data");
     assert_eq!(var.r#type, VariantTypes::String);
 }
@@ -387,6 +390,6 @@ fn model_workflow_set_metadata() {
 
 #[test]
 fn model_workflow_with_expose() {
-    let m = Workflow::new().with_expose("v1", 0);
+    let m = Workflow::new().with_expose(Variant::create("v1", 0));
     assert!(m.exposes().contains_key("v1"));
 }
