@@ -27,6 +27,13 @@ async fn pack_action_submit_on_step() {
     proc.print();
     assert_eq!(
         proc.task_by_nid("step1").first().unwrap().state(),
+        TaskState::Completed
+    );
+    assert_eq!(
+        proc.task_by_params("action", "submit")
+            .first()
+            .unwrap()
+            .state(),
         TaskState::Submitted
     );
 }
@@ -57,6 +64,13 @@ async fn pack_action_sumit_on_step_with_inputs() {
     proc.print();
     assert_eq!(
         proc.task_by_nid("step1").first().unwrap().state(),
+        TaskState::Completed
+    );
+    assert_eq!(
+        proc.task_by_params("action", "submit")
+            .first()
+            .unwrap()
+            .state(),
         TaskState::Submitted
     );
     assert_eq!(
@@ -98,6 +112,13 @@ async fn pack_action_submit_auto() {
     proc.print();
     assert_eq!(
         proc.task_by_nid("step1").first().unwrap().state(),
+        TaskState::Completed
+    );
+    assert_eq!(
+        proc.task_by_params("action", "submit")
+            .first()
+            .unwrap()
+            .state(),
         TaskState::Submitted
     );
     assert!(
@@ -356,6 +377,13 @@ async fn pack_action_skip_on_step() {
     proc.print();
     assert_eq!(
         proc.task_by_nid("step1").first().unwrap().state(),
+        TaskState::Completed
+    );
+    assert_eq!(
+        proc.task_by_params("action", "skip")
+            .first()
+            .unwrap()
+            .state(),
         TaskState::Skipped
     );
     assert!(proc.state().is_completed());

@@ -101,9 +101,8 @@ pub fn build_step(
         }
     }
 
-    if typ == NodeOutputKind::Normal {
-        *prev = node.clone();
-    }
+    // create a step chain from the step array
+    *prev = node.clone();
 
     Ok(())
 }

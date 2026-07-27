@@ -364,7 +364,7 @@ impl Context {
                 && let Some(parent) = task.parent()
             {
                 parent.set_err(&err);
-                return parent.error(self);
+                return parent.on_error(self);
             }
         }
 
@@ -412,13 +412,7 @@ impl Context {
             Vars::new()
                 .with("id", workflow.id)
                 .with("name", workflow.name)
-                .with(
-                    "tag",
-                    workflow
-                        .options
-                        .get::<String>(consts::OPTION_TAG)
-                        .unwrap_or_default(),
-                ),
+                .with("options", workflow.options),
         );
 
         // append act.optins to inputs

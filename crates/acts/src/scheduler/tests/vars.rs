@@ -50,9 +50,12 @@ async fn sch_vars_workflow_outputs_value() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_vars_workflow_outputs_script() {
-    let workflow = Workflow::new()
-        .with_var("a", json!(10))
-        .with_expose(Variant::new().name("var1").r#type(VariantTypes::Number).value(json!(r#"{{ a }}"#)));
+    let workflow = Workflow::new().with_var("a", json!(10)).with_expose(
+        Variant::new()
+            .name("var1")
+            .r#type(VariantTypes::Number)
+            .value(json!(r#"{{ a }}"#)),
+    );
     let (engine, proc) = create_proc(&workflow, &utils::longid());
     let rt = engine.runtime();
     let sig = engine.signal(Vars::default());

@@ -1,4 +1,4 @@
-use crate::{Act, Branch, Step, Variant, Vars, Workflow, utils::consts};
+use crate::{Act, Branch, Step, Variant, Vars, Workflow};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::{Arc, RwLock, Weak};
@@ -55,10 +55,6 @@ pub struct NodeData {
     pub id: String,
     pub content: NodeContent,
     pub level: usize,
-    // pub parent: Option<String>,
-    // pub children: Vec<String>,
-    // pub prev: Option<String>,
-    // pub next: Option<String>,
 }
 
 impl NodeContent {
@@ -112,27 +108,6 @@ impl NodeContent {
             NodeContent::Step(node) => node.params.clone(),
             NodeContent::Act(node) => node.params.clone(),
             _ => serde_json::Value::Null,
-        }
-    }
-
-    pub fn tag(&self) -> String {
-        match self {
-            NodeContent::Workflow(node) => node
-                .options
-                .get::<String>(consts::OPTION_TAG)
-                .unwrap_or_default(),
-            NodeContent::Branch(node) => node
-                .options
-                .get::<String>(consts::OPTION_TAG)
-                .unwrap_or_default(),
-            NodeContent::Step(node) => node
-                .options
-                .get::<String>(consts::OPTION_TAG)
-                .unwrap_or_default(),
-            NodeContent::Act(node) => node
-                .options
-                .get::<String>(consts::OPTION_TAG)
-                .unwrap_or_default(),
         }
     }
 
@@ -269,10 +244,6 @@ impl Node {
             NodeContent::Step(_) => NodeKind::Step,
             NodeContent::Act(_) => NodeKind::Act,
         }
-    }
-
-    pub fn tag(&self) -> String {
-        self.content.tag()
     }
 
     #[allow(clippy::inherent_to_string)]

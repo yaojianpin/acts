@@ -40,24 +40,33 @@ async fn sch_step_timeout_one() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_step_timeout_many() {
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_timeout(|step| {
-                step.with_id("timout1")
-                    .with_if(r#"$cost() >= 1000"#)
-                    .with_uses(USES_MSG, Vars::new().with("key", "msg1"))
-            })
-            .with_timeout(|step| {
-                step.with_id("timout2")
-                    .with_if(r#"$cost() >= 2000"#)
-                    .with_uses(USES_MSG, Vars::new().with("key", "msg2"))
-            })
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
+    let workflow = Workflow::new()
+        .with_step(|step| {
+            step.with_id("step1")
+                .with_timeout(|step| {
+                    step.with_id("timeout1")
+                        .with_if(r#"$cost() >= 1000 && $cost() < 2000"#)
+                        .with_uses(USES_MSG, Vars::new().with("key", "msg1"))
+                })
+                .with_timeout(|step| {
+                    step.with_id("timeout2")
+                        .with_if(
+                            r#"
+                        console.log('timeout2 cost:' + $cost());
+                        $cost() >= 2000
+                        "#,
+                        )
+                        .with_uses(USES_MSG, Vars::new().with("key", "msg2"))
+                })
+                .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+        })
+        .with_step(|step| {
+            step.with_id("step2")
+                .with_uses("acts.core.action", Vars::new().with("action", "next"))
+        });
     workflow.print();
     let (engine, proc) = create_proc(&workflow, &utils::longid());
     let (tx, rx) = engine.signal(Vec::<Message>::default()).double();
-    auto_complete(&engine, &rx);
     let channel = engine.channel();
     channel.on_message(move |e| {
         if e.is_params_key("msg1") {
@@ -71,7 +80,7 @@ async fn sch_step_timeout_many() {
     });
 
     engine.runtime().launch(&proc).unwrap();
-    let ret = tx.recv().await;
+    let ret = tx.timeout(5000).await;
     proc.print();
     assert_eq!(ret.len(), 2)
 }

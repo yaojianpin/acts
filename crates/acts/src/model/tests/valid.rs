@@ -24,8 +24,8 @@ fn model_valid_act_id() {
 fn model_valid_same_tag() {
     let m = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_catch(|step| step.with_tag("tag1"))
-            .with_catch(|step| step.with_tag("tag1"))
+            .with_catch(|step| step.with_option("tag", "tag1"))
+            .with_catch(|step| step.with_option("tag", "tag1"))
     });
     assert!(m.valid().is_ok());
 }

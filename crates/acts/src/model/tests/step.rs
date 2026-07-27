@@ -1,7 +1,7 @@
 use crate::{
-    Step, TimeoutLimit, Vars, Variant, Workflow,
+    Step, TimeoutLimit, Variant, Vars, Workflow,
     model::act::TimeoutUnit,
-    utils::{consts, test::{USES_IRQ, USES_MSG}},
+    utils::test::{USES_IRQ, USES_MSG},
 };
 use serde_json::json;
 
@@ -94,8 +94,8 @@ fn model_step_set_output() {
 
 #[test]
 fn model_step_tag() {
-    let step = Step::new().with_tag("tag1");
-    assert_eq!(step.options.get::<String>(consts::OPTION_TAG).unwrap(), "tag1");
+    let step = Step::new().with_option("tag", "tag1");
+    assert_eq!(step.options.get::<String>("tag").unwrap(), "tag1");
 }
 
 #[test]
@@ -119,10 +119,10 @@ fn model_step_if() {
 #[test]
 fn model_step_rn() {
     let mut step = Step::new();
-    assert!(step.options.get::<String>(consts::OPTION_RN).is_none());
+    assert!(step.options.get::<String>("rn").is_none());
 
-    step = step.with_rn("a:b:c");
-    assert_eq!(step.options.get::<String>(consts::OPTION_RN).unwrap(), "a:b:c");
+    step = step.with_option("rn", "a:b:c");
+    assert_eq!(step.options.get::<String>("rn").unwrap(), "a:b:c");
 }
 
 #[test]
@@ -130,7 +130,7 @@ fn model_step_options() {
     let mut step = Step::new();
     assert!(step.options.is_empty());
 
-    step = step.with_options("max_limit", 5);
+    step = step.with_option("max_limit", 5);
     assert_eq!(step.options.get::<i32>("max_limit").unwrap(), 5);
 }
 

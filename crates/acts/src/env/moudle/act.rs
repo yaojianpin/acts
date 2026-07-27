@@ -70,10 +70,20 @@ mod act {
     #[rquickjs::function]
     pub fn cost() -> i64 {
         Context::with(|ctx| {
-            // the data.cost is user custom cost value
-            if let Some(cost) = ctx.task().data().get::<i64>(consts::TASK_COST) {
+            let task = ctx.task();
+            // 1. current task has a user-set TASK_COST
+            if let Some(cost) = task.data().get::<i64>(consts::TASK_COST) {
                 return cost;
             }
+            // 2. check parent chain for TASK_COST in data
+            let mut p = task.parent();
+            while let Some(parent) = p {
+                if let Some(cost) = parent.data().get::<i64>(consts::TASK_COST) {
+                    return cost;
+                }
+                p = parent.parent();
+            }
+            // 3. fallback: own runtime cost
             ctx.task().cost()
         })
     }

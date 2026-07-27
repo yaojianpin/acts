@@ -193,8 +193,8 @@ async fn sch_task_step_id() {
 async fn sch_task_step_options() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_options("timeout", 30)
-            .with_options("retry", 3)
+            .with_option("timeout", 30)
+            .with_option("retry", 3)
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     let (engine, proc) = create_proc(&workflow, &utils::longid());

@@ -296,13 +296,6 @@ impl Runtime {
                     .upsert(&e_clone)
                     .unwrap_or_else(|err| error!("scher.initialize upsert={}", err));
 
-                let ctx = e.create_context();
-                // run the hook events
-                if e.state().is_error() {
-                    e.run_hooks_err(&ctx)
-                        .unwrap_or_else(|err| error!("scher.initialize hooks={}", err));
-                }
-
                 // check task is allowed to emit message to client
                 if !e.state().is_pending() && !e.state().is_running() && !e.is_emit_disabled() {
                     let msg = e.create_message();
@@ -313,52 +306,35 @@ impl Runtime {
             });
         }
         {
-            // start tick interval
-            #[allow(unused_assignments)]
-            let mut default_interval_millis = 15;
+            // Message retry timer — periodically re-send unacknowledged messages
             let max_message_retry_times = options.max_message_retry_times();
-            if options.tick_interval_secs() > 0 {
-                #[allow(unused_assignments)]
-                {
-                    default_interval_millis = options.tick_interval_secs() * 1000;
-                }
-            }
+            #[cfg(not(test))]
+            let interval_ms = {
+                let secs = if options.tick_interval_secs() > 0 {
+                    options.tick_interval_secs()
+                } else {
+                    15
+                };
+                (secs * 1000) as u64
+            };
             #[cfg(test)]
-            {
-                default_interval_millis = 900;
-            }
+            let interval_ms = 900u64;
 
             let evt = self.emitter().clone();
             let cache = self.cache.clone();
-            self.emitter().on_tick(move |_| {
-                // do the process tick works
-                for proc in cache.procs().iter() {
-                    if proc.state().is_running() {
-                        proc.do_tick();
-                    }
-                }
-
-                // re-send the messages if it is neither acked nor completed
-                let cache = cache.clone();
-                let evt = evt.clone();
-                let _ = cache.store().with_no_response_messages(
-                    default_interval_millis,
-                    max_message_retry_times,
-                    |m| {
-                        let emitter = evt.clone();
-                        let m = m.clone();
-                        emitter.emit_message(&m);
-                    },
-                );
-            });
-
-            let evt = self.emitter().clone();
             Handle::current().spawn(async move {
-                let mut intv =
-                    time::interval(Duration::from_millis(default_interval_millis as u64));
+                let mut intv = time::interval(Duration::from_millis(interval_ms));
                 loop {
                     intv.tick().await;
-                    evt.emit_tick();
+                    let _ = cache.store().with_no_response_messages(
+                        interval_ms as i64,
+                        max_message_retry_times,
+                        |m| {
+                            let emitter = evt.clone();
+                            let m = m.clone();
+                            emitter.emit_message(&m);
+                        },
+                    );
                 }
             });
         }

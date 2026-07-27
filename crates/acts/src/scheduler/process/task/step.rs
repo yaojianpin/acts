@@ -1,7 +1,7 @@
 use crate::{
-    Act, ActTask, Error, Result,
+    Act, ActTask, Error, Result, Vars,
     model::Step,
-    scheduler::{Context, TaskState},
+    scheduler::{Context, TaskState, tree::NodeOutputKind},
     utils::consts,
 };
 
@@ -15,13 +15,11 @@ impl ActTask for Step {
                 return Ok(());
             }
         }
-
         Ok(())
     }
 
     fn run(&self, ctx: &Context) -> Result<()> {
         let task = ctx.task();
-
         if let Some(uses) = &self.uses {
             ctx.dispatch_act(
                 &Act {
@@ -159,5 +157,48 @@ impl ActTask for Step {
         }
 
         Ok(false)
+    }
+
+    fn on_error(&self, ctx: &Context) -> Result<()> {
+        let task = ctx.task();
+        let children = task.node().children_in(NodeOutputKind::Catch);
+        if task.sign().is_none() && !children.is_empty() {
+            task.set_sign(consts::TASK_SIGN_ERR);
+            task.set_state(TaskState::Running);
+            for child in &children {
+                ctx.sched_task_with_vars(
+                    child,
+                    Vars::new().with(consts::TASK_SIGN, consts::TASK_SIGN_CATCH),
+                )?;
+            }
+        }
+        ctx.emit_error()
+    }
+
+    fn on_timeout(&self, ctx: &Context) -> Result<()> {
+        let task = ctx.task();
+        let children = task.node().children_in(NodeOutputKind::Timeout);
+        if !children.is_empty() {
+            task.set_sign(consts::TASK_SIGN_TIMEOUTS);
+            let cost = task.cost();
+            // Write cost to parent task so timeout children read it via $cost()
+            task.set_data_with(|data| data.set(consts::TASK_COST, cost));
+            for child in &children {
+                // Skip if a live or successful task already exists for this node.
+                // Skipped tasks are replaced — condition failed at that cost, retry.
+                // let existing = ctx.proc.task_by_nid(&child.id());
+                // if existing.iter().any(|t| {
+                //     t.state().is_running() || t.state().is_pending() || t.state().is_success()
+                // }) {
+                //     continue;
+                // }
+                ctx.sched_task_with_vars(
+                    child,
+                    Vars::new().with(consts::TASK_SIGN, consts::TASK_SIGN_TIMEOUTS),
+                )?;
+            }
+        }
+
+        Ok(())
     }
 }

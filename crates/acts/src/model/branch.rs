@@ -1,4 +1,4 @@
-use crate::{ModelBase, Variant, Vars, model::Step, utils::consts};
+use crate::{ModelBase, Variant, Vars, model::Step};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -66,10 +66,6 @@ impl Branch {
         self
     }
 
-    pub fn with_tag(self, tag: &str) -> Self {
-        self.with_options(consts::OPTION_TAG, tag)
-    }
-
     pub fn with_var<T>(mut self, name: &str, value: T) -> Self
     where
         T: Serialize + Clone,
@@ -87,7 +83,7 @@ impl Branch {
         ret
     }
 
-    pub fn with_options<T>(mut self, name: &str, value: T) -> Self
+    pub fn with_option<T>(mut self, name: &str, value: T) -> Self
     where
         T: Serialize + Clone,
     {

@@ -1,4 +1,4 @@
-use crate::{ActSchema, Variant, Vars, Workflow, model::var::VariantTypes, utils::consts};
+use crate::{ActSchema, Variant, Vars, Workflow, model::var::VariantTypes};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -300,8 +300,8 @@ fn model_workflow_steps() {
 
 #[test]
 fn model_workflow_tag() {
-    let m = Workflow::new().with_tag("tag1");
-    assert_eq!(m.options.get::<String>(consts::OPTION_TAG).unwrap(), "tag1");
+    let m = Workflow::new().with_option("tag", "tag1");
+    assert_eq!(m.options.get::<String>("tag").unwrap(), "tag1");
 }
 
 #[test]
@@ -324,8 +324,8 @@ fn model_workflow_set_ver() {
 
 #[test]
 fn model_workflow_rn() {
-    let m = Workflow::new().with_rn("a:b:c");
-    assert_eq!(m.options.get::<String>(consts::OPTION_RN).unwrap(), "a:b:c");
+    let m = Workflow::new().with_option("rn", "a:b:c");
+    assert_eq!(m.options.get::<String>("rn").unwrap(), "a:b:c");
 }
 
 #[test]
@@ -350,7 +350,8 @@ fn model_workflow_inputs_schema() {
 #[test]
 fn model_workflow_outputs_schema() {
     let mut m = Workflow::new();
-    m.exposes.push(Variant::new().name("data").r#type(VariantTypes::String));
+    m.exposes
+        .push(Variant::new().name("data").r#type(VariantTypes::String));
     let var = &m.exposes[0];
     assert_eq!(var.name, "data");
     assert_eq!(var.r#type, VariantTypes::String);

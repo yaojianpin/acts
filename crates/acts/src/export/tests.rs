@@ -2519,9 +2519,7 @@ mod test_module {
 async fn export_emitter_options_multi_key() {
     let engine = Engine::new().start().unwrap();
     let emitter = engine.channel_with_options(&ChannelOptions {
-        options: Vars::new()
-            .with("tag", "tag*")
-            .with("rn", "a:*"),
+        options: Vars::new().with("tag", "tag*").with("rn", "a:*"),
         ..Default::default()
     });
     let sig = engine.signal::<Vec<Message>>(Vec::new());
@@ -2574,19 +2572,13 @@ async fn export_emitter_options_custom_key() {
     });
 
     let msg = Message {
-        inputs: Vars::new().with(
-            "options",
-            Vars::new().with("priority", "high"),
-        ),
+        inputs: Vars::new().with("options", Vars::new().with("priority", "high")),
         ..Message::default()
     };
     engine.runtime().emitter().emit_message(&msg);
 
     let msg = Message {
-        inputs: Vars::new().with(
-            "options",
-            Vars::new().with("priority", "low"),
-        ),
+        inputs: Vars::new().with("options", Vars::new().with("priority", "low")),
         ..Message::default()
     };
     engine.runtime().emitter().emit_message(&msg);

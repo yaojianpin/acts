@@ -34,7 +34,11 @@ pub trait ActTask: Clone + Send {
         Ok(true)
     }
 
-    fn error(&self, ctx: &Context) -> Result<()> {
+    fn on_error(&self, ctx: &Context) -> Result<()> {
         ctx.emit_error()
+    }
+
+    fn on_timeout(&self, _ctx: &Context) -> Result<()> {
+        Ok(())
     }
 }

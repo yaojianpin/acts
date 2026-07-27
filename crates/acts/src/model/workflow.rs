@@ -1,6 +1,5 @@
 use crate::{
     Act, ActError, ActSchema, ModelBase, Result, Step, Variant, Vars, scheduler::NodeTree,
-    utils::consts,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -189,14 +188,6 @@ impl Workflow {
     pub fn with_ver(mut self, ver: &str) -> Self {
         self.ver = ver.to_string();
         self
-    }
-
-    pub fn with_rn(self, rn: &str) -> Self {
-        self.with_option(consts::OPTION_RN, rn)
-    }
-
-    pub fn with_tag(self, tag: &str) -> Self {
-        self.with_option(consts::OPTION_TAG, tag)
     }
 
     pub fn with_option<T>(mut self, name: &str, value: T) -> Self

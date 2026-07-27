@@ -19,10 +19,6 @@ impl TaskTree {
         self.maps.values().cloned().collect()
     }
 
-    pub fn root(&self) -> Option<Arc<Task>> {
-        self.root.clone()
-    }
-
     pub fn task_by_tid(&self, tid: &str) -> Option<Arc<Task>> {
         self.maps.get(tid).cloned()
     }

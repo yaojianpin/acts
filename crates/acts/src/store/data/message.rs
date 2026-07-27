@@ -64,23 +64,23 @@ impl DbCollectionIden for Message {
                 let mut value = value;
                 if let JsonValue::Object(map) = &mut value {
                     let tag = map.remove("tag");
-                    if let Some(tag) = tag {
-                        if let Some(JsonValue::String(inputs_str)) = map.get("inputs") {
-                            let mut inputs_map: serde_json::Map<String, JsonValue> =
-                                serde_json::from_str(inputs_str).unwrap_or_default();
-                            let options = inputs_map
-                                .entry("options".to_string())
-                                .or_insert_with(|| JsonValue::Object(serde_json::Map::new()));
-                            if let JsonValue::Object(opts) = options {
-                                opts.insert("tag".to_string(), tag);
-                            }
-                            map.insert(
-                                "inputs".to_string(),
-                                JsonValue::String(
-                                    serde_json::to_string(&inputs_map).unwrap_or_default(),
-                                ),
-                            );
+                    if let Some(tag) = tag
+                        && let Some(JsonValue::String(inputs_str)) = map.get("inputs")
+                    {
+                        let mut inputs_map: serde_json::Map<String, JsonValue> =
+                            serde_json::from_str(inputs_str).unwrap_or_default();
+                        let options = inputs_map
+                            .entry("options".to_string())
+                            .or_insert_with(|| JsonValue::Object(serde_json::Map::new()));
+                        if let JsonValue::Object(opts) = options {
+                            opts.insert("tag".to_string(), tag);
                         }
+                        map.insert(
+                            "inputs".to_string(),
+                            JsonValue::String(
+                                serde_json::to_string(&inputs_map).unwrap_or_default(),
+                            ),
+                        );
                     }
                     map.insert(
                         "v".to_string(),

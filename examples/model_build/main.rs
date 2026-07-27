@@ -8,7 +8,12 @@ async fn main() -> Result<()> {
         .with_id("m1")
         .with_var("index", 0)
         .with_var("result", 0)
-        .with_expose(Variant::new().name("result").r#type(acts::VariantTypes::Number).value(r#"{{ result }}"#))
+        .with_expose(
+            Variant::new()
+                .name("result")
+                .r#type(acts::VariantTypes::Number)
+                .value(r#"{{ result }}"#),
+        )
         .with_step(|step| {
             step.with_id("cond")
                 .with_branch(|b| {

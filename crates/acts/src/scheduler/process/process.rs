@@ -1,3 +1,4 @@
+use crate::ActTask;
 use crate::event::EventAction;
 use crate::store::DbCollectionIden;
 use crate::{
@@ -15,7 +16,7 @@ use std::{
     fmt,
     sync::{Arc, RwLock},
 };
-use tokio::runtime::Handle;
+use tokio::time::Duration;
 use tracing::{error, instrument};
 
 #[derive(Clone)]
@@ -280,18 +281,14 @@ impl Process {
 
     pub(crate) fn do_tick(&self) {
         let tasks = self.find_tasks(|t| t.is_timeouts());
-        Handle::current().spawn(async move {
-            for t in tasks.iter() {
-                let ctx = t.create_context();
-
-                t.run_hooks_timeout(&ctx).await.unwrap_or_else(|err| {
-                    eprintln!("{err}");
-                    error!("{err}");
-                });
-            }
-        });
+        for t in tasks.iter() {
+            let ctx = t.create_context();
+            t.on_timeout(&ctx).unwrap_or_else(|err| {
+                eprintln!("{err}");
+                error!("{err}");
+            });
+        }
     }
-
     #[instrument()]
     pub fn do_action(self: &Arc<Self>, action: &Action) -> Result<()> {
         let mut action = action.clone();
@@ -341,12 +338,37 @@ impl Process {
         Ok(())
     }
 
-    #[instrument()]
     pub fn start(self: &Arc<Self>) -> Result<()> {
         self.set_state(TaskState::Running);
         let cache = self.runtime.cache().clone();
         let proc = self.clone();
         cache.push_proc(&proc)?;
+
+        // Start per-process tick loop
+        #[cfg(not(test))]
+        let interval_ms = {
+            let config = self.runtime.config();
+            let secs = if config.tick_interval_secs() > 0 {
+                config.tick_interval_secs()
+            } else {
+                15
+            };
+            (secs * 1000) as u64
+        };
+        #[cfg(test)]
+        let interval_ms = 900u64;
+
+        let tick_proc = proc.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+                if !tick_proc.state().is_running() {
+                    break;
+                }
+                tick_proc.do_tick();
+            }
+        });
+
         let tr = self.tree();
         if let Some(root) = &tr.root {
             let task = self.create_task(root, None);
@@ -406,15 +428,48 @@ impl Process {
 
     #[allow(unused)]
     pub fn tree_output(&self) -> String {
-        let ttree = self.tasks.read().unwrap();
         let s = &RefCell::new(String::new());
         s.borrow_mut()
             .push_str(&format!("Proc({})  state={}\n", self.id, self.state()));
-        if let Some(root) = ttree.root() {
-            let path = std::collections::HashMap::new();
-            print_task_string(&root, 0, &path, true, s);
+
+        if let Some(root) = self.root() {
+            self.write_task_tree(&root, s, 0, true);
         }
+
         s.clone().into_inner()
+    }
+
+    fn write_task_tree(&self, task: &Arc<Task>, s: &RefCell<String>, depth: usize, is_last: bool) {
+        // indent with tree connectors
+        s.borrow_mut().push_str(&"    ".repeat(depth));
+        if depth > 0 {
+            if is_last {
+                s.borrow_mut().push_str("└── ");
+            } else {
+                s.borrow_mut().push_str("├── ");
+            }
+        }
+
+        s.borrow_mut().push_str(&format!(
+            "Task({}) prev={} kind={} nid={} name={} state={}  uses={}  data={}\n",
+            task.id,
+            match task.prev() {
+                Some(v) => v,
+                None => "nil".to_string(),
+            },
+            task.node().kind(),
+            task.node().id(),
+            task.node().content.name(),
+            task.state(),
+            task.node().uses(),
+            task.data()
+        ));
+
+        let children = self.children(&task.id);
+        let len = children.len();
+        for (i, child) in children.iter().enumerate() {
+            self.write_task_tree(child, s, depth + 1, i == len - 1);
+        }
     }
 
     pub fn into_data(self: &Arc<Self>) -> Result<data::Proc> {
@@ -432,53 +487,5 @@ impl Process {
             err: self.err().map(|err| err.to_string()),
             v: data::Proc::version(),
         })
-    }
-}
-
-fn print_task_string(
-    task: &Arc<Task>,
-    depth: usize,
-    path: &std::collections::HashMap<usize, bool>,
-    is_last: bool,
-    s: &RefCell<String>,
-) {
-    // Draw tree connectors
-    if depth > 0 {
-        for idx in 1..depth {
-            if let Some(&true) = path.get(&idx) {
-                s.borrow_mut().push_str("│   ");
-            } else {
-                s.borrow_mut().push_str("    ");
-            }
-        }
-        if is_last {
-            s.borrow_mut().push_str("└── ");
-        } else {
-            s.borrow_mut().push_str("├── ");
-        }
-    }
-
-    s.borrow_mut().push_str(&format!(
-        "Task({}) prev={} kind={} nid={} name={} state={}  uses={}  data={}\n",
-        task.id,
-        match task.prev() {
-            Some(v) => v,
-            None => "nil".to_string(),
-        },
-        task.node().kind(),
-        task.node().id(),
-        task.node().content.name(),
-        task.state(),
-        task.node().uses(),
-        task.data()
-    ));
-
-    let mut child_path = path.clone();
-    child_path.insert(depth, !is_last);
-
-    let children = task.children();
-    let len = children.len();
-    for (i, child) in children.iter().enumerate() {
-        print_task_string(child, depth + 1, &child_path, i == len - 1, s);
     }
 }

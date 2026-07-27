@@ -1,10 +1,8 @@
 mod act;
 mod branch;
-// mod hook;
 mod step;
 mod workflow;
 
-use crate::scheduler::tree::NodeOutputKind;
 use crate::store::DbCollectionIden;
 use crate::utils::consts::TASK_ROOT_TID;
 use crate::{
@@ -52,8 +50,6 @@ pub struct Task {
 
     node: Arc<Node>,
 
-    // lifecycle hooks
-    // hooks: ShareLock<HashMap<TaskLifeCycle, Vec<StatementBatch>>>,
     runtime: Arc<Runtime>,
 }
 
@@ -71,8 +67,6 @@ impl Task {
             prev: Arc::new(RwLock::new(None)),
             timestamp: utils::time::timestamp(),
             proc: proc.clone(),
-
-            // hooks: Arc::new(RwLock::new(HashMap::new())),
             runtime: rt.clone(),
         }
     }
@@ -191,13 +185,7 @@ impl Task {
             Vars::new()
                 .with("id", workflow.id.clone())
                 .with("name", workflow.name)
-                .with(
-                    "tag",
-                    workflow
-                        .options
-                        .get::<String>(consts::OPTION_TAG)
-                        .unwrap_or_default(),
-                ),
+                .with("options", workflow.options),
         );
 
         // add error to inputs
@@ -593,7 +581,7 @@ impl Task {
                 }
                 task.set_err(&err);
                 task.set_data(&ctx.vars());
-                task.error(ctx)?;
+                task.on_error(ctx)?;
             }
             EventAction::SetProcessVars => {
                 if self.state().is_completed() {
@@ -665,86 +653,6 @@ impl Task {
             self.set_state(TaskState::Running);
             ctx.runtime.emitter().emit_task_event(self)?;
             self.exec(ctx)?;
-        }
-
-        Ok(())
-    }
-
-    pub async fn run_hooks_timeout(&self, ctx: &Context) -> Result<()> {
-        let children = self.node.children_in(NodeOutputKind::Timeout);
-        if !children.is_empty() {
-            self.set_sign(consts::TASK_SIGN_TIMEOUTS);
-            let mut timeouts = self
-                .with_data(|data| data.get::<Vec<String>>(consts::TASK_TIMEOUTS))
-                .unwrap_or_default();
-
-            let cost = self.cost();
-            for child in &children {
-                if timeouts.contains(&child.id) {
-                    continue;
-                }
-
-                let mut is_timeout = false;
-                if let Some(expr) = &child.content.r#if() {
-                    is_timeout = ctx.eval::<bool>(expr)?;
-                }
-
-                if is_timeout {
-                    timeouts.push(child.id.clone());
-                    self.set_data_with(|data| data.set(consts::TASK_TIMEOUTS, timeouts.clone()));
-                    ctx.sched_task_with_vars(
-                        child,
-                        Vars::new()
-                            .with(consts::TASK_COST, cost)
-                            .with(consts::TASK_SIGN, consts::TASK_SIGN_TIMEOUTS),
-                    )?;
-                }
-            }
-        }
-
-        Ok(())
-    }
-
-    pub fn run_hooks_err(&self, ctx: &Context) -> Result<()> {
-        if self.sign().is_some() {
-            return Ok(());
-        }
-        let children = self.node.children_in(NodeOutputKind::Catch);
-        if !children.is_empty() {
-            // no if condition in catch acts
-            let mut catch_elses = vec![];
-            let mut is_err_catch = false;
-            for child in children.iter() {
-                let mut is_cond_catch = false;
-                if let Some(expr) = &child.content.r#if() {
-                    is_cond_catch = ctx.eval::<bool>(expr)?;
-                } else {
-                    catch_elses.push(child.clone());
-                }
-
-                if is_cond_catch {
-                    is_err_catch = true;
-                    self.set_sign(consts::TASK_SIGN_ERR);
-                    self.set_state(TaskState::Running);
-                    ctx.sched_task_with_vars(
-                        child,
-                        Vars::new().with(consts::TASK_SIGN, consts::TASK_SIGN_CATCH),
-                    )?;
-                }
-            }
-
-            if !is_err_catch && !catch_elses.is_empty() {
-                self.set_sign(consts::TASK_SIGN_ERR);
-                self.set_state(TaskState::Running);
-                // if there is no other catched acts
-                // do the none if action
-                for child in catch_elses.iter() {
-                    ctx.sched_task_with_vars(
-                        child,
-                        Vars::new().with(consts::TASK_SIGN, consts::TASK_SIGN_CATCH),
-                    )?;
-                }
-            }
         }
 
         Ok(())
@@ -931,13 +839,23 @@ impl ActTask for Arc<Task> {
         Ok(false)
     }
 
-    fn error(&self, ctx: &Context) -> Result<()> {
+    fn on_error(&self, ctx: &Context) -> Result<()> {
         ctx.set_task(self);
         match &self.node.content {
-            NodeContent::Workflow(data) => data.error(ctx),
-            NodeContent::Step(data) => data.error(ctx),
-            NodeContent::Branch(data) => data.error(ctx),
-            NodeContent::Act(data) => data.error(ctx),
+            NodeContent::Workflow(data) => data.on_error(ctx),
+            NodeContent::Step(data) => data.on_error(ctx),
+            NodeContent::Branch(data) => data.on_error(ctx),
+            NodeContent::Act(data) => data.on_error(ctx),
+        }
+    }
+
+    fn on_timeout(&self, ctx: &Context) -> Result<()> {
+        ctx.set_task(self);
+        match &self.node.content {
+            NodeContent::Workflow(data) => data.on_timeout(ctx),
+            NodeContent::Step(data) => data.on_timeout(ctx),
+            NodeContent::Branch(data) => data.on_timeout(ctx),
+            NodeContent::Act(data) => data.on_timeout(ctx),
         }
     }
 }

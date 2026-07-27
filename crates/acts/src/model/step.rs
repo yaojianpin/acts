@@ -1,6 +1,6 @@
+use crate::Variant;
 #[allow(unused_imports)]
 use crate::{Act, Catch, ModelBase, Timeout, Vars, model::Branch};
-use crate::{Variant, utils::consts};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 
@@ -81,10 +81,6 @@ impl Step {
         self
     }
 
-    pub fn with_tag(self, tag: &str) -> Self {
-        self.with_options(consts::OPTION_TAG, tag)
-    }
-
     pub fn with_uses(mut self, uses: &str, params: Vars) -> Self {
         self.uses = Some(uses.to_string());
         self.params = params.into();
@@ -107,10 +103,6 @@ impl Step {
         self
     }
 
-    pub fn with_rn(self, rn: &str) -> Self {
-        self.with_options(consts::OPTION_RN, rn)
-    }
-
     pub fn with_var<T>(mut self, name: &str, value: T) -> Self
     where
         T: Serialize + Clone,
@@ -128,7 +120,7 @@ impl Step {
         ret
     }
 
-    pub fn with_options<T>(mut self, name: &str, value: T) -> Self
+    pub fn with_option<T>(mut self, name: &str, value: T) -> Self
     where
         T: Serialize + Clone,
     {

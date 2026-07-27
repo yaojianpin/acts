@@ -43,7 +43,6 @@ pub struct TaskInfo {
     pub id: String,
     pub prev: Option<String>,
     pub name: String,
-    pub tag: String,
     pub pid: String,
     pub nid: String,
     pub r#type: String,
@@ -185,7 +184,6 @@ impl From<data::Task> for TaskInfo {
             start_time: t.start_time,
             end_time: t.end_time,
             timestamp: t.timestamp,
-            tag: node_data.content.tag(),
         }
     }
 }
@@ -210,7 +208,6 @@ impl From<&Arc<scheduler::Task>> for TaskInfo {
             start_time: t.start_time(),
             end_time: t.end_time(),
             timestamp: t.timestamp,
-            tag: t.node().tag(),
         }
     }
 }

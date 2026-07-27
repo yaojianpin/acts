@@ -1,4 +1,4 @@
-use crate::{Act, Step, Vars, Variant, Workflow, utils::{consts, test::USES_MSG}};
+use crate::{Act, Step, Variant, Vars, Workflow, utils::test::USES_MSG};
 use serde_json::json;
 
 #[test]
@@ -103,8 +103,8 @@ fn model_act_set_if() {
 
 #[test]
 fn model_act_set_tag() {
-    let b = Act::new().with_tag("tag1");
-    assert_eq!(b.options.get::<String>(consts::OPTION_TAG).unwrap(), "tag1");
+    let b = Act::new().with_option("tag", "tag1");
+    assert_eq!(b.options.get::<String>("tag").unwrap(), "tag1");
 }
 
 #[test]
@@ -112,7 +112,7 @@ fn model_act_options() {
     let mut b = Act::new();
     assert!(b.options.is_empty());
 
-    b = b.with_options("max_limit", 5);
+    b = b.with_option("max_limit", 5);
     assert_eq!(b.options.get::<i32>("max_limit").unwrap(), 5);
 }
 

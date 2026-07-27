@@ -2,7 +2,6 @@ use crate::{
     Event, Result, ShareLock,
     event::Message,
     scheduler::{Process, Task},
-    utils,
 };
 use std::{
     collections::HashMap,
@@ -11,20 +10,6 @@ use std::{
 use tracing::debug;
 
 use super::TaskExtra;
-
-macro_rules! dispatch_event {
-    ($fn:ident, $event_name:ident, $(&$item:ident), +) => {
-        let handlers = $fn.$event_name.read().unwrap();
-        for handle in handlers.iter() {
-            let handle = handle.clone();
-            let ($($item,)+) = ($($item.clone(),)+);
-             (handle)($(&$item),+);
-            // tokio::spawn(async move {
-            //     (handle)($(&$item),+);
-            // });
-        }
-    };
-}
 
 macro_rules! dispatch_key_event {
     ($fn:ident, $event_name:ident, $(&$item:ident), +) => {
@@ -42,7 +27,6 @@ macro_rules! dispatch_key_event {
 pub type ActWorkflowMessageHandle = Arc<dyn Fn(&Event<Message>) + Send + Sync>;
 pub type ProcHandle = Arc<dyn Fn(&Event<Arc<Process>>) + Send + Sync>;
 pub type TaskHandle = Arc<dyn Fn(&Event<Arc<Task>, TaskExtra>) + Send + Sync>;
-pub type TickHandle = Arc<dyn Fn(&i64) + Send + Sync>;
 
 pub struct Emitter {
     starts: ShareLock<HashMap<String, ActWorkflowMessageHandle>>,
@@ -53,8 +37,6 @@ pub struct Emitter {
 
     procs: ShareLock<Vec<ProcHandle>>,
     tasks: ShareLock<Vec<TaskHandle>>,
-
-    ticks: ShareLock<Vec<TickHandle>>,
 }
 
 impl std::fmt::Debug for Emitter {
@@ -78,7 +60,6 @@ impl Emitter {
             errors: Arc::new(RwLock::new(HashMap::new())),
             procs: Arc::new(RwLock::new(Vec::new())),
             tasks: Arc::new(RwLock::new(Vec::new())),
-            ticks: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -138,10 +119,6 @@ impl Emitter {
         self.tasks.write().unwrap().push(Arc::new(f));
     }
 
-    pub fn on_tick(&self, f: impl Fn(&i64) + Send + Sync + 'static) {
-        self.ticks.write().unwrap().push(Arc::new(f));
-    }
-
     pub fn emit_proc_event(&self, proc: &Arc<Process>) {
         debug!("emit_proc_event: {}", proc.id());
         let handlers = self.procs.read().unwrap();
@@ -188,12 +165,6 @@ impl Emitter {
         debug!("emit_error: {:?}", state);
         let e = Event::new(state);
         dispatch_key_event!(self, errors, &e);
-    }
-
-    pub fn emit_tick(&self) {
-        let time_millis = utils::time::time_millis();
-        debug!("emit_tick {time_millis}");
-        dispatch_event!(self, ticks, &time_millis);
     }
 
     pub fn remove(&self, key: &str) {

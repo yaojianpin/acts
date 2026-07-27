@@ -60,16 +60,13 @@ impl ActPackage for ActionPackage {
 impl ActPackageFn for ActionPackage {
     fn execute(&self, ctx: &Context) -> Result<Option<Vars>> {
         let task = ctx.task();
-        if let Some(parent) = task.parent() {
-            ctx.set_task(&parent);
-            ctx.set_action(&Action::new(
-                &parent.pid,
-                &parent.id,
-                self.action.clone(),
-                self.options.clone(),
-            ))?;
-            parent.update(ctx)?;
-        }
+        ctx.set_action(&Action::new(
+            &task.pid,
+            &task.id,
+            self.action.clone(),
+            self.options.clone(),
+        ))?;
+        task.update(ctx)?;
         Ok(None)
     }
 }

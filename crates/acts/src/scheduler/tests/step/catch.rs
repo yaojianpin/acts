@@ -225,14 +225,19 @@ async fn sch_step_catch_many_if() {
             .with_var("v1", 10)
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
             .with_catch(|step| {
-                step.with_if(r#"v1 > 0"#)
+                step.with_id("catch1")
+                    .with_if(r#"v1 > 0"#)
                     .with_uses(USES_IRQ, Vars::new().with("key", "catch1"))
             })
             .with_catch(|step| {
-                step.with_if(r#"v1 = 0"#)
+                step.with_id("catch2")
+                    .with_if(r#"v1 == 0"#)
                     .with_uses(USES_IRQ, Vars::new().with("key", "catch2"))
             })
-            .with_catch(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "catch3")))
+            .with_catch(|step| {
+                step.with_id("catch3")
+                    .with_uses(USES_IRQ, Vars::new().with("key", "catch3"))
+            })
     });
     workflow.print();
     let (engine, proc) = create_proc(&workflow, &utils::longid());
@@ -259,6 +264,10 @@ async fn sch_step_catch_many_if() {
     let ret = tx.recv().await;
     proc.print();
     assert!(ret);
+    assert_eq!(
+        proc.task_by_nid("catch1").first().unwrap().state(),
+        TaskState::Running
+    );
     assert!(proc.task_by_nid("catch2").is_empty());
     assert!(proc.task_by_nid("catch3").is_empty());
 }
@@ -279,7 +288,10 @@ async fn sch_step_catch_many_else() {
                     .with_if(r#"v1 == 0"#)
                     .with_uses(USES_IRQ, Vars::new().with("key", "catch2"))
             })
-            .with_catch(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "catch3")))
+            .with_catch(|step| {
+                step.with_id("catch_step_else")
+                    .with_uses(USES_IRQ, Vars::new().with("key", "catch3"))
+            })
     });
     workflow.print();
     let (engine, proc) = create_proc(&workflow, &utils::longid());
@@ -304,8 +316,18 @@ async fn sch_step_catch_many_else() {
     let ret = tx.recv().await;
     proc.print();
     assert!(ret);
-    assert!(proc.task_by_nid("catch_step1").is_empty());
-    assert!(proc.task_by_nid("catch_step2").is_empty());
+    assert_eq!(
+        proc.task_by_nid("catch_step1").first().unwrap().state(),
+        TaskState::Skipped
+    );
+    assert_eq!(
+        proc.task_by_nid("catch_step2").first().unwrap().state(),
+        TaskState::Skipped
+    );
+    assert_eq!(
+        proc.task_by_nid("catch_step_else").first().unwrap().state(),
+        TaskState::Running
+    );
 }
 
 #[tokio::test]

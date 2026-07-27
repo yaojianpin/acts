@@ -67,7 +67,7 @@ async fn sch_message_workflow_name() {
 
 #[tokio::test]
 async fn sch_message_workflow_tag() {
-    let workflow = Workflow::new().with_tag("my_tag");
+    let workflow = Workflow::new().with_option("tag", "my_tag");
     let id = utils::longid();
     let (engine, proc) = create_proc(&workflow, &id);
     let rt = engine.runtime();
@@ -84,6 +84,8 @@ async fn sch_message_workflow_tag() {
             rx.send(
                 msg.inputs
                     .get::<Vars>(consts::WORKFLOW_MODEL_KEY)
+                    .unwrap()
+                    .get::<Vars>("options")
                     .unwrap()
                     .get::<String>("tag")
                     .unwrap()
@@ -303,9 +305,8 @@ async fn sch_message_step_completed() {
 
 #[tokio::test]
 async fn sch_message_step_tag() {
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_tag("my_step_tag")
-    });
+    let workflow =
+        Workflow::new().with_step(|step| step.with_id("step1").with_option("tag", "my_step_tag"));
     let id = utils::longid();
     let (engine, proc) = create_proc(&workflow, &id);
     let rt = engine.runtime();
@@ -335,7 +336,7 @@ async fn sch_message_step_tag() {
 async fn sch_message_act_tag() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_tag("my_act_tag")
+            .with_option("tag", "my_act_tag")
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     let id = utils::longid();
@@ -1328,9 +1329,8 @@ async fn sch_message_error_if_not_ack_and_exceed_max_reties() {
 
 #[tokio::test]
 async fn sch_message_channel_options_match() {
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_tag("important")
-    });
+    let workflow =
+        Workflow::new().with_step(|step| step.with_id("step1").with_option("tag", "important"));
     let id = utils::longid();
     let (engine, proc) = create_proc(&workflow, &id);
     let rt = engine.runtime();
@@ -1351,7 +1351,11 @@ async fn sch_message_channel_options_match() {
     let ret = sig.timeout(500).await;
     // should receive step created + step completed + workflow created + workflow completed
     // all have options.tag = "important"
-    assert!(ret.len() >= 2, "expected at least 2 messages, got {}", ret.len());
+    assert!(
+        ret.len() >= 2,
+        "expected at least 2 messages, got {}",
+        ret.len()
+    );
     for msg in &ret {
         let tag = msg
             .options()
