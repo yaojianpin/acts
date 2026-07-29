@@ -44,7 +44,7 @@ fn deploy(c: &mut Criterion) {
                 async move {
                     let start = std::time::Instant::now();
                     for _ in 0..iters {
-                        engine.executor().model().deploy(&workflow).unwrap();
+                        engine.executor().model().deploy(&workflow, None).unwrap();
                     }
                     start.elapsed()
                 }
@@ -65,7 +65,7 @@ fn start(c: &mut Criterion) {
         let engine = Engine::new().start().expect("failed to start engine");
         let text = include_str!("./start.yml");
         let workflow = Workflow::from_yml(text).unwrap();
-        engine.executor().model().deploy(&workflow).unwrap();
+        engine.executor().model().deploy(&workflow, None).unwrap();
 
         group.bench_function("proc", |b| {
             let engine = engine.clone();
@@ -108,7 +108,7 @@ fn act(c: &mut Criterion) {
             let workflow = workflow.clone();
             async move {
                 let engine = Engine::new().start().expect("failed to start engine");
-                engine.executor().model().deploy(&workflow).unwrap();
+                engine.executor().model().deploy(&workflow, None).unwrap();
 
                 let (s, sig) = engine.signal(()).double();
                 let tasks = Arc::new(Mutex::new(Vec::new()));

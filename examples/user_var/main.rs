@@ -36,7 +36,7 @@ async fn main() -> Result<()> {
     let executor = engine.executor();
     executor
         .model()
-        .deploy(&workflow)
+        .deploy(&workflow, None)
         .expect("fail to deploy workflow");
 
     // set test data when start

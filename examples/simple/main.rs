@@ -8,7 +8,7 @@ async fn main() -> Result<()> {
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text)?;
     workflow.print();
-    engine.executor().model().deploy(&workflow)?;
+    engine.executor().model().deploy(&workflow, None)?;
 
     let mut vars = Vars::new();
     vars.insert("input".into(), 10.into());

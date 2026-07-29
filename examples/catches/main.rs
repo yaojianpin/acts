@@ -13,7 +13,7 @@ async fn main() -> Result<()> {
     workflow.print();
 
     let executor = engine.executor().clone();
-    engine.executor().model().deploy(&workflow)?;
+    engine.executor().model().deploy(&workflow, None)?;
 
     engine.channel().on_message(move |e| {
         println!("on_message: state={} inputs={}", e.state, e.inputs);

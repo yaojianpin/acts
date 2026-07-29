@@ -5,6 +5,7 @@ use crate::{
     store::PageData,
     utils::consts,
 };
+use serde_json::Value as JsonValue;
 use std::sync::Arc;
 use tracing::instrument;
 
@@ -21,11 +22,11 @@ impl ModelExecutor {
     }
 
     #[instrument(skip(self))]
-    pub fn deploy(&self, model: &Workflow) -> Result<bool> {
+    pub fn deploy(&self, model: &Workflow, view: Option<&JsonValue>) -> Result<bool> {
         model.valid()?;
 
         let store = self.runtime.cache().store();
-        let ret = store.deploy(model)?;
+        let ret = store.deploy(model, view)?;
         self.deploy_event(&model.on, &model.id, &model.ver)?;
 
         Ok(ret)

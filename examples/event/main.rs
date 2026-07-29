@@ -8,7 +8,7 @@ async fn main() -> Result<()> {
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text).unwrap();
     workflow.print();
-    engine.executor().model().deploy(&workflow)?;
+    engine.executor().model().deploy(&workflow, None)?;
     executor.proc().start(&workflow.id, Vars::new())?;
 
     let ret = executor.evt().start(

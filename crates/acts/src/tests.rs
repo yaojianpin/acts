@@ -30,7 +30,7 @@ async fn engine_event_on_message() {
     });
 
     let executor = engine.executor();
-    engine.executor().model().deploy(&workflow).unwrap();
+    engine.executor().model().deploy(&workflow, None).unwrap();
 
     let mut options = Vars::new();
     options.insert("pid".to_string(), json!(utils::longid()));
@@ -56,7 +56,7 @@ async fn engine_event_on_start() {
     });
 
     let executor = engine.executor();
-    engine.executor().model().deploy(&workflow).unwrap();
+    engine.executor().model().deploy(&workflow, None).unwrap();
 
     let mut options = Vars::new();
     options.insert("pid".to_string(), json!(utils::longid()));
@@ -81,7 +81,7 @@ async fn engine_event_on_complete() {
     });
 
     let executor = engine.executor();
-    engine.executor().model().deploy(&workflow).unwrap();
+    engine.executor().model().deploy(&workflow, None).unwrap();
 
     let mut options = Vars::new();
     options.insert("pid".to_string(), json!(utils::longid()));
@@ -121,7 +121,7 @@ async fn engine_event_on_error() {
     });
 
     let executor = engine.executor();
-    executor.model().deploy(&workflow).unwrap();
+    executor.model().deploy(&workflow, None).unwrap();
 
     let mut options = Vars::new();
     options.insert("pid".to_string(), json!(utils::longid()));

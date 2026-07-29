@@ -47,7 +47,7 @@ async fn export_manager_deploy_ok() {
         .with_id(&utils::longid())
         .with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "test")));
 
-    let result = manager.model().deploy(&model);
+    let result = manager.model().deploy(&model, None);
 
     assert!(result.is_ok());
     assert!(manager.model().get(&model.id, "text").is_ok());
@@ -64,7 +64,7 @@ async fn export_manager_deploy_many_times() {
 
     let mut result = true;
     for _ in 0..10 {
-        let state = manager.model().deploy(&model);
+        let state = manager.model().deploy(&model, None);
         result &= state.is_ok();
     }
     assert!(result);
@@ -77,7 +77,7 @@ async fn export_manager_deploy_no_model_id_error() {
     let manager = engine.executor();
     let model = Workflow::new().with_step(|step| step.with_id("step1"));
 
-    let result = manager.model().deploy(&model);
+    let result = manager.model().deploy(&model, None);
     assert!(result.is_err());
 }
 
@@ -91,7 +91,7 @@ async fn export_manager_deploy_dup_id_error() {
         .with_step(|step| step.with_id("step1"))
         .with_step(|step| step.with_id("step1"));
 
-    let result = executor.model().deploy(&model);
+    let result = executor.model().deploy(&model, None);
     assert!(result.is_err());
 }
 
@@ -105,7 +105,7 @@ async fn engine_executor_start_no_pid() {
     let workflow = Workflow::new()
         .with_id(&mid)
         .with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "test")));
-    engine.executor().model().deploy(&workflow).unwrap();
+    engine.executor().model().deploy(&workflow, None).unwrap();
     let options = Vars::new();
     let result = executor.proc().start(&workflow.id, options);
     assert!(result.is_ok());
@@ -121,7 +121,7 @@ async fn engine_executor_start_with_pid() {
     let workflow = Workflow::new()
         .with_id(&mid)
         .with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "test")));
-    engine.executor().model().deploy(&workflow).unwrap();
+    engine.executor().model().deploy(&workflow, None).unwrap();
     let mut options = Vars::new();
     options.insert("pid".to_string(), "123".into());
     let result = executor.proc().start(&workflow.id, options);
@@ -141,7 +141,7 @@ async fn export_executor_start_empty_pid() {
         .with_id(&mid)
         .with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "test")));
 
-    engine.executor().model().deploy(&workflow).unwrap();
+    engine.executor().model().deploy(&workflow, None).unwrap();
     let mut options = Vars::new();
     options.insert("pid".to_string(), "".into());
     let result = executor.proc().start(&workflow.id, options);
@@ -178,7 +178,7 @@ async fn export_executor_start_dup_pid_error() {
     engine
         .executor()
         .model()
-        .deploy(&model)
+        .deploy(&model, None)
         .expect("fail to deploy workflow");
     let mut options = Vars::new();
     options.insert("pid".to_string(), json!(pid.to_string()));
@@ -235,7 +235,7 @@ async fn export_executor_start_with_inputs_schema_ok() {
             json!("string"),
         )]))
         .with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "test")));
-    engine.executor().model().deploy(&workflow).unwrap();
+    engine.executor().model().deploy(&workflow, None).unwrap();
     let result = executor.proc().start(&mid, Vars::new().with("a", "abc"));
     assert!(result.is_ok());
 }
@@ -253,7 +253,7 @@ async fn export_executor_start_with_inputs_schema_err() {
             json!("string"),
         )]))
         .with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "test")));
-    engine.executor().model().deploy(&workflow).unwrap();
+    engine.executor().model().deploy(&workflow, None).unwrap();
     let result = executor.proc().start(&mid, Vars::new().with("a", 100));
     assert!(result.is_err());
 }
@@ -268,7 +268,7 @@ async fn export_executor_start_with_outputs_schema_ok() {
         .with_id(&mid)
         .with_expose(Variant::new().name("a").r#type(VariantTypes::Number));
 
-    engine.executor().model().deploy(&workflow).unwrap();
+    engine.executor().model().deploy(&workflow, None).unwrap();
 
     let (s1, s2) = Signal::new(0).double();
     engine.channel().on_complete(move |e| {
@@ -292,7 +292,7 @@ async fn export_executor_start_with_outputs_schema_err() {
     let workflow = Workflow::new()
         .with_id(&mid)
         .with_expose(Variant::new().name("a").r#type(VariantTypes::Number));
-    engine.executor().model().deploy(&workflow).unwrap();
+    engine.executor().model().deploy(&workflow, None).unwrap();
 
     let (s1, s2) = Signal::new(None).double();
     engine.channel().on_error(move |e| {
@@ -348,7 +348,7 @@ async fn export_manager_models_get_count() {
 
     for _ in 0..5 {
         model.set_id(&utils::longid());
-        manager.model().deploy(&model).unwrap();
+        manager.model().deploy(&model, None).unwrap();
     }
 
     let result = manager
@@ -368,7 +368,7 @@ async fn export_manager_models_order() {
     for i in 0..5 {
         model.set_id(&utils::longid());
         model.name = format!("model-{}", i + 1);
-        manager.model().deploy(&model).unwrap();
+        manager.model().deploy(&model, None).unwrap();
     }
 
     let result = manager
@@ -387,7 +387,7 @@ async fn export_manager_models_get_rows() {
 
     for _ in 0..5 {
         model.set_id(&utils::longid());
-        manager.model().deploy(&model).unwrap();
+        manager.model().deploy(&model, None).unwrap();
     }
 
     let result = manager
@@ -407,7 +407,7 @@ async fn export_manager_models_query() {
     for i in 0..5 {
         model.set_id(&utils::longid());
         model.name = format!("model-{}", i + 1);
-        manager.model().deploy(&model).unwrap();
+        manager.model().deploy(&model, None).unwrap();
     }
 
     let result = manager
@@ -426,7 +426,7 @@ async fn export_manager_model_get_text() {
     let mut model = Workflow::new().with_step(|step| step.with_id("step1"));
 
     model.set_id(&utils::longid());
-    manager.model().deploy(&model).unwrap();
+    manager.model().deploy(&model, None).unwrap();
 
     let result = manager.model().get(&model.id, "text").unwrap();
     assert_eq!(result.id, model.id);
@@ -441,7 +441,7 @@ async fn export_manager_model_get_tree() {
     let mut model = Workflow::new().with_step(|step| step.with_id("step1"));
 
     model.set_id(&utils::longid());
-    manager.model().deploy(&model).unwrap();
+    manager.model().deploy(&model, None).unwrap();
 
     let result = manager.model().get(&model.id, "tree").unwrap();
     assert_eq!(result.id, model.id);
@@ -456,7 +456,7 @@ async fn export_manager_model_remove() {
     let mut model = Workflow::new().with_step(|step| step.with_id("step1"));
 
     model.set_id(&utils::longid());
-    manager.model().deploy(&model).unwrap();
+    manager.model().deploy(&model, None).unwrap();
 
     manager.model().rm(&model.id).unwrap();
     assert_eq!(
@@ -480,7 +480,7 @@ async fn export_manager_model_remove_with_events() {
         .with_step(|step| step.with_id("step1"));
 
     model.set_id(&utils::longid());
-    manager.model().deploy(&model).unwrap();
+    manager.model().deploy(&model, None).unwrap();
 
     assert_eq!(
         manager
@@ -1567,7 +1567,7 @@ async fn export_executor_start() {
     let s1 = sig.clone();
     engine.channel().on_complete(move |_| s1.close());
 
-    engine.executor().model().deploy(&model).unwrap();
+    engine.executor().model().deploy(&model, None).unwrap();
 
     let pid = utils::longid();
     let mut vars = Vars::new();
@@ -2313,7 +2313,7 @@ async fn export_message_store_with_emit_id_and_options() {
     let pattern = serde_json::from_str::<Vars>(&message.chan_pattern).unwrap();
     assert_eq!(message.chan_id, "my_emit_id");
     assert_eq!(pattern.get::<String>("tag").unwrap(), "tag*");
-    assert_eq!(pattern.get::<bool>("ack").unwrap(), true);
+    assert!(pattern.get::<bool>("ack").unwrap());
 }
 #[serial]
 #[tokio::test(flavor = "multi_thread")]

@@ -63,6 +63,7 @@ pub struct ModelInfo {
     pub create_time: i64,
     pub update_time: i64,
     pub data: String,
+    pub view: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -144,6 +145,7 @@ impl From<data::Model> for ModelInfo {
             create_time: m.create_time,
             update_time: m.update_time,
             data: m.data,
+            view: m.view,
         }
     }
 }

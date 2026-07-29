@@ -35,7 +35,7 @@ async fn pack_subflow_start() {
     let channel = engine.channel();
 
     // deploy w2 workflow
-    Executor::new(&rt).model().deploy(&w2).unwrap();
+    Executor::new(&rt).model().deploy(&w2, None).unwrap();
     channel.on_start(move |e| {
         if e.mid == "w2" {
             rx.update(|data| *data = true);
@@ -91,7 +91,7 @@ async fn pack_subflow_act_running() {
     let (tx, rx) = engine.signal(false).double();
     auto_complete(&engine, &rx);
 
-    Executor::new(&rt).model().deploy(&w2).unwrap();
+    Executor::new(&rt).model().deploy(&w2, None).unwrap();
     let channel = engine.channel();
     channel.on_message(move |e| {
         println!("message: {:?}", e.inner());
@@ -141,7 +141,7 @@ async fn pack_subflow_act_complete() {
             rx.close();
         }
     });
-    Executor::new(&rt).model().deploy(&w2).unwrap();
+    Executor::new(&rt).model().deploy(&w2, None).unwrap();
     channel.on_message(move |e| {
         if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             rt.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
@@ -186,7 +186,7 @@ async fn pack_subflow_act_skip() {
             rx.close();
         }
     });
-    Executor::new(&rt).model().deploy(&w2).unwrap();
+    Executor::new(&rt).model().deploy(&w2, None).unwrap();
     channel.on_message(move |e| {
         if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             rt.do_action2(&e.pid, &e.tid, EventAction::Skip, Vars::new())
@@ -230,7 +230,7 @@ async fn pack_subflow_act_abort() {
     // auto_complete(&engine, &rx);
     let channel = engine.channel();
 
-    Executor::new(&rt).model().deploy(&w2).unwrap();
+    Executor::new(&rt).model().deploy(&w2, None).unwrap();
     channel.on_message(move |e| {
         if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             rt.do_action2(&e.pid, &e.tid, EventAction::Abort, Vars::new())
@@ -276,7 +276,7 @@ async fn pack_subflow_act_error() {
     let (tx, rx) = engine.signal(false).double();
     let channel = engine.channel();
 
-    Executor::new(&rt).model().deploy(&w2).unwrap();
+    Executor::new(&rt).model().deploy(&w2, None).unwrap();
     channel.on_error(move |e| {
         if e.mid == "main" {
             rx.close();

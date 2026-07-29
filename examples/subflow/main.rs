@@ -55,6 +55,6 @@ async fn main() -> Result<()> {
 
 fn deploy_model(mgr: &Executor, model: &str) -> Result<()> {
     let workflow = Workflow::from_yml(model)?;
-    mgr.model().deploy(&workflow)?;
+    mgr.model().deploy(&workflow, None)?;
     Ok(())
 }

@@ -12,7 +12,7 @@ async fn main() -> Result<()> {
     workflow.print();
 
     let executor = engine.executor().clone();
-    engine.executor().model().deploy(&workflow)?;
+    engine.executor().model().deploy(&workflow, None)?;
 
     engine.channel().on_message(move |e| {
         let ret = tokio::task::block_in_place(|| {

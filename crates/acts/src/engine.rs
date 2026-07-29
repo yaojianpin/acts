@@ -26,7 +26,7 @@ use std::sync::Arc;
 ///         println!("{:?}", e.outputs);
 ///     });
 ///     let exec = engine.executor();
-///     exec.model().deploy(&workflow).expect("fail to deploy workflow");
+///     exec.model().deploy(&workflow, None).expect("fail to deploy workflow");
 ///
 ///     let mut vars = Vars::new();
 ///     vars.insert("input".into(), 3.into());

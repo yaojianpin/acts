@@ -111,7 +111,7 @@ async fn cache_restore_count() {
         .with_step(|step| step.with_name("step1"));
     let rt = engine.runtime();
     let cache = rt.cache();
-    cache.store().deploy(&model).unwrap();
+    cache.store().deploy(&model, None).unwrap();
 
     assert_eq!(cache.count(), 0);
     for _ in 0..10 {
@@ -143,7 +143,7 @@ async fn cache_restore_working_state() {
         .with_step(|step| step.with_name("step1"));
     let rt = engine.runtime();
     let cache = rt.cache();
-    cache.store().deploy(&model).unwrap();
+    cache.store().deploy(&model, None).unwrap();
 
     assert_eq!(cache.count(), 0);
 
@@ -188,7 +188,7 @@ async fn cache_restore_completed_state() {
         .with_step(|step| step.with_name("step1"));
     let rt = engine.runtime();
     let cache = rt.cache();
-    cache.store().deploy(&model).unwrap();
+    cache.store().deploy(&model, None).unwrap();
 
     assert_eq!(cache.count(), 0);
 
@@ -233,7 +233,7 @@ async fn cache_restore_less_cap() {
         .with_step(|step| step.with_name("step1"));
     let rt = engine.runtime();
     let cache = rt.cache();
-    cache.store().deploy(&model).unwrap();
+    cache.store().deploy(&model, None).unwrap();
 
     assert_eq!(cache.count(), 0);
 

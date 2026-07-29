@@ -16,7 +16,7 @@ async fn sch_scher_next() {
     let workflow = Workflow::new().with_id(&utils::longid());
 
     let s = runtime.clone();
-    store.deploy(&workflow).unwrap();
+    store.deploy(&workflow, None).unwrap();
     tokio::spawn(async move {
         let mut options = Vars::new();
         options.insert("pid".to_string(), json!(utils::longid()));

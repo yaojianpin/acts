@@ -120,7 +120,7 @@ impl Channel {
     ///         }
     ///     });
     ///     let exec = engine.executor();
-    ///     exec.model().deploy(&workflow).expect("fail to deploy workflow");
+    ///     exec.model().deploy(&workflow, None).expect("fail to deploy workflow");
     ///     let mut vars = Vars::new();
     ///     vars.set("pid", "w1");
     ///     exec.proc().start(

@@ -25,7 +25,7 @@ async fn pack_event_deploy() {
 
     workflow.print();
 
-    engine.executor().model().deploy(&workflow).unwrap();
+    engine.executor().model().deploy(&workflow, None).unwrap();
     let ret = engine
         .executor()
         .evt()
@@ -55,7 +55,7 @@ async fn pack_event_get() {
 
     workflow.print();
 
-    engine.executor().model().deploy(&workflow).unwrap();
+    engine.executor().model().deploy(&workflow, None).unwrap();
     let ret = engine
         .executor()
         .evt()
@@ -87,7 +87,7 @@ async fn pack_event_manual_start() {
 
     workflow.print();
 
-    engine.executor().model().deploy(&workflow).unwrap();
+    engine.executor().model().deploy(&workflow, None).unwrap();
     let ret = engine
         .executor()
         .evt()
@@ -116,7 +116,7 @@ async fn pack_event_hook_start() {
         });
 
     workflow.print();
-    engine.executor().model().deploy(&workflow).unwrap();
+    engine.executor().model().deploy(&workflow, None).unwrap();
     let ret = engine
         .executor()
         .evt()
@@ -139,7 +139,7 @@ async fn pack_event_chat_start() {
         .with_step(|step| step.with_id("step1"));
 
     workflow.print();
-    engine.executor().model().deploy(&workflow).unwrap();
+    engine.executor().model().deploy(&workflow, None).unwrap();
     let ret = engine
         .executor()
         .evt()
@@ -170,7 +170,7 @@ async fn pack_event_multiple() {
 
     workflow.print();
 
-    engine.executor().model().deploy(&workflow).unwrap();
+    engine.executor().model().deploy(&workflow, None).unwrap();
     let ret = engine
         .executor()
         .evt()
@@ -207,7 +207,7 @@ async fn pack_event_dup_id() {
         - id: step1
     "#;
     let workflow = Workflow::from_yml(workflow).unwrap();
-    let ret = engine.executor().model().deploy(&workflow);
+    let ret = engine.executor().model().deploy(&workflow, None);
     assert!(ret.is_err());
 }
 
@@ -225,6 +225,6 @@ async fn pack_event_empty_id() {
         - id: step1
     "#;
     let workflow = Workflow::from_yml(workflow).unwrap();
-    let ret = engine.executor().model().deploy(&workflow);
+    let ret = engine.executor().model().deploy(&workflow, None);
     assert!(ret.is_err());
 }

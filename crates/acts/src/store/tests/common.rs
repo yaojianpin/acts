@@ -119,7 +119,7 @@ macro_rules! gen_store_tests {
         async fn store_model_deploy_ok() {
             let store = store();
             let workflow = create_workflow();
-            let ok = store.deploy(&workflow).unwrap();
+            let ok = store.deploy(&workflow, None).unwrap();
             assert!(ok);
         }
 
@@ -130,10 +130,10 @@ macro_rules! gen_store_tests {
 
             let mut workflow = create_workflow();
             workflow.id = utils::longid();
-            store.deploy(&workflow).unwrap();
+            store.deploy(&workflow, None).unwrap();
 
             workflow.id = utils::longid();
-            store.deploy(&workflow).unwrap();
+            store.deploy(&workflow, None).unwrap();
 
             let q = Query::new().limit(2);
             let models = store.models().query(&q).unwrap();
@@ -147,7 +147,7 @@ macro_rules! gen_store_tests {
             let store = store();
             let mut workflow = create_workflow();
             workflow.id = utils::longid();
-            store.deploy(&workflow).unwrap();
+            store.deploy(&workflow, None).unwrap();
 
             let model = store.models().find(&workflow.id).unwrap();
             assert_eq!(model.id, workflow.id);
@@ -166,6 +166,7 @@ macro_rules! gen_store_tests {
                 create_time: 3333,
                 update_time: 0,
                 data: "{}".to_string(),
+                view: None,
                 timestamp: 0,
                 v: 0,
             };
@@ -191,6 +192,7 @@ macro_rules! gen_store_tests {
                     create_time,
                     update_time: 0,
                     data: "{}".to_string(),
+                    view: None,
                     timestamp: utils::time::timestamp(),
                     v: 0,
                 };
@@ -238,6 +240,7 @@ macro_rules! gen_store_tests {
                     create_time,
                     update_time: 0,
                     data: "{}".to_string(),
+                    view: None,
                     timestamp: utils::time::timestamp(),
                     v: 0,
                 };
@@ -279,6 +282,7 @@ macro_rules! gen_store_tests {
                     create_time,
                     update_time: 0,
                     data: "{}".to_string(),
+                    view: None,
                     timestamp: utils::time::timestamp(),
                     v: 0,
                 };
@@ -294,6 +298,7 @@ macro_rules! gen_store_tests {
                     create_time,
                     update_time: 0,
                     data: "{}".to_string(),
+                    view: None,
                     timestamp: utils::time::timestamp(),
                     v: 0,
                 };
@@ -330,6 +335,7 @@ macro_rules! gen_store_tests {
                     create_time,
                     update_time: 0,
                     data: "{}".to_string(),
+                    view: None,
                     timestamp: utils::time::timestamp(),
                     v: 0,
                 };
@@ -369,7 +375,7 @@ macro_rules! gen_store_tests {
             let id = utils::longid();
             let mut workflow = create_workflow();
             workflow.id = id.clone();
-            store.deploy(&workflow).unwrap();
+            store.deploy(&workflow, None).unwrap();
 
             let model = store.models().find(&id);
             assert!(model.is_ok());
@@ -385,7 +391,7 @@ macro_rules! gen_store_tests {
             let store = store();
             let mut workflow = create_workflow();
             workflow.id = "".to_string();
-            let result = store.deploy(&workflow);
+            let result = store.deploy(&workflow, None);
 
             assert!(result.is_err());
         }
@@ -1717,6 +1723,7 @@ macro_rules! gen_store_tests {
                 create_time: 500,
                 update_time: 0,
                 data: "{}".to_string(),
+                view: None,
                 timestamp: utils::time::timestamp(),
                 v: 0,
             };

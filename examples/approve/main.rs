@@ -14,7 +14,7 @@ async fn main() -> Result<()> {
     workflow.print();
 
     let executor = engine.executor().clone();
-    engine.executor().model().deploy(&workflow)?;
+    engine.executor().model().deploy(&workflow, None)?;
     executor.proc().start(&workflow.id, Vars::new())?;
 
     engine.channel().on_message(move |e| {

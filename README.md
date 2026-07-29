@@ -80,7 +80,7 @@ async fn main() {
     let workflow = Workflow::from_yml(model).unwrap();
 
     let executor = engine.executor();
-    executor.model().deploy(&workflow).expect("fail to deploy workflow");
+    executor.model().deploy(&workflow, None).expect("fail to deploy workflow");
 
     let mut vars = Vars::new();
 

@@ -113,6 +113,7 @@ fn model_info_model() {
         create_time: 3333,
         update_time: 0,
         data: "{}".to_string(),
+        view: None,
         timestamp: 0,
         v: 0,
     };
@@ -282,6 +283,7 @@ fn model_info_model_arr_to_value() {
         create_time: 3333,
         update_time: 0,
         data: "{}".to_string(),
+        view: None,
         timestamp: 0,
         v: 0,
     };

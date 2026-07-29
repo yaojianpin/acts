@@ -3,6 +3,7 @@ use std::sync::Mutex;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
+use serde_json::Value as JsonValue;
 use std::fmt::Debug;
 use tracing::trace;
 
@@ -130,7 +131,7 @@ impl Store {
         }
     }
 
-    pub fn deploy(&self, model: &Workflow) -> Result<bool> {
+    pub fn deploy(&self, model: &Workflow, view: Option<&JsonValue>) -> Result<bool> {
         trace!("store::deploy({})", model.id);
         if model.id.is_empty() {
             return Err(ActError::Model("missing id in model".into()));
@@ -147,6 +148,7 @@ impl Store {
                     name: model.name.clone(),
                     desc: model.desc.clone(),
                     data: text.clone(),
+                    view: view.map(|v| v.to_string()),
                     ver: m.ver.clone(),
                     size: text.len() as i32,
                     create_time: m.create_time,
@@ -163,6 +165,7 @@ impl Store {
                     name: model.name.clone(),
                     desc: model.desc.clone(),
                     data: text.clone(),
+                    view: view.map(|v| v.to_string()),
                     ver: model.ver.to_string(),
                     size: text.len() as i32,
                     create_time: utils::time::time_millis(),

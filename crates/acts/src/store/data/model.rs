@@ -14,6 +14,7 @@ pub struct Model {
     pub create_time: i64,
     pub update_time: i64,
     pub data: String,
+    pub view: Option<String>,
     pub timestamp: i64,
     pub v: i32,
 }
