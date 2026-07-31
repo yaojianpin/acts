@@ -19,11 +19,7 @@ impl ActJsModule {
 #[allow(clippy::module_inception)]
 #[rquickjs::module(rename_vars = "camelCase")]
 mod act {
-    use crate::{
-        Context, TimeoutLimit, Vars,
-        env::value::ActJsValue,
-        utils::{self, consts},
-    };
+    use crate::{Context, TimeoutLimit, Vars, env::value::ActJsValue, utils::consts};
 
     #[rquickjs::function]
     pub fn get_act_value(name: String) -> Option<ActJsValue> {
@@ -89,15 +85,33 @@ mod act {
     }
 
     #[rquickjs::function]
-    pub fn cost_in(value: String) -> bool {
+    pub fn cost_in(min: String, max: Option<String>) -> bool {
         Context::with(|ctx| {
-            let mut cost = utils::time::time_millis() - ctx.task().start_time();
-            if let Some(v) = ctx.task().data().get::<i64>(consts::TASK_COST) {
+            let task = ctx.task();
+            let mut cost = task.cost();
+            if let Some(v) = task.data().get::<i64>(consts::TASK_COST) {
                 cost = v;
+            } else {
+                // check parent chain for TASK_COST in data
+                let mut p = task.parent();
+                while let Some(parent) = p {
+                    if let Some(v) = parent.data().get::<i64>(consts::TASK_COST) {
+                        cost = v;
+                        break;
+                    }
+                    p = parent.parent();
+                }
             }
 
-            let on = TimeoutLimit::parse(&value).unwrap_or_default();
-            cost >= on.as_secs() * 1000
+            let min_timeout = TimeoutLimit::parse(&min).unwrap_or_default();
+
+            let mut ret = cost >= min_timeout.as_secs() * 1000;
+            if ret && let Some(v) = &max {
+                let max_timeout = TimeoutLimit::parse(v).unwrap_or_default();
+                ret &= cost < max_timeout.as_secs() * 1000;
+            }
+
+            ret
         })
     }
 }
@@ -122,7 +136,9 @@ impl ActModule for ActJsModule {
         globalThis.$set_process_var = set_process_var;
         globalThis.$ecode = err_code;
         globalThis.$cost = cost
-        globalThis.$cost_in = cost_in
+        globalThis.$cost_in = (min, max) => {
+            return cost_in(min, max);
+        }
         "#;
         let _ = JsModule::evaluate(ctx.clone(), "@acts/act", source)
             .catch(ctx)

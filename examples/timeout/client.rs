@@ -30,7 +30,9 @@ impl Client {
     }
 
     pub async fn process(&self, executor: &Executor, e: &Event<Message>) -> Result<()> {
-        if let Some(key) = e.params().unwrap().get::<String>("key") {
+        if let Some(params) = e.params()
+            && let Some(key) = params.get::<String>("key")
+        {
             if e.is_irq() && e.is_state(MessageState::Created) {
                 match self.actions.get(&key) {
                     Some(action) => {

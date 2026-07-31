@@ -13,6 +13,7 @@ async fn main() -> Result<()> {
     let model = r#"
     id: my_model
     name: my model
+    ver: 0.1.0
     steps:
       - name: step 1
         uses: acts.core.msg

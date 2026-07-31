@@ -1,5 +1,6 @@
 name: a timeout example
 id: timeout_model
+ver: 0.1.0
 steps:
   - name: prepare
     id: prepare
@@ -13,13 +14,13 @@ steps:
       key: act1
     timeouts:
       - uses: acts.core.msg
-        if: $cost_in('2s')
+        if: $cost_in('2s', '5s')
         params:
           key: step1_timeout_2s
           a: 1
 
       - uses: acts.core.irq
-        if: $cost_in('5s')
+        if: $cost_in('5s', '8s')
         params:
           key: step1_timeout_5s
           a: 2

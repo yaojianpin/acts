@@ -32,10 +32,11 @@ steps:
 
 | Format | Example | Description |
 | ---- | ---- | ---- |
-| Seconds | `$cost_in('2s')` | 2 seconds |
-| Minutes | `$cost_in('5m')` | 5 minutes |
-| Hours | `$cost_in('2h')` | 2 hours |
-| Days | `$cost_in('1d')` | 1 day |
+| Seconds | `$cost_in('2s')` | >= 2 seconds |
+| Minutes | `$cost_in('5m')` | >= 5 minutes |
+| Hours | `$cost_in('2h')` | >= 2 hours |
+| Days | `$cost_in('1d')` | >= 1 day |
+| Range | `$cost_in('1d', '2d')` | >= 1 day and < 2 days |
 
 ## Timeout Check Interval
 

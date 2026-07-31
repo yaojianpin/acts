@@ -1,5 +1,6 @@
 name: event model
 id: my-event-model
+ver: 0.1.0
 on:
   # start event by manual and return the result directly
   - id: event-manual

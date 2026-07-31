@@ -1,5 +1,6 @@
 name: sub
 id: sub
+ver: 0.1.0
 vars:
   - name: v
     value: 0

@@ -1,5 +1,6 @@
 name: a example to catch act error
 id: catches
+ver: 0.1.0
 steps:
   - name: prepare
     id: prepare
@@ -12,17 +13,24 @@ steps:
     params:
       key: act1
     catches:
-      - uses: acts.core.msg
-        if: $ecode() == 'err1'
-        params:
-          key: catch1
-      - uses: acts.core.msg
-        if: $ecode() == 'err2'
-        params:
-          key: catch2
-      - uses: acts.core.msg
-        params:
-          key: others
+      - name: gate way
+        branches:
+          - if: $ecode() == 'err1'
+            steps:
+              - uses: acts.core.msg
+                params:
+                  key: catch1
+          - if: $ecode() == 'err2'
+            steps:
+              - uses: acts.core.msg
+                params:
+                  key: catch2
+
+          - else: true
+            steps:
+              - uses: acts.core.msg
+                params:
+                  key: others
 
   - name: final
     id: final

@@ -1,10 +1,8 @@
 id: pack_example
-
-options:
-  exposes:
-    - name: result
-      value: '{{ input }}'
-
+ver: 0.1.0
+exposes:
+  - name: result
+    value: '{{ input }}'
 steps:
   - name: step 1
     id: step1

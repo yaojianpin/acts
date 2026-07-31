@@ -6,6 +6,7 @@ async fn main() -> Result<()> {
     let (s, sig) = engine.signal(()).double();
     let workflow = Workflow::new()
         .with_id("m1")
+        .with_ver("0.1.0")
         .with_var("index", 0)
         .with_var("result", 0)
         .with_expose(

@@ -191,7 +191,7 @@ fn model_act_timeout() {
 
     step = step
         .with_timeout(|step| {
-            step.with_if(r#"$cost_in('1h')"#)
+            step.with_if(r#"$cost_in('1h', '2h')"#)
                 .with_uses(USES_MSG, Vars::new())
         })
         .with_timeout(|step| {
@@ -202,7 +202,7 @@ fn model_act_timeout() {
     assert_eq!(step.timeouts.len(), 2);
 
     let timeout = step.timeouts.first().unwrap();
-    assert_eq!(timeout.r#if.as_ref().unwrap(), "$cost_in('1h')");
+    assert_eq!(timeout.r#if.as_ref().unwrap(), "$cost_in('1h', '2h')");
 
     let timeout = step.timeouts.get(1).unwrap();
     assert_eq!(timeout.r#if.as_ref().unwrap(), "$cost_in('2d')");

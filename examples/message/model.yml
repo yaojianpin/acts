@@ -1,5 +1,6 @@
 name: event_test
 id: m1
+ver: 0.1.0
 vars:
   - name: value
     value: 0
