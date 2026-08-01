@@ -1,4 +1,4 @@
-use crate::{Engine, EngineBuilder, Signal, Workflow, config::ConfigData, scheduler::Process};
+use crate::{Engine, Signal, Workflow, config::ConfigData, scheduler::Process};
 use std::sync::Arc;
 
 // Package uses constants
@@ -31,7 +31,7 @@ pub(crate) fn create_proc_with_config(
     workflow: &Workflow,
     pid: &str,
 ) -> (Engine, Arc<Process>) {
-    let engine = EngineBuilder::new()
+    let engine = Engine::builder()
         .set_config(config)
         .build()
         .start()

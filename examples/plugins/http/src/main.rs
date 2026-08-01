@@ -30,7 +30,7 @@ async fn main() -> Result<()> {
         .with_body(json!({ "my_value": "world"}).to_string())
         .create();
 
-    let engine = EngineBuilder::new()
+    let engine = Engine::builder()
         .add_plugin(&HttpPackagePlugin)
         .build()
         .await?

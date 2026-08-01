@@ -1,5 +1,6 @@
 use crate::{
     ActPlugin, ChannelOptions, Signal,
+    builder::EngineBuilder,
     config::Config,
     export::{Channel, Executor, Extender},
     package,
@@ -72,7 +73,7 @@ impl Engine {
     /// ## Example
     ///
     /// ```no_run
-    /// use acts::{ActPlugin, Message, Engine, EngineBuilder, Workflow, Result};
+    /// use acts::{ActPlugin, Message, Engine, Workflow, Result};
     ///
     /// #[derive(Clone)]
     /// struct TestPlugin;
@@ -94,7 +95,7 @@ impl Engine {
     ///
     /// #[tokio::main]
     /// async fn main() {
-    ///     let engine = EngineBuilder::new().add_plugin(&TestPlugin::new()).build().start().unwrap();
+    ///     let engine = Engine::builder().add_plugin(&TestPlugin::new()).build().start().unwrap();
     /// }
     /// ```
     pub fn add_plugin<T>(mut self, plugin: &T) -> Self
@@ -146,6 +147,11 @@ impl Engine {
     /// engine extender
     pub fn extender(&self) -> Arc<Extender> {
         Arc::new(Extender::new(&self.runtime()))
+    }
+
+    /// create engine builder
+    pub fn builder() -> EngineBuilder {
+        EngineBuilder::new()
     }
 
     pub(crate) fn runtime(&self) -> Arc<Runtime> {

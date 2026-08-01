@@ -24,7 +24,6 @@ mod tests;
 use std::sync::Arc;
 use std::sync::RwLock;
 
-pub use builder::EngineBuilder;
 pub use config::Config;
 pub use engine::Engine;
 pub use env::ActUserVar;

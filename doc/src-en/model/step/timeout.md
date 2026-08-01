@@ -11,9 +11,9 @@ steps:
       params:
         key: act1
       timeouts:
-        # Trigger message after 2 seconds
+        # Trigger message in >=2 seconds and < 8 seconds
         - uses: acts.core.msg
-          if: $cost_in('2s')
+          if: $cost_in('2s', '8s')
           params:
             key: step1_timeout_2s
 

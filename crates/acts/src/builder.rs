@@ -75,7 +75,7 @@ impl EngineBuilder {
     /// ## Example
     ///
     /// ```no_run
-    /// use acts::{ActPlugin, Message, Engine, EngineBuilder, Workflow, Result};
+    /// use acts::{ActPlugin, Message, Engine, Workflow, Result};
     ///
     /// #[derive(Clone)]
     /// struct TestPlugin;
@@ -97,7 +97,7 @@ impl EngineBuilder {
     ///
     /// #[tokio::main]
     /// async fn main() {
-    ///     let engine = EngineBuilder::new().add_plugin(&TestPlugin::new()).build().start().unwrap();
+    ///     let engine = Engine::builder().add_plugin(&TestPlugin::new()).build().start().unwrap();
     /// }
     /// ```
     pub fn add_plugin<T>(mut self, plugin: &T) -> Self

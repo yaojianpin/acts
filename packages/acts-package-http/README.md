@@ -12,12 +12,12 @@ cargo add acts-package-http
 ## Start
 
 ```rust,no_run
-use acts::EngineBuilder;
+use acts::Engine;
 use acts_package_http::HttpPackagePlugin;
 
 #[tokio::main]
 async fn main() {
-    let engine = EngineBuilder::new()
+    let engine = Engine::builder()
         .add_plugin(&HttpPackagePlugin)
         .build()
         .start();

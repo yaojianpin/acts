@@ -1,5 +1,5 @@
 use crate::event::EventAction;
-use crate::{Engine, EngineBuilder, MessageState, Vars, Workflow, utils, utils::test::USES_IRQ};
+use crate::{Engine, MessageState, Vars, Workflow, utils, utils::test::USES_IRQ};
 use serde::Deserialize;
 use serde_json::json;
 
@@ -161,18 +161,14 @@ async fn engine_model_create() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn engine_build_cache_size() {
-    let engine = EngineBuilder::new()
-        .cache_size(100)
-        .build()
-        .start()
-        .unwrap();
+    let engine = Engine::builder().cache_size(100).build().start().unwrap();
     assert_eq!(engine.config().cache_cap(), 100)
 }
 
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn engine_build_log_dir() {
-    let engine = EngineBuilder::new()
+    let engine = Engine::builder()
         .log("test", "INFO")
         .build()
         .start()
@@ -183,7 +179,7 @@ async fn engine_build_log_dir() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn engine_build_log_level() {
-    let engine = EngineBuilder::new()
+    let engine = Engine::builder()
         .log("log", "DEBUG")
         .build()
         .start()
@@ -194,7 +190,7 @@ async fn engine_build_log_level() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn engine_build_tick_interval_secs() {
-    let engine = EngineBuilder::new()
+    let engine = Engine::builder()
         .tick_interval_secs(10)
         .build()
         .start()
@@ -205,7 +201,7 @@ async fn engine_build_tick_interval_secs() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn engine_build_max_message_retry_times() {
-    let engine = EngineBuilder::new()
+    let engine = Engine::builder()
         .max_message_retry_times(100)
         .build()
         .start()
@@ -244,7 +240,7 @@ async fn engine_build_config_default() {
         "#,
     )
     .unwrap();
-    let engine = EngineBuilder::new().build();
+    let engine = Engine::builder().build();
     assert_eq!(engine.config().cache_cap(), 100);
     assert_eq!(engine.config().log().dir, "data");
     assert_eq!(engine.config().log().level, "INFO");
@@ -277,7 +273,7 @@ async fn engine_build_config_set_source() {
         "#,
     )
     .unwrap();
-    let engine = EngineBuilder::new().set_config_source(path).build();
+    let engine = Engine::builder().set_config_source(path).build();
     assert_eq!(engine.config().cache_cap(), 100);
     assert_eq!(engine.config().log().dir, "data");
     assert_eq!(engine.config().log().level, "INFO");
@@ -307,7 +303,7 @@ async fn engine_get_custom_config() {
         "#,
     )
     .unwrap();
-    let engine = EngineBuilder::new().build();
+    let engine = Engine::builder().build();
     let custom = engine.config().get::<Custom>("custom").unwrap();
     assert_eq!(custom.myint, 100);
     assert_eq!(custom.mystr, "myData");

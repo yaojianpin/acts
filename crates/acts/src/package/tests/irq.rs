@@ -1,5 +1,5 @@
 use crate::{
-    EngineBuilder, Message, Vars, Workflow,
+    Engine, Message, Vars, Workflow,
     event::{Action, EventAction, MessageState},
     scheduler::TaskState,
     utils::{
@@ -46,7 +46,7 @@ async fn pack_irq_multi_threads() {
     });
 
     workflow.print();
-    let engine = EngineBuilder::new().cache_size(10).build().start().unwrap();
+    let engine = Engine::builder().cache_size(10).build().start().unwrap();
     engine.executor().model().deploy(&workflow, None).unwrap();
     let (s1, s2) = engine.signal(false).double();
     let count = Arc::new(Mutex::new(0));

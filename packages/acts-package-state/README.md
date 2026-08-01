@@ -18,12 +18,12 @@ cargo add acts-package-state
 ## Example
 
 ```rust,no_run
-use acts::EngineBuilder;
+use acts::Engine;
 use acts_package_state::StatePackagePlugin;
 
 #[tokio::main]
 async fn main() {
-    let engine = EngineBuilder::new()
+    let engine = Engine::builder()
         .add_plugin(&StatePackagePlugin)
         .build()
         .start();

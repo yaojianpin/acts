@@ -1,9 +1,9 @@
-use acts::{EngineBuilder, Result, Vars, Workflow};
+use acts::{Engine, Result, Vars, Workflow};
 use acts_package_state::StatePackagePlugin;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let engine = EngineBuilder::new()
+    let engine = Engine::builder()
         .add_plugin(&StatePackagePlugin)
         .build()
         .await?

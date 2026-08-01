@@ -1,11 +1,11 @@
-use acts::{EngineBuilder, Result, Vars, Workflow};
+use acts::{Engine, Result, Vars, Workflow};
 
 mod client;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let client = client::Client::new();
-    let engine = EngineBuilder::new().tick_interval_secs(1).build().start()?;
+    let engine = Engine::builder().tick_interval_secs(1).build().start()?;
     let (s1, s2, sig) = engine.signal(()).triple();
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text)?;

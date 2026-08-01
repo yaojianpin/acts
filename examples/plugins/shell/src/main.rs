@@ -1,9 +1,9 @@
-use acts::{EngineBuilder, Result, Vars, Workflow};
+use acts::{Engine, Result, Vars, Workflow};
 use acts_package_shell::ShellPackagePlugin;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let engine = EngineBuilder::new()
+    let engine = Engine::builder()
         .add_plugin(&ShellPackagePlugin)
         .build()
         .await?

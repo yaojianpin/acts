@@ -1,10 +1,10 @@
 mod plugin;
 
-use acts::{EngineBuilder, Vars, Workflow};
+use acts::{Engine, Vars, Workflow};
 
 #[tokio::main]
 async fn main() -> acts::Result<()> {
-    let engine = EngineBuilder::new()
+    let engine = Engine::builder()
         .add_plugin(&plugin::MyPackagePlugin)
         .build()
         .start()?;

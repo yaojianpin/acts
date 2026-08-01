@@ -16,15 +16,15 @@ steps:
       params:
         key: act1
       timeouts:
-        # 2秒后超时 - 发送消息
+        # 超时在>=2s 且 <5s - 发送消息
         - uses: acts.core.msg
-          if: $cost_in('2s')
+          if: $cost_in('2s', '5s')
           params:
             key: step1_timeout_2s
 
-        # 5秒后超时 - 发起中断请求
+        # 超时在>=5s 且 <8s - 发起中断请求
         - uses: acts.core.irq
-          if: $cost_in('5s')
+          if: $cost_in('5s', '8s')
           params:
             key: step1_timeout_5s
 
@@ -40,7 +40,7 @@ steps:
 使用超时需要配置 tick 间隔：
 
 ```rust
-let engine = EngineBuilder::new()
+let engine = Engine::builder()
     .tick_interval_secs(1)
     .build()
     .start()

@@ -10,12 +10,12 @@ cargo add acts-package-shell
 
 ## Start
 ```rust,no_run
-use acts::EngineBuilder;
+use acts::Engine;
 use acts_package_shell::ShellPackagePlugin;
 
 #[tokio::main]
 async fn main() {
-    let engine = EngineBuilder::new()
+    let engine = Engine::builder()
         .add_plugin(&ShellPackagePlugin)
         .build()
         .start();
