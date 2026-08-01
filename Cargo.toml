@@ -1,6 +1,6 @@
 
 [workspace]
-members = ["crates/*", "examples/plugins/*"]
+members = ["crates/*", "packages/*", "examples/plugins/*"]
 exclude = [
     "examples/plugins/state",
     "examples/plugins/http",
