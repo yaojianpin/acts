@@ -1,15 +1,16 @@
 use crate::{
-    Context, Executor, Result, Vars,
-    package::{
-        ActPackage, ActPackageCatalog, ActPackageFn, ActPackageMeta, ActPackageRegister, ActRunAs,
-    },
+    ActError, Context, Executor, Result, Vars,
+    package::{ActPackage, ActPackageCatalog, ActPackageDefinition, ActPackageRegister, ActRunAs},
     utils::{self, consts},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+#[derive(Debug, Clone)]
+pub struct SubflowPackage;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct SubflowPackage {
+pub struct SubflowPackageParams {
     pub to: String,
 
     #[serde(default)]
@@ -17,8 +18,8 @@ pub struct SubflowPackage {
 }
 
 impl ActPackage for SubflowPackage {
-    fn meta() -> ActPackageMeta {
-        ActPackageMeta {
+    fn definition() -> ActPackageDefinition {
+        ActPackageDefinition {
             id: "acts.core.subflow",
             name: "Subflow",
             desc: "call a subflow",
@@ -53,18 +54,31 @@ impl ActPackage for SubflowPackage {
             catalog: ActPackageCatalog::Core,
         }
     }
-}
 
-impl ActPackageFn for SubflowPackage {
-    fn execute(&self, ctx: &Context) -> Result<Option<Vars>> {
+    fn new(_: &crate::Config) -> Result<Self>
+    where
+        Self: Sized,
+    {
+        Ok(Self)
+    }
+
+    fn execute(&self, ctx: &Context, params: &serde_json::Value) -> Result<Option<Vars>> {
+        let params =
+            serde_json::from_value::<SubflowPackageParams>(params.clone()).map_err(|e| {
+                ActError::Package(format!(
+                    "invalid ActPackage({}) params: {}",
+                    Self::definition().id,
+                    e
+                ))
+            })?;
         let task = ctx.task();
         task.set_auto_complete(false);
         let executor = Executor::new(&ctx.runtime);
 
-        let mut inputs = utils::fill_inputs(&self.options, ctx);
+        let mut inputs = utils::fill_inputs(&params.options, ctx);
         inputs.set(consts::ACT_USE_PARENT_PROC_ID, &ctx.proc.id());
         inputs.set(consts::ACT_USE_PARENT_TASK_ID, &task.id);
-        executor.proc().start(&self.to, inputs)?;
+        executor.proc().start(&params.to, inputs)?;
 
         Ok(None)
     }
@@ -86,8 +100,8 @@ mod tests {
         "#;
 
         let value = serde_yaml::from_str::<serde_json::Value>(params).unwrap();
-        let meta = super::SubflowPackage::meta();
-        serde_json::from_value::<super::SubflowPackage>(value.clone()).unwrap();
+        let meta = super::SubflowPackage::definition();
+        serde_json::from_value::<super::SubflowPackageParams>(value.clone()).unwrap();
         jsonschema::validate(&meta.schema, &value).unwrap()
     }
 }

@@ -2,20 +2,17 @@ use std::sync::Arc;
 
 use crate::{
     ActError, Channel, ModelInfo, Result, Vars,
-    package::{
-        ActPackage, ActPackageCatalog, ActPackageFn, ActPackageMeta, ActPackageRegister, ActRunAs,
-    },
+    package::{ActPackage, ActPackageCatalog, ActPackageDefinition, ActPackageRegister, ActRunAs},
     utils::{self, consts},
 };
-use serde::Serialize;
 use serde_json::json;
 
-#[derive(Debug, Clone, Serialize)]
-pub struct HookEventPackage(Option<Vars>);
+#[derive(Debug, Clone)]
+pub struct HookEventPackage;
 
 impl ActPackage for HookEventPackage {
-    fn meta() -> ActPackageMeta {
-        ActPackageMeta {
+    fn definition() -> ActPackageDefinition {
+        ActPackageDefinition {
             id: "acts.event.hook",
             name: "Hook",
             desc: "do an event by hook event",
@@ -42,10 +39,20 @@ impl ActPackage for HookEventPackage {
             catalog: ActPackageCatalog::Event,
         }
     }
-}
 
-impl ActPackageFn for HookEventPackage {
-    fn start(&self, rt: &Arc<crate::scheduler::Runtime>, options: &Vars) -> Result<Option<Vars>> {
+    fn new(_: &crate::Config) -> Result<Self>
+    where
+        Self: Sized,
+    {
+        Ok(Self)
+    }
+
+    fn start(
+        &self,
+        rt: &Arc<crate::scheduler::Runtime>,
+        params: &serde_json::Value,
+        options: &Vars,
+    ) -> Result<Option<Vars>> {
         let mid = options
             .get::<String>(consts::MODEL_ID)
             .ok_or(ActError::Runtime(format!(
@@ -64,21 +71,17 @@ impl ActPackageFn for HookEventPackage {
             s3.send(m.outputs.clone());
         });
 
-        let params = self.0.clone().unwrap_or_default();
+        let params = serde_json::from_value::<Vars>(params.clone()).map_err(|e| {
+            ActError::Package(format!(
+                "invalid ActPackage({}) params: {}",
+                Self::definition().id,
+                e
+            ))
+        })?;
         rt.start(&workflow, params)?;
         let s_clone = s.clone();
         let ret = utils::sync::block_on(async move { s_clone.recv().await });
         Ok(Some(ret))
-    }
-}
-
-impl<'de> serde::de::Deserialize<'de> for HookEventPackage {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = Option::<Vars>::deserialize(deserializer)?;
-        Ok(Self(value))
     }
 }
 
@@ -96,8 +99,7 @@ mod tests {
         "#;
 
         let value = serde_yaml::from_str::<serde_json::Value>(params).unwrap();
-        let meta = super::HookEventPackage::meta();
-        serde_json::from_value::<super::HookEventPackage>(value.clone()).unwrap();
+        let meta = super::HookEventPackage::definition();
         jsonschema::validate(&meta.schema, &value).unwrap()
     }
 }

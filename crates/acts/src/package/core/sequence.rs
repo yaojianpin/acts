@@ -1,23 +1,26 @@
-use super::super::core::{BlockPackage, RunningMode};
-use crate::Context;
-use crate::package::{ActPackage, ActPackageCatalog, ActPackageMeta, ActPackageRegister, Result};
-use crate::utils::consts;
-use crate::{
-    Act, Vars,
-    package::{ActPackageFn, ActRunAs},
+use super::super::core::RunningMode;
+use crate::package::core::block::BlockPackageParams;
+use crate::package::{
+    ActPackage, ActPackageCatalog, ActPackageDefinition, ActPackageRegister, Result,
 };
+use crate::utils::consts;
+use crate::{Act, Vars, package::ActRunAs};
+use crate::{ActError, Context};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 
+#[derive(Debug, Clone)]
+pub struct SequencePackage;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct SequencePackage {
+pub struct SequencePackageParams {
     r#in: Vec<JsonValue>,
     acts: Vec<Act>,
 }
 
 impl ActPackage for SequencePackage {
-    fn meta() -> ActPackageMeta {
-        ActPackageMeta {
+    fn definition() -> ActPackageDefinition {
+        ActPackageDefinition {
             id: "acts.core.sequence",
             name: "Sequence",
             desc: "generate sequence acts and run them in sequence",
@@ -56,15 +59,25 @@ impl ActPackage for SequencePackage {
             catalog: ActPackageCatalog::Core,
         }
     }
-}
 
-impl ActPackageFn for SequencePackage {
-    fn execute(&self, ctx: &Context) -> Result<Option<Vars>> {
+    fn new(_config: &crate::Config) -> crate::Result<Self> {
+        Ok(Self)
+    }
+
+    fn execute(&self, ctx: &Context, params: &serde_json::Value) -> Result<Option<Vars>> {
+        let params =
+            serde_json::from_value::<SequencePackageParams>(params.clone()).map_err(|e| {
+                ActError::Package(format!(
+                    "invalid ActPackage({}) params: {}",
+                    Self::definition().id,
+                    e
+                ))
+            })?;
         let mut acts = Vec::new();
-        for (index, value) in self.r#in.iter().enumerate() {
-            let params = serde_json::to_value(BlockPackage {
+        for (index, value) in params.r#in.iter().enumerate() {
+            let block_params = serde_json::to_value(BlockPackageParams {
                 mode: RunningMode::Sequence,
-                acts: self.acts.clone(),
+                acts: params.acts.clone(),
             })?;
 
             acts.push(Act {
@@ -72,7 +85,7 @@ impl ActPackageFn for SequencePackage {
                 options: Vars::new()
                     .with(consts::ACT_INDEX, index)
                     .with(consts::ACT_VALUE, value),
-                params,
+                params: block_params,
                 ..Default::default()
             })
         }
@@ -102,8 +115,8 @@ mod tests {
     "#;
 
         let value = serde_yaml::from_str::<serde_json::Value>(params).unwrap();
-        let meta = super::SequencePackage::meta();
-        serde_json::from_value::<super::SequencePackage>(value.clone()).unwrap();
+        let meta = super::SequencePackage::definition();
+        serde_json::from_value::<super::SequencePackageParams>(value.clone()).unwrap();
         jsonschema::validate(&meta.schema, &value).unwrap()
     }
 }

@@ -1,15 +1,14 @@
 use crate::package::{
-    ActPackage, ActPackageCatalog, ActPackageFn, ActPackageMeta, ActPackageRegister, ActRunAs,
+    ActPackage, ActPackageCatalog, ActPackageDefinition, ActPackageRegister, ActRunAs,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone)]
 pub struct MsgPackage;
 
 impl ActPackage for MsgPackage {
-    fn meta() -> ActPackageMeta {
-        ActPackageMeta {
+    fn definition() -> ActPackageDefinition {
+        ActPackageDefinition {
             id: "acts.core.msg",
             name: "Message",
             desc: "send an message with inputs",
@@ -31,10 +30,14 @@ impl ActPackage for MsgPackage {
             catalog: ActPackageCatalog::Core,
         }
     }
-}
 
-#[async_trait::async_trait]
-impl ActPackageFn for MsgPackage {}
+    fn new(_config: &crate::Config) -> crate::Result<Self>
+    where
+        Self: Sized,
+    {
+        Ok(Self)
+    }
+}
 
 inventory::submit!(ActPackageRegister::new::<MsgPackage>());
 
@@ -49,28 +52,28 @@ mod tests {
         "#;
 
         let value = serde_yaml::from_str::<serde_json::Value>(params).unwrap();
-        let meta = super::MsgPackage::meta();
+        let meta = super::MsgPackage::definition();
         jsonschema::validate(&meta.schema, &value).unwrap()
     }
 
     #[test]
     fn pack_msg_parse_empty() {
         let value = serde_yaml::from_str::<serde_json::Value>("").unwrap();
-        let meta = super::MsgPackage::meta();
+        let meta = super::MsgPackage::definition();
         jsonschema::validate(&meta.schema, &value).unwrap()
     }
 
     #[test]
     fn pack_msg_parse_default() {
         let value = serde_yaml::from_str::<serde_json::Value>("{}").unwrap();
-        let meta = super::MsgPackage::meta();
+        let meta = super::MsgPackage::definition();
         jsonschema::validate(&meta.schema, &value).unwrap()
     }
 
     #[test]
     fn pack_msg_parse_null() {
         let value = serde_json::json!(null);
-        let meta = super::MsgPackage::meta();
+        let meta = super::MsgPackage::definition();
         jsonschema::validate(&meta.schema, &value).unwrap()
     }
 }

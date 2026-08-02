@@ -1,11 +1,13 @@
-mod plugin;
+mod pack1;
+mod pack2;
 
 use acts::{Engine, Vars, Workflow};
 
 #[tokio::main]
 async fn main() -> acts::Result<()> {
     let engine = Engine::builder()
-        .add_plugin(&plugin::MyPackagePlugin)
+        .add_package::<pack1::Pack1>()
+        .add_package::<pack2::Pack2>()
         .build()
         .start()?;
 
@@ -35,7 +37,7 @@ async fn main() -> acts::Result<()> {
         s1.close();
     });
     chan.on_error(move |e| {
-        println!("on_error: state={}", e.state,);
+        println!("on_error: state={:?}", e);
         s2.close();
     });
     sig.recv().await;

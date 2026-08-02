@@ -13,7 +13,7 @@ steps:
             - u2
       uses: acts.core.sequence
       params:
-        in: '{{ items }}'
+        in: '${{ items }}'
         acts:
           # Generates 2 IRQ activities, executed one by one in sequence
           - uses: acts.core.irq

@@ -54,7 +54,7 @@ async fn sch_vars_workflow_outputs_script() {
         Variant::new()
             .name("var1")
             .r#type(VariantTypes::Number)
-            .value(json!(r#"{{ a }}"#)),
+            .value(json!(r#"${{ a }}"#)),
     );
     let (engine, proc) = create_proc(&workflow, &utils::longid());
     let rt = engine.runtime();
@@ -127,7 +127,7 @@ async fn sch_vars_get_with_script() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_var("var1", 10)
-            .with_var("var2", r#"{{ var1 }}"#)
+            .with_var("var2", r#"${{ var1 }}"#)
     });
     let (engine, proc) = create_proc(&workflow, &utils::longid());
     let rt = engine.runtime();
@@ -154,7 +154,7 @@ async fn sch_vars_get_with_script() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_vars_get_with_not_exists() {
     let workflow =
-        Workflow::new().with_step(|step| step.with_id("step1").with_var("var2", r#"{{ var1 }}"#));
+        Workflow::new().with_step(|step| step.with_id("step1").with_var("var2", r#"${{ var1 }}"#));
     let (engine, proc) = create_proc(&workflow, &utils::longid());
     let rt = engine.runtime();
     let sig = engine.signal(());

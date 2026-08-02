@@ -22,10 +22,10 @@ steps:
         - uses: acts.core.msg
           params:
             key: msg1
-            a: '{{ value + 10 }}'
+            a: '${{ value + 10 }}'
         - uses: acts.core.msg
           params:
             key: msg2
-            b: '{{ value + 20 }}'
+            b: '${{ value + 20 }}'
   - name: step 4
     

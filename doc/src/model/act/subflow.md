@@ -11,7 +11,7 @@ steps:
         # 子流程的模型 ID
         to: sub_workflow_id
         # 传递给子流程的输入数据
-        a: '{{ value }}'
+        a: '${{ value }}'
 ```
 
 ## 子流程定义
@@ -53,7 +53,7 @@ steps:
       uses: acts.core.subflow
       params:
         to: sub_workflow_id
-        input_value: '{{ parent_var }}'
+        input_value: '${{ parent_var }}'
       options:
         exposes:
           - name: result

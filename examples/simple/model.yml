@@ -8,10 +8,9 @@ vars:
     value: 0
   - name: value
     value: 0
-options:
-  exposes:
-    - name: result
-      value: '{{ value }}'
+exposes:
+  - name: result
+    value: '${{ value }}'
 steps:
   - name: init
     id: init

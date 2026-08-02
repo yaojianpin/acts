@@ -4,10 +4,9 @@ ver: 0.1.0
 vars:
   - name: v
     value: 0  
-options:
-  exposes:
-    - name: result
-      value: '{{ v }}'
+exposes:
+  - name: result
+    value: '${{ v }}'
 steps:
   - name: prepare
     id: prepare
@@ -27,14 +26,14 @@ steps:
             uses: acts.core.irq
             params:
               key: action1 
-              v: '{{ v }}'
+              v: '${{ v }}'
 
           - name: step2
             id: step2
             uses: acts.core.irq
             params:
                 key: action2
-                v: '{{ v }}'   
+                v: '${{ v }}'   
    
       - name: cond 2
         id: cond2
@@ -51,6 +50,6 @@ steps:
     uses: acts.core.irq
     params:
       key: action4
-      v: '{{ v }}'
+      v: '${{ v }}'
   
 

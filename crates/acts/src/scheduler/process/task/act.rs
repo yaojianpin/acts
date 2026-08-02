@@ -64,8 +64,8 @@ impl ActTask for Act {
                     "cannot find Func package '{}'",
                     package.id
                 )))?;
-            let package = (register.create)(ctx.task().params())?;
-            if let Some(vars) = package.execute(ctx)? {
+            let package = (register.create)(&ctx.runtime.config())?;
+            if let Some(vars) = package.execute(ctx, &ctx.task().params())? {
                 task.update_data(&vars);
             };
         }

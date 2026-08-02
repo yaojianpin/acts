@@ -6,4 +6,4 @@ mod parallel;
 mod sequence;
 mod subflow;
 
-pub use block::{BlockPackage, RunningMode};
+pub use block::RunningMode;

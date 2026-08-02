@@ -1,11 +1,14 @@
 #[cfg(test)]
 use crate::config::ConfigData;
-use crate::{ActPlugin, Config, Engine, config::ConfigLog};
+use crate::{
+    ActPackage, ActPlugin, Config, Engine, config::ConfigLog, package::ActPackageRegister,
+};
 use std::{path::Path, sync::Arc};
 
 pub struct EngineBuilder {
     config: Config,
     plugins: Vec<Arc<dyn ActPlugin>>,
+    packages: Vec<ActPackageRegister>,
 }
 
 impl Default for EngineBuilder {
@@ -30,6 +33,7 @@ impl EngineBuilder {
         Self {
             config,
             plugins: Vec::new(),
+            packages: Vec::new(),
         }
     }
 
@@ -108,9 +112,59 @@ impl EngineBuilder {
         self
     }
 
+    /// register package
+    //// ## Example
+    /// ```no_run
+    /// use acts::{ActPackage, ActPackageDefinition, ActPackageCatalog, Context, Engine, Result, Vars};   
+    /// use serde::{Deserialize, Serialize};
+    /// use serde_json::json;
+    ///
+    /// #[derive(Debug, Clone, Deserialize, Serialize)]
+    /// struct MyPackage;
+    /// impl ActPackage for MyPackage {
+    ///    fn definition() -> ActPackageDefinition {
+    ///       ActPackageDefinition {
+    ///         id: "my_package",
+    ///         name: "my package",
+    ///         desc: "",
+    ///         icon: "",
+    ///         doc: "",
+    ///         version: "0.1.0",
+    ///         schema: json!({}),
+    ///         options: Some(json!({})),
+    ///         run_as: acts::ActRunAs::Func,
+    ///         resources: vec![],
+    ///         catalog: ActPackageCatalog::App,
+    ///       }
+    ///     }  
+    ///
+    ///     fn new(_config: &acts::Config) -> Result<Self> {
+    ///       Ok(Self)
+    ///     }
+    ///
+    ///     fn execute(&self, ctx: &Context, params: &serde_json::Value) -> Result<Option<Vars>> {
+    ///       // do something with ctx
+    ///       Ok(None)
+    ///     }
+    /// }
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let engine = Engine::builder().add_package::<MyPackage>().build().start().unwrap();
+    /// }
+    /// ```
+    pub fn add_package<T>(mut self) -> Self
+    where
+        T: ActPackage + Clone + 'static,
+    {
+        let package_register = ActPackageRegister::new::<T>();
+        self.packages.push(package_register);
+        self
+    }
+
     pub fn build(self) -> Engine {
         Engine::new()
             .with_config(&self.config)
             .set_plugins(self.plugins.clone())
+            .set_packages(self.packages.clone())
     }
 }

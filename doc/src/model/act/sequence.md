@@ -13,7 +13,7 @@ steps:
             - u2
       uses: acts.core.sequence
       params:
-        in: '{{ items }}'
+        in: '${{ items }}'
         acts:
           # 会生成 2 个 irq 活动，按顺序逐一执行
           - uses: acts.core.irq

@@ -97,8 +97,8 @@ fn model_act_set_output() {
 
 #[test]
 fn model_act_set_if() {
-    let act = Act::new().with_if("{{ var1 > 1 }}");
-    assert_eq!(act.r#if.unwrap(), "{{ var1 > 1 }}");
+    let act = Act::new().with_if("${{ var1 > 1 }}");
+    assert_eq!(act.r#if.unwrap(), "${{ var1 > 1 }}");
 }
 
 #[test]

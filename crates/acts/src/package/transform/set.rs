@@ -1,18 +1,14 @@
-use crate::package::{ActPackageCatalog, ActPackageMeta, ActPackageRegister};
-use crate::{ActPackage, Context};
-use crate::{
-    Result, Vars,
-    package::{ActPackageFn, ActRunAs},
-};
-use serde::Serialize;
+use crate::package::{ActPackageCatalog, ActPackageDefinition, ActPackageRegister};
+use crate::{ActError, ActPackage, Context};
+use crate::{Result, Vars, package::ActRunAs};
 use serde_json::json;
 
-#[derive(Debug, Clone, Serialize)]
-pub struct SetPackage(Vars);
+#[derive(Debug, Clone)]
+pub struct SetPackage;
 
 impl ActPackage for SetPackage {
-    fn meta() -> ActPackageMeta {
-        ActPackageMeta {
+    fn definition() -> ActPackageDefinition {
+        ActPackageDefinition {
             id: "acts.transform.set",
             name: "Set",
             desc: "set act data from inputs",
@@ -37,23 +33,46 @@ impl ActPackage for SetPackage {
             catalog: ActPackageCatalog::Transform,
         }
     }
-}
 
-impl ActPackageFn for SetPackage {
-    fn execute(&self, _ctx: &Context) -> Result<Option<Vars>> {
-        // expose the set keys as next inputs
-        Ok(Some(self.0.clone()))
-    }
-}
-
-impl<'de> serde::de::Deserialize<'de> for SetPackage {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    fn new(_: &crate::Config) -> Result<Self>
     where
-        D: serde::Deserializer<'de>,
+        Self: Sized,
     {
-        let value = Vars::deserialize(deserializer)?;
-        Ok(Self(value))
+        Ok(Self)
+    }
+
+    fn execute(&self, _ctx: &Context, params: &serde_json::Value) -> Result<Option<Vars>> {
+        let params = serde_json::from_value::<Vars>(params.clone()).map_err(|e| {
+            ActError::Package(format!(
+                "invalid ActPackage({}) params: {}",
+                Self::definition().id,
+                e
+            ))
+        })?;
+        // expose the set keys as next inputs
+        Ok(Some(params))
     }
 }
 
 inventory::submit!(ActPackageRegister::new::<SetPackage>());
+
+#[cfg(test)]
+mod tests {
+    use crate::ActPackage;
+
+    #[test]
+    fn pack_set_parse() {
+        let params = r#"
+            v1: 1
+            v2: "string"
+            v3:
+              - 1
+              - 2
+              - 3
+        "#;
+
+        let value = serde_yaml::from_str::<serde_json::Value>(params).unwrap();
+        let meta = super::SetPackage::definition();
+        jsonschema::validate(&meta.schema, &value).unwrap()
+    }
+}

@@ -1,9 +1,11 @@
+use serde::de::DeserializeOwned;
+
 use crate::{
-    ActPlugin, ChannelOptions, Signal,
+    ActPackage, ActPlugin, ChannelOptions, Signal,
     builder::EngineBuilder,
     config::Config,
     export::{Channel, Executor, Extender},
-    package,
+    package::{self, ActPackageRegister},
     scheduler::Runtime,
 };
 use std::sync::Arc;
@@ -41,6 +43,7 @@ use std::sync::Arc;
 pub struct Engine {
     config: Arc<Config>,
     plugins: Vec<Arc<dyn ActPlugin>>,
+    packages: Vec<ActPackageRegister>,
     runtime: Option<Arc<Runtime>>,
 }
 
@@ -55,6 +58,7 @@ impl Engine {
         Self {
             config: Arc::new(Config::default()),
             plugins: Vec::new(),
+            packages: Vec::new(),
             runtime: None,
         }
     }
@@ -108,6 +112,20 @@ impl Engine {
 
     pub fn set_plugins(mut self, plugins: Vec<Arc<dyn ActPlugin>>) -> Self {
         self.plugins = plugins;
+        self
+    }
+
+    pub fn add_package<T>(mut self) -> Self
+    where
+        T: ActPackage + Clone + DeserializeOwned + 'static,
+    {
+        let package_register = ActPackageRegister::new::<T>();
+        self.packages.push(package_register);
+        self
+    }
+
+    pub fn set_packages(mut self, packages: Vec<ActPackageRegister>) -> Self {
+        self.packages = packages;
         self
     }
 
@@ -184,7 +202,18 @@ impl Engine {
         for plugin in self.plugins.iter() {
             plugin.on_init(&self)?;
         }
+
+        // init built-in packages
         package::init(&self)?;
+
+        // register packages
+        for package_register in self.packages.iter() {
+            let meta = (package_register.meta)();
+            self.extender().register_package(&meta)?;
+            if meta.run_as == crate::ActRunAs::Func {
+                self.runtime().package().register(meta.id, package_register);
+            }
+        }
 
         // start event loop
         self.runtime().event_loop();

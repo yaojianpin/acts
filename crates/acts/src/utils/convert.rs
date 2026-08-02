@@ -6,12 +6,15 @@ use std::sync::Arc;
 pub fn fill_params(params: &JsonValue, ctx: &Context) -> JsonValue {
     match params {
         JsonValue::String(value) => {
+            println!("fill_params: value={value:?}");
             let exprs = get_exprs(value);
+            println!("fill_params: value={exprs:?}");
             if !exprs.is_empty() {
                 let mut value = value.clone();
-                for (range, expr) in &exprs {
+                for (range, expr, content) in &exprs {
+                    println!("fill_params: expr={expr}, range={range:?}");
                     let result = Context::scope(ctx.clone(), move || {
-                        ctx.runtime.env().eval::<JsonValue>(expr)
+                        ctx.runtime.env().eval::<JsonValue>(content)
                     })
                     .unwrap_or_else(|err| {
                         eprintln!("fill_params: expr:{value}, err={err}");
@@ -73,6 +76,7 @@ pub fn fill_inputs(inputs: &Vars, ctx: &Context) -> Vars {
                 let result = Context::scope(ctx.clone(), move || {
                     ctx.runtime.env().eval::<JsonValue>(&expr)
                 });
+
                 let new_value = result.unwrap_or_else(|err| {
                     eprintln!("fill_inputs: expr:{value}, err={err}");
                     JsonValue::Null
@@ -156,7 +160,7 @@ pub fn fill_proc_vars(task: &Arc<Task>, values: &Vars, ctx: &Context) -> Vars {
 }
 
 pub fn get_expr(text: &str) -> Option<String> {
-    let re = Regex::new(r"^\{\{(.+)\}\}$").unwrap();
+    let re = Regex::new(r"^\$\{\{(.+)\}\}$").unwrap();
     let caps = re.captures(text);
 
     if let Some(caps) = caps {
@@ -167,9 +171,17 @@ pub fn get_expr(text: &str) -> Option<String> {
     None
 }
 
-pub fn get_exprs(text: &str) -> Vec<(core::ops::Range<usize>, String)> {
-    let re = Regex::new(r"\{\{(.*)\}\}").unwrap();
-    re.find_iter(text)
-        .map(|cap| (cap.range(), cap.as_str().to_string()))
+pub fn get_exprs(text: &str) -> Vec<(core::ops::Range<usize>, String, String)> {
+    let re = Regex::new(r"\$\{\{(.*)\}\}").unwrap();
+    re.captures_iter(text)
+        .map(|caps| {
+            let input = caps.get(0).unwrap();
+            let content = caps.get(1).unwrap();
+            (
+                input.range(),
+                input.as_str().to_string(),
+                content.as_str().to_string(),
+            )
+        })
         .collect()
 }

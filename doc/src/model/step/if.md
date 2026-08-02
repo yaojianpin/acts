@@ -6,7 +6,7 @@
 name: test
 steps:
     - id: step1
-      if: '{{ a }} > 0'
+      if: '${{ a }} > 0'
       uses: acts.core.irq
       params:
         key: act1
@@ -17,4 +17,4 @@ steps:
         key: done
 ```
 
-条件表达式中使用 `{{ var }}` 语法引用变量。当 `if` 条件为 `false` 时，步骤会被跳过。
+条件表达式中使用 `${{ var }}` 语法引用变量。当 `if` 条件为 `false` 时，步骤会被跳过。

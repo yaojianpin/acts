@@ -30,7 +30,7 @@ steps:
 | uses | Package | The package name, e.g. `acts.core.irq`, `acts.transform.set` |
 | params | Parameters | Parameters passed to the package |
 | vars | Variables | Local variable definitions |
-| if | Condition | Skip execution based on condition, e.g. `{{ a }} > 0` |
+| if | Condition | Skip execution based on condition, e.g. `${{ a }} > 0` |
 | catches | Catches | Error handling when step errors, type `Vec<Step>` |
 | timeouts | Timeouts | Timeout handling, type `Vec<Step>` |
 | branches | Branches | Step branches, a step can have multiple branches |

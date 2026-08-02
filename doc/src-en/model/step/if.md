@@ -10,13 +10,13 @@ steps:
         a: 10
 
     - id: step2
-      if: '{{ a }} > 0'
+      if: '${{ a }} > 0'
       uses: acts.core.irq
       params:
         key: act1
 
     - id: step3
-      if: '{{ a }} <= 0'
+      if: '${{ a }} <= 0'
       uses: acts.core.msg
       params:
         key: skipped
@@ -24,23 +24,23 @@ steps:
 
 ## Expression Syntax
 
-Step conditions use `{{ }}` for variable interpolation:
+Step conditions use `${{ }}` for variable interpolation:
 
 ```yml
 # Numeric comparison
-if: '{{ count }} >= 10'
+if: '${{ count }} >= 10'
 
 # String comparison
-if: '{{ status }} == "active"'
+if: '${{ status }} == "active"'
 
 # Boolean check
-if: '{{ flag }} == true'
+if: '${{ flag }} == true'
 
 # Logical AND
-if: '{{ a }} > 0 && $get("b") == "yes"'
+if: '${{ a }} > 0 && $get("b") == "yes"'
 
 # Logical OR
-if: '{{ a }} > 0 || $get("b") == "yes"'
+if: '${{ a }} > 0 || $get("b") == "yes"'
 ```
 
 When the `if` condition is not met, the step is skipped and execution continues with the next step.

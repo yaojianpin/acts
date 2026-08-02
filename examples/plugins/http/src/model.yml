@@ -13,9 +13,9 @@ steps:
           # params from workflow.inputs
           params: 
             - key: key1
-              value: '{{ key1 }}'
+              value: '${{ key1 }}'
             - key: key2
-              value: '{{ key2 }}'
+              value: '${{ key2 }}'
 
       - uses: acts.core.http
         params:
@@ -24,5 +24,5 @@ steps:
           content-type: json
           # body data from prev http response data
           body:
-            data: '{{ $inputs().data }}'
+            data: '${{ $inputs().data }}'
 

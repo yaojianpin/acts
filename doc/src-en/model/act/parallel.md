@@ -14,7 +14,7 @@ steps:
             - u3
       uses: acts.core.parallel
       params:
-        in: '{{ items }}'
+        in: '${{ items }}'
         acts:
           # Generates 3 IRQ activities, all executing in parallel
           - uses: acts.core.irq
@@ -32,7 +32,7 @@ steps:
 
 ## Variable Injection
 
-The engine automatically injects `index` and `value` into each child activity's variable context, accessible via `{{ index }}` and `{{ value }}`.
+The engine automatically injects `index` and `value` into each child activity's variable context, accessible via `${{ index }}` and `${{ value }}`.
 
 ## Dynamic Collection with Code
 
@@ -48,7 +48,7 @@ steps:
     - id: step2
       uses: acts.core.parallel
       params:
-        in: '{{ items }}'
+        in: '${{ items }}'
         acts:
           - uses: acts.core.irq
             params:

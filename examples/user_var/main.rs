@@ -23,7 +23,7 @@ async fn main() -> Result<()> {
                 var1: "changed_var1"
 
         params:
-            var1: '{{ test.var1 }}'
+            var1: '${{ test.var1 }}'
       - name: step 2
         uses: acts.transform.code
         params: |

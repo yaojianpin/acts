@@ -6,13 +6,13 @@ pub mod transform;
 mod tests;
 
 use crate::{
-    ActError, Engine, Result, Vars, data,
+    Config, Engine, Result, Vars, data,
     scheduler::{Context, Runtime},
     store::DbCollectionIden,
 };
 use dashmap::DashMap;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::sync::Arc;
+use serde::{Deserialize, Serialize};
+use std::{fmt::Debug, sync::Arc};
 use tracing::debug;
 
 #[cfg(test)]
@@ -23,18 +23,26 @@ pub struct Package {
     packages: Arc<DashMap<String, ActPackageRegister>>,
 }
 
-pub trait ActPackage {
-    fn meta() -> ActPackageMeta;
-}
-
-pub trait ActPackageFn: Send + Sync {
+pub trait ActPackage: Send + Sync {
+    /// create package instance with config
+    fn new(config: &Config) -> Result<Self>
+    where
+        Self: Sized;
+    /// get package meta definition
+    fn definition() -> ActPackageDefinition
+    where
+        Self: Sized;
     /// executing with task context
-    fn execute(&self, _ctx: &Context) -> Result<Option<Vars>> {
+    fn execute(&self, _ctx: &Context, _params: &serde_json::Value) -> Result<Option<Vars>> {
         Ok(None)
     }
-
     /// start with non-context, such as workflow event
-    fn start(&self, _rt: &Arc<Runtime>, _options: &Vars) -> Result<Option<Vars>> {
+    fn start(
+        &self,
+        _rt: &Arc<Runtime>,
+        _params: &serde_json::Value,
+        _options: &Vars,
+    ) -> Result<Option<Vars>> {
         Ok(None)
     }
 }
@@ -101,7 +109,7 @@ pub enum ActPackageCatalog {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ActPackageMeta {
+pub struct ActPackageDefinition {
     /// package id, used to identify the package
     pub id: &'static str,
 
@@ -149,28 +157,28 @@ pub struct ActResource {
 
 #[derive(Debug, Clone)]
 pub struct ActPackageRegister {
-    pub meta: fn() -> ActPackageMeta,
-    pub(crate) create: fn(serde_json::Value) -> Result<Box<dyn ActPackageFn>>,
+    pub meta: fn() -> ActPackageDefinition,
+    pub create: fn(config: &Config) -> Result<Arc<dyn ActPackage>>,
 }
 
 impl ActPackageRegister {
     pub(crate) const fn new<T>() -> Self
     where
-        T: ActPackageFn + ActPackage + DeserializeOwned + 'static,
+        T: ActPackage + 'static,
     {
         Self {
-            meta: T::meta,
-            create: (|params: serde_json::Value| {
-                let meta = T::meta();
+            meta: T::definition,
+            create: (|config: &Config| {
+                // let meta = T::definition();
+                // jsonschema::validate(&meta.schema, params).map_err(|err| {
+                //     ActError::Package(format!(
+                //         "package({}) schema validation error: {}",
+                //         meta.id, err
+                //     ))
+                // })?;
 
-                jsonschema::validate(&meta.schema, &params).map_err(|err| {
-                    ActError::Package(format!(
-                        "package({}) schema validation error: {}",
-                        meta.id, err
-                    ))
-                })?;
-                let ret = serde_json::from_value::<T>(params)?;
-                Ok(Box::new(ret) as Box<dyn ActPackageFn>)
+                let ret = T::new(config)?;
+                Ok(Arc::new(ret) as Arc<dyn ActPackage>)
             }),
         }
     }
@@ -198,7 +206,7 @@ impl Package {
     }
 }
 
-impl ActPackageMeta {
+impl ActPackageDefinition {
     pub fn into_data(&self) -> Result<data::Package> {
         let pack = self.clone();
         Ok(data::Package {

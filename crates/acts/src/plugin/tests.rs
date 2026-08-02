@@ -60,7 +60,7 @@ impl ActPlugin for TestPackagePlugin {
     fn on_init(&self, engine: &Engine) -> crate::Result<()> {
         println!("TestPackagePlugin");
 
-        engine.extender().register_package(&crate::ActPackageMeta {
+        engine.extender().register_package(&crate::ActPackageDefinition {
             id: "test_package",
             name: "test_package",
             desc: "test package description",
@@ -83,7 +83,7 @@ impl ActPlugin for TestPackagePlugin {
             catalog: crate::ActPackageCatalog::App,
         })?;
 
-        engine.extender().register_package(&crate::ActPackageMeta {
+        engine.extender().register_package(&crate::ActPackageDefinition {
             id: "test_package2",
             name: "test_package2",
             desc: "test package description",

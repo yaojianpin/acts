@@ -1,18 +1,27 @@
+use crate::config::StateConfig;
 use acts::{
-    ActError, ActPackage, ActPackageCatalog, ActPackageMeta, ActResource, ActRunAs, Result, Vars,
+    ActError, ActPackage, ActPackageCatalog, ActPackageDefinition, ActResource, ActRunAs, Result,
+    Vars,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-#[derive(Clone, Serialize)]
+const CONFIG_NAME: &str = "state";
+
+#[derive(Debug, Clone)]
 pub struct StatePackage {
+    client: redis::Client,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StatePackageParams {
     op: String,
     params: Vars,
 }
 
 impl ActPackage for StatePackage {
-    fn meta() -> acts::ActPackageMeta {
-        ActPackageMeta {
+    fn definition() -> acts::ActPackageDefinition {
+        ActPackageDefinition {
             id: "acts.app.state",
             name: "State",
             desc: "get or set state to redis",
@@ -68,31 +77,46 @@ impl ActPackage for StatePackage {
             catalog: ActPackageCatalog::App,
         }
     }
-}
 
-impl<'de> serde::de::Deserialize<'de> for StatePackage {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    fn new(config: &acts::Config) -> Result<Self>
     where
-        D: serde::Deserializer<'de>,
+        Self: Sized,
     {
-        let params: Vars = Vars::deserialize(deserializer)?;
-        let op = params
-            .get::<String>("op")
-            .ok_or(serde::de::Error::custom("missing 'op' in params"))?
-            .to_string();
+        if !config.has(CONFIG_NAME) {
+            return Err(acts::ActError::Config(
+                "missing 'state' section in config file".to_string(),
+            ));
+        }
+        let config = config
+            .get::<StateConfig>(CONFIG_NAME)
+            .map_err(|err| acts::ActError::Config(format!("get state config error: {err}")))?;
 
-        Ok(Self { op, params })
+        let mut client = redis::Client::open(config.database_uri.as_str())
+            .map_err(|err| acts::ActError::Config(format!("create redis client error: {err}")))?;
+
+        redis::cmd("PING")
+            .exec(&mut client)
+            .map_err(|err| acts::ActError::Config(format!("ping redis error: {err}")))?;
+        Ok(Self { client })
     }
-}
 
-impl StatePackage {
-    pub fn run(&self, client: &redis::Client, pid: &str) -> Result<Vars> {
-        let mut conn = client
+    fn execute(&self, ctx: &acts::Context, params: &serde_json::Value) -> Result<Option<Vars>> {
+        let mut conn = self
+            .client
             .get_connection()
             .map_err(|err| ActError::Package(format!("error happend to get connection: {err}")))?;
-        match self.op.as_str() {
+
+        let pid = ctx.task().pid.to_string();
+        let params = serde_json::from_value::<StatePackageParams>(params.clone()).map_err(|e| {
+            ActError::Package(format!(
+                "invalid ActPackage({}) params: {}",
+                Self::definition().id,
+                e
+            ))
+        })?;
+        match params.op.as_str() {
             "GET" => {
-                let key = self
+                let key = params
                     .params
                     .get::<String>("key")
                     .ok_or(ActError::Package("missing 'key' in params".to_string()))?
@@ -113,16 +137,16 @@ impl StatePackage {
                     })?,
                 );
 
-                Ok(vars)
+                Ok(Some(vars))
             }
             "SET" => {
-                let key = self
+                let key = params
                     .params
                     .get::<String>("key")
                     .ok_or(ActError::Package("missing 'key' in params".to_string()))?
                     .to_string();
 
-                let value: serde_json::Value = self
+                let value: serde_json::Value = params
                     .params
                     .get("value")
                     .ok_or(ActError::Package("missing 'value' in params".to_string()))?;
@@ -138,9 +162,12 @@ impl StatePackage {
                     .map_err(|err| {
                         ActError::Package(format!("error happend to set value: {err}"))
                     })?;
-                Ok(Vars::new())
+                Ok(None)
             }
-            _ => Err(ActError::Package(format!("invalid operation: {}", self.op))),
+            _ => Err(ActError::Package(format!(
+                "invalid operation: {}",
+                params.op
+            ))),
         }
     }
 }

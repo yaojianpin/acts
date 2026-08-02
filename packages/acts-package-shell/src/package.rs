@@ -1,5 +1,6 @@
 use acts::{
-    ActError, ActPackage, ActPackageCatalog, ActPackageMeta, ActRunAs, Result, Vars, include_json,
+    ActError, ActPackage, ActPackageCatalog, ActPackageDefinition, ActRunAs, Result, Vars,
+    include_json,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
@@ -34,8 +35,11 @@ pub enum ContentType {
     Json,
 }
 
+#[derive(Debug, Clone)]
+pub struct ShellPackage;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ShellPackage {
+pub struct ShellPackageParams {
     shell: Option<Shell>,
     script: String,
     #[serde(rename(deserialize = "content-type"))]
@@ -43,8 +47,8 @@ pub struct ShellPackage {
 }
 
 impl ActPackage for ShellPackage {
-    fn meta() -> ActPackageMeta {
-        ActPackageMeta {
+    fn definition() -> ActPackageDefinition {
+        ActPackageDefinition {
             id: "acts.app.shell",
             name: "Shell",
             desc: "do shell script with nushell, bash or powershell",
@@ -63,23 +67,28 @@ impl ActPackage for ShellPackage {
             catalog: ActPackageCatalog::App,
         }
     }
-}
-
-impl ShellPackage {
-    pub fn create(inputs: &Vars) -> Result<Self> {
-        let params = inputs
-            .get::<serde_json::Value>("params")
-            .ok_or(ActError::Package("missing 'params' in package".to_string()))?;
-        let package = serde_json::from_value::<Self>(params)?;
-        Ok(package)
+    fn new(_: &acts::Config) -> Result<Self>
+    where
+        Self: Sized,
+    {
+        Ok(Self)
     }
 
-    pub fn run(&self) -> Result<Vars> {
+    fn execute(&self, _ctx: &acts::Context, params: &serde_json::Value) -> Result<Option<Vars>> {
         let mut ret = Vars::new();
-        let shell = self.shell.as_ref().unwrap_or(&Shell::Sh);
+
+        let params = serde_json::from_value::<ShellPackageParams>(params.clone()).map_err(|e| {
+            ActError::Package(format!(
+                "invalid ActPackage({}) params: {}",
+                Self::definition().id,
+                e
+            ))
+        })?;
+
+        let shell = params.shell.as_ref().unwrap_or(&Shell::Sh);
         let output = Command::new(shell.as_ref())
             .arg("-c")
-            .arg(&self.script)
+            .arg(&params.script)
             .output()
             .map_err(|err| ActError::Package(format!("{err}")))?;
 
@@ -88,7 +97,7 @@ impl ShellPackage {
             return Err(ActError::Package(err));
         }
         let data = String::from_utf8(output.stdout)?;
-        let content_type = self.content_type.as_ref().unwrap_or(&ContentType::Text);
+        let content_type = params.content_type.as_ref().unwrap_or(&ContentType::Text);
         match content_type {
             ContentType::Text => ret.set(DATA_KEY, data),
             ContentType::Json => ret.set(
@@ -99,6 +108,6 @@ impl ShellPackage {
             ),
         }
 
-        Ok(ret)
+        Ok(Some(ret))
     }
 }

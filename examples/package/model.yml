@@ -1,19 +1,20 @@
-id: pack_example
+id: custom_pack_example
 ver: 0.1.0
 exposes:
   - name: result
-    value: '{{ input }}'
+    value: ${{ input }}
+    type: number
 steps:
   - name: step 1
     id: step1
     uses: pack1
     params:
-      v1: '{{ input }}'
+      v1: ${{ input }}
   - name: step 2
     id: step2
     uses: pack2
     params:
-      a: '{{ input }}'
+      a: ${{ input }}
       b: [ "a", "b" ]
 
 

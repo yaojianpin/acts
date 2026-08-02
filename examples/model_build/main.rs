@@ -13,7 +13,7 @@ async fn main() -> Result<()> {
             Variant::new()
                 .name("result")
                 .r#type(acts::VariantTypes::Number)
-                .value(r#"{{ result }}"#),
+                .value(r#"${{ result }}"#),
         )
         .with_step(|step| {
             step.with_id("cond")

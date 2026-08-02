@@ -1,20 +1,17 @@
 use crate::{
     ActError, ModelInfo, Result, Vars,
-    package::{
-        ActPackage, ActPackageCatalog, ActPackageFn, ActPackageMeta, ActPackageRegister, ActRunAs,
-    },
+    package::{ActPackage, ActPackageCatalog, ActPackageDefinition, ActPackageRegister, ActRunAs},
     utils::consts,
 };
-use serde::Serialize;
 use serde_json::json;
 use std::sync::Arc;
 
-#[derive(Debug, Clone, Serialize)]
-pub struct ManualEventPackage(Option<String>);
+#[derive(Debug, Clone)]
+pub struct ManualEventPackage;
 
 impl ActPackage for ManualEventPackage {
-    fn meta() -> ActPackageMeta {
-        ActPackageMeta {
+    fn definition() -> ActPackageDefinition {
+        ActPackageDefinition {
             id: "acts.event.chat",
             name: "Chat",
             desc: "do an event by chat",
@@ -35,10 +32,20 @@ impl ActPackage for ManualEventPackage {
             catalog: ActPackageCatalog::Event,
         }
     }
-}
 
-impl ActPackageFn for ManualEventPackage {
-    fn start(&self, rt: &Arc<crate::scheduler::Runtime>, options: &Vars) -> Result<Option<Vars>> {
+    fn new(_: &crate::Config) -> Result<Self>
+    where
+        Self: Sized,
+    {
+        Ok(Self)
+    }
+
+    fn start(
+        &self,
+        rt: &Arc<crate::scheduler::Runtime>,
+        params: &serde_json::Value,
+        options: &Vars,
+    ) -> Result<Option<Vars>> {
         let mid = options
             .get::<String>(consts::MODEL_ID)
             .ok_or(ActError::Runtime(format!(
@@ -49,23 +56,13 @@ impl ActPackageFn for ManualEventPackage {
         let model: ModelInfo = rt.cache().store().models().find(&mid)?.into();
         let workflow = model.workflow()?;
 
-        let mut params = Vars::new();
-        if let Some(ref v) = self.0 {
-            params.insert(consts::ACT_PARAMS_KEY.to_string(), json!(v));
+        let mut start_params = Vars::new();
+        if let Some(ref v) = params.as_str() {
+            start_params.set(consts::ACT_PARAMS_KEY, v);
         }
-        let ret = rt.start(&workflow, params)?;
+        let ret = rt.start(&workflow, start_params)?;
 
         Ok(Some(Vars::new().with(consts::PROCESS_ID, ret.id())))
-    }
-}
-
-impl<'de> serde::de::Deserialize<'de> for ManualEventPackage {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = Option::<String>::deserialize(deserializer)?;
-        Ok(Self(value))
     }
 }
 
@@ -80,8 +77,7 @@ mod tests {
         let params = r#"hello world"#;
 
         let value = serde_yaml::from_str::<serde_json::Value>(params).unwrap();
-        let meta = super::ManualEventPackage::meta();
-        serde_json::from_value::<super::ManualEventPackage>(value.clone()).unwrap();
+        let meta = super::ManualEventPackage::definition();
         jsonschema::validate(&meta.schema, &value).unwrap()
     }
 }

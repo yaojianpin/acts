@@ -13,12 +13,12 @@ cargo add acts-package-http
 
 ```rust,no_run
 use acts::Engine;
-use acts_package_http::HttpPackagePlugin;
+use acts_package_http::HttpPackage;
 
 #[tokio::main]
 async fn main() {
     let engine = Engine::builder()
-        .add_plugin(&HttpPackagePlugin)
+        .add_pacakge::<HttpPackage>()
         .build()
         .start();
 }
@@ -34,25 +34,24 @@ inputs:
   key2: 2
 steps:
   - name: http step
-    acts:
-      - uses: acts.core.http
-        params:
-          url: http://127.0.0.1:1234/hello
-          method: GET
-          # params from workflow.inputs
-          params: 
-            - key: key1
-              value: '{{ key1 }}'
-            - key: key2
-              value: '{{ key2 }}'
-
-      - uses: acts.core.http
-        params:
-          url: http://127.0.0.1:1234/world
-          method: POST
-          content-type: json
-          # body data from prev http response data
-          body:
-            data: '{{ $inputs().data }}'
+    uses: acts.core.http
+    params:
+      url: http://127.0.0.1:1234/hello
+      method: GET
+      # params from workflow.inputs
+      params: 
+        - key: key1
+          value: '${{ key1 }}'
+        - key: key2
+          value: '${{ key2 }}'
+  - name: http step 2
+    uses: acts.core.http
+    params:
+      url: http://127.0.0.1:1234/world
+      method: POST
+      content-type: json
+      # body data from prev http response data
+      body:
+        data: '${{ $inputs().data }}'
 
 ```

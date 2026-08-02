@@ -13,7 +13,7 @@ steps:
       branches:
         - id: b1
           name: branch 1
-          if: '{{ a }} > 0'
+          if: '${{ a }} > 0'
           steps:
             - id: step3
               uses: acts.transform.set
@@ -60,12 +60,12 @@ If branch `b1` depends on `b2`, the engine sets `b1` to Pending state until `b2`
 
 ## Expressions in Conditions
 
-Branch conditions use `{{ }}` expression syntax:
+Branch conditions use `${{ }}` expression syntax:
 
 ```yml
 # Variable comparison
-if: '{{ a }} > 0'
+if: '${{ a }} > 0'
 
 # Multi-condition
-if: '{{ a }} > 0 && $get("status") == "active"'
+if: '${{ a }} > 0 && $get("status") == "active"'
 ```

@@ -114,7 +114,7 @@ async fn pack_irq_with_params_var() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_var("a", json!(5)).with_uses(
             USES_IRQ,
-            Vars::new().with("key", "act1").with("a", r#"{{ a }}"#),
+            Vars::new().with("key", "act1").with("a", r#"${{ a }}"#),
         )
     });
 
@@ -655,7 +655,7 @@ async fn pack_irq_do_action_rets() {
             .with_var("uid", json!("a"))
             .with_uses(
                 USES_IRQ,
-                Vars::new().with("key", "fn1").with("uid", "{{ uid }}"),
+                Vars::new().with("key", "fn1").with("uid", "${{ uid }}"),
             )
     });
 

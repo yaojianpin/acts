@@ -50,7 +50,7 @@ steps:
             - u2
       uses: acts.core.parallel
       params:
-        in: '{{ users }}'
+        in: '${{ users }}'
         acts:
           - uses: acts.core.irq
             params:
@@ -73,7 +73,7 @@ steps:
             - u2
       uses: acts.core.sequence
       params:
-        in: '{{ users }}'
+        in: '${{ users }}'
         acts:
           - uses: acts.core.irq
             params:

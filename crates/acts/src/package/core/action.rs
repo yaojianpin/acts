@@ -1,25 +1,27 @@
 use crate::{
-    Action, Context, Result, Vars,
+    ActError, Action, Config, Context, Result, Vars,
     event::EventAction,
-    package::{
-        ActPackage, ActPackageCatalog, ActPackageFn, ActPackageMeta, ActPackageRegister, ActRunAs,
-    },
+    package::{ActPackage, ActPackageCatalog, ActPackageDefinition, ActPackageRegister, ActRunAs},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use strum::IntoEnumIterator;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ActionPackage {
-    pub action: EventAction,
+#[derive(Debug, Clone)]
+pub struct ActionPackage;
 
-    #[serde(default)]
-    pub options: Vars,
+#[derive(Debug, Clone, Deserialize, Serialize)]
+struct ActionPackageParams {
+    action: EventAction,
+    options: Option<Vars>,
 }
 
 impl ActPackage for ActionPackage {
-    fn meta() -> ActPackageMeta {
-        ActPackageMeta {
+    fn new(_config: &Config) -> Result<Self> {
+        Ok(Self)
+    }
+    fn definition() -> ActPackageDefinition {
+        ActPackageDefinition {
             id: "acts.core.action",
             name: "Action",
             desc: "do an action with inputs",
@@ -55,16 +57,24 @@ impl ActPackage for ActionPackage {
             catalog: ActPackageCatalog::Core,
         }
     }
-}
 
-impl ActPackageFn for ActionPackage {
-    fn execute(&self, ctx: &Context) -> Result<Option<Vars>> {
+    fn execute(&self, ctx: &Context, params: &serde_json::Value) -> Result<Option<Vars>> {
         let task = ctx.task();
+
+        let params =
+            serde_json::from_value::<ActionPackageParams>(params.clone()).map_err(|e| {
+                ActError::Package(format!(
+                    "invalid ActPackage({}) params: {}",
+                    Self::definition().id,
+                    e
+                ))
+            })?;
+
         ctx.set_action(&Action::new(
             &task.pid,
             &task.id,
-            self.action.clone(),
-            self.options.clone(),
+            params.action.clone(),
+            params.options.unwrap_or_default().clone(),
         ))?;
         task.update(ctx)?;
         Ok(None)
@@ -108,7 +118,7 @@ mod tests {
         ];
 
         for action in actions {
-            pack_action_witout_options(action)
+            pack_action_without_options(action)
         }
     }
 
@@ -121,21 +131,21 @@ mod tests {
             "options": options,
         });
 
-        let meta = super::ActionPackage::meta();
-        serde_json::from_value::<super::ActionPackage>(params.clone()).unwrap();
+        let meta = super::ActionPackage::definition();
+        serde_json::from_value::<super::ActionPackageParams>(params.clone()).unwrap();
         jsonschema::validate(&meta.schema, &params).unwrap()
     }
 
     #[cfg(test)]
-    fn pack_action_witout_options(action: &str) {
+    fn pack_action_without_options(action: &str) {
         use serde_json::json;
 
         let params = json!({
             "action": action,
         });
 
-        let meta = super::ActionPackage::meta();
-        serde_json::from_value::<super::ActionPackage>(params.clone()).unwrap();
+        let meta = super::ActionPackage::definition();
+        serde_json::from_value::<super::ActionPackageParams>(params.clone()).unwrap();
         jsonschema::validate(&meta.schema, &params).unwrap()
     }
 }

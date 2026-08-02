@@ -44,7 +44,7 @@ steps:
     - id: step1
       uses: acts.core.parallel
       params:
-        in: '{{ list }}'
+        in: '${{ list }}'
         acts:
           - uses: acts.core.irq
             params:
@@ -58,7 +58,7 @@ steps:
     - id: step1
       uses: acts.core.sequence
       params:
-        in: '{{ list }}'
+        in: '${{ list }}'
         acts:
           - uses: acts.core.irq
             params:

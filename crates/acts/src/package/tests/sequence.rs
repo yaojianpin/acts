@@ -99,7 +99,7 @@ async fn pack_sequence_chain_var() {
             .with_uses(
                 USES_SEQUENCE,
                 Vars::from(json!({
-                    "in": r#"{{ a }}"#,
+                    "in": r#"${{ a }}"#,
                     "acts": vec![
                         Act::irq(|act| act.with_params_vars(|v| v.with("key", "act1")))
                     ]

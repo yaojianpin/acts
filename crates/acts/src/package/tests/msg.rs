@@ -94,7 +94,7 @@ async fn pack_msg_with_params_var() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_var("a", json!(5)).with_uses(
             USES_MSG,
-            Vars::new().with("key", "msg1").with("a", "{{ a }}"),
+            Vars::new().with("key", "msg1").with("a", "${{ a }}"),
         )
     });
 

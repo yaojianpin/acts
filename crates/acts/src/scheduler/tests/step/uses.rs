@@ -179,9 +179,12 @@ async fn sch_step_uses_if_false() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_step_uses_action() {
     let workflow = Workflow::new().with_step(|step| {
-        step.with_var("a", json!(10))
-            .with_id("step1")
-            .with_uses(USES_ACTION, Vars::new().with("action", EventAction::Next))
+        step.with_var("a", json!(10)).with_id("step1").with_uses(
+            USES_ACTION,
+            Vars::new()
+                .with("action", EventAction::Next)
+                .with("options", json!({})),
+        )
     });
 
     workflow.print();

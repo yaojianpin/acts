@@ -1,8 +1,6 @@
 use crate::{
-    Act, Context, Result, Vars,
-    package::{
-        ActPackage, ActPackageCatalog, ActPackageFn, ActPackageMeta, ActPackageRegister, ActRunAs,
-    },
+    Act, ActError, Context, Result, Vars,
+    package::{ActPackage, ActPackageCatalog, ActPackageDefinition, ActPackageRegister, ActRunAs},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -28,15 +26,18 @@ pub enum RunningMode {
     Parallel,
 }
 
+#[derive(Debug, Clone)]
+pub struct BlockPackage;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct BlockPackage {
+pub struct BlockPackageParams {
     pub mode: RunningMode,
     pub acts: Vec<Act>,
 }
 
 impl ActPackage for BlockPackage {
-    fn meta() -> ActPackageMeta {
-        ActPackageMeta {
+    fn definition() -> ActPackageDefinition {
+        ActPackageDefinition {
             id: "acts.core.block",
             name: "Block",
             desc: "run block acts in paralle or sequence",
@@ -81,17 +82,30 @@ impl ActPackage for BlockPackage {
             catalog: ActPackageCatalog::Core,
         }
     }
-}
 
-impl ActPackageFn for BlockPackage {
-    fn execute(&self, ctx: &Context) -> Result<Option<Vars>> {
+    fn new(_config: &crate::Config) -> Result<Self>
+    where
+        Self: Sized,
+    {
+        Ok(Self)
+    }
+
+    fn execute(&self, ctx: &Context, params: &serde_json::Value) -> Result<Option<Vars>> {
+        let params = serde_json::from_value::<BlockPackageParams>(params.clone()).map_err(|e| {
+            ActError::Package(format!(
+                "invalid ActPackage({}) params: {}",
+                Self::definition().id,
+                e
+            ))
+        })?;
+
         let mut options = ctx.task().options();
-        let mut acts = self.acts.clone();
+        let mut acts = params.acts;
         for act in acts.iter_mut() {
             // append block options to each child act
             act.options.append(&mut options);
         }
-        ctx.build_acts(&acts, self.mode == RunningMode::Sequence)?;
+        ctx.build_acts(&acts, params.mode == RunningMode::Sequence)?;
         Ok(None)
     }
 }
@@ -112,8 +126,8 @@ mod tests {
         "#;
 
         let value = serde_yaml::from_str::<serde_json::Value>(params).unwrap();
-        let meta = super::BlockPackage::meta();
-        serde_json::from_value::<super::BlockPackage>(value.clone()).unwrap();
+        let meta = super::BlockPackage::definition();
+        serde_json::from_value::<super::BlockPackageParams>(value.clone()).unwrap();
         jsonschema::validate(&meta.schema, &value).unwrap()
     }
 
@@ -127,8 +141,8 @@ mod tests {
         "#;
 
         let value = serde_yaml::from_str::<serde_json::Value>(params).unwrap();
-        let meta = super::BlockPackage::meta();
-        serde_json::from_value::<super::BlockPackage>(value.clone()).unwrap();
+        let meta = super::BlockPackage::definition();
+        serde_json::from_value::<super::BlockPackageParams>(value.clone()).unwrap();
         jsonschema::validate(&meta.schema, &value).unwrap()
     }
 }

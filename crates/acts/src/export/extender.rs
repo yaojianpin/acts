@@ -1,6 +1,4 @@
-use crate::{
-    ActError, ActPackageMeta, ActRunAs, Result, env::ActUserVar, scheduler::Runtime, store::KvStore,
-};
+use crate::{ActPackageDefinition, Result, env::ActUserVar, scheduler::Runtime, store::KvStore};
 use core::fmt;
 use std::sync::Arc;
 
@@ -52,7 +50,7 @@ impl Extender {
     /// register package with meta definition
     /// ## Example
     /// ```no_run
-    /// use acts::{ActPackage, ActPackageMeta, Vars};
+    /// use acts::{ActPackage, ActPackageDefinition, Vars};
     /// use serde::{Deserialize, Serialize};
     /// use serde_json::json;
     ///
@@ -62,8 +60,8 @@ impl Extender {
     ///    b: Vec<String>,
     /// }
     /// impl ActPackage for MyPackage {
-    ///     fn meta() -> ActPackageMeta {
-    ///        ActPackageMeta {
+    ///     fn definition() -> ActPackageDefinition {
+    ///        ActPackageDefinition {
     ///             id: "my_package",
     ///             name: "my package",
     ///             desc: "",
@@ -84,20 +82,19 @@ impl Extender {
     ///             catalog: acts::ActPackageCatalog::App,
     ///        }
     ///    }
-    ///  }
+    ///
+    ///    fn new(_config: &acts::Config) -> acts::Result<Self> {
+    ///        Ok(Self { a: 0, b: vec![] })
+    ///    }
+    /// }
     ///
     ///  #[tokio::main]
     ///  async fn main() {
     ///     let engine = acts::Engine::new().start().unwrap();
-    ///     engine.extender().register_package(&MyPackage::meta()).unwrap();
+    ///     engine.extender().register_package(&MyPackage::definition()).unwrap();
     /// }
-    pub fn register_package(&self, meta: &ActPackageMeta) -> Result<()> {
-        if meta.run_as == ActRunAs::Func {
-            return Err(ActError::Package(
-                "package run_as must be one of Irq and Msg".to_string(),
-            ));
-        }
-        let package = meta.into_data()?;
+    pub fn register_package(&self, def: &ActPackageDefinition) -> Result<()> {
+        let package = def.into_data()?;
         self.runtime.cache().store().publish(&package)?;
 
         Ok(())

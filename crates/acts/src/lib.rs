@@ -31,7 +31,7 @@ pub use error::{ActError, Error};
 pub use event::{Action, Event, Message, MessageState};
 pub use export::{Channel, ChannelOptions, Executor, Extender};
 pub use model::*;
-pub use package::{ActPackage, ActPackageCatalog, ActPackageMeta, ActResource, ActRunAs};
+pub use package::{ActPackage, ActPackageCatalog, ActPackageDefinition, ActResource, ActRunAs};
 pub use plugin::ActPlugin;
 pub use scheduler::Context;
 pub use signal::Signal;

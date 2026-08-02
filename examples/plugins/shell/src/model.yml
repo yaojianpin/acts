@@ -11,7 +11,7 @@ steps:
           content-type: json
           # nushell can run on all os
           script: |
-            let data = "{{ my_input }}"
+            let data = "${{ my_input }}"
             $data | split row ',' | each { |it| $it | str trim  } | to json
 
       - uses: acts.app.shell

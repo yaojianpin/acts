@@ -14,7 +14,7 @@ steps:
             - u3
       uses: acts.core.parallel
       params:
-        in: '{{ items }}'
+        in: '${{ items }}'
         acts:
           # 会生成 3 个 irq 活动，同时并行执行
           - uses: acts.core.irq
@@ -32,7 +32,7 @@ steps:
 
 ## 变量注入
 
-引擎会自动将 `index` 和 `value` 注入到每个子活动的变量上下文中，可以在子活动中通过 `{{ index }}` 和 `{{ value }}` 访问。
+引擎会自动将 `index` 和 `value` 注入到每个子活动的变量上下文中，可以在子活动中通过 `${{ index }}` 和 `${{ value }}` 访问。
 
 ## 代码生成集合
 
@@ -48,7 +48,7 @@ steps:
     - id: step2
       uses: acts.core.parallel
       params:
-        in: '{{ items }}'
+        in: '${{ items }}'
         acts:
           - uses: acts.core.irq
             params:

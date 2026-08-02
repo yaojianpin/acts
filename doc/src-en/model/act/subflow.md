@@ -11,7 +11,7 @@ steps:
         # The target sub-workflow model ID
         to: sub_workflow_id
         # Input data passed to the sub-workflow
-        a: '{{ value }}'
+        a: '${{ value }}'
 ```
 
 ## Sub-Workflow Definition
@@ -53,7 +53,7 @@ steps:
       uses: acts.core.subflow
       params:
         to: sub_workflow_id
-        input_value: '{{ parent_var }}'
+        input_value: '${{ parent_var }}'
       options:
         exposes:
           - name: result

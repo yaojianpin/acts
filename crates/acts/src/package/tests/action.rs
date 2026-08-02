@@ -12,8 +12,12 @@ use serial_test::serial;
 #[tokio::test(flavor = "multi_thread")]
 async fn pack_action_submit_on_step() {
     let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_uses(USES_ACTION, Vars::new().with("action", "submit"))
+        step.with_id("step1").with_uses(
+            USES_ACTION,
+            Vars::new()
+                .with("action", "submit")
+                .with("options", json!({})),
+        )
     });
 
     workflow.print();
@@ -135,8 +139,12 @@ async fn pack_action_submit_auto() {
 #[tokio::test(flavor = "multi_thread")]
 async fn pack_action_complete_on_step() {
     let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_uses(USES_ACTION, Vars::new().with("action", EventAction::Next))
+        step.with_id("step1").with_uses(
+            USES_ACTION,
+            Vars::new()
+                .with("action", EventAction::Next)
+                .with("options", json!({})),
+        )
     });
 
     workflow.print();
@@ -363,8 +371,12 @@ async fn pack_action_error_on_step_with_no_err_code() {
 #[tokio::test(flavor = "multi_thread")]
 async fn pack_action_skip_on_step() {
     let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_uses(USES_ACTION, Vars::new().with("action", "skip"))
+        step.with_id("step1").with_uses(
+            USES_ACTION,
+            Vars::new()
+                .with("action", "skip")
+                .with("options", json!({})),
+        )
     });
 
     workflow.print();

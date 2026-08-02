@@ -4,10 +4,9 @@ ver: 0.1.0
 vars:
   - name: v
     value: 0
-options:
-  exposes:
-    - name: result
-      value: '{{ v }}'
+exposes:
+  - name: result
+    value: '${{ v }}'
 steps:
   - name: prepare
     id: prepare
@@ -20,13 +19,13 @@ steps:
     params:
         to: sub
         extra:
-          v: '{{ v }}'
+          v: '${{ v }}'
 
   - name: final
     id: final
     uses: acts.core.irq
     params:
       key: action2
-      v: '{{ v }}'
+      v: '${{ v }}'
 
     

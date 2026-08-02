@@ -31,12 +31,11 @@ inputs:
   my_input:  "hello, world"
 steps:
   - name: shell step
-    acts:
-      - uses: acts.app.shell
-        params:
-          shell: nu
-          content-type: json
-          script: |
-            let data = "{{ my_input }}"
-            $data | split row ',' | each { |it| $it | str trim  } | to json
+    uses: acts.app.shell
+    params:
+      shell: nu
+      content-type: json
+      script: |
+        let data = "${{ my_input }}"
+        $data | split row ',' | each { |it| $it | str trim  } | to json
 ```

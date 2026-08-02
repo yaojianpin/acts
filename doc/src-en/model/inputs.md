@@ -61,5 +61,5 @@ steps:
     - id: step1
       vars:
         - name: local_var
-          value: '{{ inputs.a }}'
+          value: '${{ inputs.a }}'
 ```

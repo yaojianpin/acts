@@ -23,14 +23,13 @@ steps:
           params:
             key: pm
             role_id: pm
-          options:
-            exposes:
-              - name: pm
+          exposes:
+            - name: pm
         # parse the pm variable from prev act
         # and parallel run multiple acts
         - uses: acts.core.parallel
           params:
-            in: '{{ pm }}'
+            in: '${{ pm }}'
             acts:
               - uses: acts.core.irq
                 params:
@@ -60,7 +59,7 @@ steps:
         # parallel generate multiple acts
         - uses: acts.core.parallel
           params:
-            in: '{{ gm }}'
+            in: '${{ gm }}'
             acts:
               - uses: acts.core.msg
                 params:

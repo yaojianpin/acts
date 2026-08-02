@@ -1,5 +1,6 @@
 use acts::{
-    ActError, ActPackage, ActPackageCatalog, ActPackageMeta, ActRunAs, Result, Vars, include_json,
+    ActError, ActPackage, ActPackageCatalog, ActPackageDefinition, ActRunAs, Result, Vars,
+    include_json,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, InvalidHeaderValue};
@@ -39,8 +40,11 @@ pub struct Pair {
     pub value: JsonValue,
 }
 
+#[derive(Debug, Clone)]
+pub struct HttpPackage;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct HttpPackage {
+pub struct HttpPackageParams {
     pub url: String,
     pub method: String,
     #[serde(default)]
@@ -54,8 +58,8 @@ pub struct HttpPackage {
 }
 
 impl ActPackage for HttpPackage {
-    fn meta() -> ActPackageMeta {
-        ActPackageMeta {
+    fn definition() -> ActPackageDefinition {
+        ActPackageDefinition {
             id: "acts.core.http",
             name: "Http",
             desc: "do a http request",
@@ -69,19 +73,15 @@ impl ActPackage for HttpPackage {
             catalog: ActPackageCatalog::Core,
         }
     }
-}
 
-impl HttpPackage {
-    pub fn create(inputs: &Vars) -> Result<Self> {
-        let params = inputs
-            .get::<serde_json::Value>("params")
-            .ok_or(ActError::Package("missing 'params' in package".to_string()))?;
-
-        let package = serde_json::from_value::<Self>(params)?;
-        Ok(package)
+    fn new(_: &acts::Config) -> Result<Self>
+    where
+        Self: Sized,
+    {
+        Ok(Self)
     }
 
-    pub fn run(&self) -> Result<Vars> {
+    fn execute(&self, _ctx: &acts::Context, params: &serde_json::Value) -> Result<Option<Vars>> {
         let mut ret = Vars::new();
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -89,7 +89,15 @@ impl HttpPackage {
             HeaderValue::from_static("*/*"),
         );
 
-        for Pair { key, value } in &self.headers {
+        let params = serde_json::from_value::<HttpPackageParams>(params.clone()).map_err(|e| {
+            ActError::Package(format!(
+                "invalid ActPackage({}) params: {}",
+                Self::definition().id,
+                e
+            ))
+        })?;
+
+        for Pair { key, value } in &params.headers {
             headers.insert(
                 key.parse::<HeaderName>()
                     .map_err(|err| ActError::Runtime(err.to_string()))?,
@@ -100,24 +108,24 @@ impl HttpPackage {
             );
         }
         let mut query = Vec::new();
-        for Pair { key, value } in &self.params {
+        for Pair { key, value } in &params.params {
             query.push((key.clone(), value.clone()));
         }
 
         let c = reqwest::blocking::Client::new();
         let mut request = c
             .request(
-                self.method
-                    .parse()
-                    .map_err(|_| ActError::Runtime(format!("invalid method '{}'", self.method)))?,
-                &self.url,
+                params.method.parse().map_err(|_| {
+                    ActError::Runtime(format!("invalid method '{}'", params.method))
+                })?,
+                &params.url,
             )
             .headers(headers)
             .query(&query);
 
-        match self.content_type {
+        match params.content_type {
             ContentType::Text | ContentType::Html => {
-                if let Some(text) = &self.body {
+                if let Some(text) = &params.body {
                     let data = text.as_str().ok_or(ActError::Package(
                         "content-type did not match the body content".to_string(),
                     ))?;
@@ -125,13 +133,13 @@ impl HttpPackage {
                 }
             }
             ContentType::Json => {
-                if let Some(json) = &self.body {
+                if let Some(json) = &params.body {
                     let body = serde_json::to_vec(json)?;
                     request = request.body(body);
                 }
             }
             ContentType::FormData | ContentType::UrlEncoded => {
-                if let Some(form) = &self.body {
+                if let Some(form) = &params.body {
                     let data = form.as_object().ok_or(ActError::Package(
                         "content-type did not match the body content".to_string(),
                     ))?;
@@ -139,7 +147,7 @@ impl HttpPackage {
                 }
             }
             ContentType::Binary | ContentType::Image | ContentType::Video | ContentType::Audio => {
-                if let Some(value) = &self.body {
+                if let Some(value) = &params.body {
                     let data = value.as_str().ok_or(ActError::Package(
                         "content-type did not match the body content".to_string(),
                     ))?;
@@ -192,7 +200,7 @@ impl HttpPackage {
             });
         }
 
-        Ok(ret)
+        Ok(Some(ret))
     }
 }
 

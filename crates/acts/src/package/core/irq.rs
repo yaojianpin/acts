@@ -1,15 +1,14 @@
 use crate::package::{
-    ActPackage, ActPackageCatalog, ActPackageFn, ActPackageMeta, ActPackageRegister, ActRunAs,
+    ActPackage, ActPackageCatalog, ActPackageDefinition, ActPackageRegister, ActRunAs,
 };
-use serde::{Deserialize, Serialize};
 use serde_json::json;
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone)]
 pub struct IrqPackage;
 
 impl ActPackage for IrqPackage {
-    fn meta() -> ActPackageMeta {
-        ActPackageMeta {
+    fn definition() -> ActPackageDefinition {
+        ActPackageDefinition {
             id: "acts.core.irq",
             name: "Request",
             desc: "send a request to client with params",
@@ -28,10 +27,11 @@ impl ActPackage for IrqPackage {
             catalog: ActPackageCatalog::Core,
         }
     }
-}
 
-#[async_trait::async_trait]
-impl ActPackageFn for IrqPackage {}
+    fn new(_config: &crate::Config) -> crate::Result<Self> {
+        Ok(Self)
+    }
+}
 
 inventory::submit!(ActPackageRegister::new::<IrqPackage>());
 
@@ -47,28 +47,28 @@ mod tests {
         "#;
 
         let value = serde_yaml::from_str::<serde_json::Value>(params).unwrap();
-        let meta = super::IrqPackage::meta();
+        let meta = super::IrqPackage::definition();
         jsonschema::validate(&meta.schema, &value).unwrap()
     }
 
     #[test]
     fn pack_irq_parse_empty() {
         let value = serde_yaml::from_str::<serde_json::Value>("").unwrap();
-        let meta = super::IrqPackage::meta();
+        let meta = super::IrqPackage::definition();
         jsonschema::validate(&meta.schema, &value).unwrap()
     }
 
     #[test]
     fn pack_irq_parse_default() {
         let value = serde_yaml::from_str::<serde_json::Value>("{}").unwrap();
-        let meta = super::IrqPackage::meta();
+        let meta = super::IrqPackage::definition();
         jsonschema::validate(&meta.schema, &value).unwrap()
     }
 
     #[test]
     fn pack_irq_parse_null() {
         let value = serde_json::json!(null);
-        let meta = super::IrqPackage::meta();
+        let meta = super::IrqPackage::definition();
         jsonschema::validate(&meta.schema, &value).unwrap()
     }
 }

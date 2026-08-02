@@ -188,7 +188,7 @@ fn model_step_yml_uses() {
         - id: step2
           uses: acts.core.msg
           params:
-            b: '{{ a }}'
+            b: ${{ a }}
     "#;
     let m = Workflow::from_yml(text).unwrap();
     assert_eq!(m.steps.len(), 2);

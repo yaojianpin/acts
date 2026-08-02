@@ -1,16 +1,13 @@
-use crate::package::{
-    ActPackageCatalog, ActPackageFn, ActPackageMeta, ActPackageRegister, ActRunAs,
-};
+use crate::package::{ActPackageCatalog, ActPackageDefinition, ActPackageRegister, ActRunAs};
 use crate::{ActPackage, Context, Result, Vars};
-use serde::Serialize;
 use serde_json::json;
 
-#[derive(Debug, Clone, Serialize)]
-pub struct CodePackage(String);
+#[derive(Debug, Clone)]
+pub struct CodePackage;
 
 impl ActPackage for CodePackage {
-    fn meta() -> ActPackageMeta {
-        ActPackageMeta {
+    fn definition() -> ActPackageDefinition {
+        ActPackageDefinition {
             id: "acts.transform.code",
             name: "Code",
             desc: "run javascript code",
@@ -33,13 +30,24 @@ impl ActPackage for CodePackage {
             catalog: ActPackageCatalog::Transform,
         }
     }
-}
 
-impl ActPackageFn for CodePackage {
-    fn execute(&self, ctx: &Context) -> Result<Option<Vars>> {
+    fn new(_: &crate::Config) -> Result<Self>
+    where
+        Self: Sized,
+    {
+        Ok(Self)
+    }
+
+    fn execute(&self, ctx: &Context, params: &serde_json::Value) -> Result<Option<Vars>> {
+        let Some(code) = params.as_str() else {
+            return Err(crate::ActError::Package(
+                "Code package requires a string parameter".to_string(),
+            ));
+        };
+
         // wrap the code into a function to support return synax
-        let code = format!(r#"(()=>{{ {} }})()"#, self.0);
-        let outputs = ctx.eval::<serde_json::Value>(&code)?;
+        let code_fn = format!(r#"(()=>{{ {} }})()"#, code);
+        let outputs = ctx.eval::<serde_json::Value>(&code_fn)?;
         let mut ret = None;
         if let serde_json::Value::Object(map) = outputs {
             ret = Some(Vars::from(map));
@@ -48,14 +56,20 @@ impl ActPackageFn for CodePackage {
     }
 }
 
-impl<'de> serde::de::Deserialize<'de> for CodePackage {
-    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = String::deserialize(deserializer)?;
-        Ok(Self(value))
+inventory::submit!(ActPackageRegister::new::<CodePackage>());
+
+#[cfg(test)]
+mod tests {
+    use crate::ActPackage;
+
+    #[test]
+    fn pack_code_parse() {
+        let params = r#"
+            console.log("Hello, World!");
+        "#;
+
+        let value = serde_yaml::from_str::<serde_json::Value>(params).unwrap();
+        let meta = super::CodePackage::definition();
+        jsonschema::validate(&meta.schema, &value).unwrap()
     }
 }
-
-inventory::submit!(ActPackageRegister::new::<CodePackage>());

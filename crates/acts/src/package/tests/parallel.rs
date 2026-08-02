@@ -53,7 +53,7 @@ async fn pack_parallel_var_exist() {
         step.with_id("step1")
             .with_var("a", json!(["u1", "u2"]))
             .with_uses(USES_PARALLEL, Vars::from(json!({
-                "in": r#"{{ a }}"#,
+                "in": r#"${{ a }}"#,
                 "acts": vec![
                     Act::irq(|act| act.with_params_vars(|v| v.with("key", "act1")).with_id("act1"))
                 ]
@@ -126,7 +126,7 @@ async fn pack_parallel_in_code() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
                 .with_uses(USES_PARALLEL, Vars::from(json!({
-                    "in": r#"{{ let a = ["u1", "u2"]; let b = ["u3"];let c = [ "u1" ];let d = [ "u3", "u4" ];a.union(b).difference(c).intersection(d) }}"#,
+                    "in": r#"${{ let a = ["u1", "u2"]; let b = ["u3"];let c = [ "u1" ];let d = [ "u3", "u4" ];a.union(b).difference(c).intersection(d) }}"#,
                     "acts": vec![
                         Act::irq(|act| act.with_params_vars(|v| v.with("key", "act1")).with_id("act1"))
                     ]

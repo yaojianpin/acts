@@ -1,23 +1,27 @@
-use super::super::core::{BlockPackage, RunningMode};
+use super::super::core::RunningMode;
 use crate::{
-    Act, Context, Result, Vars,
+    Act, ActError, Context, Result, Vars,
     package::{
-        ActPackage, ActPackageCatalog, ActPackageFn, ActPackageMeta, ActPackageRegister, ActRunAs,
+        ActPackage, ActPackageCatalog, ActPackageDefinition, ActPackageRegister, ActRunAs,
+        core::block::BlockPackageParams,
     },
     utils::consts,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 
+#[derive(Debug, Clone)]
+pub struct ParallelPackage;
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ParallelPackage {
+struct ParallelPackageParams {
     r#in: Vec<JsonValue>,
     acts: Vec<Act>,
 }
 
 impl ActPackage for ParallelPackage {
-    fn meta() -> ActPackageMeta {
-        ActPackageMeta {
+    fn definition() -> ActPackageDefinition {
+        ActPackageDefinition {
             id: "acts.core.parallel",
             name: "Parallel",
             desc: "create acts based on an array and run them in parallel",
@@ -64,15 +68,25 @@ impl ActPackage for ParallelPackage {
             catalog: ActPackageCatalog::Core,
         }
     }
-}
 
-impl ActPackageFn for ParallelPackage {
-    fn execute(&self, ctx: &Context) -> Result<Option<Vars>> {
+    fn new(_config: &crate::Config) -> crate::Result<Self> {
+        Ok(Self)
+    }
+
+    fn execute(&self, ctx: &Context, params: &serde_json::Value) -> Result<Option<Vars>> {
+        let params =
+            serde_json::from_value::<ParallelPackageParams>(params.clone()).map_err(|e| {
+                ActError::Package(format!(
+                    "invalid ActPackage({}) params: {}",
+                    Self::definition().id,
+                    e
+                ))
+            })?;
         let mut acts = Vec::new();
-        for (index, value) in self.r#in.iter().enumerate() {
-            let params = serde_json::to_value(BlockPackage {
+        for (index, value) in params.r#in.iter().enumerate() {
+            let block_params = serde_json::to_value(BlockPackageParams {
                 mode: RunningMode::Parallel,
-                acts: self.acts.clone(),
+                acts: params.acts.clone(),
             })?;
 
             acts.push(Act {
@@ -80,7 +94,7 @@ impl ActPackageFn for ParallelPackage {
                 options: Vars::new()
                     .with(consts::ACT_INDEX, index)
                     .with(consts::ACT_VALUE, value),
-                params,
+                params: block_params,
                 ..Default::default()
             });
         }
@@ -109,7 +123,7 @@ mod tests {
         "#;
 
         let value = serde_yaml::from_str::<serde_json::Value>(params).unwrap();
-        let meta = super::ParallelPackage::meta();
+        let meta = super::ParallelPackage::definition();
         jsonschema::validate(&meta.schema, &value).unwrap()
     }
 }

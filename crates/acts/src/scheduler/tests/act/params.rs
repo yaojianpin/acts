@@ -45,7 +45,7 @@ async fn sch_act_params_expr_full_line() {
             USES_IRQ,
             Vars::new()
                 .with("key", "act1")
-                .with("data", json!(r#"{{ "hello" }}"#)),
+                .with("data", json!(r#"${{ "hello" }}"#)),
         )
     });
 
@@ -75,7 +75,7 @@ async fn sch_act_params_expr_partial_line() {
             USES_IRQ,
             Vars::new()
                 .with("key", "act1")
-                .with("data", json!(r#"{{ "hello" }} world"#)),
+                .with("data", r#"${{ "hello" }} world"#),
         )
     });
 
@@ -105,7 +105,7 @@ async fn sch_act_params_expr_multi_statements() {
             USES_IRQ,
             Vars::new().with("key", "act1").with(
                 "data",
-                json!(r#"{{ let a = "hello";let b = "world"; a + " " + b }}"#),
+                json!(r#"${{ let a = "hello";let b = "world"; a + " " + b }}"#),
             ),
         )
     });
@@ -137,7 +137,7 @@ async fn sch_act_params_expr_multi_line() {
             Vars::new().with("key", "act1").with(
                 "data",
                 json!(
-                    r#"{{
+                    r#"${{
                 let a = "hello";
                 let b = "world";
                 a + " " + b
@@ -178,8 +178,8 @@ async fn sch_act_params_multi_expr_str() {
                     "data",
                     json!(
                         r#"
-                    let v1 = "{{ a }}";
-                    let v2 = "{{ b }}";
+                    let v1 = "${{ a }}";
+                    let v2 = "${{ b }}";
                     v1 + " " +  v2
                 "#
                     ),
@@ -219,8 +219,8 @@ async fn sch_act_params_multi_expr_bool() {
                     "data",
                     json!(
                         r#"
-                    let v1 = {{ a }};
-                    let v2 = {{ b }};
+                    let v1 = ${{ a }};
+                    let v2 = ${{ b }};
                     v1 && v2
                 "#
                     ),
@@ -261,9 +261,9 @@ async fn sch_act_params_multi_expr_others() {
                     "data",
                     json!(
                         r#"
-                    let v1 = {{ a }};
-                    let v2 = {{ b }};
-                    let v3 = {{ c }};
+                    let v1 = ${{ a }};
+                    let v2 = ${{ b }};
+                    let v3 = ${{ c }};
                 "#
                     ),
                 ),
