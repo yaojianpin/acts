@@ -56,7 +56,7 @@ impl EventExecutor {
             params = serde_json::from_str(&event.params)
                 .map_err(|err| ActError::Convert(format!("failed to deserialize params: {err}")))?;
         }
-        let package = (register.create)(&self.runtime.config())?;
+        let package = (register.create)(self.runtime.config())?;
         let ret = package.start(&self.runtime, &params, &options)?;
         Ok(ret)
     }

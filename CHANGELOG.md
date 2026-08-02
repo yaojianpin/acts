@@ -189,3 +189,5 @@
 - add `exposes` to workflow, step, branch and act instead of options.exposes
 - change `timeouts` and `catches` to support complex flow like `steps`
 - add `Engine::builder()` to `Engine` and remove the export of EngineBuilder
+- merge `ActPackageFn`  into into `ActPackage`
+- change expression `{{ }}` to `${{ }}`
