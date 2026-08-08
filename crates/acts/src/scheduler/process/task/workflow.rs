@@ -1,4 +1,7 @@
-use crate::{ActTask, Result, TaskState, Workflow, scheduler::Context};
+use crate::{
+    ActTask, Result, TaskState, Workflow,
+    scheduler::{Context, NextAction},
+};
 
 impl ActTask for Workflow {
     fn init(&self, ctx: &Context) -> Result<()> {
@@ -15,34 +18,16 @@ impl ActTask for Workflow {
     }
 
     fn run(&self, ctx: &Context) -> Result<()> {
-        let task = ctx.task();
-        let children = task.node.children();
-        if !children.is_empty() {
-            for step in &children {
-                ctx.sched_task(step)?;
-            }
-        } else {
-            task.set_state(TaskState::Completed);
-        }
-
+        ctx.task().run_into_children(ctx)?;
         Ok(())
     }
 
-    fn next(&self, ctx: &Context) -> Result<bool> {
+    fn next(&self, ctx: &Context) -> Result<NextAction> {
         let task = ctx.task();
-        let tasks = task.children();
 
-        Ok(tasks.iter().all(|t| t.state().is_completed()))
-    }
-
-    fn review(&self, ctx: &Context) -> Result<bool> {
-        let task = ctx.task();
-        let state = task.state();
-        if state.is_running() {
+        if task.children().iter().all(|t| t.state().is_completed()) && task.state().is_running() {
             task.set_state(TaskState::Completed);
-            return Ok(true);
         }
-
-        Ok(false)
+        Ok(NextAction::Parent)
     }
 }

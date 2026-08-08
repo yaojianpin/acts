@@ -95,15 +95,15 @@ impl TaskState {
     }
 
     pub fn is_success(&self) -> bool {
-        *self == TaskState::Completed || *self == TaskState::Submitted
+        *self == TaskState::Completed
+            || *self == TaskState::Submitted
+            || *self == TaskState::Backed
+            || *self == TaskState::Removed
+            || *self == TaskState::Cancelled
     }
 
     pub fn is_skip(&self) -> bool {
         *self == TaskState::Skipped
-    }
-
-    pub fn is_next(&self) -> bool {
-        self.is_skip() || self.is_running() || self.is_removed() || self.is_success()
     }
 
     pub fn is_interrupted(&self) -> bool {

@@ -6,13 +6,10 @@ use std::sync::Arc;
 pub fn fill_params(params: &JsonValue, ctx: &Context) -> JsonValue {
     match params {
         JsonValue::String(value) => {
-            println!("fill_params: value={value:?}");
             let exprs = get_exprs(value);
-            println!("fill_params: value={exprs:?}");
             if !exprs.is_empty() {
                 let mut value = value.clone();
                 for (range, expr, content) in &exprs {
-                    println!("fill_params: expr={expr}, range={range:?}");
                     let result = Context::scope(ctx.clone(), move || {
                         ctx.runtime.env().eval::<JsonValue>(content)
                     })

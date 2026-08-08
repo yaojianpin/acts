@@ -705,7 +705,7 @@ async fn sch_step_catch_and_continue() {
         if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
-            options.set(consts::ACT_ERR_CODE, "aaaaaaaaaa");
+            options.set(consts::ACT_ERR_CODE, "my_error");
 
             let action = Action::new(&e.pid, &e.tid, EventAction::Error, options);
             rt.do_action(&action).unwrap();

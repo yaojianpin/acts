@@ -1,4 +1,5 @@
   id: test1
+  ver: 0.1.0
   vars: 
     - name: a
       value: 100

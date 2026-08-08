@@ -920,6 +920,7 @@ async fn env_act_cost_get() {
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     engine.channel().on_message(move |e| {
+        println!("message: {e:?}");
         if e.is_irq() {
             s1.close()
         }
@@ -989,9 +990,8 @@ async fn env_act_ecode_get() {
 
     let runtime = engine.runtime();
     engine.channel().on_message(move |e| {
-        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
-            && e.is_state(MessageState::Created)
-        {
+        println!("on_message: {:?}", e);
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             runtime
                 .do_action2(
                     &e.pid,

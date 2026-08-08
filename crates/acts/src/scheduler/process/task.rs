@@ -3,6 +3,8 @@ mod branch;
 mod step;
 mod workflow;
 
+use crate::ActRunAs;
+use crate::scheduler::NextAction;
 use crate::store::DbCollectionIden;
 use crate::utils::consts::TASK_ROOT_TID;
 use crate::{
@@ -46,6 +48,12 @@ pub struct Task {
     // previous tid
     prev: ShareLock<Option<String>>,
 
+    // next tid
+    next: ShareLock<Vec<String>>,
+
+    // parent tid
+    parent: ShareLock<Option<String>>,
+
     proc: Arc<Process>,
 
     node: Arc<Node>,
@@ -65,6 +73,8 @@ impl Task {
             start_time: Arc::new(RwLock::new(0)),
             end_time: Arc::new(RwLock::new(0)),
             prev: Arc::new(RwLock::new(None)),
+            next: Arc::new(RwLock::new(Vec::new())),
+            parent: Arc::new(RwLock::new(None)),
             timestamp: utils::time::timestamp(),
             proc: proc.clone(),
             runtime: rt.clone(),
@@ -106,14 +116,14 @@ impl Task {
         utils::time::time_millis() - self.start_time()
     }
 
-    pub fn is_emit_disabled(&self) -> bool {
-        self.with_data(|data| data.get::<bool>(consts::TASK_EMIT_DISABLED))
-            .unwrap_or(false)
+    pub fn is_emit(&self) -> bool {
+        self.with_data(|data| data.get::<bool>(consts::TASK_EMIT))
+            .unwrap_or(true)
     }
 
-    pub fn set_emit_disabled(&self, v: bool) {
+    pub fn set_emit(&self, v: bool) {
         self.set_data_with(move |data| {
-            data.set(consts::TASK_EMIT_DISABLED, v);
+            data.set(consts::TASK_EMIT, v);
         });
     }
 
@@ -214,27 +224,26 @@ impl Task {
         }
     }
 
-    pub fn prev(&self) -> Option<String> {
+    pub fn prev_id(&self) -> Option<String> {
         let ret = self.prev.read().unwrap();
         ret.clone()
     }
 
-    pub fn parent(&self) -> Option<Arc<Task>> {
-        let mut prev = self.prev();
-        while let Some(tid) = prev.clone() {
-            match self.proc.task(&tid) {
-                Some(task) => {
-                    if task.node.level < self.node.level {
-                        return Some(task.clone());
-                    }
+    pub fn next_ids(&self) -> Vec<String> {
+        let ret = self.next.read().unwrap();
+        ret.clone()
+    }
 
-                    prev = task.prev();
-                    continue;
-                }
-                None => {
-                    break;
-                }
-            }
+    pub fn parent_id(&self) -> Option<String> {
+        let ret = self.parent.read().unwrap();
+        ret.clone()
+    }
+
+    pub fn parent(&self) -> Option<Arc<Task>> {
+        if let Some(parent) = self.parent.read().unwrap().clone()
+            && let Some(task) = self.proc.task(&parent)
+        {
+            return Some(task.clone());
         }
 
         None
@@ -242,6 +251,17 @@ impl Task {
 
     pub fn children(&self) -> Vec<Arc<Self>> {
         self.proc.children(&self.id)
+    }
+
+    pub fn next(&self) -> Vec<Arc<Self>> {
+        let mut ret = Vec::new();
+        let nexts = self.next_ids();
+        for tid in &nexts {
+            if let Some(task) = self.proc.task(tid) {
+                ret.push(task);
+            }
+        }
+        ret
     }
 
     pub fn siblings(&self) -> Vec<Arc<Self>> {
@@ -257,7 +277,7 @@ impl Task {
     pub fn inputs(self: &Arc<Self>) -> Vars {
         let ctx = self.create_context();
         let mut inputs = Vars::new();
-        if let Some(prev) = self.prev()
+        if let Some(prev) = self.prev_id()
             && let Some(prev_task) = self.proc.task(&prev)
         {
             // set the prev task's outputs as current inputs
@@ -305,8 +325,16 @@ impl Task {
         utils::fill_params(&self.node.content.params(), &ctx)
     }
 
-    pub fn set_prev(&self, prev: Option<String>) {
-        *self.prev.write().unwrap() = prev;
+    pub fn set_prev(&self, prev: &str) {
+        *self.prev.write().unwrap() = Some(prev.to_string());
+    }
+
+    pub fn set_parent(&self, parent: &str) {
+        *self.parent.write().unwrap() = Some(parent.to_string());
+    }
+
+    pub fn set_next(&self, next: &str) {
+        self.next.write().unwrap().push(next.to_string());
     }
 
     pub fn set_state(&self, state: TaskState) {
@@ -335,6 +363,15 @@ impl Task {
             data.set(consts::ACT_ERR_MESSAGE, &err.message)
         });
         self.set_state(TaskState::Error);
+    }
+
+    pub fn clear_err_with(&self, new_state: TaskState) {
+        *self.err.write().unwrap() = None;
+        self.set_data_with(|data| {
+            data.remove(consts::ACT_ERR_CODE);
+            data.remove(consts::ACT_ERR_MESSAGE);
+        });
+        self.set_state(new_state);
     }
 
     pub(crate) fn set_pure_err(&self, err: &Error) {
@@ -432,6 +469,7 @@ impl Task {
                 self.next(ctx)?;
             }
             EventAction::Submit => {
+                self.update_data(&ctx.vars());
                 self.set_state(TaskState::Submitted);
                 self.next(ctx)?;
             }
@@ -442,6 +480,7 @@ impl Task {
                         self.pid, self.id
                     )));
                 }
+                self.update_data(&ctx.vars());
                 self.set_state(TaskState::Completed);
                 self.next(ctx)?;
             }
@@ -491,6 +530,7 @@ impl Task {
                         task.id
                     )));
                 }
+
                 // get the neartest next step tasks
                 let mut path_tasks = Vec::new();
                 let nexts = task.follows(
@@ -662,7 +702,9 @@ impl Task {
         let id = utils::Id::new(&self.pid, &self.id);
         Ok(data::Task {
             id: id.id(),
-            prev: self.prev(),
+            prev: self.prev_id(),
+            next: self.next_ids(),
+            parent: self.parent_id(),
             name: self.node.content.name(),
             kind: self.node.kind().to_string(),
             pid: self.pid.clone(),
@@ -692,7 +734,7 @@ impl Task {
     ) -> Option<Arc<Self>> {
         let mut ret = None;
 
-        let mut prev = self.prev();
+        let mut prev = self.prev_id();
         while let Some(tid) = &prev {
             if let Some(task) = self.proc.task(tid) {
                 if predicate(&task) {
@@ -705,7 +747,7 @@ impl Task {
                     path.push(task.clone());
                 }
 
-                prev = task.prev();
+                prev = task.prev_id();
             } else {
                 prev = None
             }
@@ -720,9 +762,9 @@ impl Task {
         path: &mut Vec<Arc<Self>>,
     ) -> Vec<Arc<Self>> {
         let mut ret = Vec::new();
-        let children = self.children();
-        if !children.is_empty() {
-            for task in &children {
+        let nexts = self.next();
+        if !nexts.is_empty() {
+            for task in &nexts {
                 if predicate(task) {
                     ret.push(task.clone());
                 } else {
@@ -739,6 +781,74 @@ impl Task {
 
         ret
     }
+
+    pub fn is_next(&self) -> bool {
+        let state = self.state();
+        state.is_completed() || state.is_interrupted()
+    }
+
+    pub fn auto_complete(self: &Arc<Self>, ctx: &Context) -> Result<NextAction> {
+        ctx.set_task(self);
+        let state = self.state();
+        let task_children = self.children();
+        if state.is_running() {
+            let mut count = 0;
+
+            // for msg act, the client can only receive 'completed' message
+            if self.node().kind() == NodeKind::Act
+                && let Some(run_as) = ctx
+                    .task()
+                    .with_data(|data| data.get::<ActRunAs>(consts::ACT_RUN_AS))
+                && run_as == ActRunAs::Msg
+            {
+                self.set_state(TaskState::Completed);
+            }
+
+            for task in task_children.iter() {
+                if task.state().is_pending() && task.is_ready() {
+                    // resume task
+                    task.set_state(TaskState::Ready);
+                    self.runtime.emitter().emit_task_event(task)?;
+                    task.exec(ctx)?;
+                }
+                if task.state().is_completed() {
+                    count += 1;
+                }
+            }
+
+            if count == task_children.len()
+                && self.is_auto_complete()
+                && !self.state().is_completed()
+            {
+                // check if the task is error catched
+                let is_empty_catched = task_children
+                    .iter()
+                    .filter(|t| t.is_sign(consts::TASK_SIGN_CATCH))
+                    .all(|t| t.state().is_skip());
+
+                if self.is_sign(consts::TASK_SIGN_ERR) && is_empty_catched {
+                    // no any action to match
+                    // resume the task error state
+                    let err = self.with_data(|data| {
+                        Error::new(
+                            &data
+                                .get::<String>(consts::ACT_ERR_MESSAGE)
+                                .unwrap_or_default(),
+                            &data.get::<String>(consts::ACT_ERR_CODE).unwrap_or_default(),
+                        )
+                    });
+                    self.set_err(&err);
+                    ctx.emit_error()?;
+                    return Ok(NextAction::Stop);
+                } else {
+                    self.set_state(TaskState::Completed);
+                }
+            }
+        }
+
+        // continue to run next
+        Ok(NextAction::Continue)
+    }
 }
 
 impl ActTask for Arc<Task> {
@@ -753,10 +863,7 @@ impl ActTask for Arc<Task> {
                 NodeContent::Step(step) => step.init(ctx)?,
                 NodeContent::Act(act) => act.init(ctx)?,
             }
-
-            if !self.state().is_completed() {
-                ctx.emit_task(&ctx.task())?;
-            }
+            ctx.emit_task(&ctx.task())?;
         }
 
         Ok(())
@@ -772,71 +879,48 @@ impl ActTask for Arc<Task> {
                 NodeContent::Step(step) => step.run(ctx),
                 NodeContent::Act(act) => act.run(ctx),
             }?;
+
             ctx.emit_task(&ctx.task())?;
         }
 
         Ok(())
     }
 
-    fn next(&self, ctx: &Context) -> Result<bool> {
+    fn next(&self, ctx: &Context) -> Result<NextAction> {
         ctx.set_task(self);
-        let mut is_next = false;
-        if ctx.task().state().is_next() {
-            is_next = match &self.node.content {
+        let task = ctx.task();
+        let mut next_action = task.auto_complete(ctx)?;
+        if next_action.is_continue() && task.is_next() {
+            next_action = match &self.node.content {
                 NodeContent::Workflow(data) => data.next(ctx)?,
                 NodeContent::Step(data) => data.next(ctx)?,
                 NodeContent::Branch(data) => data.next(ctx)?,
                 NodeContent::Act(data) => data.next(ctx)?,
             };
         }
-        debug!("is_next:{} task={:?}", is_next, ctx.task());
-        if self.state().is_completed() {
-            self.update_data(&ctx.vars());
-            ctx.emit_task(self)?;
 
-            if !is_next {
-                let parent = ctx.task().parent();
-                if let Some(task) = &parent.clone() {
-                    task.review(ctx)?;
-                }
-            }
-        }
+        debug!(
+            "next action:{} node={:?} task={:?}",
+            next_action,
+            ctx.task().node,
+            ctx.task()
+        );
 
-        Ok(false)
-    }
-
-    fn review(&self, ctx: &Context) -> Result<bool> {
-        if ctx.task().is_sign(consts::TASK_SIGN_TIMEOUTS) {
-            return Ok(false);
-        }
-        // last task's outputs
-        // update prev outputs to current task
-        let outputs = ctx.task().outputs();
-        self.update_data(&outputs);
-
-        ctx.set_task(self);
-
-        let before_state = self.state();
-        let is_review = match &self.node.content {
-            NodeContent::Workflow(data) => data.review(ctx)?,
-            NodeContent::Step(data) => data.review(ctx)?,
-            NodeContent::Branch(data) => data.review(ctx)?,
-            NodeContent::Act(data) => data.review(ctx)?,
-        };
-
-        debug!("is_review:{} task={:?}", is_review, ctx.task());
-        if self.state().is_completed() && before_state != self.state() {
+        if task.state().is_completed() {
             ctx.emit_task(self)?;
         }
 
-        if is_review {
-            let parent = ctx.task().parent();
-            if let Some(task) = &parent.clone() {
-                return task.review(ctx);
+        if next_action.is_parent() {
+            let parent = task.parent();
+            if let Some(p) = &parent.clone() {
+                let outputs = task.outputs();
+                // Update the parent task's data with current task's outputs
+                p.update_data(&outputs);
+                return p.next(ctx);
             }
         }
 
-        Ok(false)
+        Ok(NextAction::Continue)
     }
 
     fn on_error(&self, ctx: &Context) -> Result<()> {
@@ -871,7 +955,9 @@ impl std::fmt::Debug for Task {
             .field("state", &self.state())
             .field("start_time", &self.start_time())
             .field("end_time", &self.end_time())
-            .field("prev", &self.prev())
+            .field("prev", &self.prev_id())
+            .field("next", &self.next_ids())
+            .field("parent", &self.parent_id())
             .field("data", &self.data())
             .field("err", &self.err())
             .finish()
@@ -909,17 +995,6 @@ impl Task {
             data.set(name, value);
         }
     }
-
-    // pub fn expose(&self, keys: &Vec<&str>) {
-    //     self.set_data_with(move |data| {
-    //         data.set(
-    //             consts::ACT_EXPOSE,
-    //             keys.iter()
-    //                 .filter(|v| !consts::is_private_key(v))
-    //                 .collect::<Vec<_>>(),
-    //         )
-    //     });
-    // }
 
     pub fn update_data_if_exists<F: Fn(&mut Vars) -> bool>(&self, f: F) -> bool {
         let mut data = self.data.write().unwrap();
@@ -976,5 +1051,26 @@ impl Task {
 
         // also set the to current task
         self.set_data(vars);
+    }
+
+    fn run_into_children(&self, ctx: &Context) -> Result<()> {
+        let children = self.node().children();
+        if !children.is_empty() {
+            for child in &children {
+                ctx.sched_task(child, ctx.task())?;
+            }
+        }
+
+        Ok(())
+    }
+
+    fn move_next(&self, ctx: &Context) -> Result<bool> {
+        let task = ctx.task();
+        if let Some(next) = &task.node.next().upgrade() {
+            ctx.sched_task(next, ctx.task())?;
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 }

@@ -643,6 +643,7 @@ async fn sch_vars_act_data() {
     });
     rt.launch(&proc).unwrap();
     sig.recv().await;
+    proc.print();
     assert_eq!(
         proc.task_by_params("key", "act1")
             .first()

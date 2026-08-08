@@ -180,21 +180,22 @@ impl Context {
         self.action.read().unwrap().clone()
     }
 
-    pub fn sched_task(&self, node: &Arc<Node>) -> Result<()> {
+    pub fn sched_task(&self, node: &Arc<Node>, prev: Arc<Task>) -> Result<()> {
         debug!("sched_task: {}", node.to_string());
-        let task = self.proc.create_task(node, Some(self.task()));
+        let task = self.proc.create_task(node, Some(prev));
         self.runtime.push(&task)?;
         Ok(())
     }
 
-    pub fn sched_task_with_vars(&self, node: &Arc<Node>, vars: Vars) -> Result<()> {
+    pub fn sched_task_with_vars(
+        &self,
+        node: &Arc<Node>,
+        vars: Vars,
+        parent: Arc<Task>,
+    ) -> Result<()> {
         debug!("sched_task: {}", node.to_string());
-        let task = self.proc.create_task(node, Some(self.task()));
-        task.set_data_with(|data| {
-            for (k, v) in &vars {
-                data.set(&k, v);
-            }
-        });
+        let task = self.proc.create_task(node, Some(parent));
+        task.set_data(&vars);
         self.runtime.push(&task)?;
         Ok(())
     }
@@ -202,24 +203,19 @@ impl Context {
     pub fn dispatch_act(&self, act: &Act, vars: Vars) -> Result<()> {
         debug!("dispatch_act: {act:?}  {:?}", self.task);
         let task = self.task();
-        let mut id = act.id.to_string();
-        if id.is_empty() {
-            id = shortid();
-        }
-
-        let node = Arc::new(Node::new(
-            &id,
-            NodeContent::Act(act.clone()),
-            task.node().level + 1,
-        ));
 
         if !task.state().is_none() {
+            let mut id = act.id.to_string();
+            if id.is_empty() {
+                id = shortid();
+            }
+            let node = self.task().node().append_node(
+                &id,
+                NodeContent::Act(act.clone()),
+                task.node().level + 1,
+            );
             let task = self.proc.create_task(&node, Some(task));
-            task.set_data_with(|data| {
-                for (k, v) in &vars {
-                    data.set(&k, v);
-                }
-            });
+            task.set_data(&vars);
             self.runtime.push(&task)?;
         }
 
@@ -230,14 +226,13 @@ impl Context {
         let task = self.task();
 
         let mut prev = task.node().clone();
-        let parent = task.node().clone();
         let mut acts = acts.to_owned();
         for (index, act) in acts.iter_mut().enumerate() {
             dyn_build_act(
                 act,
-                &parent,
+                task.node(),
                 &mut prev,
-                parent.level + 1,
+                task.node().level + 1,
                 index,
                 is_sequence,
             )?;
@@ -248,7 +243,7 @@ impl Context {
 
     /// redo the task and dispatch directly
     pub fn redo_task(&self, task: &Arc<Task>) -> Result<()> {
-        if let Some(prev) = task.prev()
+        if let Some(prev) = task.prev_id()
             && let Some(prev_task) = self.proc.task(&prev)
         {
             let task = self.proc.create_task(task.node(), Some(prev_task));

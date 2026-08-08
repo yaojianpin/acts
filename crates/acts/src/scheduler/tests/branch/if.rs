@@ -103,7 +103,7 @@ async fn sch_task_branch_if_false_else_running() {
     let emitter = engine.channel();
     // process.tree().print();
     emitter.on_message(move |e| {
-        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1") {
+        if e.is_params_key("act1") {
             rx.close();
         }
     });

@@ -97,7 +97,7 @@ async fn pack_set_local_var() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_var("b", json!("abc"))
-            .with_uses(USES_SET, Vars::new().with("a", r#"${{ b }}"#))
+            .with_uses(USES_SET, Vars::new().with("a", "${{ b }}"))
     });
 
     workflow.print();

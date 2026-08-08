@@ -1,5 +1,4 @@
 use super::Node;
-use crate::NodeKind;
 use crate::scheduler::tree::NodeOutputKind;
 use std::collections::HashMap;
 use std::ops::Deref;
@@ -71,8 +70,7 @@ impl Visitor {
         let len = children.len();
         children.iter().enumerate().for_each(|(i, iter)| {
             let mut is_last = i == len - 1;
-            if iter.kind() == NodeKind::Step
-                && let Some(next) = iter.next().upgrade()
+            if let Some(next) = iter.next().upgrade()
                 && self.root.visit_count(next.id()) == 0
             {
                 is_last = false;

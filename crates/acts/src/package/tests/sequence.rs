@@ -99,7 +99,7 @@ async fn pack_sequence_chain_var() {
             .with_uses(
                 USES_SEQUENCE,
                 Vars::from(json!({
-                    "in": r#"${{ a }}"#,
+                    "in": "${{ a }}",
                     "acts": vec![
                         Act::irq(|act| act.with_params_vars(|v| v.with("key", "act1")))
                     ]
@@ -114,7 +114,6 @@ async fn pack_sequence_chain_var() {
     auto_complete(&engine, &rx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        println!("message: {:?}", e.inner());
         if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             rx.update(|data| {
                 let vars = e.inputs.get::<Vars>(consts::ACT_OPTIONS_KEY).unwrap();

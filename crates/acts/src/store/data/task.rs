@@ -14,6 +14,8 @@ pub struct Task {
     pub node_data: String,
     pub kind: String,
     pub prev: Option<String>,
+    pub next: Vec<String>,
+    pub parent: Option<String>,
 
     pub name: String,
     pub state: String,

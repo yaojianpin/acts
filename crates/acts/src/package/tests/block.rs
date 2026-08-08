@@ -32,7 +32,6 @@ async fn pack_block_sequence() {
     let channel = engine.channel();
 
     channel.on_message(move |e| {
-        println!("message: {e:?}");
         if e.is_msg() {
             // std::thread::sleep(std::time::Duration::from_millis(200));
             rx.update(|data| data.push(e.inner().clone()));

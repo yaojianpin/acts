@@ -200,7 +200,7 @@ impl From<&Arc<scheduler::Task>> for TaskInfo {
     fn from(t: &Arc<scheduler::Task>) -> Self {
         Self {
             id: t.id.clone(),
-            prev: t.prev(),
+            prev: t.prev_id(),
             name: t.node().content.name(),
             pid: t.pid.clone(),
             nid: t.node().id().to_string(),

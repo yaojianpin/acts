@@ -102,7 +102,7 @@ pub fn build_step(
     }
 
     // create a step chain from the step array
-    *prev = node.clone();
+    *prev = node;
 
     Ok(())
 }
@@ -121,20 +121,19 @@ pub fn build_branch(
     let node = tree.make(&data.id(), data, level)?;
     node.set_parent(parent);
 
-    let parent = node.clone();
     let mut step_prev = node.clone();
     for step in branch.steps.iter_mut() {
         build_step(
             step,
             tree,
-            &parent,
+            &node,
             &mut step_prev,
             level + 1,
             NodeOutputKind::Normal,
         )?;
     }
 
-    *prev = node.clone();
+    *prev = node;
 
     Ok(())
 }
@@ -193,7 +192,7 @@ pub fn dyn_build_act(
         } else {
             node.set_parent(parent);
         }
-        *prev = node.clone();
+        *prev = node;
     } else {
         node.set_parent(parent);
     }

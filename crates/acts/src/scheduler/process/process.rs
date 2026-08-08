@@ -213,7 +213,7 @@ impl Process {
         let mut tasks = self
             .tasks()
             .into_iter()
-            .filter(|iter| iter.prev() == Some(tid.to_string()))
+            .filter(|iter| iter.parent_id() == Some(tid.to_string()))
             .collect::<Vec<_>>();
 
         tasks.sort_by_key(|a| a.timestamp);
@@ -356,7 +356,7 @@ impl Process {
             (secs * 1000) as u64
         };
         #[cfg(test)]
-        let interval_ms = 900u64;
+        let interval_ms = 800u64;
 
         let tick_proc = proc.clone();
         tokio::spawn(async move {
@@ -391,8 +391,16 @@ impl Process {
         }
         let task = Arc::new(Task::new(self, &tid, node.clone(), &self.runtime));
         if let Some(prev) = prev {
-            task.set_prev(Some(prev.id.clone()));
+            task.set_prev(&prev.id);
+            prev.set_next(&tid);
+
+            if task.node().level > prev.node().level {
+                task.set_parent(&prev.id);
+            } else if let Some(parent) = prev.parent() {
+                task.set_parent(&parent.id);
+            }
         }
+
         self.push_task(task.clone());
         task
     }
@@ -453,7 +461,7 @@ impl Process {
         s.borrow_mut().push_str(&format!(
             "Task({}) prev={} kind={} nid={} name={} state={}  uses={}  data={}\n",
             task.id,
-            match task.prev() {
+            match task.prev_id() {
                 Some(v) => v,
                 None => "nil".to_string(),
             },

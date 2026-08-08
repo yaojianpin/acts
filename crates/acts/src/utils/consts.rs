@@ -15,7 +15,7 @@ pub const ACT_ERR_CODE: &str = "ecode";
 pub const ACT_INDEX: &str = "$index";
 pub const ACT_VALUE: &str = "$value";
 
-pub const TASK_EMIT_DISABLED: &str = "__emit_disabled";
+pub const TASK_EMIT: &str = "__emit";
 pub const TASK_AUOT_COMPLETE: &str = "__auto_complete";
 
 pub const TASK_SIGN: &str = "__sign";
@@ -31,6 +31,10 @@ pub const TASK_ROOT_TID: &str = "$";
 
 pub const PROCESS_ID: &str = "pid";
 pub const MODEL_ID: &str = "mid";
+
+pub const ACT_RUN_AS_IRQ: &str = "acts.core.irq";
+pub const ACT_RUN_AS_MSG: &str = "acts.core.msg";
+pub const ACT_RUN_AS: &str = "__run_as";
 
 /// Key delimiter for constructing store keys and composite IDs.
 /// Must be valid across all backends (NATS KV, SQL LIKE, Redis).

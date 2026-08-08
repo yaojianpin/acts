@@ -1598,7 +1598,7 @@ async fn export_executor_start_not_found_model() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
-async fn export_executor_complete() {
+async fn export_executor_complete_normal() {
     let engine = Engine::new().start().unwrap();
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -1610,9 +1610,7 @@ async fn export_executor_complete() {
     let s1 = sig.clone();
     let executor = engine.executor();
     engine.channel().on_message(move |e| {
-        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
-            && e.is_state(MessageState::Created)
-        {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             let ret = executor.act().complete(&e.pid, &e.tid, vars);
@@ -1641,9 +1639,7 @@ async fn export_executor_complete_no_uid() {
     let executor = engine.executor();
 
     engine.channel().on_message(move |e| {
-        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
-            && e.is_state(MessageState::Created)
-        {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             let vars = Vars::new();
             let ret = executor.act().complete(&e.pid, &e.tid, vars);
 
@@ -1671,9 +1667,7 @@ async fn export_executor_submit() {
     let executor = engine.executor();
 
     engine.channel().on_message(move |e| {
-        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
-            && e.is_state(MessageState::Created)
-        {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             let ret = executor.act().submit(&e.pid, &e.tid, vars);
@@ -1763,9 +1757,7 @@ async fn export_executor_abort() {
     let executor = engine.executor();
     engine.channel().on_message(move |e| {
         println!("message: {:?}", e.inner());
-        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
-            && e.is_state(MessageState::Created)
-        {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             let ret = executor.act().abort(&e.pid, &e.tid, vars);
@@ -1800,9 +1792,8 @@ async fn export_executor_back() {
 
     let count = Arc::new(Mutex::new(0));
     engine.channel().on_message(move |e| {
-        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
-            && e.is_state(MessageState::Created)
-        {
+        println!("message: {e:?}");
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             let mut count = count.lock().unwrap();
             if *count == 1 {
                 s1.close();
@@ -1814,9 +1805,7 @@ async fn export_executor_back() {
             *count += 1;
         }
 
-        if e.params().unwrap().get::<String>("key").as_deref() == Some("act2")
-            && e.is_state(MessageState::Created)
-        {
+        if e.is_params_key("act2") && e.is_state(MessageState::Created) {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             vars.insert("to".to_string(), json!("step1"));
@@ -1852,6 +1841,7 @@ async fn export_executor_cancel() {
     let count = Arc::new(Mutex::new(0));
     let tid = Arc::new(Mutex::new("".to_string()));
     engine.channel().on_message(move |e| {
+        println!("message: {:?}", e.inner());
         if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             let mut count = count.lock().unwrap();
             if *count == 1 {
@@ -1865,9 +1855,7 @@ async fn export_executor_cancel() {
             *count += 1;
         }
 
-        if e.params().unwrap().get::<String>("key").as_deref() == Some("act2")
-            && e.is_state(MessageState::Created)
-        {
+        if e.is_params_key("act2") && e.is_state(MessageState::Created) {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
             let ret = executor.act().cancel(&e.pid, &tid.lock().unwrap(), vars);

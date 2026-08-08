@@ -5,7 +5,7 @@ mod timeout;
 pub use catch::Catch;
 pub use retry::Retry;
 
-use crate::{ModelBase, Variant, Vars};
+use crate::{ActRunAs, ModelBase, Variant, Vars, utils::consts};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 
@@ -218,5 +218,13 @@ impl Act {
     {
         self.metadata.set(name, value);
         self
+    }
+
+    pub fn run_as(&self) -> ActRunAs {
+        match self.uses.as_str() {
+            consts::ACT_RUN_AS_IRQ => ActRunAs::Irq,
+            consts::ACT_RUN_AS_MSG => ActRunAs::Msg,
+            _ => ActRunAs::Func,
+        }
     }
 }

@@ -239,7 +239,13 @@ impl Store {
             task.set_start_time(t.start_time);
             task.set_end_time(t.end_time);
             task.timestamp = t.timestamp;
-            task.set_prev(t.prev);
+            if let Some(prev) = &t.prev {
+                task.set_prev(prev);
+            }
+
+            if let Some(parent) = &t.parent {
+                task.set_parent(parent);
+            }
 
             let data =
                 serde_json::from_str(&t.data).map_err(|err| ActError::Store(err.to_string()))?;

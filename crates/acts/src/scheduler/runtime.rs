@@ -297,7 +297,7 @@ impl Runtime {
                     .unwrap_or_else(|err| error!("scher.initialize upsert={}", err));
 
                 // check task is allowed to emit message to client
-                if !e.state().is_pending() && !e.state().is_running() && !e.is_emit_disabled() {
+                if !e.state().is_pending() && !e.state().is_running() && e.is_emit() {
                     let msg = e.create_message();
                     debug!("emit_message:{msg:?}");
                     let emitter = rt.emitter().clone();
@@ -318,7 +318,7 @@ impl Runtime {
                 (secs * 1000) as u64
             };
             #[cfg(test)]
-            let interval_ms = 900u64;
+            let interval_ms = 800u64;
 
             let evt = self.emitter().clone();
             let cache = self.cache.clone();

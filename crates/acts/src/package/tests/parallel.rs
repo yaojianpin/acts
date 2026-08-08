@@ -53,7 +53,7 @@ async fn pack_parallel_var_exist() {
         step.with_id("step1")
             .with_var("a", json!(["u1", "u2"]))
             .with_uses(USES_PARALLEL, Vars::from(json!({
-                "in": r#"${{ a }}"#,
+                "in": "${{ a }}",
                 "acts": vec![
                     Act::irq(|act| act.with_params_vars(|v| v.with("key", "act1")).with_id("act1"))
                 ]
