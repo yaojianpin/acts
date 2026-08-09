@@ -423,7 +423,7 @@ impl Task {
 
     pub fn is_uses(&self, v: &str) -> bool {
         if self.node.kind() == NodeKind::Act {
-            return self.node.uses() == v;
+            return self.node.uses().as_deref() == Some(v);
         }
         false
     }
@@ -811,17 +811,65 @@ impl Task {
         state.is_completed() || state.is_interrupted()
     }
 
+    pub fn check_uses_action(&self, ctx: &Context) -> Result<NextAction> {
+        let task = ctx.task();
+        if task.state().is_running()
+            && task.node().kind() == NodeKind::Step
+            && task.node().uses().is_some()
+            && !self.is_sign(Sign::USES_COMPLETE)
+        {
+            let mut count = 0;
+            let task_children = self.children();
+            let task_children = task_children
+                .iter()
+                .filter(|t| t.node().kind() == NodeKind::Act)
+                .collect::<Vec<_>>();
+
+            for task in task_children.iter() {
+                if task.state().is_pending() && task.is_ready() {
+                    // resume task
+                    task.set_state(TaskState::Ready);
+                    self.runtime.emitter().emit_task_event(task)?;
+                    task.exec(ctx)?;
+                }
+                if task.state().is_completed() {
+                    count += 1;
+                }
+            }
+
+            if count != task_children.len() {
+                return Ok(NextAction::Stop);
+            }
+
+            // marked sign flag when all children task completed
+            self.set_sign(Sign::USES_COMPLETE);
+        }
+
+        Ok(NextAction::Continue)
+    }
+
+    pub fn check_in_children(self: &Arc<Self>, ctx: &Context) -> Result<NextAction> {
+        if self.state().is_running() {
+            // run into children nodes if there is children nodes
+            if !self.is_sign(Sign::IN_CHILDREN) {
+                let children = self.node().children();
+                if !children.is_empty() {
+                    for child in &children {
+                        ctx.sched_task(child, ctx.task())?;
+                    }
+                    self.set_sign(Sign::IN_CHILDREN);
+                    return Ok(NextAction::Stop);
+                }
+            }
+        }
+
+        Ok(NextAction::Continue)
+    }
+
     pub fn auto_complete(self: &Arc<Self>, ctx: &Context) -> Result<NextAction> {
-        ctx.set_task(self);
         let state = self.state();
 
         if state.is_running() {
-            // run into children nodes if there is children nodes
-            if !self.is_sign(Sign::IN_CHILDREN)
-                && self.run_into_children(ctx)? {
-                    self.set_sign(Sign::IN_CHILDREN);
-                    return Ok(NextAction::Continue);
-                }
             let task_children = self.children();
             let mut count = 0;
 
@@ -920,7 +968,21 @@ impl ActTask for Arc<Task> {
     fn next(&self, ctx: &Context) -> Result<NextAction> {
         ctx.set_task(self);
         let task = ctx.task();
-        let mut next_action = task.auto_complete(ctx)?;
+
+        // 1. check uses action completed
+        let mut next_action = task.check_uses_action(ctx)?;
+
+        // 2. check run into children
+        if next_action.is_continue() {
+            next_action = task.check_in_children(ctx)?;
+        }
+
+        // 3. auto-complete task state
+        if next_action.is_continue() {
+            next_action = task.auto_complete(ctx)?;
+        }
+
+        // 4. schedule next task
         if next_action.is_continue() && task.is_next() {
             next_action = match &self.node.content {
                 NodeContent::Workflow(data) => data.next(ctx)?,
@@ -930,7 +992,7 @@ impl ActTask for Arc<Task> {
             };
         }
 
-        println!(
+        debug!(
             "next action:{} node={:?} task={:?}",
             next_action,
             ctx.task().node,
@@ -941,6 +1003,7 @@ impl ActTask for Arc<Task> {
             ctx.emit_task(self)?;
         }
 
+        // 5. move to parent and contine
         if next_action.is_parent() {
             let parent = task.parent();
             if let Some(p) = &parent.clone() {
@@ -1082,18 +1145,6 @@ impl Task {
 
         // also set the to current task
         self.set_data(vars);
-    }
-
-    fn run_into_children(&self, ctx: &Context) -> Result<bool> {
-        let children = self.node().children();
-        if !children.is_empty() {
-            for child in &children {
-                ctx.sched_task(child, ctx.task())?;
-            }
-            return Ok(true);
-        }
-
-        Ok(false)
     }
 
     fn move_next(&self, ctx: &Context) -> Result<bool> {

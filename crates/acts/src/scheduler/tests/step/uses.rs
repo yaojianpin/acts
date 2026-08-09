@@ -1,5 +1,6 @@
 use serde_json::json;
 
+use crate::MessageState;
 use crate::event::EventAction;
 use crate::{
     Message, Vars, Workflow,
@@ -196,6 +197,74 @@ async fn sch_step_uses_action() {
     proc.print();
     assert_eq!(
         proc.task_by_nid("step1").first().unwrap().state(),
+        TaskState::Completed
+    );
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_step_uses_action_and_then_branch() {
+    let workflow = Workflow::new().with_step(|step| {
+        step.with_var("a", json!(10))
+            .with_id("step1")
+            .with_uses(
+                USES_ACTION,
+                Vars::new()
+                    .with("action", EventAction::Next)
+                    .with("options", json!({ "a": 0 })),
+            )
+            .with_branch(|b| b.with_id("b1").with_if("a > 0"))
+            .with_branch(|b| b.with_id("b2").with_if("a == 0"))
+    });
+
+    workflow.print();
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
+    engine.runtime().launch(&proc).unwrap();
+    tx.recv().await;
+    proc.print();
+    assert_eq!(
+        proc.task_by_nid("b1").first().unwrap().state(),
+        TaskState::Skipped
+    );
+    assert_eq!(
+        proc.task_by_nid("b2").first().unwrap().state(),
+        TaskState::Completed
+    );
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_step_uses_irq_and_then_branch() {
+    let workflow = Workflow::new().with_step(|step| {
+        step.with_var("a", json!(10))
+            .with_id("step1")
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+            .with_branch(|b| b.with_id("b1").with_if("a > 0"))
+            .with_branch(|b| b.with_id("b2").with_if("a == 0"))
+    });
+
+    workflow.print();
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (tx, rx) = engine.signal(()).double();
+    auto_complete(&engine, &rx);
+    let rt = engine.runtime();
+    engine.channel().on_message(move |e| {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+            rt.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new().with("a", 0))
+                .unwrap();
+        }
+    });
+    engine.runtime().launch(&proc).unwrap();
+    tx.recv().await;
+    proc.print();
+    assert_eq!(
+        proc.task_by_nid("b1").first().unwrap().state(),
+        TaskState::Skipped
+    );
+    assert_eq!(
+        proc.task_by_nid("b2").first().unwrap().state(),
         TaskState::Completed
     );
 }

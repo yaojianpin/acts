@@ -115,7 +115,7 @@ impl Channel {
     ///     });
     ///
     ///     engine.channel().on_message(move |e| {
-    ///         if e.r#type == "act" && e.uses == "acts.core.irq" {
+    ///         if let Some(uses) = &e.uses && e.r#type == "act" && uses == "acts.core.irq" {
     ///             println!("act message: state={} inputs={:?} outputs={:?}", e.state, e.inputs, e.outputs);
     ///         }
     ///     });
@@ -217,7 +217,7 @@ fn is_match(
     let (pat_type, pat_state, pat_uses, pat_options) = glob;
     if !pat_type.is_match(&e.r#type)
         || !pat_state.is_match(e.state.as_ref())
-        || !pat_uses.is_match(&e.uses)
+        || !pat_uses.is_match(e.uses.as_deref().unwrap_or_default())
     {
         return false;
     }

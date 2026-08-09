@@ -82,7 +82,7 @@ pub struct MessageInfo {
     pub retry_times: i32,
     pub status: String,
     pub timestamp: i64,
-    pub uses: String,
+    pub uses: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]

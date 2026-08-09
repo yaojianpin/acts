@@ -192,3 +192,4 @@
 - merge `ActPackageFn`  into into `ActPackage`
 - change expression `{{ }}` to `${{ }}`
 - merge the task logic `review` to `next`
+- feat: add uses action check in  `task.next` before run into children tasks

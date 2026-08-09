@@ -28,7 +28,7 @@ pub struct Message {
     pub pid: String,
     pub nid: String,
     pub mid: String,
-    pub uses: String,
+    pub uses: Option<String>,
     pub inputs: String,
     pub outputs: String,
     pub start_time: i64,

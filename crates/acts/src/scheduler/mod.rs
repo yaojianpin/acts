@@ -42,11 +42,14 @@ bitflags! {
         /// NOT emit message to client
         const NO_EMIT = 0b0000_0000_0000_1000;
 
-        /// Run into children
+        /// Run into children nodes (steps, branches, act)
         const IN_CHILDREN  = 0b0000_0000_0001_0000;
 
         /// NOT auto complete the task state
         const NO_AUTO_COMPLETE  = 0b0000_0000_0010_0000;
+
+        /// uses action completed
+        const USES_COMPLETE  = 0b0000_0000_0100_0000;
     }
 }
 

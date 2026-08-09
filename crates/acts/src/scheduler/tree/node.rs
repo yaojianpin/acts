@@ -217,11 +217,11 @@ impl Node {
         &self.id
     }
 
-    pub fn uses(&self) -> String {
+    pub fn uses(&self) -> Option<String> {
         match &self.content {
-            NodeContent::Step(step) => step.uses.clone().unwrap_or_default(),
-            NodeContent::Act(act) => act.uses.to_string(),
-            _ => "".to_string(),
+            NodeContent::Step(step) => step.uses.clone(),
+            NodeContent::Act(act) => Some(act.uses.to_string()),
+            _ => None,
         }
     }
 
@@ -318,7 +318,7 @@ impl Node {
                     "{}:{} uses={} name={}  next={}",
                     n.kind(),
                     n.id(),
-                    n.uses(),
+                    n.uses().unwrap_or("nil".to_string()),
                     n.name(),
                     next,
                 );

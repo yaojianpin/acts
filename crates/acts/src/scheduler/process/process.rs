@@ -244,7 +244,7 @@ impl Process {
 
     #[cfg(test)]
     pub fn task_by_uses(&self, uses: &str) -> Vec<Arc<Task>> {
-        self.find_tasks(|t| t.node().uses() == uses)
+        self.find_tasks(|t| t.node().uses().as_deref() == Some(uses))
     }
 
     pub fn create_context(self: &Arc<Self>, task: &Arc<Task>) -> Context {
@@ -469,7 +469,7 @@ impl Process {
             task.node().id(),
             task.node().content.name(),
             task.state(),
-            task.node().uses(),
+            task.node().uses().as_deref().unwrap_or("nil"),
             task.data()
         ));
 

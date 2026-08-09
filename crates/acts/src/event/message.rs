@@ -62,7 +62,7 @@ pub struct Message {
     pub mid: String,
 
     /// used package name
-    pub uses: String,
+    pub uses: Option<String>,
 
     /// from the task inputs
     pub inputs: Vars,
@@ -93,15 +93,15 @@ impl Message {
     }
 
     pub fn is_uses(&self, uses: &str) -> bool {
-        self.uses == uses && self.r#type == "act"
+        self.uses.as_deref() == Some(uses) && self.r#type == "act"
     }
 
     pub fn is_irq(&self) -> bool {
-        self.uses == "acts.core.irq" && self.r#type == "act"
+        self.uses.as_deref() == Some("acts.core.irq") && self.r#type == "act"
     }
 
     pub fn is_msg(&self) -> bool {
-        self.uses == "acts.core.msg" && self.r#type == "act"
+        self.uses.as_deref() == Some("acts.core.msg") && self.r#type == "act"
     }
 
     pub fn is_state(&self, state: MessageState) -> bool {

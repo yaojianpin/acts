@@ -431,7 +431,7 @@ impl Context {
             pid: task.pid.clone(),
             tid: task.id.clone(),
             name: task.node().name(),
-            uses: msg.uses.clone(),
+            uses: Some(msg.uses.clone()),
             inputs,
             ..Default::default()
         };

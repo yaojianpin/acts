@@ -1178,7 +1178,7 @@ async fn sch_message_complete_message_in_store() {
     let ret = tx.recv().await;
     let message = e2.runtime().cache().store().messages().find(&ret).unwrap();
     assert_eq!(message.r#type, "act");
-    assert_eq!(message.uses, "acts.core.irq");
+    assert_eq!(message.uses.unwrap_or_default(), "acts.core.irq");
     assert_eq!(message.pid, id);
     assert_eq!(message.state, MessageState::Created);
     assert_eq!(message.status, MessageStatus::Completed);
