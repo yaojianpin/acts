@@ -17,11 +17,6 @@ impl ActTask for Workflow {
         Ok(())
     }
 
-    fn run(&self, ctx: &Context) -> Result<()> {
-        ctx.task().run_into_children(ctx)?;
-        Ok(())
-    }
-
     fn next(&self, ctx: &Context) -> Result<NextAction> {
         let task = ctx.task();
 

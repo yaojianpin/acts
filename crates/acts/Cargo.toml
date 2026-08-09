@@ -37,6 +37,7 @@ async-nats = { version = "0.49.1", optional = true }
 futures = { version = "0.3", optional = true }
 sqlx = { version = "0.8", features = ["runtime-tokio"], optional = true }
 tokio-util = "0.7.18"
+bitflags = { version = "2.13.1", features = ["serde"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio", "async_futures"] }

@@ -60,7 +60,6 @@ impl ActTask for Act {
                 if let Some(vars) = package.execute(ctx, &ctx.task().params())? {
                     task.update_data(&vars);
                 };
-                task.run_into_children(ctx)?;
             }
         }
 

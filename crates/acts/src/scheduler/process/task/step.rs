@@ -1,7 +1,7 @@
 use crate::{
     Act, ActTask, Result, Vars,
     model::Step,
-    scheduler::{Context, NextAction, TaskState, tree::NodeOutputKind},
+    scheduler::{Context, NextAction, Sign, TaskState, tree::NodeOutputKind},
     utils::consts,
 };
 
@@ -32,8 +32,6 @@ impl ActTask for Step {
                 self.vars(),
             )?;
         }
-
-        task.run_into_children(ctx)?;
         Ok(())
     }
 
@@ -54,13 +52,12 @@ impl ActTask for Step {
         let task = ctx.task();
         let children = task.node().children_in(NodeOutputKind::Catch);
         if task.sign().is_none() && !children.is_empty() {
-            // task.clear_err_with(TaskState::Running);
+            task.set_sign(Sign::ERROR);
             task.set_state(TaskState::Running);
-            task.set_sign(consts::TASK_SIGN_ERR);
             for child in &children {
                 ctx.sched_task_with_vars(
                     child,
-                    Vars::new().with(consts::TASK_SIGN, consts::TASK_SIGN_CATCH),
+                    Vars::new().with(consts::TASK_SIGN, Sign::CATCH),
                     task.clone(),
                 )?;
             }
@@ -72,16 +69,11 @@ impl ActTask for Step {
         let task = ctx.task();
         let children = task.node().children_in(NodeOutputKind::Timeout);
         if !children.is_empty() {
-            task.set_sign(consts::TASK_SIGN_TIMEOUTS);
             let cost = task.cost();
             // Write cost to parent task so timeout children read it via $cost()
             task.set_data_with(|data| data.set(consts::TASK_COST, cost));
             for child in &children {
-                ctx.sched_task_with_vars(
-                    child,
-                    Vars::new().with(consts::TASK_SIGN, consts::TASK_SIGN_TIMEOUTS),
-                    task.clone(),
-                )?;
+                ctx.sched_task(child, task.clone())?;
             }
         }
 

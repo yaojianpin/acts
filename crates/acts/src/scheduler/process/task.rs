@@ -4,7 +4,7 @@ mod step;
 mod workflow;
 
 use crate::ActRunAs;
-use crate::scheduler::NextAction;
+use crate::scheduler::{NextAction, Sign};
 use crate::store::DbCollectionIden;
 use crate::utils::consts::TASK_ROOT_TID;
 use crate::{
@@ -117,43 +117,67 @@ impl Task {
     }
 
     pub fn is_emit(&self) -> bool {
-        self.with_data(|data| data.get::<bool>(consts::TASK_EMIT))
-            .unwrap_or(true)
+        let Some(v) = self.sign() else {
+            return true;
+        };
+
+        let is_no_emit = (v & Sign::NO_EMIT) == Sign::NO_EMIT;
+        !is_no_emit
     }
 
     pub fn set_emit(&self, v: bool) {
-        self.set_data_with(move |data| {
-            data.set(consts::TASK_EMIT, v);
-        });
+        if v {
+            self.remove_sign(Sign::NO_EMIT);
+        } else {
+            self.set_sign(Sign::NO_EMIT);
+        }
     }
 
     pub fn is_auto_complete(&self) -> bool {
-        self.with_data(|data| data.get::<bool>(consts::TASK_AUOT_COMPLETE))
-            .unwrap_or(true)
+        let Some(v) = self.sign() else {
+            return true;
+        };
+
+        let is_no_automate = (v & Sign::NO_AUTO_COMPLETE) == Sign::NO_AUTO_COMPLETE;
+        !is_no_automate
     }
 
-    pub fn is_sign(&self, sign: &str) -> bool {
+    pub fn is_sign(&self, sign: Sign) -> bool {
         self.with_data(|data| {
-            if let Some(ref v) = data.get::<String>(consts::TASK_SIGN) {
-                return v == sign;
+            if let Some(ref v) = data.get::<Sign>(consts::TASK_SIGN) {
+                return (*v & sign) == sign;
             }
             false
         })
     }
 
-    pub fn sign(&self) -> Option<String> {
-        self.with_data(|data| data.get::<String>(consts::TASK_SIGN))
+    pub fn sign(&self) -> Option<Sign> {
+        self.with_data(|data| data.get::<Sign>(consts::TASK_SIGN))
     }
 
-    pub fn set_sign(&self, sign: &str) {
+    pub fn set_sign(&self, sign: Sign) {
         self.set_data_with(move |data| {
-            data.set(consts::TASK_SIGN, sign);
+            if let Some(ref v) = data.get::<Sign>(consts::TASK_SIGN) {
+                data.set(consts::TASK_SIGN, *v | sign);
+            } else {
+                data.set(consts::TASK_SIGN, sign);
+            }
+        });
+    }
+
+    pub fn remove_sign(&self, sign: Sign) {
+        self.set_data_with(move |data| {
+            if let Some(ref v) = data.get::<Sign>(consts::TASK_SIGN) {
+                data.set(consts::TASK_SIGN, *v & !sign);
+            }
         });
     }
     pub fn set_auto_complete(&self, v: bool) {
-        self.set_data_with(move |data| {
-            data.set(consts::TASK_AUOT_COMPLETE, v);
-        });
+        if v {
+            self.remove_sign(Sign::NO_AUTO_COMPLETE);
+        } else {
+            self.set_sign(Sign::NO_AUTO_COMPLETE);
+        }
     }
     pub fn create_context(self: &Arc<Self>) -> Context {
         self.proc.create_context(self)
@@ -790,8 +814,15 @@ impl Task {
     pub fn auto_complete(self: &Arc<Self>, ctx: &Context) -> Result<NextAction> {
         ctx.set_task(self);
         let state = self.state();
-        let task_children = self.children();
+
         if state.is_running() {
+            // run into children nodes if there is children nodes
+            if !self.is_sign(Sign::IN_CHILDREN)
+                && self.run_into_children(ctx)? {
+                    self.set_sign(Sign::IN_CHILDREN);
+                    return Ok(NextAction::Continue);
+                }
+            let task_children = self.children();
             let mut count = 0;
 
             // for msg act, the client can only receive 'completed' message
@@ -823,10 +854,10 @@ impl Task {
                 // check if the task is error catched
                 let is_empty_catched = task_children
                     .iter()
-                    .filter(|t| t.is_sign(consts::TASK_SIGN_CATCH))
+                    .filter(|t| t.is_sign(Sign::CATCH))
                     .all(|t| t.state().is_skip());
 
-                if self.is_sign(consts::TASK_SIGN_ERR) && is_empty_catched {
+                if self.is_sign(Sign::ERROR) && is_empty_catched {
                     // no any action to match
                     // resume the task error state
                     let err = self.with_data(|data| {
@@ -899,7 +930,7 @@ impl ActTask for Arc<Task> {
             };
         }
 
-        debug!(
+        println!(
             "next action:{} node={:?} task={:?}",
             next_action,
             ctx.task().node,
@@ -1053,15 +1084,16 @@ impl Task {
         self.set_data(vars);
     }
 
-    fn run_into_children(&self, ctx: &Context) -> Result<()> {
+    fn run_into_children(&self, ctx: &Context) -> Result<bool> {
         let children = self.node().children();
         if !children.is_empty() {
             for child in &children {
                 ctx.sched_task(child, ctx.task())?;
             }
+            return Ok(true);
         }
 
-        Ok(())
+        Ok(false)
     }
 
     fn move_next(&self, ctx: &Context) -> Result<bool> {

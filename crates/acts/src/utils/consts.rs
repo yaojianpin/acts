@@ -15,14 +15,7 @@ pub const ACT_ERR_CODE: &str = "ecode";
 pub const ACT_INDEX: &str = "$index";
 pub const ACT_VALUE: &str = "$value";
 
-pub const TASK_EMIT: &str = "__emit";
-pub const TASK_AUOT_COMPLETE: &str = "__auto_complete";
-
 pub const TASK_SIGN: &str = "__sign";
-pub const TASK_SIGN_ERR: &str = "error";
-pub const TASK_SIGN_CATCH: &str = "catch";
-pub const TASK_SIGN_TIMEOUTS: &str = "timeouts";
-
 pub const TASK_COST: &str = "__cost";
 
 pub const ACT_TO: &str = "to";

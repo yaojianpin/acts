@@ -49,7 +49,6 @@ impl ActTask for Branch {
         if let Some(script) = &self.run {
             ctx.eval::<()>(script)?;
         }
-        ctx.task().run_into_children(ctx)?;
         Ok(())
     }
 }

@@ -28,6 +28,7 @@ async fn sch_branch_skip() {
     auto_complete(&engine, &rx);
     rt.launch(&proc).unwrap();
     let _ = sig.recv().await;
+    proc.print();
 
     assert_eq!(
         proc.task_by_nid("b1").first().unwrap().state(),
