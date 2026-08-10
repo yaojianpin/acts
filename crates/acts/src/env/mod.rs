@@ -90,6 +90,11 @@ impl Enviroment {
         user_envs.push(Box::new(module.clone()));
     }
 
+    pub fn register_module(&self, module: Box<dyn ActModule>) {
+        let mut modules = self.modules.write().unwrap();
+        modules.push(module);
+    }
+
     pub fn eval<T>(&self, expr: &str) -> Result<T>
     where
         T: DeserializeOwned,
