@@ -193,3 +193,6 @@
 - change expression `{{ }}` to `${{ }}`
 - merge the task logic `review` to `next`
 - feat: add uses action check in  `task.next` before run into children tasks
+
+# 0.20.1
+- fix the package publish version issue closes #17
