@@ -14,6 +14,11 @@ impl ActTask for Workflow {
             });
         }
 
+        // copy resolver config to root task data
+        for (name, cfg) in ctx.proc.configs().iter() {
+            ctx.task().set_data_with(|d| d.set(name, cfg.clone()));
+        }
+
         Ok(())
     }
 
