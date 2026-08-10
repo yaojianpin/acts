@@ -196,3 +196,7 @@
 
 # 0.20.1
 - fix the package publish version issue closes #17
+
+# 0.21.0
+- migrates `acts-channel` from https://github.com/yaojianpin/acts-channel
+- add plugin `acts-plugin-grpc` and `acts-plugin-web`

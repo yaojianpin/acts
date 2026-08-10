@@ -1,0 +1,11 @@
+[package]
+name = "acts-example-plugin-grpc"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+tokio = { workspace = true }
+acts = { workspace = true }
+acts-plugin-grpc = { path = "../../../plugins/acts-plugin-grpc" }
+serde_json = { workspace = true }

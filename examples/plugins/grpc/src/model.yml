@@ -1,0 +1,8 @@
+name: grpc plugin example
+id: grpc-example
+steps:
+  - name: simple step
+    acts:
+      - uses: acts.core.set
+        params:
+          message: "Hello from gRPC plugin!"

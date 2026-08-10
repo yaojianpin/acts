@@ -1,13 +1,39 @@
 use acts::{Engine, Result, Vars, Workflow};
-use acts_package_shell::ShellPackagePlugin;
+use acts_package_http::HttpPackage;
+use mockito::Matcher;
+use serde_json::json;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let opts = mockito::ServerOpts {
+        host: "0.0.0.0",
+        port: 1234,
+        ..Default::default()
+    };
+    let mut server = mockito::Server::new_with_opts(opts);
+    server
+        .mock("GET", "/hello")
+        .match_query(Matcher::AllOf(vec![
+            Matcher::UrlEncoded("key1".into(), "1".into()),
+            Matcher::UrlEncoded("key2".into(), "2".into()),
+        ]))
+        .with_status(200)
+        .with_header("content-type", "text/plain")
+        .with_body("hello")
+        .create();
+
+    server
+        .mock("POST", "/world")
+        .with_body(json!({ "key": 2 }).to_string())
+        .with_status(200)
+        .with_header("content-type", "application/json")
+        .with_body(json!({ "my_value": "world"}).to_string())
+        .create();
+
     let engine = Engine::builder()
-        .add_plugin(&ShellPackagePlugin)
+        .add_package::<HttpPackage>()
         .build()
-        .await?
-        .start();
+        .start()?;
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text).unwrap();
     workflow.print();
@@ -16,11 +42,11 @@ async fn main() -> Result<()> {
     engine
         .executor()
         .model()
-        .deploy(&workflow)
+        .deploy(&workflow, None)
         .expect("deploy model");
     executor
         .proc()
-        .start(&workflow.id, &Vars::new())
+        .start(&workflow.id, Vars::new())
         .expect("start workflow");
 
     engine.channel().on_complete(move |e| {

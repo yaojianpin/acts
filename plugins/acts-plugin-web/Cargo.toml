@@ -1,0 +1,21 @@
+[package]
+name = "acts-plugin-web"
+version = "0.1.0"
+edition = "2024"
+description = "Web REST API plugin for acts workflow engine"
+license = "Apache-2.0"
+keywords = ["workflow", "acts", "web", "rest"]
+repository = "https://github.com/yaojianpin/acts.git"
+
+[dependencies]
+acts = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+axum = { workspace = true }
+async-trait = { workspace = true }
+validator = { workspace = true }
+futures-util = { workspace = true }
+async-stream = { workspace = true }
+
+[dev-dependencies]

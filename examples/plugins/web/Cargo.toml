@@ -1,0 +1,11 @@
+[package]
+name = "acts-example-plugin-web"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+tokio = { workspace = true }
+acts = { workspace = true }
+acts-plugin-web = { path = "../../../plugins/acts-plugin-web" }
+serde_json = { workspace = true }

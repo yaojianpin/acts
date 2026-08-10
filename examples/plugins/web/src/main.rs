@@ -1,13 +1,13 @@
 use acts::{Engine, Result, Vars, Workflow};
-use acts_package_state::StatePackagePlugin;
+use acts_plugin_web::WebPlugin;
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let engine = Engine::builder()
-        .add_plugin(&StatePackagePlugin)
+        .add_plugin(&WebPlugin::new())
         .build()
-        .await?
-        .start();
+        .start()?;
+
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text).unwrap();
     workflow.print();
@@ -16,11 +16,11 @@ async fn main() -> Result<()> {
     engine
         .executor()
         .model()
-        .deploy(&workflow)
+        .deploy(&workflow, None)
         .expect("deploy model");
     executor
         .proc()
-        .start(&workflow.id, &Vars::new())
+        .start(&workflow.id, Vars::new())
         .expect("start workflow");
 
     engine.channel().on_complete(move |e| {
@@ -41,6 +41,8 @@ async fn main() -> Result<()> {
         );
         s2.close();
     });
+
+    println!("Web server running on port 10082...");
     sig.recv().await;
 
     Ok(())

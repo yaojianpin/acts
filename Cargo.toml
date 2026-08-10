@@ -1,10 +1,11 @@
 
 [workspace]
-members = ["crates/*", "packages/*", "examples/plugins/*"]
-exclude = [
-    "examples/plugins/state",
-    "examples/plugins/http",
-    "examples/plugins/shell",
+members = [
+    "crates/*",
+    "packages/*",
+    "plugins/*",
+    "examples/plugins/*",
+    "examples/packages/*",
 ]
 resolver = "3"
 
@@ -15,7 +16,7 @@ keywords = ["workflow"]
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/yaojianpin/acts.git"
-version = "0.20.1"
+version = "0.21.0"
 
 [workspace.dependencies]
 tokio = { version = "1.52", features = ["full"] }
@@ -23,7 +24,20 @@ async-trait = { version = "0.1.88" }
 serde = "1.0.219"
 serde_json = "1.0.140"
 strum = { version = "0.27", features = ["derive"] }
-acts = { path = "./crates/acts", version = "0.20.1" }
+tonic = { version = "0.8.3", default-features = false, features = [
+    "prost",
+    "channel",
+    "codegen",
+] }
+prost-types = "0.11.9"
+axum = "0.6"
+validator = { version = "0.20.0", features = ["derive"] }
+futures-util = "0.3.31"
+async-stream = "0.3.6"
+anyhow = "1.0.100"
+tokio-stream = "0.1.12"
+acts-channel = { path = "./crates/acts-channel" }
+acts = { path = "./crates/acts", version = "0.21.0" }
 
 
 [profile.release]
@@ -31,3 +45,4 @@ codegen-units = 1
 lto = true
 opt-level = "z"
 strip = true
+

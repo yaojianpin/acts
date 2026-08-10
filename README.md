@@ -34,7 +34,7 @@ The lib size is about 4.6mb now.
   support creating external store, please refer to the code under `crates/src/store/postgres`.
 
 - pakcage extension
-  support creating custom package, please refer to the code under `example/pakcage`.
+  support creating custom package, please refer to the code under `example/custom_pakcage`.
 
 ## Installation
 
@@ -214,7 +214,7 @@ async fn main() {
 
 ### Options
 
-In the [`Workflow`], you can set the `options.exposes` to filter the outputs.
+In the [`Workflow`], you can set the `exposes` to filter the outputs.
 
 ```yml
 name: model name

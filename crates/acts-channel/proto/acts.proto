@@ -1,0 +1,32 @@
+syntax = "proto3";
+package acts.grpc;
+
+// subscript message options
+message MessageOptions {
+  string client_id = 1;
+  // message type
+  string type = 2;
+  // message event
+  string state = 3;
+  // custom key-value options for filtering
+  map<string, string> options = 4;
+  // message uses
+  string uses = 5;
+}
+
+// grpc message with server or client
+message Message {
+  string name = 1;
+  string seq = 2;
+  optional string ack = 3;
+  optional bytes data = 4;
+}
+
+// acts service
+service ActsService {
+  rpc Send(Message) returns (Message) {}
+  // rpc OnFlow(Message) returns (stream Message) {}
+  // rpc OnStep(Message) returns (stream Message) {}
+  // rpc OnAct(Message) returns (stream Message) {}
+  rpc OnMessage(MessageOptions) returns (stream Message) {}
+}

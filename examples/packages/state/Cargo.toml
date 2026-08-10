@@ -1,10 +1,11 @@
 [package]
-name = "acts-example-plugin-app-state"
+name = "acts-example-package-state"
 version = "0.1.0"
 edition = "2024"
+publish = false
 
 
 [dependencies]
 tokio = { version = "1.44", features = ["full"] }
 acts = { path = "../../../crates/acts" }
-acts-package-state = { path = "../../../crates/acts-package-state" }
+acts-package-state = { path = "../../../packages/acts-package-state" }

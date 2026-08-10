@@ -91,8 +91,8 @@ name = "message"
 path = "../../examples/message/main.rs"
 
 [[example]]
-name = "package"
-path = "../../examples/package/main.rs"
+name = "custom_package"
+path = "../../examples/custom_package/main.rs"
 
 [[example]]
 name = "subflow"

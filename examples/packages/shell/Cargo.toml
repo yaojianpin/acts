@@ -1,10 +1,11 @@
 [package]
-name = "acts-example-plugin-shell"
+name = "acts-example-package-shell"
 version = "0.1.0"
 edition = "2024"
+publish = false
 
 [dependencies]
 tokio = { version = "1.44", features = ["full"] }
 acts = { path = "../../../crates/acts" }
-acts-package-shell = { path = "../../../crates/acts-package-shell" }
+acts-package-shell = { path = "../../../packages/acts-package-shell" }
 serde_json = "1.0.140"
