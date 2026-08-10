@@ -1,6 +1,7 @@
 use serde::Deserialize;
 use std::path::Path;
 use toml::Table;
+use crate::{Result, Vars};
 
 #[derive(Debug, Clone)]
 pub struct Config {
@@ -97,4 +98,18 @@ impl Config {
             level: "INFO".to_string(),
         })
     }
+}
+
+/// Resolves configuration for a named target at process start time.
+///
+/// A Plugin registers one resolver per target name (e.g. "profile", "features")
+/// via `Engine::add_resolver()`. The returned `Vars` is stored on the process,
+/// then copied into root task data during Workflow init, where the corresponding
+/// JS module reads its namespace to construct globals like `$profile`.
+///
+/// Tenant identifiers (`unit`, `dept`, `project`, `user`) are passed in `ctx`
+/// by convention; ACTS does not enforce any schema.
+#[async_trait::async_trait]
+pub trait ConfigResolver: Send + Sync {
+    async fn resolve(&self, ctx: &Vars) -> Result<Vars>;
 }
