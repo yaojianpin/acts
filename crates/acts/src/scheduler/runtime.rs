@@ -3,8 +3,9 @@ use tracing::{debug, error};
 
 use super::{Process, Task, TaskState};
 use crate::{
-    ActError, Action, Config, Error, Package, Result, Vars, Workflow,
+    ActError, Action, Config, Error, Package, Result, ShareLock, Vars, Workflow,
     cache::Cache,
+    config::ConfigResolver,
     data,
     env::Enviroment,
     event::{Emitter, EventAction},
@@ -12,9 +13,13 @@ use crate::{
     store::Store,
     utils::{self, consts},
 };
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+    time::Duration,
+};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct Runtime {
     config: Arc<Config>,
     queue: Arc<Queue>,
@@ -22,6 +27,21 @@ pub struct Runtime {
     cache: Arc<Cache>,
     emitter: Arc<Emitter>,
     package: Arc<Package>,
+    resolvers: ShareLock<HashMap<String, Arc<dyn ConfigResolver>>>,
+}
+
+impl std::fmt::Debug for Runtime {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Runtime")
+            .field("config", &self.config)
+            .field("queue", &self.queue)
+            .field("env", &self.env)
+            .field("cache", &self.cache)
+            .field("emitter", &self.emitter)
+            .field("package", &self.package)
+            .field("resolvers", &format_args!("<{} entries>", self.resolvers.read().map(|r| r.len()).unwrap_or(0)))
+            .finish()
+    }
 }
 
 impl Runtime {
@@ -61,6 +81,11 @@ impl Runtime {
     pub fn config(&self) -> &Arc<Config> {
         &self.config
     }
+    pub fn register_resolver(&self, name: &str, resolver: Arc<dyn ConfigResolver>) {
+        let mut resolvers = self.resolvers.write().unwrap();
+        resolvers.insert(name.to_string(), resolver);
+    }
+
 
     pub fn close(&self) {
         self.queue.abort();
@@ -99,6 +124,14 @@ impl Runtime {
 
         let proc = Process::new(&proc_id, self);
         proc.load(&model)?;
+        // resolve config from all registered resolvers
+        let resolvers = self.resolvers.read().unwrap();
+        for (name, resolver) in resolvers.iter() {
+            let result = Handle::current().block_on(resolver.resolve(&options))?;
+            proc.set_config(name, result);
+        }
+        drop(resolvers);
+
         self.launch(&proc)?;
 
         Ok(proc)
@@ -195,6 +228,7 @@ impl Runtime {
         let emitter = Arc::new(Emitter::new());
         let package = Arc::new(Package::new());
         let queue = Queue::new();
+        let resolvers = Arc::new(RwLock::new(HashMap::new()));
         let runtime = Arc::new(Runtime {
             config: Arc::new(config.clone()),
             emitter,
@@ -203,6 +237,7 @@ impl Runtime {
             env,
             cache,
             package,
+            resolvers,
         });
 
         runtime.initialize(config)?;
