@@ -3,7 +3,7 @@ use serde::de::DeserializeOwned;
 use crate::{
     ActPackage, ActPlugin, ChannelOptions, Signal,
     builder::EngineBuilder,
-    config::Config,
+    config::{Config, ConfigResolver},
     export::{Channel, Executor, Extender},
     package::{self, ActPackageRegister},
     scheduler::Runtime,
@@ -122,6 +122,12 @@ impl Engine {
         let package_register = ActPackageRegister::new::<T>();
         self.packages.push(package_register);
         self
+    }
+
+    /// Register a named config resolver. Called by plugins in `on_init`.
+    /// Resolvers are invoked at `proc.start()` to inject tenant-scoped config.
+    pub fn add_resolver(&self, name: &str, resolver: Arc<dyn ConfigResolver>) {
+        self.runtime().register_resolver(name, resolver);
     }
 
     pub fn set_packages(mut self, packages: Vec<ActPackageRegister>) -> Self {
