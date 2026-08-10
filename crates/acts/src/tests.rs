@@ -1,5 +1,7 @@
 use crate::event::EventAction;
 use crate::{Engine, MessageState, Vars, Workflow, utils, utils::test::USES_IRQ};
+use crate::ConfigResolver;
+use std::sync::Arc;
 use serde::Deserialize;
 use serde_json::json;
 
@@ -308,4 +310,62 @@ async fn engine_get_custom_config() {
     assert_eq!(custom.myint, 100);
     assert_eq!(custom.mystr, "myData");
     assert_eq!(custom.my_option, None);
+}
+
+struct TestResolver {
+    data: Vars,
+}
+
+#[async_trait::async_trait]
+impl ConfigResolver for TestResolver {
+    async fn resolve(&self, _ctx: &Vars) -> crate::Result<Vars> {
+        Ok(self.data.clone())
+    }
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn config_resolver_injects_into_task_data() {
+    let resolver = Arc::new(TestResolver {
+        data: Vars::new()
+            .with("secrets", Vars::new().with("TOKEN", "abc123"))
+            .with("vars", Vars::new().with("DB_HOST", "10.0.0.1")),
+    });
+
+    let engine = Engine::new().start().unwrap();
+    engine.add_resolver("profile", resolver);
+
+    let workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_uses(USES_IRQ, Vars::new().with("key", "test"))
+    });
+
+    let sig = engine.signal(());
+    let s1 = sig.clone();
+
+    engine.channel().on_message(move |e| {
+        if e.is_irq() {
+            s1.close();
+        }
+    });
+
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new().with("unit", "u1"))
+        .unwrap();
+
+    sig.recv().await;
+
+    // config should be on process
+    let profile = proc.config("profile").unwrap();
+    let secrets = profile.get::<Vars>("secrets").unwrap();
+    assert_eq!(secrets.get::<String>("TOKEN").unwrap(), "abc123");
+    let vars = profile.get::<Vars>("vars").unwrap();
+    assert_eq!(vars.get::<String>("DB_HOST").unwrap(), "10.0.0.1");
+
+    // config should also be on root task data
+    let root = proc.root().unwrap();
+    let root_profile = root.find::<Vars>("profile").unwrap();
+    let root_secrets = root_profile.get::<Vars>("secrets").unwrap();
+    assert_eq!(root_secrets.get::<String>("TOKEN").unwrap(), "abc123");
 }

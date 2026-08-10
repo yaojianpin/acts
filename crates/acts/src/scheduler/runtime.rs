@@ -127,7 +127,9 @@ impl Runtime {
         // resolve config from all registered resolvers
         let resolvers = self.resolvers.read().unwrap();
         for (name, resolver) in resolvers.iter() {
-            let result = Handle::current().block_on(resolver.resolve(&options))?;
+            let result = tokio::task::block_in_place(|| {
+                Handle::current().block_on(resolver.resolve(&options))
+            })?;
             proc.set_config(name, result);
         }
         drop(resolvers);
