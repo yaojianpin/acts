@@ -37,7 +37,7 @@ impl Client {
                 match self.actions.get(&key) {
                     Some(action) => {
                         action(executor, e)?;
-                        println!("action state: key={}", &key);
+                        println!("action state: key={}", key);
                     }
                     None => println!("'{}' is waitting for timeout", key),
                 }

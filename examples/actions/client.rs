@@ -42,8 +42,8 @@ impl Client {
                     executor
                         .act()
                         .complete(&message.pid, &message.tid, outputs.clone())?;
-                    println!("action state: key={}", &params.key);
-                    println!("inputs:{:?}", &message.inputs);
+                    println!("action state: key={}", params.key);
+                    println!("inputs:{:?}", message.inputs);
                     println!("outputs:{outputs:?}");
                     println!();
                 }

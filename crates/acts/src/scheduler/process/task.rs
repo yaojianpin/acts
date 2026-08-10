@@ -1003,7 +1003,7 @@ impl ActTask for Arc<Task> {
             ctx.emit_task(self)?;
         }
 
-        // 5. move to parent and contine
+        // 5. move to parent and continue
         if next_action.is_parent() {
             let parent = task.parent();
             if let Some(p) = &parent.clone() {

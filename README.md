@@ -168,7 +168,7 @@ steps:
           - name: step 4
             uses: acts.core.parallel
             params:
-              in: '{{ list }}'
+              in: ${{ list }}
               acts:
                 - uses: acts.core.irq
   - name: final step
@@ -218,9 +218,8 @@ In the [`Workflow`], you can set the `options.exposes` to filter the outputs.
 
 ```yml
 name: model name
-options:
-  exposes:
-    - name: output_key
+exposes:
+  - name: output_key
 steps:
   - name: step1
     uses: acts.transform.set
@@ -261,17 +260,15 @@ steps:
 
     # catch the step errors
     catches:
-      - id: catch1
-        on: err1
-        steps:
-          - name: catch step 1
-            uses: acts.core.irq
+      - name: catch step 1
+        id: catch1
+        uses: acts.core.irq
+        if: $ecode() == "err1"
 
-      - id: catch2
-        on: err2
-        steps:
-          - name: catch step 2
-            uses: acts.core.irq
+      - name: catch step 2
+        id: catch2
+        uses: acts.core.irq
+        if: $ecode() == "err2"
 
   - name: final
     id: final

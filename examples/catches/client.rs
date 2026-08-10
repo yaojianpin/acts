@@ -27,7 +27,7 @@ impl Client {
             let key = e.params().unwrap().get::<String>("key").unwrap();
             match self.actions.get(&key) {
                 Some(action) => {
-                    println!("action:{} inputs={:?}", &key, e.inputs);
+                    println!("action:{} inputs={:?}", key, e.inputs);
                     action(executor, e)?;
                 }
                 None => eprintln!("cannot find action '{}'", key),
