@@ -462,3 +462,44 @@ async fn config_resolver_skips_when_required_params_missing() {
     // sealed_data should be empty since required params were missing
     assert!(!root.has_sealed());
 }
+
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sealed_data_inherits_from_parent() {
+    let resolver = Arc::new(TestResolver {
+        data: Vars::new().with("scope", "workflow"),
+    });
+
+    let engine = Engine::new().start().unwrap();
+    engine.add_resolver("profile", resolver);
+
+    let workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+    });
+
+    let sig = engine.signal(());
+    let s1 = sig.clone();
+    engine.channel().on_message(move |e| {
+        if e.is_irq() {
+            s1.close();
+        }
+    });
+
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new().with("unit", "u1"))
+        .unwrap();
+
+    sig.recv().await;
+
+    // root task has sealed data
+    let root = proc.root().unwrap();
+    let root_profile = root.sealed("profile").unwrap();
+    assert_eq!(root_profile.get::<String>("scope").unwrap(), "workflow");
+
+    // child task inherits sealed data from parent
+    let child = proc.task_by_params("key", "act1").last().cloned().unwrap();
+    let child_profile = child.sealed("profile").unwrap();
+    assert_eq!(child_profile.get::<String>("scope").unwrap(), "workflow");
+}

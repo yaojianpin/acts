@@ -24,7 +24,7 @@ mod tests;
 use std::sync::Arc;
 use std::sync::RwLock;
 
-pub use config::{Config, ConfigResolver};
+pub use config::{Config, ConfigResolver, MissingParamAction};
 pub use engine::Engine;
 pub use env::ActUserVar;
 pub use error::{ActError, Error};

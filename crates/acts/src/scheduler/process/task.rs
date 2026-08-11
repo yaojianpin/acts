@@ -1101,13 +1101,27 @@ impl Task {
         f(&mut data)
     }
 
-    pub fn sealed(&self, name: &str) -> Option<Vars> {
-        self.sealed_data.read().unwrap().get::<Vars>(name)
-    }
-
     pub(crate) fn set_sealed(&self, name: &str, value: Vars) {
         let mut sealed = self.sealed_data.write().unwrap();
         sealed.set(name, value);
+    }
+
+    /// Get sealed data by resolver name. Walks the parent chain
+    /// if not found locally (child overrides parent).
+    pub fn sealed(&self, name: &str) -> Option<Vars> {
+        // check local first
+        if let Some(v) = self.sealed_data.read().unwrap().get::<Vars>(name) {
+            return Some(v);
+        }
+        // walk up parent chain
+        let mut parent = self.parent();
+        while let Some(task) = parent {
+            if let Some(v) = task.sealed_data.read().unwrap().get::<Vars>(name) {
+                return Some(v);
+            }
+            parent = task.parent();
+        }
+        None
     }
 
     pub fn has_sealed(&self) -> bool {

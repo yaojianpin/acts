@@ -1,6 +1,6 @@
 use super::{ActTask, Runtime};
 use crate::{
-    Act, ActError, Executor, Message, MessageState, Result, TaskState, Vars,
+    Act, ActError, Executor, Message, MessageState, MissingParamAction, Result, TaskState, Vars,
     event::Action,
     scheduler::{
         Node, Process, Task,
@@ -113,19 +113,39 @@ impl Context {
         if resolvers.is_empty() {
             return Ok(());
         }
-        let inputs = self.task().inputs();
+        let task = self.task();
         for (name, resolver) in resolvers.iter() {
-            // check required params
+            // check required params via task.find() (walks parent chain)
             let required = resolver.required_params();
-            let missing: Vec<_> = required.iter().filter(|p| !inputs.contains_key(*p)).collect();
+            let missing: Vec<_> = required
+                .iter()
+                .filter(|p| task.find::<serde_json::Value>(p).is_none())
+                .cloned()
+                .collect();
             if !missing.is_empty() {
-                continue; // skip resolver if required params not available
+                match resolver.on_missing_params() {
+                    MissingParamAction::Skip => continue,
+                    MissingParamAction::Error => {
+                        return Err(ActError::Runtime(format!(
+                            "resolver '{name}' missing required params: {missing:?}"
+                        )));
+                    }
+                }
             }
-            let result = utils::sync::block_on(resolver.resolve(&inputs))?;
-            self.task().set_sealed(name, result);
+            // collect available params
+            let mut ctx = Vars::new();
+            for p in &required {
+                if let Some(v) = task.find::<serde_json::Value>(p) {
+                    ctx.set(p, v);
+                }
+            }
+            let result = utils::sync::block_on(resolver.resolve(&ctx))?;
+            task.set_sealed(name, result);
         }
         Ok(())
     }
+
+
     pub fn set_action(&self, action: &Action) -> Result<()> {
         *self.action.write().unwrap() = Some(action.clone());
 
@@ -139,7 +159,6 @@ impl Context {
 
         Ok(())
     }
-
     pub fn vars(&self) -> Vars {
         self.vars.read().unwrap().clone()
     }
