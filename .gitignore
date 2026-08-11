@@ -10,3 +10,5 @@ Cargo.lock
 /acts.cfg
 doc/book/
 .claude
+docs/
+.superpowers/
