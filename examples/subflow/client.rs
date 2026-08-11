@@ -1,5 +1,4 @@
 use acts::{ActError, Executor, Message, MessageState, Result, Vars};
-use serde_json::json;
 use std::collections::HashMap;
 
 type Action = fn(&Vars) -> Vars;
@@ -20,7 +19,7 @@ impl Client {
     }
 
     pub async fn process(&self, executor: &Executor, message: &Message) -> Result<()> {
-        println!("process: {message:?}");
+        // println!("process: {message:?}");
         if message.is_type("act") && message.is_state(MessageState::Created) {
             let params = message
                 .params()
@@ -47,13 +46,13 @@ impl Client {
     fn init(_params: &Vars) -> Vars {
         println!("init");
         let mut vars = Vars::new();
-        vars.insert("v".to_string(), json!(10));
+        vars.set("v", 10);
         vars
     }
     fn action1(_params: &Vars) -> Vars {
         println!("action1");
         let mut vars = Vars::new();
-        vars.insert("v".to_string(), json!(100));
+        vars.set("v", 100);
 
         vars
     }
@@ -61,7 +60,7 @@ impl Client {
         println!("action2: {params:?}");
         let v = params.get::<i64>("v").unwrap();
         let mut vars = Vars::new();
-        vars.insert("v".to_string(), json!(v * 2));
+        vars.set("v", v * 2);
 
         vars
     }

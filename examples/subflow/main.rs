@@ -42,7 +42,10 @@ async fn main() -> Result<()> {
     });
 
     engine.channel().on_error(move |e| {
-        eprintln!("on_workflow_error: pid={} state={:?}", e.pid, e.state);
+        eprintln!(
+            "on_workflow_error: pid={} state={:?} data={:?}",
+            e.pid, e.state, e
+        );
         s2.close();
     });
 

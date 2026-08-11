@@ -6,7 +6,8 @@ vars:
     value: 0
 exposes:
   - name: result
-    value: '${{ v }}'
+    value: ${{ v }}
+    type: number
 steps:
   - name: prepare
     id: prepare
@@ -19,13 +20,13 @@ steps:
     params:
         to: sub
         extra:
-          v: '${{ v }}'
+          v: ${{ v }}
 
   - name: final
     id: final
     uses: acts.core.irq
     params:
       key: action2
-      v: '${{ v }}'
+      v: ${{ v }}
 
     

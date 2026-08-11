@@ -1,8 +1,8 @@
 name: web plugin example
 id: web-example
+ver: 0.1.0
 steps:
   - name: simple step
-    acts:
-      - uses: acts.core.set
-        params:
-          message: "Hello from Web plugin!"
+    uses: acts.core.set
+    params:
+      message: "Hello from Web plugin!"

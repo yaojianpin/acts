@@ -4,17 +4,14 @@ ver: 0.1.0
 vars:
   - name: v
     value: 0
-options:
-  exposes:
-    - name: v
+exposes:
+  - name: v
+    type: number
 steps:
   - name: t1
     uses: acts.core.irq
     params:
       key: action1
-      options:
-        exposes:
-          - name: v
 
   - name: t2
 
