@@ -27,7 +27,7 @@ pub struct Runtime {
     cache: Arc<Cache>,
     emitter: Arc<Emitter>,
     package: Arc<Package>,
-    resolvers: ShareLock<HashMap<String, Arc<dyn ConfigResolver>>>,
+    pub(crate) resolvers: ShareLock<HashMap<String, Arc<dyn ConfigResolver>>>,
 }
 
 impl std::fmt::Debug for Runtime {
@@ -124,15 +124,6 @@ impl Runtime {
 
         let proc = Process::new(&proc_id, self);
         proc.load(&model)?;
-        // resolve config from all registered resolvers
-        let resolvers = self.resolvers.read().unwrap();
-        for (name, resolver) in resolvers.iter() {
-            let result = tokio::task::block_in_place(|| {
-                Handle::current().block_on(resolver.resolve(&options))
-            })?;
-            proc.set_config(name, result);
-        }
-        drop(resolvers);
 
         self.launch(&proc)?;
 

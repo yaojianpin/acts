@@ -31,7 +31,6 @@ pub struct Process {
     end_time: ShareLock<i64>,
     timestamp: i64,
     env: ShareLock<Vars>,
-    config: ShareLock<HashMap<String, Vars>>,
     runtime: Arc<Runtime>,
 }
 
@@ -66,7 +65,6 @@ impl Process {
             tasks: Arc::new(RwLock::new(TaskTree::new())),
             timestamp,
             env: Arc::new(RwLock::new(Vars::new())),
-            config: Arc::new(RwLock::new(HashMap::new())),
             err: Arc::new(RwLock::new(None)),
             runtime: rt.clone(),
         })
@@ -280,19 +278,6 @@ impl Process {
 
     pub(crate) fn set_env(&self, value: &Vars) {
         *self.env.write().unwrap() = value.clone();
-    }
-
-    pub fn set_config(&self, name: &str, value: Vars) {
-        let mut config = self.config.write().unwrap();
-        config.insert(name.to_string(), value);
-    }
-
-    pub fn config(&self, name: &str) -> Option<Vars> {
-        self.config.read().unwrap().get(name).cloned()
-    }
-
-    pub fn configs(&self) -> HashMap<String, Vars> {
-        self.config.read().unwrap().clone()
     }
 
     pub(crate) fn do_tick(&self) {

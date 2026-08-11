@@ -36,6 +36,9 @@ pub struct Task {
     // task data
     data: ShareLock<Vars>,
 
+    /// sealed data (read-only, written only by resolver)
+    sealed_data: ShareLock<Vars>,
+
     /// task state
     state: ShareLock<TaskState>,
 
@@ -68,6 +71,7 @@ impl Task {
             id: tid.to_string(),
             node,
             data: Arc::new(RwLock::new(Vars::new())),
+            sealed_data: Arc::new(RwLock::new(Vars::new())),
             state: Arc::new(RwLock::new(TaskState::None)),
             err: Arc::new(RwLock::new(None)),
             start_time: Arc::new(RwLock::new(0)),
@@ -736,6 +740,7 @@ impl Task {
             node_data: self.node.to_string(),
             state: self.state().into(),
             data: self.data().to_string(),
+            sealed: self.sealed_data.read().unwrap().to_string(),
             start_time: self.start_time(),
             end_time: self.end_time(),
             timestamp: self.timestamp,
@@ -1053,6 +1058,7 @@ impl std::fmt::Debug for Task {
             .field("next", &self.next_ids())
             .field("parent", &self.parent_id())
             .field("data", &self.data())
+            .field("sealed", &self.sealed_data.read().unwrap().clone())
             .field("err", &self.err())
             .finish()
     }
@@ -1093,6 +1099,23 @@ impl Task {
     pub fn update_data_if_exists<F: Fn(&mut Vars) -> bool>(&self, f: F) -> bool {
         let mut data = self.data.write().unwrap();
         f(&mut data)
+    }
+
+    pub fn sealed(&self, name: &str) -> Option<Vars> {
+        self.sealed_data.read().unwrap().get::<Vars>(name)
+    }
+
+    pub(crate) fn set_sealed(&self, name: &str, value: Vars) {
+        let mut sealed = self.sealed_data.write().unwrap();
+        sealed.set(name, value);
+    }
+
+    pub fn has_sealed(&self) -> bool {
+        !self.sealed_data.read().unwrap().is_empty()
+    }
+
+    pub fn sealed_keys(&self) -> Vec<String> {
+        self.sealed_data.read().unwrap().keys().cloned().collect()
     }
 
     pub fn find<T>(&self, name: &str) -> Option<T>

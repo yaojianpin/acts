@@ -90,6 +90,7 @@ fn model_info_task() {
         data: "{}".to_string(),
         err: None,
         v: 0,
+        sealed: String::new(),
     };
     let info: TaskInfo = task.clone().into();
     assert_eq!(info.id, task.tid);
@@ -252,6 +253,7 @@ fn model_info_task_arr_to_value() {
         data: "{}".to_string(),
         err: None,
         v: 0,
+        sealed: String::new(),
     };
     let info: TaskInfo = task.clone().into();
 

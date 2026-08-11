@@ -20,6 +20,8 @@ pub struct Task {
     pub name: String,
     pub state: String,
     pub data: String,
+    #[serde(default)]
+    pub sealed: String,
     pub err: Option<String>,
     pub start_time: i64,
     pub end_time: i64,

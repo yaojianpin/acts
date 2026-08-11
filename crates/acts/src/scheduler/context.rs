@@ -105,8 +105,20 @@ impl Context {
 
     pub fn prepare(&self) {
         self.init_vars(&self.task());
+        self.resolve_sealed();
     }
 
+    fn resolve_sealed(&self) {
+        let resolvers = self.runtime.resolvers.read().unwrap();
+        if resolvers.is_empty() {
+            return;
+        }
+        let inputs = self.task().inputs();
+        for (name, resolver) in resolvers.iter() {
+            let result = utils::sync::block_on(resolver.resolve(&inputs)).unwrap_or_default();
+            self.task().set_sealed(name, result);
+        }
+    }
     pub fn set_action(&self, action: &Action) -> Result<()> {
         *self.action.write().unwrap() = Some(action.clone());
 

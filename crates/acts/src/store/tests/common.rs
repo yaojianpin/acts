@@ -681,6 +681,7 @@ macro_rules! gen_store_tests {
                 data: "{}".to_string(),
                 err: None,
                 v: 0,
+                sealed: String::new(),
             };
 
             store.tasks().create(&task).expect("create task");
@@ -714,6 +715,7 @@ macro_rules! gen_store_tests {
                 data: "{}".to_string(),
                 err: None,
                 v: 0,
+                sealed: String::new(),
             };
 
             store.tasks().create(&task).expect("create task");
@@ -748,6 +750,7 @@ macro_rules! gen_store_tests {
                     data: "{}".to_string(),
                     err: None,
                     v: 0,
+                    sealed: String::new(),
                 };
                 store.tasks().create(&task).expect("create task");
             }
@@ -793,6 +796,7 @@ macro_rules! gen_store_tests {
                     data: "{}".to_string(),
                     err: None,
                     v: 0,
+                    sealed: String::new(),
                 };
                 store.tasks().create(&task).expect("create task");
             }
@@ -838,6 +842,7 @@ macro_rules! gen_store_tests {
                     data: "{}".to_string(),
                     err: None,
                     v: 0,
+                    sealed: String::new(),
                 };
                 store.tasks().create(&task).expect("create task");
             }
@@ -861,6 +866,7 @@ macro_rules! gen_store_tests {
                     data: "{}".to_string(),
                     err: None,
                     v: 0,
+                    sealed: String::new(),
                 };
                 store.tasks().create(&task).expect("create task");
             }
@@ -900,6 +906,7 @@ macro_rules! gen_store_tests {
                     data: "{}".to_string(),
                     err: None,
                     v: 0,
+                    sealed: String::new(),
                 };
                 store.tasks().create(&task).expect("create task");
             }
@@ -946,6 +953,7 @@ macro_rules! gen_store_tests {
                 data: "{}".to_string(),
                 err: None,
                 v: 0,
+                sealed: String::new(),
             };
 
             store.tasks().create(&task).expect("create task");
@@ -984,6 +992,7 @@ macro_rules! gen_store_tests {
                 data: "{}".to_string(),
                 err: None,
                 v: 0,
+                sealed: String::new(),
             };
 
             store.tasks().create(&task).expect("create task");
@@ -1818,6 +1827,7 @@ macro_rules! gen_store_tests {
                 data: "{}".to_string(),
                 err: None,
                 v: 0,
+                sealed: String::new(),
             };
             store.tasks().create(&task).expect("create task");
 
