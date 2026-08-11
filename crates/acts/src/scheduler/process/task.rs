@@ -939,7 +939,7 @@ impl ActTask for Arc<Task> {
     fn init(&self, ctx: &Context) -> Result<()> {
         ctx.set_task(self);
         if ctx.task().state().is_none() {
-            ctx.prepare();
+            ctx.prepare()?;
             ctx.task().set_state(TaskState::Ready);
             match &self.node.content {
                 NodeContent::Workflow(workflow) => workflow.init(ctx)?,

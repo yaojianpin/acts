@@ -103,9 +103,10 @@ impl Context {
         self.task.read().unwrap().clone()
     }
 
-    pub fn prepare(&self) {
+    pub fn prepare(&self) -> Result<()> {
         self.init_vars(&self.task());
-        let _ = self.resolve_sealed();
+        self.resolve_sealed()?;
+        Ok(())
     }
 
     fn resolve_sealed(&self) -> Result<()> {
@@ -117,11 +118,17 @@ impl Context {
         for (name, resolver) in resolvers.iter() {
             // check required params via task.find() (walks parent chain)
             let required = resolver.required_params();
-            let missing: Vec<_> = required
-                .iter()
-                .filter(|p| task.find::<serde_json::Value>(p).is_none())
-                .cloned()
-                .collect();
+            let mut missing = vec![];
+            let mut ctx = Vars::new();
+            // collect available params
+            for p in &required {
+                if let Some(v) = task.find::<serde_json::Value>(p) {
+                    ctx.set(p, v);
+                } else {
+                    missing.push(p);
+                    break;
+                }
+            }
             if !missing.is_empty() {
                 match resolver.on_missing_params() {
                     MissingParamAction::Skip => continue,
@@ -132,19 +139,11 @@ impl Context {
                     }
                 }
             }
-            // collect available params
-            let mut ctx = Vars::new();
-            for p in &required {
-                if let Some(v) = task.find::<serde_json::Value>(p) {
-                    ctx.set(p, v);
-                }
-            }
             let result = utils::sync::block_on(resolver.resolve(&ctx))?;
             task.set_sealed(name, result);
         }
         Ok(())
     }
-
 
     pub fn set_action(&self, action: &Action) -> Result<()> {
         *self.action.write().unwrap() = Some(action.clone());
