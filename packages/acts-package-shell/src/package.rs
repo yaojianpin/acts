@@ -75,7 +75,11 @@ impl ActPackage for ShellPackage {
         Ok(Self)
     }
 
-    async fn execute(&self, _ctx: &acts::Context, params: &serde_json::Value) -> Result<Option<Vars>> {
+    async fn execute(
+        &self,
+        _ctx: &acts::Context,
+        params: &serde_json::Value,
+    ) -> Result<Option<Vars>> {
         let mut ret = Vars::new();
 
         let params = serde_json::from_value::<ShellPackageParams>(params.clone()).map_err(|e| {

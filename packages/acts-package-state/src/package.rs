@@ -101,7 +101,11 @@ impl ActPackage for StatePackage {
         Ok(Self { client })
     }
 
-    async fn execute(&self, ctx: &acts::Context, params: &serde_json::Value) -> Result<Option<Vars>> {
+    async fn execute(
+        &self,
+        ctx: &acts::Context,
+        params: &serde_json::Value,
+    ) -> Result<Option<Vars>> {
         let mut conn = self
             .client
             .get_connection()

@@ -82,7 +82,11 @@ impl ActPackage for HttpPackage {
         Ok(Self)
     }
 
-    async fn execute(&self, _ctx: &acts::Context, params: &serde_json::Value) -> Result<Option<Vars>> {
+    async fn execute(
+        &self,
+        _ctx: &acts::Context,
+        params: &serde_json::Value,
+    ) -> Result<Option<Vars>> {
         let mut ret = Vars::new();
         let mut headers = HeaderMap::new();
         headers.insert(
