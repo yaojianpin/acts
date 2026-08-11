@@ -103,13 +103,17 @@ impl Config {
 /// Resolves configuration for a named target at process start time.
 ///
 /// A Plugin registers one resolver per target name (e.g. "profile", "features")
-/// via `Engine::add_resolver()`. The returned `Vars` is stored on the process,
-/// then copied into root task data during Workflow init, where the corresponding
-/// JS module reads its namespace to construct globals like `$profile`.
-///
-/// Tenant identifiers (`unit`, `dept`, `project`, `user`) are passed in `ctx`
-/// by convention; ACTS does not enforce any schema.
+/// via `Engine::add_resolver()`. At each task's prepare step, the engine calls
+/// `resolve()` with the task's inputs and stores the result in the task's
+/// sealed_data. The `SealedModule` then auto-injects `$<name>` JS globals.
 #[async_trait::async_trait]
 pub trait ConfigResolver: Send + Sync {
+    /// Required parameter names that must be present in the task context
+    /// for this resolver to produce output. If any are missing, the resolver
+    /// is skipped for this task.
+    fn required_params(&self) -> Vec<String> {
+        vec![]
+    }
+
     async fn resolve(&self, ctx: &Vars) -> Result<Vars>;
 }

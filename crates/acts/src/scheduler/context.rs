@@ -105,19 +105,26 @@ impl Context {
 
     pub fn prepare(&self) {
         self.init_vars(&self.task());
-        self.resolve_sealed();
+        let _ = self.resolve_sealed();
     }
 
-    fn resolve_sealed(&self) {
+    fn resolve_sealed(&self) -> Result<()> {
         let resolvers = self.runtime.resolvers.read().unwrap();
         if resolvers.is_empty() {
-            return;
+            return Ok(());
         }
         let inputs = self.task().inputs();
         for (name, resolver) in resolvers.iter() {
-            let result = utils::sync::block_on(resolver.resolve(&inputs)).unwrap_or_default();
+            // check required params
+            let required = resolver.required_params();
+            let missing: Vec<_> = required.iter().filter(|p| !inputs.contains_key(*p)).collect();
+            if !missing.is_empty() {
+                continue; // skip resolver if required params not available
+            }
+            let result = utils::sync::block_on(resolver.resolve(&inputs))?;
             self.task().set_sealed(name, result);
         }
+        Ok(())
     }
     pub fn set_action(&self, action: &Action) -> Result<()> {
         *self.action.write().unwrap() = Some(action.clone());

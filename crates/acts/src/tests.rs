@@ -417,3 +417,48 @@ async fn sealed_data_js_dollar_profile_access() {
         assert!(err.is_err(), "frozen object should reject writes");
     });
 }
+
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn config_resolver_skips_when_required_params_missing() {
+    struct StrictResolver;
+
+    #[async_trait::async_trait]
+    impl ConfigResolver for StrictResolver {
+        fn required_params(&self) -> Vec<String> {
+            vec!["unit".into(), "project".into()]
+        }
+
+        async fn resolve(&self, _ctx: &Vars) -> crate::Result<Vars> {
+            Ok(Vars::new().with("result", "should not be called"))
+        }
+    }
+
+    let engine = Engine::new().start().unwrap();
+    engine.add_resolver("profile", Arc::new(StrictResolver));
+
+    let workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_uses(USES_IRQ, Vars::new().with("key", "test"))
+    });
+
+    let sig = engine.signal(());
+    let s1 = sig.clone();
+    engine.channel().on_message(move |e| {
+        if e.is_irq() {
+            s1.close();
+        }
+    });
+
+    // start WITHOUT required params
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .unwrap();
+
+    sig.recv().await;
+
+    let root = proc.root().unwrap();
+    // sealed_data should be empty since required params were missing
+    assert!(!root.has_sealed());
+}
