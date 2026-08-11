@@ -106,6 +106,10 @@ path = "../../examples/timeout/main.rs"
 name = "user_var"
 path = "../../examples/user_var/main.rs"
 
+[[example]]
+name = "resolver"
+path = "../../examples/resolver/main.rs"
+
 [profile.release]
 codegen-units = 1
 lto = true

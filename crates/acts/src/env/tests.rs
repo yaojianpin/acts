@@ -166,6 +166,9 @@ async fn env_console_module() {
         console.info(`v=${v}`);
         console.warn(`v=${v}`);
         console.error(`v=${v}`);
+        // multi-arg support
+        console.log("hello", 42, true, v);
+        console.log("joined:", "a", "b", "c");
     "#;
     let result = env.eval::<()>(script);
     assert!(result.is_ok());

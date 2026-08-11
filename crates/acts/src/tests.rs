@@ -369,8 +369,6 @@ async fn config_resolver_injects_sealed_data() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sealed_data_js_dollar_profile_access() {
-    use crate::env::Enviroment;
-
     let resolver = Arc::new(TestResolver {
         data: Vars::new()
             .with("permissions", vec!["deploy", "read_logs"])
@@ -451,10 +449,7 @@ async fn config_resolver_skips_when_required_params_missing() {
     });
 
     // start WITHOUT required params
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
-        .unwrap();
+    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
 
     sig.recv().await;
 

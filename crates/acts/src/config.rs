@@ -1,7 +1,7 @@
+use crate::{Result, Vars};
 use serde::Deserialize;
 use std::path::Path;
 use toml::Table;
-use crate::{Result, Vars};
 
 #[derive(Debug, Clone)]
 pub struct Config {

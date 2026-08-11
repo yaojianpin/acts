@@ -9,6 +9,7 @@ pub struct EngineBuilder {
     config: Config,
     plugins: Vec<Arc<dyn ActPlugin>>,
     packages: Vec<ActPackageRegister>,
+    resolvers: Vec<(String, Arc<dyn crate::config::ConfigResolver>)>,
 }
 
 impl Default for EngineBuilder {
@@ -34,6 +35,7 @@ impl EngineBuilder {
             config,
             plugins: Vec::new(),
             packages: Vec::new(),
+            resolvers: Vec::new(),
         }
     }
 
@@ -161,10 +163,56 @@ impl EngineBuilder {
         self
     }
 
+    /// register config resolver
+    ///
+    /// Resolvers are invoked at `proc.start()` on each task to inject
+    /// tenant-scoped configuration into sealed data, which inherits
+    /// from parent tasks.
+    ///
+    /// ## Example
+    ///
+    /// ```no_run
+    /// use acts::{ConfigResolver, Engine, Result, Vars};
+    /// use std::sync::Arc;
+    ///
+    /// struct MyResolver {
+    ///     data: Vars,
+    /// }
+    ///
+    /// #[async_trait::async_trait]
+    /// impl ConfigResolver for MyResolver {
+    ///     async fn resolve(&self, _ctx: &Vars) -> Result<Vars> {
+    ///         Ok(self.data.clone())
+    ///     }
+    /// }
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let resolver = Arc::new(MyResolver {
+    ///         data: Vars::new()
+    ///             .with("secrets", Vars::new().with("TOKEN", "abc123")),
+    ///     });
+    ///     let engine = Engine::builder()
+    ///         .add_resolver("profile", resolver)
+    ///         .build()
+    ///         .start()
+    ///         .unwrap();
+    /// }
+    /// ```
+    pub fn add_resolver(
+        mut self,
+        name: &str,
+        resolver: Arc<dyn crate::config::ConfigResolver>,
+    ) -> Self {
+        self.resolvers.push((name.to_string(), resolver));
+        self
+    }
+
     pub fn build(self) -> Engine {
         Engine::new()
             .with_config(&self.config)
             .set_plugins(self.plugins.clone())
             .set_packages(self.packages.clone())
+            .set_resolvers(self.resolvers.clone())
     }
 }

@@ -39,7 +39,13 @@ impl std::fmt::Debug for Runtime {
             .field("cache", &self.cache)
             .field("emitter", &self.emitter)
             .field("package", &self.package)
-            .field("resolvers", &format_args!("<{} entries>", self.resolvers.read().map(|r| r.len()).unwrap_or(0)))
+            .field(
+                "resolvers",
+                &format_args!(
+                    "<{} entries>",
+                    self.resolvers.read().map(|r| r.len()).unwrap_or(0)
+                ),
+            )
             .finish()
     }
 }
@@ -85,7 +91,6 @@ impl Runtime {
         let mut resolvers = self.resolvers.write().unwrap();
         resolvers.insert(name.to_string(), resolver);
     }
-
 
     pub fn close(&self) {
         self.queue.abort();

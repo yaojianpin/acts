@@ -1,15 +1,16 @@
 use acts::{ActPlugin, ChannelOptions, Engine, Vars, Workflow};
-use acts_channel::{acts_service_server::*, Message, MessageOptions};
+use acts_channel::{Message, MessageOptions, acts_service_server::*};
 use serde_json::Value;
 use tokio::sync::mpsc::{self, Sender};
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::{transport::Server, Code, Response, Status};
+use tonic::{Code, Response, Status, transport::Server};
 
 pub use config::GrpcConfig;
 
 mod config;
 
-type MessageStream = std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<Message, Status>> + Send>>;
+type MessageStream =
+    std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<Message, Status>> + Send>>;
 
 macro_rules! wrap_result {
     ($seq:expr, $name:expr, $input:expr) => {
@@ -48,11 +49,7 @@ impl MessageClient {
         let msg = Ok(message);
         let client = self.clone();
         if client.sender.is_closed() {
-            tracing::warn!(
-                "client {}({}) is closed",
-                client.addr,
-                client.options.id
-            );
+            tracing::warn!("client {}({}) is closed", client.addr, client.options.id);
             return;
         }
         tokio::spawn(async move {
@@ -216,8 +213,8 @@ impl GrpcServer {
                 let model_text = options
                     .get::<String>("model")
                     .ok_or(Status::invalid_argument("model is required"))?;
-                let mut model =
-                    Workflow::from_yml(&model_text).map_err(|e| Status::invalid_argument(e.to_string()))?;
+                let mut model = Workflow::from_yml(&model_text)
+                    .map_err(|e| Status::invalid_argument(e.to_string()))?;
                 if let Some(mid) = options.get::<String>("mid") {
                     model.set_id(&mid);
                 }

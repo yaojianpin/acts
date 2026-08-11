@@ -14,7 +14,6 @@ impl ActTask for Workflow {
             });
         }
 
-
         Ok(())
     }
 

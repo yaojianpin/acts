@@ -200,3 +200,5 @@
 # 0.21.0
 - migrates `acts-channel` from https://github.com/yaojianpin/acts-channel
 - add plugin `acts-plugin-grpc` and `acts-plugin-web`
+- add resolver to `EngineBuilder` and `Engine`
+- feat: `console.log` supports multiple parameters

@@ -44,6 +44,7 @@ pub struct Engine {
     config: Arc<Config>,
     plugins: Vec<Arc<dyn ActPlugin>>,
     packages: Vec<ActPackageRegister>,
+    resolvers: Vec<(String, Arc<dyn ConfigResolver>)>,
     runtime: Option<Arc<Runtime>>,
 }
 
@@ -59,6 +60,7 @@ impl Engine {
             config: Arc::new(Config::default()),
             plugins: Vec::new(),
             packages: Vec::new(),
+            resolvers: Vec::new(),
             runtime: None,
         }
     }
@@ -124,14 +126,22 @@ impl Engine {
         self
     }
 
-    /// Register a named config resolver. Called by plugins in `on_init`.
-    /// Resolvers are invoked at `proc.start()` to inject tenant-scoped config.
+    /// Register a named config resolver. Called by plugins in `on_init`,
+    /// or via [`EngineBuilder::add_resolver`] before starting the engine.
+    ///
+    /// Resolvers are invoked at `proc.start()` on each task to inject
+    /// tenant-scoped configuration into [`sealed_data`](crate::task::Task::sealed),
+    /// which inherits from parent tasks.
     pub fn add_resolver(&self, name: &str, resolver: Arc<dyn ConfigResolver>) {
         self.runtime().register_resolver(name, resolver);
     }
 
     pub fn set_packages(mut self, packages: Vec<ActPackageRegister>) -> Self {
         self.packages = packages;
+        self
+    }
+    pub fn set_resolvers(mut self, resolvers: Vec<(String, Arc<dyn ConfigResolver>)>) -> Self {
+        self.resolvers = resolvers;
         self
     }
 
@@ -204,6 +214,11 @@ impl Engine {
 
     pub fn start(mut self) -> crate::Result<Self> {
         self.runtime = Some(Runtime::new(&self.config())?);
+
+        // register resolvers
+        for (name, resolver) in self.resolvers.iter() {
+            self.runtime().register_resolver(name, resolver.clone());
+        }
 
         for plugin in self.plugins.iter() {
             plugin.on_init(&self)?;
