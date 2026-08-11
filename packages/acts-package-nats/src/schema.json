@@ -1,0 +1,19 @@
+{
+    "$schema": "http://json-schema.org/draft-07/schema#",
+    "type": "object",
+    "properties": {
+        "mode": {
+            "type": "string",
+            "title": "Mode",
+            "enum": ["pub", "sub"]
+        },
+        "subject": {
+            "type": "string",
+            "title": "Subject"
+        },
+        "message": {
+            "title": "Message"
+        }
+    },
+    "required": ["mode", "subject"]
+}

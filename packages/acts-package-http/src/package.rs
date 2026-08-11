@@ -57,6 +57,7 @@ pub struct HttpPackageParams {
     pub body: Option<JsonValue>,
 }
 
+#[async_trait::async_trait]
 impl ActPackage for HttpPackage {
     fn definition() -> ActPackageDefinition {
         ActPackageDefinition {
@@ -81,7 +82,7 @@ impl ActPackage for HttpPackage {
         Ok(Self)
     }
 
-    fn execute(&self, _ctx: &acts::Context, params: &serde_json::Value) -> Result<Option<Vars>> {
+    async fn execute(&self, _ctx: &acts::Context, params: &serde_json::Value) -> Result<Option<Vars>> {
         let mut ret = Vars::new();
         let mut headers = HeaderMap::new();
         headers.insert(

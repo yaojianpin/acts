@@ -10,6 +10,7 @@ pub struct Pack1Params {
     v1: i32,
 }
 
+#[async_trait::async_trait]
 impl ActPackage for Pack1 {
     fn definition() -> ActPackageDefinition {
         ActPackageDefinition {
@@ -39,7 +40,7 @@ impl ActPackage for Pack1 {
         Ok(Self)
     }
 
-    fn execute(
+    async fn execute(
         &self,
         _ctx: &acts::Context,
         params: &serde_json::Value,

@@ -9,6 +9,7 @@ use std::sync::Arc;
 #[derive(Debug, Clone)]
 pub struct ManualEventPackage;
 
+#[async_trait::async_trait]
 impl ActPackage for ManualEventPackage {
     fn definition() -> ActPackageDefinition {
         ActPackageDefinition {

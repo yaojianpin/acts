@@ -35,6 +35,7 @@ pub struct BlockPackageParams {
     pub acts: Vec<Act>,
 }
 
+#[async_trait::async_trait]
 impl ActPackage for BlockPackage {
     fn definition() -> ActPackageDefinition {
         ActPackageDefinition {
@@ -90,7 +91,7 @@ impl ActPackage for BlockPackage {
         Ok(Self)
     }
 
-    fn execute(&self, ctx: &Context, params: &serde_json::Value) -> Result<Option<Vars>> {
+    async fn execute(&self, ctx: &Context, params: &serde_json::Value) -> Result<Option<Vars>> {
         let params = serde_json::from_value::<BlockPackageParams>(params.clone()).map_err(|e| {
             ActError::Package(format!(
                 "invalid ActPackage({}) params: {}",

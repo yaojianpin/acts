@@ -10,6 +10,7 @@ use serde_json::json;
 #[derive(Debug, Clone)]
 pub struct HookEventPackage;
 
+#[async_trait::async_trait]
 impl ActPackage for HookEventPackage {
     fn definition() -> ActPackageDefinition {
         ActPackageDefinition {

@@ -431,14 +431,16 @@ acts:
     - [x] code
 
 - [x] doc (doc/)
-
-- package extension
+- plugins
+  - [x] grpc (plugins/acts-plugin-grpc)
+  - [x] web (plugins/acts-plugin-web)
+- packages
   - [ ] form (plugins/form)
   - [ ] ai (plugins/ai)
-  - [x] state (plugins/state)
-  - [x] http (plugins/http)
-  - [x] shell (plugins/shell) support nushell, bash and powershell
-  - [ ] pubsub (plugins/pubsub)
+  - [x] state (packages/acts-package-state)
+  - [x] http (packages/acts-package-http)
+  - [x] shell (packages/acts-package-shell) support nushell, bash and powershell
+  - [x] pubsub (packages/acts-package-nats)
   - [ ] observability (plugins/obs)
   - [ ] database (plugins/database)
   - [ ] mail (plugins/mail)

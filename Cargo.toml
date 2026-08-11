@@ -6,6 +6,7 @@ members = [
     "plugins/*",
     "examples/plugins/*",
     "examples/packages/*",
+    "packages/acts-package-nats",
 ]
 resolver = "3"
 

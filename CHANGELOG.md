@@ -202,3 +202,5 @@
 - add plugin `acts-plugin-grpc` and `acts-plugin-web`
 - add resolver to `EngineBuilder` and `Engine`
 - feat: `console.log` supports multiple parameters
+- feat: add `acts-package-nats` pubsub package
+- feat: modify `execute` of `ActPackage` to async

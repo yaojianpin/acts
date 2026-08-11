@@ -19,6 +19,7 @@ pub struct StatePackageParams {
     params: Vars,
 }
 
+#[async_trait::async_trait]
 impl ActPackage for StatePackage {
     fn definition() -> acts::ActPackageDefinition {
         ActPackageDefinition {
@@ -61,7 +62,7 @@ impl ActPackage for StatePackage {
                     }
                 }
             })),
-            run_as: ActRunAs::Irq,
+            run_as: ActRunAs::Func,
             resources: vec![
                 ActResource {
                     name: "Get state store".to_string(),
@@ -100,7 +101,7 @@ impl ActPackage for StatePackage {
         Ok(Self { client })
     }
 
-    fn execute(&self, ctx: &acts::Context, params: &serde_json::Value) -> Result<Option<Vars>> {
+    async fn execute(&self, ctx: &acts::Context, params: &serde_json::Value) -> Result<Option<Vars>> {
         let mut conn = self
             .client
             .get_connection()

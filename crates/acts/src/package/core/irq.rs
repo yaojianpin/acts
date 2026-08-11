@@ -6,6 +6,7 @@ use serde_json::json;
 #[derive(Debug, Clone)]
 pub struct IrqPackage;
 
+#[async_trait::async_trait]
 impl ActPackage for IrqPackage {
     fn definition() -> ActPackageDefinition {
         ActPackageDefinition {

@@ -6,6 +6,7 @@ use serde_json::json;
 #[derive(Debug, Clone)]
 pub struct SetPackage;
 
+#[async_trait::async_trait]
 impl ActPackage for SetPackage {
     fn definition() -> ActPackageDefinition {
         ActPackageDefinition {
@@ -41,7 +42,7 @@ impl ActPackage for SetPackage {
         Ok(Self)
     }
 
-    fn execute(&self, _ctx: &Context, params: &serde_json::Value) -> Result<Option<Vars>> {
+    async fn execute(&self, _ctx: &Context, params: &serde_json::Value) -> Result<Option<Vars>> {
         let params = serde_json::from_value::<Vars>(params.clone()).map_err(|e| {
             ActError::Package(format!(
                 "invalid ActPackage({}) params: {}",

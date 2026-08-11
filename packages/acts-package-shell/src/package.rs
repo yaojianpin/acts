@@ -46,6 +46,7 @@ pub struct ShellPackageParams {
     content_type: Option<ContentType>,
 }
 
+#[async_trait::async_trait]
 impl ActPackage for ShellPackage {
     fn definition() -> ActPackageDefinition {
         ActPackageDefinition {
@@ -74,7 +75,7 @@ impl ActPackage for ShellPackage {
         Ok(Self)
     }
 
-    fn execute(&self, _ctx: &acts::Context, params: &serde_json::Value) -> Result<Option<Vars>> {
+    async fn execute(&self, _ctx: &acts::Context, params: &serde_json::Value) -> Result<Option<Vars>> {
         let mut ret = Vars::new();
 
         let params = serde_json::from_value::<ShellPackageParams>(params.clone()).map_err(|e| {

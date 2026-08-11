@@ -123,6 +123,8 @@ impl EngineBuilder {
     ///
     /// #[derive(Debug, Clone, Deserialize, Serialize)]
     /// struct MyPackage;
+    ///
+    /// #[async_trait::async_trait]
     /// impl ActPackage for MyPackage {
     ///    fn definition() -> ActPackageDefinition {
     ///       ActPackageDefinition {
@@ -144,7 +146,7 @@ impl EngineBuilder {
     ///       Ok(Self)
     ///     }
     ///
-    ///     fn execute(&self, ctx: &Context, params: &serde_json::Value) -> Result<Option<Vars>> {
+    ///     async fn execute(&self, ctx: &Context, params: &serde_json::Value) -> Result<Option<Vars>> {
     ///       // do something with ctx
     ///       Ok(None)
     ///     }

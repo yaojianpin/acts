@@ -23,6 +23,8 @@ pub struct Package {
     packages: Arc<DashMap<String, ActPackageRegister>>,
 }
 
+#[async_trait::async_trait]
+
 pub trait ActPackage: Send + Sync {
     /// create package instance with config
     fn new(config: &Config) -> Result<Self>
@@ -33,7 +35,7 @@ pub trait ActPackage: Send + Sync {
     where
         Self: Sized;
     /// executing with task context
-    fn execute(&self, _ctx: &Context, _params: &serde_json::Value) -> Result<Option<Vars>> {
+    async fn execute(&self, _ctx: &Context, _params: &serde_json::Value) -> Result<Option<Vars>> {
         Ok(None)
     }
     /// start with non-context, such as workflow event

@@ -16,6 +16,7 @@ struct ActionPackageParams {
     options: Option<Vars>,
 }
 
+#[async_trait::async_trait]
 impl ActPackage for ActionPackage {
     fn new(_config: &Config) -> Result<Self> {
         Ok(Self)
@@ -58,7 +59,7 @@ impl ActPackage for ActionPackage {
         }
     }
 
-    fn execute(&self, ctx: &Context, params: &serde_json::Value) -> Result<Option<Vars>> {
+    async fn execute(&self, ctx: &Context, params: &serde_json::Value) -> Result<Option<Vars>> {
         let task = ctx.task();
 
         let params =

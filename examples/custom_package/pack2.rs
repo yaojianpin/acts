@@ -11,6 +11,7 @@ pub struct Pack2Params {
     b: Vec<String>,
 }
 
+#[async_trait::async_trait]
 impl ActPackage for Pack2 {
     fn definition() -> ActPackageDefinition {
         ActPackageDefinition {
@@ -43,7 +44,7 @@ impl ActPackage for Pack2 {
         Ok(Self)
     }
 
-    fn execute(
+    async fn execute(
         &self,
         _ctx: &acts::Context,
         params: &serde_json::Value,

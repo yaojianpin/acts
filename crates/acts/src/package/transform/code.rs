@@ -5,6 +5,7 @@ use serde_json::json;
 #[derive(Debug, Clone)]
 pub struct CodePackage;
 
+#[async_trait::async_trait]
 impl ActPackage for CodePackage {
     fn definition() -> ActPackageDefinition {
         ActPackageDefinition {
@@ -38,7 +39,7 @@ impl ActPackage for CodePackage {
         Ok(Self)
     }
 
-    fn execute(&self, ctx: &Context, params: &serde_json::Value) -> Result<Option<Vars>> {
+    async fn execute(&self, ctx: &Context, params: &serde_json::Value) -> Result<Option<Vars>> {
         let Some(code) = params.as_str() else {
             return Err(crate::ActError::Package(
                 "Code package requires a string parameter".to_string(),

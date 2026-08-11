@@ -17,6 +17,7 @@ pub struct SubflowPackageParams {
     pub options: Vars,
 }
 
+#[async_trait::async_trait]
 impl ActPackage for SubflowPackage {
     fn definition() -> ActPackageDefinition {
         ActPackageDefinition {
@@ -62,7 +63,7 @@ impl ActPackage for SubflowPackage {
         Ok(Self)
     }
 
-    fn execute(&self, ctx: &Context, params: &serde_json::Value) -> Result<Option<Vars>> {
+    async fn execute(&self, ctx: &Context, params: &serde_json::Value) -> Result<Option<Vars>> {
         let params =
             serde_json::from_value::<SubflowPackageParams>(params.clone()).map_err(|e| {
                 ActError::Package(format!(

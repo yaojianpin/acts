@@ -18,6 +18,7 @@ pub struct SequencePackageParams {
     acts: Vec<Act>,
 }
 
+#[async_trait::async_trait]
 impl ActPackage for SequencePackage {
     fn definition() -> ActPackageDefinition {
         ActPackageDefinition {
@@ -64,7 +65,7 @@ impl ActPackage for SequencePackage {
         Ok(Self)
     }
 
-    fn execute(&self, ctx: &Context, params: &serde_json::Value) -> Result<Option<Vars>> {
+    async fn execute(&self, ctx: &Context, params: &serde_json::Value) -> Result<Option<Vars>> {
         let params =
             serde_json::from_value::<SequencePackageParams>(params.clone()).map_err(|e| {
                 ActError::Package(format!(
