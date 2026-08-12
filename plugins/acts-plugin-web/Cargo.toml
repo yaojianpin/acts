@@ -1,11 +1,11 @@
 [package]
 name = "acts-plugin-web"
-version = "0.1.0"
-edition = "2024"
 description = "Web REST API plugin for acts workflow engine"
-license = "Apache-2.0"
 keywords = ["workflow", "acts", "web", "rest"]
-repository = "https://github.com/yaojianpin/acts.git"
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+edition.workspace = true
 
 [dependencies]
 acts = { workspace = true }

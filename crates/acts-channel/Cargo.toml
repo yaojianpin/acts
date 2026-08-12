@@ -1,14 +1,13 @@
 [package]
-authors = ["yao <39178011@qq.com>"]
-description = "acts client channel for acts-server"
-documentation = "https://github.com/yaojianpin/acts-channel"
-edition = "2024"
-homepage = "https://github.com/yaojianpin/acts-channel"
-keywords = ["workflow-channel"]
-license = "MIT"
 name = "acts-channel"
-repository = "https://github.com/yaojianpin/acts-channel.git"
-version = "0.10.0"
+description = "acts client channel for acts-server"
+documentation = "https://github.com/yaojianpin/acts"
+homepage = "https://github.com/yaojianpin/acts"
+keywords = ["workflow-channel"]
+version.workspace = true
+authors.workspace = true
+repository.workspace = true
+edition.workspace = true
 
 [dependencies]
 anyhow = "1.0.98"
@@ -35,4 +34,4 @@ codegen = []
 docker_test = []
 
 [dev-dependencies]
-acts = { path = "../acts", version = "0.21.0" }
+acts = { workspace = true }
