@@ -57,7 +57,7 @@ async fn connect(
 impl ActPackage for NatsPackage {
     fn definition() -> ActPackageDefinition {
         ActPackageDefinition {
-            id: "acts.app.nats",
+            id: "acts.app.pubsub.nats",
             name: "Nats",
             desc: "publish or subscribe NATS messages",
             version: "0.1.0",
