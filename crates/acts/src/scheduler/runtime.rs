@@ -94,6 +94,7 @@ impl Runtime {
 
     pub fn close(&self) {
         self.queue.abort();
+        self.cache.close();
     }
 
     pub fn start(self: &Arc<Self>, model: &Workflow, options: Vars) -> Result<Arc<Process>> {
@@ -157,7 +158,7 @@ impl Runtime {
         debug!("scheduler::push  task={:?}", task);
         let cache = self.cache.clone();
         let task_clone = task.clone();
-        cache.upsert(&task_clone)?;
+        cache.upsert_async(&task_clone)?;
         self.queue.send(&task_clone)?;
         Ok(())
     }
@@ -326,7 +327,7 @@ impl Runtime {
                 let cache = cache.clone();
                 let e_clone = e.clone();
                 cache
-                    .upsert(&e_clone)
+                    .upsert_async(&e_clone)
                     .unwrap_or_else(|err| error!("scher.initialize upsert={}", err));
 
                 // check task is allowed to emit message to client

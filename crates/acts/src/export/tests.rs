@@ -894,6 +894,7 @@ async fn export_manager_tasks_query() {
 
     rt.start(&model, vars).unwrap();
     sig.recv().await;
+    engine.runtime().cache().flush();
 
     let tasks = manager
         .task()

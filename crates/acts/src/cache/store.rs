@@ -3,7 +3,7 @@ use crate::{
     data::{self, MessageStatus},
     scheduler::{self, Node, Runtime, TaskState},
     store::{Store, query::*},
-    utils::{self, Id},
+    utils,
 };
 use std::sync::Arc;
 use tracing::debug;
@@ -194,18 +194,30 @@ impl Store {
 
     pub fn upsert_task(&self, task: &Arc<scheduler::Task>) -> Result<()> {
         debug!("upsert_task: {task:?}");
-        let collection = self.tasks();
         let data: data::Task = task.into_data()?;
-        let id = Id::new(&task.pid, &task.id);
-        match collection.find(&id.id()) {
+        self.upsert_task_data(&data)
+    }
+
+    pub fn upsert_task_data(&self, data: &data::Task) -> Result<()> {
+        let collection = self.tasks();
+        match collection.find(&data.id) {
             Ok(_) => {
-                collection.update(&data)?;
+                collection.update(data)?;
             }
             Err(_) => {
-                collection.create(&data)?;
+                collection.create(data)?;
             }
         }
 
+        Ok(())
+    }
+
+    pub fn mark_proc_complete(&self, pid: &str, end_time: i64, state: TaskState) -> Result<()> {
+        let collection = self.procs();
+        let mut proc = collection.find(pid)?;
+        proc.end_time = end_time;
+        proc.state = state.into();
+        collection.update(&proc)?;
         Ok(())
     }
 

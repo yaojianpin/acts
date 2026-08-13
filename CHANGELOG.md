@@ -205,3 +205,4 @@
 - feat: add `acts-package-nats` pubsub package
 - feat: modify `execute` of `ActPackage` to async
 - feat: change `ActTask` `run` to async
+- feat: change `cache.upsert` to `cache.upsert_async` to improve performance

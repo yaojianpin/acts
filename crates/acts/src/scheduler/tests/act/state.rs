@@ -340,6 +340,8 @@ async fn sch_act_state_set_process_var() {
         TaskState::Running
     );
     proc.print();
+    engine.runtime().cache().flush();
+
     // test the new var is stored
     let id = utils::Id::new(proc.id(), utils::consts::TASK_ROOT_TID);
     let task_root = engine.runtime().store().tasks().find(&id.id()).unwrap();

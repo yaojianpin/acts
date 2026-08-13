@@ -2,6 +2,6 @@ id: act_test
 ver: 0.1.0
 steps:
   - id: step1
-    acts:
-      - uses: acts.core.irq
-        key: act1
+    uses: acts.core.irq
+    params:
+      key: act1

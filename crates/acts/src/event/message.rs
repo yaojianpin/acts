@@ -138,7 +138,6 @@ impl Message {
         self.inputs.get::<Vars>("options")
     }
 
-    #[cfg(test)]
     pub fn is_params_key(&self, key: &str) -> bool {
         if let Some(params) = self.inputs.get::<Vars>("params")
             && let Some(k) = params.get::<String>("key")

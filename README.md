@@ -18,10 +18,18 @@ Write in Rust, No virtual machine.
 1. bechmark with memory store
 
 ```txt,no_run
-load                    time:   [57.334 µs 61.745 µs 66.755 µs]
-deploy                  time:   [21.323 µs 23.811 µs 26.829 µs]
-start                   time:   [80.320 µs 82.188 µs 84.336 µs]
-act                     time:   [601.40 µs 636.69 µs 674.49 µs]
+load/from_yml           time:   [46.130 µs 46.411 µs 46.666 µs]
+                        thrpt:  [21.429 Kelem/s 21.547 Kelem/s 21.678 Kelem/s]
+deploy/model            time:   [192.09 µs 197.48 µs 204.39 µs]
+                        thrpt:  [4.8927 Kelem/s 5.0639 Kelem/s 5.2059 Kelem/s]
+start/proc              time:   [684.94 µs 794.32 µs 955.33 µs]
+                        thrpt:  [1.0468 Kelem/s 1.2589 Kelem/s 1.4600 Kelem/s]
+act/act                 time:   [2.6184 ms 3.2692 ms 3.6153 ms]
+                        thrpt:  [276.61  elem/s 305.88  elem/s 381.91  elem/s]
+
+store_mixed/proc_crud/1000
+                        time:   [44.543 µs 45.109 µs 46.292 µs]
+                        thrpt:  [21.602 Kelem/s 22.169 Kelem/s 22.450 Kelem/s]
 ```
 
 ### Lightweight

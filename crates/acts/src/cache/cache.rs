@@ -3,6 +3,7 @@ use crate::{
     scheduler::{Process, Runtime, Task},
     store::Store,
 };
+use super::writer::{StoreWriter, WriteOp};
 use moka::sync::Cache as MokaCache;
 use std::sync::Arc;
 use tracing::{debug, instrument};
@@ -12,6 +13,7 @@ pub struct Cache {
     cap: usize,
     procs: MokaCache<String, Arc<Process>>,
     store: Arc<Store>,
+    writer: StoreWriter,
 }
 
 impl std::fmt::Debug for Cache {
@@ -25,10 +27,12 @@ impl std::fmt::Debug for Cache {
 
 impl Cache {
     pub fn new(config: &Config) -> crate::Result<Self> {
+        let store = Arc::new(Store::create(config)?);
         Ok(Self {
             cap: config.cache_cap() as usize,
             procs: MokaCache::new(config.cache_cap() as u64),
-            store: Arc::new(Store::create(config)?),
+            store: store.clone(),
+            writer: StoreWriter::spawn(store),
         })
     }
 
@@ -45,7 +49,9 @@ impl Cache {
         self.procs.entry_count() as usize
     }
 
-    pub fn close(&self) {}
+    pub fn close(&self) {
+        self.flush();
+    }
 
     #[instrument]
     pub fn push_proc(&self, proc: &Arc<Process>) -> Result<()> {
@@ -68,6 +74,7 @@ impl Cache {
         match self.get_proc(pid) {
             Some(proc) => Ok(Some(proc.clone())),
             None => {
+                self.flush();
                 if let Some(proc) = self.store.load_proc(pid, rt)? {
                     debug!("loaded: {:?}", proc);
                     debug!("tasks: {:?}", proc.tasks());
@@ -99,6 +106,7 @@ impl Cache {
         }
         if count < check_point {
             let cap = cap - count;
+            self.flush();
             for ref proc in self.store.load(cap, rt)? {
                 if !self.procs.contains_key(proc.id()) {
                     self.push_proc_pri(proc, false)?;
@@ -136,29 +144,68 @@ impl Cache {
     }
 
     pub(super) fn push_task_pri(&self, task: &Arc<Task>, save: bool) -> Result<()> {
-        let p = task.proc();
         if save {
-            self.store.upsert_task(task)?;
-            // update root task data when updating task
-            if let Some(root) = p.root() {
-                self.store.upsert_task(&root)?;
-            }
-            // update process to store when process state is completed
-            if p.state().is_completed() {
-                let collection = self.store.procs();
-                let mut proc = collection.find(&task.pid)?;
-                proc.end_time = p.end_time();
-                proc.state = p.state().into();
-                collection.update(&proc)?;
-            }
+            self.persist_task(task)?;
+        }
+        self.push_task_mem(task);
+
+        Ok(())
+    }
+
+    #[instrument]
+    pub(crate) fn upsert_async(&self, task: &Arc<Task>) -> Result<()> {
+        self.push_task_mem(task);
+        for op in Self::build_ops(task)? {
+            self.writer.send(op)?;
         }
 
+        Ok(())
+    }
+
+    pub(crate) fn flush(&self) {
+        self.writer.flush();
+    }
+
+    fn persist_task(&self, task: &Arc<Task>) -> Result<()> {
+        let p = task.proc();
+        self.store.upsert_task(task)?;
+        // update root task data when updating task
+        if let Some(root) = p.root() {
+            self.store.upsert_task(&root)?;
+        }
+        // update process to store when process state is completed
+        if p.state().is_completed() {
+            self.store
+                .mark_proc_complete(&task.pid, p.end_time(), p.state())?;
+        }
+
+        Ok(())
+    }
+
+    fn push_task_mem(&self, task: &Arc<Task>) {
+        let p = task.proc();
         if let Some(proc) = self.procs.get(&task.pid) {
             proc.set_pure_state(p.state());
             proc.set_end_time(p.end_time());
             proc.push_task(task.clone());
         }
+    }
 
-        Ok(())
+    fn build_ops(task: &Arc<Task>) -> Result<Vec<WriteOp>> {
+        let p = task.proc();
+        let mut ops = Vec::with_capacity(3);
+        ops.push(WriteOp::Task(task.into_data()?));
+        if let Some(root) = p.root() {
+            ops.push(WriteOp::Task(root.into_data()?));
+        }
+        if p.state().is_completed() {
+            ops.push(WriteOp::ProcComplete {
+                pid: task.pid.clone(),
+                end_time: p.end_time(),
+                state: p.state(),
+            });
+        }
+
+        Ok(ops)
     }
 }
