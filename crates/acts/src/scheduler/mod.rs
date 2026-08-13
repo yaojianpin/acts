@@ -58,7 +58,7 @@ pub trait ActTask: Clone + Send {
         Ok(())
     }
 
-    fn run(&self, _ctx: &Context) -> Result<()> {
+    async fn run(&self, _ctx: &Context) -> Result<()> {
         Ok(())
     }
 

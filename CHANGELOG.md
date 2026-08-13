@@ -204,3 +204,4 @@
 - feat: `console.log` supports multiple parameters
 - feat: add `acts-package-nats` pubsub package
 - feat: modify `execute` of `ActPackage` to async
+- feat: change `ActTask` `run` to async

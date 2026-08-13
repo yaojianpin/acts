@@ -45,7 +45,7 @@ impl ActTask for Branch {
         Ok(())
     }
 
-    fn run(&self, ctx: &Context) -> Result<()> {
+    async fn run(&self, ctx: &Context) -> Result<()> {
         if let Some(script) = &self.run {
             ctx.eval::<()>(script)?;
         }

@@ -199,7 +199,7 @@ impl Runtime {
                     Ok(data) => match data {
                         QueueData::Task(task) => {
                             let ctx = &task.create_context();
-                            if let Err(err) = task.exec(ctx) {
+                            if let Err(err) = task.exec(ctx).await {
                                 eprintln!("runtime task.exec error: {}", err);
                                 task.set_err(&err.clone().into());
                                 ctx.set_task(&task);

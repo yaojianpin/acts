@@ -18,7 +18,7 @@ impl ActTask for Step {
         Ok(())
     }
 
-    fn run(&self, ctx: &Context) -> Result<()> {
+    async fn run(&self, ctx: &Context) -> Result<()> {
         let task = ctx.task();
         if let Some(uses) = &self.uses {
             ctx.dispatch_act(

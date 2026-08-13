@@ -27,7 +27,7 @@ impl ActTask for Act {
         Ok(())
     }
 
-    fn run(&self, ctx: &Context) -> Result<()> {
+    async fn run(&self, ctx: &Context) -> Result<()> {
         let task = ctx.task();
         task.set_emit(true);
         let package = ctx.runtime.store().packages().find(&self.uses)?;
@@ -57,9 +57,7 @@ impl ActTask for Act {
                         package.id
                     )))?;
                 let package = (register.create)(ctx.runtime.config())?;
-                if let Some(vars) =
-                    crate::utils::sync::block_on(package.execute(ctx, &ctx.task().params()))?
-                {
+                if let Some(vars) = package.execute(ctx, &ctx.task().params()).await? {
                     task.update_data(&vars);
                 };
             }

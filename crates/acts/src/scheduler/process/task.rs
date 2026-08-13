@@ -446,7 +446,7 @@ impl Task {
         }
     }
 
-    pub fn exec(self: &Arc<Self>, ctx: &Context) -> Result<()> {
+    pub async fn exec(self: &Arc<Self>, ctx: &Context) -> Result<()> {
         // let _lock = self.sync.lock().unwrap();
         debug!("exec task={:?}", ctx.task());
         if self.state().is_completed() {
@@ -456,7 +456,7 @@ impl Task {
             )));
         }
         self.init(ctx)?;
-        self.run(ctx)?;
+        self.run(ctx).await?;
         self.next(ctx)?;
         Ok(())
     }
@@ -720,7 +720,7 @@ impl Task {
         if self.is_ready() {
             self.set_state(TaskState::Running);
             ctx.runtime.emitter().emit_task_event(self)?;
-            self.exec(ctx)?;
+            self.exec(ctx).await?;
         }
 
         Ok(())
@@ -835,7 +835,7 @@ impl Task {
                     // resume task
                     task.set_state(TaskState::Ready);
                     self.runtime.emitter().emit_task_event(task)?;
-                    task.exec(ctx)?;
+                    utils::sync::block_on(task.exec(ctx))?;
                 }
                 if task.state().is_completed() {
                     count += 1;
@@ -893,7 +893,7 @@ impl Task {
                     // resume task
                     task.set_state(TaskState::Ready);
                     self.runtime.emitter().emit_task_event(task)?;
-                    task.exec(ctx)?;
+                    utils::sync::block_on(task.exec(ctx))?;
                 }
                 if task.state().is_completed() {
                     count += 1;
@@ -953,15 +953,15 @@ impl ActTask for Arc<Task> {
         Ok(())
     }
 
-    fn run(&self, ctx: &Context) -> Result<()> {
+    async fn run(&self, ctx: &Context) -> Result<()> {
         let task = ctx.task();
         if task.state().is_ready() {
             task.set_state(TaskState::Running);
             match &self.node.content {
-                NodeContent::Workflow(workflow) => workflow.run(ctx),
-                NodeContent::Branch(branch) => branch.run(ctx),
-                NodeContent::Step(step) => step.run(ctx),
-                NodeContent::Act(act) => act.run(ctx),
+                NodeContent::Workflow(workflow) => workflow.run(ctx).await,
+                NodeContent::Branch(branch) => branch.run(ctx).await,
+                NodeContent::Step(step) => step.run(ctx).await,
+                NodeContent::Act(act) => act.run(ctx).await,
             }?;
 
             ctx.emit_task(&ctx.task())?;
