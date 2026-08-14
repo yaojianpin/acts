@@ -17,7 +17,7 @@ impl ActTask for Workflow {
         Ok(())
     }
 
-    fn next(&self, ctx: &Context) -> Result<NextAction> {
+    async fn next(&self, ctx: &Context) -> Result<NextAction> {
         let task = ctx.task();
 
         if task.children().iter().all(|t| t.state().is_completed()) && task.state().is_running() {

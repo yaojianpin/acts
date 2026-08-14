@@ -1176,6 +1176,7 @@ async fn sch_message_complete_message_in_store() {
         });
     e2.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
+    e2.runtime().cache().flush();
     let message = e2.runtime().cache().store().messages().find(&ret).unwrap();
     assert_eq!(message.r#type, "act");
     assert_eq!(message.uses.unwrap_or_default(), "acts.core.irq");

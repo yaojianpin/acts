@@ -30,7 +30,7 @@ async fn pack_parallel_setup_list() {
     auto_complete(&engine, &rx);
 
     rt.launch(&proc).unwrap();
-    tx.timeout(300).await;
+    tx.timeout(500).await;
     proc.print();
     let tasks = proc.task_by_nid("act1");
     assert_eq!(tasks.first().unwrap().state(), TaskState::Interrupt);

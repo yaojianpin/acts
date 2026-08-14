@@ -319,20 +319,20 @@ async fn pack_action_error_on_step_with_inputs() {
 
     rt.launch(&proc).unwrap();
     tx.recv().await;
+
+    // async `next` propagates the error data after the error event fires;
+    // wait until the value lands on the step task before asserting.
+    let step_task = proc.task_by_nid("step1").first().unwrap().clone();
+    for _ in 0..100 {
+        if step_task.data().get::<i32>("a").is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+
     proc.print();
-    assert_eq!(
-        proc.task_by_nid("step1").first().unwrap().state(),
-        TaskState::Error
-    );
-    assert_eq!(
-        proc.task_by_nid("step1")
-            .first()
-            .unwrap()
-            .data()
-            .get::<i32>("a")
-            .unwrap(),
-        5
-    );
+    assert_eq!(step_task.state(), TaskState::Error);
+    assert_eq!(step_task.data().get::<i32>("a").unwrap(), 5);
 }
 
 #[serial]

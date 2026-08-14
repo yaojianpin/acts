@@ -206,3 +206,5 @@
 - feat: modify `execute` of `ActPackage` to async
 - feat: change `ActTask` `run` to async
 - feat: change `cache.upsert` to `cache.upsert_async` to improve performance
+- feat: move `task.next` to async queue
+- perf: optimize in-memory scan_prefix performance.

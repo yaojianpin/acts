@@ -1,17 +1,18 @@
 use crate::Result;
-use dashmap::DashMap;
+use std::collections::BTreeMap;
+use std::sync::RwLock;
 
 use crate::store::{KvStore, ScanOperation, ScanOptions};
 
 #[derive(Debug)]
 pub struct MemoryStore {
-    data: DashMap<String, Vec<u8>>,
+    data: RwLock<BTreeMap<String, Vec<u8>>>,
 }
 
 impl MemoryStore {
     pub fn new() -> Self {
         Self {
-            data: DashMap::new(),
+            data: RwLock::new(BTreeMap::new()),
         }
     }
 }
@@ -55,16 +56,16 @@ fn key_matches(k: &str, key: &str, prefix: &str, op: &ScanOperation) -> bool {
 
 impl KvStore for MemoryStore {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        Ok(self.data.get(key).map(|v| v.clone()))
+        Ok(self.data.read().unwrap().get(key).map(|v| v.clone()))
     }
 
     fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
-        self.data.insert(key.to_string(), value);
+        self.data.write().unwrap().insert(key.to_string(), value);
         Ok(())
     }
 
     fn delete(&self, key: &str) -> Result<()> {
-        self.data.remove(key);
+        self.data.write().unwrap().remove(key);
         Ok(())
     }
 
@@ -74,11 +75,12 @@ impl KvStore for MemoryStore {
             op,
             ref prefix,
         } = options;
-        let mut entries: Vec<(String, Vec<u8>)> = self
-            .data
-            .iter()
-            .filter(|entry| key_matches(entry.key(), key, prefix, &op))
-            .map(|entry| (entry.key().clone(), entry.value().clone()))
+        let map = self.data.read().unwrap();
+        let mut entries: Vec<(String, Vec<u8>)> = map
+            .range(prefix.clone()..)
+            .take_while(|(k, _)| k.starts_with(prefix.as_str()))
+            .filter(|(k, _)| key_matches(k, key, prefix, &op))
+            .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
         if is_rev {
             entries.reverse();

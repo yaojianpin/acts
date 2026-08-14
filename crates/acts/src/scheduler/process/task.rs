@@ -372,8 +372,12 @@ impl Task {
             if self.id == TASK_ROOT_TID {
                 self.proc().set_state(state.clone());
             }
-        } else if state.is_created() {
-            self.set_start_time(utils::time::time_millis());
+        } else {
+            // re-entering a non-terminal state: reset the propagation guard
+            self.remove_sign(Sign::PROPAGATED);
+            if state.is_created() {
+                self.set_start_time(utils::time::time_millis());
+            }
         }
         *self.state.write().unwrap() = state.clone();
 
@@ -457,7 +461,7 @@ impl Task {
         }
         self.init(ctx)?;
         self.run(ctx).await?;
-        self.next(ctx)?;
+        self.next(ctx).await?;
         Ok(())
     }
 
@@ -494,12 +498,16 @@ impl Task {
             }
             EventAction::Remove => {
                 self.set_state(TaskState::Removed);
-                self.next(ctx)?;
+                self.set_sign(Sign::NEXT_PENDING);
+                ctx.emit_task(self)?;
+                ctx.push_next()?;
             }
             EventAction::Submit => {
                 self.update_data(&ctx.vars());
                 self.set_state(TaskState::Submitted);
-                self.next(ctx)?;
+                self.set_sign(Sign::NEXT_PENDING);
+                ctx.emit_task(self)?;
+                ctx.push_next()?;
             }
             EventAction::Next => {
                 if self.state().is_completed() {
@@ -510,7 +518,9 @@ impl Task {
                 }
                 self.update_data(&ctx.vars());
                 self.set_state(TaskState::Completed);
-                self.next(ctx)?;
+                self.set_sign(Sign::NEXT_PENDING);
+                ctx.emit_task(self)?;
+                ctx.push_next()?;
             }
             EventAction::Back => {
                 if self.state().is_completed() {
@@ -612,7 +622,9 @@ impl Task {
 
                 // set both current act and parent step to skip
                 self.set_state(TaskState::Skipped);
-                self.next(ctx)?;
+                self.set_sign(Sign::NEXT_PENDING);
+                ctx.emit_task(self)?;
+                ctx.push_next()?;
             }
             EventAction::Error => {
                 let ecode = ctx
@@ -666,8 +678,8 @@ impl Task {
         };
 
         if action.event != EventAction::Push {
-            // update the message status after doing action
-            ctx.runtime.cache().store().set_message_with(
+            // update the message status after doing action (deferred to writer thread)
+            ctx.runtime.cache().upsert_message_status(
                 &action.pid,
                 &action.tid,
                 MessageStatus::Completed,
@@ -928,6 +940,10 @@ impl Task {
                     self.set_state(TaskState::Completed);
                 }
             }
+
+            if self.state().is_completed() {
+                ctx.emit_task(self)?;
+            }
         }
 
         // continue to run next
@@ -970,9 +986,14 @@ impl ActTask for Arc<Task> {
         Ok(())
     }
 
-    fn next(&self, ctx: &Context) -> Result<NextAction> {
+    async fn next(&self, ctx: &Context) -> Result<NextAction> {
         ctx.set_task(self);
         let task = ctx.task();
+
+        // idempotent replay guard: skip if this task already propagated
+        if self.is_sign(Sign::PROPAGATED) {
+            return Ok(NextAction::Continue);
+        }
 
         // 1. check uses action completed
         let mut next_action = task.check_uses_action(ctx)?;
@@ -990,10 +1011,10 @@ impl ActTask for Arc<Task> {
         // 4. schedule next task
         if next_action.is_continue() && task.is_next() {
             next_action = match &self.node.content {
-                NodeContent::Workflow(data) => data.next(ctx)?,
-                NodeContent::Step(data) => data.next(ctx)?,
-                NodeContent::Branch(data) => data.next(ctx)?,
-                NodeContent::Act(data) => data.next(ctx)?,
+                NodeContent::Workflow(data) => data.next(ctx).await?,
+                NodeContent::Step(data) => data.next(ctx).await?,
+                NodeContent::Branch(data) => data.next(ctx).await?,
+                NodeContent::Act(data) => data.next(ctx).await?,
             };
         }
 
@@ -1005,7 +1026,8 @@ impl ActTask for Arc<Task> {
         );
 
         if task.state().is_completed() {
-            ctx.emit_task(self)?;
+            // terminal + emitted → propagation complete, mark idempotent
+            self.set_sign(Sign::PROPAGATED);
         }
 
         // 5. move to parent and continue
@@ -1015,7 +1037,7 @@ impl ActTask for Arc<Task> {
                 let outputs = task.outputs();
                 // Update the parent task's data with current task's outputs
                 p.update_data(&outputs);
-                return p.next(ctx);
+                return Box::pin(p.next(ctx)).await;
             }
         }
 

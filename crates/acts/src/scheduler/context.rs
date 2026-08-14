@@ -476,4 +476,9 @@ impl Context {
         self.runtime.emitter().emit_message(&msg);
         Ok(())
     }
+
+    pub fn push_next(&self) -> Result<()> {
+        self.runtime.queue().send_next(&self.task())?;
+        Ok(())
+    }
 }

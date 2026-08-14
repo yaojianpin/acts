@@ -12,6 +12,7 @@ pub struct Queue {
 #[derive(Debug)]
 pub enum QueueData {
     Task(Arc<Task>),
+    Next(Arc<Task>),
     Abort,
 }
 
@@ -34,12 +35,16 @@ impl Queue {
     }
 
     pub(crate) fn send(&self, task: &Arc<Task>) -> Result<()> {
-        let sender = self.sender.clone();
-        let task = task.clone();
-        sender
+        self.sender
             .send(QueueData::Task(task.clone()))
             .map_err(|err| ActError::Runtime(err.to_string()))?;
+        Ok(())
+    }
 
+    pub(crate) fn send_next(&self, task: &Arc<Task>) -> Result<()> {
+        self.sender
+            .send(QueueData::Next(task.clone()))
+            .map_err(|err| ActError::Runtime(err.to_string()))?;
         Ok(())
     }
 

@@ -1,7 +1,7 @@
 use tokio::{runtime::Handle, time};
 use tracing::{debug, error};
 
-use super::{Process, Task, TaskState};
+use super::{ActTask, Process, Sign, Task, TaskState};
 use crate::{
     ActError, Action, Config, Error, Package, Result, ShareLock, Vars, Workflow,
     cache::Cache,
@@ -175,6 +175,23 @@ impl Runtime {
         }
     }
 
+    /// Replay tasks whose `next` propagation was enqueued (`Sign::NEXT_PENDING`)
+    /// but never executed (e.g. the engine crashed before the queued `next`
+    /// ran). Re-enqueueing is idempotent: `next` clears the marker once run.
+    pub fn recover_actions(self: &Arc<Self>) -> Result<()> {
+        let pending = self.cache.store().load_pending_next_tasks()?;
+        for (pid, tid) in pending {
+            if let Some(proc) = self.cache.proc(&pid, self)? {
+                if let Some(task) = proc.task(&tid) {
+                    if task.is_sign(Sign::NEXT_PENDING) {
+                        self.queue.send_next(&task)?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
     #[cfg(test)]
     pub fn do_action2(
         self: &Arc<Self>,
@@ -202,6 +219,16 @@ impl Runtime {
                             let ctx = &task.create_context();
                             if let Err(err) = task.exec(ctx).await {
                                 eprintln!("runtime task.exec error: {}", err);
+                                task.set_err(&err.clone().into());
+                                ctx.set_task(&task);
+                                ctx.emit_error().ok();
+                            }
+                        }
+                        QueueData::Next(task) => {
+                            let ctx = &task.create_context();
+                            let result = task.next(ctx).await;
+                            if let Err(err) = result {
+                                eprintln!("runtime task.next error: {}", err);
                                 task.set_err(&err.clone().into());
                                 ctx.set_task(&task);
                                 ctx.emit_error().ok();
@@ -372,6 +399,9 @@ impl Runtime {
                 }
             });
         }
+
+        // recover durable actions that were not yet fully processed (crash replay)
+        self.recover_actions()?;
 
         Ok(())
     }

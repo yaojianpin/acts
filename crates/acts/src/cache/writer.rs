@@ -2,14 +2,17 @@ use std::sync::{Arc, mpsc};
 
 use tracing::error;
 
-use crate::{ActError, Result, data, scheduler::TaskState, store::Store};
+use crate::{ActError, Result, data::MessageStatus, scheduler::Task, store::Store};
 
 pub(crate) enum WriteOp {
-    Task(data::Task),
-    ProcComplete {
+    /// Persist a task, its root task, and mark the process complete when needed.
+    /// Serialization happens on the writer thread, off the caller's hot path.
+    Task(Arc<Task>),
+    /// Deferred message status update (marks a task's message as completed).
+    MessageStatus {
         pid: String,
-        end_time: i64,
-        state: TaskState,
+        tid: String,
+        status: MessageStatus,
     },
     Barrier(mpsc::SyncSender<()>),
 }
@@ -50,16 +53,30 @@ impl StoreWriter {
 
     fn apply(store: &Store, op: WriteOp) -> Result<()> {
         match op {
-            WriteOp::Task(data) => store.upsert_task_data(&data),
-            WriteOp::ProcComplete {
-                pid,
-                end_time,
-                state,
-            } => store.mark_proc_complete(&pid, end_time, state),
+            WriteOp::Task(task) => Self::apply_task(store, &task),
+            WriteOp::MessageStatus { pid, tid, status } => {
+                store.set_message_with(&pid, &tid, status)?;
+                Ok(())
+            }
             WriteOp::Barrier(tx) => {
                 let _ = tx.send(());
                 Ok(())
             }
         }
+    }
+
+    fn apply_task(store: &Store, task: &Arc<Task>) -> Result<()> {
+        store.upsert_task(task)?;
+        if let Some(root) = task.proc().root() {
+            store.upsert_task(&root)?;
+        }
+        if task.proc().state().is_completed() {
+            store.mark_proc_complete(
+                &task.pid,
+                task.proc().end_time(),
+                task.proc().state(),
+            )?;
+        }
+        Ok(())
     }
 }

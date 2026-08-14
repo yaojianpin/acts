@@ -1,9 +1,10 @@
 use crate::event::EventAction;
-use crate::{Vars, utils};
+use crate::Vars;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Action {
+    pub id: String,
     pub pid: String,
     pub tid: String,
     pub event: EventAction,
@@ -13,14 +14,11 @@ pub struct Action {
 impl Action {
     pub fn new(pid: &str, tid: &str, event: EventAction, options: Vars) -> Self {
         Self {
+            id: String::new(),
             pid: pid.to_string(),
             tid: tid.to_string(),
             event,
             options,
         }
-    }
-
-    pub fn id(&self) -> String {
-        utils::Id::new(&self.pid, &self.tid).id()
     }
 }

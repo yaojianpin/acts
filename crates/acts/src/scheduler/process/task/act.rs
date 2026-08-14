@@ -66,7 +66,7 @@ impl ActTask for Act {
         Ok(())
     }
 
-    fn next(&self, ctx: &Context) -> Result<NextAction> {
+    async fn next(&self, ctx: &Context) -> Result<NextAction> {
         let task = ctx.task();
 
         if task.state().is_interrupted() {

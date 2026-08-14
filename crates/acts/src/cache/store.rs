@@ -1,29 +1,35 @@
 use crate::{
-    ActError, Error, Message, Result, Workflow,
+    ActError, Error, Message, Result, Vars, Workflow,
     data::{self, MessageStatus},
     scheduler::{self, Node, Runtime, TaskState},
     store::{Store, query::*},
     utils,
 };
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 use tracing::debug;
 
 impl Store {
-    pub fn load(&self, cap: usize, rt: &Arc<Runtime>) -> Result<Vec<Arc<scheduler::Process>>> {
+    pub fn load(
+        &self,
+        cap: usize,
+        rt: &Arc<Runtime>,
+        skip: &HashSet<String>,
+    ) -> Result<Vec<Arc<scheduler::Process>>> {
         debug!("load cap={}", cap);
         let mut ret = Vec::new();
         if cap > 0 {
-            let query = Query::new()
-                .filter(
-                    Filter::or()
-                        .expr(Expr::eq("state", TaskState::None.to_string()))
-                        .expr(Expr::eq("state", TaskState::Ready.to_string()))
-                        .expr(Expr::eq("state", TaskState::Running.to_string()))
-                        .expr(Expr::eq("state", TaskState::Pending.to_string())),
-                )
-                .limit(cap);
+            let query = Query::new().filter(
+                Filter::or()
+                    .expr(Expr::eq("state", TaskState::None.to_string()))
+                    .expr(Expr::eq("state", TaskState::Ready.to_string()))
+                    .expr(Expr::eq("state", TaskState::Running.to_string()))
+                    .expr(Expr::eq("state", TaskState::Pending.to_string())),
+            );
             let procs = self.procs().query(&query)?;
             for p in procs.rows {
+                if skip.contains(&p.id) {
+                    continue;
+                }
                 let model = Workflow::from_json(&p.model)?;
                 let env_local: serde_json::Value =
                     serde_json::from_str(&p.env).map_err(|err| ActError::Store(err.to_string()))?;
@@ -43,6 +49,9 @@ impl Store {
 
                 self.load_tasks(&proc, rt)?;
                 ret.push(proc);
+                if ret.len() >= cap {
+                    break;
+                }
             }
         }
 
@@ -88,6 +97,23 @@ impl Store {
         }
         self.procs().delete(pid)?;
         Ok(true)
+    }
+
+    /// Returns the `(pid, tid)` of tasks whose `next` execution was enqueued
+    /// (`Sign::NEXT_PENDING`) but not yet run — used for crash replay.
+    pub fn load_pending_next_tasks(&self) -> Result<Vec<(String, String)>> {
+        let tasks = self.tasks().query(&Query::new())?;
+        let mut ret = Vec::new();
+        for t in tasks.rows {
+            let data: Vars =
+                serde_json::from_str(&t.data).map_err(|err| ActError::Store(err.to_string()))?;
+            if let Some(sign) = data.get::<scheduler::Sign>(utils::consts::TASK_SIGN) {
+                if (sign & scheduler::Sign::NEXT_PENDING) == scheduler::Sign::NEXT_PENDING {
+                    ret.push((t.pid, t.tid));
+                }
+            }
+        }
+        Ok(ret)
     }
 
     pub fn set_message(&self, id: &str, status: MessageStatus) -> Result<()> {

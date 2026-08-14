@@ -50,6 +50,12 @@ bitflags! {
 
         /// uses action completed
         const USES_COMPLETE  = 0b0000_0000_0100_0000;
+
+        /// task `next` propagation completed (idempotent replay guard)
+        const PROPAGATED  = 0b0000_0000_1000_0000;
+
+        /// task `next` execution is queued but not yet run (crash replay guard)
+        const NEXT_PENDING  = 0b0000_0001_0000_0000;
     }
 }
 
@@ -62,7 +68,7 @@ pub trait ActTask: Clone + Send {
         Ok(())
     }
 
-    fn next(&self, _ctx: &Context) -> Result<NextAction> {
+    async fn next(&self, _ctx: &Context) -> Result<NextAction> {
         Ok(NextAction::Parent)
     }
 
