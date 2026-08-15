@@ -209,3 +209,4 @@
 - perf: move `task.next` to async queue
 - perf: optimize in-memory scan_prefix performance.
 - perf: optimize `convert::get_expr` and `convert::get_exprs` to improve `fill_params` performance
+- perf: optimize list iter and add shutdown token to runtime

@@ -56,7 +56,7 @@ fn key_matches(k: &str, key: &str, prefix: &str, op: &ScanOperation) -> bool {
 
 impl KvStore for MemoryStore {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        Ok(self.data.read().unwrap().get(key).map(|v| v.clone()))
+        Ok(self.data.read().unwrap().get(key).cloned())
     }
 
     fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {

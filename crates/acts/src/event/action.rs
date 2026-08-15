@@ -1,5 +1,5 @@
-use crate::event::EventAction;
 use crate::Vars;
+use crate::event::EventAction;
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

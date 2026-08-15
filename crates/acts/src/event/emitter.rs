@@ -12,13 +12,14 @@ use tracing::debug;
 use super::TaskExtra;
 
 macro_rules! dispatch_key_event {
-    ($fn:ident, $event_name:ident, $(&$item:ident), +) => {
+    ($fn:ident, $event_name:ident, $item:ident) => {
         let handlers = $fn.$event_name.read().unwrap();
         for (_, handle) in handlers.iter() {
             let handle = handle.clone();
-            let ($($item,)+) = ($($item.clone(),)+);
+            let item = $item.clone();
             tokio::spawn(async move {
-                (handle)($(&$item),+);
+                let event = Event::from_inner(item);
+                (handle)(&event);
             });
         }
     };
@@ -145,26 +146,22 @@ impl Emitter {
 
     pub fn emit_start_event(&self, state: &Message) {
         debug!("emit_start_event: {:?}", state);
-        let e = Event::new(state);
-        dispatch_key_event!(self, starts, &e);
+        dispatch_key_event!(self, starts, state);
     }
 
     pub fn emit_complete_event(&self, state: &Message) {
         debug!("emit_complete_event: {:?}", state);
-        let e = Event::new(state);
-        dispatch_key_event!(self, completes, &e);
+        dispatch_key_event!(self, completes, state);
     }
 
     pub fn emit_message(&self, msg: &Message) {
         debug!("emit_message: {:?}", msg);
-        let e = Event::new(msg);
-        dispatch_key_event!(self, messages, &e);
+        dispatch_key_event!(self, messages, msg);
     }
 
     pub fn emit_error(&self, state: &Message) {
         debug!("emit_error: {:?}", state);
-        let e = Event::new(state);
-        dispatch_key_event!(self, errors, &e);
+        dispatch_key_event!(self, errors, state);
     }
 
     pub fn remove(&self, key: &str) {
@@ -187,5 +184,14 @@ impl Emitter {
         if messages.contains_key(key) {
             messages.remove(key);
         }
+    }
+
+    pub(crate) fn close(&self) {
+        self.messages.write().unwrap().clear();
+        self.starts.write().unwrap().clear();
+        self.completes.write().unwrap().clear();
+        self.errors.write().unwrap().clear();
+        self.procs.write().unwrap().clear();
+        self.tasks.write().unwrap().clear();
     }
 }

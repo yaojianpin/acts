@@ -86,7 +86,7 @@ impl Workflow {
     }
 
     pub fn set_vars(&mut self, vars: &Vars) {
-        for (ref name, value) in vars {
+        for (name, value) in vars.iter() {
             self.vars.push(Variant::create(name, value.clone()));
         }
     }

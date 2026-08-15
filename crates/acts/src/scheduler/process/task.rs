@@ -1113,7 +1113,7 @@ impl Task {
 
     pub fn set_data(&self, vars: &Vars) {
         let mut data = self.data.write().unwrap();
-        for (ref name, value) in vars {
+        for (name, value) in vars.iter() {
             data.set(name, value);
         }
     }
@@ -1182,7 +1182,7 @@ impl Task {
             parent = task.parent();
         }
 
-        for (ref name, ref value) in vars {
+        for (name, value) in vars.iter() {
             // skip private keys
             if consts::is_private_key(name) {
                 continue;

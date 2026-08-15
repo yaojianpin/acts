@@ -107,10 +107,10 @@ impl Store {
         for t in tasks.rows {
             let data: Vars =
                 serde_json::from_str(&t.data).map_err(|err| ActError::Store(err.to_string()))?;
-            if let Some(sign) = data.get::<scheduler::Sign>(utils::consts::TASK_SIGN) {
-                if (sign & scheduler::Sign::NEXT_PENDING) == scheduler::Sign::NEXT_PENDING {
-                    ret.push((t.pid, t.tid));
-                }
+            if let Some(sign) = data.get::<scheduler::Sign>(utils::consts::TASK_SIGN)
+                && (sign & scheduler::Sign::NEXT_PENDING) == scheduler::Sign::NEXT_PENDING
+            {
+                ret.push((t.pid, t.tid));
             }
         }
         Ok(ret)

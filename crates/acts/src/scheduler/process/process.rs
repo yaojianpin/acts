@@ -359,9 +359,13 @@ impl Process {
         let interval_ms = 800u64;
 
         let tick_proc = proc.clone();
+        let shutdown = self.runtime.shutdown_token();
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    _ = tokio::time::sleep(Duration::from_millis(interval_ms)) => {}
+                }
                 if !tick_proc.state().is_running() {
                     break;
                 }

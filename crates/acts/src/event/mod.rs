@@ -75,9 +75,13 @@ where
         &self.inner
     }
     pub fn new(inner: &T) -> Self {
+        Self::from_inner(inner.clone())
+    }
+
+    pub fn from_inner(inner: T) -> Self {
         Self {
             extra: E::default(),
-            inner: inner.clone(),
+            inner,
         }
     }
 

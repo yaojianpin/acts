@@ -135,7 +135,12 @@ fn act(c: &mut Criterion) {
                 }
                 sig.recv().await;
 
-                let tasks = tasks.lock().unwrap();
+                let tasks = {
+                    let guard = tasks.lock().unwrap();
+                    guard.clone()
+                };
+
+                chan.close();
 
                 // Only time the act().complete() calls
                 let bench_start = std::time::Instant::now();
@@ -146,7 +151,9 @@ fn act(c: &mut Criterion) {
                         .complete(pid, tid, Vars::new())
                         .unwrap();
                 }
-                bench_start.elapsed()
+                let elapsed = bench_start.elapsed();
+                engine.close();
+                elapsed
             }
         })
     });

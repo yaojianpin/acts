@@ -1,6 +1,3 @@
-use tokio::{runtime::Handle, time};
-use tracing::{debug, error};
-
 use super::{ActTask, Process, Sign, Task, TaskState};
 use crate::{
     ActError, Action, Config, Error, Package, Result, ShareLock, Vars, Workflow,
@@ -18,6 +15,9 @@ use std::{
     sync::{Arc, RwLock},
     time::Duration,
 };
+use tokio::{runtime::Handle, time};
+use tokio_util::sync::CancellationToken;
+use tracing::{debug, error};
 
 #[derive(Clone)]
 pub struct Runtime {
@@ -27,6 +27,7 @@ pub struct Runtime {
     cache: Arc<Cache>,
     emitter: Arc<Emitter>,
     package: Arc<Package>,
+    shutdown: CancellationToken,
     pub(crate) resolvers: ShareLock<HashMap<String, Arc<dyn ConfigResolver>>>,
 }
 
@@ -93,8 +94,14 @@ impl Runtime {
     }
 
     pub fn close(&self) {
+        self.shutdown.cancel();
         self.queue.abort();
         self.cache.close();
+        self.emitter.close();
+    }
+
+    pub(crate) fn shutdown_token(&self) -> CancellationToken {
+        self.shutdown.clone()
     }
 
     pub fn start(self: &Arc<Self>, model: &Workflow, options: Vars) -> Result<Arc<Process>> {
@@ -181,12 +188,11 @@ impl Runtime {
     pub fn recover_actions(self: &Arc<Self>) -> Result<()> {
         let pending = self.cache.store().load_pending_next_tasks()?;
         for (pid, tid) in pending {
-            if let Some(proc) = self.cache.proc(&pid, self)? {
-                if let Some(task) = proc.task(&tid) {
-                    if task.is_sign(Sign::NEXT_PENDING) {
-                        self.queue.send_next(&task)?;
-                    }
-                }
+            if let Some(proc) = self.cache.proc(&pid, self)?
+                && let Some(task) = proc.task(&tid)
+                && task.is_sign(Sign::NEXT_PENDING)
+            {
+                self.queue.send_next(&task)?;
             }
         }
         Ok(())
@@ -211,9 +217,14 @@ impl Runtime {
 
     pub fn event_loop(self: &Arc<Self>) {
         let queue = self.queue.clone();
+        let shutdown = self.shutdown.clone();
         tokio::spawn(async move {
             loop {
-                match queue.next().await {
+                let next = tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    next = queue.next() => next,
+                };
+                match next {
                     Ok(data) => match data {
                         QueueData::Task(task) => {
                             let ctx = &task.create_context();
@@ -254,6 +265,7 @@ impl Runtime {
         let emitter = Arc::new(Emitter::new());
         let package = Arc::new(Package::new());
         let queue = Queue::new();
+        let shutdown = CancellationToken::new();
         let resolvers = Arc::new(RwLock::new(HashMap::new()));
         let runtime = Arc::new(Runtime {
             config: Arc::new(config.clone()),
@@ -263,6 +275,7 @@ impl Runtime {
             env,
             cache,
             package,
+            shutdown,
             resolvers,
         });
 
@@ -383,10 +396,14 @@ impl Runtime {
 
             let evt = self.emitter().clone();
             let cache = self.cache.clone();
+            let shutdown = self.shutdown.clone();
             Handle::current().spawn(async move {
                 let mut intv = time::interval(Duration::from_millis(interval_ms));
                 loop {
-                    intv.tick().await;
+                    tokio::select! {
+                        _= shutdown.cancelled() => break,
+                        _ = intv.tick() => {}
+                    }
                     let _ = cache.store().with_no_response_messages(
                         interval_ms as i64,
                         max_message_retry_times,

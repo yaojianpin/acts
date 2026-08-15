@@ -67,7 +67,7 @@ pub fn fill_params(params: &JsonValue, ctx: &Context) -> JsonValue {
 ///    or insert the input itself
 pub fn fill_inputs(inputs: &Vars, ctx: &Context) -> Vars {
     let mut ret = Vars::new();
-    for (k, ref v) in inputs {
+    for (k, v) in inputs.iter() {
         if let JsonValue::String(value) = v {
             if let Some(expr) = get_expr(value) {
                 let result = Context::scope(ctx.clone(), move || {
@@ -80,14 +80,14 @@ pub fn fill_inputs(inputs: &Vars, ctx: &Context) -> Vars {
                 });
 
                 // satisfies the rule 1
-                ret.insert(k.to_string(), new_value);
+                ret.insert(k.clone(), new_value);
                 continue;
             }
         } else if let JsonValue::Object(obj) = v {
-            ret.insert(k.to_string(), fill_inputs(&obj.clone().into(), ctx).into());
+            ret.insert(k.clone(), fill_inputs(&obj.clone().into(), ctx).into());
             continue;
         }
-        ret.insert(k.to_string(), v.clone());
+        ret.insert(k.clone(), v.clone());
     }
 
     ret
@@ -99,7 +99,7 @@ pub fn fill_inputs(inputs: &Vars, ctx: &Context) -> Vars {
 pub fn fill_outputs(outputs: &Vars, ctx: &Context) -> Vars {
     // println!("fill_outputs: outputs={outputs}");
     let mut ret = Vars::new();
-    for (ref k, ref v) in outputs {
+    for (k, v) in outputs.iter() {
         if let JsonValue::String(string) = v
             && let Some(expr) = get_expr(string)
         {
@@ -112,7 +112,7 @@ pub fn fill_outputs(outputs: &Vars, ctx: &Context) -> Vars {
             });
 
             // satisfies the rule 1
-            ret.insert(k.to_string(), new_value);
+            ret.insert(k.clone(), new_value);
             continue;
         }
 
@@ -120,12 +120,12 @@ pub fn fill_outputs(outputs: &Vars, ctx: &Context) -> Vars {
         if v.is_null() {
             // the env value
             match ctx.task().find(k) {
-                Some(v) => ret.insert(k.to_string(), v),
-                None => ret.insert(k.to_string(), v.clone()),
+                Some(v) => ret.insert(k.clone(), v),
+                None => ret.insert(k.clone(), v.clone()),
             };
         } else {
             // insert the orign value
-            ret.insert(k.to_string(), v.clone());
+            ret.insert(k.clone(), v.clone());
         }
     }
 
@@ -134,7 +134,7 @@ pub fn fill_outputs(outputs: &Vars, ctx: &Context) -> Vars {
 
 pub fn fill_proc_vars(task: &Arc<Task>, values: &Vars, ctx: &Context) -> Vars {
     let mut ret = Vars::new();
-    for (ref k, ref v) in values {
+    for (k, v) in values.iter() {
         if let JsonValue::String(string) = v
             && let Some(expr) = get_expr(string)
         {
@@ -142,15 +142,15 @@ pub fn fill_proc_vars(task: &Arc<Task>, values: &Vars, ctx: &Context) -> Vars {
             let new_value = result.unwrap_or(JsonValue::Null);
 
             // satisfies the rule 1
-            ret.insert(k.to_string(), new_value);
+            ret.insert(k.clone(), new_value);
 
             continue;
         }
 
         // rule 2
         match task.find::<JsonValue>(k) {
-            Some(v) => ret.insert(k.to_string(), v.clone()),
-            None => ret.insert(k.to_string(), v.clone()),
+            Some(v) => ret.insert(k.clone(), v.clone()),
+            None => ret.insert(k.clone(), v.clone()),
         };
     }
     ret

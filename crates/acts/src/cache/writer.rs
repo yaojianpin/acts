@@ -1,4 +1,4 @@
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 
 use tracing::error;
 
@@ -19,7 +19,7 @@ pub(crate) enum WriteOp {
 
 #[derive(Clone)]
 pub(crate) struct StoreWriter {
-    tx: mpsc::Sender<WriteOp>,
+    tx: Arc<Mutex<Option<mpsc::Sender<WriteOp>>>>,
 }
 
 impl StoreWriter {
@@ -33,22 +33,36 @@ impl StoreWriter {
             }
         });
 
-        Self { tx }
+        Self {
+            tx: Arc::new(Mutex::new(Some(tx))),
+        }
     }
 
     pub(crate) fn send(&self, op: WriteOp) -> Result<()> {
-        self.tx
-            .send(op)
+        let tx = self.sender()?;
+        tx.send(op)
             .map_err(|_| ActError::Runtime("store writer channel closed".to_string()))
     }
 
     /// Block until all previously enqueued writes have been applied.
     pub(crate) fn flush(&self) {
+        let Ok(sender) = self.sender() else {
+            return;
+        };
         let (tx, rx) = mpsc::sync_channel(1);
-        if self.tx.send(WriteOp::Barrier(tx)).is_err() {
+        if sender.send(WriteOp::Barrier(tx)).is_err() {
             return;
         }
         let _ = rx.recv();
+    }
+
+    fn sender(&self) -> Result<mpsc::Sender<WriteOp>> {
+        self.tx
+            .lock()
+            .unwrap()
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| ActError::Runtime("store writer channel closed".to_string()))
     }
 
     fn apply(store: &Store, op: WriteOp) -> Result<()> {
@@ -71,12 +85,13 @@ impl StoreWriter {
             store.upsert_task(&root)?;
         }
         if task.proc().state().is_completed() {
-            store.mark_proc_complete(
-                &task.pid,
-                task.proc().end_time(),
-                task.proc().state(),
-            )?;
+            store.mark_proc_complete(&task.pid, task.proc().end_time(), task.proc().state())?;
         }
         Ok(())
+    }
+
+    pub(crate) fn close(&self) {
+        self.flush();
+        self.tx.lock().unwrap().take();
     }
 }

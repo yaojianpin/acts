@@ -110,6 +110,10 @@ path = "../../examples/user_var/main.rs"
 name = "resolver"
 path = "../../examples/resolver/main.rs"
 
+[[example]]
+name = "prof"
+path = "../../examples/prof/main.rs"
+
 [profile.release]
 codegen-units = 1
 lto = true

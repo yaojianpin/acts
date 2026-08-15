@@ -58,7 +58,7 @@ impl Context {
 
         // set the inputs to task's data
         self.task().set_data_with(|data| {
-            for (ref k, v) in &inputs {
+            for (k, v) in inputs.iter() {
                 data.set(k, v.clone());
             }
         });
@@ -150,7 +150,7 @@ impl Context {
 
         // set the action options to the context
         let mut vars = self.vars.write().unwrap();
-        for (name, v) in &action.options {
+        for (name, v) in action.options.iter() {
             vars.entry(name.to_string())
                 .and_modify(|i| *i = v.clone())
                 .or_insert(v.clone());

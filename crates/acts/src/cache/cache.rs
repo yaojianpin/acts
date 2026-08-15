@@ -1,9 +1,10 @@
+use super::writer::{StoreWriter, WriteOp};
 use crate::{
-    Config, Result, data::MessageStatus,
+    Config, Result,
+    data::MessageStatus,
     scheduler::{Process, Runtime, Task},
     store::Store,
 };
-use super::writer::{StoreWriter, WriteOp};
 use moka::sync::Cache as MokaCache;
 use std::{collections::HashSet, sync::Arc};
 use tracing::{debug, instrument};
@@ -49,7 +50,7 @@ impl Cache {
     }
 
     pub fn close(&self) {
-        self.flush();
+        self.writer.close();
     }
 
     #[instrument]
@@ -105,8 +106,7 @@ impl Cache {
         }
         if count < check_point {
             // skip procs already in the cache to avoid redundant deserialization
-            let cached: HashSet<String> =
-                self.procs().iter().map(|p| p.id().to_string()).collect();
+            let cached: HashSet<String> = self.procs().iter().map(|p| p.id().to_string()).collect();
             let cap = cap - count;
             self.flush();
             for ref proc in self.store.load(cap, rt, &cached)? {
@@ -202,5 +202,4 @@ impl Cache {
             proc.push_task(task.clone());
         }
     }
-
 }
