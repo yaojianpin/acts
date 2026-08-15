@@ -24,8 +24,8 @@ deploy/model            time:   [192.09 µs 197.48 µs 204.39 µs]
                         thrpt:  [4.8927 Kelem/s 5.0639 Kelem/s 5.2059 Kelem/s]
 start/proc              time:   [684.94 µs 794.32 µs 955.33 µs]
                         thrpt:  [1.0468 Kelem/s 1.2589 Kelem/s 1.4600 Kelem/s]
-act/act                 time:   [2.6184 ms 3.2692 ms 3.6153 ms]
-                        thrpt:  [276.61  elem/s 305.88  elem/s 381.91  elem/s]
+act/act                 time:   [64.940 µs 67.718 µs 71.373 µs]
+                        thrpt:  [14.011 Kelem/s 14.767 Kelem/s 15.399 Kelem/s]
 
 store_mixed/proc_crud/1000
                         time:   [44.543 µs 45.109 µs 46.292 µs]

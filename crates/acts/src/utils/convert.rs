@@ -1,7 +1,7 @@
 use crate::{Context, Vars, scheduler::Task};
 use regex::Regex;
 use serde_json::Value as JsonValue;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 pub fn fill_params(params: &JsonValue, ctx: &Context) -> JsonValue {
     match params {
@@ -157,8 +157,8 @@ pub fn fill_proc_vars(task: &Arc<Task>, values: &Vars, ctx: &Context) -> Vars {
 }
 
 pub fn get_expr(text: &str) -> Option<String> {
-    let re = Regex::new(r"^\$\{\{(.+)\}\}$").unwrap();
-    let caps = re.captures(text);
+    static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^\$\{\{(.+)\}\}$").unwrap());
+    let caps = RE.captures(text);
 
     if let Some(caps) = caps {
         let value = caps.get(1).map_or("", |m| m.as_str());
@@ -169,8 +169,8 @@ pub fn get_expr(text: &str) -> Option<String> {
 }
 
 pub fn get_exprs(text: &str) -> Vec<(core::ops::Range<usize>, String, String)> {
-    let re = Regex::new(r"\$\{\{(.*)\}\}").unwrap();
-    re.captures_iter(text)
+    static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\$\{\{(.*)\}\}").unwrap());
+    RE.captures_iter(text)
         .map(|caps| {
             let input = caps.get(0).unwrap();
             let content = caps.get(1).unwrap();

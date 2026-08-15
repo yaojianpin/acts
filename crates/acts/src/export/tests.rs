@@ -769,7 +769,7 @@ async fn export_manager_tasks_count() {
     let sig = engine.signal(());
     let s1 = sig.clone();
     engine.channel().on_message(move |e| {
-        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1") {
+        if e.is_params_key("act1") {
             s1.close()
         }
     });
@@ -780,6 +780,7 @@ async fn export_manager_tasks_count() {
 
     rt.start(&model, vars).unwrap();
     sig.recv().await;
+    engine.runtime().cache().flush();
 
     let tasks = manager
         .task()
@@ -807,7 +808,7 @@ async fn export_manager_tasks_offset_in_range() {
     let sig = engine.signal(());
     let s1 = sig.clone();
     engine.channel().on_message(move |e| {
-        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1") {
+        if e.is_params_key("act1") {
             s1.close()
         }
     });
@@ -818,6 +819,7 @@ async fn export_manager_tasks_offset_in_range() {
 
     rt.start(&model, vars).unwrap();
     sig.recv().await;
+    engine.runtime().cache().flush();
 
     let tasks = manager
         .task()
@@ -845,7 +847,7 @@ async fn export_manager_tasks_offset_out_range() {
     let sig = engine.signal(());
     let s1 = sig.clone();
     engine.channel().on_message(move |e| {
-        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1") {
+        if e.is_params_key("act1") {
             s1.close()
         }
     });
@@ -856,6 +858,7 @@ async fn export_manager_tasks_offset_out_range() {
 
     rt.start(&model, vars).unwrap();
     sig.recv().await;
+    engine.runtime().cache().flush();
 
     let tasks = manager
         .task()
@@ -931,9 +934,9 @@ async fn export_manager_tasks_order() {
     let mut vars = Vars::new();
     vars.insert("uid".to_string(), json!("u1"));
     vars.insert("pid".to_string(), json!(pid));
-
     rt.start(&model, vars).unwrap();
     sig.recv().await;
+    engine.runtime().cache().flush();
 
     let tasks = manager
         .task()
