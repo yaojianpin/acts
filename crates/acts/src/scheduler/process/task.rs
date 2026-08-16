@@ -21,7 +21,7 @@ use crate::{
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use std::sync::{Arc, RwLock};
-use tracing::debug;
+use tracing::{debug, instrument};
 
 #[derive(Clone)]
 pub struct Task {
@@ -450,9 +450,10 @@ impl Task {
         }
     }
 
+    #[instrument(skip(self, ctx), fields(pid = %self.pid, tid = %self.id))]
     pub async fn exec(self: &Arc<Self>, ctx: &Context) -> Result<()> {
         // let _lock = self.sync.lock().unwrap();
-        debug!("exec task={:?}", ctx.task());
+        debug!(kind = %self.node().kind(), name = %self.node().name(), uses = ?self.node().uses(), "task started");
         if self.state().is_completed() {
             return Err(ActError::Runtime(format!(
                 "task({}:{}) is already completed",
@@ -465,8 +466,9 @@ impl Task {
         Ok(())
     }
 
+    #[instrument(skip(self, ctx), fields(pid = %self.pid, tid = %self.id))]
     pub fn update(self: &Arc<Self>, ctx: &Context) -> Result<()> {
-        debug!("update task={:?}", ctx.task());
+        debug!("task updated");
         let action = ctx.action().ok_or(ActError::Action(
             "cannot find action in context".to_string(),
         ))?;
@@ -639,7 +641,7 @@ impl Task {
                     .unwrap_or("".to_string());
 
                 let err = Error::new(&error, &ecode);
-                debug!("error: {err:?}");
+                debug!(error = ?err, "task error");
                 let task = &ctx.task();
                 if task.state().is_completed() {
                     return Err(ActError::Action(format!(
@@ -952,7 +954,9 @@ impl Task {
 }
 
 impl ActTask for Arc<Task> {
+    #[instrument(skip(self, ctx), fields(pid = %self.pid, tid = %self.id))]
     fn init(&self, ctx: &Context) -> Result<()> {
+        debug!("task init");
         ctx.set_task(self);
         if ctx.task().state().is_none() {
             ctx.prepare()?;
@@ -969,7 +973,9 @@ impl ActTask for Arc<Task> {
         Ok(())
     }
 
+    #[instrument(skip(self, ctx), fields(pid = %self.pid, tid = %self.id))]
     async fn run(&self, ctx: &Context) -> Result<()> {
+        debug!("task running");
         let task = ctx.task();
         if task.state().is_ready() {
             task.set_state(TaskState::Running);
@@ -986,7 +992,9 @@ impl ActTask for Arc<Task> {
         Ok(())
     }
 
+    #[instrument(skip(self, ctx), fields(pid = %self.pid, tid = %self.id))]
     async fn next(&self, ctx: &Context) -> Result<NextAction> {
+        debug!("task next");
         ctx.set_task(self);
         let task = ctx.task();
 
@@ -1018,12 +1026,7 @@ impl ActTask for Arc<Task> {
             };
         }
 
-        debug!(
-            "next action:{} node={:?} task={:?}",
-            next_action,
-            ctx.task().node,
-            ctx.task()
-        );
+        debug!(action = %next_action, "next action");
 
         if task.state().is_completed() {
             // terminal + emitted → propagation complete, mark idempotent

@@ -7,7 +7,7 @@ use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
 };
-use tracing::debug;
+use tracing::{debug, instrument};
 
 use super::TaskExtra;
 
@@ -120,8 +120,9 @@ impl Emitter {
         self.tasks.write().unwrap().push(Arc::new(f));
     }
 
+    #[instrument(skip(self, proc), fields(pid = %proc.id()))]
     pub fn emit_proc_event(&self, proc: &Arc<Process>) {
-        debug!("emit_proc_event: {}", proc.id());
+        debug!("proc event emitted");
         let handlers = self.procs.read().unwrap();
         let e = &Event::new(proc);
         for handle in handlers.iter() {
@@ -133,8 +134,9 @@ impl Emitter {
         self.emit_task_event_with_extra(task, true)
     }
 
+    #[instrument(skip(self, task), fields(pid = %task.pid, tid = %task.id))]
     pub fn emit_task_event_with_extra(&self, task: &Arc<Task>, emit_message: bool) -> Result<()> {
-        debug!("emit_task_event: task={:?}", task);
+        debug!("task event emitted");
         let handlers = self.tasks.read().unwrap();
         let e = &Event::new_with_extra(task, &TaskExtra { emit_message });
         for handle in handlers.iter() {
@@ -144,23 +146,27 @@ impl Emitter {
         Ok(())
     }
 
+    #[instrument(skip(self, state), fields(pid = %state.pid, tid = %state.tid, mid = %state.mid))]
     pub fn emit_start_event(&self, state: &Message) {
-        debug!("emit_start_event: {:?}", state);
+        debug!(state = %state.state, "start event emitted");
         dispatch_key_event!(self, starts, state);
     }
 
+    #[instrument(skip(self, state), fields(pid = %state.pid, tid = %state.tid, mid = %state.mid))]
     pub fn emit_complete_event(&self, state: &Message) {
-        debug!("emit_complete_event: {:?}", state);
+        debug!(state = %state.state, "complete event emitted");
         dispatch_key_event!(self, completes, state);
     }
 
+    #[instrument(skip(self, msg), fields(pid = %msg.pid, tid = %msg.tid, mid = %msg.mid))]
     pub fn emit_message(&self, msg: &Message) {
-        debug!("emit_message: {:?}", msg);
+        debug!("message emitted");
         dispatch_key_event!(self, messages, msg);
     }
 
+    #[instrument(skip(self, state), fields(pid = %state.pid, tid = %state.tid, mid = %state.mid))]
     pub fn emit_error(&self, state: &Message) {
-        debug!("emit_error: {:?}", state);
+        debug!(state = %state.state, "error event emitted");
         dispatch_key_event!(self, errors, state);
     }
 

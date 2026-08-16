@@ -106,7 +106,7 @@ impl Store {
     }
 
     pub fn publish(&self, pack: &Package) -> Result<bool> {
-        trace!("store::publish({})", pack.id);
+        trace!(id = %pack.id, "store publish");
         if pack.id.is_empty() {
             return Err(ActError::Action("missing id in package".into()));
         }
@@ -132,7 +132,7 @@ impl Store {
     }
 
     pub fn deploy(&self, model: &Workflow, view: Option<&JsonValue>) -> Result<bool> {
-        trace!("store::deploy({})", model.id);
+        trace!(id = %model.id, "store deploy");
         if model.id.is_empty() {
             return Err(ActError::Model("missing id in model".into()));
         }

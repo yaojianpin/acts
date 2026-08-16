@@ -21,7 +21,7 @@ impl ModelExecutor {
         }
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self, model, view), fields(id = %model.id, name = %model.name))]
     pub fn deploy(&self, model: &Workflow, view: Option<&JsonValue>) -> Result<bool> {
         model.valid()?;
 
@@ -32,7 +32,7 @@ impl ModelExecutor {
         Ok(ret)
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self, q))]
     pub fn list(&self, q: &Query) -> Result<PageData<ModelInfo>> {
         match self.runtime.cache().store().models().query(q) {
             Ok(models) => Ok(PageData {
@@ -46,7 +46,7 @@ impl ModelExecutor {
         }
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self), fields(id = %id))]
     pub fn get(&self, id: &str, fmt: &str) -> Result<ModelInfo> {
         match self.runtime.cache().store().models().find(id) {
             Ok(m) => {
@@ -72,7 +72,7 @@ impl ModelExecutor {
         }
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self), fields(id = %id))]
     pub fn rm(&self, id: &str) -> Result<bool> {
         let store = self.runtime.cache().store();
 

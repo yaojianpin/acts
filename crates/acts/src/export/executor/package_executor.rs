@@ -16,13 +16,13 @@ impl PackageExecutor {
         }
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self, pack), fields(id = %pack.id))]
     pub fn publish(&self, pack: &Package) -> Result<bool> {
         let ret = self.runtime.cache().store().publish(pack)?;
         Ok(ret)
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self, q))]
     pub fn list(&self, q: &Query) -> Result<PageData<PackageInfo>> {
         match self.runtime.cache().store().packages().query(q) {
             Ok(packages) => Ok(PageData {
@@ -36,13 +36,13 @@ impl PackageExecutor {
         }
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self), fields(id = %id))]
     pub fn get(&self, id: &str) -> Result<PackageInfo> {
         let package = &self.runtime.cache().store().packages().find(id)?;
         Ok(package.into())
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self), fields(id = %id))]
     pub fn rm(&self, id: &str) -> Result<bool> {
         self.runtime.cache().store().packages().delete(id)
     }

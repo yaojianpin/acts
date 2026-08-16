@@ -2,7 +2,7 @@ use crate::objects::{AppError, RespData};
 use acts::{ChannelOptions, Engine, Message, Vars};
 use axum::{
     Json,
-    extract::State,
+    extract::{Query, State},
     response::{
         IntoResponse, Sse,
         sse::{Event, KeepAlive},
@@ -32,7 +32,7 @@ pub struct MessageAck {
 
 pub async fn sse(
     State(state): State<Arc<Engine>>,
-    Json(query): Json<MessageQuery>,
+    Query(query): Query<MessageQuery>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let (tx, mut rx) = mpsc::channel::<Message>(100);
 

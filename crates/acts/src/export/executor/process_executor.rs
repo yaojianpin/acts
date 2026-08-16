@@ -7,7 +7,7 @@ use crate::{
 use std::sync::Arc;
 use tracing::instrument;
 
-#[derive(Clone)]
+#[derive(Debug, Clone)]
 pub struct ProcessExecutor {
     runtime: Arc<Runtime>,
 }
@@ -19,6 +19,7 @@ impl ProcessExecutor {
         }
     }
 
+    #[instrument(skip(self, options), fields(mid = %mid))]
     pub fn start(&self, mid: &str, options: Vars) -> Result<String> {
         let model: ModelInfo = self.runtime.cache().store().models().find(mid)?.into();
         let workflow = model.workflow()?;
@@ -26,6 +27,7 @@ impl ProcessExecutor {
         Ok(proc.id().to_string())
     }
 
+    #[instrument(skip(self, model, options), fields(fmt = %fmt))]
     pub fn start_from_model(&self, model: &str, fmt: &str, options: Vars) -> Result<String> {
         let workflow = match fmt {
             "yaml" | "yml" => Workflow::from_yml(model),
@@ -38,7 +40,7 @@ impl ProcessExecutor {
         Ok(proc.id().to_string())
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self, q))]
     pub fn list(&self, q: &Query) -> Result<PageData<ProcInfo>> {
         match self.runtime.cache().store().procs().query(q) {
             Ok(procs) => Ok(PageData {

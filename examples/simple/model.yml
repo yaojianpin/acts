@@ -10,7 +10,8 @@ vars:
     value: 0
 exposes:
   - name: result
-    value: '${{ value }}'
+    value: ${{ value }}
+    type: number
 steps:
   - name: init
     id: init

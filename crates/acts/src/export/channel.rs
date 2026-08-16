@@ -75,7 +75,7 @@ impl Channel {
     /// if the message is not received by client, the engine will re-send at the next time interval
     #[allow(clippy::self_named_constructors)]
     pub fn channel(rt: &Arc<Runtime>, options: &ChannelOptions) -> Self {
-        debug!("channel: {options:?}");
+        debug!("channel created");
         let pat_type = globset::Glob::new(&options.r#type)
             .unwrap()
             .compile_matcher();
@@ -136,7 +136,7 @@ impl Channel {
         let chan_id = self.chan_id.clone();
         let pattern = self.pattern.clone();
         self.runtime.emitter().on_message(&self.chan_id, move |e| {
-            debug!("on_message: chan={} {e:?}", chan_id);
+            debug!(chan = %chan_id, "on message");
             if is_match(&glob, e) {
                 store_if(&runtime, ack, &chan_id, &pattern, e);
                 f(e);
@@ -165,7 +165,7 @@ impl Channel {
         let chan_id = self.chan_id.clone();
         let pattern = self.pattern.clone();
         self.runtime.emitter().on_complete(&self.chan_id, move |e| {
-            debug!("on_complete: chan={} {e:?}", chan_id);
+            debug!(chan = %chan_id, "on complete");
             if is_match(&glob, e) {
                 store_if(&runtime, ack, &chan_id, &pattern, e);
                 f(e);
@@ -194,12 +194,11 @@ impl Channel {
 
 fn store_if(runtime: &Arc<Runtime>, ack: bool, chan_id: &str, pattern: &str, message: &Message) {
     if ack && !chan_id.is_empty() && message.retry_times == 0 {
-        info!("store: {message:?}");
+        info!(r#type = message.r#type, pid = %message.pid, tid = %message.tid, mid = %message.mid,  state = %message.state, "message stored");
         let msg = message.into(chan_id, pattern);
         let store = runtime.cache().store();
         store.messages().create(&msg).unwrap_or_else(|err| {
-            error!("channel.store_if_emit_id: {err}");
-            eprintln!("channel.store_if_emit_id: {err}");
+            error!(error = %err, "channel store failure");
             false
         });
     }

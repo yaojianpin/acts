@@ -42,6 +42,7 @@ bitflags = { version = "2.13.1", features = ["serde"] }
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio", "async_futures"] }
 serial_test = { version = "3", features = ["async"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [features]
 default = []

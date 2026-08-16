@@ -9,6 +9,7 @@ use crate::{
     scheduler::Runtime,
 };
 use std::sync::Arc;
+use tracing::info;
 
 /// Workflow Engine
 ///
@@ -238,6 +239,7 @@ impl Engine {
 
         // start event loop
         self.runtime().event_loop();
+        info!("engine started");
 
         Ok(self)
     }

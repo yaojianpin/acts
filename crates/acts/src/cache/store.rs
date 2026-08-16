@@ -219,7 +219,7 @@ impl Store {
     }
 
     pub fn upsert_task(&self, task: &Arc<scheduler::Task>) -> Result<()> {
-        debug!("upsert_task: {task:?}");
+        debug!(pid = %task.pid, tid = %task.id, "upsert task");
         let data: data::Task = task.into_data()?;
         self.upsert_task_data(&data)
     }

@@ -14,7 +14,7 @@ use std::{
     any::type_name,
     sync::{Arc, RwLock},
 };
-use tracing::debug;
+use tracing::{debug, instrument};
 
 tokio::task_local! {
     static CONTEXT: Context;
@@ -55,7 +55,7 @@ impl std::fmt::Debug for Context {
 impl Context {
     fn init_vars(&self, task: &Arc<Task>) {
         let inputs = task.inputs();
-        debug!("init_vars: {inputs}");
+        debug!(inputs = %inputs, "init vars");
 
         // set the inputs to task's data
         self.task().set_data_with(|data| {
@@ -218,28 +218,31 @@ impl Context {
         self.action.read().unwrap().clone()
     }
 
+    #[instrument(skip(self, node, prev))]
     pub fn sched_task(&self, node: &Arc<Node>, prev: Arc<Task>) -> Result<()> {
-        debug!("sched_task: {}", node.to_string());
+        debug!(nid = %node.id(), kind = %node.kind(), name = %node.name(), "task scheduled");
         let task = self.proc.create_task(node, Some(prev));
         self.runtime.push(&task)?;
         Ok(())
     }
 
+    #[instrument(skip(self, node, vars, parent))]
     pub fn sched_task_with_vars(
         &self,
         node: &Arc<Node>,
         vars: Vars,
         parent: Arc<Task>,
     ) -> Result<()> {
-        debug!("sched_task: {}", node.to_string());
+        debug!(nid = %node.id(), kind = %node.kind(), name = %node.name(), "task scheduled");
         let task = self.proc.create_task(node, Some(parent));
         task.set_data(&vars);
         self.runtime.push(&task)?;
         Ok(())
     }
 
+    #[instrument(skip(self, act, vars), fields(uses = %act.uses, name = %act.name))]
     pub fn dispatch_act(&self, act: &Act, vars: Vars) -> Result<()> {
-        debug!("dispatch_act: {act:?}  {:?}", self.task);
+        debug!(nid = %act.id, "act dispatched");
         let task = self.task();
 
         if !task.state().is_none() {
@@ -393,7 +396,7 @@ impl Context {
 
     pub fn emit_error(&self) -> Result<()> {
         let task = self.task();
-        debug!("emit_error: {task:?}");
+        debug!(pid = %task.pid, tid = %task.id, "emit error");
         if task.state().is_error() {
             self.emit_task(&task)?;
 
@@ -415,7 +418,7 @@ impl Context {
     }
 
     pub fn emit_task(&self, task: &Arc<Task>) -> Result<()> {
-        debug!("ctx::emit_task, task={:?}", task);
+        debug!(pid = %task.pid, tid = %task.id, state = %task.state(), "emit task");
 
         // on workflow start
         if let NodeContent::Workflow(_) = &task.node().content
@@ -445,7 +448,7 @@ impl Context {
     }
 
     pub async fn emit_message(&self, msg: &Act) -> Result<()> {
-        debug!("emit_message: {:?}", msg);
+        debug!(uses = %msg.uses, name = %msg.name, "emit message");
         let workflow = self.proc.model();
         let mut inputs = utils::fill_inputs(&msg.vars(), self);
 

@@ -17,7 +17,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 use tokio::time::Duration;
-use tracing::{error, instrument};
+use tracing::{debug, error, info, instrument};
 
 #[derive(Clone)]
 pub struct Process {
@@ -283,14 +283,13 @@ impl Process {
         let tasks = self.find_tasks(|t| t.is_timeouts());
         for t in tasks.iter() {
             let ctx = t.create_context();
-            t.on_timeout(&ctx).unwrap_or_else(|err| {
-                eprintln!("{err}");
-                error!("{err}");
-            });
+            t.on_timeout(&ctx)
+                .unwrap_or_else(|err| error!(error = %err, "tick failed"));
         }
     }
-    #[instrument()]
+    #[instrument(skip(self, action), fields(pid = %self.id, tid = %action.tid, event = ?action.event))]
     pub fn do_action(self: &Arc<Self>, action: &Action) -> Result<()> {
+        debug!("action received");
         let mut action = action.clone();
         let task = self.task(&action.tid).ok_or(ActError::Action(format!(
             "cannot find task by '{}' tasks={:?}",
@@ -338,7 +337,9 @@ impl Process {
         Ok(())
     }
 
+    #[instrument(skip(self))]
     pub fn start(self: &Arc<Self>) -> Result<()> {
+        info!(pid = %self.id, mid = %self.tree().model.id, name = %self.tree().model.name, "process started");
         self.set_state(TaskState::Running);
         let cache = self.runtime.cache().clone();
         let proc = self.clone();

@@ -52,7 +52,7 @@ impl ActPlugin for WebPlugin {
                     .route("/pack/list", post(routes::pack_list))
                     .route("/pack/catalogs", get(routes::pack_catalogs))
                     .route("/pack", post(routes::pack_get))
-                    .route("/msg/sse", post(sse::sse))
+                    .route("/msg/sse", get(sse::sse))
                     .route("/msg/ack", post(sse::ack)),
             )
             .with_state(engine.clone());

@@ -17,7 +17,7 @@ use std::{
 };
 use tokio::{runtime::Handle, time};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error};
+use tracing::{debug, error, info, instrument};
 
 #[derive(Clone)]
 pub struct Runtime {
@@ -104,8 +104,9 @@ impl Runtime {
         self.shutdown.clone()
     }
 
+    #[instrument(skip(self, model, options), fields(mid = %model.id, name = %model.name))]
     pub fn start(self: &Arc<Self>, model: &Workflow, options: Vars) -> Result<Arc<Process>> {
-        debug!("scheduler::start({})", model.id);
+        debug!("process starting");
 
         let mut proc_id = utils::longid();
         if let Some(pid) = &options.get::<String>(consts::PROCESS_ID) {
@@ -140,6 +141,7 @@ impl Runtime {
 
         self.launch(&proc)?;
 
+        info!(pid = %proc_id, mid = %model.id, name = %model.name, "process started");
         Ok(proc)
     }
 
@@ -147,8 +149,9 @@ impl Runtime {
         self.cache.proc(pid, self)
     }
 
+    #[instrument(skip(self, proc), fields(pid = %proc.id()))]
     pub fn launch(self: &Arc<Self>, proc: &Arc<Process>) -> Result<()> {
-        debug!("scheduler::launch");
+        debug!("process launched");
         let proc = proc.clone();
         proc.start()?;
         Ok(())
@@ -161,8 +164,9 @@ impl Runtime {
         proc
     }
 
+    #[instrument(skip(self, task), fields(pid = %task.pid, tid = %task.id))]
     pub fn push(&self, task: &Arc<Task>) -> Result<()> {
-        debug!("scheduler::push  task={:?}", task);
+        debug!("task pushed");
         let cache = self.cache.clone();
         let task_clone = task.clone();
         cache.upsert_async(&task_clone)?;
@@ -170,8 +174,9 @@ impl Runtime {
         Ok(())
     }
 
+    #[instrument(skip(self, action), fields(pid = %action.pid, tid = %action.tid, event = ?action.event))]
     pub fn do_action(self: &Arc<Self>, action: &Action) -> Result<()> {
-        debug!("scheduler::do_action  action={:?}", action);
+        debug!("action received");
         let proc = self.cache.proc(&action.pid, self)?;
         match proc {
             Some(proc) => proc.do_action(action),
@@ -229,7 +234,7 @@ impl Runtime {
                         QueueData::Task(task) => {
                             let ctx = &task.create_context();
                             if let Err(err) = task.exec(ctx).await {
-                                eprintln!("runtime task.exec error: {}", err);
+                                error!(error = %err, "task.exec failed");
                                 task.set_err(&err.clone().into());
                                 ctx.set_task(&task);
                                 ctx.emit_error().ok();
@@ -239,7 +244,7 @@ impl Runtime {
                             let ctx = &task.create_context();
                             let result = task.next(ctx).await;
                             if let Err(err) = result {
-                                eprintln!("runtime task.next error: {}", err);
+                                error!(error = %err, "task.next failed");
                                 task.set_err(&err.clone().into());
                                 ctx.set_task(&task);
                                 ctx.emit_error().ok();
@@ -250,7 +255,7 @@ impl Runtime {
                         }
                     },
                     Err(err) => {
-                        eprintln!("runtime queue.next error: {}", err);
+                        error!(error = %err, "queue.next failed");
                         break;
                     }
                 }
@@ -288,7 +293,7 @@ impl Runtime {
             let cache = self.cache.clone();
             let rt = self.clone();
             self.emitter.on_proc(move |proc| {
-                debug!("on_proc: {:?}", proc);
+                debug!(pid = %proc.id(), "proc event");
                 if let Some(root) = proc.root() {
                     let state = proc.state();
                     let mut message = root.create_message();
@@ -330,6 +335,12 @@ impl Runtime {
                                 emitter.emit_complete_event(&message);
                             }
                         }
+                        let final_state = proc.state();
+                        if final_state.is_error() {
+                            info!(pid = %proc.id(), state = %final_state, cost_ms = proc.cost(), "process errored");
+                        } else if final_state.is_completed() {
+                            info!(pid = %proc.id(), state = %final_state, cost_ms = proc.cost(), "process completed");
+                        }
 
                         // if the process is a sub process
                         // call the parent act
@@ -338,11 +349,11 @@ impl Runtime {
                         }
 
                         if !rt.config.keep_processes() {
-                            debug!("remove: {:?}", proc.tasks());
+                            debug!(pid = %proc.id(), "remove process");
                             let cache = cache.clone();
                             let pid = proc.id().to_string();
                             cache.remove(&pid).unwrap_or_else(|err| {
-                                error!("scher.initialize remove={}", err);
+                                error!(error = %err, "process remove failed");
                                 false
                             });
                         }
@@ -351,11 +362,10 @@ impl Runtime {
                         let rt = rt.clone();
                         cache
                             .restore(&rt)
-                            .unwrap_or_else(|err| error!("scher.initialize restore={}", err));
+                            .unwrap_or_else(|err| error!(error = %err, "process restore failed"));
                     }
                 } else {
-                    error!("cannot find root pid={}", proc.id());
-                    error!("tasks={:?}", proc.tasks());
+                    error!(pid = %proc.id(), "cannot find root task");
                 }
             });
         }
@@ -363,17 +373,17 @@ impl Runtime {
             let cache = self.cache.clone();
             let rt = self.clone();
             self.emitter.on_task(move |e| {
-                debug!("on_task: task={:?}", e.inner());
+                debug!(pid = %e.inner().pid, tid = %e.inner().id, "task event");
                 let cache = cache.clone();
                 let e_clone = e.clone();
                 cache
                     .upsert_async(&e_clone)
-                    .unwrap_or_else(|err| error!("scher.initialize upsert={}", err));
+                    .unwrap_or_else(|err| error!(error = %err, "task upsert failed"));
 
                 // check task is allowed to emit message to client
                 if !e.state().is_pending() && !e.state().is_running() && e.is_emit() {
                     let msg = e.create_message();
-                    debug!("emit_message:{msg:?}");
+                    debug!(pid = %msg.pid, tid = %msg.tid, name = %msg.name, "emit message");
                     let emitter = rt.emitter().clone();
                     emitter.emit_message(&msg);
                 }
@@ -424,11 +434,11 @@ impl Runtime {
     }
 
     fn return_to_act(self: &Arc<Self>, pid: &str, tid: &str, proc: &Process) {
-        debug!("scher.return_to_act");
+        debug!(pid = %pid, tid = %tid, "return to act");
         let state = proc.state();
         // process.print();
         let mut vars = proc.outputs();
-        debug!("sub outputs: {vars}");
+        debug!(pid = %pid, tid = %tid, outputs = %vars, "sub outputs");
 
         let event = match state {
             TaskState::Aborted => EventAction::Abort,
@@ -448,6 +458,6 @@ impl Runtime {
         let scher = self.clone();
         let _ = scher
             .do_action(&action)
-            .map_err(|err| error!("scher::return_to_act {}", err.to_string()));
+            .map_err(|err| error!(error = %err, "return to act failed"));
     }
 }

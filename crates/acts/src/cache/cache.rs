@@ -53,7 +53,7 @@ impl Cache {
         self.writer.close();
     }
 
-    #[instrument]
+    #[instrument(skip(self, proc), fields(pid = %proc.id()))]
     pub fn push_proc(&self, proc: &Arc<Process>) -> Result<()> {
         self.push_proc_pri(proc, true)?;
 
@@ -68,7 +68,7 @@ impl Cache {
         procs
     }
 
-    #[instrument]
+    #[instrument(skip(self, rt), fields(pid = %pid))]
     pub fn proc(&self, pid: &str, rt: &Arc<Runtime>) -> Result<Option<Arc<Process>>> {
         debug!("process: pid={pid}");
         match self.get_proc(pid) {
@@ -76,8 +76,7 @@ impl Cache {
             None => {
                 self.flush();
                 if let Some(proc) = self.store.load_proc(pid, rt)? {
-                    debug!("loaded: {:?}", proc);
-                    debug!("tasks: {:?}", proc.tasks());
+                    debug!(pid = %pid, "loaded process");
                     // add to cache
                     self.push_proc_pri(&proc, false)?;
                     return Ok(Some(proc));
@@ -87,7 +86,7 @@ impl Cache {
         }
     }
 
-    #[instrument]
+    #[instrument(skip(self), fields(pid = %pid))]
     pub fn remove(&self, pid: &str) -> Result<bool> {
         debug!("remove pid={pid}");
         self.procs.remove(pid);
@@ -95,7 +94,7 @@ impl Cache {
         Ok(true)
     }
 
-    #[instrument(skip())]
+    #[instrument(skip(self, rt))]
     pub fn restore(&self, rt: &Arc<Runtime>) -> Result<()> {
         debug!("restore");
         let cap = self.cap();
@@ -121,7 +120,7 @@ impl Cache {
         Ok(())
     }
 
-    #[instrument]
+    #[instrument(skip(self, task), fields(pid = %task.pid, tid = %task.id))]
     pub fn upsert(&self, task: &Arc<Task>) -> Result<()> {
         self.push_task_pri(task, true)
     }
@@ -154,7 +153,7 @@ impl Cache {
         Ok(())
     }
 
-    #[instrument]
+    #[instrument(skip(self, task), fields(pid = %task.pid, tid = %task.id))]
     pub(crate) fn upsert_async(&self, task: &Arc<Task>) -> Result<()> {
         self.push_task_mem(task);
         self.writer.send(WriteOp::Task(task.clone()))?;
