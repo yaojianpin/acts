@@ -6,8 +6,23 @@ use async_nats::Client;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
-
+use std::{future::Future, sync::LazyLock};
+use tokio::runtime::Runtime;
 const DATA_KEY: &str = "data";
+
+static RUNTIME: LazyLock<Runtime> =
+    LazyLock::new(|| Runtime::new().expect("failed to create tokio runtime"));
+
+fn runtime() -> &'static Runtime {
+    &RUNTIME
+}
+
+fn block_on<F: Future>(f: F) -> F::Output {
+    match tokio::runtime::Handle::try_current() {
+        Ok(_) => tokio::task::block_in_place(|| runtime().block_on(f)),
+        Err(_) => runtime().block_on(f),
+    }
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -81,10 +96,8 @@ impl ActPackage for NatsPackage {
         Self: Sized,
     {
         let nats_config = config.get::<NatsConfig>("nats")?;
-        let client = tokio::runtime::Handle::current()
-            .block_on(connect(&nats_config))
+        let client = block_on(connect(&nats_config))
             .map_err(|err| ActError::Config(format!("failed to connect to NATS: {err}")))?;
-
         Ok(Self { client })
     }
 
@@ -113,7 +126,6 @@ impl ActPackage for NatsPackage {
                     .map_err(|err| {
                         ActError::Package(format!("failed to publish message: {err}"))
                     })?;
-
                 Ok(None)
             }
             Mode::Sub => {

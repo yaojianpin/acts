@@ -24,7 +24,7 @@
                 {
                     "properties": {
                         "mode": { "enum": ["pub"] },
-                        "message": { "type": "string" }
+                        "message": { "type": "string", "title": "Message" }
                     },
                     "required": ["message"]
                 }
