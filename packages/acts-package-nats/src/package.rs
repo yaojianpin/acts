@@ -5,7 +5,7 @@ use acts::{
 use async_nats::Client;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use serde_json::Value as JsonValue;
+use serde_json::{Value as JsonValue, json};
 
 const DATA_KEY: &str = "data";
 
@@ -64,7 +64,12 @@ impl ActPackage for NatsPackage {
             icon: r#"<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg>"#,
             doc: "",
             schema: include_json!("./schema.json"),
-            options: None,
+            options: Some(json!({
+                "ui:order": ["mode", "subject", "message"],
+                "message": {
+                    "ui:widget": "textarea"
+                }
+            })),
             run_as: ActRunAs::Func,
             resources: vec![],
             catalog: ActPackageCatalog::App,

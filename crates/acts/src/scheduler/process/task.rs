@@ -374,7 +374,7 @@ impl Task {
             }
         } else {
             // re-entering a non-terminal state: reset the propagation guard
-            self.remove_sign(Sign::PROPAGATED);
+            self.remove_sign(Sign::NEXT_COMPLETE);
             if state.is_created() {
                 self.set_start_time(utils::time::time_millis());
             }
@@ -461,7 +461,7 @@ impl Task {
         }
         self.init(ctx)?;
         self.run(ctx).await?;
-        self.next(ctx).await?;
+        ctx.push_next()?;
         Ok(())
     }
 
@@ -828,7 +828,7 @@ impl Task {
         state.is_completed() || state.is_interrupted()
     }
 
-    pub fn check_uses_action(&self, ctx: &Context) -> Result<NextAction> {
+    pub async fn check_uses_action(&self, ctx: &Context) -> Result<NextAction> {
         let task = ctx.task();
         if task.state().is_running()
             && task.node().kind() == NodeKind::Step
@@ -847,7 +847,7 @@ impl Task {
                     // resume task
                     task.set_state(TaskState::Ready);
                     self.runtime.emitter().emit_task_event(task)?;
-                    utils::sync::block_on(task.exec(ctx))?;
+                    task.exec(ctx).await?;
                 }
                 if task.state().is_completed() {
                     count += 1;
@@ -865,7 +865,7 @@ impl Task {
         Ok(NextAction::Continue)
     }
 
-    pub fn check_in_children(self: &Arc<Self>, ctx: &Context) -> Result<NextAction> {
+    pub async fn check_in_children(self: &Arc<Self>, ctx: &Context) -> Result<NextAction> {
         if self.state().is_running() {
             // run into children nodes if there is children nodes
             if !self.is_sign(Sign::IN_CHILDREN) {
@@ -883,7 +883,7 @@ impl Task {
         Ok(NextAction::Continue)
     }
 
-    pub fn auto_complete(self: &Arc<Self>, ctx: &Context) -> Result<NextAction> {
+    pub async fn auto_complete(self: &Arc<Self>, ctx: &Context) -> Result<NextAction> {
         let state = self.state();
 
         if state.is_running() {
@@ -905,7 +905,7 @@ impl Task {
                     // resume task
                     task.set_state(TaskState::Ready);
                     self.runtime.emitter().emit_task_event(task)?;
-                    utils::sync::block_on(task.exec(ctx))?;
+                    task.exec(ctx).await?;
                 }
                 if task.state().is_completed() {
                     count += 1;
@@ -991,21 +991,21 @@ impl ActTask for Arc<Task> {
         let task = ctx.task();
 
         // idempotent replay guard: skip if this task already propagated
-        if self.is_sign(Sign::PROPAGATED) {
+        if self.is_sign(Sign::NEXT_COMPLETE) {
             return Ok(NextAction::Continue);
         }
 
         // 1. check uses action completed
-        let mut next_action = task.check_uses_action(ctx)?;
+        let mut next_action = task.check_uses_action(ctx).await?;
 
         // 2. check run into children
         if next_action.is_continue() {
-            next_action = task.check_in_children(ctx)?;
+            next_action = task.check_in_children(ctx).await?;
         }
 
         // 3. auto-complete task state
         if next_action.is_continue() {
-            next_action = task.auto_complete(ctx)?;
+            next_action = task.auto_complete(ctx).await?;
         }
 
         // 4. schedule next task
@@ -1027,7 +1027,7 @@ impl ActTask for Arc<Task> {
 
         if task.state().is_completed() {
             // terminal + emitted → propagation complete, mark idempotent
-            self.set_sign(Sign::PROPAGATED);
+            self.set_sign(Sign::NEXT_COMPLETE);
         }
 
         // 5. move to parent and continue

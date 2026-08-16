@@ -31,11 +31,11 @@ impl ActTask for Act {
         let task = ctx.task();
         task.set_emit(true);
         let package = ctx.runtime.store().packages().find(&self.uses)?;
-        let in_scheam = serde_json::from_str::<JsonValue>(&package.schema)?;
+        let in_schema = serde_json::from_str::<JsonValue>(&package.schema)?;
         task.set_data_with(|data| data.set(consts::ACT_RUN_AS, package.run_as));
         match package.run_as {
             ActRunAs::Irq => {
-                jsonschema::validate(&in_scheam, &task.params()).map_err(|err| {
+                jsonschema::validate(&in_schema, &task.params()).map_err(|err| {
                     ActError::Package(format!("package({}) validation error: {}", package.id, err))
                 })?;
                 // interrupt the state
@@ -43,7 +43,7 @@ impl ActTask for Act {
                 task.set_state(TaskState::Interrupt);
             }
             ActRunAs::Msg => {
-                jsonschema::validate(&in_scheam, &task.params()).map_err(|err| {
+                jsonschema::validate(&in_schema, &task.params()).map_err(|err| {
                     ActError::Package(format!("package({}) validation error: {}", package.id, err))
                 })?;
             }

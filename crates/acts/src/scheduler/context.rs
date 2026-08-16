@@ -1,6 +1,7 @@
 use super::{ActTask, Runtime};
 use crate::{
-    Act, ActError, Executor, Message, MessageState, MissingParamAction, Result, TaskState, Vars,
+    Act, ActError, Executor, Message, MessageState, MissingParamAction, NodeKind, Result,
+    TaskState, Vars,
     event::Action,
     scheduler::{
         Node, Process, Task,
@@ -333,9 +334,14 @@ impl Context {
         // abort all running task
         let ctx = self;
         let mut parent = task.parent();
+        let mut prev = task.clone();
         while let Some(task) = parent {
             task.set_state(TaskState::Aborted);
             ctx.set_task(&task);
+            if prev.is_kind(NodeKind::Act) {
+                // act task's data will update to parent
+                task.update_data(&prev.outputs());
+            }
             ctx.emit_task(&ctx.task())?;
 
             for t in task.children() {
@@ -348,6 +354,7 @@ impl Context {
                 }
             }
 
+            prev = task.clone();
             parent = task.parent();
         }
         Ok(())
@@ -396,6 +403,10 @@ impl Context {
                 && let Some(parent) = task.parent()
             {
                 parent.set_err(&err);
+                if task.is_kind(NodeKind::Act) {
+                    // act task's data will update to parent
+                    parent.update_data(&task.outputs());
+                }
                 return parent.on_error(self);
             }
         }

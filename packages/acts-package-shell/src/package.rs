@@ -63,7 +63,7 @@ impl ActPackage for ShellPackage {
                     "ui:widget": "textarea",
                 },
             })),
-            run_as: ActRunAs::Irq,
+            run_as: ActRunAs::Func,
             resources: vec![],
             catalog: ActPackageCatalog::App,
         }

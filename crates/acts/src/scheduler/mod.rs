@@ -52,7 +52,7 @@ bitflags! {
         const USES_COMPLETE  = 0b0000_0000_0100_0000;
 
         /// task `next` propagation completed (idempotent replay guard)
-        const PROPAGATED  = 0b0000_0000_1000_0000;
+        const NEXT_COMPLETE  = 0b0000_0000_1000_0000;
 
         /// task `next` execution is queued but not yet run (crash replay guard)
         const NEXT_PENDING  = 0b0000_0001_0000_0000;

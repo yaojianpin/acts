@@ -210,3 +210,4 @@
 - perf: optimize in-memory scan_prefix performance.
 - perf: optimize `convert::get_expr` and `convert::get_exprs` to improve `fill_params` performance
 - perf: optimize list iter and add shutdown token to runtime
+- fix: act data cannot update to parent when abort or error task, test cases #pack_action_abort_on_step_with_inputs, pack_action_error_on_step_with_inputs

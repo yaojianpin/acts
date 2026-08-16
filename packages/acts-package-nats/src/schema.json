@@ -10,10 +10,25 @@
         "subject": {
             "type": "string",
             "title": "Subject"
-        },
-        "message": {
-            "title": "Message"
         }
     },
-    "required": ["mode", "subject"]
+    "required": ["mode", "subject"],
+    "dependencies": {
+        "mode": {
+            "oneOf": [
+                {
+                    "properties": {
+                        "mode": { "enum": ["sub"] }
+                    }
+                },
+                {
+                    "properties": {
+                        "mode": { "enum": ["pub"] },
+                        "message": { "type": "string" }
+                    },
+                    "required": ["message"]
+                }
+            ]
+        }
+    }
 }
