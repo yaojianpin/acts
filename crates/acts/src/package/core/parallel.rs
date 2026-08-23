@@ -40,7 +40,7 @@ impl ActPackage for ParallelPackage {
                     },
                     "acts": {
                         "type": "array",
-                        "title": "Act List",
+                        "title": "Actions",
                         "items": { "type": "object" },
                         "description": "The acts to run in parallel"
                     }
@@ -49,14 +49,10 @@ impl ActPackage for ParallelPackage {
             }),
             options: Some(json!({
                 "in": {
-                    "ui:widget": "array",
-                    "ui:options": {
-                        "label": false,
-                        "addButtonText": "Add Input"
-                    }
+                    "ui:widget": "in",
                 },
                 "acts": {
-                    "ui:widget": "acts",
+                    "ui:widget": "actions",
                     "ui:options": {
                         "label": false,
                         "addButtonText": "Add Act"

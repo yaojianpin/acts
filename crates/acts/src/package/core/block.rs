@@ -50,12 +50,14 @@ impl ActPackage for BlockPackage {
                 "properties": {
                     "mode": {
                         "type": "string",
+                        "title": "Mode",
                         "enum": RunningMode::iter().collect::<Vec<_>>(),
                         "default": RunningMode::Sequence.as_ref(),
                         "description": "The running mode of the block"
                     },
                     "acts": {
                         "type": "array",
+                        "title": "Actions",
                         "items": { "type": "object" },
                         "description": "The acts to run in the block"
                     }
@@ -67,15 +69,11 @@ impl ActPackage for BlockPackage {
                 "mode": {
                     "ui:widget": "select",
                     "ui:options": {
-                        "label": false,
                         "placeholder": "Select a mode"
                     }
                 },
                 "acts": {
-                    "ui:widget": "acts",
-                    "ui:options": {
-                        "label": false
-                    }
+                    "ui:widget": "actions",
                 }
             })),
             run_as: ActRunAs::Func,

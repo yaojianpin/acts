@@ -51,6 +51,10 @@ impl ActPackage for SequencePackage {
                 "required": ["in", "acts"]
             }),
             options: Some(json!({
+                 "ui:order": ["in", "acts"],
+                "in": {
+                    "ui:widget": "in",
+                },
                 "acts": {
                     "ui:widget": "actions",
                 }
