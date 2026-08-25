@@ -62,10 +62,8 @@ impl ActPlugin for WebPlugin {
                 "The Web server is now ready to accept connections on port {}",
                 port
             );
-            axum::Server::bind(&addr)
-                .serve(app.into_make_service())
-                .await
-                .unwrap();
+            let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+            axum::serve(listener, app).await.unwrap();
         });
 
         Ok(())

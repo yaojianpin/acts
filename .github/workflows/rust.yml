@@ -16,11 +16,16 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+      - name: Install build tools
+        shell: bash
+        run: |
+          sudo apt install -y protobuf-compiler
       - uses: actions-rs/toolchain@v1
         with:
           toolchain: stable
           override: true
           components: rustfmt, clippy
+
       - name: Build
         run: cargo build --verbose
 
