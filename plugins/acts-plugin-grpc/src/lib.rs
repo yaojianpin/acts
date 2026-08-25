@@ -1,3 +1,7 @@
+// `tonic::Status` (~176 bytes) is the gRPC error type; boxing it would break the
+// service trait, so suppress the large-Result lint.
+#![allow(clippy::result_large_err)]
+
 use acts::{ActPlugin, ChannelOptions, Engine, Vars, Workflow};
 use acts_channel::{Message, MessageOptions, acts_service_server::*};
 use serde_json::Value;
