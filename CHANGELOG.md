@@ -213,3 +213,6 @@
 - fix: act data cannot update to parent when abort or error task, test cases #pack_action_abort_on_step_with_inputs, pack_action_error_on_step_with_inputs
 - feat: add tracing log for key function
 - fix: fix examples/simple exposes type error
+
+# 0.21.1
+- fix: fix acts-channel version dependency issue, close #18
