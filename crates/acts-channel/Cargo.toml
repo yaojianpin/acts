@@ -27,10 +27,11 @@ tonic = "0.12"
 
 [build-dependencies]
 tonic-build = { version = "0.12" }
+protoc-bin-vendored = { version = "3", optional = true }
 
 [features]
 default = []
-codegen = []
+codegen = ["dep:protoc-bin-vendored"]
 docker_test = []
 
 [dev-dependencies]
