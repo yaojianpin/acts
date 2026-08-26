@@ -15,6 +15,27 @@ jobs:
       - uses: actions/checkout@v4
       - name: Install dependency
         run: cargo install cargo-workspaces
+      - name: Validate crate metadata (license)
+        run: |
+          python3 - <<'PY'
+          import json, subprocess, sys
+          meta = json.loads(subprocess.check_output(
+              ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+              text=True,
+          ))
+          missing = [
+              p["name"]
+              for p in meta["packages"]
+              if p.get("publish") != []            # skip publish = false
+              and not p.get("license")
+              and not p.get("license_file")
+          ]
+          if missing:
+              print("error: publishable crates missing license/license-file: "
+                    + ", ".join(missing), file=sys.stderr)
+              sys.exit(1)
+          print("license check passed")
+          PY
       - name: Build
         run: cargo build --workspace --verbose
       - name: Run tests

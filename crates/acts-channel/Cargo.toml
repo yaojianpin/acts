@@ -6,6 +6,7 @@ homepage = "https://github.com/yaojianpin/acts"
 keywords = ["workflow-channel"]
 version.workspace = true
 authors.workspace = true
+license.workspace = true
 repository.workspace = true
 edition.workspace = true
 

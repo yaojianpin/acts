@@ -4,6 +4,7 @@ description = "Web REST API plugin for acts workflow engine"
 keywords = ["workflow", "acts", "web", "rest"]
 version.workspace = true
 authors.workspace = true
+license.workspace = true
 repository.workspace = true
 edition.workspace = true
 
