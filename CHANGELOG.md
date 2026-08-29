@@ -216,3 +216,6 @@
 
 # 0.21.1
 - fix: fix acts-channel version dependency issue, close #18
+
+# 0.22.0
+- change rust ci branch to `main` and `develep`
