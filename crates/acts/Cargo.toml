@@ -43,6 +43,7 @@ bitflags = { version = "2.13.1", features = ["serde"] }
 criterion = { version = "0.5", features = ["async_tokio", "async_futures"] }
 serial_test = { version = "3", features = ["async"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+parking_lot = "0.12"
 
 [features]
 default = []

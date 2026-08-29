@@ -7,7 +7,9 @@ use crate::{
     export::{Channel, Executor, Extender},
     package::{self, ActPackageRegister},
     scheduler::Runtime,
+    store::KvStore,
 };
+
 use std::sync::Arc;
 use tracing::info;
 
@@ -46,6 +48,7 @@ pub struct Engine {
     plugins: Vec<Arc<dyn ActPlugin>>,
     packages: Vec<ActPackageRegister>,
     resolvers: Vec<(String, Arc<dyn ConfigResolver>)>,
+    store: Option<Arc<dyn KvStore>>,
     runtime: Option<Arc<Runtime>>,
 }
 
@@ -62,6 +65,7 @@ impl Engine {
             plugins: Vec::new(),
             packages: Vec::new(),
             resolvers: Vec::new(),
+            store: None,
             runtime: None,
         }
     }
@@ -145,6 +149,10 @@ impl Engine {
         self.resolvers = resolvers;
         self
     }
+    pub fn set_store(mut self, store: Option<Arc<dyn KvStore>>) -> Self {
+        self.store = store;
+        self
+    }
 
     /// engine executor
     pub fn executor(&self) -> Arc<Executor> {
@@ -214,7 +222,7 @@ impl Engine {
     }
 
     pub fn start(mut self) -> crate::Result<Self> {
-        self.runtime = Some(Runtime::new(&self.config())?);
+        self.runtime = Some(Runtime::new(&self.config(), self.store.clone())?);
 
         // register resolvers
         for (name, resolver) in self.resolvers.iter() {

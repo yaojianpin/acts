@@ -28,12 +28,6 @@ pub struct ConfigData {
 
     // log config
     pub log: Option<ConfigLog>,
-    pub db: Option<DbConfig>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct DbConfig {
-    pub database_url: String,
 }
 
 impl Default for Config {

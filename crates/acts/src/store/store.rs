@@ -1,5 +1,4 @@
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -9,63 +8,20 @@ use tracing::trace;
 
 use crate::store::KvStore;
 use crate::{
-    ActError, Config, Result, Workflow,
+    ActError, Result, Workflow,
     store::{Model, Package},
     utils,
 };
 
-use super::memory::MemoryStore;
 use super::{DbCollection, DbCollectionIden, collection::KvCollection, data};
 
 pub struct Store {
     kv: Arc<dyn KvStore>,
-    overrides: Arc<Mutex<Option<Arc<dyn KvStore>>>>,
 }
 
 impl Store {
     pub fn new(kv: Arc<dyn KvStore>) -> Self {
-        Self {
-            kv,
-            overrides: Arc::new(Mutex::new(None)),
-        }
-    }
-
-    pub fn create(config: &Config) -> crate::Result<Self> {
-        #[allow(unused_mut)]
-        let mut kv: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
-
-        #[allow(unused_variables, unused_assignments)]
-        if let Some(db) = &config.data.db {
-            #[cfg(feature = "store-sqlite")]
-            {
-                kv = Arc::new(super::SqliteStore::open(&db.database_url)?);
-            }
-            #[cfg(feature = "store-postgres")]
-            {
-                kv = Arc::new(super::PostgresStore::open(&db.database_url)?);
-            }
-            #[cfg(feature = "store-redis")]
-            {
-                kv = Arc::new(super::RedisStore::open(&db.database_url)?);
-            }
-            #[cfg(feature = "store-nats")]
-            {
-                kv = Arc::new(super::NatsStore::open(&db.database_url)?);
-            }
-            #[cfg(feature = "store-sled")]
-            {
-                kv = Arc::new(super::SledStore::open(&db.database_url)?);
-            }
-        }
-
-        Ok(Self {
-            kv,
-            overrides: Arc::new(Mutex::new(None)),
-        })
-    }
-
-    pub fn register(&self, kv: Arc<dyn KvStore + Send + Sync + 'static>) {
-        *self.overrides.lock().unwrap() = Some(kv);
+        Self { kv }
     }
 
     fn collection<DATA>(&self) -> Arc<dyn DbCollection<Item = DATA>>
@@ -74,10 +30,6 @@ impl Store {
             DbCollectionIden + Serialize + DeserializeOwned + Send + Sync + Clone + Debug + 'static,
     {
         let prefix = DATA::iden().as_ref().to_string();
-        if let Some(kv) = self.overrides.lock().unwrap().as_ref() {
-            return Arc::new(KvCollection::new(&prefix, kv.clone()));
-        }
-
         Arc::new(KvCollection::new(&prefix, self.kv.clone()))
     }
 

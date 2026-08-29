@@ -1,8 +1,13 @@
 use crate::ConfigResolver;
 use crate::event::EventAction;
-use crate::{Context, Engine, MessageState, Vars, Workflow, utils, utils::test::USES_IRQ};
+use crate::{
+    Context, Engine, KvStore, MemoryStore, MessageState, ScanOperation, ScanOptions, Vars,
+    Workflow, utils, utils::test::USES_IRQ,
+};
+use parking_lot::Mutex;
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use serial_test::serial;
@@ -497,4 +502,157 @@ async fn sealed_data_inherits_from_parent() {
     let child = proc.task_by_params("key", "act1").last().cloned().unwrap();
     let child_profile = child.sealed("profile").unwrap();
     assert_eq!(child_profile.get::<String>("scope").unwrap(), "workflow");
+}
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn engine_default_store_is_memory() {
+    let engine = Engine::new().start().unwrap();
+    let store = engine.runtime().store();
+    assert!(store.procs().query(&crate::query::Query::new()).is_ok());
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn engine_set_store_memory() {
+    let engine = Engine::builder()
+        .set_store(Arc::new(MemoryStore::new()))
+        .build()
+        .start()
+        .unwrap();
+    let store = engine.runtime().store();
+    assert!(store.procs().query(&crate::query::Query::new()).is_ok());
+}
+
+#[cfg(feature = "store-sqlite")]
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn engine_set_store_sqlite() {
+    let engine = Engine::builder()
+        .set_store(Arc::new(
+            crate::store::SqliteStore::open(":memory:").unwrap(),
+        ))
+        .build()
+        .start()
+        .unwrap();
+    let store = engine.runtime().store();
+    assert!(store.procs().query(&crate::query::Query::new()).is_ok());
+}
+/// Custom `KvStore` implementation injected via [`EngineBuilder::set_store`].
+#[derive(Debug, Default)]
+struct CustomStore {
+    data: Arc<Mutex<BTreeMap<String, Vec<u8>>>>,
+}
+
+impl CustomStore {
+    fn new() -> Self {
+        Self::default()
+    }
+}
+
+/// Return true if `k` matches the scan operation given `key` and `prefix`.
+fn key_matches(k: &str, key: &str, prefix: &str, op: &ScanOperation) -> bool {
+    if !k.starts_with(prefix) {
+        return false;
+    }
+    match op {
+        ScanOperation::Eq | ScanOperation::Match => k.starts_with(key),
+        ScanOperation::Gt => k > key,
+        ScanOperation::Ge => k >= key,
+        ScanOperation::Lt => k < key,
+        ScanOperation::Le => k <= key,
+        ScanOperation::Ne => !k.starts_with(key),
+        ScanOperation::Range { from, to } => {
+            let start = format!("{}{}", key, from);
+            let end = format!("{}{}", key, to);
+            k >= start.as_str() && k < end.as_str()
+        }
+        ScanOperation::ExclusiveRange { from, to } => {
+            let start = format!("{}{}", key, from);
+            let end = format!("{}{}", key, to);
+            k > start.as_str() && k < end.as_str()
+        }
+        ScanOperation::InclusiveRange { from, to } => {
+            let start = format!("{}{}", key, from);
+            let end = format!("{}{}", key, to);
+            k >= start.as_str() && k <= end.as_str()
+        }
+        ScanOperation::In { values } => values.iter().any(|v| k.starts_with(v.as_str())),
+    }
+}
+
+impl KvStore for CustomStore {
+    fn get(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
+        Ok(self.data.lock().get(key).cloned())
+    }
+
+    fn put(&self, key: &str, value: Vec<u8>) -> crate::Result<()> {
+        self.data.lock().insert(key.to_string(), value);
+        Ok(())
+    }
+
+    fn delete(&self, key: &str) -> crate::Result<()> {
+        self.data.lock().remove(key);
+        Ok(())
+    }
+
+    fn scan_prefix(
+        &self,
+        key: &str,
+        options: ScanOptions,
+    ) -> crate::Result<Vec<(String, Vec<u8>)>> {
+        let ScanOptions {
+            is_rev,
+            op,
+            ref prefix,
+        } = options;
+        let map = self.data.lock();
+        let mut entries: Vec<(String, Vec<u8>)> = map
+            .range(prefix.clone()..)
+            .take_while(|(k, _)| k.starts_with(prefix.as_str()))
+            .filter(|(k, _)| key_matches(k, key, prefix, &op))
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        if is_rev {
+            entries.reverse();
+        }
+        Ok(entries)
+    }
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn engine_set_store_custom() {
+    let custom = Arc::new(CustomStore::new());
+    let engine = Engine::builder()
+        .set_store(custom.clone())
+        .build()
+        .start()
+        .unwrap();
+
+    // writes through the engine must land in the custom store
+    let model = Workflow::new().with_id("custom_store_model");
+    engine.executor().model().deploy(&model, None).unwrap();
+
+    // reads must go through the custom store
+    let store = engine.runtime().store();
+    assert!(store.models().find("custom_store_model").is_ok());
+    let page = store.models().query(&crate::query::Query::new()).unwrap();
+    assert_eq!(page.count, 1);
+
+    // the raw key must physically exist in the custom store
+    assert!(
+        custom
+            .data
+            .lock()
+            .keys()
+            .any(|k| k.contains("custom_store_model"))
+    );
+}
+
+#[test]
+#[should_panic(expected = "only one backend")]
+fn engine_builder_set_store_duplicate() {
+    let _ = Engine::builder()
+        .set_store(Arc::new(MemoryStore::new()))
+        .set_store(Arc::new(MemoryStore::new()));
 }

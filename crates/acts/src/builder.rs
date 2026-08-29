@@ -2,6 +2,7 @@
 use crate::config::ConfigData;
 use crate::{
     ActPackage, ActPlugin, Config, Engine, config::ConfigLog, package::ActPackageRegister,
+    store::KvStore,
 };
 use std::{path::Path, sync::Arc};
 
@@ -10,6 +11,7 @@ pub struct EngineBuilder {
     plugins: Vec<Arc<dyn ActPlugin>>,
     packages: Vec<ActPackageRegister>,
     resolvers: Vec<(String, Arc<dyn crate::config::ConfigResolver>)>,
+    store: Option<Arc<dyn KvStore>>,
 }
 
 impl Default for EngineBuilder {
@@ -36,6 +38,7 @@ impl EngineBuilder {
             plugins: Vec::new(),
             packages: Vec::new(),
             resolvers: Vec::new(),
+            store: None,
         }
     }
 
@@ -210,11 +213,47 @@ impl EngineBuilder {
         self
     }
 
+    /// set the store
+    ///
+    /// The `store-*` cargo features only control which backend structs are
+    /// compiled and exported; create the backend externally and set it here.
+    /// When unset, an in-memory store is used. Only one store can be set —
+    /// calling this again panics.
+    ///
+    /// ## Example
+    ///
+    /// ```no_run
+    /// use acts::{Engine, MemoryStore};
+    /// use std::sync::Arc;
+    ///
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let engine = Engine::builder()
+    ///         .set_store(Arc::new(MemoryStore::new()))
+    ///         .build()
+    ///         .start()
+    ///         .unwrap();
+    /// }
+    /// ```
+    ///
+    /// `SqliteStore`, `PostgresStore`, `RedisStore`, `NatsStore` and
+    /// `SledStore` are exported from the crate when the matching `store-*`
+    /// feature is enabled, e.g. `set_store(Arc::new(SqliteStore::open(path)?))`.
+    pub fn set_store(mut self, store: Arc<dyn KvStore>) -> Self {
+        assert!(
+            self.store.is_none(),
+            "store already set: only one backend is allowed"
+        );
+        self.store = Some(store);
+        self
+    }
+
     pub fn build(self) -> Engine {
         Engine::new()
             .with_config(&self.config)
             .set_plugins(self.plugins.clone())
             .set_packages(self.packages.clone())
             .set_resolvers(self.resolvers.clone())
+            .set_store(self.store)
     }
 }

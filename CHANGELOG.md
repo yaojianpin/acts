@@ -220,3 +220,7 @@
 # 0.22.0
 - change rust ci branch to `main` and `develep`
 - remove truncate data issue in store/postgres
+- feat: `store-*` features only control compilation; the matching store struct is exported when enabled
+- feat: select the store with `EngineBuilder::set_store(Arc<dyn KvStore>)`, only one store is allowed, default is in-memory
+- BREAKING: remove `Extender::register_store` and the runtime store override
+- BREAKING: remove the `db` config section (`DbConfig`); create the backend struct externally and pass it to `set_store`

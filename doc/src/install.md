@@ -24,12 +24,24 @@ cargo add acts --features store-postgres
 # NATS
 cargo add acts --features store-nats
 
-# Redis
-cargo add acts --features store-redis
+## 选择存储后端
 
-# Sled
-cargo add acts --features store-sled
+feature 只决定哪些后端会被编译，实际使用的后端在外部创建实例后通过
+`EngineBuilder::set_store` 指定（不设置时默认使用内存存储）：
+
+```rust
+use acts::{Engine, store::SqliteStore};
+use std::sync::Arc;
+
+let engine = Engine::builder()
+    .set_store(Arc::new(SqliteStore::open("data/acts.db").unwrap()))
+    .build()
+    .start()
+    .unwrap();
 ```
+
+启用对应 feature 时会从库中导出 `SqliteStore`、`PostgresStore`、`RedisStore`、
+`NatsStore`、`SledStore` 等后端结构体。
 
 ## 创建引擎
 

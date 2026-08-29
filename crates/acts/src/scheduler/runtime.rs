@@ -7,7 +7,7 @@ use crate::{
     env::Enviroment,
     event::{Emitter, EventAction},
     scheduler::queue::{Queue, QueueData},
-    store::Store,
+    store::{KvStore, Store},
     utils::{self, consts},
 };
 use std::{
@@ -52,8 +52,8 @@ impl std::fmt::Debug for Runtime {
 }
 
 impl Runtime {
-    pub fn new(config: &Config) -> crate::Result<Arc<Self>> {
-        let runtime = Self::create(config)?;
+    pub fn new(config: &Config, store: Option<Arc<dyn KvStore>>) -> crate::Result<Arc<Self>> {
+        let runtime = Self::create(config, store)?;
         Ok(runtime)
     }
 
@@ -263,10 +263,10 @@ impl Runtime {
         });
     }
 
-    fn create(config: &Config) -> crate::Result<Arc<Runtime>> {
+    fn create(config: &Config, store: Option<Arc<dyn KvStore>>) -> crate::Result<Arc<Runtime>> {
         // let scher = Scheduler::new();
         let env = Arc::new(Enviroment::new());
-        let cache = Arc::new(Cache::new(config)?);
+        let cache = Arc::new(Cache::new(config, store)?);
         let emitter = Arc::new(Emitter::new());
         let package = Arc::new(Package::new());
         let queue = Queue::new();

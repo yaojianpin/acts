@@ -342,43 +342,34 @@ steps:
 
 For more acts example, please see [`examples`](https://github.com/yaojianpin/acts/tree/main/examples)
 
-## Store
-
-Current, the supported store features:  store-sqlite, store-postgres, store-sled, store-redis, store-nats
-
-You can add custom store support as follow:
+The active backend is created externally and passed to
+`EngineBuilder::set_store` — when unset, an in-memory store is used:
 
 ```rust,ignore
-use acts::{Engine, Result, KvStore, ScanOptions, data};
+use acts::{Engine, SqliteStore};
 use std::sync::Arc;
-
-pub struct MyStore;
-impl KvStore for MyStore {
-    fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        Ok(None)
-    }
-
-    fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
-        Ok(())
-    }
-
-    fn delete(&self, key: &str) -> Result<()> {
-        Ok(())
-    }
-
-    fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>> {
-        Ok(vec![])
-    }
-
-}
 
 #[tokio::main]
 async fn main() {
-    let engine = acts::Engine::new().start().unwrap();
-    let store: Arc<dyn KvStore + 'static> = Arc::new(MyStore);
-    engine.extender().register_store(store);
+    let engine = Engine::builder()
+        .set_store(Arc::new(SqliteStore::open("data/acts.db").unwrap()))
+        .build()
+        .start()
+        .unwrap();
 }
 ```
+
+Backends exported when the matching feature is enabled:
+
+- `MemoryStore` — in-memory store, no persistence (default when unset)
+- `SqliteStore` — requires feature `store-sqlite`
+- `PostgresStore` — requires feature `store-postgres`
+- `RedisStore` — requires feature `store-redis`
+- `NatsStore` — requires feature `store-nats`
+- `SledStore` — requires feature `store-sled`
+
+Custom stores can be built by implementing `KvStore` and passed to
+`set_store` the same way.
 
 ## Package
 

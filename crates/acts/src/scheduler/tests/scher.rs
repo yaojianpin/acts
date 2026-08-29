@@ -10,8 +10,8 @@ use serial_test::serial;
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_scher_next() {
     let config = Config::default();
-    let runtime = Runtime::new(&config).unwrap();
-    let cache = Cache::new(&config).unwrap();
+    let runtime = Runtime::new(&config, None).unwrap();
+    let cache = Cache::new(&config, None).unwrap();
     let store = cache.store();
     let workflow = Workflow::new().with_id(&utils::longid());
 
@@ -31,7 +31,7 @@ async fn sch_scher_next() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_scher_task() {
     let config = Config::default();
-    let runtime = Runtime::new(&config).unwrap();
+    let runtime = Runtime::new(&config, None).unwrap();
     let workflow = Workflow::new();
     let pid = utils::longid();
     let proc = runtime.create_proc(&pid, &workflow);
@@ -45,7 +45,7 @@ async fn sch_scher_task() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_scher_start_default() {
     let config = Config::default();
-    let runtime = Runtime::new(&config).unwrap();
+    let runtime = Runtime::new(&config, None).unwrap();
     let workflow = Workflow::new();
     let result = runtime.start(&workflow, Vars::new());
     assert!(result.is_ok());
@@ -55,7 +55,7 @@ async fn sch_scher_start_default() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_scher_start_with_vars() {
     let config = Config::default();
-    let runtime = Runtime::new(&config).unwrap();
+    let runtime = Runtime::new(&config, None).unwrap();
     let workflow = Workflow::new();
     let mut vars = Vars::new();
     vars.insert("a".to_string(), json!(100));

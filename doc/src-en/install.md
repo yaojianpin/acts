@@ -24,12 +24,25 @@ cargo add acts --features store-postgres
 # NATS
 cargo add acts --features store-nats
 
-# Redis
-cargo add acts --features store-redis
+## Select the Store Backend
 
-# Sled
-cargo add acts --features store-sled
+The features only decide which backend structs are compiled and exported;
+create the backend externally and pass it to `EngineBuilder::set_store`
+(the default is an in-memory store):
+
+```rust
+use acts::{Engine, store::SqliteStore};
+use std::sync::Arc;
+
+let engine = Engine::builder()
+    .set_store(Arc::new(SqliteStore::open("data/acts.db").unwrap()))
+    .build()
+    .start()
+    .unwrap();
 ```
+
+When the matching feature is enabled, `SqliteStore`, `PostgresStore`,
+`RedisStore`, `NatsStore` and `SledStore` are exported from the crate.
 
 ## Create Engine
 

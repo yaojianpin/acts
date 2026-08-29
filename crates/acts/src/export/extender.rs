@@ -1,4 +1,4 @@
-use crate::{ActPackageDefinition, Result, env::ActUserVar, scheduler::Runtime, store::KvStore};
+use crate::{ActPackageDefinition, Result, env::ActUserVar, scheduler::Runtime};
 use core::fmt;
 use std::sync::Arc;
 
@@ -98,42 +98,5 @@ impl Extender {
         self.runtime.cache().store().publish(&package)?;
 
         Ok(())
-    }
-
-    /// register collection
-    /// ## Example
-    ///
-    /// ```no_run
-    /// use acts::{Engine, Result, KvStore, ScanOptions, data};
-    /// use std::sync::Arc;
-    ///
-    /// pub struct MyStore;
-    /// impl KvStore for MyStore {
-    ///     fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
-    ///         Ok(None)
-    ///     }
-    ///
-    ///     fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
-    ///         Ok(())
-    ///     }
-    ///
-    ///     fn delete(&self, key: &str) -> Result<()> {
-    ///         Ok(())
-    ///     }
-    ///
-    ///     fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>> {
-    ///         Ok(vec![])
-    ///     }
-    ///
-    /// }
-    ///
-    ///  #[tokio::main]
-    ///  async fn main() {
-    ///     let engine = acts::Engine::new().start().unwrap();
-    ///     let store: Arc<dyn KvStore + 'static> = Arc::new(MyStore);
-    ///     engine.extender().register_store(store);
-    /// }
-    pub fn register_store(&self, store: Arc<dyn KvStore + 'static>) {
-        self.runtime.store().register(store);
     }
 }
