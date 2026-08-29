@@ -219,3 +219,4 @@
 
 # 0.22.0
 - change rust ci branch to `main` and `develep`
+- remove truncate data issue in store/postgres

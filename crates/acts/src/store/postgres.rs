@@ -48,12 +48,6 @@ fn init_pool(url: &str) -> Result<()> {
         .await
         .map_err(|e| ActError::Store(e.to_string()))?;
 
-        // Truncate to remove accumulated data from previous test runs
-        sqlx::query(&format!("TRUNCATE TABLE {}", consts::ACTS_STORE_NAME))
-            .execute(&pool)
-            .await
-            .map_err(|e| ActError::Store(e.to_string()))?;
-
         Ok::<_, ActError>(pool)
     })?;
 
