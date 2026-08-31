@@ -27,8 +27,9 @@ impl std::fmt::Debug for Cache {
 
 impl Cache {
     pub fn new(config: &Config, store: Option<Arc<dyn KvStore>>) -> crate::Result<Self> {
-        let store =
-            Arc::new(Store::new(store.unwrap_or_else(|| Arc::new(MemoryStore::new()))));
+        let store = Arc::new(Store::new(
+            store.unwrap_or_else(|| Arc::new(MemoryStore::new())),
+        ));
         Ok(Self {
             cap: config.cache_cap() as usize,
             procs: MokaCache::new(config.cache_cap() as u64),
