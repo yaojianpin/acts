@@ -1,4 +1,4 @@
-use crate::{Engine, Signal, Workflow, config::ConfigData, scheduler::Process};
+use crate::{Config, Engine, Signal, Workflow, scheduler::Process};
 use std::sync::Arc;
 
 // Package uses constants
@@ -27,7 +27,7 @@ pub fn create_proc(workflow: &Workflow, pid: &str) -> (Engine, Arc<Process>) {
 
 /// Like [`create_proc`] but uses [`EngineBuilder`] with a custom [`ConfigData`].
 pub(crate) fn create_proc_with_config(
-    config: &ConfigData,
+    config: &Config,
     workflow: &Workflow,
     pid: &str,
 ) -> (Engine, Arc<Process>) {

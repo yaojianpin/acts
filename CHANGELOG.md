@@ -225,3 +225,4 @@
 - BREAKING: remove `Extender::register_store` and the runtime store override
 - BREAKING: remove the `db` config section (`DbConfig`); create the backend struct externally and pass it to `set_store`
 - fix: fix the event delivered to handlers in FIFO order
+- feat: add `set_config` to `EngineBuilder` and unit test

@@ -1,5 +1,3 @@
-#[cfg(test)]
-use crate::config::ConfigData;
 use crate::{
     ActPackage, ActPlugin, Config, Engine, config::ConfigLog, package::ActPackageRegister,
     store::KvStore,
@@ -42,12 +40,8 @@ impl EngineBuilder {
         }
     }
 
-    #[cfg(test)]
-    pub fn set_config(mut self, data: &ConfigData) -> Self {
-        self.config = Config {
-            data: data.clone(),
-            table: toml::Table::new(),
-        };
+    pub fn set_config(mut self, config: &Config) -> Self {
+        self.config = config.clone();
         self
     }
 

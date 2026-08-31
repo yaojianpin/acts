@@ -17,7 +17,7 @@ keywords = ["workflow"]
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/yaojianpin/acts.git"
-version = "0.21.1"
+version = "0.22.0"
 
 [workspace.dependencies]
 tokio = { version = "1.52", features = ["full"] }
@@ -37,8 +37,8 @@ futures-util = "0.3.31"
 async-stream = "0.3.6"
 anyhow = "1.0.100"
 tokio-stream = "0.1.12"
-acts-channel = { path = "./crates/acts-channel", version = "0.21.1" }
-acts = { path = "./crates/acts", version = "0.21.1" }
+acts-channel = { path = "./crates/acts-channel", version = "0.22.0" }
+acts = { path = "./crates/acts", version = "0.22.0" }
 
 
 [profile.release]

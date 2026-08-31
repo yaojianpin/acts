@@ -1,5 +1,5 @@
-use crate::ConfigResolver;
 use crate::event::EventAction;
+use crate::{Config, ConfigResolver};
 use crate::{
     Context, Engine, KvStore, MemoryStore, MessageState, ScanOperation, ScanOptions, Vars,
     Workflow, utils, utils::test::USES_IRQ,
@@ -248,6 +248,41 @@ async fn engine_build_config_default() {
     )
     .unwrap();
     let engine = Engine::builder().build();
+    assert_eq!(engine.config().cache_cap(), 100);
+    assert_eq!(engine.config().log().dir, "data");
+    assert_eq!(engine.config().log().level, "INFO");
+    assert_eq!(engine.config().tick_interval_secs(), 200);
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn engine_build_config_set_config() {
+    if !std::path::Path::new("test").exists() {
+        let _ = std::fs::create_dir("test");
+    }
+    let path = std::path::Path::new("test/test.toml");
+
+    if path.exists() {
+        std::fs::remove_file(path).unwrap();
+    }
+    std::fs::write(
+        path,
+        r#"
+        cache_cap =  100
+        tick_interval_secs = 200
+        default_outputs = [ 
+            "data"
+        ]
+
+        [log]
+        dir = "data"
+        level = "INFO"
+        "#,
+    )
+    .unwrap();
+
+    let config = Config::create(path);
+    let engine = Engine::builder().set_config(&config).build();
     assert_eq!(engine.config().cache_cap(), 100);
     assert_eq!(engine.config().log().dir, "data");
     assert_eq!(engine.config().log().level, "INFO");

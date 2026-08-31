@@ -1,3 +1,4 @@
+use crate::Config;
 use crate::event::EventAction;
 use crate::{
     Action, ChannelOptions, Message, Variant, Vars, Workflow,
@@ -1284,11 +1285,18 @@ async fn sch_message_error_if_not_ack_and_exceed_max_reties() {
         Workflow::new().with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "act1")));
     let id = utils::longid();
 
-    let config = ConfigData {
-        max_message_retry_times: Some(2),
-        ..ConfigData::default()
-    };
-    let (engine, proc) = create_proc_with_config(&config, &workflow, &id);
+    let (engine, proc) = create_proc_with_config(
+        &Config {
+            data: ConfigData {
+                max_message_retry_times: Some(2),
+                ..ConfigData::default()
+            },
+            ..Default::default()
+        },
+        &workflow,
+        &id,
+    );
+    let config = engine.config();
     let _rt = engine.runtime();
     let sig = engine.signal(Vec::<Message>::default());
     let tx = sig.clone();
@@ -1325,7 +1333,7 @@ async fn sch_message_error_if_not_ack_and_exceed_max_reties() {
     assert_eq!(message.status, MessageStatus::Error);
     assert!(message.create_time > 0);
     assert!(message.update_time > 0);
-    assert_eq!(message.retry_times, config.max_message_retry_times.unwrap());
+    assert_eq!(message.retry_times, config.max_message_retry_times());
 }
 
 #[tokio::test]
