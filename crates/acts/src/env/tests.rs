@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::{
     ActError, ActUserVar, Context, Engine, MessageState, Vars, Workflow, env::Enviroment,
@@ -55,6 +55,22 @@ fn env_eval_throw_error() {
             message: "err1".to_string()
         }
     );
+}
+#[test]
+fn env_eval_infinite_loop_timeout() {
+    let env = Enviroment::new();
+    let script = r#"
+        while (true) {}
+    "#;
+
+    let start = Instant::now();
+    let result = env.eval::<()>(script);
+    assert_eq!(
+        result.err().unwrap(),
+        ActError::Script("Execution timeout".into())
+    );
+    // the interrupt handler must abort the loop, not hang the process
+    assert!(start.elapsed() < Duration::from_secs(60));
 }
 
 #[test]

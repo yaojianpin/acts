@@ -99,11 +99,18 @@ impl Enviroment {
     where
         T: DeserializeOwned,
     {
+        const TIMEOUT: Duration = Duration::from_millis(15_000);
+
         let runtime = JsRuntime::new()?;
         runtime.set_memory_limit(10 * 1024 * 1024); // 10M
         let ctx = JsContext::full(&runtime)?;
 
         let start = Instant::now();
+        // QuickJS invokes the handler regularly (every 10_000 instructions) while
+        // running script; returning true aborts execution with an uncatchable
+        // exception, so an infinite loop cannot hang the process past the deadline.
+        runtime.set_interrupt_handler(Some(Box::new(move || start.elapsed() > TIMEOUT)));
+
         ctx.with(|ctx| {
             let global = ctx.globals();
             // remove eval for safe reason
@@ -118,6 +125,10 @@ impl Enviroment {
             }
 
             let result = ctx.eval::<ActJsValue, &str>(expr);
+            // deadline hit during execution: the interrupt handler aborted eval
+            if start.elapsed() > TIMEOUT {
+                return Err(ActError::Script("Execution timeout".into()));
+            }
             if let Err(rquickjs::Error::Exception) = result {
                 let exception = rquickjs::Exception::from_js(&ctx, ctx.catch()).unwrap();
                 eprintln!("error: {exception:?}");
@@ -125,11 +136,6 @@ impl Enviroment {
                     ecode: "".to_string(),
                     message: exception.message().unwrap_or_default(),
                 });
-            }
-
-            // catches timeout
-            if start.elapsed() > Duration::from_millis(15_000) {
-                return Err(ActError::Script("Execution timeout".into()));
             }
 
             let value = result.map_err(ActError::from)?;
