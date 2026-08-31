@@ -7,27 +7,65 @@ use std::{
     collections::HashMap,
     sync::{Arc, RwLock},
 };
-use tracing::{debug, instrument};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tracing::{debug, error, instrument};
 
 use super::TaskExtra;
-
-macro_rules! dispatch_key_event {
-    ($fn:ident, $event_name:ident, $item:ident) => {
-        let handlers = $fn.$event_name.read().unwrap();
-        for (_, handle) in handlers.iter() {
-            let handle = handle.clone();
-            let item = $item.clone();
-            tokio::spawn(async move {
-                let event = Event::from_inner(item);
-                (handle)(&event);
-            });
-        }
-    };
-}
 
 pub type ActWorkflowMessageHandle = Arc<dyn Fn(&Event<Message>) + Send + Sync>;
 pub type ProcHandle = Arc<dyn Fn(&Event<Arc<Process>>) + Send + Sync>;
 pub type TaskHandle = Arc<dyn Fn(&Event<Arc<Task>, TaskExtra>) + Send + Sync>;
+
+/// Keyed workflow events, delivered to handlers in FIFO order by a single
+/// queue consumer. Spawning one task per handler per event made delivery
+/// order nondeterministic; the queue guarantees emission order.
+enum KeyEvent {
+    Start(Message),
+    Complete(Message),
+    Message(Message),
+    Error(Message),
+}
+
+async fn consume_key_events(
+    mut rx: UnboundedReceiver<KeyEvent>,
+    starts: ShareLock<HashMap<String, ActWorkflowMessageHandle>>,
+    completes: ShareLock<HashMap<String, ActWorkflowMessageHandle>>,
+    messages: ShareLock<HashMap<String, ActWorkflowMessageHandle>>,
+    errors: ShareLock<HashMap<String, ActWorkflowMessageHandle>>,
+) {
+    while let Some(event) = rx.recv().await {
+        match event {
+            KeyEvent::Start(item) => dispatch_key_event(&starts, item),
+            KeyEvent::Complete(item) => dispatch_key_event(&completes, item),
+            KeyEvent::Message(item) => dispatch_key_event(&messages, item),
+            KeyEvent::Error(item) => dispatch_key_event(&errors, item),
+        }
+    }
+}
+
+/// Invoke every registered handler for `item`. A panicking handler must not
+/// stop delivery to the remaining handlers (the previous per-handler spawn
+/// isolated panics), so each call is guarded by `catch_unwind`.
+fn dispatch_key_event(
+    handlers: &ShareLock<HashMap<String, ActWorkflowMessageHandle>>,
+    item: Message,
+) {
+    let handles: Vec<_> = handlers.read().unwrap().values().cloned().collect();
+    for handle in handles {
+        let event = Event::from_inner(item.clone());
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (handle)(&event)));
+        if let Err(payload) = result {
+            let panic = if let Some(s) = payload.downcast_ref::<&str>() {
+                (*s).to_string()
+            } else if let Some(s) = payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown panic payload".to_string()
+            };
+            error!(panic = %panic, "event handler panicked");
+        }
+    }
+}
 
 pub struct Emitter {
     starts: ShareLock<HashMap<String, ActWorkflowMessageHandle>>,
@@ -38,6 +76,8 @@ pub struct Emitter {
 
     procs: ShareLock<Vec<ProcHandle>>,
     tasks: ShareLock<Vec<TaskHandle>>,
+
+    queue: UnboundedSender<KeyEvent>,
 }
 
 impl std::fmt::Debug for Emitter {
@@ -54,13 +94,26 @@ impl Default for Emitter {
 
 impl Emitter {
     pub fn new() -> Self {
+        let messages = Arc::new(RwLock::new(HashMap::new()));
+        let starts = Arc::new(RwLock::new(HashMap::new()));
+        let completes = Arc::new(RwLock::new(HashMap::new()));
+        let errors = Arc::new(RwLock::new(HashMap::new()));
+        let (queue, rx) = unbounded_channel();
+        tokio::spawn(consume_key_events(
+            rx,
+            starts.clone(),
+            completes.clone(),
+            messages.clone(),
+            errors.clone(),
+        ));
         Self {
-            messages: Arc::new(RwLock::new(HashMap::new())),
-            starts: Arc::new(RwLock::new(HashMap::new())),
-            completes: Arc::new(RwLock::new(HashMap::new())),
-            errors: Arc::new(RwLock::new(HashMap::new())),
+            messages,
+            starts,
+            completes,
+            errors,
             procs: Arc::new(RwLock::new(Vec::new())),
             tasks: Arc::new(RwLock::new(Vec::new())),
+            queue,
         }
     }
 
@@ -149,25 +202,25 @@ impl Emitter {
     #[instrument(skip(self, state), fields(pid = %state.pid, tid = %state.tid, mid = %state.mid))]
     pub fn emit_start_event(&self, state: &Message) {
         debug!(state = %state.state, "start event emitted");
-        dispatch_key_event!(self, starts, state);
+        let _ = self.queue.send(KeyEvent::Start(state.clone()));
     }
 
     #[instrument(skip(self, state), fields(pid = %state.pid, tid = %state.tid, mid = %state.mid))]
     pub fn emit_complete_event(&self, state: &Message) {
         debug!(state = %state.state, "complete event emitted");
-        dispatch_key_event!(self, completes, state);
+        let _ = self.queue.send(KeyEvent::Complete(state.clone()));
     }
 
     #[instrument(skip(self, msg), fields(pid = %msg.pid, tid = %msg.tid, mid = %msg.mid))]
     pub fn emit_message(&self, msg: &Message) {
         debug!("message emitted");
-        dispatch_key_event!(self, messages, msg);
+        let _ = self.queue.send(KeyEvent::Message(msg.clone()));
     }
 
     #[instrument(skip(self, state), fields(pid = %state.pid, tid = %state.tid, mid = %state.mid))]
     pub fn emit_error(&self, state: &Message) {
         debug!(state = %state.state, "error event emitted");
-        dispatch_key_event!(self, errors, state);
+        let _ = self.queue.send(KeyEvent::Error(state.clone()));
     }
 
     pub fn remove(&self, key: &str) {

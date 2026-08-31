@@ -224,3 +224,4 @@
 - feat: select the store with `EngineBuilder::set_store(Arc<dyn KvStore>)`, only one store is allowed, default is in-memory
 - BREAKING: remove `Extender::register_store` and the runtime store override
 - BREAKING: remove the `db` config section (`DbConfig`); create the backend struct externally and pass it to `set_store`
+- fix: fix the event delivered to handlers in FIFO order

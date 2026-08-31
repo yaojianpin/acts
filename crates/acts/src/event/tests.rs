@@ -268,3 +268,32 @@ async fn event_message_dup_key() {
     let ret = s2.recv().await;
     assert!(ret);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn event_message_fifo_order() {
+    let workflow = Workflow::new()
+        .with_id("m1")
+        .with_step(|step| step.with_id("step1"));
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+
+    let (s1, s2) = engine.signal(Vec::new()).double();
+    let evt = Emitter::new();
+    evt.on_message("k1", move |e| {
+        let is_last = e.mid == "mid-2";
+        let mid = e.mid.clone();
+        s1.update(move |data| data.push(mid.clone()));
+        if is_last {
+            s1.close();
+        }
+    });
+
+    proc.start().unwrap();
+    for i in 0..3 {
+        let mut msg = crate::Message::default();
+        msg.mid = format!("mid-{i}");
+        evt.emit_message(&msg);
+    }
+
+    let ret = s2.recv().await;
+    assert_eq!(ret, vec!["mid-0", "mid-1", "mid-2"]);
+}
