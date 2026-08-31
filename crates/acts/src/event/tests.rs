@@ -289,8 +289,10 @@ async fn event_message_fifo_order() {
 
     proc.start().unwrap();
     for i in 0..3 {
-        let mut msg = crate::Message::default();
-        msg.mid = format!("mid-{i}");
+        let msg = crate::Message {
+            mid: format!("mid-{i}"),
+            ..Default::default()
+        };
         evt.emit_message(&msg);
     }
 
