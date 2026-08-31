@@ -665,7 +665,7 @@ macro_rules! gen_store_tests {
             let tid = utils::shortid();
             let nid = utils::shortid();
             let task = Task {
-                id: format!("{pid}{}{tid}", utils::consts::KEY_SEP),
+                id: format!("{pid}{tid}"),
                 name: "test".to_string(),
                 prev: None,
                 next: vec![],
@@ -699,7 +699,7 @@ macro_rules! gen_store_tests {
             let pid = utils::longid();
             let tid = utils::shortid();
             let task = Task {
-                id: format!("{pid}{}{tid}", utils::consts::KEY_SEP),
+                id: format!("{pid}{tid}"),
                 name: "test".to_string(),
                 prev: None,
                 next: vec![],
@@ -937,7 +937,7 @@ macro_rules! gen_store_tests {
             let tid = utils::shortid();
             let nid = utils::shortid();
             let task = Task {
-                id: format!("{pid}{}{tid}", utils::consts::KEY_SEP),
+                id: format!("{pid}{tid}"),
                 name: "test".to_string(),
                 prev: None,
                 next: vec![],
@@ -976,7 +976,7 @@ macro_rules! gen_store_tests {
             let tid = utils::shortid();
             let nid = utils::shortid();
             let task = Task {
-                id: format!("{pid}{}{tid}", utils::consts::KEY_SEP),
+                id: format!("{pid}{tid}"),
                 name: "test".to_string(),
                 prev: None,
                 next: vec![],
@@ -1010,7 +1010,7 @@ macro_rules! gen_store_tests {
             let pid = utils::longid();
             let tid = utils::shortid();
             let msg = Message {
-                id: format!("{pid}{}{tid}", utils::consts::KEY_SEP),
+                id: format!("{pid}{tid}"),
                 name: "test".to_string(),
                 pid: pid.clone(),
                 tid: tid.clone(),
@@ -1048,7 +1048,7 @@ macro_rules! gen_store_tests {
             let pid = utils::longid();
             let tid = utils::shortid();
             let msg = Message {
-                id: format!("{pid}{}{tid}", utils::consts::KEY_SEP),
+                id: format!("{pid}{tid}"),
                 name: "test".to_string(),
                 pid: pid.clone(),
                 tid: tid.clone(),
@@ -1316,7 +1316,7 @@ macro_rules! gen_store_tests {
             let pid = utils::longid();
             let tid = utils::shortid();
             let msg = Message {
-                id: format!("{pid}{}{tid}", utils::consts::KEY_SEP),
+                id: format!("{pid}{tid}"),
                 name: "test".to_string(),
                 pid: pid.clone(),
                 tid: tid.clone(),
@@ -1362,7 +1362,7 @@ macro_rules! gen_store_tests {
             let pid = utils::longid();
             let tid = utils::shortid();
             let msg = Message {
-                id: format!("{pid}{}{tid}", utils::consts::KEY_SEP),
+                id: format!("{pid}{tid}"),
                 name: "test".to_string(),
                 pid: pid.clone(),
                 tid: tid.clone(),

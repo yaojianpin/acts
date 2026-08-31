@@ -44,7 +44,6 @@ impl<'a> Id<'a> {
     pub fn id(&self) -> String {
         let mut id = String::from(self.pid);
         if !self.tid.is_empty() {
-            id.push_str(KEY_SEP);
             id.push_str(self.tid);
         }
 

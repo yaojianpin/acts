@@ -226,3 +226,4 @@
 - BREAKING: remove the `db` config section (`DbConfig`); create the backend struct externally and pass it to `set_store`
 - fix: fix the event delivered to handlers in FIFO order
 - feat: add `set_config` to `EngineBuilder` and unit test
+- fix: change task id format with `{pid}{tid}`, remove `SEP` between `pid` and `tid`
