@@ -751,7 +751,7 @@ impl Task {
             kind: self.node.kind().to_string(),
             pid: self.pid.clone(),
             tid: self.id.clone(),
-            node_data: self.node.to_string(),
+            node_data: self.node.to_string()?,
             state: self.state().into(),
             data: self.data().to_string(),
             sealed: self.sealed_data.read().unwrap().to_string(),

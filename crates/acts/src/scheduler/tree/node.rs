@@ -1,4 +1,4 @@
-use crate::{Act, Branch, Step, Variant, Vars, Workflow};
+use crate::{Act, ActError, Branch, Result, Step, Variant, Vars, Workflow};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::sync::{Arc, RwLock, Weak};
@@ -247,45 +247,24 @@ impl Node {
     }
 
     #[allow(clippy::inherent_to_string)]
-    pub fn to_string(&self) -> String {
+    pub fn to_string(&self) -> Result<String> {
         let data = NodeData {
             id: self.id.clone(),
             content: self.content.clone(),
             level: self.level,
         };
-        serde_json::to_string(&data).unwrap()
+        serde_json::to_string(&data).map_err(|err| ActError::Store(err.to_string()))
     }
 
-    pub fn from_str(s: &str, tree: &node_tree::NodeTree) -> Arc<Self> {
-        let data: NodeData = serde_json::from_str(s).unwrap();
+    pub fn from_str(s: &str, tree: &node_tree::NodeTree) -> Result<Arc<Self>> {
+        let data: NodeData =
+            serde_json::from_str(s).map_err(|err| ActError::Store(err.to_string()))?;
         let ret = Arc::new(Self::new(&data.id, data.content, data.level));
         if let Some(node) = tree.node(&ret.id) {
-            return node;
+            return Ok(node);
         }
-        // for c in &data.children {
-        //     if let Some(n) = tree.node(c) {
-        //         ret.push_child(&n);
-        //     }
-        // }
-        // if let Some(parent) = &data.parent {
-        //     if let Some(n) = tree.node(parent) {
-        //         ret.set_parent(&n);
-        //     }
-        // }
 
-        // if let Some(prev) = &data.prev {
-        //     if let Some(n) = tree.node(prev) {
-        //         ret.set_prev(&n, false);
-        //     }
-        // }
-
-        // if let Some(next) = &data.next {
-        //     if let Some(n) = tree.node(next) {
-        //         ret.set_next(&n, false);
-        //     }
-        // }
-
-        ret
+        Ok(ret)
     }
 
     #[allow(unused)]

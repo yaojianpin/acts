@@ -193,8 +193,8 @@ async fn sch_tree_node_workflow_ser_de() {
     let tree = NodeTree::build(&mut workflow).unwrap();
     let w = tree.node("w1").unwrap();
 
-    let data = w.to_string();
-    let w2 = Node::from_str(&data, &tree);
+    let data = w.to_string().unwrap();
+    let w2 = Node::from_str(&data, &tree).unwrap();
     assert_eq!(w2.children().len(), w.children().len());
     assert_eq!(w2.id, w.id);
     assert_eq!(w2.kind(), w.kind());
@@ -213,8 +213,8 @@ async fn sch_tree_node_step_ser_de() {
     let tree = NodeTree::build(&mut workflow).unwrap();
     let step1 = tree.node("step1").unwrap();
 
-    let data = step1.to_string();
-    let step = Node::from_str(&data, &tree);
+    let data = step1.to_string().unwrap();
+    let step = Node::from_str(&data, &tree).unwrap();
     assert_eq!(step.children().len(), 2);
     assert_eq!(step.id, "step1");
     assert_eq!(step.kind(), NodeKind::Step);
@@ -232,9 +232,9 @@ async fn sch_tree_node_branch_ser_de() {
     });
     let tree = NodeTree::build(&mut workflow).unwrap();
     let b1 = tree.node("b1").unwrap();
-    let data = b1.to_string();
+    let data = b1.to_string().unwrap();
 
-    let b = Node::from_str(&data, &tree);
+    let b = Node::from_str(&data, &tree).unwrap();
     assert_eq!(b.children().len(), 1);
     assert_eq!(b.id, "b1");
     assert_eq!(b.kind(), NodeKind::Branch);
@@ -257,8 +257,8 @@ async fn sch_tree_node_act_ser_de() {
 
     act1.set_parent(&step1);
 
-    let data = act1.to_string();
-    let act = Node::from_str(&data, &tree);
+    let data = act1.to_string().unwrap();
+    let act = Node::from_str(&data, &tree).unwrap();
     assert_eq!(act.children().len(), 0);
     assert_eq!(act.id, "act_id_1");
     assert_eq!(act.kind(), NodeKind::Act);
@@ -289,8 +289,8 @@ async fn sch_tree_node_act2_ser_de() {
 
     act2.set_parent(&act1);
 
-    let data = act2.to_string();
-    let act = Node::from_str(&data, &tree);
+    let data = act2.to_string().unwrap();
+    let act = Node::from_str(&data, &tree).unwrap();
     assert_eq!(act.children().len(), 0);
     assert_eq!(act.id, "act_id_2");
     assert_eq!(act.kind(), NodeKind::Act);

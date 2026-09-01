@@ -271,7 +271,7 @@ impl Store {
         let tree = &proc.tree();
         for t in tasks.rows {
             let state: TaskState = t.state.into();
-            let node = Node::from_str(&t.node_data, tree);
+            let node = Node::from_str(&t.node_data, tree)?;
             let mut task = scheduler::Task::new(proc, &t.tid, node, rt);
             task.set_pure_state(state.clone());
             task.set_start_time(t.start_time);
