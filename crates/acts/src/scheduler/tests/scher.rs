@@ -67,6 +67,41 @@ async fn sch_scher_start_with_vars() {
     assert_eq!(proc.inputs().get::<i64>("a").unwrap(), 100);
     assert_eq!(proc.inputs().get::<String>("b").unwrap(), "string");
 }
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_scher_start_empty_pid_error() {
+    let config = Config::default();
+    let runtime = Runtime::new(&config, None).unwrap();
+    let workflow = Workflow::new();
+    let mut vars = Vars::new();
+    vars.insert("pid".to_string(), json!(""));
+
+    let result = runtime.start(&workflow, vars);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("external process id cannot be empty"),
+        "unexpected error: {err}"
+    );
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_scher_start_pid_with_sep_error() {
+    let config = Config::default();
+    let runtime = Runtime::new(&config, None).unwrap();
+    let workflow = Workflow::new();
+    let mut vars = Vars::new();
+    vars.insert("pid".to_string(), json!("proc-123"));
+
+    let result = runtime.start(&workflow, vars);
+    assert!(result.is_err());
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("external process id cannot contain"),
+        "unexpected error: {err}"
+    );
+}
 
 #[serial]
 #[tokio::test(flavor = "multi_thread")]

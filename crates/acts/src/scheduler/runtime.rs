@@ -112,6 +112,20 @@ impl Runtime {
         if let Some(pid) = &options.get::<String>(consts::PROCESS_ID) {
             // the pid will use as the proc_id
             proc_id = pid.to_string();
+
+            // check external pid is valid
+            if proc_id.is_empty() {
+                return Err(ActError::Action(
+                    "external process id cannot be empty".to_string(),
+                ));
+            }
+
+            if proc_id.contains(consts::KEY_SEP) {
+                return Err(ActError::Action(format!(
+                    "external process id cannot contain '{}'",
+                    consts::KEY_SEP
+                )));
+            }
         }
         let proc = self.cache.proc(&proc_id, self)?;
         if proc.is_some() {
