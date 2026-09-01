@@ -285,6 +285,11 @@ impl Store {
                 task.set_parent(parent);
             }
 
+            // resume next tasks
+            for next in t.next.iter() {
+                task.set_next(next);
+            }
+
             let data =
                 serde_json::from_str(&t.data).map_err(|err| ActError::Store(err.to_string()))?;
             task.set_data(&data);
