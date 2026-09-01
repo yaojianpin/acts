@@ -290,9 +290,19 @@ impl Store {
                 task.set_next(next);
             }
 
-            let data =
-                serde_json::from_str(&t.data).map_err(|err| ActError::Store(err.to_string()))?;
-            task.set_data(&data);
+            // resume data
+            if !t.data.is_empty() {
+                let data = serde_json::from_str(&t.data)
+                    .map_err(|err| ActError::Store(err.to_string()))?;
+                task.set_data(&data);
+            }
+
+            // resume task sealed data
+            if !t.sealed.is_empty() {
+                let data = serde_json::from_str(&t.sealed)
+                    .map_err(|err| ActError::Store(err.to_string()))?;
+                task.set_sealed_data(&data);
+            }
 
             if let Some(err) = t.err {
                 let err: Error =

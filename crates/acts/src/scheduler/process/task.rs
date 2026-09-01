@@ -1131,6 +1131,13 @@ impl Task {
         sealed.set(name, value);
     }
 
+    pub(crate) fn set_sealed_data(&self, vars: &Vars) {
+        let mut data = self.sealed_data.write().unwrap();
+        for (name, value) in vars.iter() {
+            data.set(name, value);
+        }
+    }
+
     /// Get sealed data by resolver name. Walks the parent chain
     /// if not found locally (child overrides parent).
     pub fn sealed(&self, name: &str) -> Option<Vars> {
