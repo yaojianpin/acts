@@ -2,7 +2,7 @@ use crate::{
     Act, NodeKind, Workflow,
     scheduler::{
         Node,
-        tree::{NodeContent, NodeTree},
+        tree::{NodeContent, NodeData, NodeTree, dyn_build_act},
     },
 };
 use std::sync::Arc;
@@ -297,4 +297,73 @@ async fn sch_tree_node_act2_ser_de() {
     assert_eq!(act.level, act1.level + 1);
     // not care the parent for act when resume data from string
     assert!(act.parent().is_none());
+}
+#[tokio::test]
+async fn sch_tree_dyn_acts_restore_chain() {
+    // build the dynamic act chain exactly like ctx.build_acts does
+    let mut workflow = Workflow::new()
+        .with_id("w1")
+        .with_step(|step| step.with_id("step1"));
+    let tree = NodeTree::build(&mut workflow).unwrap();
+    let step1 = tree.node("step1").unwrap();
+
+    let mut acts = [
+        Act::irq(|r| r.with_params_vars(|v| v.with("key", "act1"))),
+        Act::irq(|r| r.with_params_vars(|v| v.with("key", "act2"))),
+        Act::irq(|r| r.with_params_vars(|v| v.with("key", "act3"))),
+    ];
+    let mut prev = step1.clone();
+    for (index, act) in acts.iter_mut().enumerate() {
+        dyn_build_act(act, &tree, &step1, &mut prev, step1.level + 1, index, true).unwrap();
+    }
+
+    // dynamic nodes are registered in the tree map
+    let act_ids = acts.iter().map(|a| a.id.clone()).collect::<Vec<_>>();
+    for id in &act_ids {
+        assert!(tree.node(id).is_some(), "dynamic node {id} in tree map");
+    }
+    // chain: act1 -> act2 -> act3, act1 is the child of step1
+    assert_eq!(step1.children().len(), 1);
+    let act1 = tree.node(&act_ids[0]).unwrap();
+    let act2 = tree.node(&act_ids[1]).unwrap();
+    assert_eq!(act1.next().upgrade().unwrap().id(), act2.id());
+
+    // persist every node like Task::into_data does
+    let datas = acts
+        .iter()
+        .map(|a| {
+            let node = tree.node(&a.id).unwrap();
+            serde_json::from_str::<NodeData>(&node.to_string().unwrap()).unwrap()
+        })
+        .collect::<Vec<_>>();
+    assert!(datas[0].parent_id.is_some());
+    assert_eq!(datas[0].next_id.as_deref(), Some(act_ids[1].as_str()));
+
+    // restore into a fresh tree (mirrors store::load_proc + load_tasks:
+    // register all dynamic nodes first, then rebuild the links)
+    let tree2 = NodeTree::build(&mut workflow).unwrap();
+    let mut dyn_nodes = Vec::new();
+    for data in datas.iter() {
+        let node = tree2
+            .get_or_make(&data.id, data.content.clone(), data.level)
+            .unwrap();
+        dyn_nodes.push((node, data));
+    }
+    for (node, data) in dyn_nodes {
+        node.restore_links(data, &tree2);
+    }
+
+    // links are rebuilt: prev/next chain, parent and children
+    let a1 = tree2.node(&act_ids[0]).unwrap();
+    let a2 = tree2.node(&act_ids[1]).unwrap();
+    let a3 = tree2.node(&act_ids[2]).unwrap();
+    assert_eq!(a1.next().upgrade().unwrap().id(), a2.id());
+    assert_eq!(a2.prev().upgrade().unwrap().id(), a1.id());
+    assert_eq!(a2.next().upgrade().unwrap().id(), a3.id());
+    assert!(a3.next().upgrade().is_none());
+    assert_eq!(a1.parent().unwrap().id(), "step1");
+    // children restored as the inverse of the parent link
+    let step = tree2.node("step1").unwrap();
+    assert_eq!(step.children().len(), 1);
+    assert_eq!(step.children()[0].id(), a1.id());
 }

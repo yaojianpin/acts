@@ -145,7 +145,10 @@ async fn export_executor_start_empty_pid() {
     let mut options = Vars::new();
     options.insert("pid".to_string(), "".into());
     let result = executor.proc().start(&workflow.id, options);
-    assert!(result.is_ok());
+    assert_eq!(
+        result.err().unwrap().to_string(),
+        "external process id cannot be empty"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

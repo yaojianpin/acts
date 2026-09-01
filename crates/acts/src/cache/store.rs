@@ -1,7 +1,7 @@
 use crate::{
     ActError, Error, Message, Result, Vars, Workflow,
     data::{self, MessageStatus},
-    scheduler::{self, Node, Runtime, TaskState},
+    scheduler::{self, Node, NodeData, Runtime, TaskState},
     store::{Store, query::*},
     utils,
 };
@@ -269,9 +269,23 @@ impl Store {
         let query = Query::new().filter(Filter::and().expr(Expr::eq("pid", proc.id())));
         let tasks = collection.query(&query)?;
         let tree = &proc.tree();
+
+        // phase 1: load tasks and register dynamic nodes into the tree map,
+        // so node links (parent/prev/next) can be resolved afterwards
+        let mut dyn_nodes: Vec<(Arc<Node>, NodeData)> = Vec::new();
         for t in tasks.rows {
+            let data: NodeData = serde_json::from_str(&t.node_data)
+                .map_err(|err| ActError::Store(err.to_string()))?;
+            let node = match tree.node(&data.id) {
+                Some(node) => node,
+                None => {
+                    let node = tree.get_or_make(&data.id, data.content.clone(), data.level)?;
+                    dyn_nodes.push((node.clone(), data));
+                    node
+                }
+            };
+
             let state: TaskState = t.state.into();
-            let node = Node::from_str(&t.node_data, tree)?;
             let mut task = scheduler::Task::new(proc, &t.tid, node, rt);
             task.set_pure_state(state.clone());
             task.set_start_time(t.start_time);
@@ -310,6 +324,11 @@ impl Store {
                 task.set_pure_err(&err)
             }
             proc.push_task(Arc::new(task));
+        }
+
+        // phase 2: rebuild the node graph (parent/prev/next) of dynamic nodes
+        for (node, data) in dyn_nodes.iter() {
+            node.restore_links(data, tree);
         }
 
         Ok(())

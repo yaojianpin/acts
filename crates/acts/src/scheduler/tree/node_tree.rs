@@ -3,13 +3,16 @@ use super::{
     node::{Node, NodeContent},
     visit::VisitRoot,
 };
-use crate::{ActError, Result, ShareLock, Workflow};
-use std::{cell::RefCell, collections::HashMap, sync::Arc};
+use crate::utils::shortid;
+use crate::{ActError, Result, Workflow};
+use parking_lot::RwLock;
+use std::sync::Arc;
+use std::{cell::RefCell, collections::HashMap};
 
 #[derive(Default, Clone)]
 pub struct NodeTree {
     pub(crate) root: Option<Arc<Node>>,
-    pub(crate) node_map: ShareLock<HashMap<String, Arc<Node>>>,
+    pub(crate) node_map: Arc<RwLock<HashMap<String, Arc<Node>>>>,
     pub(crate) error: Option<ActError>,
     pub(crate) model: Box<Workflow>,
 }
@@ -48,7 +51,7 @@ impl NodeTree {
 
     pub fn make(&self, id: &str, data: NodeContent, level: usize) -> Result<Arc<Node>> {
         let node = Arc::new(Node::new(id, data, level));
-        let mut node_map = self.node_map.write().unwrap();
+        let mut node_map = self.node_map.write();
         if node_map.contains_key(node.id()) {
             return Err(ActError::Model(format!("dup node id with '{}'", node.id())));
         }
@@ -57,12 +60,39 @@ impl NodeTree {
         Ok(node)
     }
 
+    /// create a node in the tree map, reusing the existing node if the id already exists
+    pub fn get_or_make(&self, id: &str, data: NodeContent, level: usize) -> Result<Arc<Node>> {
+        if let Some(node) = self.node(id) {
+            return Ok(node);
+        }
+        self.make(id, data, level)
+    }
+
+    /// create a dynamic node under parent and register it in the tree map.
+    /// node ids must be unique so persisted links resolve on restore;
+    /// parallel acts may share the same model id, so uniquify on collision
+    pub fn append_node(
+        &self,
+        parent: &Arc<Node>,
+        id: &str,
+        data: NodeContent,
+        level: usize,
+    ) -> Result<Arc<Node>> {
+        let mut node_id = id.to_string();
+        if self.node(&node_id).is_some() {
+            node_id = format!("{}-{}", node_id, shortid());
+        }
+        let node = self.make(&node_id, data, level)?;
+        parent.nodes.write().push(node.clone());
+        Ok(node)
+    }
+
     pub fn set_root(&mut self, node: &Arc<Node>) {
         self.root = Some(node.clone());
     }
 
     pub fn node(&self, key: &str) -> Option<Arc<Node>> {
-        let map = self.node_map.read().unwrap();
+        let map = self.node_map.read();
         map.get(key).cloned()
     }
 

@@ -1,7 +1,8 @@
 use crate::{Act, ActError, Branch, Result, Step, Variant, Vars, Workflow};
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{Arc, Weak};
 
 use super::{node_tree, visit::VisitRoot};
 
@@ -55,6 +56,15 @@ pub struct NodeData {
     pub id: String,
     pub content: NodeContent,
     pub level: usize,
+    /// parent node id, persisted for dynamic nodes
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    /// previous node id in the dynamic chain
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prev_id: Option<String>,
+    /// next node id in the dynamic chain
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_id: Option<String>,
 }
 
 impl NodeContent {
@@ -145,7 +155,7 @@ impl Node {
     }
 
     pub fn parent(&self) -> Option<Arc<Node>> {
-        let node = self.parent.read().unwrap();
+        let node = self.parent.read();
         if let Some(parent) = node.upgrade() {
             return Some(parent);
         }
@@ -158,7 +168,7 @@ impl Node {
     }
 
     pub fn push_child(&self, typ: NodeOutputKind, child: &Arc<Node>) {
-        let mut children = self.children.write().unwrap();
+        let mut children = self.children.write();
         children.push(NodeOutput {
             typ,
             node: child.clone(),
@@ -171,24 +181,38 @@ impl Node {
 
     /// set parent in the node tree with the given type
     pub fn set_parent_in(&self, typ: NodeOutputKind, parent: &Arc<Node>) {
-        *self.parent.write().unwrap() = Arc::downgrade(parent);
-        parent.children.write().unwrap().push(NodeOutput {
+        *self.parent.write() = Arc::downgrade(parent);
+        parent.children.write().push(NodeOutput {
             typ,
             node: Arc::new(self.clone()),
         });
     }
 
     pub fn set_next(self: &Arc<Node>, node: &Arc<Node>, is_prev: bool) {
-        *self.next.write().unwrap() = Arc::downgrade(node);
+        *self.next.write() = Arc::downgrade(node);
         if is_prev {
-            *node.prev.write().unwrap() = Arc::downgrade(self);
+            *node.prev.write() = Arc::downgrade(self);
         }
     }
 
-    pub fn append_node(self: &Arc<Node>, id: &str, data: NodeContent, level: usize) -> Arc<Node> {
-        let node = Arc::new(Node::new(id, data.clone(), level));
-        self.nodes.write().unwrap().push(node.clone());
-        node
+    /// rebuild the node graph links (parent/prev/next) from persisted data.
+    /// children are restored as the inverse of each child's parent link.
+    pub fn restore_links(self: &Arc<Self>, data: &NodeData, tree: &node_tree::NodeTree) {
+        if let Some(parent_id) = &data.parent_id
+            && let Some(parent) = tree.node(parent_id)
+        {
+            self.set_parent(&parent);
+        }
+        if let Some(prev_id) = &data.prev_id
+            && let Some(prev) = tree.node(prev_id)
+        {
+            *self.prev.write() = Arc::downgrade(&prev);
+        }
+        if let Some(next_id) = &data.next_id
+            && let Some(next) = tree.node(next_id)
+        {
+            *self.next.write() = Arc::downgrade(&next);
+        }
     }
 
     pub fn children(&self) -> Vec<Arc<Node>> {
@@ -196,7 +220,7 @@ impl Node {
     }
 
     pub fn children_in(&self, typ: NodeOutputKind) -> Vec<Arc<Node>> {
-        let node = self.children.read().unwrap();
+        let node = self.children.read();
         node.iter()
             .filter(|n| n.typ == typ)
             .map(|n| n.node.clone())
@@ -204,12 +228,12 @@ impl Node {
     }
 
     pub fn next(&self) -> Weak<Node> {
-        let next = self.next.read().unwrap();
+        let next = self.next.read();
         next.clone()
     }
 
     pub fn prev(&self) -> Weak<Node> {
-        let prev = self.prev.read().unwrap();
+        let prev = self.prev.read();
         prev.clone()
     }
 
@@ -252,6 +276,9 @@ impl Node {
             id: self.id.clone(),
             content: self.content.clone(),
             level: self.level,
+            parent_id: self.parent.read().upgrade().map(|n| n.id.clone()),
+            prev_id: self.prev().upgrade().map(|n| n.id.clone()),
+            next_id: self.next().upgrade().map(|n| n.id.clone()),
         };
         serde_json::to_string(&data).map_err(|err| ActError::Store(err.to_string()))
     }

@@ -172,6 +172,7 @@ pub fn build_branch(
 
 pub fn dyn_build_act(
     act: &mut Act,
+    tree: &NodeTree,
     parent: &Arc<Node>,
     prev: &mut Arc<Node>,
     level: usize,
@@ -183,7 +184,7 @@ pub fn dyn_build_act(
     }
 
     let data = NodeContent::Act(act.clone());
-    let node = parent.append_node(&act.id, data, level);
+    let node = tree.append_node(parent, &act.id, data, level)?;
 
     if is_sequence {
         // set the act order one by one

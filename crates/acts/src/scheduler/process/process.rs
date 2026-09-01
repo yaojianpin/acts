@@ -221,7 +221,7 @@ impl Process {
     }
 
     pub fn task_by_nid(&self, nid: &str) -> Vec<Arc<Task>> {
-        self.find_tasks(|t| t.node().id() == nid)
+        self.find_tasks(|t| t.node().id() == nid || t.node().content.id() == nid)
     }
 
     #[cfg(test)]

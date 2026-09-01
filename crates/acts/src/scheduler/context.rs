@@ -250,11 +250,13 @@ impl Context {
             if id.is_empty() {
                 id = shortid();
             }
-            let node = self.task().node().append_node(
+            let tree = self.proc.tree();
+            let node = tree.append_node(
+                self.task().node(),
                 &id,
                 NodeContent::Act(act.clone()),
                 task.node().level + 1,
-            );
+            )?;
             let task = self.proc.create_task(&node, Some(task));
             task.set_data(&vars);
             self.runtime.push(&task)?;
@@ -265,12 +267,14 @@ impl Context {
 
     pub fn build_acts(&self, acts: &[Act], is_sequence: bool) -> Result<()> {
         let task = self.task();
+        let tree = self.proc.tree();
 
         let mut prev = task.node().clone();
         let mut acts = acts.to_owned();
         for (index, act) in acts.iter_mut().enumerate() {
             dyn_build_act(
                 act,
+                &tree,
                 task.node(),
                 &mut prev,
                 task.node().level + 1,

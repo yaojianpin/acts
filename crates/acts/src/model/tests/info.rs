@@ -72,6 +72,9 @@ fn model_info_task() {
         id: "nid".to_string(),
         content: crate::scheduler::NodeContent::Workflow(workflow),
         level: 0,
+        parent_id: None,
+        prev_id: None,
+        next_id: None,
     };
     let task = data::Task {
         id: utils::shortid(),
@@ -235,6 +238,9 @@ fn model_info_task_arr_to_value() {
         id: "nid".to_string(),
         content: crate::scheduler::NodeContent::Workflow(workflow),
         level: 0,
+        parent_id: None,
+        prev_id: None,
+        next_id: None,
     };
     let task = data::Task {
         id: utils::shortid(),

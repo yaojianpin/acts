@@ -229,3 +229,5 @@
 - fix: change task id format with `{pid}{tid}`, remove `SEP` between `pid` and `tid`
 - fix: add QuickJS interrupt handle to deal with deadline issue
 - feat: change PostgresStore connection from global to local
+- fix: persist dynamic acts (`build_acts`) node links and rebuild parent/prev/next/children on restore so chained acts resume correctly
+- fix: register dynamic act nodes in the NodeTree map, uniquify node ids on collision (parallel acts share model ids)
