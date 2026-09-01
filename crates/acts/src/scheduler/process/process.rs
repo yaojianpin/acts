@@ -224,6 +224,16 @@ impl Process {
         self.find_tasks(|t| t.node().id() == nid || t.node().content.id() == nid)
     }
 
+    /// Find the task instance created for `node` with `prev` as its previous
+    /// task — the identity used when scheduling. A crash mid-`next` can leave
+    /// such an instance behind; re-scheduling must reuse it instead of creating
+    /// a duplicate (see `Context::schedule_once`).
+    pub fn task_for_node_prev(&self, node_id: &str, prev_id: &str) -> Option<Arc<Task>> {
+        self.find_tasks(|t| t.node().id() == node_id && t.prev_id().as_deref() == Some(prev_id))
+            .into_iter()
+            .next()
+    }
+
     #[cfg(test)]
     pub fn task_by_params(&self, key: &str, value: &str) -> Vec<Arc<Task>> {
         self.find_tasks(|t| {

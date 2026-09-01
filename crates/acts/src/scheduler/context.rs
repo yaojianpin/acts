@@ -240,6 +240,26 @@ impl Context {
         Ok(())
     }
 
+    /// Schedule `node` with `prev` as its predecessor, reusing the task
+    /// instance that was already created for the same `(node, prev)` slot when
+    /// it is still in flight. A crash mid-`next` (or its recovery replay) can
+    /// re-run the propagation after the node was already scheduled; re-creating
+    /// the task would duplicate it. Instances that were persisted but never
+    /// started (state `None`) are re-enqueued; terminal instances (completed,
+    /// skipped, …) are left alone so legitimate re-execution (redo, timeout
+    /// re-evaluation) still creates fresh tasks.
+    pub fn schedule_once(&self, node: &Arc<Node>, prev: Arc<Task>) -> Result<()> {
+        if let Some(existing) = self.proc.task_for_node_prev(node.id(), &prev.id)
+            && !existing.state().is_completed()
+        {
+            if existing.state().is_none() {
+                self.runtime.push(&existing)?;
+            }
+            return Ok(());
+        }
+        self.sched_task(node, prev)
+    }
+
     #[instrument(skip(self, act, vars), fields(uses = %act.uses, name = %act.name))]
     pub fn dispatch_act(&self, act: &Act, vars: Vars) -> Result<()> {
         debug!(nid = %act.id, "act dispatched");
@@ -495,8 +515,10 @@ impl Context {
         Ok(())
     }
 
+    /// Enqueue the task's `next` propagation through the durable outbox:
+    /// the task state is flushed and a `Pending` outbox record is written
+    /// before the in-memory queue dispatch.
     pub fn push_next(&self) -> Result<()> {
-        self.runtime.queue().send_next(&self.task())?;
-        Ok(())
+        self.runtime.enqueue_next(&self.task())
     }
 }

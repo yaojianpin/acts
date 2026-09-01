@@ -14,6 +14,14 @@ pub(crate) enum WriteOp {
         tid: String,
         status: MessageStatus,
     },
+    /// Durable outbox enqueue: record the task's `next` as pending. Ordered
+    /// after the task write queued by the same caller, so when this record
+    /// becomes durable the task state it depends on is durable too.
+    EnqueueNext { pid: String, tid: String },
+    /// Durable outbox close: mark the task's in-flight records `Done`. Ordered
+    /// after the task write carrying the `NEXT_COMPLETE` marker, so `Done` is
+    /// only durable once the completion is durable.
+    OpDone { pid: String, tid: String },
     Barrier(mpsc::SyncSender<()>),
 }
 
@@ -70,6 +78,14 @@ impl StoreWriter {
             WriteOp::Task(task) => Self::apply_task(store, &task),
             WriteOp::MessageStatus { pid, tid, status } => {
                 store.set_message_with(&pid, &tid, status)?;
+                Ok(())
+            }
+            WriteOp::EnqueueNext { pid, tid } => {
+                store.enqueue_next_op(&pid, &tid)?;
+                Ok(())
+            }
+            WriteOp::OpDone { pid, tid } => {
+                store.complete_next_ops(&pid, &tid)?;
                 Ok(())
             }
             WriteOp::Barrier(tx) => {

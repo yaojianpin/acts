@@ -500,14 +500,12 @@ impl Task {
             }
             EventAction::Remove => {
                 self.set_state(TaskState::Removed);
-                self.set_sign(Sign::NEXT_PENDING);
                 ctx.emit_task(self)?;
                 ctx.push_next()?;
             }
             EventAction::Submit => {
                 self.update_data(&ctx.vars());
                 self.set_state(TaskState::Submitted);
-                self.set_sign(Sign::NEXT_PENDING);
                 ctx.emit_task(self)?;
                 ctx.push_next()?;
             }
@@ -520,7 +518,6 @@ impl Task {
                 }
                 self.update_data(&ctx.vars());
                 self.set_state(TaskState::Completed);
-                self.set_sign(Sign::NEXT_PENDING);
                 ctx.emit_task(self)?;
                 ctx.push_next()?;
             }
@@ -624,7 +621,6 @@ impl Task {
 
                 // set both current act and parent step to skip
                 self.set_state(TaskState::Skipped);
-                self.set_sign(Sign::NEXT_PENDING);
                 ctx.emit_task(self)?;
                 ctx.push_next()?;
             }
@@ -874,7 +870,7 @@ impl Task {
                 let children = self.node().children();
                 if !children.is_empty() {
                     for child in &children {
-                        ctx.sched_task(child, ctx.task())?;
+                        ctx.schedule_once(child, ctx.task())?;
                     }
                     self.set_sign(Sign::IN_CHILDREN);
                     return Ok(NextAction::Stop);
@@ -1219,7 +1215,7 @@ impl Task {
     fn move_next(&self, ctx: &Context) -> Result<bool> {
         let task = ctx.task();
         if let Some(next) = &task.node.next().upgrade() {
-            ctx.sched_task(next, ctx.task())?;
+            ctx.schedule_once(next, ctx.task())?;
             return Ok(true);
         }
 

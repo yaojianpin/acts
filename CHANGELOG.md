@@ -229,5 +229,4 @@
 - fix: change task id format with `{pid}{tid}`, remove `SEP` between `pid` and `tid`
 - fix: add QuickJS interrupt handle to deal with deadline issue
 - feat: change PostgresStore connection from global to local
-- fix: persist dynamic acts (`build_acts`) node links and rebuild parent/prev/next/children on restore so chained acts resume correctly
-- fix: register dynamic act nodes in the NodeTree map, uniquify node ids on collision (parallel acts share model ids)
+- fix: make `task.next` propagation crash-safe with a durable outbox — pending `next` operations are recorded in a new `ops` store collection before in-memory dispatch and closed only after the task (with the `NEXT_COMPLETE` marker) is durably persisted; recovery replays unfinished records, and re-scheduling is deduplicated, so reloading after a crash never loses or duplicates propagation (removes the non-durable `NEXT_PENDING` sign)

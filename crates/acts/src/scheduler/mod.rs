@@ -51,11 +51,9 @@ bitflags! {
         /// uses action completed
         const USES_COMPLETE  = 0b0000_0000_0100_0000;
 
-        /// task `next` propagation completed (idempotent replay guard)
+        /// task `next` propagation completed (durable replay guard: persisted
+        /// before the outbox record is closed, so recovery skips completed work)
         const NEXT_COMPLETE  = 0b0000_0000_1000_0000;
-
-        /// task `next` execution is queued but not yet run (crash replay guard)
-        const NEXT_PENDING  = 0b0000_0001_0000_0000;
     }
 }
 

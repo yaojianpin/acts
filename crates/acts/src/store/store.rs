@@ -56,6 +56,9 @@ impl Store {
     pub fn events(&self) -> Arc<dyn DbCollection<Item = data::Event>> {
         self.collection()
     }
+    pub fn ops(&self) -> Arc<dyn DbCollection<Item = data::Op>> {
+        self.collection()
+    }
 
     pub fn publish(&self, pack: &Package) -> Result<bool> {
         trace!(id = %pack.id, "store publish");

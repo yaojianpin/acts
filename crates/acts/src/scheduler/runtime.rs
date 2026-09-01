@@ -201,18 +201,52 @@ impl Runtime {
         }
     }
 
-    /// Replay tasks whose `next` propagation was enqueued (`Sign::NEXT_PENDING`)
-    /// but never executed (e.g. the engine crashed before the queued `next`
-    /// ran). Re-enqueueing is idempotent: `next` clears the marker once run.
+    /// Durable outbox enqueue for a `next` operation: a `Pending` outbox record
+    /// is queued on the store writer (after the task state change, so the task
+    /// is durable first) and the operation is dispatched to the in-memory
+    /// queue — neither blocks the caller. A crash before the record lands is
+    /// consistent (nothing to replay); a crash after it lands is recovered by
+    /// [`Self::recover_actions`]; a crash after the operation ran is a no-op
+    /// thanks to the durably persisted `NEXT_COMPLETE` marker.
+    pub(crate) fn enqueue_next(&self, task: &Arc<Task>) -> Result<()> {
+        self.cache.enqueue_next(task)?;
+        self.queue.send_next(task)?;
+        Ok(())
+    }
+
+    /// Durable outbox close after `task.next` ran: queue the task persist (with
+    /// the `NEXT_COMPLETE` marker) and then the outbox record close, in order,
+    /// on the store writer — non-blocking.
+    pub(crate) fn complete_next(&self, task: &Arc<Task>) -> Result<()> {
+        self.cache.complete_next(task)
+    }
+
+    /// Replay durable outbox records that were not durably completed (the
+    /// engine crashed before the queued `next` ran or before its effects were
+    /// persisted). Re-enqueueing is idempotent:
+    /// - records of a task whose `next` already completed are skipped by the
+    ///   durable `NEXT_COMPLETE` guard and closed;
+    /// - records of a task whose `next` never ran are dispatched again, and
+    ///   re-scheduling is deduplicated against tasks created before the crash.
     pub fn recover_actions(self: &Arc<Self>) -> Result<()> {
-        let pending = self.cache.store().load_pending_next_tasks()?;
-        for (pid, tid) in pending {
-            if let Some(proc) = self.cache.proc(&pid, self)?
-                && let Some(task) = proc.task(&tid)
-                && task.is_sign(Sign::NEXT_PENDING)
-            {
-                self.queue.send_next(&task)?;
+        let ops = self.cache.store().load_pending_ops()?;
+        for op in ops {
+            let (pid, tid) = (op.pid, op.tid);
+            let Some(proc) = self.cache.proc(&pid, self)? else {
+                // process is gone (removed while completing) — drop the orphan
+                self.cache.store().complete_next_ops(&pid, &tid)?;
+                continue;
+            };
+            let Some(task) = proc.task(&tid) else {
+                self.cache.store().complete_next_ops(&pid, &tid)?;
+                continue;
+            };
+            if task.is_sign(Sign::NEXT_COMPLETE) {
+                // propagation already completed durably; just close the record
+                self.cache.store().complete_next_ops(&pid, &tid)?;
+                continue;
             }
+            self.queue.send_next(&task)?;
         }
         Ok(())
     }
@@ -262,6 +296,13 @@ impl Runtime {
                                 task.set_err(&err.clone().into());
                                 ctx.set_task(&task);
                                 ctx.emit_error().ok();
+                            }
+                            // durable completion: persist the task (capturing
+                            // the NEXT_COMPLETE marker) and close the outbox
+                            // record, so a crash right after this cannot re-run
+                            // the propagation on recovery.
+                            if let Err(err) = task.runtime().complete_next(&task) {
+                                error!(error = %err, "complete_next failed");
                             }
                         }
                         QueueData::Abort => {

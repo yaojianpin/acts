@@ -175,6 +175,33 @@ impl Cache {
         })
     }
 
+    /// Durable outbox enqueue for a `next` operation. The `Pending` record is
+    /// queued on the writer **after** the task state change the caller already
+    /// queued (`emit_task`), so FIFO order guarantees the task is durable
+    /// before the record — without blocking the caller. A crash leaves either
+    /// nothing (consistent, no replay) or the record, which recovery replays.
+    pub(crate) fn enqueue_next(&self, task: &Arc<Task>) -> Result<()> {
+        self.writer.send(WriteOp::EnqueueNext {
+            pid: task.pid.clone(),
+            tid: task.id.clone(),
+        })
+    }
+
+    /// Durable outbox close: queue the task persist (capturing the
+    /// `NEXT_COMPLETE` marker), then queue the record close after it — FIFO
+    /// order makes `Done` durable only after the marker, without blocking the
+    /// event loop. If the process crashes between the two, the record is still
+    /// `Pending` and recovery re-dispatches it; the durable marker turns the
+    /// re-run into a no-op.
+    pub(crate) fn complete_next(&self, task: &Arc<Task>) -> Result<()> {
+        self.upsert_async(task)?;
+        self.writer.send(WriteOp::OpDone {
+            pid: task.pid.clone(),
+            tid: task.id.clone(),
+        })?;
+        Ok(())
+    }
+
     pub(crate) fn flush(&self) {
         self.writer.flush();
     }

@@ -1,8 +1,8 @@
 use crate::{
-    ActError, Error, Message, Result, Vars, Workflow,
+    ActError, Error, Message, Result, Workflow,
     data::{self, MessageStatus},
     scheduler::{self, Node, NodeData, Runtime, TaskState},
-    store::{Store, query::*},
+    store::{DbCollectionIden, Store, query::*},
     utils,
 };
 use std::{collections::HashSet, sync::Arc};
@@ -95,25 +95,79 @@ impl Store {
         for task in tasks.rows {
             self.tasks().delete(&task.id)?;
         }
+        self.remove_ops(pid)?;
         self.procs().delete(pid)?;
         Ok(true)
     }
 
-    /// Returns the `(pid, tid)` of tasks whose `next` execution was enqueued
-    /// (`Sign::NEXT_PENDING`) but not yet run — used for crash replay.
-    pub fn load_pending_next_tasks(&self) -> Result<Vec<(String, String)>> {
-        let tasks = self.tasks().query(&Query::new())?;
-        let mut ret = Vec::new();
-        for t in tasks.rows {
-            let data: Vars =
-                serde_json::from_str(&t.data).map_err(|err| ActError::Store(err.to_string()))?;
-            if let Some(sign) = data.get::<scheduler::Sign>(utils::consts::TASK_SIGN)
-                && (sign & scheduler::Sign::NEXT_PENDING) == scheduler::Sign::NEXT_PENDING
-            {
-                ret.push((t.pid, t.tid));
-            }
+    /// Record a durable outbox entry: the task's `next` propagation is enqueued
+    /// but not yet run. Deduplicated per `(pid, tid)` — at most one in-flight
+    /// record per task, matching the previous `Sign::NEXT_PENDING` semantics.
+    /// Called synchronously *before* the in-memory queue dispatch, after the
+    /// task state was flushed, so a `Pending` record always has a durable task
+    /// behind it.
+    pub fn enqueue_next_op(&self, pid: &str, tid: &str) -> Result<()> {
+        let collection = self.ops();
+        let q = Query::new().filter(
+            Filter::and()
+                .expr(Expr::eq("pid", pid.to_string()))
+                .expr(Expr::eq("tid", tid.to_string()))
+                .expr(Expr::eq("status", data::OpStatus::Pending.as_ref())),
+        );
+        if !collection.query(&q)?.rows.is_empty() {
+            return Ok(());
         }
-        Ok(ret)
+
+        let now = utils::time::time_millis();
+        let op = data::Op {
+            id: utils::longid(),
+            pid: pid.to_string(),
+            tid: tid.to_string(),
+            r#type: data::OpType::Next.as_ref().to_string(),
+            status: data::OpStatus::Pending.as_ref().to_string(),
+            create_time: now,
+            update_time: now,
+            v: data::Op::version(),
+        };
+        collection.create(&op)?;
+        Ok(())
+    }
+
+    /// Load every outbox record that was not durably completed — the crash
+    /// replay set. Order is stable across restarts (creation time).
+    pub fn load_pending_ops(&self) -> Result<Vec<data::Op>> {
+        let q = Query::new()
+            .filter(Filter::and().expr(Expr::eq("status", data::OpStatus::Pending.as_ref())));
+        Ok(self.ops().query(&q)?.rows)
+    }
+
+    /// Close the in-flight outbox records of a task (`Pending` → `Done`).
+    /// Must only be called after the operation's effects — including the
+    /// `NEXT_COMPLETE` marker — were durably persisted.
+    pub fn complete_next_ops(&self, pid: &str, tid: &str) -> Result<()> {
+        let collection = self.ops();
+        let q = Query::new().filter(
+            Filter::and()
+                .expr(Expr::eq("pid", pid.to_string()))
+                .expr(Expr::eq("tid", tid.to_string()))
+                .expr(Expr::eq("status", data::OpStatus::Pending.as_ref())),
+        );
+        for mut op in collection.query(&q)?.rows {
+            op.status = data::OpStatus::Done.as_ref().to_string();
+            op.update_time = utils::time::time_millis();
+            collection.update(&op)?;
+        }
+        Ok(())
+    }
+
+    /// Drop every outbox record of a process (used when the process is removed).
+    pub fn remove_ops(&self, pid: &str) -> Result<()> {
+        let collection = self.ops();
+        let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", pid.to_string())));
+        for op in collection.query(&q)?.rows {
+            collection.delete(&op.id)?;
+        }
+        Ok(())
     }
 
     pub fn set_message(&self, id: &str, status: MessageStatus) -> Result<()> {
