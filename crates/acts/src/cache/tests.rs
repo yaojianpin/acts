@@ -189,6 +189,83 @@ async fn cache_upsert() {
     assert_eq!(proc.state(), TaskState::Running);
 }
 
+/// `Cache::remove` is serialized through the store writer (FIFO): a task
+/// write queued before the removal is applied first, and then every row of
+/// the process (proc, tasks, outbox ops) is dropped — one flush reports no
+/// failure, so removal can never race the writes still queued behind it.
+#[tokio::test]
+async fn cache_remove_after_writer_writes_drops_all_rows() {
+    let engine = Engine::builder().cache_size(10).build().start().unwrap();
+    let rt = engine.runtime();
+    let cache = rt.cache();
+    let store = cache.store();
+
+    let pid = utils::longid();
+    let proc = Process::new(&pid, &rt);
+    cache.push_proc(&proc).unwrap();
+    assert!(store.procs().exists(&pid).unwrap());
+
+    let mut workflow = Workflow::new().with_step(|step| step.with_name("step1"));
+    let tree = NodeTree::build(&mut workflow).unwrap();
+    let node = tree.root.as_ref().unwrap();
+    let task = proc.create_task(node, None).unwrap();
+    let tid = task.id.clone();
+    // the persisted row id is the composite pid-tid
+    let task_row_id = utils::Id::new(&pid, &tid).id();
+
+    // queue a task write on the writer and remove without flushing first:
+    // remove() must drain the queue (the task write applies) before it drops
+    // the rows
+    proc.set_state(TaskState::Completed);
+    cache.upsert_async(&task).unwrap();
+    cache.remove(&pid).unwrap();
+
+    assert!(!store.procs().exists(&pid).unwrap());
+    assert!(store.tasks().find(&task_row_id).is_err());
+    assert!(cache.proc(&pid, &rt).unwrap().is_none());
+    cache.flush().unwrap();
+}
+
+/// A task write that reaches the writer after its process was removed is
+/// dead data: it is skipped — neither applied (which would resurrect the
+/// rows) nor failed (which would poison a later flush).
+#[tokio::test]
+async fn cache_writes_after_remove_are_skipped() {
+    let engine = Engine::builder().cache_size(10).build().start().unwrap();
+    let rt = engine.runtime();
+    let cache = rt.cache();
+    let store = cache.store();
+
+    let pid = utils::longid();
+    let proc = Process::new(&pid, &rt);
+    cache.push_proc(&proc).unwrap();
+
+    let mut workflow = Workflow::new().with_step(|step| step.with_name("step1"));
+    let tree = NodeTree::build(&mut workflow).unwrap();
+    let node = tree.root.as_ref().unwrap();
+    let task = proc.create_task(node, None).unwrap();
+    let tid = task.id.clone();
+    // the persisted row id is the composite pid-tid
+    let task_row_id = utils::Id::new(&pid, &tid).id();
+
+    proc.set_state(TaskState::Completed);
+    cache.upsert_async(&task).unwrap();
+    cache.flush().unwrap();
+    assert!(store.tasks().find(&task_row_id).is_ok());
+
+    cache.remove(&pid).unwrap();
+    assert!(store.tasks().find(&task_row_id).is_err());
+
+    // late write for the removed process: skipped silently
+    cache.upsert_async(&task).unwrap();
+    cache.flush().unwrap();
+    assert!(
+        store.tasks().find(&task_row_id).is_err(),
+        "late write resurrected the task row of a removed process"
+    );
+    assert!(!store.procs().exists(&pid).unwrap());
+}
+
 #[tokio::test]
 async fn cache_restore_count() {
     let engine = Engine::builder().cache_size(5).build().start().unwrap();

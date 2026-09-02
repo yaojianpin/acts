@@ -6,7 +6,7 @@ macro_rules! gen_store_tests {
         use std::collections::HashSet;
         use std::sync::OnceLock;
         use $crate::store::data::{Message, MessageStatus, Model, Package, Proc, Task};
-        use $crate::store::query::{Expr, Sort, ExprOp};
+        use $crate::store::query::{Expr, ExprOp, Sort};
         use $crate::store::{Filter, Query};
         use $crate::{MessageState, TaskState, Workflow, scheduler::NodeKind, utils};
 
@@ -3017,7 +3017,8 @@ macro_rules! gen_store_tests {
                 let q = Query::new().filter(Filter::and().expr(expr));
                 let err = store.procs().query(&q).unwrap_err();
                 assert!(
-                    err.to_string().contains("In operator requires a non-empty array"),
+                    err.to_string()
+                        .contains("In operator requires a non-empty array"),
                     "unexpected error: {}",
                     err
                 );

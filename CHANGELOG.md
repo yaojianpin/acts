@@ -238,3 +238,6 @@
 - fix: one-shot atomic start process
 - fix: not return error when tree build error
 - fix: add `limit`, `ExprOp::Between`，`ExprOp::In` validation in store query
+- fix: `StoreWriter.close` flushes, stops and joins the writer thread — when it returns no writer thread is left running, and later `send`/`flush` calls fail with a channel-closed error (close previously returned without joining the thread)
+- fix: store writer `flush` reports the first failure of the writes queued since the previous flush — a failing write is surfaced through the barrier instead of acksing `Ok`; `Cache::flush` returns `Result`
+- fix: serialize process removal through the store writer (`RemoveProc` op) — `cache.remove` no longer deletes the process rows directly while its completion markers are still queued, so removal can never race the pending writes; task writes reaching the writer after the removal are skipped instead of resurrecting rows or erroring

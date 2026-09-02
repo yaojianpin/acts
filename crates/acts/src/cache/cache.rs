@@ -76,7 +76,7 @@ impl Cache {
         match self.get_proc(pid) {
             Some(proc) => Ok(Some(proc.clone())),
             None => {
-                self.flush();
+                self.flush()?;
                 if let Some(proc) = self.store.load_proc(pid, rt)? {
                     debug!(pid = %pid, "loaded process");
                     // add to cache
@@ -92,7 +92,15 @@ impl Cache {
     pub fn remove(&self, pid: &str) -> Result<bool> {
         debug!("remove pid={pid}");
         self.procs.remove(pid);
-        self.store.remove_proc(pid)?;
+        // Removal is serialized through the writer (FIFO) so it can never
+        // race writes still queued for the process — its completion markers
+        // are applied first, then the rows are dropped. `flush` keeps the
+        // callers' synchronous contract: when this returns, the removal is
+        // durable and no pending write can resurrect the rows afterwards.
+        self.writer.send(WriteOp::RemoveProc {
+            pid: pid.to_string(),
+        })?;
+        self.writer.flush()?;
         Ok(true)
     }
 
@@ -109,7 +117,7 @@ impl Cache {
             // skip procs already in the cache to avoid redundant deserialization
             let cached: HashSet<String> = self.procs().iter().map(|p| p.id().to_string()).collect();
             let cap = cap - count;
-            self.flush();
+            self.flush()?;
             for ref proc in self.store.load(cap, rt, &cached)? {
                 if !self.procs.contains_key(proc.id()) {
                     self.push_proc_pri(proc, false)?;
@@ -229,8 +237,8 @@ impl Cache {
         Ok(())
     }
 
-    pub(crate) fn flush(&self) {
-        self.writer.flush();
+    pub(crate) fn flush(&self) -> Result<()> {
+        self.writer.flush()
     }
 
     fn persist_task(&self, task: &Arc<Task>) -> Result<()> {

@@ -116,7 +116,7 @@ async fn sch_task_branch_if_false_else_running() {
         TaskState::Running
     );
 
-    rt.cache().flush();
+    rt.cache().flush().unwrap();
 
     // check the branch state is updated to store
     let task = proc.task_by_nid("b1").first().unwrap().clone();

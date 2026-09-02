@@ -783,7 +783,7 @@ async fn export_manager_tasks_count() {
 
     rt.start(&model, vars).unwrap();
     sig.recv().await;
-    engine.runtime().cache().flush();
+    engine.runtime().cache().flush().unwrap();
 
     let tasks = manager
         .task()
@@ -822,7 +822,7 @@ async fn export_manager_tasks_offset_in_range() {
 
     rt.start(&model, vars).unwrap();
     sig.recv().await;
-    engine.runtime().cache().flush();
+    engine.runtime().cache().flush().unwrap();
 
     let tasks = manager
         .task()
@@ -861,7 +861,7 @@ async fn export_manager_tasks_offset_out_range() {
 
     rt.start(&model, vars).unwrap();
     sig.recv().await;
-    engine.runtime().cache().flush();
+    engine.runtime().cache().flush().unwrap();
 
     let tasks = manager
         .task()
@@ -900,7 +900,7 @@ async fn export_manager_tasks_query() {
 
     rt.start(&model, vars).unwrap();
     sig.recv().await;
-    engine.runtime().cache().flush();
+    engine.runtime().cache().flush().unwrap();
 
     let tasks = manager
         .task()
@@ -939,7 +939,7 @@ async fn export_manager_tasks_order() {
     vars.insert("pid".to_string(), json!(pid));
     rt.start(&model, vars).unwrap();
     sig.recv().await;
-    engine.runtime().cache().flush();
+    engine.runtime().cache().flush().unwrap();
 
     let tasks = manager
         .task()
