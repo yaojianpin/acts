@@ -159,7 +159,9 @@ async fn event_on_task() {
         assert_eq!(e.inner().state(), TaskState::Running);
     });
     proc.set_state(TaskState::Running);
-    let task = proc.create_task(proc.tree().root.as_ref().unwrap(), None);
+    let task = proc
+        .create_task(proc.tree().root.as_ref().unwrap(), None)
+        .unwrap();
     task.set_state(TaskState::Running);
     engine.runtime().emitter().emit_task_event(&task).unwrap();
 }

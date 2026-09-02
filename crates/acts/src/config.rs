@@ -25,6 +25,10 @@ pub struct ConfigData {
     pub max_message_retry_times: Option<i32>,
     // do not remove process and tasks on complete
     pub keep_processes: Option<bool>,
+    /// max times a tree node can be executed in one process; protects against
+    /// unbounded task creation caused by a node self-loop / cyclic `next`.
+    /// 0 disables the check
+    pub max_node_run_times: Option<i64>,
 
     // log config
     pub log: Option<ConfigLog>,
@@ -81,6 +85,9 @@ impl Config {
     }
     pub fn max_message_retry_times(&self) -> i32 {
         self.data.max_message_retry_times.unwrap_or(20)
+    }
+    pub fn max_node_run_times(&self) -> i64 {
+        self.data.max_node_run_times.unwrap_or(1000)
     }
     pub fn tick_interval_secs(&self) -> i64 {
         self.data.tick_interval_secs.unwrap_or(15)

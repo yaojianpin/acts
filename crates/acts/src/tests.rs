@@ -215,6 +215,16 @@ async fn engine_build_max_message_retry_times() {
         .unwrap();
     assert_eq!(engine.config().max_message_retry_times(), 100)
 }
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn engine_build_max_node_run_times() {
+    let engine = Engine::builder()
+        .max_node_run_times(100)
+        .build()
+        .start()
+        .unwrap();
+    assert_eq!(engine.config().max_node_run_times(), 100)
+}
 
 #[serial]
 #[tokio::test(flavor = "multi_thread")]

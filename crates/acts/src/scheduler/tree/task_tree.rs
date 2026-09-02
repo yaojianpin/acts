@@ -5,6 +5,9 @@ use std::{collections::BTreeMap, sync::Arc};
 pub struct TaskTree {
     maps: BTreeMap<String, Arc<Task>>,
     root: Option<Arc<Task>>,
+    /// task instances created per node id; bounds re-execution of a node
+    /// (a self-loop / cyclic `next` must not create tasks forever)
+    run_counts: BTreeMap<String, usize>,
 }
 
 impl TaskTree {
@@ -12,6 +15,7 @@ impl TaskTree {
         Self {
             maps: BTreeMap::new(),
             root: None,
+            run_counts: BTreeMap::new(),
         }
     }
 
@@ -34,6 +38,7 @@ impl TaskTree {
     }
 
     pub fn push(&mut self, task: Arc<Task>) {
+        let is_new = !self.maps.contains_key(&task.id);
         self.maps
             .entry(task.id.clone())
             .and_modify(|t| {
@@ -47,8 +52,18 @@ impl TaskTree {
                 // }
             })
             .or_insert(task.clone());
+        if is_new {
+            *self
+                .run_counts
+                .entry(task.node().id().to_string())
+                .or_insert(0) += 1;
+        }
         if task.node().kind() == NodeKind::Workflow {
             self.root = Some(task);
         }
+    }
+    /// number of task instances created for the node in this process
+    pub fn run_count(&self, node_id: &str) -> usize {
+        self.run_counts.get(node_id).copied().unwrap_or(0)
     }
 }

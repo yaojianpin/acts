@@ -229,9 +229,13 @@ async fn sch_action_recover_partial_next_no_duplicate() {
     // scope the tree read guard so it is dropped before any await below
     let (root, s1, s2) = {
         let tree = proc.tree();
-        let root = proc.create_task(tree.root.as_ref().unwrap(), None);
-        let s1 = proc.create_task(&tree.node("s1").unwrap(), Some(root.clone()));
-        let s2 = proc.create_task(&tree.node("s2").unwrap(), Some(s1.clone()));
+        let root = proc.create_task(tree.root.as_ref().unwrap(), None).unwrap();
+        let s1 = proc
+            .create_task(&tree.node("s1").unwrap(), Some(root.clone()))
+            .unwrap();
+        let s2 = proc
+            .create_task(&tree.node("s2").unwrap(), Some(s1.clone()))
+            .unwrap();
         (root, s1, s2)
     };
     root.set_state(TaskState::Running);

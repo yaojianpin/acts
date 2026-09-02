@@ -72,6 +72,13 @@ impl EngineBuilder {
         self.config.data.max_message_retry_times = Some(retry_times);
         self
     }
+    /// bound the times a tree node can be executed in one process (protects
+    /// against unbounded task creation caused by a node self-loop or a cyclic
+    /// `next`); 0 disables the check
+    pub fn max_node_run_times(mut self, times: i64) -> Self {
+        self.config.data.max_node_run_times = Some(times);
+        self
+    }
 
     /// register plugin
     ///

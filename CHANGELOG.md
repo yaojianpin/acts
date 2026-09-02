@@ -232,3 +232,5 @@
 - fix: make `task.next` propagation crash-safe with a durable outbox — pending `next` operations are recorded in a new `ops` store collection before in-memory dispatch and closed only after the task (with the `NEXT_COMPLETE` marker) is durably persisted; recovery replays unfinished records, and re-scheduling is deduplicated, so reloading after a crash never loses or duplicates propagation (removes the non-durable `NEXT_PENDING` sign)
 - fix: make `task.action` propagation crash-safe with a durable outbox
 - fix: fix the hang issue when executing `pack_irq_multi_threads`
+- fix: bound the re-execution of a tree node per process — add `max_node_run_times` (default 1000, `EngineBuilder::max_node_run_times`, 0 disables); a node `next` self-loop or cycle now errors the process instead of creating tasks forever
+- fix: `process.do_tick` fires timeouts only for tasks still in flight — completed, error, aborted and skipped tasks no longer schedule their timeout children on every tick

@@ -221,7 +221,7 @@ impl Context {
     #[instrument(skip(self, node, prev))]
     pub fn sched_task(&self, node: &Arc<Node>, prev: Arc<Task>) -> Result<()> {
         debug!(nid = %node.id(), kind = %node.kind(), name = %node.name(), "task scheduled");
-        let task = self.proc.create_task(node, Some(prev));
+        let task = self.proc.create_task(node, Some(prev))?;
         self.runtime.push(&task)?;
         Ok(())
     }
@@ -234,7 +234,7 @@ impl Context {
         parent: Arc<Task>,
     ) -> Result<()> {
         debug!(nid = %node.id(), kind = %node.kind(), name = %node.name(), "task scheduled");
-        let task = self.proc.create_task(node, Some(parent));
+        let task = self.proc.create_task(node, Some(parent))?;
         task.set_data(&vars);
         self.runtime.push(&task)?;
         Ok(())
@@ -277,7 +277,7 @@ impl Context {
                 NodeContent::Act(act.clone()),
                 task.node().level + 1,
             )?;
-            let task = self.proc.create_task(&node, Some(task));
+            let task = self.proc.create_task(&node, Some(task))?;
             task.set_data(&vars);
             self.runtime.push(&task)?;
         }
@@ -311,7 +311,7 @@ impl Context {
         if let Some(prev) = task.prev_id()
             && let Some(prev_task) = self.proc.task(&prev)
         {
-            let task = self.proc.create_task(task.node(), Some(prev_task));
+            let task = self.proc.create_task(task.node(), Some(prev_task))?;
             self.runtime.push(&task)?;
         }
 

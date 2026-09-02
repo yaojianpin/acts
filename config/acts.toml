@@ -2,6 +2,7 @@
 cache_cap = 1024
 tick_interval_secs = 15
 max_message_retry_times = 20
+max_node_run_times = 1000
 
 [log]
 dir = "data"

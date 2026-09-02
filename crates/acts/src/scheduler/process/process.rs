@@ -290,7 +290,11 @@ impl Process {
     }
 
     pub(crate) fn do_tick(&self) {
-        let tasks = self.find_tasks(|t| t.is_timeouts());
+        // only run the timeout check for tasks that are running or interrupted, since
+        // tasks that are completed or skipped will not be timed out
+        let tasks = self.find_tasks(|t| {
+            t.is_timeouts() && (t.state().is_running() || t.state().is_interrupted())
+        });
         for t in tasks.iter() {
             let ctx = t.create_context();
             t.on_timeout(&ctx)
@@ -386,18 +390,23 @@ impl Process {
 
         let tr = self.tree();
         if let Some(root) = &tr.root {
-            let task = self.create_task(root, None);
+            let task = self.create_task(root, None)?;
             self.runtime.push(&task)?;
         }
 
         Ok(())
     }
 
+    /// Create a task for the node, rejecting the scheduling when the node has
+    /// already been executed `max_node_run_times` times in this process (0
+    /// disables the check). A node whose `next` points back at itself — or
+    /// into a cycle — would otherwise create an unbounded stream of new tasks;
+    /// the rejected scheduling errors the process instead.
     pub fn create_task(
         self: &Arc<Process>,
         node: &Arc<Node>,
         prev: Option<Arc<Task>>,
-    ) -> Arc<Task> {
+    ) -> Result<Arc<Task>> {
         let mut tid = utils::shortid();
         if node.kind() == NodeKind::Workflow {
             // set $ for the root task id
@@ -416,8 +425,22 @@ impl Process {
             }
         }
 
-        self.push_task(task.clone());
-        task
+        // the run-limit check and the registration must be atomic so
+        // concurrent schedulers cannot overshoot the limit
+        let mut tasks = self.tasks.write().unwrap();
+        let max = self.runtime.config().max_node_run_times();
+        if max > 0 && tasks.run_count(node.id()) >= max as usize {
+            return Err(ActError::Runtime(format!(
+                "node '{}' ({}) in process '{}' was executed more than {} times, \
+                 a loop in the workflow is likely",
+                node.id(),
+                node.name(),
+                self.id,
+                max
+            )));
+        }
+        tasks.push(task.clone());
+        Ok(task)
     }
 
     pub fn push_task(&self, task: Arc<Task>) {

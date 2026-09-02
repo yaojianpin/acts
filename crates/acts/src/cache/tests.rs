@@ -55,11 +55,11 @@ async fn cache_restore_dynamic_acts() {
 
     // create tasks for the chain like sched_task does, then save everything
     let step_node = proc.tree().node("step1").unwrap();
-    let step_task = proc.create_task(&step_node, None);
+    let step_task = proc.create_task(&step_node, None).unwrap();
     let mut prev_task = step_task;
     for id in &act_ids {
         let node = proc.tree().node(id).unwrap();
-        let task = proc.create_task(&node, Some(prev_task.clone()));
+        let task = proc.create_task(&node, Some(prev_task.clone())).unwrap();
         prev_task = task;
     }
     for task in proc.tasks() {
@@ -180,7 +180,7 @@ async fn cache_upsert() {
     assert_eq!(cache.count(), 1);
 
     let node = tree.root.as_ref().unwrap();
-    let task = proc.create_task(node, None);
+    let task = proc.create_task(node, None).unwrap();
 
     proc.set_state(TaskState::Running);
     cache.upsert(&task).unwrap();
