@@ -93,21 +93,23 @@ impl<T> KvCollection<T> {
                 ExprOp::Between => {
                     let empty = vec![];
                     let arr = expr.value.as_array().unwrap_or(&empty);
-                    let from = if arr.len() > 1 {
-                        json_value_to_key_str(&arr[0])
-                    } else {
-                        "".to_string()
-                    };
-                    let to = if arr.len() > 1 {
-                        json_value_to_key_str(&arr[1])
-                    } else {
-                        "".to_string()
-                    };
+                    if arr.is_empty() || arr.len() < 2 {
+                        return Err(ActError::Store(
+                            "Between operator requires an array of two values".to_string(),
+                        ));
+                    }
+                    let from = json_value_to_key_str(&arr[0]);
+                    let to = json_value_to_key_str(&arr[1]);
                     ScanOperation::InclusiveRange { from, to }
                 }
                 ExprOp::In => {
                     let empty = vec![];
                     let arr = expr.value.as_array().unwrap_or(&empty);
+                    if arr.is_empty() {
+                        return Err(ActError::Store(
+                            "In operator requires a non-empty array".to_string(),
+                        ));
+                    }
                     let values: Vec<String> = arr
                         .iter()
                         .map(|val| {
@@ -295,6 +297,12 @@ where
     }
 
     fn query(&self, q: &Query) -> crate::Result<PageData<Self::Item>> {
+        // Step 0: Validate query parameters
+        if q.limit == 0 {
+            return Err(ActError::Store(
+                "query limit must be greater than 0".to_string(),
+            ));
+        }
         let indexed = T::indexed_fields();
 
         // Determine global is_rev for no-filter fallback and final ID sort

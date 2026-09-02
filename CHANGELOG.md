@@ -237,3 +237,4 @@
 - fix: keep `TaskTree.push` only insert and not replace old task
 - fix: one-shot atomic start process
 - fix: not return error when tree build error
+- fix: add `limit`, `ExprOp::Between`，`ExprOp::In` validation in store query

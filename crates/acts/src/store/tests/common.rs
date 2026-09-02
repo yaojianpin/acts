@@ -6,7 +6,7 @@ macro_rules! gen_store_tests {
         use std::collections::HashSet;
         use std::sync::OnceLock;
         use $crate::store::data::{Message, MessageStatus, Model, Package, Proc, Task};
-        use $crate::store::query::{Expr, Sort};
+        use $crate::store::query::{Expr, Sort, ExprOp};
         use $crate::store::{Filter, Query};
         use $crate::{MessageState, TaskState, Workflow, scheduler::NodeKind, utils};
 
@@ -2983,6 +2983,68 @@ macro_rules! gen_store_tests {
             assert!(result_names.contains(&"a2"));
             assert!(result_names.contains(&"a4"));
             assert!(result_names.contains(&"a5"));
+        }
+
+        // ========== query parameter / operator validation tests ==========
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[serial(store_tests)]
+        async fn store_query_limit_zero_rejected() {
+            // limit=0 must be rejected before any scan happens
+            let store = store();
+
+            let q = Query::new().limit(0);
+            let err = store.procs().query(&q).unwrap_err();
+            assert!(
+                err.to_string().contains("limit must be greater than 0"),
+                "unexpected error: {}",
+                err
+            );
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[serial(store_tests)]
+        async fn store_query_in_empty_rejected() {
+            // In with an empty array or a non-array value is rejected on indexed fields
+            let store = store();
+
+            for value in [json!([]), json!("not-an-array")] {
+                let expr = Expr {
+                    key: "state".to_string(),
+                    value,
+                    op: ExprOp::In,
+                };
+                let q = Query::new().filter(Filter::and().expr(expr));
+                let err = store.procs().query(&q).unwrap_err();
+                assert!(
+                    err.to_string().contains("In operator requires a non-empty array"),
+                    "unexpected error: {}",
+                    err
+                );
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[serial(store_tests)]
+        async fn store_query_between_invalid_rejected() {
+            // Between requires an array of exactly two values on indexed fields
+            let store = store();
+
+            for value in [json!([]), json!([1]), json!("not-an-array")] {
+                let expr = Expr {
+                    key: "state".to_string(),
+                    value,
+                    op: ExprOp::Between,
+                };
+                let q = Query::new().filter(Filter::and().expr(expr));
+                let err = store.procs().query(&q).unwrap_err();
+                assert!(
+                    err.to_string()
+                        .contains("Between operator requires an array of two values"),
+                    "unexpected error: {}",
+                    err
+                );
+            }
         }
 
         // ========== NE tests ==========
