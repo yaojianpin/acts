@@ -140,14 +140,20 @@ impl Store {
         options: Option<String>,
     ) -> Result<()> {
         let collection = self.ops();
+        // Dedup against an in-flight Pending record for this (pid, tid, type).
+        // The query is scoped to (pid, tid) — at most a couple of rows — with
+        // the type/status filters applied in memory; a `type` or `status`
+        // expression would scan every record of that type/status in the
+        // collection.
         let q = Query::new().filter(
             Filter::and()
                 .expr(Expr::eq("pid", pid.to_string()))
-                .expr(Expr::eq("tid", tid.to_string()))
-                .expr(Expr::eq("type", r#type.as_ref().to_string()))
-                .expr(Expr::eq("status", data::OpStatus::Pending.as_ref())),
+                .expr(Expr::eq("tid", tid.to_string())),
         );
-        if !collection.query(&q)?.rows.is_empty() {
+        let existing = collection.query(&q)?;
+        if existing.rows.iter().any(|op| {
+            op.r#type == r#type.as_ref() && op.status == data::OpStatus::Pending.as_ref()
+        }) {
             return Ok(());
         }
 
@@ -187,14 +193,14 @@ impl Store {
         let q = Query::new().filter(
             Filter::and()
                 .expr(Expr::eq("pid", pid.to_string()))
-                .expr(Expr::eq("tid", tid.to_string()))
-                .expr(Expr::eq("type", r#type.to_string()))
-                .expr(Expr::eq("status", data::OpStatus::Pending.as_ref())),
+                .expr(Expr::eq("tid", tid.to_string())),
         );
         for mut op in collection.query(&q)?.rows {
-            op.status = data::OpStatus::Done.as_ref().to_string();
-            op.update_time = utils::time::time_millis();
-            collection.update(&op)?;
+            if op.r#type == r#type && op.status == data::OpStatus::Pending.as_ref() {
+                op.status = data::OpStatus::Done.as_ref().to_string();
+                op.update_time = utils::time::time_millis();
+                collection.update(&op)?;
+            }
         }
         Ok(())
     }

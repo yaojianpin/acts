@@ -409,7 +409,7 @@ where
 
         // Write new index entries
         for idx_key in self.index_keys(&new_json, &id) {
-            self.kv.put(&idx_key, new_bytes.clone())?;
+            self.kv.put(&idx_key, vec![])?;
         }
 
         Ok(true)
