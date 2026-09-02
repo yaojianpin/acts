@@ -151,9 +151,11 @@ impl Store {
                 .expr(Expr::eq("tid", tid.to_string())),
         );
         let existing = collection.query(&q)?;
-        if existing.rows.iter().any(|op| {
-            op.r#type == r#type.as_ref() && op.status == data::OpStatus::Pending.as_ref()
-        }) {
+        if existing
+            .rows
+            .iter()
+            .any(|op| op.r#type == r#type.as_ref() && op.status == data::OpStatus::Pending.as_ref())
+        {
             return Ok(());
         }
 
@@ -422,7 +424,7 @@ impl Store {
                     serde_json::from_str(&err).map_err(|err| ActError::Store(err.to_string()))?;
                 task.set_pure_err(&err)
             }
-            proc.push_task(Arc::new(task));
+            proc.push_task(Arc::new(task))?;
         }
 
         // phase 2: rebuild the node graph (parent/prev/next) of dynamic nodes

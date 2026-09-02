@@ -150,14 +150,14 @@ impl Cache {
         if save {
             self.persist_task(task)?;
         }
-        self.push_task_mem(task);
+        self.push_task_mem(task)?;
 
         Ok(())
     }
 
     #[instrument(skip(self, task), fields(pid = %task.pid, tid = %task.id))]
     pub(crate) fn upsert_async(&self, task: &Arc<Task>) -> Result<()> {
-        self.push_task_mem(task);
+        self.push_task_mem(task)?;
         self.writer.send(WriteOp::Task(task.clone()))?;
         Ok(())
     }
@@ -249,12 +249,14 @@ impl Cache {
         Ok(())
     }
 
-    fn push_task_mem(&self, task: &Arc<Task>) {
+    fn push_task_mem(&self, task: &Arc<Task>) -> Result<()> {
         let p = task.proc();
         if let Some(proc) = self.procs.get(&task.pid) {
             proc.set_pure_state(p.state());
             proc.set_end_time(p.end_time());
-            proc.push_task(task.clone());
+            proc.push_task(task.clone())?;
         }
+
+        Ok(())
     }
 }

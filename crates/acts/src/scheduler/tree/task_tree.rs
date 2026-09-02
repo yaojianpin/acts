@@ -1,4 +1,4 @@
-use crate::{NodeKind, scheduler::Task};
+use crate::{NodeKind, Result, scheduler::Task};
 use std::{collections::BTreeMap, sync::Arc};
 
 #[derive(Debug)]
@@ -37,21 +37,10 @@ impl TaskTree {
         tasks
     }
 
-    pub fn push(&mut self, task: Arc<Task>) {
+    pub fn push(&mut self, task: Arc<Task>) -> Result<()> {
         let is_new = !self.maps.contains_key(&task.id);
-        self.maps
-            .entry(task.id.clone())
-            .and_modify(|t| {
-                *t = task.clone();
-                // t.set_pure_state(task.state());
-                // t.set_end_time(task.end_time());
-                // t.set_data(&task.data());
-                // t.set_hooks(&task.hooks());
-                // if let Some(err) = task.err() {
-                //     t.set_err(&err);
-                // }
-            })
-            .or_insert(task.clone());
+        // only insert and not replace old task
+        self.maps.entry(task.id.clone()).or_insert(task.clone());
         if is_new {
             *self
                 .run_counts
@@ -61,6 +50,7 @@ impl TaskTree {
         if task.node().kind() == NodeKind::Workflow {
             self.root = Some(task);
         }
+        Ok(())
     }
     /// number of task instances created for the node in this process
     pub fn run_count(&self, node_id: &str) -> usize {

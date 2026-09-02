@@ -439,13 +439,14 @@ impl Process {
                 max
             )));
         }
-        tasks.push(task.clone());
+        tasks.push(task.clone())?;
         Ok(task)
     }
 
-    pub fn push_task(&self, task: Arc<Task>) {
+    pub fn push_task(&self, task: Arc<Task>) -> Result<()> {
         let mut tasks = self.tasks.write().unwrap();
-        tasks.push(task);
+        tasks.push(task)?;
+        Ok(())
     }
 
     pub fn parent(&self) -> Option<(String, String)> {
