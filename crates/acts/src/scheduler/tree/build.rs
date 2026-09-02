@@ -60,9 +60,11 @@ pub fn build_step(
             Some(next) => {
                 node.set_next(next, false);
             }
-            None => tree.set_error(ActError::Runtime(format!(
-                "found next node error by '{next}'",
-            ))),
+            None => {
+                return Err(ActError::Runtime(format!(
+                    "found next node error by '{next}'",
+                )));
+            }
         },
         None => {
             if !step.branches.is_empty() {

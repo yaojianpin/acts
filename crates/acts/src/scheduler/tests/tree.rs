@@ -367,3 +367,15 @@ async fn sch_tree_dyn_acts_restore_chain() {
     assert_eq!(step.children().len(), 1);
     assert_eq!(step.children()[0].id(), a1.id());
 }
+
+#[tokio::test]
+async fn sch_tree_next_error() {
+    let mut workflow = Workflow::new()
+        .with_id("w1")
+        .with_step(|step| step.with_id("step1").with_next("next1"));
+    let tree = NodeTree::build(&mut workflow);
+    assert!(
+        tree.is_err(),
+        "next node 'next1' does not exist, should error"
+    );
+}

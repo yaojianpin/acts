@@ -236,3 +236,4 @@
 - fix: `process.do_tick` fires timeouts only for tasks still in flight — completed, error, aborted and skipped tasks no longer schedule their timeout children on every tick
 - fix: keep `TaskTree.push` only insert and not replace old task
 - fix: one-shot atomic start process
+- fix: not return error when tree build error

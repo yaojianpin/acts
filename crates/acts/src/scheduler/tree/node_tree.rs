@@ -13,7 +13,6 @@ use std::{cell::RefCell, collections::HashMap};
 pub struct NodeTree {
     pub(crate) root: Option<Arc<Node>>,
     pub(crate) node_map: Arc<RwLock<HashMap<String, Arc<Node>>>>,
-    pub(crate) error: Option<ActError>,
     pub(crate) model: Box<Workflow>,
 }
 
@@ -139,9 +138,5 @@ impl NodeTree {
             });
         }
         s.clone().into_inner()
-    }
-
-    pub fn set_error(&mut self, err: ActError) {
-        self.error = Some(err);
     }
 }
