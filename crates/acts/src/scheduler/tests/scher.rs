@@ -2,7 +2,7 @@ use crate::cache::Cache;
 use crate::event::EventAction;
 use crate::scheduler::Runtime;
 use crate::utils::test::{USES_IRQ, auto_complete};
-use crate::{Action, Config, Engine, MessageState, TaskState, Variant, Vars, Workflow, utils};
+use crate::{Action, Config, Engine, MessageState, Variant, Vars, Workflow, utils};
 use serde_json::json;
 
 use serial_test::serial;
@@ -35,7 +35,6 @@ async fn sch_scher_task() {
     let workflow = Workflow::new();
     let pid = utils::longid();
     let proc = runtime.create_proc(&pid, &workflow);
-    proc.set_state(TaskState::Pending);
     runtime.launch(&proc).unwrap();
     let ret = runtime.queue().next().await;
     assert!(ret.is_ok());

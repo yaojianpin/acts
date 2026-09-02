@@ -353,40 +353,28 @@ impl Process {
 
     #[instrument(skip(self))]
     pub fn start(self: &Arc<Self>) -> Result<()> {
+        // One-shot atomic start. The state lock guards the `None -> Running`
+        // transition, so concurrent or repeated `start()` calls can never run
+        // the start body twice: the root task is scheduled exactly once and
+        // exactly one per-process tick loop is spawned. A call that finds the
+        // process already started (or finished) is a no-op — it must not
+        // replace the root task, reset the start time, or re-push the process.
+        {
+            let mut state = self.state.write().unwrap();
+            if !state.is_none() {
+                return Ok(());
+            }
+            *state = TaskState::Running;
+            *self.start_time.write().unwrap() = utils::time::time_millis();
+        }
+
         info!(pid = %self.id, mid = %self.tree().model.id, name = %self.tree().model.name, "process started");
-        self.set_state(TaskState::Running);
         let cache = self.runtime.cache().clone();
         let proc = self.clone();
         cache.push_proc(&proc)?;
 
         // Start per-process tick loop
-        #[cfg(not(test))]
-        let interval_ms = {
-            let config = self.runtime.config();
-            let secs = if config.tick_interval_secs() > 0 {
-                config.tick_interval_secs()
-            } else {
-                15
-            };
-            (secs * 1000) as u64
-        };
-        #[cfg(test)]
-        let interval_ms = 800u64;
-
-        let tick_proc = proc.clone();
-        let shutdown = self.runtime.shutdown_token();
-        tokio::spawn(async move {
-            loop {
-                tokio::select! {
-                    _ = shutdown.cancelled() => break,
-                    _ = tokio::time::sleep(Duration::from_millis(interval_ms)) => {}
-                }
-                if !tick_proc.state().is_running() {
-                    break;
-                }
-                tick_proc.do_tick();
-            }
-        });
+        self.init_tick();
 
         let tr = self.tree();
         if let Some(root) = &tr.root {
@@ -534,5 +522,36 @@ impl Process {
             err: self.err().map(|err| err.to_string()),
             v: data::Proc::version(),
         })
+    }
+
+    fn init_tick(&self) {
+        // Start per-process tick loop
+        #[cfg(not(test))]
+        let interval_ms = {
+            let config = self.runtime.config();
+            let secs = if config.tick_interval_secs() > 0 {
+                config.tick_interval_secs()
+            } else {
+                15
+            };
+            (secs * 1000) as u64
+        };
+        #[cfg(test)]
+        let interval_ms = 800u64;
+
+        let tick_proc = self.clone();
+        let shutdown = self.runtime.shutdown_token();
+        tokio::spawn(async move {
+            loop {
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    _ = tokio::time::sleep(Duration::from_millis(interval_ms)) => {}
+                }
+                if !tick_proc.state().is_running() {
+                    break;
+                }
+                tick_proc.do_tick();
+            }
+        });
     }
 }

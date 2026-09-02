@@ -235,3 +235,4 @@
 - fix: bound the re-execution of a tree node per process — add `max_node_run_times` (default 1000, `EngineBuilder::max_node_run_times`, 0 disables); a node `next` self-loop or cycle now errors the process instead of creating tasks forever
 - fix: `process.do_tick` fires timeouts only for tasks still in flight — completed, error, aborted and skipped tasks no longer schedule their timeout children on every tick
 - fix: keep `TaskTree.push` only insert and not replace old task
+- fix: one-shot atomic start process

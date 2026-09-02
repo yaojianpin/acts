@@ -73,6 +73,50 @@ async fn sch_proc_task() {
     let task = proc.create_task(node, None).unwrap();
     assert!(proc.task(&task.id).is_some())
 }
+
+#[tokio::test]
+async fn sch_proc_start_single_shot() {
+    // `start()` is an atomic state machine: the first call takes the process
+    // from `None` to `Running` and schedules the root task; any repeated call
+    // — while running or after completion — is a no-op and must not replace
+    // the root task, reset the start time, or re-execute the workflow (which
+    // would duplicate tasks and spawn extra per-process tick loops).
+    let workflow = Workflow::new()
+        .with_id("w1")
+        .with_step(|step| step.with_id("s1"));
+    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let sig = engine.signal(());
+    auto_complete(&engine, &sig);
+
+    engine.runtime().launch(&proc).unwrap();
+    let start_time = proc.start_time();
+    assert!(start_time > 0, "start must set the start time");
+
+    // repeated start while the process is running (or already finished) is a
+    // no-op — the start time must not be reset
+    proc.start().unwrap();
+    assert_eq!(
+        proc.start_time(),
+        start_time,
+        "a repeated start must not reset the start time"
+    );
+
+    sig.recv().await;
+    assert_eq!(proc.state(), TaskState::Completed);
+    assert_eq!(
+        proc.task_by_nid("s1").len(),
+        1,
+        "a repeated start must not re-execute the workflow root"
+    );
+
+    // even after completion a repeated start must not restart the process
+    proc.start().unwrap();
+    assert_eq!(proc.state(), TaskState::Completed);
+    assert_eq!(proc.task_by_nid("s1").len(), 1);
+    assert_eq!(proc.start_time(), start_time);
+    drop(engine);
+}
+
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_proc_node_self_loop_bounded() {
