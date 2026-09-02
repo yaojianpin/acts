@@ -214,39 +214,117 @@ impl Runtime {
         Ok(())
     }
 
-    /// Durable outbox close after `task.next` ran: queue the task persist (with
-    /// the `NEXT_COMPLETE` marker) and then the outbox record close, in order,
-    /// on the store writer — non-blocking.
+    /// Durable outbox close for a task whose `next` propagation finished: queue
+    /// the task persist (with the `NEXT_COMPLETE` marker) and then the outbox
+    /// record close, in order, on the store writer — non-blocking. Called from
+    /// `Task::next` once the task reaches a terminal state (also for the
+    /// idempotent replay guard), and from the event loop when `next` ends in
+    /// error. Non-terminal outcomes (children in flight, interrupt) leave the
+    /// record `Pending` so recovery replays it.
     pub(crate) fn complete_next(&self, task: &Arc<Task>) -> Result<()> {
         self.cache.complete_next(task)
     }
 
+    /// Durable outbox enqueue for a client action (non-`Next` events): the
+    /// `Pending` record with the event + options payload is written **before**
+    /// the action is applied, so a crash before the task state write lands is
+    /// replayed by [`Self::recover_actions`].
+    pub(crate) fn enqueue_action(&self, action: &Action) -> Result<()> {
+        self.cache.enqueue_action(action)
+    }
+
+    /// Durable outbox close for a client action: the state write and message
+    /// status were already queued by the caller, so FIFO order makes `Done`
+    /// durable only after both.
+    pub(crate) fn complete_action(&self, task: &Arc<Task>) -> Result<()> {
+        self.cache.complete_action(task)
+    }
+
     /// Replay durable outbox records that were not durably completed (the
-    /// engine crashed before the queued `next` ran or before its effects were
-    /// persisted). Re-enqueueing is idempotent:
-    /// - records of a task whose `next` already completed are skipped by the
-    ///   durable `NEXT_COMPLETE` guard and closed;
-    /// - records of a task whose `next` never ran are dispatched again, and
-    ///   re-scheduling is deduplicated against tasks created before the crash.
+    /// engine crashed before the queued `next` ran, before its effects were
+    /// persisted, or before a client action's state write became durable).
+    /// Re-enqueueing is idempotent:
+    /// - `next` records of a task whose `next` already completed are skipped
+    ///   by the durable `NEXT_COMPLETE` guard and closed;
+    /// - `next` records of a task whose `next` never ran are dispatched again,
+    ///   and re-scheduling is deduplicated against tasks created before the
+    ///   crash;
+    /// - action records of a task that is already in a terminal state are
+    ///   closed (the action was applied durably) and the task's messages are
+    ///   marked completed so the client is not asked to act again — except
+    ///   `Cancel`/`Remove`, which never guard on the target's state (a Cancel
+    ///   target is usually already `Completed`), so they are always re-applied
+    ///   and an already-applied one is rejected by the arm's guards;
+    /// - action records of a task that never received the action are
+    ///   re-applied, which also closes the record through the action path.
     pub fn recover_actions(self: &Arc<Self>) -> Result<()> {
         let ops = self.cache.store().load_pending_ops()?;
         for op in ops {
+            let r#type = op.r#type.clone();
             let (pid, tid) = (op.pid, op.tid);
+            let close = |store: &Store| store.complete_ops(&pid, &tid, &r#type);
             let Some(proc) = self.cache.proc(&pid, self)? else {
                 // process is gone (removed while completing) — drop the orphan
-                self.cache.store().complete_next_ops(&pid, &tid)?;
+                close(&self.cache.store())?;
                 continue;
             };
             let Some(task) = proc.task(&tid) else {
-                self.cache.store().complete_next_ops(&pid, &tid)?;
+                close(&self.cache.store())?;
                 continue;
             };
-            if task.is_sign(Sign::NEXT_COMPLETE) {
+            if r#type == data::OpType::Action.as_ref() {
+                let (Some(event), Some(options)) = (op.event.as_deref(), op.options.as_deref())
+                else {
+                    // malformed action record — drop it
+                    close(&self.cache.store())?;
+                    continue;
+                };
+                let Ok(event) = EventAction::parse(event) else {
+                    error!(pid = %pid, tid = %tid, event = %event, "cannot parse replayed action");
+                    close(&self.cache.store())?;
+                    continue;
+                };
+                let Ok(options) = serde_json::from_str::<Vars>(options) else {
+                    error!(pid = %pid, tid = %tid, "cannot parse replayed action options");
+                    close(&self.cache.store())?;
+                    continue;
+                };
+                // `Cancel` and `Remove` never guard on the target task's state
+                // (a Cancel target is usually already `Completed` from an
+                // earlier `Next`; Remove has no guard at all), so a terminal
+                // target does NOT prove the action was applied — always
+                // re-apply them. Re-applying an already-applied one is
+                // rejected by the arm's guards and closes the record.
+                let always_reapply = matches!(event, EventAction::Cancel | EventAction::Remove);
+                if !always_reapply && task.state().is_completed() {
+                    // already applied durably (the state write landed but the
+                    // close was lost) — close and mark the messages completed
+                    close(&self.cache.store())?;
+                    self.cache.store().set_message_with(
+                        &pid,
+                        &tid,
+                        data::MessageStatus::Completed,
+                    )?;
+                    continue;
+                }
+                // the action was never durably applied — re-apply it; the
+                // action path (Task::update) closes the record itself
+                let action = Action::new(&pid, &tid, event, options);
+                if let Err(err) = proc.do_action(&action) {
+                    error!(error = %err, pid = %pid, tid = %tid, "replayed action failed");
+                    close(&self.cache.store())?;
+                }
+            } else if task.is_sign(Sign::NEXT_COMPLETE) {
                 // propagation already completed durably; just close the record
-                self.cache.store().complete_next_ops(&pid, &tid)?;
+                // and mark the messages completed
+                close(&self.cache.store())?;
+                self.cache
+                    .store()
+                    .set_message_with(&pid, &tid, data::MessageStatus::Completed)?;
                 continue;
+            } else {
+                self.queue.send_next(&task)?;
             }
-            self.queue.send_next(&task)?;
         }
         Ok(())
     }
@@ -296,14 +374,17 @@ impl Runtime {
                                 task.set_err(&err.clone().into());
                                 ctx.set_task(&task);
                                 ctx.emit_error().ok();
+                                // the propagation ended in error (terminal):
+                                // close the outbox record so recovery does not
+                                // replay the failed `next`
+                                if let Err(err) = task.runtime().complete_next(&task) {
+                                    error!(error = %err, "complete_next failed");
+                                }
                             }
-                            // durable completion: persist the task (capturing
-                            // the NEXT_COMPLETE marker) and close the outbox
-                            // record, so a crash right after this cannot re-run
-                            // the propagation on recovery.
-                            if let Err(err) = task.runtime().complete_next(&task) {
-                                error!(error = %err, "complete_next failed");
-                            }
+                            // on success the record is closed inside `next`
+                            // once the task reaches a terminal state; outcomes
+                            // with children still in flight or an interrupt
+                            // leave it `Pending` for recovery to replay.
                         }
                         QueueData::Abort => {
                             break;

@@ -21,7 +21,7 @@ use crate::{
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use std::sync::{Arc, RwLock};
-use tracing::{debug, instrument};
+use tracing::{debug, error, instrument};
 
 #[derive(Clone)]
 pub struct Task {
@@ -472,210 +472,225 @@ impl Task {
         let action = ctx.action().ok_or(ActError::Action(
             "cannot find action in context".to_string(),
         ))?;
+        // helpers (e.g. `abort_task`) may re-point `ctx.task()` while applying
+        // the action, so capture the action's own task for the outbox close
+        let action_task = ctx.task().clone();
 
-        match action.event {
-            EventAction::Push => {
-                let package = ctx.get_var::<String>("uses").unwrap_or_default();
-                let act = Act {
-                    id: ctx.get_var::<String>("id").unwrap_or_default(),
-                    name: ctx.get_var::<String>("name").unwrap_or_default(),
-                    desc: ctx.get_var::<String>("desc").unwrap_or_default(),
-                    r#if: ctx.get_var::<String>("if"),
-                    vars: ctx.get_var::<Vec<Variant>>("vars").unwrap_or_default(),
-                    uses: package.clone(),
-                    params: ctx.get_var("params").unwrap_or_default(),
-                    options: ctx.get_var("options").unwrap_or_default(),
-                    exposes: ctx.get_var("exposes").unwrap_or_default(),
-                    ..Default::default()
-                };
+        // durable action outbox: non-`Next` client events are recorded before
+        // applying so a crash before the state write lands can be replayed on
+        // recovery; `Next` uses its own outbox (`push_next`), `Push` is
+        // internal
+        let action_outbox = !matches!(&action.event, EventAction::Next | EventAction::Push);
+        if action_outbox {
+            ctx.runtime.enqueue_action(&action)?;
+        }
 
-                // check key property
-                if package.is_empty() {
-                    return Err(crate::ActError::Action(
-                        "cannot find 'uses' in act".to_string(),
-                    ));
-                }
+        let result = (|| -> Result<()> {
+            match &action.event {
+                EventAction::Push => {
+                    let package = ctx.get_var::<String>("uses").unwrap_or_default();
+                    let act = Act {
+                        id: ctx.get_var::<String>("id").unwrap_or_default(),
+                        name: ctx.get_var::<String>("name").unwrap_or_default(),
+                        desc: ctx.get_var::<String>("desc").unwrap_or_default(),
+                        r#if: ctx.get_var::<String>("if"),
+                        vars: ctx.get_var::<Vec<Variant>>("vars").unwrap_or_default(),
+                        uses: package.clone(),
+                        params: ctx.get_var("params").unwrap_or_default(),
+                        options: ctx.get_var("options").unwrap_or_default(),
+                        exposes: ctx.get_var("exposes").unwrap_or_default(),
+                        ..Default::default()
+                    };
 
-                ctx.dispatch_act(&act, Vars::new())?;
-            }
-            EventAction::Remove => {
-                self.set_state(TaskState::Removed);
-                ctx.emit_task(self)?;
-                ctx.push_next()?;
-            }
-            EventAction::Submit => {
-                self.update_data(&ctx.vars());
-                self.set_state(TaskState::Submitted);
-                ctx.emit_task(self)?;
-                ctx.push_next()?;
-            }
-            EventAction::Next => {
-                if self.state().is_completed() {
-                    return Err(ActError::Action(format!(
-                        "task '{}:{}' is already completed",
-                        self.pid, self.id
-                    )));
-                }
-                self.update_data(&ctx.vars());
-                self.set_state(TaskState::Completed);
-                ctx.emit_task(self)?;
-                ctx.push_next()?;
-            }
-            EventAction::Back => {
-                if self.state().is_completed() {
-                    return Err(ActError::Action(format!(
-                        "task '{}:{}' is already completed",
-                        self.pid, self.id
-                    )));
-                }
-                let nid = ctx
-                    .get_var::<String>(consts::ACT_TO)
-                    .ok_or(ActError::Action(
-                        "cannot find 'to' value in options".to_string(),
-                    ))?;
-
-                let mut path_tasks = Vec::new();
-                let task = self.backs(
-                    &|t| t.node.kind() == NodeKind::Step && t.node.id() == nid,
-                    &mut path_tasks,
-                );
-
-                let task = task.ok_or(ActError::Action(format!(
-                    "cannot find history task by nid '{nid}'",
-                )))?;
-
-                ctx.back_task(&ctx.task(), &path_tasks)?;
-                ctx.redo_task(&task)?;
-            }
-            EventAction::Cancel => {
-                // find the parent step task
-                let mut step = ctx.task().parent();
-                while let Some(task) = &step {
-                    if task.is_kind(NodeKind::Step) {
-                        break;
+                    // check key property
+                    if package.is_empty() {
+                        return Err(crate::ActError::Action(
+                            "cannot find 'uses' in act".to_string(),
+                        ));
                     }
-                    step = task.parent();
-                }
 
-                let task = step.ok_or(ActError::Action(format!(
-                    "cannot find parent step task by tid '{}'",
-                    ctx.task().id,
-                )))?;
-                if !task.state().is_success() {
-                    return Err(ActError::Action(format!(
-                        "task('{}') is not allowed to cancel",
-                        task.id
-                    )));
+                    ctx.dispatch_act(&act, Vars::new())?;
                 }
-
-                // get the neartest next step tasks
-                let mut path_tasks = Vec::new();
-                let nexts = task.follows(
-                    &|t| t.is_kind(NodeKind::Step) && t.is_acts(),
-                    &mut path_tasks,
-                );
-                if nexts.is_empty() {
-                    return Err(ActError::Action("cannot find cancelled tasks".to_string()));
+                EventAction::Remove => {
+                    self.set_state(TaskState::Removed);
+                    ctx.emit_task(self)?;
+                    ctx.push_next()?;
                 }
-
-                // mark the path tasks as completed
-                for p in path_tasks {
-                    if p.state().is_running() {
-                        p.set_state(TaskState::Completed);
-                        ctx.emit_task(&p)?;
-                    } else if p.state().is_pending() {
-                        p.set_state(TaskState::Skipped);
-                        ctx.emit_task(&p)?;
+                EventAction::Submit => {
+                    self.update_data(&ctx.vars());
+                    self.set_state(TaskState::Submitted);
+                    ctx.emit_task(self)?;
+                    ctx.push_next()?;
+                }
+                EventAction::Next => {
+                    if self.state().is_completed() {
+                        return Err(ActError::Action(format!(
+                            "task '{}:{}' is already completed",
+                            self.pid, self.id
+                        )));
                     }
+                    self.update_data(&ctx.vars());
+                    self.set_state(TaskState::Completed);
+                    ctx.emit_task(self)?;
+                    ctx.push_next()?;
                 }
-
-                for next in &nexts {
-                    ctx.undo_task(next)?;
-                }
-                ctx.redo_task(&task)?;
-            }
-            EventAction::Abort => {
-                if self.state().is_completed() {
-                    return Err(ActError::Action(format!(
-                        "task '{}:{}' is already completed",
-                        self.pid, self.id
-                    )));
-                }
-                ctx.abort_task(&ctx.task())?;
-            }
-            EventAction::Skip => {
-                if self.state().is_completed() {
-                    return Err(ActError::Action(format!(
-                        "task '{}:{}' is already completed",
-                        self.pid, self.id
-                    )));
-                }
-
-                for task in self.siblings() {
-                    if task.state().is_completed() {
-                        continue;
+                EventAction::Back => {
+                    if self.state().is_completed() {
+                        return Err(ActError::Action(format!(
+                            "task '{}:{}' is already completed",
+                            self.pid, self.id
+                        )));
                     }
-                    task.set_state(TaskState::Skipped);
-                    ctx.emit_task(&task)?;
-                }
+                    let nid = ctx
+                        .get_var::<String>(consts::ACT_TO)
+                        .ok_or(ActError::Action(
+                            "cannot find 'to' value in options".to_string(),
+                        ))?;
 
-                // set both current act and parent step to skip
-                self.set_state(TaskState::Skipped);
-                ctx.emit_task(self)?;
-                ctx.push_next()?;
-            }
-            EventAction::Error => {
-                let ecode = ctx
-                    .get_var::<String>(consts::ACT_ERR_CODE)
-                    .ok_or(ActError::Action(format!(
-                        "cannot find '{}' in options",
-                        consts::ACT_ERR_CODE
+                    let mut path_tasks = Vec::new();
+                    let task = self.backs(
+                        &|t| t.node.kind() == NodeKind::Step && t.node.id() == nid,
+                        &mut path_tasks,
+                    );
+
+                    let task = task.ok_or(ActError::Action(format!(
+                        "cannot find history task by nid '{nid}'",
                     )))?;
 
-                let error = ctx
-                    .get_var::<String>(consts::ACT_ERR_MESSAGE)
-                    .unwrap_or("".to_string());
-
-                let err = Error::new(&error, &ecode);
-                debug!(error = ?err, "task error");
-                let task = &ctx.task();
-                if task.state().is_completed() {
-                    return Err(ActError::Action(format!(
-                        "task '{}:{}' is already completed",
-                        task.pid, task.id
-                    )));
+                    ctx.back_task(&ctx.task(), &path_tasks)?;
+                    ctx.redo_task(&task)?;
                 }
-                let parent = task.parent().ok_or(ActError::Action(format!(
-                    "cannot find task parent by tid '{}'",
-                    task.id
-                )))?;
-
-                for sub in parent.siblings().iter() {
-                    if sub.state().is_completed() {
-                        continue;
+                EventAction::Cancel => {
+                    // find the parent step task
+                    let mut step = ctx.task().parent();
+                    while let Some(task) = &step {
+                        if task.is_kind(NodeKind::Step) {
+                            break;
+                        }
+                        step = task.parent();
                     }
-                    sub.set_state(TaskState::Skipped);
-                    ctx.emit_task(sub)?;
-                }
-                task.set_err(&err);
-                task.set_data(&ctx.vars());
-                task.on_error(ctx)?;
-            }
-            EventAction::SetProcessVars => {
-                if self.state().is_completed() {
-                    return Err(ActError::Action(format!(
-                        "task '{}:{}' is already completed",
-                        self.pid, self.id
-                    )));
-                }
 
-                self.proc.set_data(&ctx.vars());
-                // emit the task change (issue #)
-                ctx.emit_task(self)?;
-            }
-        };
+                    let task = step.ok_or(ActError::Action(format!(
+                        "cannot find parent step task by tid '{}'",
+                        ctx.task().id,
+                    )))?;
+                    if !task.state().is_success() {
+                        return Err(ActError::Action(format!(
+                            "task('{}') is not allowed to cancel",
+                            task.id
+                        )));
+                    }
 
-        if action.event != EventAction::Push {
+                    // get the neartest next step tasks
+                    let mut path_tasks = Vec::new();
+                    let nexts = task.follows(
+                        &|t| t.is_kind(NodeKind::Step) && t.is_acts(),
+                        &mut path_tasks,
+                    );
+                    if nexts.is_empty() {
+                        return Err(ActError::Action("cannot find cancelled tasks".to_string()));
+                    }
+
+                    // mark the path tasks as completed
+                    for p in path_tasks {
+                        if p.state().is_running() {
+                            p.set_state(TaskState::Completed);
+                            ctx.emit_task(&p)?;
+                        } else if p.state().is_pending() {
+                            p.set_state(TaskState::Skipped);
+                            ctx.emit_task(&p)?;
+                        }
+                    }
+
+                    for next in &nexts {
+                        ctx.undo_task(next)?;
+                    }
+                    ctx.redo_task(&task)?;
+                }
+                EventAction::Abort => {
+                    if self.state().is_completed() {
+                        return Err(ActError::Action(format!(
+                            "task '{}:{}' is already completed",
+                            self.pid, self.id
+                        )));
+                    }
+                    ctx.abort_task(&ctx.task())?;
+                }
+                EventAction::Skip => {
+                    if self.state().is_completed() {
+                        return Err(ActError::Action(format!(
+                            "task '{}:{}' is already completed",
+                            self.pid, self.id
+                        )));
+                    }
+
+                    for task in self.siblings() {
+                        if task.state().is_completed() {
+                            continue;
+                        }
+                        task.set_state(TaskState::Skipped);
+                        ctx.emit_task(&task)?;
+                    }
+
+                    // set both current act and parent step to skip
+                    self.set_state(TaskState::Skipped);
+                    ctx.emit_task(self)?;
+                    ctx.push_next()?;
+                }
+                EventAction::Error => {
+                    let ecode =
+                        ctx.get_var::<String>(consts::ACT_ERR_CODE)
+                            .ok_or(ActError::Action(format!(
+                                "cannot find '{}' in options",
+                                consts::ACT_ERR_CODE
+                            )))?;
+
+                    let error = ctx
+                        .get_var::<String>(consts::ACT_ERR_MESSAGE)
+                        .unwrap_or("".to_string());
+
+                    let err = Error::new(&error, &ecode);
+                    debug!(error = ?err, "task error");
+                    let task = &ctx.task();
+                    if task.state().is_completed() {
+                        return Err(ActError::Action(format!(
+                            "task '{}:{}' is already completed",
+                            task.pid, task.id
+                        )));
+                    }
+                    let parent = task.parent().ok_or(ActError::Action(format!(
+                        "cannot find task parent by tid '{}'",
+                        task.id
+                    )))?;
+
+                    for sub in parent.siblings().iter() {
+                        if sub.state().is_completed() {
+                            continue;
+                        }
+                        sub.set_state(TaskState::Skipped);
+                        ctx.emit_task(sub)?;
+                    }
+                    task.set_err(&err);
+                    task.set_data(&ctx.vars());
+                    task.on_error(ctx)?;
+                }
+                EventAction::SetProcessVars => {
+                    if self.state().is_completed() {
+                        return Err(ActError::Action(format!(
+                            "task '{}:{}' is already completed",
+                            self.pid, self.id
+                        )));
+                    }
+
+                    self.proc.set_data(&ctx.vars());
+                    // emit the task change (issue #)
+                    ctx.emit_task(self)?;
+                }
+            }
+            Ok(())
+        })();
+
+        if result.is_ok() && action.event != EventAction::Push {
             // update the message status after doing action (deferred to writer thread)
             ctx.runtime.cache().upsert_message_status(
                 &action.pid,
@@ -683,7 +698,18 @@ impl Task {
                 MessageStatus::Completed,
             )?;
         }
-        Ok(())
+
+        if action_outbox {
+            // close the action's outbox record: the state write (emit_task) and
+            // the message status were already queued above, so FIFO order makes
+            // `Done` durable only after both. An errored application is closed
+            // too — nothing to replay.
+            if let Err(err) = ctx.runtime.complete_action(&action_task) {
+                error!(error = %err, "complete_action failed");
+            }
+        }
+
+        result
     }
 
     pub fn is_ready(&self) -> bool {
@@ -996,6 +1022,11 @@ impl ActTask for Arc<Task> {
 
         // idempotent replay guard: skip if this task already propagated
         if self.is_sign(Sign::NEXT_COMPLETE) {
+            // close the re-dispatched outbox record: the completion marker is
+            // already durable, so the re-run is a no-op
+            if let Err(err) = self.runtime().complete_next(self) {
+                error!(error = %err, "complete_next failed");
+            }
             return Ok(NextAction::Continue);
         }
 
@@ -1025,9 +1056,15 @@ impl ActTask for Arc<Task> {
         debug!(action = %next_action, "next action");
 
         if task.state().is_completed() {
-            // terminal + emitted → propagation complete, mark idempotent
+            // terminal + emitted → propagation complete, mark idempotent and
+            // close the durable outbox record (persisting the marker first)
             self.set_sign(Sign::NEXT_COMPLETE);
+            if let Err(err) = self.runtime().complete_next(self) {
+                error!(error = %err, "complete_next failed");
+            }
         }
+        // non-terminal outcomes (children in flight, interrupt, …) deliberately
+        // leave the record `Pending` so recovery re-dispatches this `next`.
 
         // 5. move to parent and continue
         if next_action.is_parent() {

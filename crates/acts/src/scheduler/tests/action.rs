@@ -1,12 +1,15 @@
 use serde_json::json;
 
 use crate::{
-    Act, Action, Config, Engine, MessageState, TaskState, Vars, Workflow,
+    Act, Action, ChannelOptions, Config, Engine, MessageState, TaskState, Vars, Workflow,
     event::EventAction,
     scheduler::Sign,
-    store::{KvStore, MemoryStore, query::{Expr, Filter, Query}},
-    utils::{self, consts},
+    store::{
+        KvStore, MemoryStore,
+        query::{Expr, Filter, Query},
+    },
     utils::test::{USES_IRQ, USES_PARALLEL, auto_complete, create_proc},
+    utils::{self, consts},
 };
 use serial_test::serial;
 use std::sync::Arc;
@@ -134,13 +137,23 @@ async fn sch_action_recover_completed_next_is_noop() {
     let proc = rt.create_proc(&utils::longid(), &workflow);
     rt.launch(&proc).unwrap();
     let (pid, act1_tid) = s1.recv().await;
-    rt.do_action(&Action::new(&pid, &act1_tid, EventAction::Next, Vars::new()))
-        .unwrap();
+    rt.do_action(&Action::new(
+        &pid,
+        &act1_tid,
+        EventAction::Next,
+        Vars::new(),
+    ))
+    .unwrap();
 
     // s1's `next` schedules s2; complete act2 as well
     let (_, act2_tid) = s2.recv().await;
-    rt.do_action(&Action::new(&pid, &act2_tid, EventAction::Next, Vars::new()))
-        .unwrap();
+    rt.do_action(&Action::new(
+        &pid,
+        &act2_tid,
+        EventAction::Next,
+        Vars::new(),
+    ))
+    .unwrap();
 
     tx.recv().await;
     assert!(proc.state().is_success());
@@ -192,7 +205,10 @@ async fn sch_action_recover_completed_next_is_noop() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_action_recover_partial_next_no_duplicate() {
     let store: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
-    let engine = Engine::new().set_store(Some(store.clone())).start().unwrap();
+    let engine = Engine::new()
+        .set_store(Some(store.clone()))
+        .start()
+        .unwrap();
     let rt = engine.runtime();
 
     let workflow = Workflow::new()
@@ -210,10 +226,14 @@ async fn sch_action_recover_partial_next_no_duplicate() {
     let proc = rt.create_proc(&utils::longid(), &workflow);
     let pid = proc.id().to_string();
     proc.set_state(TaskState::Running);
-    let tree = proc.tree();
-    let root = proc.create_task(tree.root.as_ref().unwrap(), None);
-    let s1 = proc.create_task(&tree.node("s1").unwrap(), Some(root.clone()));
-    let s2 = proc.create_task(&tree.node("s2").unwrap(), Some(s1.clone()));
+    // scope the tree read guard so it is dropped before any await below
+    let (root, s1, s2) = {
+        let tree = proc.tree();
+        let root = proc.create_task(tree.root.as_ref().unwrap(), None);
+        let s1 = proc.create_task(&tree.node("s1").unwrap(), Some(root.clone()));
+        let s2 = proc.create_task(&tree.node("s2").unwrap(), Some(s1.clone()));
+        (root, s1, s2)
+    };
     root.set_state(TaskState::Running);
     s1.set_state(TaskState::Completed);
     s2.set_state(TaskState::Running);
@@ -226,7 +246,10 @@ async fn sch_action_recover_partial_next_no_duplicate() {
     engine.close();
 
     // reload: recovery re-dispatches s1's `next`; re-scheduling s2 is deduped
-    let engine2 = Engine::new().set_store(Some(store.clone())).start().unwrap();
+    let engine2 = Engine::new()
+        .set_store(Some(store.clone()))
+        .start()
+        .unwrap();
     let rt2 = engine2.runtime();
     let store2 = rt2.cache().store();
     for _ in 0..100 {
@@ -241,6 +264,648 @@ async fn sch_action_recover_partial_next_no_duplicate() {
     assert_eq!(reloaded.task_by_nid("s1").len(), 1);
     assert_eq!(reloaded.task_by_nid("s2").len(), 1);
     assert_eq!(reloaded.tasks().len(), 3, "root + s1 + s2, no duplicates");
+}
+
+/// A `next` that stops with children still in flight (the parent step stays
+/// `Running`) keeps its outbox record `Pending` — the propagation has not
+/// finished — and the record is closed only after the children complete and
+/// the step's `next` actually completes.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_action_next_op_pending_until_children_complete() {
+    let engine = Engine::new().start().unwrap();
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    let workflow = Workflow::new().with_step(|step| {
+        step.with_id("s1")
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+    });
+
+    let sig = engine.signal((String::new(), String::new()));
+    let (s, s2) = sig.double();
+    engine.channel().on_message(move |e| {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+            s2.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+            s2.close();
+        }
+    });
+    auto_complete(&engine, &rx);
+
+    let proc = rt.create_proc(&utils::longid(), &workflow);
+    rt.launch(&proc).unwrap();
+    let (pid, act1_tid) = s.recv().await;
+    let step_tid = proc.task_by_nid("s1").first().unwrap().id.clone();
+    let store = rt.cache().store();
+
+    // while act1 is still in flight (Interrupt), the step's `next` outbox
+    // record must be `Pending`: the step cannot have completed, so the record
+    // must not be closed early
+    let mut found = false;
+    for _ in 0..100 {
+        if store
+            .load_pending_ops()
+            .unwrap()
+            .iter()
+            .any(|op| op.pid == pid && op.tid == step_tid)
+        {
+            found = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        found,
+        "step's next outbox record should be Pending while the child act is in flight"
+    );
+    let q = Query::new().filter(
+        Filter::and()
+            .expr(Expr::eq("pid", pid.clone()))
+            .expr(Expr::eq("tid", step_tid.clone())),
+    );
+    let rows = store.ops().query(&q).unwrap().rows;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].status, "pending");
+
+    // complete the act: the step then completes and closes its record
+    rt.do_action(&Action::new(
+        &pid,
+        &act1_tid,
+        EventAction::Next,
+        Vars::new(),
+    ))
+    .unwrap();
+    tx.recv().await;
+    assert!(proc.state().is_success());
+
+    // both the act's and the step's records are eventually closed
+    for _ in 0..100 {
+        if store.load_pending_ops().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(store.load_pending_ops().unwrap().is_empty());
+}
+
+/// A non-`Next` action whose outbox record landed but whose task state write
+/// was lost in the crash is re-applied on recovery: the client's action is not
+/// silently dropped.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_action_recover_reapplies_lost_action() {
+    let store: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
+    let mut config = Config::default();
+    config.data.keep_processes = Some(true);
+    let engine = Engine::new()
+        .with_config(&config)
+        .set_store(Some(store.clone()))
+        .start()
+        .unwrap();
+    let rt = engine.runtime();
+    let workflow = Workflow::new().with_step(|step| {
+        step.with_id("s1")
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+    });
+
+    let sig = engine.signal((String::new(), String::new()));
+    let (s, s2) = sig.double();
+    engine.channel().on_message(move |e| {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+            s2.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+            s2.close();
+        }
+    });
+
+    let proc = rt.create_proc(&utils::longid(), &workflow);
+    rt.launch(&proc).unwrap();
+    let (pid, act1_tid) = s.recv().await;
+
+    // simulate a crash mid-action: the Skip was applied in memory and its
+    // outbox record landed, but the task state write never became durable —
+    // the store still holds the pre-action (Interrupt) row
+    rt.cache()
+        .store()
+        .enqueue_action_op(&pid, &act1_tid, "skip", "{}")
+        .unwrap();
+    engine.close();
+
+    // reload: recovery re-applies the Skip action, which closes the record
+    let engine2 = Engine::new()
+        .with_config(&config)
+        .set_store(Some(store.clone()))
+        .start()
+        .unwrap();
+    let rt2 = engine2.runtime();
+    let store2 = rt2.cache().store();
+    for _ in 0..100 {
+        if store2.load_pending_ops().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(store2.load_pending_ops().unwrap().is_empty());
+
+    let reloaded = rt2.proc(&pid).unwrap().unwrap();
+    let act_task = reloaded.task(&act1_tid).unwrap();
+    assert_eq!(act_task.state(), TaskState::Skipped);
+}
+
+/// A `Cancel` action whose outbox record landed but whose effects were never
+/// durably applied is re-applied on recovery — even though the target act is
+/// already `Completed` (from the earlier `Next`), which would otherwise make
+/// the terminal-state check close the record and silently drop the cancel.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_action_recover_reapplies_cancel() {
+    let store: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
+    let mut config = Config::default();
+    config.data.keep_processes = Some(true);
+    let engine = Engine::new()
+        .with_config(&config)
+        .set_store(Some(store.clone()))
+        .start()
+        .unwrap();
+    let rt = engine.runtime();
+    let workflow = Workflow::new()
+        .with_step(|step| {
+            step.with_id("step1")
+                .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+        })
+        .with_step(|step| {
+            step.with_id("step2")
+                .with_uses(USES_IRQ, Vars::new().with("key", "act2"))
+        });
+
+    let sig = engine.signal((String::new(), String::new()));
+    let (s, s2) = sig.double();
+    engine.channel().on_message(move |e| {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+            s2.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+            s2.close();
+        }
+    });
+    let sig2 = engine.signal((String::new(), String::new()));
+    let (s3, s4) = sig2.double();
+    engine.channel().on_message(move |e| {
+        if e.is_params_key("act2") && e.is_state(MessageState::Created) {
+            s4.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+            s4.close();
+        }
+    });
+
+    let proc = rt.create_proc(&utils::longid(), &workflow);
+    rt.launch(&proc).unwrap();
+    let (pid, act1_tid) = s.recv().await;
+
+    // complete act1 so step1 completes and act2 is scheduled
+    rt.do_action(&Action::new(
+        &pid,
+        &act1_tid,
+        EventAction::Next,
+        Vars::new(),
+    ))
+    .unwrap();
+    let (_, act2_tid) = s3.recv().await;
+
+    // simulate a crash before the cancel was applied: only the outbox record
+    // landed — act2 is still in flight (Interrupt), nothing was cancelled
+    rt.cache()
+        .store()
+        .enqueue_action_op(&pid, &act1_tid, "cancel", r#"{"to":"step1"}"#)
+        .unwrap();
+    engine.close();
+
+    // reload: the cancel must be re-applied — act2 becomes Cancelled even
+    // though act1 (the cancel target) is already Completed
+    let engine2 = Engine::new()
+        .with_config(&config)
+        .set_store(Some(store.clone()))
+        .start()
+        .unwrap();
+    let rt2 = engine2.runtime();
+    let store2 = rt2.cache().store();
+    // the cancel action record must be closed; the still-running root and the
+    // redo act keep their `next` records open by design
+    let mut drained = false;
+    for _ in 0..100 {
+        let pending = store2.load_pending_ops().unwrap();
+        if pending.iter().all(|op| op.r#type != "action") {
+            drained = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(drained, "cancel action record was not closed");
+
+    let reloaded = rt2.proc(&pid).unwrap().unwrap();
+    let act2_task = reloaded.task(&act2_tid).unwrap();
+    assert_eq!(act2_task.state(), TaskState::Cancelled);
+}
+
+/// An `Abort` action whose outbox record landed but whose task write was lost
+/// is re-applied on recovery: the act and its ancestors become `Aborted`.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_action_recover_reapplies_abort() {
+    let store: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
+    let mut config = Config::default();
+    config.data.keep_processes = Some(true);
+    let engine = Engine::new()
+        .with_config(&config)
+        .set_store(Some(store.clone()))
+        .start()
+        .unwrap();
+    let rt = engine.runtime();
+    let workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+    });
+
+    let sig = engine.signal((String::new(), String::new()));
+    let (s, s2) = sig.double();
+    engine.channel().on_message(move |e| {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+            s2.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+            s2.close();
+        }
+    });
+
+    let proc = rt.create_proc(&utils::longid(), &workflow);
+    rt.launch(&proc).unwrap();
+    let (pid, act1_tid) = s.recv().await;
+
+    // crash before the abort was durably applied: only the outbox record landed
+    rt.cache()
+        .store()
+        .enqueue_action_op(&pid, &act1_tid, "abort", "{}")
+        .unwrap();
+    engine.close();
+
+    // reload: recovery re-applies the abort to the act and its ancestors
+    let engine2 = Engine::new()
+        .with_config(&config)
+        .set_store(Some(store.clone()))
+        .start()
+        .unwrap();
+    let rt2 = engine2.runtime();
+    let store2 = rt2.cache().store();
+    let mut drained = false;
+    for _ in 0..100 {
+        let pending = store2.load_pending_ops().unwrap();
+        if pending.iter().all(|op| op.r#type != "action") {
+            drained = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(drained, "abort action record was not closed");
+
+    let reloaded = rt2.proc(&pid).unwrap().unwrap();
+    assert_eq!(
+        reloaded.task(&act1_tid).unwrap().state(),
+        TaskState::Aborted
+    );
+    assert_eq!(
+        reloaded.task_by_nid("step1").first().unwrap().state(),
+        TaskState::Aborted
+    );
+}
+
+/// An `Error` action whose outbox record landed but whose task write was lost
+/// is re-applied on recovery: the act becomes `Error` with the recorded code.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_action_recover_reapplies_error() {
+    let store: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
+    let mut config = Config::default();
+    config.data.keep_processes = Some(true);
+    let engine = Engine::new()
+        .with_config(&config)
+        .set_store(Some(store.clone()))
+        .start()
+        .unwrap();
+    let rt = engine.runtime();
+    let workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+    });
+
+    let sig = engine.signal((String::new(), String::new()));
+    let (s, s2) = sig.double();
+    engine.channel().on_message(move |e| {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+            s2.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+            s2.close();
+        }
+    });
+
+    let proc = rt.create_proc(&utils::longid(), &workflow);
+    rt.launch(&proc).unwrap();
+    let (pid, act1_tid) = s.recv().await;
+
+    // crash before the error was durably applied: only the outbox record landed
+    rt.cache()
+        .store()
+        .enqueue_action_op(&pid, &act1_tid, "error", r#"{"ecode":"err1"}"#)
+        .unwrap();
+    engine.close();
+
+    // reload: recovery re-applies the error with its code
+    let engine2 = Engine::new()
+        .with_config(&config)
+        .set_store(Some(store.clone()))
+        .start()
+        .unwrap();
+    let rt2 = engine2.runtime();
+    let store2 = rt2.cache().store();
+    let mut drained = false;
+    for _ in 0..100 {
+        let pending = store2.load_pending_ops().unwrap();
+        if pending.iter().all(|op| op.r#type != "action") {
+            drained = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(drained, "error action record was not closed");
+
+    let reloaded = rt2.proc(&pid).unwrap().unwrap();
+    let act_task = reloaded.task(&act1_tid).unwrap();
+    assert_eq!(act_task.state(), TaskState::Error);
+    assert_eq!(act_task.err().unwrap().ecode, "err1");
+}
+
+/// A `Back` action whose outbox record landed but whose task write was lost is
+/// re-applied on recovery: the act becomes `Backed` and the redo task resumes.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_action_recover_reapplies_back() {
+    let store: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
+    let mut config = Config::default();
+    config.data.keep_processes = Some(true);
+    let engine = Engine::new()
+        .with_config(&config)
+        .set_store(Some(store.clone()))
+        .start()
+        .unwrap();
+    let rt = engine.runtime();
+    let workflow = Workflow::new()
+        .with_step(|step| {
+            step.with_id("step1")
+                .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+        })
+        .with_step(|step| {
+            step.with_id("step2")
+                .with_uses(USES_IRQ, Vars::new().with("key", "act2"))
+        });
+
+    let sig = engine.signal((String::new(), String::new()));
+    let (s, s2) = sig.double();
+    engine.channel().on_message(move |e| {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+            s2.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+            s2.close();
+        }
+    });
+    let sig2 = engine.signal((String::new(), String::new()));
+    let (s3, s4) = sig2.double();
+    engine.channel().on_message(move |e| {
+        if e.is_params_key("act2") && e.is_state(MessageState::Created) {
+            s4.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+            s4.close();
+        }
+    });
+
+    let proc = rt.create_proc(&utils::longid(), &workflow);
+    rt.launch(&proc).unwrap();
+    let (pid, act1_tid) = s.recv().await;
+
+    // complete act1 so step1 completes and act2 is scheduled
+    rt.do_action(&Action::new(
+        &pid,
+        &act1_tid,
+        EventAction::Next,
+        Vars::new(),
+    ))
+    .unwrap();
+    let (_, act2_tid) = s3.recv().await;
+
+    // crash before the back was durably applied: only the outbox record landed
+    rt.cache()
+        .store()
+        .enqueue_action_op(&pid, &act2_tid, "back", r#"{"to":"step1"}"#)
+        .unwrap();
+    engine.close();
+
+    // reload: recovery re-applies the back
+    let engine2 = Engine::new()
+        .with_config(&config)
+        .set_store(Some(store.clone()))
+        .start()
+        .unwrap();
+    let rt2 = engine2.runtime();
+    let store2 = rt2.cache().store();
+    let mut drained = false;
+    for _ in 0..100 {
+        let pending = store2.load_pending_ops().unwrap();
+        if pending.iter().all(|op| op.r#type != "action") {
+            drained = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(drained, "back action record was not closed");
+
+    let reloaded = rt2.proc(&pid).unwrap().unwrap();
+    assert_eq!(reloaded.task(&act2_tid).unwrap().state(), TaskState::Backed);
+}
+
+/// A `Back` whose effects are durable but whose outbox close was lost is
+/// closed on recovery without re-applying — the redo task is not duplicated.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_action_recover_closes_applied_back() {
+    let store: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
+    let mut config = Config::default();
+    config.data.keep_processes = Some(true);
+    let engine = Engine::new()
+        .with_config(&config)
+        .set_store(Some(store.clone()))
+        .start()
+        .unwrap();
+    let rt = engine.runtime();
+    let workflow = Workflow::new()
+        .with_step(|step| {
+            step.with_id("step1")
+                .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+        })
+        .with_step(|step| {
+            step.with_id("step2")
+                .with_uses(USES_IRQ, Vars::new().with("key", "act2"))
+        });
+
+    let sig = engine.signal((String::new(), String::new()));
+    let (s, s2) = sig.double();
+    engine.channel().on_message(move |e| {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+            s2.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+            s2.close();
+        }
+    });
+    let sig2 = engine.signal((String::new(), String::new()));
+    let (s3, s4) = sig2.double();
+    engine.channel().on_message(move |e| {
+        if e.is_params_key("act2") && e.is_state(MessageState::Created) {
+            s4.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+            s4.close();
+        }
+    });
+
+    let proc = rt.create_proc(&utils::longid(), &workflow);
+    rt.launch(&proc).unwrap();
+    let (pid, act1_tid) = s.recv().await;
+    rt.do_action(&Action::new(
+        &pid,
+        &act1_tid,
+        EventAction::Next,
+        Vars::new(),
+    ))
+    .unwrap();
+    let (_, act2_tid) = s3.recv().await;
+
+    // apply the back normally (durable: act2 Backed + redo task created), then
+    // simulate a crash that lost only the outbox close
+    let mut options = Vars::new();
+    options.set("to", "step1");
+    rt.do_action(&Action::new(&pid, &act2_tid, EventAction::Back, options))
+        .unwrap();
+    rt.cache()
+        .store()
+        .enqueue_action_op(&pid, &act2_tid, "back", r#"{"to":"step1"}"#)
+        .unwrap();
+    engine.close();
+
+    // reload: recovery sees act2 already Backed (terminal) and closes the
+    // record without re-applying — no second redo task
+    let engine2 = Engine::new()
+        .with_config(&config)
+        .set_store(Some(store.clone()))
+        .start()
+        .unwrap();
+    let rt2 = engine2.runtime();
+    let store2 = rt2.cache().store();
+    let mut drained = false;
+    for _ in 0..100 {
+        let pending = store2.load_pending_ops().unwrap();
+        if pending.iter().all(|op| op.r#type != "action") {
+            drained = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(drained, "back action record was not closed");
+
+    let reloaded = rt2.proc(&pid).unwrap().unwrap();
+    assert_eq!(reloaded.task(&act2_tid).unwrap().state(), TaskState::Backed);
+    assert_eq!(
+        reloaded.task_by_nid("step1").len(),
+        2,
+        "original + one redo"
+    );
+}
+
+/// A non-`Next` action whose state write is durable but whose outbox close was
+/// lost is closed on recovery without re-applying (no duplicate effects), and
+/// the task's messages are marked completed so the client is not asked to act
+/// again.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_action_recover_closes_applied_action() {
+    let store: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
+    let mut config = Config::default();
+    config.data.keep_processes = Some(true);
+    let engine = Engine::new()
+        .with_config(&config)
+        .set_store(Some(store.clone()))
+        .start()
+        .unwrap();
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    let workflow = Workflow::new().with_step(|step| {
+        step.with_id("s1")
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+    });
+
+    // ack-enabled channel: messages are persisted to the store
+    let chan = engine.channel_with_options(&ChannelOptions {
+        id: "chan1".to_string(),
+        ack: true,
+        ..Default::default()
+    });
+    let sig = engine.signal((String::new(), String::new()));
+    let (s, s2) = sig.double();
+    chan.on_message(move |e| {
+        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+            s2.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+            s2.close();
+        }
+    });
+    auto_complete(&engine, &rx);
+
+    let proc = rt.create_proc(&utils::longid(), &workflow);
+    rt.launch(&proc).unwrap();
+    let (pid, act1_tid) = s.recv().await;
+
+    // apply the Skip action normally (durable), then simulate a crash that
+    // lost only the outbox close
+    rt.do_action(&Action::new(
+        &pid,
+        &act1_tid,
+        EventAction::Skip,
+        Vars::new(),
+    ))
+    .unwrap();
+    tx.recv().await;
+    rt.cache()
+        .store()
+        .enqueue_action_op(&pid, &act1_tid, "skip", "{}")
+        .unwrap();
+    engine.close();
+
+    // reload: recovery sees the task already Skipped (terminal) and closes the
+    // record without re-applying; the act message is marked completed
+    let engine2 = Engine::new()
+        .with_config(&config)
+        .set_store(Some(store.clone()))
+        .start()
+        .unwrap();
+    let rt2 = engine2.runtime();
+    let store2 = rt2.cache().store();
+    for _ in 0..100 {
+        if store2.load_pending_ops().unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(store2.load_pending_ops().unwrap().is_empty());
+
+    let reloaded = rt2.proc(&pid).unwrap().unwrap();
+    assert_eq!(reloaded.task_by_nid("s1").len(), 1);
+    let act_task = reloaded.task(&act1_tid).unwrap();
+    assert_eq!(act_task.state(), TaskState::Skipped);
+
+    // the act message is completed: the client will not be asked again
+    let q = Query::new().filter(
+        Filter::and()
+            .expr(Expr::eq("pid", pid.clone()))
+            .expr(Expr::eq("tid", act1_tid.clone())),
+    );
+    let msgs = store2.messages().query(&q).unwrap().rows;
+    assert!(!msgs.is_empty());
+    assert!(
+        msgs.iter()
+            .all(|m| m.status == crate::data::MessageStatus::Completed)
+    );
 }
 
 /// Concurrent completion of sibling acts advances the parent step exactly once.

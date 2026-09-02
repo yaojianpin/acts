@@ -1,6 +1,6 @@
 use super::writer::{StoreWriter, WriteOp};
 use crate::{
-    Config, Result,
+    Action, Config, Result,
     data::MessageStatus,
     scheduler::{Process, Runtime, Task},
     store::{KvStore, MemoryStore, Store},
@@ -187,17 +187,44 @@ impl Cache {
         })
     }
 
+    /// Durable outbox enqueue for a client action: the `Pending` record (with
+    /// the event + options payload) is queued **before** the action is applied
+    /// in memory, so a crash before the state write lands is replayed on
+    /// recovery. Deduplicated per `(pid, tid)` against any other in-flight
+    /// record.
+    pub(crate) fn enqueue_action(&self, action: &Action) -> Result<()> {
+        self.writer.send(WriteOp::EnqueueAction {
+            pid: action.pid.clone(),
+            tid: action.tid.clone(),
+            event: action.event.as_ref().to_string(),
+            options: action.options.to_string(),
+        })
+    }
+
+    /// Durable outbox close for a client action: the state write (and the
+    /// message status) were already queued by the caller, so FIFO order makes
+    /// `Done` durable only after both.
+    pub(crate) fn complete_action(&self, task: &Arc<Task>) -> Result<()> {
+        self.writer.send(WriteOp::OpDone {
+            pid: task.pid.clone(),
+            tid: task.id.clone(),
+            r#type: crate::data::OpType::Action.as_ref().to_string(),
+        })
+    }
+
     /// Durable outbox close: queue the task persist (capturing the
     /// `NEXT_COMPLETE` marker), then queue the record close after it — FIFO
     /// order makes `Done` durable only after the marker, without blocking the
     /// event loop. If the process crashes between the two, the record is still
     /// `Pending` and recovery re-dispatches it; the durable marker turns the
-    /// re-run into a no-op.
+    /// re-run into a no-op. Safe to call repeatedly: already-closed records
+    /// are left untouched.
     pub(crate) fn complete_next(&self, task: &Arc<Task>) -> Result<()> {
         self.upsert_async(task)?;
         self.writer.send(WriteOp::OpDone {
             pid: task.pid.clone(),
             tid: task.id.clone(),
+            r#type: crate::data::OpType::Next.as_ref().to_string(),
         })?;
         Ok(())
     }

@@ -17,11 +17,28 @@ pub(crate) enum WriteOp {
     /// Durable outbox enqueue: record the task's `next` as pending. Ordered
     /// after the task write queued by the same caller, so when this record
     /// becomes durable the task state it depends on is durable too.
-    EnqueueNext { pid: String, tid: String },
-    /// Durable outbox close: mark the task's in-flight records `Done`. Ordered
-    /// after the task write carrying the `NEXT_COMPLETE` marker, so `Done` is
-    /// only durable once the completion is durable.
-    OpDone { pid: String, tid: String },
+    EnqueueNext {
+        pid: String,
+        tid: String,
+    },
+    /// Durable outbox enqueue: record a client action (event + options) as
+    /// pending, before the action is applied in memory, so a crash before the
+    /// task state write lands can replay the action on recovery.
+    EnqueueAction {
+        pid: String,
+        tid: String,
+        event: String,
+        options: String,
+    },
+    /// Durable outbox close: mark the task's in-flight records of `r#type`
+    /// `Done` — a `next` close must not sweep away a concurrent client-action
+    /// record (and vice versa). Ordered after the task state write (and the
+    /// message status), so `Done` is only durable once the effects are.
+    OpDone {
+        pid: String,
+        tid: String,
+        r#type: String,
+    },
     Barrier(mpsc::SyncSender<()>),
 }
 
@@ -84,8 +101,17 @@ impl StoreWriter {
                 store.enqueue_next_op(&pid, &tid)?;
                 Ok(())
             }
-            WriteOp::OpDone { pid, tid } => {
-                store.complete_next_ops(&pid, &tid)?;
+            WriteOp::EnqueueAction {
+                pid,
+                tid,
+                event,
+                options,
+            } => {
+                store.enqueue_action_op(&pid, &tid, &event, &options)?;
+                Ok(())
+            }
+            WriteOp::OpDone { pid, tid, r#type } => {
+                store.complete_ops(&pid, &tid, &r#type)?;
                 Ok(())
             }
             WriteOp::Barrier(tx) => {

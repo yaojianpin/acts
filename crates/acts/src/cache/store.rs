@@ -100,18 +100,51 @@ impl Store {
         Ok(true)
     }
 
-    /// Record a durable outbox entry: the task's `next` propagation is enqueued
-    /// but not yet run. Deduplicated per `(pid, tid)` — at most one in-flight
-    /// record per task, matching the previous `Sign::NEXT_PENDING` semantics.
-    /// Called synchronously *before* the in-memory queue dispatch, after the
-    /// task state was flushed, so a `Pending` record always has a durable task
-    /// behind it.
+    /// but not yet run. Deduplicated per `(pid, tid, type)` — at most one
+    /// in-flight record per operation, matching the previous
+    /// `Sign::NEXT_PENDING` semantics. Queued on the store writer (FIFO)
+    /// *before* the in-memory queue dispatch, after the task state write, so a
+    /// `Pending` record always has a durable task behind it.
     pub fn enqueue_next_op(&self, pid: &str, tid: &str) -> Result<()> {
+        self.enqueue_op(pid, tid, data::OpType::Next, None, None)
+    }
+
+    /// Record a durable outbox entry for a client action (event + options).
+    /// Deduplicated per `(pid, tid, type)`, so it is not shadowed by the
+    /// task's in-flight `next` record (an interrupt act keeps its `next` op
+    /// `Pending` while waiting for the client). Written before the action is
+    /// applied so recovery can re-apply it when the crash happened before the
+    /// task state write became durable.
+    pub fn enqueue_action_op(
+        &self,
+        pid: &str,
+        tid: &str,
+        event: &str,
+        options: &str,
+    ) -> Result<()> {
+        self.enqueue_op(
+            pid,
+            tid,
+            data::OpType::Action,
+            Some(event.to_string()),
+            Some(options.to_string()),
+        )
+    }
+
+    fn enqueue_op(
+        &self,
+        pid: &str,
+        tid: &str,
+        r#type: data::OpType,
+        event: Option<String>,
+        options: Option<String>,
+    ) -> Result<()> {
         let collection = self.ops();
         let q = Query::new().filter(
             Filter::and()
                 .expr(Expr::eq("pid", pid.to_string()))
                 .expr(Expr::eq("tid", tid.to_string()))
+                .expr(Expr::eq("type", r#type.as_ref().to_string()))
                 .expr(Expr::eq("status", data::OpStatus::Pending.as_ref())),
         );
         if !collection.query(&q)?.rows.is_empty() {
@@ -123,8 +156,10 @@ impl Store {
             id: utils::longid(),
             pid: pid.to_string(),
             tid: tid.to_string(),
-            r#type: data::OpType::Next.as_ref().to_string(),
+            r#type: r#type.as_ref().to_string(),
             status: data::OpStatus::Pending.as_ref().to_string(),
+            event,
+            options,
             create_time: now,
             update_time: now,
             v: data::Op::version(),
@@ -141,15 +176,19 @@ impl Store {
         Ok(self.ops().query(&q)?.rows)
     }
 
-    /// Close the in-flight outbox records of a task (`Pending` → `Done`).
-    /// Must only be called after the operation's effects — including the
-    /// `NEXT_COMPLETE` marker — were durably persisted.
-    pub fn complete_next_ops(&self, pid: &str, tid: &str) -> Result<()> {
+    /// Close the in-flight outbox records of a task (`Pending` → `Done`),
+    /// filtered by operation type: a `next` close must not sweep away a
+    /// concurrent client-action record of the same task (and vice versa). Must
+    /// only be called after the operation's effects (the task state write,
+    /// including the `NEXT_COMPLETE` marker) were durably persisted — the
+    /// writer FIFO order guarantees this.
+    pub fn complete_ops(&self, pid: &str, tid: &str, r#type: &str) -> Result<()> {
         let collection = self.ops();
         let q = Query::new().filter(
             Filter::and()
                 .expr(Expr::eq("pid", pid.to_string()))
                 .expr(Expr::eq("tid", tid.to_string()))
+                .expr(Expr::eq("type", r#type.to_string()))
                 .expr(Expr::eq("status", data::OpStatus::Pending.as_ref())),
         );
         for mut op in collection.query(&q)?.rows {

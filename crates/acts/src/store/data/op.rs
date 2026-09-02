@@ -12,6 +12,9 @@ use crate::store::{DbCollectionIden, StoreIden};
 pub enum OpType {
     /// propagate the task's `next` (schedule children / move to next node)
     Next,
+    /// a client action (event + options) that must be replayed if the engine
+    /// crashed before the task state write became durable
+    Action,
 }
 
 /// Durable outbox record lifecycle.
@@ -24,15 +27,15 @@ pub enum OpStatus {
     /// the operation completed and its effects are durable
     Done,
 }
-
-/// Durable outbox record for a task operation (currently `next` propagation).
+/// Durable outbox record for a task operation (`next` propagation or a client
+/// action).
 ///
-/// The record is written synchronously **before** the in-memory queue dispatch,
-/// and is marked `Done` only after the operation's effects (including the
-/// `NEXT_COMPLETE` marker) are durably persisted. Crash recovery replays every
-/// record that is not `Done`, which makes `next` propagation idempotent across
-/// engine restarts: an operation is never lost, and a completed operation is
-/// never re-executed.
+/// The record is queued on the store writer **before** the in-memory dispatch
+/// (FIFO-ordered after the task state write), and is marked `Done` only after
+/// the operation's effects (including the `NEXT_COMPLETE` marker) are durably
+/// persisted. Crash recovery replays every record that is not `Done`, which
+/// makes task operations idempotent across engine restarts: an operation is
+/// never lost, and a completed operation is never re-executed.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Op {
     pub id: String,
@@ -40,6 +43,12 @@ pub struct Op {
     pub tid: String,
     pub r#type: String,
     pub status: String,
+    /// event of the recorded client action (`OpType::Action` records only)
+    #[serde(default)]
+    pub event: Option<String>,
+    /// options JSON of the recorded client action (`OpType::Action` records only)
+    #[serde(default)]
+    pub options: Option<String>,
     pub create_time: i64,
     pub update_time: i64,
     pub v: i32,
