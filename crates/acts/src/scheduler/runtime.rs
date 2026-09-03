@@ -420,11 +420,11 @@ impl Runtime {
             resolvers,
         });
 
-        runtime.initialize(config)?;
+        runtime.initialize()?;
         Ok(runtime)
     }
 
-    fn initialize(self: &Arc<Self>, options: &Config) -> crate::Result<()> {
+    fn initialize(self: &Arc<Self>) -> crate::Result<()> {
         {
             let cache = self.cache.clone();
             let rt = self.clone();
@@ -525,46 +525,46 @@ impl Runtime {
                 }
             });
         }
-        {
-            // Message retry timer — periodically re-send unacknowledged messages
-            let max_message_retry_times = options.max_message_retry_times();
-            #[cfg(not(test))]
-            let interval_ms = {
-                let secs = if options.tick_interval_secs() > 0 {
-                    options.tick_interval_secs()
-                } else {
-                    15
-                };
-                (secs * 1000) as u64
+
+        Ok(())
+    }
+
+    pub fn init_retry_timer(self: &Arc<Self>) -> crate::Result<()> {
+        // Message retry timer — periodically re-send unacknowledged messages
+        let max_message_retry_times = self.config().max_message_retry_times();
+        #[cfg(not(test))]
+        let interval_ms = {
+            let secs = if self.config().tick_interval_secs() > 0 {
+                self.config().tick_interval_secs()
+            } else {
+                15
             };
-            #[cfg(test)]
-            let interval_ms = 800u64;
+            (secs * 1000) as u64
+        };
+        #[cfg(test)]
+        let interval_ms = 800u64;
 
-            let evt = self.emitter().clone();
-            let cache = self.cache.clone();
-            let shutdown = self.shutdown.clone();
-            Handle::current().spawn(async move {
-                let mut intv = time::interval(Duration::from_millis(interval_ms));
-                loop {
-                    tokio::select! {
-                        _= shutdown.cancelled() => break,
-                        _ = intv.tick() => {}
-                    }
-                    let _ = cache.store().with_no_response_messages(
-                        interval_ms as i64,
-                        max_message_retry_times,
-                        |m| {
-                            let emitter = evt.clone();
-                            let m = m.clone();
-                            emitter.emit_message(&m);
-                        },
-                    );
+        let evt = self.emitter().clone();
+        let cache = self.cache.clone();
+        let shutdown = self.shutdown.clone();
+        Handle::current().spawn(async move {
+            let mut intv = time::interval(Duration::from_millis(interval_ms));
+            loop {
+                tokio::select! {
+                    _= shutdown.cancelled() => break,
+                    _ = intv.tick() => {}
                 }
-            });
-        }
-
-        // recover durable actions that were not yet fully processed (crash replay)
-        self.recover_actions()?;
+                let _ = cache.store().with_no_response_messages(
+                    interval_ms as i64,
+                    max_message_retry_times,
+                    |m| {
+                        let emitter = evt.clone();
+                        let m = m.clone();
+                        emitter.emit_message(&m);
+                    },
+                );
+            }
+        });
 
         Ok(())
     }

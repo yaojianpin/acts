@@ -224,11 +224,31 @@ impl Engine {
     pub fn start(mut self) -> crate::Result<Self> {
         self.runtime = Some(Runtime::new(&self.config(), self.store.clone())?);
 
+        let rt = self.runtime();
+
+        self.prepare()?;
+
+        // start event loop
+        rt.event_loop();
+
+        // recover pending actions
+        rt.recover_actions()?;
+
+        // init retry timer
+        rt.init_retry_timer()?;
+
+        info!("engine started");
+
+        Ok(self)
+    }
+
+    fn prepare(&self) -> crate::Result<()> {
         // register resolvers
         for (name, resolver) in self.resolvers.iter() {
             self.runtime().register_resolver(name, resolver.clone());
         }
 
+        // init plugins
         for plugin in self.plugins.iter() {
             plugin.on_init(&self)?;
         }
@@ -245,10 +265,6 @@ impl Engine {
             }
         }
 
-        // start event loop
-        self.runtime().event_loop();
-        info!("engine started");
-
-        Ok(self)
+        Ok(())
     }
 }
