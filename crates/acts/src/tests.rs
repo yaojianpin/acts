@@ -600,28 +600,22 @@ fn key_matches(k: &str, key: &str, prefix: &str, op: &ScanOperation) -> bool {
         return false;
     }
     match op {
-        ScanOperation::Eq | ScanOperation::Match => k.starts_with(key),
-        ScanOperation::Gt => k > key,
-        ScanOperation::Ge => k >= key,
-        ScanOperation::Lt => k < key,
-        ScanOperation::Le => k <= key,
+        ScanOperation::Eq => k.starts_with(key),
         ScanOperation::Ne => !k.starts_with(key),
-        ScanOperation::Range { from, to } => {
-            let start = format!("{}{}", key, from);
-            let end = format!("{}{}", key, to);
-            k >= start.as_str() && k < end.as_str()
-        }
-        ScanOperation::ExclusiveRange { from, to } => {
-            let start = format!("{}{}", key, from);
-            let end = format!("{}{}", key, to);
-            k > start.as_str() && k < end.as_str()
-        }
-        ScanOperation::InclusiveRange { from, to } => {
-            let start = format!("{}{}", key, from);
-            let end = format!("{}{}", key, to);
-            k >= start.as_str() && k <= end.as_str()
-        }
         ScanOperation::In { values } => values.iter().any(|v| k.starts_with(v.as_str())),
+        ScanOperation::Range { lower, upper } => {
+            if let Some(l) = lower
+                && k < l.as_str()
+            {
+                return false;
+            }
+            if let Some(u) = upper
+                && k >= u.as_str()
+            {
+                return false;
+            }
+            true
+        }
     }
 }
 

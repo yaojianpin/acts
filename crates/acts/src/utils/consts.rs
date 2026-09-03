@@ -33,7 +33,23 @@ pub const ACT_RUN_AS: &str = "__run_as";
 /// Must be valid across all backends (NATS KV, SQL LIKE, Redis).
 /// NATS KV allows: [-/_=\.a-zA-Z0-9]
 /// SQL LIKE wildcards are _ and %, so these must be escaped or avoided.
+///
+/// `-` is the *only* delimiter byte below the value charset: index-key value
+/// segments are encoded (see `encode_key_str`) to never contain `-`, and ids
+/// are alphanumeric, so every key char after the value segment is either the
+/// `-` separator or a byte > `-`. That keeps each value group a contiguous,
+/// monotonic key range addressable by sentinel bounds built from
+/// [`KEY_SEP_SUCC`].
 pub const KEY_SEP: &str = "-";
+
+/// The byte immediately after [`KEY_SEP`] (`-` = 0x2D -> `.` = 0x2E), used as
+/// an exclusive upper bound that covers a whole value group: all keys of
+/// value `v` are `..<v>-<id>` < `..<v>.<suffix>`, while the first char of any
+/// larger value (`0`..`9`, `A`..`Z`, `a`..`z`, `=`) is strictly greater, so
+/// nothing outside the group falls inside the bound.
+///
+/// `.` never occurs inside an encoded value (`.` maps to `=2E`) or an id.
+pub const KEY_SEP_SUCC: &str = ".";
 
 #[allow(dead_code)]
 pub const ACTS_STORE_NAME: &str = "acts_store";

@@ -108,59 +108,22 @@ impl KvStore for PostgresStore {
             let mut binds: Vec<String> = vec![pattern];
             let mut param_idx = 2;
             match &op {
-                ScanOperation::Eq | ScanOperation::Match => {}
-                ScanOperation::Gt => {
-                    sql.push_str(&format!(" AND key > ${}", param_idx));
-                    binds.push(key.to_string());
-                }
-                ScanOperation::Ge => {
-                    sql.push_str(&format!(" AND key >= ${}", param_idx));
-                    binds.push(key.to_string());
-                }
-                ScanOperation::Lt => {
-                    sql.push_str(&format!(" AND key < ${}", param_idx));
-                    binds.push(key.to_string());
-                }
-                ScanOperation::Le => {
-                    sql.push_str(&format!(" AND key <= ${}", param_idx));
-                    binds.push(key.to_string());
-                }
+                ScanOperation::Eq => {}
                 ScanOperation::Ne => {
                     sql.push_str(&format!(" AND key NOT LIKE ${}", param_idx));
                     binds.push(format!("{}%", key));
                 }
-                ScanOperation::Range { from, to } => {
-                    let start = format!("{}{}", key, from);
-                    let end = format!("{}{}", key, to);
-                    sql.push_str(&format!(
-                        " AND key >= ${} AND key < ${}",
-                        param_idx,
-                        param_idx + 1
-                    ));
-                    binds.push(start);
-                    binds.push(end);
-                }
-                ScanOperation::ExclusiveRange { from, to } => {
-                    let start = format!("{}{}", key, from);
-                    let end = format!("{}{}", key, to);
-                    sql.push_str(&format!(
-                        " AND key > ${} AND key < ${}",
-                        param_idx,
-                        param_idx + 1
-                    ));
-                    binds.push(start);
-                    binds.push(end);
-                }
-                ScanOperation::InclusiveRange { from, to } => {
-                    let start = format!("{}{}", key, from);
-                    let end = format!("{}{}", key, to);
-                    sql.push_str(&format!(
-                        " AND key >= ${} AND key <= ${}",
-                        param_idx,
-                        param_idx + 1
-                    ));
-                    binds.push(start);
-                    binds.push(end);
+                ScanOperation::Range { lower, upper } => {
+                    if let Some(l) = lower {
+                        let n = binds.len() + 1;
+                        sql.push_str(&format!(" AND key >= ${}", n));
+                        binds.push(l.clone());
+                    }
+                    if let Some(u) = upper {
+                        let n = binds.len() + 1;
+                        sql.push_str(&format!(" AND key < ${}", n));
+                        binds.push(u.clone());
+                    }
                 }
                 ScanOperation::In { values } => {
                     sql.push_str(" AND (");

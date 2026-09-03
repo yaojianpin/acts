@@ -54,29 +54,23 @@ impl SqliteStore {
 /// Build extra WHERE conditions for scan operations.
 fn op_conditions(op: &ScanOperation, key: &str) -> (String, Vec<String>) {
     match op {
-        ScanOperation::Eq | ScanOperation::Match => {
+        ScanOperation::Eq => {
             // keys LIKE 'key%' — handled by the LIKE pattern on prefix
             (String::new(), vec![])
         }
-        ScanOperation::Gt => (" AND key > ?".to_string(), vec![key.to_string()]),
-        ScanOperation::Ge => (" AND key >= ?".to_string(), vec![key.to_string()]),
-        ScanOperation::Lt => (" AND key < ?".to_string(), vec![key.to_string()]),
-        ScanOperation::Le => (" AND key <= ?".to_string(), vec![key.to_string()]),
         ScanOperation::Ne => (" AND key NOT LIKE ?".to_string(), vec![format!("{}%", key)]),
-        ScanOperation::Range { from, to } => {
-            let start = format!("{}{}", key, from);
-            let end = format!("{}{}", key, to);
-            (" AND key >= ? AND key < ?".to_string(), vec![start, end])
-        }
-        ScanOperation::ExclusiveRange { from, to } => {
-            let start = format!("{}{}", key, from);
-            let end = format!("{}{}", key, to);
-            (" AND key > ? AND key < ?".to_string(), vec![start, end])
-        }
-        ScanOperation::InclusiveRange { from, to } => {
-            let start = format!("{}{}", key, from);
-            let end = format!("{}{}", key, to);
-            (" AND key >= ? AND key <= ?".to_string(), vec![start, end])
+        ScanOperation::Range { lower, upper } => {
+            let mut conditions = String::new();
+            let mut binds = Vec::new();
+            if let Some(l) = lower {
+                conditions.push_str(" AND key >= ?");
+                binds.push(l.clone());
+            }
+            if let Some(u) = upper {
+                conditions.push_str(" AND key < ?");
+                binds.push(u.clone());
+            }
+            (conditions, binds)
         }
         ScanOperation::In { values } => {
             let mut conditions = String::from(" AND (key LIKE ?");

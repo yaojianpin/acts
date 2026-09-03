@@ -3,7 +3,7 @@ use crate::store::{
     DbCollection, DbCollectionIden, Expr, ExprOp, Filter, FilterExpr, KvStore, OrderBy, PageData,
     Query, ScanOperation, ScanOptions, Sort, query::FilterType,
 };
-use crate::utils::consts::KEY_SEP;
+use crate::utils::consts::{KEY_SEP, KEY_SEP_SUCC};
 use crate::{ActError, Result};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value as JsonValue;
@@ -64,9 +64,32 @@ impl<T> KvCollection<T> {
         indexed: &[&str],
         order_by: &[OrderBy],
     ) -> Result<HashSet<String>> {
-        // Match uses contains() for substring matching, which can't be served
-        // by index prefix scan (starts_with). Fall through to non-indexed path.
-        if indexed.contains(&expr.key.as_str()) && expr.op != ExprOp::Match {
+        // Validate array-shaped operators up front: the error must not depend
+        // on whether the field is indexed or which scan path is selected.
+        match &expr.op {
+            ExprOp::Between => {
+                let arr = expr.value.as_array().map(Vec::as_slice).unwrap_or(&[]);
+                if arr.len() < 2 {
+                    return Err(ActError::Store(
+                        "Between operator requires an array of two values".to_string(),
+                    ));
+                }
+            }
+            ExprOp::In => {
+                if !expr.value.as_array().is_some_and(|a| !a.is_empty()) {
+                    return Err(ActError::Store(
+                        "In operator requires a non-empty array".to_string(),
+                    ));
+                }
+            }
+            _ => {}
+        }
+        // Match is substring matching (contains), which an index prefix scan
+        // cannot serve, and range/inequality scans are exact only for the
+        // fixed-width, order-preserving numeric encoding (see
+        // `is_index_exact`); everything else falls through to the
+        // non-indexed path.
+        if indexed.contains(&expr.key.as_str()) && Self::is_index_exact(expr) {
             // Determine scan direction from order_by for this expression's field
             let is_rev = order_by
                 .iter()
@@ -76,20 +99,66 @@ impl<T> KvCollection<T> {
 
             // field_prefix bounds the scan to this field: {prefix}-{field}-
             let field_prefix = format!("{}{}{}{}", self.prefix, KEY_SEP, expr.key, KEY_SEP);
-            let value_str = json_value_to_key_str(&expr.value);
-            let value_key = format!(
-                "{}{}{}{}{}{}",
-                self.prefix, KEY_SEP, expr.key, KEY_SEP, value_str, KEY_SEP
-            );
 
-            let scan_op = match expr.op {
-                ExprOp::EQ => ScanOperation::Eq,
-                ExprOp::NE => ScanOperation::Ne,
-                ExprOp::GT => ScanOperation::Gt,
-                ExprOp::GE => ScanOperation::Ge,
-                ExprOp::LT => ScanOperation::Lt,
-                ExprOp::LE => ScanOperation::Le,
-                ExprOp::Match => ScanOperation::Match,
+            // All keys of one value `v` are `..-{v}-{id}`: with `-` excluded
+            // from the value encoding that group is contiguous and sorted by
+            // value. `lower(e)` is the first possible key of group `e`;
+            // `after(e)` is an exclusive upper bound that covers the whole
+            // group and nothing above it (`KEY_SEP_SUCC` is one byte above
+            // `KEY_SEP`, below every character that can follow a value
+            // segment).
+            let lower = |e: &str| format!("{}{}", field_prefix, e);
+            let after = |e: &str| format!("{}{}{}", field_prefix, e, KEY_SEP_SUCC);
+
+            // `eq_prefix` is the exact value-key prefix when the scan can only
+            // return keys of that value (Eq); otherwise ids are recovered by
+            // cutting the trailing `-{id}` segment.
+            let (scan_op, scan_key, eq_prefix) = match expr.op {
+                ExprOp::EQ => {
+                    let v = json_value_to_key_str(&expr.value);
+                    let vk = format!("{}{}{}", field_prefix, v, KEY_SEP);
+                    (ScanOperation::Eq, vk.clone(), Some(vk))
+                }
+                ExprOp::NE => {
+                    let v = json_value_to_key_str(&expr.value);
+                    (
+                        ScanOperation::Ne,
+                        format!("{}{}{}", field_prefix, v, KEY_SEP),
+                        None,
+                    )
+                }
+                ExprOp::GT => (
+                    ScanOperation::Range {
+                        lower: Some(after(&json_value_to_key_str(&expr.value))),
+                        upper: None,
+                    },
+                    field_prefix.clone(),
+                    None,
+                ),
+                ExprOp::GE => (
+                    ScanOperation::Range {
+                        lower: Some(lower(&json_value_to_key_str(&expr.value))),
+                        upper: None,
+                    },
+                    field_prefix.clone(),
+                    None,
+                ),
+                ExprOp::LT => (
+                    ScanOperation::Range {
+                        lower: None,
+                        upper: Some(lower(&json_value_to_key_str(&expr.value))),
+                    },
+                    field_prefix.clone(),
+                    None,
+                ),
+                ExprOp::LE => (
+                    ScanOperation::Range {
+                        lower: None,
+                        upper: Some(after(&json_value_to_key_str(&expr.value))),
+                    },
+                    field_prefix.clone(),
+                    None,
+                ),
                 ExprOp::Between => {
                     let empty = vec![];
                     let arr = expr.value.as_array().unwrap_or(&empty);
@@ -100,7 +169,14 @@ impl<T> KvCollection<T> {
                     }
                     let from = json_value_to_key_str(&arr[0]);
                     let to = json_value_to_key_str(&arr[1]);
-                    ScanOperation::InclusiveRange { from, to }
+                    (
+                        ScanOperation::Range {
+                            lower: Some(lower(&from)),
+                            upper: Some(after(&to)),
+                        },
+                        field_prefix.clone(),
+                        None,
+                    )
                 }
                 ExprOp::In => {
                     let empty = vec![];
@@ -114,34 +190,25 @@ impl<T> KvCollection<T> {
                         .iter()
                         .map(|val| {
                             let v_str = json_value_to_key_str(val);
-                            format!(
-                                "{}{}{}{}{}{}",
-                                self.prefix, KEY_SEP, expr.key, KEY_SEP, v_str, KEY_SEP
-                            )
+                            format!("{}{}{}", field_prefix, v_str, KEY_SEP)
                         })
                         .collect();
-                    ScanOperation::In { values }
+                    (ScanOperation::In { values }, field_prefix.clone(), None)
                 }
-            };
-
-            let scan_key = match expr.op {
-                // For range/In ops, `key` equals `prefix` (field-level prefix)
-                ExprOp::Between | ExprOp::In => field_prefix.clone(),
-                _ => value_key.clone(),
+                ExprOp::Match => unreachable!("Match is excluded by is_index_exact"),
             };
 
             let options = ScanOptions::new(scan_op, field_prefix.clone(), is_rev);
             let entries = self.kv.scan_prefix(&scan_key, options)?;
 
-            let ids: HashSet<String> = match expr.op {
-                // For Eq/Match, returned keys all start with value_key
-                ExprOp::EQ | ExprOp::Match => entries
+            let ids: HashSet<String> = match eq_prefix {
+                // Eq: every returned key starts with the value-key prefix
+                Some(vk) => entries
                     .iter()
-                    .filter_map(|(key, _)| key.strip_prefix(&value_key).map(|s| s.to_string()))
+                    .filter_map(|(key, _)| key.strip_prefix(&vk).map(str::to_string))
                     .collect(),
-                // For other ops, extract ID from the index key by skipping
-                // past the field_prefix and the value segment
-                _ => entries
+                // Other ops: skip the field prefix and the value segment
+                None => entries
                     .iter()
                     .filter_map(|(key, _)| {
                         let rest = key.strip_prefix(&field_prefix)?;
@@ -170,6 +237,31 @@ impl<T> KvCollection<T> {
                 })
                 .collect();
             Ok(ids)
+        }
+    }
+
+    /// Whether an expression over an indexed field can be answered exactly by
+    /// index-key scans.
+    ///
+    /// Eq/Ne/In only rely on prefix matching over the injective value
+    /// encoding, so any JSON value type is safe. Range and inequality scans
+    /// compare encoded value segments lexicographically, which is exact only
+    /// for the fixed-width numeric encoding: non-negative i64/u64 padded to
+    /// 20 digits. Strings (escaped characters sort outside alphanumerics) and
+    /// negative integers (zero-padding reverses their order) must not use the
+    /// index path, so they fall back to the full data scan.
+    fn is_index_exact(expr: &Expr) -> bool {
+        fn orderable(v: &JsonValue) -> bool {
+            v.as_i64().is_some_and(|i| i >= 0) || v.as_u64().is_some()
+        }
+        match &expr.op {
+            ExprOp::EQ | ExprOp::NE | ExprOp::In => true,
+            ExprOp::GT | ExprOp::GE | ExprOp::LT | ExprOp::LE => orderable(&expr.value),
+            ExprOp::Between => match expr.value.as_array() {
+                Some(arr) if arr.len() == 2 => orderable(&arr[0]) && orderable(&arr[1]),
+                _ => false,
+            },
+            ExprOp::Match => false,
         }
     }
 
@@ -206,6 +298,39 @@ impl<T> KvCollection<T> {
         }
         Ok(result.unwrap_or_default())
     }
+
+    /// Rebuild every index entry of this collection from the stored data
+    /// documents.
+    ///
+    /// Needed after a key-encoding change (e.g. `KEY_SEP` escaping rules):
+    /// index keys written by older code encode values differently, so field
+    /// scans silently miss or cross-match entries until the index region is
+    /// recreated from the authoritative `{prefix}-id-` data region.
+    pub fn rebuild_index(&self) -> Result<usize>
+    where
+        T: DbCollectionIden,
+    {
+        // Drop the whole per-field index region, then recreate from data.
+        for field in T::indexed_fields() {
+            let field_prefix = format!("{}{}{}{}", self.prefix, KEY_SEP, field, KEY_SEP);
+            let options = ScanOptions::new(ScanOperation::Eq, field_prefix.clone(), false);
+            let stale = self.kv.scan_prefix(&field_prefix, options)?;
+            for (key, _) in stale {
+                self.kv.delete(&key)?;
+            }
+        }
+        let data_prefix = format!("{}{}id{}", self.prefix, KEY_SEP, KEY_SEP);
+        let options = ScanOptions::new(ScanOperation::Eq, data_prefix.clone(), false);
+        let docs = self.kv.scan_prefix(&data_prefix, options)?;
+        for (_, bytes) in &docs {
+            let json: JsonValue = serde_json::from_slice(bytes).map_err(map_db_err)?;
+            let id = extract_id(&json)?;
+            for idx_key in self.index_keys(&json, &id) {
+                self.kv.put(&idx_key, vec![])?;
+            }
+        }
+        Ok(docs.len())
+    }
 }
 
 /// Convert a JSON value to a string suitable for use as an index-key segment.
@@ -231,20 +356,22 @@ fn cmp_json_val(a: &JsonValue, b: &JsonValue) -> Ordering {
     }
 }
 
-/// Encode a string so it contains only characters valid for all KV store keys
-/// and safe for SQL LIKE patterns (i.e. no `%`, `_`, or `\`).
+/// Characters in `[a-zA-Z0-9]` pass through unchanged. Every other character
+/// — including `%`, `_`, `\`, `|`, `=`, `.` and `-` — is encoded as `=XX`
+/// (2-digit uppercase hex for code points 0–255, 6-digit for code points
+/// above 255). The `=` escape-prefix is itself valid in NATS KV keys (the
+/// strictest backend), and the encoding is applied identically during key
+/// creation and query scan-key construction so that lookups always match.
 ///
-/// Characters in `[a-zA-Z0-9-]` pass through unchanged. Every other character
-/// — including `%`, `_`, `\`, `|`, `=`, `.` — is encoded as `=XX` (2-digit
-/// uppercase hex for code points 0–255, 6-digit for code points above 255).
-/// The `=` escape-prefix is itself valid in NATS KV keys (the strictest
-/// backend), and the encoding is applied identically during key creation and
-/// query scan-key construction so that lookups always match.
+/// `-` MUST stay encoded: it is `KEY_SEP`, the delimiter between the field,
+/// value and id segments of an index key. Keeping it out of the value charset
+/// guarantees every value group is a contiguous, monotonically ordered key
+/// range that closed range bounds can address exactly (see `KEY_SEP_SUCC`).
 fn encode_key_str(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     for c in s.chars() {
         match c {
-            'a'..='z' | 'A'..='Z' | '0'..='9' | '-' => result.push(c),
+            'a'..='z' | 'A'..='Z' | '0'..='9' => result.push(c),
             other => {
                 result.push('=');
                 let code = other as u32;
@@ -540,9 +667,18 @@ mod tests {
         // Characters in the safe set pass through unchanged
         assert_eq!(encode_key_str("hello"), "hello");
         assert_eq!(encode_key_str("abcABC123"), "abcABC123");
-        assert_eq!(encode_key_str("hello-world"), "hello-world");
+        // `-` is KEY_SEP and must not appear inside a value segment
+        assert_eq!(encode_key_str("hello-world"), "hello=2Dworld");
         assert_eq!(encode_key_str("with_underscore"), "with=5Funderscore");
         assert_eq!(encode_key_str(""), "");
+    }
+
+    #[test]
+    fn encode_key_str_hyphen_is_escaped() {
+        // '-' must never collide with the KEY_SEP delimiter
+        assert_eq!(encode_key_str("a-b-c"), "a=2Db=2Dc");
+        assert_eq!(encode_key_str("-"), "=2D");
+        assert_eq!(encode_key_str("my-workflow-v2"), "my=2Dworkflow=2Dv2");
     }
 
     #[test]
@@ -866,11 +1002,157 @@ mod tests {
         assert!(!expr.op(&json!("hello"), &json!("xyz")));
     }
 
+    // ========== index-key range semantics regression tests ==========
+
+    use super::KvCollection;
+    use crate::store::{DbCollection, Filter, KvStore, Query};
+    use serde::{Deserialize, Serialize};
+    use std::sync::Arc;
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct Doc {
+        id: String,
+        state: String,
+        timestamp: i64,
+    }
+
+    impl crate::store::DbCollectionIden for Doc {
+        fn iden() -> crate::store::StoreIden {
+            crate::store::StoreIden::Ops
+        }
+        fn indexed_fields() -> &'static [&'static str] {
+            &["state", "timestamp"]
+        }
+    }
+
+    fn ids(page: &crate::store::PageData<Doc>) -> Vec<String> {
+        page.rows.iter().map(|d| d.id.clone()).collect()
+    }
+
+    fn query(col: &KvCollection<Doc>, filter: Filter) -> crate::store::PageData<Doc> {
+        col.query(&Query::new().filter(filter)).unwrap()
+    }
+
     #[test]
-    fn store_expr_op_match_number_is_substring_of_to_string() {
-        // Match converts both sides to string and checks contains
-        let expr = Expr::matches("field", "2");
-        assert!(expr.op(&json!(12), &json!("2")));
-        assert!(!expr.op(&json!(10), &json!("2")));
+    fn index_range_closed_boundaries_exact() {
+        let kv: Arc<crate::store::MemoryStore> = Arc::new(crate::store::MemoryStore::new());
+        let col = KvCollection::new("docs", kv.clone());
+        for ts in [100i64, 200, 300] {
+            col.create(&Doc {
+                id: format!("d{ts}"),
+                state: "idle".to_string(),
+                timestamp: ts,
+            })
+            .unwrap();
+        }
+        // Inclusive Between keeps both exact boundaries (was: value == to dropped)
+        let page = query(
+            &col,
+            Filter::and().expr(Expr::between("timestamp", 100, 200)),
+        );
+        assert_eq!(ids(&page), vec!["d100", "d200"]);
+        // Degenerate inclusive range returns the exact single value
+        let page = query(
+            &col,
+            Filter::and().expr(Expr::between("timestamp", 100, 100)),
+        );
+        assert_eq!(ids(&page), vec!["d100"]);
+        // Single-sided comparisons are exact at the equality boundary
+        let page = query(&col, Filter::and().expr(Expr::gt("timestamp", 100)));
+        assert_eq!(ids(&page), vec!["d200", "d300"]);
+        let page = query(&col, Filter::and().expr(Expr::ge("timestamp", 200)));
+        assert_eq!(ids(&page), vec!["d200", "d300"]);
+        let page = query(&col, Filter::and().expr(Expr::lt("timestamp", 200)));
+        assert_eq!(ids(&page), vec!["d100"]);
+        let page = query(&col, Filter::and().expr(Expr::le("timestamp", 200)));
+        assert_eq!(ids(&page), vec!["d100", "d200"]);
+        // Rows are sorted by id, so ids() must be sorted before comparing
+    }
+
+    #[test]
+    fn index_gate_falls_back_for_negative_bounds() {
+        // Negative bounds are not indexable (zero-padding reverses their
+        // order), so range/inequality scans must fall back to the full-data
+        // scan. Stored negative timestamps make any index-path mistake visible.
+        let kv: Arc<crate::store::MemoryStore> = Arc::new(crate::store::MemoryStore::new());
+        let col = KvCollection::new("docs", kv.clone());
+        for (i, ts) in [-200i64, -100, 100, 200].into_iter().enumerate() {
+            col.create(&Doc {
+                id: format!("d{i}"),
+                state: "idle".to_string(),
+                timestamp: ts,
+            })
+            .unwrap();
+        }
+        fn ts(page: &crate::store::PageData<Doc>) -> Vec<i64> {
+            page.rows.iter().map(|d| d.timestamp).collect()
+        }
+        let page = query(
+            &col,
+            Filter::and().expr(Expr::between("timestamp", -150, 150)),
+        );
+        assert_eq!(ts(&page), vec![-100, 100]);
+        let page = query(&col, Filter::and().expr(Expr::ge("timestamp", -1)));
+        assert_eq!(ts(&page), vec![100, 200]);
+        let page = query(
+            &col,
+            Filter::and().expr(Expr::between("timestamp", -250, -50)),
+        );
+        assert_eq!(ts(&page), vec![-200, -100]);
+    }
+
+    #[test]
+    fn index_eq_isolates_hyphenated_values() {
+        let kv: Arc<crate::store::MemoryStore> = Arc::new(crate::store::MemoryStore::new());
+        let col = KvCollection::new("docs", kv.clone());
+        for (id, state) in [("a", "w9"), ("b", "w9-foo"), ("c", "other")] {
+            col.create(&Doc {
+                id: id.to_string(),
+                state: state.to_string(),
+                timestamp: 0,
+            })
+            .unwrap();
+        }
+        // '-' is escaped in the value segment: Eq on "w9" must not reach "w9-foo"
+        let page = query(&col, Filter::and().expr(Expr::eq("state", "w9")));
+        assert_eq!(ids(&page), vec!["a"]);
+        let page = query(&col, Filter::and().expr(Expr::eq("state", "w9-foo")));
+        assert_eq!(ids(&page), vec!["b"]);
+        let page = query(&col, Filter::and().expr(Expr::ne("state", "w9")));
+        assert_eq!(ids(&page), vec!["b", "c"]);
+    }
+
+    #[test]
+    fn rebuild_index_repairs_stale_or_legacy_keys() {
+        let kv: Arc<crate::store::MemoryStore> = Arc::new(crate::store::MemoryStore::new());
+        let col = KvCollection::new("docs", kv.clone());
+        for (id, state) in [("a", "w9"), ("b", "w9-foo")] {
+            col.create(&Doc {
+                id: id.to_string(),
+                state: state.to_string(),
+                timestamp: 0,
+            })
+            .unwrap();
+        }
+        // Simulate a pre-fix persisted index: value "-" not escaped, id suffixed
+        let legacy = format!("docs-state-{}-{}", "w9-foo", "b");
+        kv.put(&legacy, vec![]).unwrap();
+        // Legacy key is a prefix-extension of the "w9" value group -> pollutes
+        // Eq with a phantom id ("foo-b"), inflating count while the row is lost
+        let page = query(&col, Filter::and().expr(Expr::eq("state", "w9")));
+        assert_eq!(page.count, 2, "legacy phantom id inflates count");
+        assert_eq!(ids(&page), vec!["a"], "phantom row cannot be fetched");
+        // Drop the fresh index key of doc b, then rebuild restores exactness
+        let fresh = format!("docs-state-{}-{}", encode_key_str("w9-foo"), "b");
+        kv.delete(&fresh).unwrap();
+        let page = query(&col, Filter::and().expr(Expr::eq("state", "w9-foo")));
+        assert_eq!(page.count, 0, "fresh key deleted, doc b unreachable");
+        assert!(col.rebuild_index().unwrap() >= 2);
+        assert!(kv.get(&legacy).unwrap().is_none(), "legacy key removed");
+        assert!(kv.get(&fresh).unwrap().is_some(), "fresh key restored");
+        let page = query(&col, Filter::and().expr(Expr::eq("state", "w9")));
+        assert_eq!(ids(&page), vec!["a"], "no pollution after rebuild");
+        let page = query(&col, Filter::and().expr(Expr::eq("state", "w9-foo")));
+        assert_eq!(ids(&page), vec!["b"]);
     }
 }

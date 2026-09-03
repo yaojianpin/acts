@@ -118,9 +118,11 @@ pub struct ScanOptions {
     /// scan operation
     pub op: ScanOperation,
     /// The prefix that bounds the scan. All returned keys must start with this prefix.
-    /// For point ops (Eq/Gt/Lt/Ge/Le/Ne/Match) this is the field-level prefix
-    /// (e.g., "tasks|state|"), and `key` is the full value prefix.
-    /// For range ops this equals the `key` parameter.
+    /// For point ops (Eq/Ne/In) this is the field-level prefix
+    /// (e.g., "tasks-state-"), and `key` is the full value prefix passed to
+    /// [`KvStore::scan_prefix`].
+    /// For [`ScanOperation::Range`] the prefix is the same field-level prefix;
+    /// the interval bounds are full keys and already contain the prefix.
     pub prefix: String,
 }
 
@@ -131,46 +133,29 @@ impl ScanOptions {
 }
 
 pub enum ScanOperation {
-    /// Not equal — keys that start with the parent prefix but NOT the given key
+    /// Not equal — keys that start with the parent prefix but NOT with `key`
     Ne,
 
-    /// Equal — keys that start with the given key
+    /// Equal — keys that start with `key` (a full value-key prefix)
     Eq,
 
-    /// Less than — keys less than the given key
-    Lt,
-
-    /// Greater than — keys greater than the given key
-    Gt,
-
-    /// Greater and equal — keys greater than or equal to the given key
-    Ge,
-
-    /// Less and equal — keys less than or equal to the given key
-    Le,
-
-    /// Start with the key (substring match on the value)
-    Match,
-
-    /// Key is in the range
-    /// The key >= key + SEP + from,
-    ///         < key + SEP + to
-    Range { from: String, to: String },
-
-    /// Key is in the range
-    /// The key > key + SEP + from,
-    ///         < key + SEP + to
-    ExclusiveRange { from: String, to: String },
-
-    /// Key is in the range
-    /// The key >= key + SEP + from,
-    ///         <= key + SEP + to
-    InclusiveRange { from: String, to: String },
-
-    /// Key starts with any one of the given value keys.
-    /// Each entry in `values` is a full value-key prefix (e.g.,
-    /// "tasks|state|Completed|").
+    /// Key starts with any one of the given full value-key prefixes (e.g.,
+    /// "tasks-state-Completed-").
     In { values: Vec<String> },
+
+    /// Half-open interval over full keys inside the scan prefix: every
+    /// returned key satisfies `lower <= key` (when `lower` is `Some`) and
+    /// `key < upper` (when `upper` is `Some`).
+    ///
+    /// Bounds are computed by the collection layer, never by backends:
+    /// inclusive value-range ends are encoded with the sentinel
+    /// [`crate::utils::consts::KEY_SEP_SUCC`], so a bound `..<v>-` group is
+    /// addressed as `upper = ..<v>+SUCC` (covers every `..<v>-<id>` key and
+    /// nothing above it). Backends only compare full key strings.
+    Range {
+        lower: Option<String>,
+        upper: Option<String>,
+    },
 }
 
 pub trait KvStore: Send + Sync {

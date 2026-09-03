@@ -60,6 +60,36 @@ impl Store {
         self.collection()
     }
 
+    fn rebuild_one<DATA>(&self) -> Result<usize>
+    where
+        DATA:
+            DbCollectionIden + Serialize + DeserializeOwned + Send + Sync + Clone + Debug + 'static,
+    {
+        let prefix = DATA::iden().as_ref().to_string();
+        KvCollection::<DATA>::new(&prefix, self.kv.clone()).rebuild_index()
+    }
+
+    /// Rebuild all collection index entries from stored data documents.
+    ///
+    /// Run once after upgrading to a version whose index-key value encoding
+    /// changed (see `KvCollection::rebuild_index`); calling it repeatedly is
+    /// harmless (idempotent rewrite).
+    pub fn rebuild_indexes(&self) -> Result<usize> {
+        let mut total = 0;
+        for rebuild in [
+            Self::rebuild_one::<data::Task>,
+            Self::rebuild_one::<data::Proc>,
+            Self::rebuild_one::<data::Package>,
+            Self::rebuild_one::<data::Model>,
+            Self::rebuild_one::<data::Message>,
+            Self::rebuild_one::<data::Event>,
+            Self::rebuild_one::<data::Op>,
+        ] {
+            total += rebuild(self)?;
+        }
+        Ok(total)
+    }
+
     pub fn publish(&self, pack: &Package) -> Result<bool> {
         trace!(id = %pack.id, "store publish");
         if pack.id.is_empty() {

@@ -2363,7 +2363,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_query_between_on_indexed_integer_field() {
-            // Between on timestamp (indexed integer field) — maps to InclusiveRange
+            // Between on timestamp (indexed integer field) — inclusive range scan
             let store = store();
             let pid = utils::longid();
             let tid = utils::shortid();
@@ -2413,21 +2413,33 @@ macro_rules! gen_store_tests {
             assert_eq!(ret.rows[1].timestamp, 300);
             assert_eq!(ret.rows[2].timestamp, 400);
 
-            // Between including exact boundary: 100 to 201 (use 201 instead of 200
-            // to work around InclusiveRange key format where entry key has trailing "|{id}")
+            // Inclusive Between keeps the exact upper boundary (100 and 200)
             let q = Query::new()
                 .filter(
                     Filter::and()
                         .expr(Expr::eq("pid", pid.clone()))
-                        .expr(Expr::between("timestamp", 100, 201)),
+                        .expr(Expr::between("timestamp", 100, 200)),
                 )
                 .order("timestamp", Sort::Asc)
                 .offset(0)
                 .limit(100);
             let ret = store.messages().query(&q).unwrap();
-            assert_eq!(ret.count, 2); // 100 and 200
+            assert_eq!(ret.count, 2);
             assert_eq!(ret.rows[0].timestamp, 100);
             assert_eq!(ret.rows[1].timestamp, 200);
+
+            // Degenerate inclusive range still matches the exact value
+            let q = Query::new()
+                .filter(
+                    Filter::and()
+                        .expr(Expr::eq("pid", pid.clone()))
+                        .expr(Expr::between("timestamp", 100, 100)),
+                )
+                .offset(0)
+                .limit(100);
+            let ret = store.messages().query(&q).unwrap();
+            assert_eq!(ret.count, 1);
+            assert_eq!(ret.rows[0].timestamp, 100);
 
             // Range that covers all data
             let q = Query::new()
@@ -2490,8 +2502,9 @@ macro_rules! gen_store_tests {
                 store.procs().create(&proc).expect("create proc");
             }
 
-            // Between "a" and "f" on indexed string field — end bound past
-            // actual data to avoid InclusiveRange boundary exclusion
+            // Between on a string field with inclusive bounds (all five states
+            // are within [<prefix>-between-a, <prefix>-between-f]); string
+            // range scans are served by the full data-scan fallback path
             let q = Query::new()
                 .filter(Filter::and().expr(Expr::between(
                     "state",
@@ -2501,10 +2514,46 @@ macro_rules! gen_store_tests {
                 .offset(0)
                 .limit(100);
             let ret = store.procs().query(&q).unwrap();
-            // Due to InclusiveRange boundary behavior and shared MemoryStore data,
-            // use a lenient assertion — the indexed Between scan on strings
-            // is validated end-to-end by the integer-field test above
-            assert!(ret.count >= 3, "expected at least 3, got {}", ret.count);
+            assert_eq!(ret.count, 5, "all five states must match");
+            let mut got: Vec<String> = ret.rows.iter().map(|p| p.state.clone()).collect();
+            got.sort();
+            assert_eq!(got, states);
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[serial(store_tests)]
+        async fn store_query_eq_isolates_hyphenated_string_value() {
+            // Eq on an indexed string must not reach stored values that extend
+            // the query value with a hyphen ("-" is KEY_SEP and is escaped in
+            // the value encoding)
+            let store = store();
+            let workflow = create_workflow();
+            let base = format!("st-{}", utils::shortid());
+
+            for (i, state) in [base.clone(), format!("{}-v2", base), "other-x".to_string()]
+                .into_iter()
+                .enumerate()
+            {
+                let mut proc = create_proc(&format!("p{}", i), TaskState::None, &workflow);
+                proc.state = state;
+                store.procs().create(&proc).expect("create proc");
+            }
+
+            let q = Query::new()
+                .filter(Filter::and().expr(Expr::eq("state", base.clone())))
+                .offset(0)
+                .limit(100);
+            let ret = store.procs().query(&q).unwrap();
+            assert_eq!(ret.count, 1, "hyphen-extension value must not match Eq");
+            assert_eq!(ret.rows[0].state, base);
+
+            let q = Query::new()
+                .filter(Filter::and().expr(Expr::eq("state", format!("{}-v2", base))))
+                .offset(0)
+                .limit(100);
+            let ret = store.procs().query(&q).unwrap();
+            assert_eq!(ret.count, 1);
+            assert_eq!(ret.rows[0].state, format!("{}-v2", base));
         }
 
         #[tokio::test(flavor = "multi_thread")]
@@ -3193,6 +3242,114 @@ macro_rules! gen_store_tests {
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
+        async fn store_query_single_sided_exact_value_boundary() {
+            // Stored values collide with the comparison bound — Gt/Ge/Lt/Le
+            // must be exact at `value == bound` on the indexed scan path.
+            let store = store();
+            let pid = utils::longid();
+            let tid = utils::shortid();
+
+            let timestamps: Vec<i64> = vec![100, 200, 300];
+            for &ts in &timestamps {
+                let msg = Message {
+                    id: utils::shortid(),
+                    name: format!("boundary-{}", ts),
+                    pid: pid.clone(),
+                    tid: tid.clone(),
+                    nid: utils::shortid(),
+                    mid: utils::shortid(),
+                    state: MessageState::Created,
+                    start_time: 0,
+                    end_time: 0,
+                    r#type: "step".to_string(),
+                    uses: Some("package".to_string()),
+                    inputs: json!({}).to_string(),
+                    outputs: json!({}).to_string(),
+                    chan_id: "test1".to_string(),
+                    chan_pattern: "*:*:*:*".to_string(),
+                    create_time: 0,
+                    update_time: 0,
+                    retry_times: 0,
+                    timestamp: ts,
+                    status: MessageStatus::Created,
+                    v: 0,
+                };
+                store.messages().create(&msg).unwrap();
+            }
+
+            let q = Query::new()
+                .filter(
+                    Filter::and()
+                        .expr(Expr::eq("pid", pid.clone()))
+                        .expr(Expr::gt("timestamp", 100)),
+                )
+                .order("timestamp", Sort::Asc)
+                .offset(0)
+                .limit(100);
+            let ret = store.messages().query(&q).unwrap();
+            let got: Vec<i64> = ret.rows.iter().map(|m| m.timestamp).collect();
+            assert_eq!(got, vec![200, 300]);
+            let q = Query::new()
+                .filter(
+                    Filter::and()
+                        .expr(Expr::eq("pid", pid.clone()))
+                        .expr(Expr::ge("timestamp", 200)),
+                )
+                .order("timestamp", Sort::Asc)
+                .offset(0)
+                .limit(100);
+            let ret = store.messages().query(&q).unwrap();
+            let got: Vec<i64> = ret.rows.iter().map(|m| m.timestamp).collect();
+            assert_eq!(got, vec![200, 300]);
+            let q = Query::new()
+                .filter(
+                    Filter::and()
+                        .expr(Expr::eq("pid", pid.clone()))
+                        .expr(Expr::lt("timestamp", 200)),
+                )
+                .order("timestamp", Sort::Asc)
+                .offset(0)
+                .limit(100);
+            let ret = store.messages().query(&q).unwrap();
+            let got: Vec<i64> = ret.rows.iter().map(|m| m.timestamp).collect();
+            assert_eq!(got, vec![100]);
+            let q = Query::new()
+                .filter(
+                    Filter::and()
+                        .expr(Expr::eq("pid", pid.clone()))
+                        .expr(Expr::le("timestamp", 200)),
+                )
+                .order("timestamp", Sort::Asc)
+                .offset(0)
+                .limit(100);
+            let ret = store.messages().query(&q).unwrap();
+            let got: Vec<i64> = ret.rows.iter().map(|m| m.timestamp).collect();
+            assert_eq!(got, vec![100, 200]);
+            let q = Query::new()
+                .filter(
+                    Filter::and()
+                        .expr(Expr::eq("pid", pid.clone()))
+                        .expr(Expr::lt("timestamp", 100)),
+                )
+                .offset(0)
+                .limit(100);
+            let ret = store.messages().query(&q).unwrap();
+            assert_eq!(ret.count, 0);
+            let q = Query::new()
+                .filter(
+                    Filter::and()
+                        .expr(Expr::eq("pid", pid.clone()))
+                        .expr(Expr::ge("timestamp", 300)),
+                )
+                .order("timestamp", Sort::Asc)
+                .offset(0)
+                .limit(100);
+            let ret = store.messages().query(&q).unwrap();
+            let got: Vec<i64> = ret.rows.iter().map(|m| m.timestamp).collect();
+            assert_eq!(got, vec![300]);
+        }
+
+        #[serial(store_tests)]
         async fn store_query_gt_on_indexed_integer_field() {
             let store = store();
             let pid = utils::longid();
@@ -3721,8 +3878,9 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_query_match_on_indexed_string_field() {
-            // Match on state (indexed string field) uses starts_with scan,
-            // which matches exact values because the index key uses trailing '|'
+            // Match is substring (contains) semantics and is never served by
+            // the index prefix scan — it runs the full-data fallback path even
+            // when the field is indexed.
             let store = store();
             let workflow = Workflow::new()
                 .with_id(&utils::shortid())
