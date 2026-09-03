@@ -2253,6 +2253,87 @@ macro_rules! gen_store_tests {
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
+        async fn store_query_order_by_pages_are_global_slices() {
+            // Regression: order_by used to run AFTER pagination, so a page was
+            // an arbitrary id-sorted batch re-ordered in isolation. Pages must
+            // now be consecutive slices of the globally sorted result.
+            let store = store();
+            let pid = utils::longid();
+            let tid = utils::shortid();
+            for &status in &[
+                MessageStatus::Created,
+                MessageStatus::Acked,
+                MessageStatus::Completed,
+                MessageStatus::Error,
+            ] {
+                for i in 0..5 {
+                    let msg = Message {
+                        id: utils::shortid(),
+                        name: format!("slice-{:02}-{:02}", status as i8, i),
+                        pid: pid.clone(),
+                        tid: tid.clone(),
+                        nid: utils::shortid(),
+                        mid: utils::shortid(),
+                        state: MessageState::Created,
+                        start_time: 0,
+                        end_time: 0,
+                        r#type: "step".to_string(),
+                        uses: Some("package".to_string()),
+                        inputs: json!({}).to_string(),
+                        outputs: json!({}).to_string(),
+                        chan_id: "test1".to_string(),
+                        chan_pattern: "*:*:*:*".to_string(),
+                        create_time: 0,
+                        update_time: 0,
+                        retry_times: 0,
+                        timestamp: utils::time::timestamp(),
+                        status,
+                        v: 0,
+                    };
+                    store.messages().create(&msg).unwrap();
+                }
+            }
+            let base = Query::new().filter(Filter::and().expr(Expr::eq("pid", pid.clone())));
+            for order in [Sort::Asc, Sort::Desc] {
+                let full: Vec<String> = store
+                    .messages()
+                    .query(&base.clone().order("status", order.clone()).limit(100))
+                    .unwrap()
+                    .rows
+                    .iter()
+                    .map(|m| m.id.clone())
+                    .collect();
+                assert_eq!(full.len(), 20);
+                let mut seen = HashSet::new();
+                for (idx, offset) in [0usize, 7, 14].into_iter().enumerate() {
+                    let page = store
+                        .messages()
+                        .query(
+                            &base
+                                .clone()
+                                .order("status", order.clone())
+                                .limit(7)
+                                .offset(offset),
+                        )
+                        .unwrap();
+                    let expect = &full[offset..full.len().min(offset + 7)];
+                    let got: Vec<String> = page.rows.iter().map(|m| m.id.clone()).collect();
+                    assert_eq!(
+                        got,
+                        expect,
+                        "{order:?} page {idx} must equal the global rows [{offset}..{})",
+                        offset + 7
+                    );
+                    for id in got {
+                        assert!(seen.insert(id), "duplicate id across pages");
+                    }
+                }
+                assert_eq!(seen.len(), 20, "{order:?} pages cover the whole set");
+            }
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[serial(store_tests)]
         async fn store_query_indexed_integer_filter() {
             // Verify that filtering by integer indexed fields works correctly
             // (tests zero-padded index key construction and scan_key matching).

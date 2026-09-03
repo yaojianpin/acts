@@ -250,11 +250,11 @@ impl Engine {
 
         // init plugins
         for plugin in self.plugins.iter() {
-            plugin.on_init(&self)?;
+            plugin.on_init(self)?;
         }
 
         // init built-in packages
-        package::init(&self)?;
+        package::init(self)?;
 
         // register packages
         for package_register in self.packages.iter() {

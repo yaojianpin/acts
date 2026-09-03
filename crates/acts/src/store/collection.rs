@@ -75,12 +75,10 @@ impl<T> KvCollection<T> {
                     ));
                 }
             }
-            ExprOp::In => {
-                if !expr.value.as_array().is_some_and(|a| !a.is_empty()) {
-                    return Err(ActError::Store(
-                        "In operator requires a non-empty array".to_string(),
-                    ));
-                }
+            ExprOp::In if !expr.value.as_array().is_some_and(|a| !a.is_empty()) => {
+                return Err(ActError::Store(
+                    "In operator requires a non-empty array".to_string(),
+                ));
             }
             _ => {}
         }
@@ -356,6 +354,71 @@ fn cmp_json_val(a: &JsonValue, b: &JsonValue) -> Ordering {
     }
 }
 
+/// Compare two documents by the query's `order_by` keys, in listed priority.
+///
+/// A field that is missing or JSON `null` counts as "no value": under `Asc`
+/// it sorts before every value, so under `Desc` it lands last. Numbers
+/// compare numerically (exact when both sides are integers); every other
+/// pair compares by canonical JSON text, which keeps the order total and
+/// deterministic. Rows that compare equal on every key keep their input
+/// order (stable sort), which is id-ascending by construction in `query`.
+fn cmp_order_docs(a: &JsonValue, b: &JsonValue, order_by: &[OrderBy]) -> Ordering {
+    let mut ret = Ordering::Equal;
+    for ob in order_by {
+        let av = a.get(&ob.field).filter(|v| !v.is_null());
+        let bv = b.get(&ob.field).filter(|v| !v.is_null());
+        let mut cmp = match (av, bv) {
+            (Some(av), Some(bv)) => cmp_order_values(av, bv),
+            (Some(_), None) => Ordering::Greater,
+            (None, Some(_)) => Ordering::Less,
+            (None, None) => Ordering::Equal,
+        };
+        if ob.order == Sort::Desc {
+            cmp = cmp.reverse();
+        }
+        ret = ret.then(cmp);
+    }
+    ret
+}
+
+/// Total order over two present JSON values for `order_by` comparison.
+fn cmp_order_values(a: &JsonValue, b: &JsonValue) -> Ordering {
+    match (a, b) {
+        (JsonValue::Number(na), JsonValue::Number(nb)) => cmp_order_numbers(na, nb),
+        _ => a.to_string().cmp(&b.to_string()),
+    }
+}
+
+/// Exact numeric order for JSON numbers.
+fn cmp_order_numbers(a: &serde_json::Number, b: &serde_json::Number) -> Ordering {
+    if let (Some(x), Some(y)) = (a.as_i64(), b.as_i64()) {
+        return x.cmp(&y);
+    }
+    if let (Some(x), Some(y)) = (a.as_u64(), b.as_u64()) {
+        return x.cmp(&y);
+    }
+    // Mixed signedness has no shared integer view: the sign decides first,
+    // then the magnitudes compare exactly as u64.
+    if let (Some(x), Some(y)) = (a.as_i64(), b.as_u64()) {
+        return if x < 0 {
+            Ordering::Less
+        } else {
+            (x as u64).cmp(&y)
+        };
+    }
+    if let (Some(x), Some(y)) = (a.as_u64(), b.as_i64()) {
+        return if y < 0 {
+            Ordering::Greater
+        } else {
+            x.cmp(&(y as u64))
+        };
+    }
+    // At least one side is a float.
+    let fa = a.as_f64().unwrap_or_default();
+    let fb = b.as_f64().unwrap_or_default();
+    fa.partial_cmp(&fb).unwrap_or(Ordering::Equal)
+}
+
 /// Characters in `[a-zA-Z0-9]` pass through unchanged. Every other character
 /// — including `%`, `_`, `\`, `|`, `=`, `.` and `-` — is encoded as `=XX`
 /// (2-digit uppercase hex for code points 0–255, 6-digit for code points
@@ -432,21 +495,13 @@ where
         }
         let indexed = T::indexed_fields();
 
-        // Determine global is_rev for no-filter fallback and final ID sort
-        let is_rev = q
-            .get_order_by()
-            .iter()
-            .find(|ob| indexed.contains(&ob.field.as_str()))
-            .map(|ob| ob.order == Sort::Desc)
-            .unwrap_or(false);
-
         // Step 1 & 2: Compute matching ID set from filter and combine with AND/OR
         let id_set: HashSet<String> = if let Some(filter) = &q.filter {
             self.filter_ids(filter, indexed, q.get_order_by())?
         } else {
             // No filter – scan all data entries to collect all IDs
             let scan_key = format!("{}{}id{}", self.prefix, KEY_SEP, KEY_SEP);
-            let options = ScanOptions::new(ScanOperation::Eq, scan_key.clone(), is_rev);
+            let options = ScanOptions::new(ScanOperation::Eq, scan_key.clone(), false);
             let entries = self.kv.scan_prefix(&scan_key, options)?;
             entries
                 .iter()
@@ -457,50 +512,43 @@ where
                 .collect()
         };
 
-        // Step 3: Sort the IDs and apply pagination
+        // ids always gather in ascending order: it is the page order when no
+        // `order_by` is given, and the tie-break (a stable sort keeps the read
+        // order) that makes offsets deterministic when sort keys repeat.
         let mut ids: Vec<String> = id_set.into_iter().collect();
-        if is_rev {
-            ids.sort_by(|a, b| b.cmp(a));
-        } else {
-            ids.sort();
-        }
-
+        ids.sort();
         let count = ids.len();
-        let page_ids: Vec<String> = ids.into_iter().skip(q.offset).take(q.limit).collect();
 
-        // Step 4: Fetch full data for paginated IDs and sort by order_by
-        let mut docs: Vec<JsonValue> = Vec::with_capacity(page_ids.len());
-        for id in &page_ids {
-            if let Some(json) = self.read_json(id)? {
-                docs.push(json);
-            }
-        }
-
-        if !q.get_order_by().is_empty() {
-            docs.sort_by(|a, b| {
-                let mut ret = Ordering::Equal;
-                for ob in q.get_order_by() {
-                    let cmp = a
-                        .get(&ob.field)
-                        .unwrap()
-                        .to_string()
-                        .cmp(&b.get(&ob.field).unwrap().to_string());
-                    match ob.order {
-                        Sort::Asc => ret = ret.then(cmp),
-                        Sort::Desc => ret = ret.then(cmp.reverse()),
-                    }
+        // Step 3: Paginate. Sorting happens BEFORE pagination when `order_by`
+        // is set: every page must be the global top-N slice, not a re-sorted
+        // batch of an arbitrary page. Without `order_by` only the page ids
+        // are read from the store.
+        let order_by = q.get_order_by();
+        let rows: Vec<T> = if order_by.is_empty() {
+            let mut rows = Vec::new();
+            for id in ids.into_iter().skip(q.offset).take(q.limit) {
+                if let Some(json) = self.read_json(&id)? {
+                    rows.push(T::upcast(json)?);
                 }
-                ret
-            });
-        }
+            }
+            rows
+        } else {
+            let mut docs: Vec<JsonValue> = Vec::with_capacity(count);
+            for id in &ids {
+                if let Some(json) = self.read_json(id)? {
+                    docs.push(json);
+                }
+            }
+            docs.sort_by(|a, b| cmp_order_docs(a, b, order_by));
+            docs.into_iter()
+                .skip(q.offset)
+                .take(q.limit)
+                .map(|row| T::upcast(row))
+                .collect::<Result<Vec<T>>>()?
+        };
 
         let page_count = count.div_ceil(q.limit);
         let page_num = q.offset.checked_div(q.limit).map_or(1, |n| n + 1);
-
-        let rows: Vec<T> = docs
-            .iter()
-            .map(|row| T::upcast(row.clone()))
-            .collect::<Result<Vec<T>>>()?;
 
         Ok(PageData {
             count,
@@ -1005,7 +1053,7 @@ mod tests {
     // ========== index-key range semantics regression tests ==========
 
     use super::KvCollection;
-    use crate::store::{DbCollection, Filter, KvStore, Query};
+    use crate::store::{DbCollection, Filter, KvStore, Query, Sort};
     use serde::{Deserialize, Serialize};
     use std::sync::Arc;
 
@@ -1154,5 +1202,139 @@ mod tests {
         assert_eq!(ids(&page), vec!["a"], "no pollution after rebuild");
         let page = query(&col, Filter::and().expr(Expr::eq("state", "w9-foo")));
         assert_eq!(ids(&page), vec!["b"]);
+    }
+
+    // ========== order_by semantics tests ==========
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct SortDoc {
+        id: String,
+        // Optional keys exercise missing/null sort keys while staying
+        // upcastable: `None` is serialized away, i.e. the key is absent.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        group: Option<i64>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        ord: Option<i64>,
+    }
+
+    impl crate::store::DbCollectionIden for SortDoc {
+        fn iden() -> crate::store::StoreIden {
+            crate::store::StoreIden::Ops
+        }
+        fn indexed_fields() -> &'static [&'static str] {
+            &[]
+        }
+    }
+
+    fn sort_col() -> (Arc<crate::store::MemoryStore>, KvCollection<SortDoc>) {
+        let kv: Arc<crate::store::MemoryStore> = Arc::new(crate::store::MemoryStore::new());
+        let col = KvCollection::new("sortdocs", kv.clone());
+        (kv, col)
+    }
+
+    fn mk_doc(id: &str, group: Option<i64>, ord: Option<i64>) -> SortDoc {
+        SortDoc {
+            id: id.to_string(),
+            group,
+            ord,
+        }
+    }
+
+    fn sort_query_ids(col: &KvCollection<SortDoc>, q: &Query) -> Vec<String> {
+        col.query(q)
+            .unwrap()
+            .rows
+            .iter()
+            .map(|d| d.id.clone())
+            .collect()
+    }
+
+    #[test]
+    fn order_by_sorts_before_pagination() {
+        let (_, col) = sort_col();
+        for (id, group, ord) in [
+            ("a", Some(1), Some(3)),
+            ("b", Some(1), Some(2)),
+            ("c", Some(2), Some(1)),
+            ("d", Some(1), Some(1)),
+            ("e", Some(2), Some(5)),
+            ("f", None, None),       // no value on every key: first under Asc
+            ("g", Some(2), Some(5)), // ties with "e" -> id-ascending break
+        ] {
+            col.create(&mk_doc(id, group, ord)).unwrap();
+        }
+        // group asc, ord desc: f | a b d | e g c
+        let order = Query::new()
+            .order("group", Sort::Asc)
+            .order("ord", Sort::Desc);
+        let full = sort_query_ids(&col, &order.clone().limit(100));
+        assert_eq!(full, vec!["f", "a", "b", "d", "e", "g", "c"]);
+
+        // Each page must be the corresponding global slice, not a re-sorted
+        // arbitrary batch: concatenated pages equal the full sorted order.
+        let page1 = sort_query_ids(&col, &order.clone().limit(2).offset(0));
+        let page2 = sort_query_ids(&col, &order.clone().limit(2).offset(2));
+        let page3 = sort_query_ids(&col, &order.clone().limit(2).offset(4));
+        let page4 = sort_query_ids(&col, &order.clone().limit(2).offset(6));
+        assert_eq!(page1, vec!["f", "a"]);
+        assert_eq!(page2, vec!["b", "d"]);
+        assert_eq!(page3, vec!["e", "g"]);
+        assert_eq!(page4, vec!["c"]);
+        let page = col.query(&order.clone().limit(2).offset(4)).unwrap();
+        assert_eq!((page.count, page.page_num, page.page_count), (7, 3, 4));
+    }
+
+    #[test]
+    fn order_by_numeric_not_lexicographic() {
+        let (_, col) = sort_col();
+        for (id, ord) in [("ten", Some(10)), ("nine", Some(9)), ("one", Some(1))] {
+            col.create(&mk_doc(id, Some(1), ord)).unwrap();
+        }
+        // "10" < "9" lexicographically; numeric order must give 1, 9, 10.
+        let q = Query::new().order("ord", Sort::Asc);
+        assert_eq!(sort_query_ids(&col, &q), vec!["one", "nine", "ten"]);
+        let q = Query::new().order("ord", Sort::Desc);
+        assert_eq!(sort_query_ids(&col, &q), vec!["ten", "nine", "one"]);
+    }
+
+    #[test]
+    fn order_by_no_value_first_asc_last_desc() {
+        let (kv, col) = sort_col();
+        for (id, ord) in [
+            ("low", Some(1)),
+            ("nil", None), // serialized as null
+            ("high", Some(5)),
+            ("mid", Some(3)),
+        ] {
+            col.create(&mk_doc(id, None, ord)).unwrap();
+        }
+        // Raw doc whose `ord` key is missing entirely must sort like null.
+        let raw = serde_json::json!({"id": "absent", "group": null});
+        kv.put(&col.data_key("absent"), serde_json::to_vec(&raw).unwrap())
+            .unwrap();
+        let q = Query::new().order("ord", Sort::Asc);
+        assert_eq!(
+            sort_query_ids(&col, &q),
+            vec!["absent", "nil", "low", "mid", "high"]
+        );
+        let q = Query::new().order("ord", Sort::Desc);
+        // no-value rows land last; among them the id-ascending tie-break wins
+        assert_eq!(
+            sort_query_ids(&col, &q),
+            vec!["high", "mid", "low", "absent", "nil"]
+        );
+    }
+
+    #[test]
+    fn order_by_unknown_field_keeps_id_order_without_panic() {
+        let (_, col) = sort_col();
+        for id in ["b", "c", "a"] {
+            col.create(&mk_doc(id, Some(1), Some(1))).unwrap();
+        }
+        // Sorting by a field no document carries used to panic in the
+        // comparator (unwrap on missing key); every key now compares equal and
+        // the stable id-ascending order is returned.
+        let q = Query::new().order("no_such_key", Sort::Asc);
+        assert_eq!(sort_query_ids(&col, &q), vec!["a", "b", "c"]);
     }
 }
