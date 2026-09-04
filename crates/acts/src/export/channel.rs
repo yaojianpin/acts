@@ -137,8 +137,7 @@ impl Channel {
         let pattern = self.pattern.clone();
         self.runtime.emitter().on_message(&self.chan_id, move |e| {
             debug!(chan = %chan_id, "on message");
-            if is_match(&glob, e) {
-                store_if(&runtime, ack, &chan_id, &pattern, e);
+            if is_match(&glob, e) && store_if(&runtime, ack, &chan_id, &pattern, e) {
                 f(e);
             }
         });
@@ -151,8 +150,7 @@ impl Channel {
         let chan_id = self.chan_id.clone();
         let pattern = self.pattern.clone();
         self.runtime.emitter().on_start(&self.chan_id, move |e| {
-            if is_match(&glob, e) {
-                store_if(&runtime, ack, &chan_id, &pattern, e);
+            if is_match(&glob, e) && store_if(&runtime, ack, &chan_id, &pattern, e) {
                 f(e);
             }
         });
@@ -166,8 +164,7 @@ impl Channel {
         let pattern = self.pattern.clone();
         self.runtime.emitter().on_complete(&self.chan_id, move |e| {
             debug!(chan = %chan_id, "on complete");
-            if is_match(&glob, e) {
-                store_if(&runtime, ack, &chan_id, &pattern, e);
+            if is_match(&glob, e) && store_if(&runtime, ack, &chan_id, &pattern, e) {
                 f(e);
             }
         });
@@ -180,8 +177,7 @@ impl Channel {
         let chan_id = self.chan_id.clone();
         let pattern = self.pattern.clone();
         self.runtime.emitter().on_error(&self.chan_id, move |e| {
-            if is_match(&glob, e) {
-                store_if(&runtime, ack, &chan_id, &pattern, e);
+            if is_match(&glob, e) && store_if(&runtime, ack, &chan_id, &pattern, e) {
                 f(e);
             }
         });
@@ -192,7 +188,13 @@ impl Channel {
     }
 }
 
-fn store_if(runtime: &Arc<Runtime>, ack: bool, chan_id: &str, pattern: &str, message: &Message) {
+fn store_if(
+    runtime: &Arc<Runtime>,
+    ack: bool,
+    chan_id: &str,
+    pattern: &str,
+    message: &Message,
+) -> bool {
     if ack && !chan_id.is_empty() && message.retry_times == 0 {
         info!(r#type = message.r#type, pid = %message.pid, tid = %message.tid, mid = %message.mid,  state = %message.state, "message stored");
         let msg = message.into(chan_id, pattern);
@@ -200,7 +202,9 @@ fn store_if(runtime: &Arc<Runtime>, ack: bool, chan_id: &str, pattern: &str, mes
         store.messages().create(&msg).unwrap_or_else(|err| {
             error!(error = %err, "channel store failure");
             false
-        });
+        })
+    } else {
+        true
     }
 }
 

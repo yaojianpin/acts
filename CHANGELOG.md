@@ -251,3 +251,4 @@
 - fix: stop sending the message if message retry update fails
 - fix: make `Signal` one-shot fires broadcast — a single `send`/`close` now releases every concurrent `recv` waiter and receivers joining after the fire return immediately; previously `Notify::notify_one` woke at most one receiver, so the rest hung forever (`update` closures may still call `close` on the same signal)
 - refactor: replace `std::sync::{Mutex, RwLock}` with `parking_lot` everywhere — locks are infallible (no `unwrap`/`map_err` at call sites) and guards are smaller; `tokio::sync` stays for async-held locks
+- fix: stop sending message if `store_if` returns `false`
