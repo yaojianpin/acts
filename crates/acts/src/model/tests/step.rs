@@ -117,6 +117,15 @@ fn model_step_if() {
 }
 
 #[test]
+fn model_step_while() {
+    let mut step = Step::new();
+    assert!(step.r#while.is_none());
+
+    step = step.with_while(r#"index < input"#);
+    assert_eq!(step.r#while.unwrap(), "index < input");
+}
+
+#[test]
 fn model_step_rn() {
     let mut step = Step::new();
     assert!(step.options.get::<String>("rn").is_none());

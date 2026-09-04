@@ -15,6 +15,17 @@ impl ActTask for Step {
                 return Ok(());
             }
         }
+
+        // the while condition is the loop gate: it is re-evaluated at the
+        // start of every iteration, and a false value exits the loop by
+        // skipping this step (falling through to the chain)
+        if let Some(expr) = &self.r#while {
+            let cond = ctx.eval::<bool>(expr)?;
+            if !cond {
+                task.set_state(TaskState::Skipped);
+                return Ok(());
+            }
+        }
         Ok(())
     }
 
@@ -38,7 +49,25 @@ impl ActTask for Step {
     async fn next(&self, ctx: &Context) -> Result<NextAction> {
         let task = ctx.task();
 
-        if task.state().is_success() || task.state().is_skip() {
+        if task.state().is_skip() {
+            // A skipped step (its `if`/`while` condition failed) must not
+            // take its explicit `next` jump — following a self/backward
+            // `next` would re-enter the loop forever. Fall through to the
+            // step declared after it; without one the flow moves to the parent.
+            if let Some(chain) = task.node().chain().upgrade() {
+                ctx.schedule_once(&chain, ctx.task())?;
+                return Ok(NextAction::Continue);
+            }
+            return Ok(NextAction::Parent);
+        }
+
+        if task.state().is_success() {
+            if self.r#while.is_some() {
+                // loop back to self; the next iteration re-evaluates the
+                // while condition in init and exits (skips) when it fails
+                ctx.schedule_once(task.node(), ctx.task())?;
+                return Ok(NextAction::Continue);
+            }
             // Schedule the next if the step.next is not empty
             if task.move_next(ctx)? {
                 return Ok(NextAction::Continue);

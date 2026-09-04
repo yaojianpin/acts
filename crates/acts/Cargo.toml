@@ -117,6 +117,10 @@ path = "../../examples/resolver/main.rs"
 name = "prof"
 path = "../../examples/prof/main.rs"
 
+[[example]]
+name = "while"
+path = "../../examples/while/main.rs"
+
 [profile.release]
 codegen-units = 1
 lto = true

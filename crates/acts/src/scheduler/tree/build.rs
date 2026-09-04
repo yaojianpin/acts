@@ -46,11 +46,17 @@ pub fn build_step(
     if step.id.is_empty() {
         step.id = shortid();
     }
+    if step.next.is_some() && step.r#while.is_some() {
+        return Err(ActError::Runtime(format!(
+            "step '{}' cannot combine 'while' with 'next': a while loop always flows to the next declared step when its condition fails",
+            step.id
+        )));
+    }
     let data = NodeContent::Step(step.clone());
     let node = tree.make(&data.id(), data, level)?;
 
     if node.level == prev.level {
-        prev.set_next(&node, true);
+        prev.link_chain(&node);
     } else {
         node.set_parent_in(typ, parent);
     }

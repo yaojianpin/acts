@@ -7,6 +7,7 @@
 | 示例 | 说明 | 路径 |
 | ---- | ---- | ---- |
 | 简单循环 | 使用 JavaScript 代码实现循环累加 | [examples/simple](https://github.com/yaojianpin/acts/tree/main/examples/simple) |
+| While 循环 | 使用 `while` 条件实现循环累加 | [examples/while](https://github.com/yaojianpin/acts/tree/main/examples/while) |
 | 程序构建 | 使用 Rust Builder API 构建工作流 | [examples/model_build](https://github.com/yaojianpin/acts/tree/main/examples/model_build) |
 
 ## 交互示例

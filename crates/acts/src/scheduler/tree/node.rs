@@ -44,13 +44,23 @@ pub struct Node {
     pub level: usize,
     pub parent: Arc<RwLock<Weak<Node>>>,
     pub children: Arc<RwLock<Vec<NodeOutput>>>,
+
+    /// previous node in the declaration chain
     pub prev: Arc<RwLock<Weak<Node>>>,
+
+    /// where the flow goes after this node completes — the step's explicit
+    /// `next` target when one is declared, otherwise the node that follows it
+    /// in the declaration chain
     pub next: Arc<RwLock<Weak<Node>>>,
+
+    /// next node in the declaration chain — the default flow a step skipped
+    /// by its `if`/`while` condition falls through to. It is never an explicit
+    /// jump target, so a following step can never clobber a declared `next`.
+    pub chain: Arc<RwLock<Weak<Node>>>,
 
     // nodes created dynamically
     pub nodes: Arc<RwLock<Vec<Arc<Node>>>>,
 }
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeData {
     pub id: String,
@@ -150,6 +160,7 @@ impl Node {
             children: Arc::new(RwLock::new(Vec::new())),
             prev: Arc::new(RwLock::new(Weak::new())),
             next: Arc::new(RwLock::new(Weak::new())),
+            chain: Arc::new(RwLock::new(Weak::new())),
             nodes: Arc::new(RwLock::new(Vec::new())),
         }
     }
@@ -195,6 +206,18 @@ impl Node {
         }
     }
 
+    /// Link `node` as `self`'s declaration-order successor: always records
+    /// `chain`; `next` only when `self` has no explicit `next` of its own, so a
+    /// later sibling can never clobber a step's declared jump target.
+    pub fn link_chain(self: &Arc<Node>, node: &Arc<Node>) {
+        *self.chain.write() = Arc::downgrade(node);
+        let has_explicit = matches!(&self.content, NodeContent::Step(step) if step.next.is_some());
+        if !has_explicit {
+            *self.next.write() = Arc::downgrade(node);
+        }
+        *node.prev.write() = Arc::downgrade(self);
+    }
+
     /// rebuild the node graph links (parent/prev/next) from persisted data.
     /// children are restored as the inverse of each child's parent link.
     pub fn restore_links(self: &Arc<Self>, data: &NodeData, tree: &node_tree::NodeTree) {
@@ -230,6 +253,11 @@ impl Node {
     pub fn next(&self) -> Weak<Node> {
         let next = self.next.read();
         next.clone()
+    }
+
+    pub fn chain(&self) -> Weak<Node> {
+        let chain = self.chain.read();
+        chain.clone()
     }
 
     pub fn prev(&self) -> Weak<Node> {

@@ -7,6 +7,7 @@ The following examples demonstrate various usage scenarios of the acts workflow 
 | Example | Description | Path |
 | ---- | ---- | ---- |
 | Simple Loop | Using JavaScript to implement a loop accumulator | [examples/simple](https://github.com/yaojianpin/acts/tree/main/examples/simple) |
+| While Loop | Accumulating with a `while` condition step | [examples/while](https://github.com/yaojianpin/acts/tree/main/examples/while) |
 | Model Builder | Building workflows via Rust Builder API | [examples/model_build](https://github.com/yaojianpin/acts/tree/main/examples/model_build) |
 
 ## Interaction Examples

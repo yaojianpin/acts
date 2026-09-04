@@ -1,0 +1,32 @@
+name: while
+id: while
+ver: 0.1.0
+vars:
+  - name: input
+    value: 5
+  - name: index
+    value: 0
+  - name: value
+    value: 0
+exposes:
+  - name: result
+    value: ${{ value }}
+    type: number
+steps:
+  - name: init
+    id: init
+    uses: acts.transform.code
+    params: |
+      $set("value", 0);
+      $set("index", 0);
+
+  - name: add
+    id: add
+    while: index <= input
+    uses: acts.transform.code
+    params: |
+      $set("value", value + index);
+      $set("index", index + 1);
+
+  - name: end
+    id: end

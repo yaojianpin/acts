@@ -22,6 +22,10 @@ pub struct Step {
     #[serde(default)]
     pub r#if: Option<String>,
 
+    /// while condition: re-execute this step while the condition holds
+    #[serde(default)]
+    pub r#while: Option<String>,
+
     #[serde(default)]
     pub branches: Vec<Branch>,
 
@@ -100,6 +104,11 @@ impl Step {
 
     pub fn with_if(mut self, r#if: &str) -> Self {
         self.r#if = Some(r#if.to_string());
+        self
+    }
+
+    pub fn with_while(mut self, r#while: &str) -> Self {
+        self.r#while = Some(r#while.to_string());
         self
     }
 

@@ -31,12 +31,31 @@ steps:
 | params | 参数 | 传递给包的参数 |
 | vars | 变量 | 本地变量定义 |
 | if | 条件 | 根据条件判断是否跳过当前步骤执行，如 `${{ a }} > 0` |
+| while | 循环条件 | 循环：条件满足时反复执行当前步骤 |
 | catches | 异常 | 步骤错误后进行异常处理，类型为 `Step` 列表 |
 | timeouts | 超时 | 超时处理，类型为 `Step` 列表 |
 | branches | 分支 | 步骤分支，一个步骤可以有多个分支 |
 | next | 下一步 | 当步骤完成后，可直接跳转到指定步骤执行 |
 | options | 选项 | 额外选项，如 `exposes` 导出变量 |
 | metadata | 元数据 | 用于UI样式的额外信息，不发送给客户端 |
+
+带 `while` 的步骤是有界循环：每轮迭代前都会重新求值条件，满足则重复执行；
+条件不满足时该步骤被跳过，流程按声明顺序落到它后面的步骤：
+
+```yml
+steps:
+    - id: add
+      while: index < input
+      uses: acts.transform.code
+      params: |
+          $set("value", value + index);
+          $set("index", index + 1);
+
+    - id: end
+```
+
+`if` 条件不满足时步骤同样被跳过并落到后面的步骤（此时不会执行指向自身或向后的
+`next`），因此 `if` 与 `next` 保持原有语义，`while` 与 `next` 不能同时使用。
 
 ## 多活动步骤
 
