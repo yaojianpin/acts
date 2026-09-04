@@ -10,12 +10,9 @@ use crate::{
     },
     utils::{self, consts},
 };
+use parking_lot::RwLock;
 use serde::Deserialize;
-use std::{
-    cell::RefCell,
-    fmt,
-    sync::{Arc, RwLock},
-};
+use std::{cell::RefCell, fmt, sync::Arc};
 use tokio::time::Duration;
 use tracing::{debug, error, info, instrument};
 
@@ -89,12 +86,12 @@ impl Process {
     }
 
     pub fn load(&self, model: &Workflow) -> Result<()> {
-        let tree = &mut self.tree.write().unwrap();
+        let tree = &mut self.tree.write();
         tree.load(model)
     }
 
-    pub fn tree(&self) -> std::sync::RwLockReadGuard<'_, NodeTree> {
-        self.tree.read().unwrap()
+    pub fn tree(&self) -> parking_lot::RwLockReadGuard<'_, NodeTree> {
+        self.tree.read()
     }
 
     pub fn model(&self) -> Box<Workflow> {
@@ -102,30 +99,30 @@ impl Process {
     }
 
     pub fn state(&self) -> TaskState {
-        self.state.read().unwrap().clone()
+        self.state.read().clone()
     }
 
     pub fn set_err(&self, err: &Error) {
-        *self.err.write().unwrap() = Some(err.clone());
+        *self.err.write() = Some(err.clone());
         self.set_state(TaskState::Error);
     }
 
     pub fn err(&self) -> Option<Error> {
-        self.err.read().unwrap().clone()
+        self.err.read().clone()
     }
 
     pub fn start_time(&self) -> i64 {
-        *self.start_time.read().unwrap()
+        *self.start_time.read()
     }
     pub fn end_time(&self) -> i64 {
-        *self.end_time.read().unwrap()
+        *self.end_time.read()
     }
     pub fn timestamp(&self) -> i64 {
         self.timestamp
     }
 
     pub fn env(&self) -> Vars {
-        let env = self.env.read().unwrap();
+        let env = self.env.read();
         env.clone()
     }
 
@@ -133,12 +130,12 @@ impl Process {
     where
         T: for<'de> Deserialize<'de> + Clone,
     {
-        let env = self.env.read().unwrap();
+        let env = self.env.read();
         f(&env)
     }
 
     pub fn with_env_mut<F: FnOnce(&mut Vars)>(&self, f: F) {
-        let mut env = self.env.write().unwrap();
+        let mut env = self.env.write();
         f(&mut env)
     }
 
@@ -189,11 +186,11 @@ impl Process {
     }
 
     pub fn task(&self, tid: &str) -> Option<Arc<Task>> {
-        self.tasks.read().unwrap().task_by_tid(tid)
+        self.tasks.read().task_by_tid(tid)
     }
 
     pub fn find_tasks(&self, predicate: impl Fn(&Arc<Task>) -> bool) -> Vec<Arc<Task>> {
-        let tasks = self.tasks.read().unwrap();
+        let tasks = self.tasks.read();
         let mut ret = tasks.find_tasks(predicate);
         ret.sort_by_key(|a| a.start_time());
 
@@ -205,7 +202,7 @@ impl Process {
     }
 
     pub fn tasks(&self) -> Vec<Arc<Task>> {
-        let ttree = self.tasks.read().unwrap();
+        let ttree = self.tasks.read();
         ttree.tasks()
     }
 
@@ -267,26 +264,26 @@ impl Process {
         } else if state.is_running() {
             self.set_start_time(utils::time::time_millis());
         }
-        *self.state.write().unwrap() = state;
+        *self.state.write() = state;
     }
 
     pub(crate) fn set_start_time(&self, time: i64) {
-        *self.start_time.write().unwrap() = time;
+        *self.start_time.write() = time;
     }
     pub(crate) fn set_end_time(&self, time: i64) {
-        *self.end_time.write().unwrap() = time;
+        *self.end_time.write() = time;
     }
 
     pub(crate) fn set_pure_state(&self, state: TaskState) {
-        *self.state.write().unwrap() = state;
+        *self.state.write() = state;
     }
 
     pub(crate) fn set_pure_err(&self, err: &Error) {
-        *self.err.write().unwrap() = Some(err.clone());
+        *self.err.write() = Some(err.clone());
     }
 
     pub(crate) fn set_env(&self, value: &Vars) {
-        *self.env.write().unwrap() = value.clone();
+        *self.env.write() = value.clone();
     }
 
     pub(crate) fn do_tick(&self) {
@@ -360,12 +357,12 @@ impl Process {
         // process already started (or finished) is a no-op — it must not
         // replace the root task, reset the start time, or re-push the process.
         {
-            let mut state = self.state.write().unwrap();
+            let mut state = self.state.write();
             if !state.is_none() {
                 return Ok(());
             }
             *state = TaskState::Running;
-            *self.start_time.write().unwrap() = utils::time::time_millis();
+            *self.start_time.write() = utils::time::time_millis();
         }
 
         info!(pid = %self.id, mid = %self.tree().model.id, name = %self.tree().model.name, "process started");
@@ -415,7 +412,7 @@ impl Process {
 
         // the run-limit check and the registration must be atomic so
         // concurrent schedulers cannot overshoot the limit
-        let mut tasks = self.tasks.write().unwrap();
+        let mut tasks = self.tasks.write();
         let max = self.runtime.config().max_node_run_times();
         if max > 0 && tasks.run_count(node.id()) >= max as usize {
             return Err(ActError::Runtime(format!(
@@ -432,7 +429,7 @@ impl Process {
     }
 
     pub fn push_task(&self, task: Arc<Task>) -> Result<()> {
-        let mut tasks = self.tasks.write().unwrap();
+        let mut tasks = self.tasks.write();
         tasks.push(task)?;
         Ok(())
     }

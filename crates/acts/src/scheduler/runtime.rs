@@ -10,11 +10,8 @@ use crate::{
     store::{KvStore, Store},
     utils::{self, consts},
 };
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-    time::Duration,
-};
+use parking_lot::RwLock;
+use std::{collections::HashMap, sync::Arc, time::Duration};
 use tokio::{runtime::Handle, time};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument};
@@ -42,10 +39,7 @@ impl std::fmt::Debug for Runtime {
             .field("package", &self.package)
             .field(
                 "resolvers",
-                &format_args!(
-                    "<{} entries>",
-                    self.resolvers.read().map(|r| r.len()).unwrap_or(0)
-                ),
+                &format_args!("<{} entries>", self.resolvers.read().len()),
             )
             .finish()
     }
@@ -89,7 +83,7 @@ impl Runtime {
         &self.config
     }
     pub fn register_resolver(&self, name: &str, resolver: Arc<dyn ConfigResolver>) {
-        let mut resolvers = self.resolvers.write().unwrap();
+        let mut resolvers = self.resolvers.write();
         resolvers.insert(name.to_string(), resolver);
     }
 

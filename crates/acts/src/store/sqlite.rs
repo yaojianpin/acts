@@ -3,9 +3,10 @@ use crate::{
     store::{ScanOperation, ScanOptions},
     utils::{consts, sync},
 };
+use parking_lot::Mutex;
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::{Connection, Row};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 pub struct SqliteStore {
     conn: Arc<Mutex<sqlx::SqliteConnection>>,
@@ -90,7 +91,7 @@ impl KvStore for SqliteStore {
         let key = key.to_string();
         let conn = self.conn.clone();
         sync::block_on(async move {
-            let mut conn = conn.lock().unwrap();
+            let mut conn = conn.lock();
             sqlx::query(&format!(
                 "SELECT value FROM {} WHERE key = ?",
                 consts::ACTS_STORE_NAME
@@ -108,7 +109,7 @@ impl KvStore for SqliteStore {
         let key = key.to_string();
         let conn = self.conn.clone();
         sync::block_on(async move {
-            let mut conn = conn.lock().unwrap();
+            let mut conn = conn.lock();
             sqlx::query(&format!(
                 "INSERT INTO {} (key, value) VALUES (?, ?)
                  ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -128,7 +129,7 @@ impl KvStore for SqliteStore {
         let key = key.to_string();
         let conn = self.conn.clone();
         sync::block_on(async move {
-            let mut conn = conn.lock().unwrap();
+            let mut conn = conn.lock();
             sqlx::query(&format!(
                 "DELETE FROM {} WHERE key = ?",
                 consts::ACTS_STORE_NAME
@@ -152,7 +153,7 @@ impl KvStore for SqliteStore {
         let (extra_sql, extra_binds) = op_conditions(&op, key);
         let conn = self.conn.clone();
         sync::block_on(async move {
-            let mut conn = conn.lock().unwrap();
+            let mut conn = conn.lock();
             let order = if is_rev { "DESC" } else { "ASC" };
             let sql = format!(
                 "SELECT key, value FROM {} WHERE key LIKE ?{} ORDER BY key {}",

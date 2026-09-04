@@ -9,8 +9,9 @@ use crate::{
         test::{USES_IRQ, auto_complete},
     },
 };
+use parking_lot::Mutex;
 use serde_json::json;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use serial_test::serial;
 
@@ -557,7 +558,7 @@ async fn export_manager_procs_count() {
     let count = Arc::new(Mutex::new(0));
     engine.channel().on_start(move |_e| {
         println!("message:{_e:?}");
-        let mut count = count.lock().unwrap();
+        let mut count = count.lock();
         *count += 1;
 
         if *count == 5 {
@@ -595,7 +596,7 @@ async fn export_manager_procs_offset_in_range() {
     let count = Arc::new(Mutex::new(0));
     engine.channel().on_start(move |_e| {
         println!("message:{_e:?}");
-        let mut count = count.lock().unwrap();
+        let mut count = count.lock();
         *count += 1;
 
         if *count == 5 {
@@ -634,7 +635,7 @@ async fn export_manager_procs_offset_out_range() {
     let count = Arc::new(Mutex::new(0));
     engine.channel().on_start(move |_e| {
         println!("message:{_e:?}");
-        let mut count = count.lock().unwrap();
+        let mut count = count.lock();
         *count += 1;
 
         if *count == 5 {
@@ -673,7 +674,7 @@ async fn export_manager_procs_query() {
     let count = Arc::new(Mutex::new(0));
     engine.channel().on_start(move |_e| {
         println!("message:{_e:?}");
-        let mut count = count.lock().unwrap();
+        let mut count = count.lock();
         *count += 1;
 
         if *count == 5 {
@@ -712,7 +713,7 @@ async fn export_manager_procs_order() {
     let count = Arc::new(Mutex::new(0));
     engine.channel().on_start(move |_e| {
         println!("message:{_e:?}");
-        let mut count = count.lock().unwrap();
+        let mut count = count.lock();
         *count += 1;
 
         if *count == 5 {
@@ -1125,7 +1126,7 @@ async fn export_manager_messages_count() {
     });
     chan.on_message(move |e| {
         println!("message:{e:?}");
-        let mut count = count.lock().unwrap();
+        let mut count = count.lock();
         *count += 1;
 
         if e.is_params_key("act1") && e.is_state(MessageState::Created) {
@@ -1210,7 +1211,7 @@ async fn export_manager_messages_offset_out_range() {
     });
     chan.on_message(move |e| {
         println!("message:{e:?}");
-        let mut count = count.lock().unwrap();
+        let mut count = count.lock();
         *count += 1;
 
         if e.is_params_key("act1") && e.is_state(MessageState::Created) {
@@ -1256,7 +1257,7 @@ async fn export_manager_message_get() {
     });
     chan.on_message(move |e| {
         println!("message:{e:?}");
-        let mut count = count.lock().unwrap();
+        let mut count = count.lock();
         *count += 1;
 
         if e.is_params_key("act1") && e.is_state(MessageState::Created) {
@@ -1303,7 +1304,7 @@ async fn export_manager_message_rm() {
     });
     chan.on_message(move |e| {
         println!("message:{e:?}");
-        let mut count = count.lock().unwrap();
+        let mut count = count.lock();
         *count += 1;
 
         if e.is_type("act") && e.is_params_key("act1") && e.is_state(MessageState::Created) {
@@ -1801,7 +1802,7 @@ async fn export_executor_back() {
     engine.channel().on_message(move |e| {
         println!("message: {e:?}");
         if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            let mut count = count.lock().unwrap();
+            let mut count = count.lock();
             if *count == 1 {
                 s1.close();
             }
@@ -1850,7 +1851,7 @@ async fn export_executor_cancel() {
     engine.channel().on_message(move |e| {
         println!("message: {:?}", e.inner());
         if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            let mut count = count.lock().unwrap();
+            let mut count = count.lock();
             if *count == 1 {
                 s1.close();
             }
@@ -1858,14 +1859,14 @@ async fn export_executor_cancel() {
             vars.insert("uid".to_string(), json!("u1"));
             executor.act().complete(&e.pid, &e.tid, vars).unwrap();
 
-            *tid.lock().unwrap() = e.tid.clone();
+            *tid.lock() = e.tid.clone();
             *count += 1;
         }
 
         if e.is_params_key("act2") && e.is_state(MessageState::Created) {
             let mut vars = Vars::new();
             vars.insert("uid".to_string(), json!("u1"));
-            let ret = executor.act().cancel(&e.pid, &tid.lock().unwrap(), vars);
+            let ret = executor.act().cancel(&e.pid, &tid.lock(), vars);
             s1.update(|data| *data = ret.is_ok());
         }
     });

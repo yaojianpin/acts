@@ -26,7 +26,7 @@ impl UserVars {
 
 impl ActModule for UserVars {
     fn init(&self, ctx: &rquickjs::Ctx<'_>) -> Result<()> {
-        let envs = self.env.user_vars.read().unwrap();
+        let envs = self.env.user_vars.read();
         for env in envs.iter() {
             let name = env.name();
             let mut data = Vars::new();

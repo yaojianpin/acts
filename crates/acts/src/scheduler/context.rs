@@ -9,11 +9,9 @@ use crate::{
     },
     utils::{self, consts, shortid},
 };
+use parking_lot::RwLock;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::{
-    any::type_name,
-    sync::{Arc, RwLock},
-};
+use std::{any::type_name, sync::Arc};
 use tracing::{debug, instrument};
 
 tokio::task_local! {
@@ -35,9 +33,9 @@ impl Clone for Context {
             runtime: self.runtime.clone(),
             executor: self.executor.clone(),
             proc: self.proc.clone(),
-            task: RwLock::new(self.task.read().unwrap().clone()),
-            action: RwLock::new(self.action.read().unwrap().clone()),
-            vars: RwLock::new(self.vars.read().unwrap().clone()),
+            task: RwLock::new(self.task.read().clone()),
+            action: RwLock::new(self.action.read().clone()),
+            vars: RwLock::new(self.vars.read().clone()),
         }
     }
 }
@@ -95,13 +93,13 @@ impl Context {
     }
 
     pub fn set_task(&self, task: &Arc<Task>) {
-        if self.task.read().unwrap().id != task.id {
-            *self.task.write().unwrap() = task.clone();
+        if self.task.read().id != task.id {
+            *self.task.write() = task.clone();
         }
     }
 
     pub fn task(&self) -> Arc<Task> {
-        self.task.read().unwrap().clone()
+        self.task.read().clone()
     }
 
     pub fn prepare(&self) -> Result<()> {
@@ -111,7 +109,7 @@ impl Context {
     }
 
     fn resolve_sealed(&self) -> Result<()> {
-        let resolvers = self.runtime.resolvers.read().unwrap();
+        let resolvers = self.runtime.resolvers.read();
         if resolvers.is_empty() {
             return Ok(());
         }
@@ -147,10 +145,10 @@ impl Context {
     }
 
     pub fn set_action(&self, action: &Action) -> Result<()> {
-        *self.action.write().unwrap() = Some(action.clone());
+        *self.action.write() = Some(action.clone());
 
         // set the action options to the context
-        let mut vars = self.vars.write().unwrap();
+        let mut vars = self.vars.write();
         for (name, v) in action.options.iter() {
             vars.entry(name.to_string())
                 .and_modify(|i| *i = v.clone())
@@ -160,7 +158,7 @@ impl Context {
         Ok(())
     }
     pub fn vars(&self) -> Vars {
-        self.vars.read().unwrap().clone()
+        self.vars.read().clone()
     }
 
     pub fn set_env<T>(&self, name: &str, value: T)
@@ -199,14 +197,14 @@ impl Context {
     where
         T: Serialize + Clone,
     {
-        self.vars.write().unwrap().set(name, value);
+        self.vars.write().set(name, value);
     }
 
     pub fn get_var<T>(&self, name: &str) -> Option<T>
     where
         T: for<'de> Deserialize<'de> + Clone,
     {
-        self.vars.read().unwrap().get::<T>(name)
+        self.vars.read().get::<T>(name)
     }
 
     pub fn eval<T: DeserializeOwned + Serialize>(&self, expr: &str) -> Result<T> {
@@ -215,7 +213,7 @@ impl Context {
 
     #[allow(unused)]
     pub(in crate::scheduler) fn action(&self) -> Option<Action> {
-        self.action.read().unwrap().clone()
+        self.action.read().clone()
     }
 
     #[instrument(skip(self, node, prev))]

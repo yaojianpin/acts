@@ -9,8 +9,9 @@ use crate::{
     utils::test::{USES_IRQ, create_proc, create_proc_with_config},
     utils::{self, consts},
 };
+use parking_lot::Mutex;
 use serde_json::json;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 #[tokio::test]
 async fn sch_message_workflow_created() {
@@ -803,7 +804,7 @@ async fn sch_message_act_cancel() {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
 
-            *act_req_id.lock().unwrap() = Some(msg.tid.to_string());
+            *act_req_id.lock() = Some(msg.tid.to_string());
             let action = Action::new(&msg.pid, &msg.tid, EventAction::Cancel, options);
             s.do_action(&action).unwrap();
         }
@@ -812,7 +813,7 @@ async fn sch_message_act_cancel() {
             let mut options = Vars::new();
             options.insert("uid".to_string(), json!("u1"));
 
-            let act_req_id = &*act_req_id.lock().unwrap();
+            let act_req_id = &*act_req_id.lock();
             let action = Action::new(
                 &msg.pid,
                 act_req_id.as_deref().unwrap(),
@@ -1009,7 +1010,7 @@ async fn sch_message_act_inputs_with_step_id() {
     let tid = step_task_id.clone();
     emitter.on_message(move |e| {
         if e.is_nid("step1") {
-            *tid.lock().unwrap() = e.tid.to_string();
+            *tid.lock() = e.tid.to_string();
         }
         if e.is_type("act") && e.is_state(MessageState::Created) {
             rx.send(e.inputs.clone());
@@ -1025,7 +1026,7 @@ async fn sch_message_act_inputs_with_step_id() {
     );
     assert_eq!(
         ret.get_value(consts::STEP_KEY).unwrap()[consts::STEP_TASK_ID],
-        json!(*step_task_id.lock().unwrap())
+        json!(*step_task_id.lock())
     );
 
     assert_eq!(

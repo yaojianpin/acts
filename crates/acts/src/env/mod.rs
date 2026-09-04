@@ -5,10 +5,11 @@ mod value;
 
 use crate::{ActError, Result, ShareLock, Vars};
 use core::fmt;
+use parking_lot::RwLock;
 use rquickjs::{Context as JsContext, Ctx as JsCtx, FromJs, Runtime as JsRuntime};
 use serde::de::DeserializeOwned;
 use std::{
-    sync::{Arc, RwLock},
+    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -82,16 +83,16 @@ impl Enviroment {
 
     #[cfg(test)]
     pub fn user_env_count(&self) -> usize {
-        self.user_vars.read().unwrap().len()
+        self.user_vars.read().len()
     }
 
     pub fn register_var<T: ActUserVar + Clone + 'static>(&self, module: &T) {
-        let mut user_envs = self.user_vars.write().unwrap();
+        let mut user_envs = self.user_vars.write();
         user_envs.push(Box::new(module.clone()));
     }
 
     pub fn register_module(&self, module: Box<dyn ActModule>) {
-        let mut modules = self.modules.write().unwrap();
+        let mut modules = self.modules.write();
         modules.push(module);
     }
 
@@ -116,10 +117,7 @@ impl Enviroment {
             // remove eval for safe reason
             global.remove("eval")?;
 
-            let modules = self
-                .modules
-                .read()
-                .map_err(|err| ActError::Script(err.to_string()))?;
+            let modules = self.modules.read();
             for m in modules.iter() {
                 m.init(&ctx)?;
             }

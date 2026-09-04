@@ -1,5 +1,6 @@
 use crate::{ActPlugin, ActRunAs, Engine};
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 use serial_test::serial;
 #[serial]
@@ -7,7 +8,7 @@ use serial_test::serial;
 async fn plugin_common_register() {
     let test_plugin = TestPlugin::new();
     Engine::new().add_plugin(&test_plugin).start().unwrap();
-    assert!(*test_plugin.is_init.lock().unwrap());
+    assert!(*test_plugin.is_init.lock());
 }
 
 #[serial]
@@ -39,7 +40,7 @@ impl TestPlugin {
 impl ActPlugin for TestPlugin {
     fn on_init(&self, engine: &Engine) -> crate::Result<()> {
         println!("TestPlugin");
-        *self.is_init.lock().unwrap() = true;
+        *self.is_init.lock() = true;
 
         // engine.register_module("name", module);
         let emitter = engine.channel();

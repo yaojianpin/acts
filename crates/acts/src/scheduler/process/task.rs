@@ -18,9 +18,10 @@ use crate::{
     },
     utils::{self, consts},
 };
+use parking_lot::RwLock;
 use serde::de::DeserializeOwned;
 use serde_json::json;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use tracing::{debug, error, instrument};
 
 #[derive(Clone)]
@@ -102,14 +103,14 @@ impl Task {
     }
 
     pub fn start_time(&self) -> i64 {
-        *self.start_time.read().unwrap()
+        *self.start_time.read()
     }
     pub fn end_time(&self) -> i64 {
-        *self.end_time.read().unwrap()
+        *self.end_time.read()
     }
 
     pub fn state(&self) -> TaskState {
-        let state = &*self.state.read().unwrap();
+        let state = &*self.state.read();
         state.clone()
     }
 
@@ -253,22 +254,22 @@ impl Task {
     }
 
     pub fn prev_id(&self) -> Option<String> {
-        let ret = self.prev.read().unwrap();
+        let ret = self.prev.read();
         ret.clone()
     }
 
     pub fn next_ids(&self) -> Vec<String> {
-        let ret = self.next.read().unwrap();
+        let ret = self.next.read();
         ret.clone()
     }
 
     pub fn parent_id(&self) -> Option<String> {
-        let ret = self.parent.read().unwrap();
+        let ret = self.parent.read();
         ret.clone()
     }
 
     pub fn parent(&self) -> Option<Arc<Task>> {
-        if let Some(parent) = self.parent.read().unwrap().clone()
+        if let Some(parent) = self.parent.read().clone()
             && let Some(task) = self.proc.task(&parent)
         {
             return Some(task.clone());
@@ -354,15 +355,15 @@ impl Task {
     }
 
     pub fn set_prev(&self, prev: &str) {
-        *self.prev.write().unwrap() = Some(prev.to_string());
+        *self.prev.write() = Some(prev.to_string());
     }
 
     pub fn set_parent(&self, parent: &str) {
-        *self.parent.write().unwrap() = Some(parent.to_string());
+        *self.parent.write() = Some(parent.to_string());
     }
 
     pub fn set_next(&self, next: &str) {
-        self.next.write().unwrap().push(next.to_string());
+        self.next.write().push(next.to_string());
     }
 
     pub fn set_state(&self, state: TaskState) {
@@ -379,16 +380,16 @@ impl Task {
                 self.set_start_time(utils::time::time_millis());
             }
         }
-        *self.state.write().unwrap() = state.clone();
+        *self.state.write() = state.clone();
 
         // clean the err
         if state != TaskState::Error {
-            *self.err.write().unwrap() = None;
+            *self.err.write() = None;
         }
     }
 
     pub fn set_err(&self, err: &Error) {
-        *self.err.write().unwrap() = Some(err.clone());
+        *self.err.write() = Some(err.clone());
 
         self.set_data_with(|data| {
             data.set(consts::ACT_ERR_CODE, &err.ecode);
@@ -398,7 +399,7 @@ impl Task {
     }
 
     pub fn clear_err_with(&self, new_state: TaskState) {
-        *self.err.write().unwrap() = None;
+        *self.err.write() = None;
         self.set_data_with(|data| {
             data.remove(consts::ACT_ERR_CODE);
             data.remove(consts::ACT_ERR_MESSAGE);
@@ -407,22 +408,22 @@ impl Task {
     }
 
     pub(crate) fn set_pure_err(&self, err: &Error) {
-        *self.err.write().unwrap() = Some(err.clone());
+        *self.err.write() = Some(err.clone());
     }
 
     pub fn err(&self) -> Option<Error> {
-        self.err.read().unwrap().clone()
+        self.err.read().clone()
     }
 
     pub fn set_pure_state(&self, state: TaskState) {
-        *self.state.write().unwrap() = state;
+        *self.state.write() = state;
     }
 
     pub fn set_start_time(&self, time: i64) {
-        *self.start_time.write().unwrap() = time;
+        *self.start_time.write() = time;
     }
     pub fn set_end_time(&self, time: i64) {
-        *self.end_time.write().unwrap() = time;
+        *self.end_time.write() = time;
     }
 
     pub fn is_kind(&self, kind: NodeKind) -> bool {
@@ -776,7 +777,7 @@ impl Task {
             node_data: self.node.to_string()?,
             state: self.state().into(),
             data: self.data().to_string(),
-            sealed: self.sealed_data.read().unwrap().to_string(),
+            sealed: self.sealed_data.read().to_string(),
             start_time: self.start_time(),
             end_time: self.end_time(),
             timestamp: self.timestamp,
@@ -1116,7 +1117,7 @@ impl std::fmt::Debug for Task {
             .field("next", &self.next_ids())
             .field("parent", &self.parent_id())
             .field("data", &self.data())
-            .field("sealed", &self.sealed_data.read().unwrap().clone())
+            .field("sealed", &self.sealed_data.read().clone())
             .field("err", &self.err())
             .finish()
     }
@@ -1124,7 +1125,7 @@ impl std::fmt::Debug for Task {
 
 impl Task {
     pub fn data(&self) -> Vars {
-        self.data.read().unwrap().clone()
+        self.data.read().clone()
     }
 
     pub fn vars(&self) -> Vars {
@@ -1138,34 +1139,34 @@ impl Task {
     }
 
     pub fn with_data<T, F: Fn(&Vars) -> T>(&self, f: F) -> T {
-        let data = self.data.read().unwrap();
+        let data = self.data.read();
         f(&data)
     }
 
     pub fn set_data_with<F: Fn(&mut Vars)>(&self, f: F) {
-        let mut data = self.data.write().unwrap();
+        let mut data = self.data.write();
         f(&mut data)
     }
 
     pub fn set_data(&self, vars: &Vars) {
-        let mut data = self.data.write().unwrap();
+        let mut data = self.data.write();
         for (name, value) in vars.iter() {
             data.set(name, value);
         }
     }
 
     pub fn update_data_if_exists<F: Fn(&mut Vars) -> bool>(&self, f: F) -> bool {
-        let mut data = self.data.write().unwrap();
+        let mut data = self.data.write();
         f(&mut data)
     }
 
     pub(crate) fn set_sealed(&self, name: &str, value: Vars) {
-        let mut sealed = self.sealed_data.write().unwrap();
+        let mut sealed = self.sealed_data.write();
         sealed.set(name, value);
     }
 
     pub(crate) fn set_sealed_data(&self, vars: &Vars) {
-        let mut data = self.sealed_data.write().unwrap();
+        let mut data = self.sealed_data.write();
         for (name, value) in vars.iter() {
             data.set(name, value);
         }
@@ -1175,13 +1176,13 @@ impl Task {
     /// if not found locally (child overrides parent).
     pub fn sealed(&self, name: &str) -> Option<Vars> {
         // check local first
-        if let Some(v) = self.sealed_data.read().unwrap().get::<Vars>(name) {
+        if let Some(v) = self.sealed_data.read().get::<Vars>(name) {
             return Some(v);
         }
         // walk up parent chain
         let mut parent = self.parent();
         while let Some(task) = parent {
-            if let Some(v) = task.sealed_data.read().unwrap().get::<Vars>(name) {
+            if let Some(v) = task.sealed_data.read().get::<Vars>(name) {
                 return Some(v);
             }
             parent = task.parent();
@@ -1190,11 +1191,11 @@ impl Task {
     }
 
     pub fn has_sealed(&self) -> bool {
-        !self.sealed_data.read().unwrap().is_empty()
+        !self.sealed_data.read().is_empty()
     }
 
     pub fn sealed_keys(&self) -> Vec<String> {
-        self.sealed_data.read().unwrap().keys().cloned().collect()
+        self.sealed_data.read().keys().cloned().collect()
     }
 
     pub fn find<T>(&self, name: &str) -> Option<T>

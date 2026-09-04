@@ -2,8 +2,8 @@ use crate::{
     ActError, KvStore, Result,
     store::{ScanOperation, ScanOptions},
 };
+use parking_lot::Mutex;
 use redis::{Client, Commands};
-use std::sync::Mutex;
 
 pub struct RedisStore {
     conn: Mutex<redis::Connection>,
@@ -48,27 +48,18 @@ fn key_matches(k: &str, key: &str, prefix: &str, op: &ScanOperation) -> bool {
 
 impl KvStore for RedisStore {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| ActError::Store(e.to_string()))?;
+        let mut conn = self.conn.lock();
         conn.get(key).map_err(|e| ActError::Store(e.to_string()))
     }
 
     fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| ActError::Store(e.to_string()))?;
+        let mut conn = self.conn.lock();
         conn.set(key, value)
             .map_err(|e| ActError::Store(e.to_string()))
     }
 
     fn delete(&self, key: &str) -> Result<()> {
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| ActError::Store(e.to_string()))?;
+        let mut conn = self.conn.lock();
         conn.del(key).map_err(|e| ActError::Store(e.to_string()))
     }
 
@@ -78,10 +69,7 @@ impl KvStore for RedisStore {
             op,
             ref prefix,
         } = options;
-        let mut conn = self
-            .conn
-            .lock()
-            .map_err(|e| ActError::Store(e.to_string()))?;
+        let mut conn = self.conn.lock();
         let pattern = format!("{}*", prefix);
         let mut result = Vec::new();
         let mut cursor: String = "0".to_string();

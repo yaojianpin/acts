@@ -1,5 +1,6 @@
 use acts::{Engine, MessageState, Vars, Workflow};
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::time::Instant;
 
 #[tokio::main]
@@ -30,7 +31,7 @@ steps:
     let chan = engine.channel();
     chan.on_message(move |e| {
         if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            let mut t = tasks2.lock().unwrap();
+            let mut t = tasks2.lock();
             t.push((e.pid.clone(), e.tid.clone()));
             if t.len() >= iters as usize {
                 s.close();
@@ -46,7 +47,7 @@ steps:
             .unwrap();
     }
     sig.recv().await;
-    let tasks = tasks.lock().unwrap();
+    let tasks = tasks.lock();
     println!("pre-created {} tasks", tasks.len());
 
     // warmup

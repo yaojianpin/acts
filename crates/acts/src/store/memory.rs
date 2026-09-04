@@ -1,6 +1,6 @@
 use crate::Result;
+use parking_lot::RwLock;
 use std::collections::BTreeMap;
-use std::sync::RwLock;
 
 use crate::store::{KvStore, ScanOperation, ScanOptions};
 
@@ -50,16 +50,16 @@ fn key_matches(k: &str, key: &str, prefix: &str, op: &ScanOperation) -> bool {
 
 impl KvStore for MemoryStore {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        Ok(self.data.read().unwrap().get(key).cloned())
+        Ok(self.data.read().get(key).cloned())
     }
 
     fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
-        self.data.write().unwrap().insert(key.to_string(), value);
+        self.data.write().insert(key.to_string(), value);
         Ok(())
     }
 
     fn delete(&self, key: &str) -> Result<()> {
-        self.data.write().unwrap().remove(key);
+        self.data.write().remove(key);
         Ok(())
     }
 
@@ -69,7 +69,7 @@ impl KvStore for MemoryStore {
             op,
             ref prefix,
         } = options;
-        let map = self.data.read().unwrap();
+        let map = self.data.read();
         let mut entries: Vec<(String, Vec<u8>)> = map
             .range(prefix.clone()..)
             .take_while(|(k, _)| k.starts_with(prefix.as_str()))

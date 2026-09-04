@@ -3,10 +3,8 @@ use crate::{
     event::Message,
     scheduler::{Process, Task},
 };
-use std::{
-    collections::HashMap,
-    sync::{Arc, RwLock},
-};
+use parking_lot::RwLock;
+use std::{collections::HashMap, sync::Arc};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 use tracing::{debug, error, instrument};
 
@@ -50,7 +48,7 @@ fn dispatch_key_event(
     handlers: &ShareLock<HashMap<String, ActWorkflowMessageHandle>>,
     item: Message,
 ) {
-    let handles: Vec<_> = handlers.read().unwrap().values().cloned().collect();
+    let handles: Vec<_> = handlers.read().values().cloned().collect();
     for handle in handles {
         let event = Event::from_inner(item.clone());
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (handle)(&event)));
@@ -119,17 +117,16 @@ impl Emitter {
 
     #[cfg(test)]
     pub fn reset(&self) {
-        self.messages.write().unwrap().clear();
-        self.starts.write().unwrap().clear();
-        self.completes.write().unwrap().clear();
-        self.errors.write().unwrap().clear();
+        self.messages.write().clear();
+        self.starts.write().clear();
+        self.completes.write().clear();
+        self.errors.write().clear();
     }
 
     pub fn on_message(&self, key: &str, f: impl Fn(&Event<Message>) + Send + Sync + 'static) {
         let f = Arc::new(f);
         self.messages
             .write()
-            .unwrap()
             .entry(key.to_string())
             .and_modify(|v| *v = f.clone())
             .or_insert(f);
@@ -139,7 +136,6 @@ impl Emitter {
         let f = Arc::new(f);
         self.starts
             .write()
-            .unwrap()
             .entry(key.to_string())
             .and_modify(|v| *v = f.clone())
             .or_insert(f);
@@ -149,7 +145,6 @@ impl Emitter {
         let f = Arc::new(f);
         self.completes
             .write()
-            .unwrap()
             .entry(key.to_string())
             .and_modify(|v| *v = f.clone())
             .or_insert(f);
@@ -159,24 +154,23 @@ impl Emitter {
         let f = Arc::new(f);
         self.errors
             .write()
-            .unwrap()
             .entry(key.to_string())
             .and_modify(|v| *v = f.clone())
             .or_insert(f);
     }
 
     pub fn on_proc(&self, f: impl Fn(&Event<Arc<Process>>) + Send + Sync + 'static) {
-        self.procs.write().unwrap().push(Arc::new(f));
+        self.procs.write().push(Arc::new(f));
     }
 
     pub fn on_task(&self, f: impl Fn(&Event<Arc<Task>, TaskExtra>) + Send + Sync + 'static) {
-        self.tasks.write().unwrap().push(Arc::new(f));
+        self.tasks.write().push(Arc::new(f));
     }
 
     #[instrument(skip(self, proc), fields(pid = %proc.id()))]
     pub fn emit_proc_event(&self, proc: &Arc<Process>) {
         debug!("proc event emitted");
-        let handlers = self.procs.read().unwrap();
+        let handlers = self.procs.read();
         let e = &Event::new(proc);
         for handle in handlers.iter() {
             (handle)(e);
@@ -190,7 +184,7 @@ impl Emitter {
     #[instrument(skip(self, task), fields(pid = %task.pid, tid = %task.id))]
     pub fn emit_task_event_with_extra(&self, task: &Arc<Task>, emit_message: bool) -> Result<()> {
         debug!("task event emitted");
-        let handlers = self.tasks.read().unwrap();
+        let handlers = self.tasks.read();
         let e = &Event::new_with_extra(task, &TaskExtra { emit_message });
         for handle in handlers.iter() {
             (handle)(e);
@@ -224,33 +218,33 @@ impl Emitter {
     }
 
     pub fn remove(&self, key: &str) {
-        let mut starts = self.starts.write().unwrap();
+        let mut starts = self.starts.write();
         if starts.contains_key(key) {
             starts.remove(key);
         }
 
-        let mut completes = self.completes.write().unwrap();
+        let mut completes = self.completes.write();
         if completes.contains_key(key) {
             completes.remove(key);
         }
 
-        let mut errors = self.errors.write().unwrap();
+        let mut errors = self.errors.write();
         if errors.contains_key(key) {
             errors.remove(key);
         }
 
-        let mut messages = self.messages.write().unwrap();
+        let mut messages = self.messages.write();
         if messages.contains_key(key) {
             messages.remove(key);
         }
     }
 
     pub(crate) fn close(&self) {
-        self.messages.write().unwrap().clear();
-        self.starts.write().unwrap().clear();
-        self.completes.write().unwrap().clear();
-        self.errors.write().unwrap().clear();
-        self.procs.write().unwrap().clear();
-        self.tasks.write().unwrap().clear();
+        self.messages.write().clear();
+        self.starts.write().clear();
+        self.completes.write().clear();
+        self.errors.write().clear();
+        self.procs.write().clear();
+        self.tasks.write().clear();
     }
 }

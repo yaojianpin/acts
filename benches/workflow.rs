@@ -1,7 +1,8 @@
 use acts::{Engine, MessageState, Vars, Workflow};
 use criterion::async_executor::FuturesExecutor;
 use criterion::*;
-use std::sync::{Arc, Mutex};
+use parking_lot::Mutex;
+use std::sync::Arc;
 
 /// Benchmark: parse workflow YAML — average time + QPS.
 fn load(c: &mut Criterion) {
@@ -117,7 +118,7 @@ fn act(c: &mut Criterion) {
                 let chan = engine.channel();
                 chan.on_message(move |e| {
                     if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-                        let mut t = tasks2.lock().unwrap();
+                        let mut t = tasks2.lock();
                         t.push((e.pid.clone(), e.tid.clone()));
                         if t.len() >= iters as usize {
                             s.close();
@@ -136,7 +137,7 @@ fn act(c: &mut Criterion) {
                 sig.recv().await;
 
                 let tasks = {
-                    let guard = tasks.lock().unwrap();
+                    let guard = tasks.lock();
                     guard.clone()
                 };
 

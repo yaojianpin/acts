@@ -201,12 +201,12 @@ async fn sch_task_step_options() {
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
-    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vars::new()));
+    let captured = std::sync::Arc::new(parking_lot::Mutex::new(Vars::new()));
     let captured2 = captured.clone();
     let rt2 = rt.clone();
     engine.channel().on_message(move |e| {
         if e.is_type("step") && e.is_state(MessageState::Created) {
-            *captured2.lock().unwrap() = e.inner().inputs.clone();
+            *captured2.lock() = e.inner().inputs.clone();
         }
         if e.is_params_key("act1") && e.is_state(MessageState::Created) {
             rt2.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
@@ -217,7 +217,7 @@ async fn sch_task_step_options() {
     tx.recv().await;
     assert_eq!(proc.state(), TaskState::Completed);
     // verify step options set via with_options are in message.inputs
-    let inputs = captured.lock().unwrap();
+    let inputs = captured.lock();
     let options: serde_json::Value = inputs.get("options").unwrap();
     assert_eq!(options["timeout"].as_i64().unwrap(), 30);
     assert_eq!(options["retry"].as_i64().unwrap(), 3);

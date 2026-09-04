@@ -7,8 +7,9 @@ use crate::{
         test::{USES_IRQ, USES_MSG, auto_complete, create_proc},
     },
 };
+use parking_lot::Mutex;
 use serde_json::json;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 #[tokio::test]
 async fn pack_irq_one() {
@@ -63,7 +64,7 @@ async fn pack_irq_multi_threads() {
                 s1.send(false);
             }
 
-            let mut count = count.lock().unwrap();
+            let mut count = count.lock();
             *count += 1;
             // println!("count: {}", *count);
             if *count == len {
@@ -191,13 +192,13 @@ async fn pack_irq_cancel_normal() {
     let act_req_id = Arc::new(Mutex::new(None));
     channel.on_message(move |e| {
         if e.is_type("act") {
-            let mut count = count.lock().unwrap();
+            let mut count = count.lock();
             let uid = e.params().unwrap().get::<String>("uid").unwrap();
             let tid = &e.tid;
 
             if uid == "a" && e.state() == MessageState::Created {
                 if *count == 0 {
-                    *act_req_id.lock().unwrap() = Some(tid.to_string());
+                    *act_req_id.lock() = Some(tid.to_string());
 
                     let mut options = Vars::new();
                     options.insert("uid".to_string(), json!(uid.to_string()));
@@ -214,7 +215,7 @@ async fn pack_irq_cancel_normal() {
                 options.insert("uid".to_string(), json!("a".to_string()));
 
                 // get the completed act id in previous step
-                let act_req_id = &*act_req_id.lock().unwrap();
+                let act_req_id = &*act_req_id.lock();
                 let aid = act_req_id.as_deref().unwrap();
                 let action = Action::new(&e.pid, aid, EventAction::Cancel, options);
                 rt.do_action(&action).unwrap();
@@ -252,7 +253,7 @@ async fn pack_irq_back() {
     channel.on_message(move |e| {
         let msg = e.inner();
         if msg.is_type("act") {
-            let mut count = count.lock().unwrap();
+            let mut count = count.lock();
             let uid = msg.inputs.get_value("uid").unwrap().as_str().unwrap();
             let tid = &msg.tid;
             if uid == "a" && *count == 0 {

@@ -148,18 +148,18 @@ async fn sch_act_state_cancelled() {
     let tx2 = tx.clone();
     let rt2 = rt.clone();
 
-    let act1_tid = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let act1_tid = std::sync::Arc::new(parking_lot::Mutex::new(String::new()));
     let act1_tid_clone = act1_tid.clone();
 
     engine.channel().on_message(move |e| {
         if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            *act1_tid_clone.lock().unwrap() = e.tid.clone();
+            *act1_tid_clone.lock() = e.tid.clone();
             rt2.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
                 .unwrap();
         }
 
         if e.is_params_key("act2") && e.is_state(MessageState::Created) {
-            let tid = act1_tid.lock().unwrap().clone();
+            let tid = act1_tid.lock().clone();
             let mut options = Vars::new();
             options.set("to", "step1");
             rt2.do_action2(&e.pid, &tid, EventAction::Cancel, options)

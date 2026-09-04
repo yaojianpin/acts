@@ -21,8 +21,8 @@ mod utils;
 #[cfg(test)]
 mod tests;
 
+use parking_lot::RwLock;
 use std::sync::Arc;
-use std::sync::RwLock;
 
 pub use config::{Config, ConfigResolver, MissingParamAction};
 pub use engine::Engine;

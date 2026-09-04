@@ -11,7 +11,7 @@ mod vars;
 
 impl Enviroment {
     pub fn init(&mut self) {
-        let mut modules = self.modules.write().unwrap();
+        let mut modules = self.modules.write();
 
         modules.push(Box::new(console::ConsoleModule::new()));
         modules.push(Box::new(array::ArrayModule::new()));
@@ -22,7 +22,7 @@ impl Enviroment {
         modules.push(Box::new(sealed::SealedModule::new()));
         modules.push(Box::new(os::Os::new()));
 
-        let mut user_vars = self.user_vars.write().unwrap();
+        let mut user_vars = self.user_vars.write();
         user_vars.push(Box::new(vars::secrets::SecretsVar));
     }
 }
