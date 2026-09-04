@@ -252,3 +252,10 @@
 - fix: make `Signal` one-shot fires broadcast — a single `send`/`close` now releases every concurrent `recv` waiter and receivers joining after the fire return immediately; previously `Notify::notify_one` woke at most one receiver, so the rest hung forever (`update` closures may still call `close` on the same signal)
 - refactor: replace `std::sync::{Mutex, RwLock}` with `parking_lot` everywhere — locks are infallible (no `unwrap`/`map_err` at call sites) and guards are smaller; `tokio::sync` stays for async-held locks
 - fix: stop sending message if `store_if` returns `false`
+# 0.23.0
+- BREAKING: messages are now stored split: the canonical emitted `Message` (one row per message id, payload stored once) in the `messages` collection, and one `Delivery` row per (message × channel/service) in a new `deliveries` collection — Ack/Retry/Clear/Redo, the retry timer and task-completion close-outs all operate on delivery rows keyed by their own delivery id; every channel delivery of the same event shares one `msg_id` but has its own `delivery_id`, so multiple grpc/SSE clients (and future nats/kafka adapters) ack independently
+- feat: each delivered event carries `delivery_id`; channel handlers store the canonical message once and create one delivery row per ack channel, tagging the handler event with the new delivery id so the client can ack exactly its own delivery
+- feat: retry re-sends are routed to the owning channel only (`Emitter::emit_delivery`) — an acked channel never sees another channel's retries; each redelivery reuses the same delivery id for exactly-once consumer dedup
+- feat: message manager ops — `msg:ack`, `msg:get`, `msg:rm` key on delivery ids; `msg:clear`/`msg:redo` accept an `id` for one delivery while keeping the batch `pid`/all forms (`MessageExecutor::clear_delivery`, `redeliver`)
+- feat: delivery rows expose `msg_id`/`chan_id` indexes; `MessageInfo` joins delivery state with its canonical message
+- migration: existing v1 merged message rows read as canonical messages (delivery state is not carried over); run `Store::rebuild_indexes` once when upgrading existing stores

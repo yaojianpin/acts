@@ -2264,6 +2264,7 @@ async fn export_message_store_with_emit_id() {
     engine.runtime().emitter().emit_message(&msg);
     let ret = s2.recv().await;
     assert_eq!(ret.id, "1");
+    // canonical message row is stored once per message id
     assert!(
         engine
             .runtime()
@@ -2273,6 +2274,16 @@ async fn export_message_store_with_emit_id() {
             .exists("1")
             .unwrap()
     );
+    // one delivery row per (message × channel), identified by delivery id
+    let delivery = engine
+        .runtime()
+        .cache()
+        .store()
+        .deliveries()
+        .find(&ret.delivery_id.clone().unwrap())
+        .unwrap();
+    assert_eq!(delivery.msg_id, "1");
+    assert_eq!(delivery.chan_id, "my_emit_id");
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -2298,19 +2309,93 @@ async fn export_message_store_with_emit_id_and_options() {
     engine.runtime().emitter().emit_message(&msg);
     let ret = s2.recv().await;
     assert_eq!(ret.id, msg.id);
-    let message = engine
+
+    // the delivery row keeps the channel pattern of the matching channel
+    let delivery = engine
         .runtime()
         .cache()
         .store()
-        .messages()
-        .find(&msg.id)
+        .deliveries()
+        .find(&ret.delivery_id.clone().unwrap())
         .unwrap();
-
-    let pattern = serde_json::from_str::<Vars>(&message.chan_pattern).unwrap();
-    assert_eq!(message.chan_id, "my_emit_id");
+    let pattern = serde_json::from_str::<Vars>(&delivery.chan_pattern).unwrap();
+    assert_eq!(delivery.msg_id, msg.id);
+    assert_eq!(delivery.chan_id, "my_emit_id");
     assert_eq!(pattern.get::<String>("tag").unwrap(), "tag*");
     assert!(pattern.get::<bool>("ack").unwrap());
 }
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn export_message_multi_channels_share_message_single_delivery_each() {
+    let engine = Engine::new().start().unwrap();
+
+    // two ack channels both match the same emitted message
+    let (s1, r1) = engine.signal::<Message>(Message::default()).double();
+    let emitter1 = engine.channel_with_options(&ChannelOptions {
+        id: "chan_a".to_string(),
+        ack: true,
+        ..Default::default()
+    });
+    let s1a = s1.clone();
+    emitter1.on_message(move |e| {
+        s1a.send(e.inner().clone());
+    });
+
+    let (s2, r2) = engine.signal::<Message>(Message::default()).double();
+    let emitter2 = engine.channel_with_options(&ChannelOptions {
+        id: "chan_b".to_string(),
+        ack: true,
+        ..Default::default()
+    });
+    let s2a = s2.clone();
+    emitter2.on_message(move |e| {
+        s2a.send(e.inner().clone());
+    });
+
+    let msg = Message {
+        id: utils::longid(),
+        ..Message::default()
+    };
+    engine.runtime().emitter().emit_message(&msg);
+
+    let (received_a, received_b) = tokio::join!(r1.recv(), r2.recv());
+    assert_eq!(received_a.id, msg.id);
+    assert_eq!(received_b.id, msg.id);
+
+    let store = engine.runtime().cache().store();
+
+    // one canonical message row for the event ...
+    let messages = store
+        .messages()
+        .query(&Query::new().filter(Filter::and().expr(Expr::eq("id", msg.id.clone()))))
+        .unwrap();
+    assert_eq!(messages.count, 1);
+
+    // ... but two delivery rows — one per channel, each with its own id
+    let q = Query::new().filter(Filter::and().expr(Expr::eq("msg_id", msg.id.clone())));
+    let deliveries = store.deliveries().query(&q).unwrap();
+    assert_eq!(deliveries.count, 2);
+    let mut chan_ids: Vec<String> = deliveries.rows.iter().map(|d| d.chan_id.clone()).collect();
+    chan_ids.sort();
+    assert_eq!(chan_ids, vec!["chan_a".to_string(), "chan_b".to_string()]);
+    assert_ne!(
+        deliveries.rows[0].id, deliveries.rows[1].id,
+        "each delivery must have its own delivery id"
+    );
+
+    // ack only channel a's delivery — channel b's delivery stays created
+    let delivery_a = received_a.delivery_id.clone().unwrap();
+    let delivery_b = received_b.delivery_id.clone().unwrap();
+    assert_ne!(delivery_a, delivery_b);
+    engine.executor().msg().ack(&delivery_a).unwrap();
+
+    let row_a = store.deliveries().find(&delivery_a).unwrap();
+    assert_eq!(row_a.status, data::MessageStatus::Acked);
+    let row_b = store.deliveries().find(&delivery_b).unwrap();
+    assert_eq!(row_b.status, data::MessageStatus::Created);
+}
+
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn export_message_not_store_without_match() {
@@ -2377,34 +2462,35 @@ async fn export_message_not_store_with_empty_emit_id_and_not_match_option() {
 #[tokio::test(flavor = "multi_thread")]
 async fn export_message_clear_error_messages_by_none() {
     let engine = Engine::new().start().unwrap();
-    let msg = data::Message {
+    let delivery = data::Delivery {
         id: utils::longid(),
+        msg_id: utils::longid(),
         status: data::MessageStatus::Error,
-        ..data::Message::default()
+        ..data::Delivery::default()
     };
     engine
         .runtime()
         .cache()
         .store()
-        .messages()
-        .create(&msg)
+        .deliveries()
+        .create(&delivery)
         .unwrap();
-    let message = engine
+    let ret = engine
         .runtime()
         .cache()
         .store()
-        .messages()
-        .find(&msg.id)
+        .deliveries()
+        .find(&delivery.id)
         .unwrap();
-    assert_eq!(message.status, data::MessageStatus::Error);
+    assert_eq!(ret.status, data::MessageStatus::Error);
     engine.executor().msg().clear(None).unwrap();
     assert!(
         !engine
             .runtime()
             .cache()
             .store()
-            .messages()
-            .exists(&msg.id)
+            .deliveries()
+            .exists(&delivery.id)
             .unwrap()
     );
 }
@@ -2418,12 +2504,13 @@ async fn export_message_clear_error_messages_by_pid() {
         .runtime()
         .cache()
         .store()
-        .messages()
-        .create(&data::Message {
+        .deliveries()
+        .create(&data::Delivery {
             id: utils::longid(),
-            status: data::MessageStatus::Error,
+            msg_id: utils::longid(),
             pid: pid.clone(),
-            ..data::Message::default()
+            status: data::MessageStatus::Error,
+            ..data::Delivery::default()
         })
         .unwrap();
 
@@ -2431,20 +2518,21 @@ async fn export_message_clear_error_messages_by_pid() {
         .runtime()
         .cache()
         .store()
-        .messages()
-        .create(&data::Message {
+        .deliveries()
+        .create(&data::Delivery {
             id: utils::longid(),
-            status: data::MessageStatus::Error,
+            msg_id: utils::longid(),
             pid: pid.clone(),
-            ..data::Message::default()
+            status: data::MessageStatus::Error,
+            ..data::Delivery::default()
         })
         .unwrap();
     engine.executor().msg().clear(Some(pid.clone())).unwrap();
-    let messages = engine
+    let deliveries = engine
         .runtime()
         .cache()
         .store()
-        .messages()
+        .deliveries()
         .query(
             &Query::new().filter(
                 Filter::and()
@@ -2454,44 +2542,45 @@ async fn export_message_clear_error_messages_by_pid() {
         )
         .unwrap();
 
-    assert_eq!(messages.rows.len(), 0);
+    assert_eq!(deliveries.rows.len(), 0);
 }
 
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn export_message_resend_error_messages() {
     let engine = Engine::new().start().unwrap();
-    let msg = data::Message {
+    let delivery = data::Delivery {
         id: utils::longid(),
+        msg_id: utils::longid(),
         status: data::MessageStatus::Error,
-        ..data::Message::default()
+        ..data::Delivery::default()
     };
     engine
         .runtime()
         .cache()
         .store()
-        .messages()
-        .create(&msg)
+        .deliveries()
+        .create(&delivery)
         .unwrap();
-    let message = engine
+    let ret = engine
         .runtime()
         .cache()
         .store()
-        .messages()
-        .find(&msg.id)
+        .deliveries()
+        .find(&delivery.id)
         .unwrap();
-    assert_eq!(message.status, data::MessageStatus::Error);
+    assert_eq!(ret.status, data::MessageStatus::Error);
     engine.executor().msg().redo().unwrap();
 
-    let message = engine
+    let ret = engine
         .runtime()
         .cache()
         .store()
-        .messages()
-        .find(&msg.id)
+        .deliveries()
+        .find(&delivery.id)
         .unwrap();
-    assert_eq!(message.status, data::MessageStatus::Created);
-    assert_eq!(message.retry_times, 0);
+    assert_eq!(ret.status, data::MessageStatus::Created);
+    assert_eq!(ret.retry_times, 0);
 }
 
 mod test_module {

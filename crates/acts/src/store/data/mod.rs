@@ -1,3 +1,4 @@
+mod delivery;
 mod event;
 mod message;
 mod model;
@@ -6,6 +7,7 @@ mod package;
 mod proc;
 mod task;
 
+pub use delivery::Delivery;
 pub use event::Event;
 pub use message::{Message, MessageStatus};
 pub use model::Model;

@@ -68,7 +68,15 @@ pub struct ModelInfo {
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct MessageInfo {
+    /// delivery id — the storage key of one (message × channel) delivery row
     pub id: String,
+
+    /// the workflow message id shared by every channel delivery of the event
+    pub msg_id: String,
+
+    /// the channel this delivery row belongs to
+    pub chan_id: String,
+
     pub tid: String,
     pub name: String,
     pub state: MessageState,
@@ -214,25 +222,31 @@ impl From<&Arc<scheduler::Task>> for TaskInfo {
     }
 }
 
-impl From<&data::Message> for MessageInfo {
-    fn from(m: &data::Message) -> Self {
+impl MessageInfo {
+    /// Build the manager view of one delivery: delivery state/identity joined
+    /// with the payload and workflow context of its canonical message.
+    pub fn from_delivery(delivery: &data::Delivery, message: &data::Message) -> Self {
         Self {
-            id: m.id.clone(),
-            name: m.name.clone(),
-            pid: m.pid.clone(),
-            tid: m.tid.clone(),
-            nid: m.nid.clone(),
-            timestamp: m.timestamp,
-            create_time: m.create_time,
-            update_time: m.update_time,
-            state: m.state,
-            r#type: m.r#type.clone(),
-
-            inputs: m.inputs.clone(),
-            outputs: m.outputs.clone(),
-            retry_times: m.retry_times,
-            status: m.status.to_string(),
-            uses: m.uses.clone(),
+            // delivery identity — the target of ack/retry/clear/redo
+            id: delivery.id.clone(),
+            msg_id: delivery.msg_id.clone(),
+            chan_id: delivery.chan_id.clone(),
+            // message payload and workflow context
+            tid: message.tid.clone(),
+            name: message.name.clone(),
+            state: message.state,
+            r#type: message.r#type.clone(),
+            pid: message.pid.clone(),
+            nid: message.nid.clone(),
+            inputs: message.inputs.clone(),
+            outputs: message.outputs.clone(),
+            uses: message.uses.clone(),
+            timestamp: message.timestamp,
+            // delivery state
+            create_time: delivery.create_time,
+            update_time: delivery.update_time,
+            retry_times: delivery.retry_times,
+            status: delivery.status.to_string(),
         }
     }
 }

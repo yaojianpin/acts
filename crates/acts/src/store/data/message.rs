@@ -18,8 +18,12 @@ pub enum MessageStatus {
     Error = 3,
 }
 
+/// Canonical emitted message — one row per message id. It records the message
+/// event once (payload + workflow context); delivery state lives in the
+/// separated [`Delivery`](super::Delivery) rows, one per (message × channel).
 #[derive(Default, Deserialize, Serialize, Debug, Clone)]
 pub struct Message {
+    /// the workflow message id — unique key of this emitted event message
     pub id: String,
     pub tid: String,
     pub name: String,
@@ -33,13 +37,8 @@ pub struct Message {
     pub outputs: String,
     pub start_time: i64,
     pub end_time: i64,
-    pub chan_id: String,
-    pub chan_pattern: String,
 
     pub create_time: i64,
-    pub update_time: i64,
-    pub retry_times: i32,
-    pub status: MessageStatus,
     pub timestamp: i64,
     pub v: i32,
 }
@@ -49,16 +48,17 @@ impl DbCollectionIden for Message {
         StoreIden::Messages
     }
     fn indexed_fields() -> &'static [&'static str] {
-        &["pid", "status", "tid", "nid", "timestamp"]
+        &["pid", "tid", "nid", "timestamp"]
     }
     fn version() -> i32 {
-        1
+        2
     }
 
     fn upcast(value: JsonValue) -> Result<Self> {
         let v = value.get("v").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
         match v {
-            1 => Self::upcast_current(value),
+            2 => Self::upcast_current(value),
+            1 => Self::migrate_v1(value),
             0 => {
                 // v0 → v1: move 'tag' field into inputs.options
                 let mut value = value;
@@ -82,18 +82,32 @@ impl DbCollectionIden for Message {
                             ),
                         );
                     }
-                    map.insert(
-                        "v".to_string(),
-                        JsonValue::Number(serde_json::Number::from(1)),
-                    );
                 }
-                Self::upcast_current(value)
+                Self::migrate_v1(value)
             }
             _ => Err(crate::ActError::Store(format!(
                 "unsupported message version: {}",
                 v
             ))),
         }
+    }
+}
+
+impl Message {
+    /// v1 → v2: v1 rows were merged delivery records keyed by the message id
+    /// (id == msg id, single delivery, embedded channel/status fields).
+    /// Dropping the delivery-only fields yields the canonical message row —
+    /// the row key stays the message id, delivery state moves to the
+    /// separated `deliveries` collection. Extra JSON fields are ignored by
+    /// serde, only the version needs bumping.
+    fn migrate_v1(mut value: JsonValue) -> Result<Self> {
+        if let JsonValue::Object(map) = &mut value {
+            map.insert(
+                "v".to_string(),
+                JsonValue::Number(serde_json::Number::from(2)),
+            );
+        }
+        Self::upcast_current(value)
     }
 }
 
@@ -187,8 +201,7 @@ mod tests {
         assert_eq!(MessageStatus::Error.to_string(), "error");
     }
 
-    #[test]
-    fn upcast_v0_with_tag_to_v1_strips_tag() {
+    fn message_json(v: i32, extra: bool) -> JsonValue {
         let mut map = serde_json::Map::new();
         map.insert("id".to_string(), JsonValue::String("m1".to_string()));
         map.insert("tid".to_string(), JsonValue::String("t1".to_string()));
@@ -204,8 +217,6 @@ mod tests {
         map.insert("uses".to_string(), JsonValue::String("pack".to_string()));
         map.insert("inputs".to_string(), JsonValue::String("{}".to_string()));
         map.insert("outputs".to_string(), JsonValue::String("{}".to_string()));
-        // old v0 field — should be stripped by upcast
-        map.insert("tag".to_string(), JsonValue::String("old-tag".to_string()));
         map.insert(
             "start_time".to_string(),
             JsonValue::Number(serde_json::Number::from(0)),
@@ -214,101 +225,69 @@ mod tests {
             "end_time".to_string(),
             JsonValue::Number(serde_json::Number::from(0)),
         );
-        map.insert("chan_id".to_string(), JsonValue::String("ch1".to_string()));
-        map.insert(
-            "chan_pattern".to_string(),
-            JsonValue::String("*:*:*:*".to_string()),
-        );
         map.insert(
             "create_time".to_string(),
-            JsonValue::Number(serde_json::Number::from(0)),
-        );
-        map.insert(
-            "update_time".to_string(),
-            JsonValue::Number(serde_json::Number::from(0)),
-        );
-        map.insert(
-            "retry_times".to_string(),
-            JsonValue::Number(serde_json::Number::from(0)),
-        );
-        map.insert(
-            "status".to_string(),
             JsonValue::Number(serde_json::Number::from(0)),
         );
         map.insert(
             "timestamp".to_string(),
             JsonValue::Number(serde_json::Number::from(1000)),
         );
+        if extra {
+            // legacy merged-delivery fields — must be dropped on upcast
+            map.insert("chan_id".to_string(), JsonValue::String("ch1".to_string()));
+            map.insert(
+                "chan_pattern".to_string(),
+                JsonValue::String("*:*:*:*".to_string()),
+            );
+            map.insert("msg_id".to_string(), JsonValue::String("m1".to_string()));
+            map.insert(
+                "status".to_string(),
+                JsonValue::Number(serde_json::Number::from(0)),
+            );
+            map.insert(
+                "retry_times".to_string(),
+                JsonValue::Number(serde_json::Number::from(3)),
+            );
+            map.insert(
+                "update_time".to_string(),
+                JsonValue::Number(serde_json::Number::from(2000)),
+            );
+        }
         map.insert(
             "v".to_string(),
-            JsonValue::Number(serde_json::Number::from(0)),
+            JsonValue::Number(serde_json::Number::from(v)),
         );
+        JsonValue::Object(map)
+    }
+
+    #[test]
+    fn upcast_v0_with_tag_strips_tag() {
+        let mut map = match message_json(0, false) {
+            JsonValue::Object(map) => map,
+            _ => unreachable!(),
+        };
+        map.insert("tag".to_string(), JsonValue::String("old-tag".to_string()));
 
         let msg = Message::upcast(JsonValue::Object(map)).unwrap();
         assert_eq!(msg.id, "m1");
-        assert_eq!(msg.v, 1);
+        assert_eq!(msg.v, 2);
         // verify tag moved into inputs.options
         let inputs: JsonValue = serde_json::from_str(&msg.inputs).unwrap();
         assert_eq!(inputs["options"]["tag"].as_str().unwrap(), "old-tag");
     }
 
     #[test]
-    fn upcast_v1_passes_through() {
-        let mut map = serde_json::Map::new();
-        map.insert("id".to_string(), JsonValue::String("m2".to_string()));
-        map.insert("tid".to_string(), JsonValue::String("t2".to_string()));
-        map.insert("name".to_string(), JsonValue::String("test".to_string()));
-        map.insert(
-            "state".to_string(),
-            JsonValue::String("completed".to_string()),
-        );
-        map.insert("type".to_string(), JsonValue::String("step".to_string()));
-        map.insert("pid".to_string(), JsonValue::String("p2".to_string()));
-        map.insert("nid".to_string(), JsonValue::String("n2".to_string()));
-        map.insert("mid".to_string(), JsonValue::String("mid2".to_string()));
-        map.insert("uses".to_string(), JsonValue::String("pack".to_string()));
-        map.insert("inputs".to_string(), JsonValue::String("{}".to_string()));
-        map.insert("outputs".to_string(), JsonValue::String("{}".to_string()));
-        map.insert(
-            "start_time".to_string(),
-            JsonValue::Number(serde_json::Number::from(0)),
-        );
-        map.insert(
-            "end_time".to_string(),
-            JsonValue::Number(serde_json::Number::from(0)),
-        );
-        map.insert("chan_id".to_string(), JsonValue::String("ch2".to_string()));
-        map.insert(
-            "chan_pattern".to_string(),
-            JsonValue::String("*:*:*:*".to_string()),
-        );
-        map.insert(
-            "create_time".to_string(),
-            JsonValue::Number(serde_json::Number::from(0)),
-        );
-        map.insert(
-            "update_time".to_string(),
-            JsonValue::Number(serde_json::Number::from(0)),
-        );
-        map.insert(
-            "retry_times".to_string(),
-            JsonValue::Number(serde_json::Number::from(0)),
-        );
-        map.insert(
-            "status".to_string(),
-            JsonValue::Number(serde_json::Number::from(0)),
-        );
-        map.insert(
-            "timestamp".to_string(),
-            JsonValue::Number(serde_json::Number::from(2000)),
-        );
-        map.insert(
-            "v".to_string(),
-            JsonValue::Number(serde_json::Number::from(1)),
-        );
+    fn upcast_v1_merged_row_becomes_canonical() {
+        let msg = Message::upcast(message_json(1, true)).unwrap();
+        assert_eq!(msg.id, "m1");
+        assert_eq!(msg.v, 2);
+    }
 
-        let msg = Message::upcast(JsonValue::Object(map)).unwrap();
-        assert_eq!(msg.id, "m2");
-        assert_eq!(msg.v, 1);
+    #[test]
+    fn upcast_v2_canonical_passes_through() {
+        let msg = Message::upcast(message_json(2, false)).unwrap();
+        assert_eq!(msg.id, "m1");
+        assert_eq!(msg.v, 2);
     }
 }

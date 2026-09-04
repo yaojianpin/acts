@@ -66,6 +66,8 @@ pub enum StoreIden {
     Tasks,
     #[strum(serialize = "messages")]
     Messages,
+    #[strum(serialize = "deliveries")]
+    Deliveries,
     #[strum(serialize = "events")]
     Events,
     #[strum(serialize = "ops")]

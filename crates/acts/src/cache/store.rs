@@ -1,5 +1,5 @@
 use crate::{
-    ActError, Error, Message, Result, Workflow,
+    ActError, Error, Result, Workflow,
     data::{self, MessageStatus},
     scheduler::{self, Node, NodeData, Runtime, TaskState},
     store::{DbCollectionIden, Store, query::*},
@@ -217,28 +217,30 @@ impl Store {
         Ok(())
     }
 
-    pub fn set_message(&self, id: &str, status: MessageStatus) -> Result<()> {
-        if let Ok(mut message) = self.messages().find(id) {
-            message.status = status;
-            message.update_time = utils::time::time_millis();
-
-            self.messages().update(&message)?;
+    /// Ack one delivery row (by its delivery id): set its status.
+    pub fn set_delivery(&self, id: &str, status: MessageStatus) -> Result<()> {
+        if let Ok(mut delivery) = self.deliveries().find(id) {
+            delivery.status = status;
+            delivery.update_time = utils::time::time_millis();
+            self.deliveries().update(&delivery)?;
         }
 
-        // it's ok there is no message
+        // it's ok there is no delivery
         Ok(())
     }
 
-    pub fn set_message_with(&self, pid: &str, tid: &str, status: MessageStatus) -> Result<bool> {
-        debug!("set_message_with pid={pid} tid={tid} status={status:?}");
+    /// Mark every delivery row of a task (pid, tid) with a status — used to
+    /// close the deliveries when the task completes.
+    pub fn set_deliveries_with(&self, pid: &str, tid: &str, status: MessageStatus) -> Result<bool> {
+        debug!("set_deliveries_with pid={pid} tid={tid} status={status:?}");
         let q = Query::new().filter(
             Filter::and()
                 .expr(Expr::eq("pid", pid.to_string()))
                 .expr(Expr::eq("tid", tid.to_string())),
         );
-        let collection = self.messages();
-        if let Ok(messages) = collection.query(&q) {
-            for m in messages.rows.iter() {
+        let collection = self.deliveries();
+        if let Ok(deliveries) = collection.query(&q) {
+            for m in deliveries.rows.iter() {
                 let mut m = m.clone();
                 m.status = status;
                 m.update_time = utils::time::time_millis();
@@ -246,16 +248,19 @@ impl Store {
             }
         }
 
-        // it's ok there is no message
-        // the message does exist or not depends on the emitter
+        // it's ok there is no delivery
+        // whether a delivery exists depends on the emitter
         // it is allowed the client creates emitter without emit_id
         Ok(true)
     }
 
-    pub fn with_no_response_messages<F: Fn(&Message)>(
+    /// Collect deliveries with no response: re-send the not-yet-acked ones and
+    /// mark the ones that exceeded `max_delivery_retry_times` as errors. The
+    /// callback receives each delivery that was re-armed.
+    pub fn with_no_response_deliveries<F: Fn(&data::Delivery)>(
         &self,
         timeout_millis: i64,
-        max_message_retry_times: i32,
+        max_delivery_retry_times: i32,
         f: F,
     ) -> Result<()> {
         let q = Query::new().limit(300).filter(
@@ -266,58 +271,95 @@ impl Store {
                     utils::time::time_millis() - timeout_millis,
                 )),
         );
-        let collection = self.messages();
-        if let Ok(messages) = collection.query(&q) {
-            for m in messages.rows.iter() {
-                let mut message = m.clone();
-                message.update_time = utils::time::time_millis();
-                if message.retry_times < max_message_retry_times {
-                    message.retry_times += 1;
-                    if collection.update(&message)? {
-                        f(&message.into());
+        let collection = self.deliveries();
+        if let Ok(deliveries) = collection.query(&q) {
+            for m in deliveries.rows.iter() {
+                let mut delivery = m.clone();
+                delivery.update_time = utils::time::time_millis();
+                if delivery.retry_times < max_delivery_retry_times {
+                    delivery.retry_times += 1;
+                    if collection.update(&delivery)? {
+                        f(&delivery);
                     }
                 } else {
-                    // mark the message as error
-                    // the error messages will re-send by manual through the manager command
-                    message.status = MessageStatus::Error;
-                    collection.update(&message)?;
+                    // the delivery will re-send by manual through the manager command
+                    delivery.status = MessageStatus::Error;
+                    collection.update(&delivery)?;
                 }
             }
         }
         Ok(())
     }
 
-    pub fn resend_error_messages(&self) -> Result<()> {
-        let collection = self.messages();
+    /// Re-send every error delivery row (reset to `Created`; the retry timer
+    /// sends them to their own channels).
+    pub fn resend_error_deliveries(&self) -> Result<()> {
+        let collection = self.deliveries();
         let q = Query::new().filter(Filter::and().expr(Expr::eq("status", MessageStatus::Error)));
-        if let Ok(messages) = collection.query(&q) {
-            for m in messages.rows.iter() {
-                let mut message = m.clone();
-                message.status = MessageStatus::Created;
-                message.retry_times = 0;
-                message.update_time = utils::time::time_millis();
-                collection.update(&message)?;
+        if let Ok(deliveries) = collection.query(&q) {
+            for m in deliveries.rows.iter() {
+                let mut delivery = m.clone();
+                delivery.status = MessageStatus::Created;
+                delivery.retry_times = 0;
+                delivery.update_time = utils::time::time_millis();
+                collection.update(&delivery)?;
             }
         }
 
         Ok(())
     }
 
-    pub fn clear_error_messages(&self, pid: Option<String>) -> Result<()> {
-        let collection = self.messages();
+    /// Delete error delivery rows: all of them or only those of one process.
+    pub fn clear_error_deliveries(&self, pid: Option<String>) -> Result<()> {
+        let collection = self.deliveries();
         let mut cond = Filter::and().expr(Expr::eq("status", MessageStatus::Error));
         if let Some(pid) = &pid {
             cond = cond.expr(Expr::eq("pid", pid));
         }
 
         let q = Query::new().filter(cond);
-        if let Ok(messages) = collection.query(&q) {
-            for m in messages.rows.iter() {
+        if let Ok(deliveries) = collection.query(&q) {
+            for m in deliveries.rows.iter() {
                 collection.delete(&m.id)?;
             }
         }
 
         Ok(())
+    }
+
+    /// Reset one error delivery row back to `Created` for redelivery. Returns
+    /// the delivery when it was an error delivery and was reset, `None`
+    /// otherwise.
+    pub fn resend_error_delivery(&self, delivery_id: &str) -> Result<Option<data::Delivery>> {
+        let collection = self.deliveries();
+        let mut delivery = match collection.find(delivery_id) {
+            Ok(delivery) => delivery,
+            Err(_) => return Ok(None),
+        };
+        if delivery.status != MessageStatus::Error {
+            return Ok(None);
+        }
+
+        delivery.status = MessageStatus::Created;
+        delivery.retry_times = 0;
+        delivery.update_time = utils::time::time_millis();
+        if collection.update(&delivery)? {
+            Ok(Some(delivery))
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Delete one error delivery row. Returns `true` when the row existed and
+    /// was in error state and was deleted.
+    pub fn clear_error_delivery(&self, delivery_id: &str) -> Result<bool> {
+        let collection = self.deliveries();
+        match collection.find(delivery_id) {
+            Ok(delivery) if delivery.status == MessageStatus::Error => {
+                collection.delete(delivery_id)
+            }
+            _ => Ok(false),
+        }
     }
 
     pub fn upsert_task(&self, task: &Arc<scheduler::Task>) -> Result<()> {

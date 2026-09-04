@@ -898,17 +898,18 @@ async fn sch_action_recover_closes_applied_action() {
     let act_task = reloaded.task(&act1_tid).unwrap();
     assert_eq!(act_task.state(), TaskState::Skipped);
 
-    // the act message is completed: the client will not be asked again
+    // the act deliveries are completed: the client will not be asked again
     let q = Query::new().filter(
         Filter::and()
             .expr(Expr::eq("pid", pid.clone()))
             .expr(Expr::eq("tid", act1_tid.clone())),
     );
-    let msgs = store2.messages().query(&q).unwrap().rows;
-    assert!(!msgs.is_empty());
+    let deliveries = store2.deliveries().query(&q).unwrap().rows;
+    assert!(!deliveries.is_empty());
     assert!(
-        msgs.iter()
-            .all(|m| m.status == crate::data::MessageStatus::Completed)
+        deliveries
+            .iter()
+            .all(|d| d.status == crate::data::MessageStatus::Completed)
     );
 }
 

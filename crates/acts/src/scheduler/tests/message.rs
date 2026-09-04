@@ -1117,12 +1117,16 @@ async fn sch_message_ack_exist_message_in_store() {
         .channel_with_options(&chan_options)
         .on_message(move |msg| {
             if msg.r#type == "workflow" && msg.state() == MessageState::Created {
-                engine.executor().msg().ack(&msg.id).unwrap();
+                // the channel delivery carries its own delivery id
+                let delivery_id = msg.delivery_id.clone().unwrap();
+                engine.executor().msg().ack(&delivery_id).unwrap();
                 rx.send(msg.inner().clone());
             }
         });
     e2.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
+
+    // the canonical message is stored once, keyed by the message id
     let message = e2
         .runtime()
         .cache()
@@ -1133,8 +1137,19 @@ async fn sch_message_ack_exist_message_in_store() {
     assert_eq!(message.r#type, "workflow");
     assert_eq!(message.pid, id);
     assert_eq!(message.state, MessageState::Created);
-    assert_eq!(message.status, MessageStatus::Acked);
     assert!(message.start_time > 0);
+
+    // the delivery row records the ack of this channel
+    let delivery_id = ret.delivery_id.clone().unwrap();
+    let delivery = e2
+        .runtime()
+        .cache()
+        .store()
+        .deliveries()
+        .find(&delivery_id)
+        .unwrap();
+    assert_eq!(delivery.chan_id, "e1");
+    assert_eq!(delivery.status, MessageStatus::Acked);
 }
 
 #[tokio::test]
@@ -1179,14 +1194,38 @@ async fn sch_message_complete_message_in_store() {
     e2.runtime().launch(&proc).unwrap();
     let ret = tx.recv().await;
     e2.runtime().cache().flush().unwrap();
+
+    // canonical message row (payload is stored once per message id)
     let message = e2.runtime().cache().store().messages().find(&ret).unwrap();
     assert_eq!(message.r#type, "act");
     assert_eq!(message.uses.unwrap_or_default(), "acts.core.irq");
     assert_eq!(message.pid, id);
     assert_eq!(message.state, MessageState::Created);
-    assert_eq!(message.status, MessageStatus::Completed);
     assert!(message.create_time > 0);
-    assert!(message.update_time > 0);
+
+    // the delivery row is completed when the task completes
+    let delivery_id = e2
+        .runtime()
+        .cache()
+        .store()
+        .deliveries()
+        .query(&Query::new().filter(Filter::and().expr(Expr::eq("msg_id", ret.clone()))))
+        .unwrap()
+        .rows
+        .first()
+        .unwrap()
+        .id
+        .clone();
+    let delivery = e2
+        .runtime()
+        .cache()
+        .store()
+        .deliveries()
+        .find(&delivery_id)
+        .unwrap();
+    assert_eq!(delivery.status, MessageStatus::Completed);
+    assert!(delivery.create_time > 0);
+    assert!(delivery.update_time > 0);
 }
 
 #[tokio::test]
@@ -1263,7 +1302,12 @@ async fn sch_message_re_sent_if_not_ack() {
     let ret = tx.recv().await;
     assert!(ret.len() > 1);
 
+    // every redelivery carries the same delivery id of the stored row
+    assert_eq!(ret[0].delivery_id, ret[1].delivery_id);
+    assert!(ret[0].delivery_id.is_some());
+
     let m = ret.first().unwrap();
+    // canonical message row — stored once per message id
     let message = engine
         .runtime()
         .cache()
@@ -1274,10 +1318,19 @@ async fn sch_message_re_sent_if_not_ack() {
     assert_eq!(message.r#type, "workflow");
     assert_eq!(message.pid, id);
     assert_eq!(message.state, MessageState::Created);
-    assert_eq!(message.status, MessageStatus::Created);
-    assert!(message.create_time > 0);
-    assert!(message.update_time > 0);
-    assert!(message.retry_times > 0);
+
+    // the delivery row keeps the retry state of this channel
+    let delivery = engine
+        .runtime()
+        .cache()
+        .store()
+        .deliveries()
+        .find(&m.delivery_id.clone().unwrap())
+        .unwrap();
+    assert_eq!(delivery.status, MessageStatus::Created);
+    assert!(delivery.create_time > 0);
+    assert!(delivery.update_time > 0);
+    assert!(delivery.retry_times > 0);
 }
 
 #[tokio::test]
@@ -1318,8 +1371,9 @@ async fn sch_message_error_if_not_ack_and_exceed_max_reties() {
         if e.r#type == "workflow" && e.state() == MessageState::Created {
             // not ack the message
             rx.update(|data| data.push(e.inner().clone()));
-        } else {
-            engine.executor().msg().ack(&e.id).unwrap();
+        } else if let Some(delivery_id) = &e.delivery_id {
+            // ack the other deliveries of this channel
+            engine.executor().msg().ack(delivery_id).unwrap();
         }
     });
     e2.runtime().launch(&proc).unwrap();
@@ -1327,14 +1381,93 @@ async fn sch_message_error_if_not_ack_and_exceed_max_reties() {
     assert!(ret.len() > 1);
 
     let m = ret.first().unwrap();
+    // canonical message row
     let message = e2.runtime().cache().store().messages().find(&m.id).unwrap();
     assert_eq!(message.r#type, "workflow");
     assert_eq!(message.pid, id);
     assert_eq!(message.state, MessageState::Created);
-    assert_eq!(message.status, MessageStatus::Error);
-    assert!(message.create_time > 0);
-    assert!(message.update_time > 0);
-    assert_eq!(message.retry_times, config.max_message_retry_times());
+
+    // the delivery row turns into error after max retries
+    let delivery = e2
+        .runtime()
+        .cache()
+        .store()
+        .deliveries()
+        .find(&m.delivery_id.clone().unwrap())
+        .unwrap();
+    assert_eq!(delivery.status, MessageStatus::Error);
+    assert!(delivery.create_time > 0);
+    assert!(delivery.update_time > 0);
+    assert_eq!(delivery.retry_times, config.max_message_retry_times());
+}
+
+#[tokio::test]
+async fn sch_message_redelivery_goes_to_owning_channel_only() {
+    // two ack channels share the same emitted messages; channel a acks its
+    // deliveries while channel b does not — the retry timer must re-send only
+    // channel b's deliveries, never acked channel a again
+    let workflow = Workflow::new();
+    let id = utils::longid();
+    let (engine, proc) = create_proc(&workflow, &id);
+    let _rt = engine.runtime();
+
+    let sig_b = engine.signal(Vec::<Message>::default());
+    let b_send = sig_b.clone();
+    let b_close = sig_b.clone();
+    let sig_a = engine.signal(Vec::<Message>::default());
+    let a_send = sig_a.clone();
+    let a_recv = sig_a.clone();
+
+    let engine_a = engine.clone();
+    engine
+        .channel_with_options(&ChannelOptions {
+            id: "chan_a".to_string(),
+            ack: true,
+            ..Default::default()
+        })
+        .on_message(move |e| {
+            if let Some(delivery_id) = &e.delivery_id {
+                engine_a.executor().msg().ack(delivery_id).unwrap();
+            }
+            if e.r#type == "workflow" && e.state() == MessageState::Created {
+                a_send.update(|data| data.push(e.inner().clone()));
+            }
+        });
+
+    // channel b: never acks, records the workflow-created redeliveries
+    let b_close2 = b_close.clone();
+    engine
+        .channel_with_options(&ChannelOptions {
+            id: "chan_b".to_string(),
+            ack: true,
+            ..Default::default()
+        })
+        .on_message(move |e| {
+            if e.r#type == "workflow" && e.state() == MessageState::Created {
+                b_send.update(|data| data.push(e.inner().clone()));
+                if b_close2.data().len() > 1 {
+                    b_close2.close();
+                }
+            }
+        });
+
+    engine.runtime().launch(&proc).unwrap();
+    let received_b = sig_b.timeout(6000).await;
+    assert!(
+        received_b.len() > 1,
+        "channel b should receive the workflow-created message again, got {:?}",
+        received_b.len()
+    );
+
+    // both redeliveries are the same delivery of the same message
+    assert_eq!(received_b[0].id, received_b[1].id);
+    assert_eq!(received_b[0].delivery_id, received_b[1].delivery_id);
+    let msg_id = received_b[0].id.clone();
+
+    // channel a saw the message exactly once (its ack stopped the retries)
+    let received_a = a_recv.timeout(200).await;
+    assert_eq!(received_a.len(), 1, "channel a must not be redelivered");
+    assert_eq!(received_a[0].id, msg_id);
 }
 
 #[tokio::test]

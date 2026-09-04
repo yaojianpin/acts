@@ -53,6 +53,10 @@ impl Store {
         self.collection()
     }
 
+    pub fn deliveries(&self) -> Arc<dyn DbCollection<Item = data::Delivery>> {
+        self.collection()
+    }
+
     pub fn events(&self) -> Arc<dyn DbCollection<Item = data::Event>> {
         self.collection()
     }
@@ -82,6 +86,7 @@ impl Store {
             Self::rebuild_one::<data::Package>,
             Self::rebuild_one::<data::Model>,
             Self::rebuild_one::<data::Message>,
+            Self::rebuild_one::<data::Delivery>,
             Self::rebuild_one::<data::Event>,
             Self::rebuild_one::<data::Op>,
         ] {

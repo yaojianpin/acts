@@ -22,6 +22,11 @@ enum KeyEvent {
     Complete(Message),
     Message(Message),
     Error(Message),
+    /// a stored delivery row is re-sent to the single channel it belongs to
+    Delivery {
+        chan_id: String,
+        msg: Message,
+    },
 }
 
 async fn consume_key_events(
@@ -37,7 +42,36 @@ async fn consume_key_events(
             KeyEvent::Complete(item) => dispatch_key_event(&completes, item),
             KeyEvent::Message(item) => dispatch_key_event(&messages, item),
             KeyEvent::Error(item) => dispatch_key_event(&errors, item),
+            KeyEvent::Delivery { chan_id, msg } => {
+                dispatch_delivery(&messages, &chan_id, msg);
+            }
         }
+    }
+}
+
+/// Deliver a stored delivery row to the single channel handler it belongs to.
+/// When no handler is registered under the channel (it unsubscribed) the row
+/// is dropped — it stays in the store and will be retried later.
+fn dispatch_delivery(
+    handlers: &ShareLock<HashMap<String, ActWorkflowMessageHandle>>,
+    chan_id: &str,
+    item: Message,
+) {
+    let Some(handle) = handlers.read().get(chan_id).cloned() else {
+        debug!(chan = %chan_id, "delivery channel handler not found");
+        return;
+    };
+    let event = Event::from_inner(item);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (handle)(&event)));
+    if let Err(payload) = result {
+        let panic = if let Some(s) = payload.downcast_ref::<&str>() {
+            (*s).to_string()
+        } else if let Some(s) = payload.downcast_ref::<String>() {
+            s.clone()
+        } else {
+            "unknown panic payload".to_string()
+        };
+        error!(panic = %panic, "delivery handler panicked");
     }
 }
 
@@ -209,6 +243,16 @@ impl Emitter {
     pub fn emit_message(&self, msg: &Message) {
         debug!("message emitted");
         let _ = self.queue.send(KeyEvent::Message(msg.clone()));
+    }
+    /// Re-send a stored delivery row only to the channel it belongs to
+    /// (`chan_id`), not to every matching channel handler.
+    #[instrument(skip(self, msg), fields(pid = %msg.pid, tid = %msg.tid, mid = %msg.mid))]
+    pub fn emit_delivery(&self, chan_id: &str, msg: &Message) {
+        debug!(chan = %chan_id, "delivery emitted");
+        let _ = self.queue.send(KeyEvent::Delivery {
+            chan_id: chan_id.to_string(),
+            msg: msg.clone(),
+        });
     }
 
     #[instrument(skip(self, state), fields(pid = %state.pid, tid = %state.tid, mid = %state.mid))]

@@ -294,7 +294,7 @@ impl Runtime {
                     // already applied durably (the state write landed but the
                     // close was lost) — close and mark the messages completed
                     close(&self.cache.store())?;
-                    self.cache.store().set_message_with(
+                    self.cache.store().set_deliveries_with(
                         &pid,
                         &tid,
                         data::MessageStatus::Completed,
@@ -310,11 +310,13 @@ impl Runtime {
                 }
             } else if task.is_sign(Sign::NEXT_COMPLETE) {
                 // propagation already completed durably; just close the record
-                // and mark the messages completed
+                // and mark the deliveries completed
                 close(&self.cache.store())?;
-                self.cache
-                    .store()
-                    .set_message_with(&pid, &tid, data::MessageStatus::Completed)?;
+                self.cache.store().set_deliveries_with(
+                    &pid,
+                    &tid,
+                    data::MessageStatus::Completed,
+                )?;
                 continue;
             } else {
                 self.queue.send_next(&task)?;
@@ -334,10 +336,11 @@ impl Runtime {
         self.do_action(&Action::new(pid, tid, action, options))
     }
 
+    /// Ack one delivery row (by its delivery id).
     pub fn ack(&self, id: &str) -> Result<()> {
         self.cache
             .store()
-            .set_message(id, data::MessageStatus::Acked)
+            .set_delivery(id, data::MessageStatus::Acked)
     }
 
     pub fn event_loop(self: &Arc<Self>) {
@@ -548,13 +551,27 @@ impl Runtime {
                     _= shutdown.cancelled() => break,
                     _ = intv.tick() => {}
                 }
-                let _ = cache.store().with_no_response_messages(
+                // each not-yet-acked delivery row is re-sent to the channel it
+                // belongs to only
+                let _ = cache.store().with_no_response_deliveries(
                     interval_ms as i64,
                     max_message_retry_times,
-                    |m| {
-                        let emitter = evt.clone();
-                        let m = m.clone();
-                        emitter.emit_message(&m);
+                    |d| {
+                        let store = cache.store();
+                        match store.messages().find(&d.msg_id) {
+                            Ok(message) => {
+                                let emitter = evt.clone();
+                                let mut msg: crate::event::Message = message.into();
+                                msg.delivery_id = Some(d.id.clone());
+                                emitter.emit_delivery(&d.chan_id, &msg);
+                            }
+                            Err(err) => {
+                                // orphan delivery: its canonical message is
+                                // gone, it can never be re-sent — drop it
+                                error!(delivery_id = %d.id, msg_id = %d.msg_id, error = %err, "delivery without canonical message dropped");
+                                let _ = store.deliveries().delete(&d.id);
+                            }
+                        }
                     },
                 );
             }

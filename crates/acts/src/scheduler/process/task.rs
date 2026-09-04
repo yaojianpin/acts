@@ -236,6 +236,7 @@ impl Task {
         let state: MessageState = self.state().into();
         Message {
             id: utils::longid(),
+            delivery_id: None,
             tid: self.id.clone(),
             name: self.node.content.name(),
             r#type: self.node.kind().to_string(),

@@ -1,6 +1,14 @@
-use crate::{Event, Message, Vars, scheduler::Runtime, utils};
+use crate::{Event, Message, Result, Vars, scheduler::Runtime, utils};
 use std::sync::Arc;
 use tracing::{debug, error, info};
+
+/// channel match filters: (type, state, uses, options) globs
+type GlobSet = (
+    globset::GlobMatcher,
+    globset::GlobMatcher,
+    globset::GlobMatcher,
+    Vec<(String, globset::GlobMatcher)>,
+);
 
 #[derive(Debug, Clone)]
 pub struct ChannelOptions {
@@ -58,12 +66,7 @@ pub struct Channel {
     ack: bool,
     chan_id: String,
     pattern: String,
-    glob: (
-        globset::GlobMatcher,
-        globset::GlobMatcher,
-        globset::GlobMatcher,
-        Vec<(String, globset::GlobMatcher)>,
-    ),
+    glob: GlobSet,
 }
 
 impl Channel {
@@ -137,9 +140,7 @@ impl Channel {
         let pattern = self.pattern.clone();
         self.runtime.emitter().on_message(&self.chan_id, move |e| {
             debug!(chan = %chan_id, "on message");
-            if is_match(&glob, e) && store_if(&runtime, ack, &chan_id, &pattern, e) {
-                f(e);
-            }
+            deliver(&glob, &runtime, ack, &chan_id, &pattern, &f, e);
         });
     }
 
@@ -150,9 +151,7 @@ impl Channel {
         let chan_id = self.chan_id.clone();
         let pattern = self.pattern.clone();
         self.runtime.emitter().on_start(&self.chan_id, move |e| {
-            if is_match(&glob, e) && store_if(&runtime, ack, &chan_id, &pattern, e) {
-                f(e);
-            }
+            deliver(&glob, &runtime, ack, &chan_id, &pattern, &f, e);
         });
     }
 
@@ -164,9 +163,7 @@ impl Channel {
         let pattern = self.pattern.clone();
         self.runtime.emitter().on_complete(&self.chan_id, move |e| {
             debug!(chan = %chan_id, "on complete");
-            if is_match(&glob, e) && store_if(&runtime, ack, &chan_id, &pattern, e) {
-                f(e);
-            }
+            deliver(&glob, &runtime, ack, &chan_id, &pattern, &f, e);
         });
     }
 
@@ -177,9 +174,7 @@ impl Channel {
         let chan_id = self.chan_id.clone();
         let pattern = self.pattern.clone();
         self.runtime.emitter().on_error(&self.chan_id, move |e| {
-            if is_match(&glob, e) && store_if(&runtime, ack, &chan_id, &pattern, e) {
-                f(e);
-            }
+            deliver(&glob, &runtime, ack, &chan_id, &pattern, &f, e);
         });
     }
 
@@ -188,35 +183,77 @@ impl Channel {
     }
 }
 
+/// Deliver a message event to a channel handler. When the channel requires
+/// acks and the event is a fresh emission (not a redelivery), it is first
+/// stored as a delivery row of this channel — the handler event is then
+/// tagged with the new delivery id so the client can ack this exact delivery.
+/// Redeliveries already carry their delivery id and pass through untouched.
+/// If a required store fails the message is not delivered.
+fn deliver<F>(
+    glob: &GlobSet,
+    runtime: &Arc<Runtime>,
+    ack: bool,
+    chan_id: &str,
+    pattern: &str,
+    f: &F,
+    e: &Event<Message>,
+) where
+    F: Fn(&Event<Message>) + Send + Sync + 'static,
+{
+    if !is_match(glob, e) {
+        return;
+    }
+
+    match store_if(runtime, ack, chan_id, pattern, e) {
+        Ok(Some(delivery_id)) => {
+            let mut msg = e.inner().clone();
+            msg.delivery_id = Some(delivery_id);
+            let event = Event::from_inner(msg);
+            f(&event);
+        }
+        Ok(None) => f(e),
+        Err(err) => error!(error = %err, chan = %chan_id, "delivery store failed, message dropped"),
+    }
+}
+
+/// Store the message as a delivery row of one channel when the channel must
+/// ack it. The canonical message row is stored once per message id and every
+/// channel delivery of the same event gets its own delivery row. Returns
+/// `Ok(Some(delivery_id))` when a fresh delivery row was stored, `Ok(None)`
+/// when nothing needs storing (non-ack channel or a redelivery that already
+/// has its row), `Err` when the store failed.
 fn store_if(
     runtime: &Arc<Runtime>,
     ack: bool,
     chan_id: &str,
     pattern: &str,
     message: &Message,
-) -> bool {
-    if ack && !chan_id.is_empty() && message.retry_times == 0 {
-        info!(r#type = message.r#type, pid = %message.pid, tid = %message.tid, mid = %message.mid,  state = %message.state, "message stored");
-        let msg = message.into(chan_id, pattern);
+) -> Result<Option<String>> {
+    if ack && !chan_id.is_empty() && message.delivery_id.is_none() {
+        info!(r#type = message.r#type, pid = %message.pid, tid = %message.tid, mid = %message.mid,  state = %message.state, "delivery stored");
         let store = runtime.cache().store();
-        store.messages().create(&msg).unwrap_or_else(|err| {
-            error!(error = %err, "channel store failure");
-            false
-        })
+
+        // the canonical message is stored once per message id — later
+        // channel deliveries of the same event reuse the row
+        if !store.messages().exists(&message.id)? {
+            store.messages().create(&message.into_message())?;
+        }
+
+        // each channel delivery gets its own delivery row
+        let delivery = message.into_delivery(chan_id, pattern);
+        match store.deliveries().create(&delivery) {
+            Ok(_) => Ok(Some(delivery.id)),
+            Err(err) => {
+                error!(error = %err, "channel store failure");
+                Err(err)
+            }
+        }
     } else {
-        true
+        Ok(None)
     }
 }
 
-fn is_match(
-    glob: &(
-        globset::GlobMatcher,
-        globset::GlobMatcher,
-        globset::GlobMatcher,
-        Vec<(String, globset::GlobMatcher)>,
-    ),
-    e: &Event<Message>,
-) -> bool {
+fn is_match(glob: &GlobSet, e: &Event<Message>) -> bool {
     let (pat_type, pat_state, pat_uses, pat_options) = glob;
     if !pat_type.is_match(&e.r#type)
         || !pat_state.is_match(e.state.as_ref())

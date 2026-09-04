@@ -353,11 +353,21 @@ impl GrpcServer {
                 wrap_result!(ack, name, executor.msg().ack(&id))
             }
             "msg:redo" => {
-                wrap_result!(ack, name, executor.msg().redo())
+                match options.get::<String>("id") {
+                    // re-send one error delivery to its channel
+                    Some(id) => wrap_result!(ack, name, executor.msg().redeliver(&id)),
+                    // re-send every error delivery
+                    None => wrap_result!(ack, name, executor.msg().redo()),
+                }
             }
             "msg:clear" => {
-                let pid = options.get::<String>("pid");
-                wrap_result!(ack, name, executor.msg().clear(pid))
+                if let Some(id) = options.get::<String>("id") {
+                    // clear one error delivery
+                    wrap_result!(ack, name, executor.msg().clear_delivery(&id))
+                } else {
+                    let pid = options.get::<String>("pid");
+                    wrap_result!(ack, name, executor.msg().clear(pid))
+                }
             }
             "msg:rm" => {
                 let id = options

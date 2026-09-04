@@ -5,7 +5,7 @@ macro_rules! gen_store_tests {
         use serial_test::serial;
         use std::collections::HashSet;
         use std::sync::OnceLock;
-        use $crate::store::data::{Message, MessageStatus, Model, Package, Proc, Task};
+        use $crate::store::data::{Delivery, Message, MessageStatus, Model, Package, Proc, Task};
         use $crate::store::query::{Expr, ExprOp, Sort};
         use $crate::store::{Filter, Query};
         use $crate::{MessageState, TaskState, Workflow, scheduler::NodeKind, utils};
@@ -1023,13 +1023,8 @@ macro_rules! gen_store_tests {
                 uses: Some("package".to_string()),
                 inputs: json!({}).to_string(),
                 outputs: json!({}).to_string(),
-                chan_id: "test1".to_string(),
-                chan_pattern: "*:*:*:*".to_string(),
                 create_time: 0,
-                update_time: 0,
-                retry_times: 0,
                 timestamp: 0,
-                status: MessageStatus::Created,
                 v: 0,
             };
 
@@ -1061,13 +1056,8 @@ macro_rules! gen_store_tests {
                 uses: Some("package".to_string()),
                 inputs: json!({}).to_string(),
                 outputs: json!({}).to_string(),
-                chan_id: "test1".to_string(),
-                chan_pattern: "*:*:*:*".to_string(),
                 create_time: 0,
-                update_time: 0,
-                retry_times: 0,
                 timestamp: 0,
-                status: MessageStatus::Created,
                 v: 0,
             };
 
@@ -1102,13 +1092,8 @@ macro_rules! gen_store_tests {
                     uses: Some("package".to_string()),
                     inputs: json!({}).to_string(),
                     outputs: json!({}).to_string(),
-                    chan_id: "test1".to_string(),
-                    chan_pattern: "*:*:*:*".to_string(),
                     create_time: 0,
-                    update_time: 0,
-                    retry_times: 0,
                     timestamp: 0,
-                    status: MessageStatus::Created,
                     v: 0,
                 };
                 store.messages().create(&msg).unwrap();
@@ -1154,13 +1139,8 @@ macro_rules! gen_store_tests {
                     uses: Some("package".to_string()),
                     inputs: json!({}).to_string(),
                     outputs: json!({}).to_string(),
-                    chan_id: "test1".to_string(),
-                    chan_pattern: "*:*:*:*".to_string(),
                     create_time: 0,
-                    update_time: 0,
-                    retry_times: 0,
                     timestamp: 0,
-                    status: MessageStatus::Created,
                     v: 0,
                 };
                 store.messages().create(&msg).unwrap();
@@ -1206,13 +1186,8 @@ macro_rules! gen_store_tests {
                     uses: Some("package".to_string()),
                     inputs: json!({}).to_string(),
                     outputs: json!({}).to_string(),
-                    chan_id: "test1".to_string(),
-                    chan_pattern: "*:*:*:*".to_string(),
                     create_time: 0,
-                    update_time: 0,
-                    retry_times: 0,
                     timestamp: 0,
-                    status: MessageStatus::Created,
                     v: 0,
                 };
                 store.messages().create(&msg).unwrap();
@@ -1233,13 +1208,8 @@ macro_rules! gen_store_tests {
                     uses: Some("package".to_string()),
                     inputs: json!({}).to_string(),
                     outputs: json!({}).to_string(),
-                    chan_id: "test1".to_string(),
-                    chan_pattern: "*:*:*:*".to_string(),
                     create_time: 0,
-                    update_time: 0,
-                    retry_times: 0,
                     timestamp: 0,
-                    status: MessageStatus::Created,
                     v: 0,
                 };
                 store.messages().create(&msg).unwrap();
@@ -1279,13 +1249,8 @@ macro_rules! gen_store_tests {
                     uses: Some("package".to_string()),
                     inputs: json!({}).to_string(),
                     outputs: json!({}).to_string(),
-                    chan_id: "test1".to_string(),
-                    chan_pattern: "*:*:*:*".to_string(),
                     create_time: 0,
-                    update_time: 0,
-                    retry_times: 0,
                     timestamp: utils::time::timestamp(),
-                    status: MessageStatus::Created,
                     v: 0,
                 };
                 store.messages().create(&msg).unwrap();
@@ -1329,13 +1294,8 @@ macro_rules! gen_store_tests {
                 uses: Some("package".to_string()),
                 inputs: json!({}).to_string(),
                 outputs: json!({}).to_string(),
-                chan_id: "test1".to_string(),
-                chan_pattern: "*:*:*:*".to_string(),
                 create_time: 0,
-                update_time: 0,
-                retry_times: 0,
                 timestamp: 0,
-                status: MessageStatus::Created,
                 v: 0,
             };
 
@@ -1344,14 +1304,12 @@ macro_rules! gen_store_tests {
             let id = utils::Id::new(&pid, &tid);
             let mut msg = store.messages().find(&id.id()).unwrap();
             msg.state = MessageState::Completed;
-            msg.retry_times = 1;
-            msg.status = MessageStatus::Completed;
+            msg.name = "updated".to_string();
             store.messages().update(&msg).unwrap();
 
             let msg2 = store.messages().find(&id.id()).unwrap();
             assert_eq!(msg2.state, MessageState::Completed);
-            assert_eq!(msg2.retry_times, 1);
-            assert_eq!(msg2.status, MessageStatus::Completed);
+            assert_eq!(msg2.name, "updated");
         }
 
         #[tokio::test(flavor = "multi_thread")]
@@ -1375,13 +1333,8 @@ macro_rules! gen_store_tests {
                 uses: Some("package".to_string()),
                 inputs: json!({}).to_string(),
                 outputs: json!({}).to_string(),
-                chan_id: "test1".to_string(),
-                chan_pattern: "*:*:*:*".to_string(),
                 create_time: 0,
-                update_time: 0,
-                retry_times: 0,
                 timestamp: 0,
-                status: MessageStatus::Created,
                 v: 0,
             };
 
@@ -1863,13 +1816,8 @@ macro_rules! gen_store_tests {
                 uses: Some("package".to_string()),
                 inputs: json!({}).to_string(),
                 outputs: json!({}).to_string(),
-                chan_id: "test1".to_string(),
-                chan_pattern: "*:*:*:*".to_string(),
                 create_time: 0,
-                update_time: 0,
-                retry_times: 0,
                 timestamp: 0,
-                status: MessageStatus::Created,
                 v: 0,
             };
             store.messages().create(&msg).expect("create message");
@@ -1877,7 +1825,7 @@ macro_rules! gen_store_tests {
             // find goes through upcast
             let found = store.messages().find(&msg.id).unwrap();
             assert_eq!(found.id, msg.id);
-            assert_eq!(found.v, 1);
+            assert_eq!(found.v, 2);
 
             // query goes through upcast
             let q = Query::new()
@@ -1885,7 +1833,7 @@ macro_rules! gen_store_tests {
                 .limit(1);
             let page = store.messages().query(&q).unwrap();
             assert_eq!(page.rows.len(), 1);
-            assert_eq!(page.rows[0].v, 1);
+            assert_eq!(page.rows[0].v, 2);
         }
 
         #[tokio::test(flavor = "multi_thread")]
@@ -1945,31 +1893,22 @@ macro_rules! gen_store_tests {
                 MessageStatus::Error,     // 3
             ];
             for &status in &statuses {
-                for i in 0..5 {
-                    let msg = Message {
+                for _ in 0..5 {
+                    let msg = Delivery {
                         id: utils::shortid(),
-                        name: format!("msg-{:02}-{:02}", status as i8, i),
+                        msg_id: utils::shortid(),
                         pid: pid.clone(),
                         tid: tid.clone(),
-                        nid: utils::shortid(),
-                        mid: utils::shortid(),
-                        state: MessageState::Created,
-                        start_time: 0,
-                        end_time: 0,
-                        r#type: "step".to_string(),
-                        uses: Some("package".to_string()),
-                        inputs: json!({}).to_string(),
-                        outputs: json!({}).to_string(),
                         chan_id: "test1".to_string(),
                         chan_pattern: "*:*:*:*".to_string(),
+                        status,
+                        retry_times: 0,
                         create_time: 0,
                         update_time: 0,
-                        retry_times: 0,
-                        timestamp: utils::time::timestamp(),
-                        status,
+                        timestamp: 0,
                         v: 0,
                     };
-                    store.messages().create(&msg).unwrap();
+                    store.deliveries().create(&msg).unwrap();
                 }
             }
 
@@ -1979,7 +1918,7 @@ macro_rules! gen_store_tests {
                 .order("status", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).unwrap();
             assert_eq!(ret.count, 20);
             for i in 1..ret.rows.len() {
                 let prev: i64 = ret.rows[i - 1].status.into();
@@ -2005,31 +1944,22 @@ macro_rules! gen_store_tests {
                 MessageStatus::Error,     // 3
             ];
             for &status in &statuses {
-                for i in 0..5 {
-                    let msg = Message {
+                for _ in 0..5 {
+                    let msg = Delivery {
                         id: utils::shortid(),
-                        name: format!("msg-{:02}-{:02}", status as i8, i),
+                        msg_id: utils::shortid(),
                         pid: pid.clone(),
                         tid: tid.clone(),
-                        nid: utils::shortid(),
-                        mid: utils::shortid(),
-                        state: MessageState::Created,
-                        start_time: 0,
-                        end_time: 0,
-                        r#type: "step".to_string(),
-                        uses: Some("package".to_string()),
-                        inputs: json!({}).to_string(),
-                        outputs: json!({}).to_string(),
                         chan_id: "test1".to_string(),
                         chan_pattern: "*:*:*:*".to_string(),
+                        status,
+                        retry_times: 0,
                         create_time: 0,
                         update_time: 0,
-                        retry_times: 0,
-                        timestamp: utils::time::timestamp(),
-                        status,
+                        timestamp: 0,
                         v: 0,
                     };
-                    store.messages().create(&msg).unwrap();
+                    store.deliveries().create(&msg).unwrap();
                 }
             }
 
@@ -2039,7 +1969,7 @@ macro_rules! gen_store_tests {
                 .order("status", Sort::Desc)
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).unwrap();
             assert_eq!(ret.count, 20);
             for i in 1..ret.rows.len() {
                 let prev: i64 = ret.rows[i - 1].status.into();
@@ -2071,41 +2001,32 @@ macro_rules! gen_store_tests {
                 } else {
                     MessageStatus::Error
                 };
-                let msg = Message {
+                let msg = Delivery {
                     id: utils::shortid(),
-                    name: format!("msg-{:02}", i),
+                    msg_id: utils::shortid(),
                     pid: pid.clone(),
                     tid: tid.clone(),
-                    nid: utils::shortid(),
-                    mid: utils::shortid(),
-                    state: MessageState::Created,
-                    start_time: 0,
-                    end_time: 0,
-                    r#type: "step".to_string(),
-                    uses: Some("package".to_string()),
-                    inputs: json!({}).to_string(),
-                    outputs: json!({}).to_string(),
                     chan_id: "test1".to_string(),
                     chan_pattern: "*:*:*:*".to_string(),
+                    status,
+                    retry_times: 0,
                     create_time: 0,
                     update_time: 0,
-                    retry_times: 0,
-                    timestamp: utils::time::timestamp(),
-                    status,
+                    timestamp: 0,
                     v: 0,
                 };
-                store.messages().create(&msg).unwrap();
+                store.deliveries().create(&msg).unwrap();
             }
 
             // name is NOT indexed, status IS indexed.
-            // The fix should match "status" (indexed) not "name" (unindexed).
+            // The fix should match "status" (indexed) not "update_time" (unindexed).
             let q = Query::new()
                 .filter(Filter::and().expr(Expr::eq("pid", pid.clone())))
-                .order("name", Sort::Asc) // NOT indexed — should be skipped
+                .order("update_time", Sort::Asc) // NOT indexed — should be skipped
                 .order("status", Sort::Asc) // IS indexed — should determine is_rev
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).unwrap();
             assert_eq!(ret.count, 20);
             for i in 1..ret.rows.len() {
                 let prev: i64 = ret.rows[i - 1].status.into();
@@ -2133,31 +2054,22 @@ macro_rules! gen_store_tests {
                 MessageStatus::Completed,
                 MessageStatus::Error,
             ] {
-                for i in 0..5 {
-                    let msg = Message {
+                for _ in 0..5 {
+                    let msg = Delivery {
                         id: utils::shortid(),
-                        name: format!("pg-{:02}-{:02}", status as i8, i),
+                        msg_id: utils::shortid(),
                         pid: pid.clone(),
                         tid: tid.clone(),
-                        nid: utils::shortid(),
-                        mid: utils::shortid(),
-                        state: MessageState::Created,
-                        start_time: 0,
-                        end_time: 0,
-                        r#type: "step".to_string(),
-                        uses: Some("package".to_string()),
-                        inputs: json!({}).to_string(),
-                        outputs: json!({}).to_string(),
                         chan_id: "test1".to_string(),
                         chan_pattern: "*:*:*:*".to_string(),
+                        status,
+                        retry_times: 0,
                         create_time: 0,
                         update_time: 0,
-                        retry_times: 0,
-                        timestamp: utils::time::timestamp(),
-                        status,
+                        timestamp: 0,
                         v: 0,
                     };
-                    store.messages().create(&msg).unwrap();
+                    store.deliveries().create(&msg).unwrap();
                 }
             }
 
@@ -2169,7 +2081,7 @@ macro_rules! gen_store_tests {
                     .order("status", Sort::Asc)
                     .offset(0)
                     .limit(7);
-                let page = store.messages().query(&q).unwrap();
+                let page = store.deliveries().query(&q).unwrap();
                 assert_eq!(page.count, 20);
                 assert_eq!(page.rows.len(), 7);
                 assert_eq!(page.page_size, 7);
@@ -2193,7 +2105,7 @@ macro_rules! gen_store_tests {
                     .order("status", Sort::Asc)
                     .offset(7)
                     .limit(7);
-                let page = store.messages().query(&q).unwrap();
+                let page = store.deliveries().query(&q).unwrap();
                 assert_eq!(page.count, 20);
                 assert_eq!(page.rows.len(), 7);
                 assert_eq!(page.page_num, 2);
@@ -2218,7 +2130,7 @@ macro_rules! gen_store_tests {
                     .order("status", Sort::Asc)
                     .offset(14)
                     .limit(7);
-                let page = store.messages().query(&q).unwrap();
+                let page = store.deliveries().query(&q).unwrap();
                 assert_eq!(page.count, 20);
                 assert_eq!(page.rows.len(), 6);
                 assert_eq!(page.page_num, 3);
@@ -2240,7 +2152,7 @@ macro_rules! gen_store_tests {
                     .order("status", Sort::Desc)
                     .offset(0)
                     .limit(7);
-                let page = store.messages().query(&q).unwrap();
+                let page = store.deliveries().query(&q).unwrap();
                 assert_eq!(page.count, 20);
                 assert_eq!(page.rows.len(), 7);
                 for i in 1..page.rows.len() {
@@ -2266,37 +2178,28 @@ macro_rules! gen_store_tests {
                 MessageStatus::Completed,
                 MessageStatus::Error,
             ] {
-                for i in 0..5 {
-                    let msg = Message {
+                for _ in 0..5 {
+                    let msg = Delivery {
                         id: utils::shortid(),
-                        name: format!("slice-{:02}-{:02}", status as i8, i),
+                        msg_id: utils::shortid(),
                         pid: pid.clone(),
                         tid: tid.clone(),
-                        nid: utils::shortid(),
-                        mid: utils::shortid(),
-                        state: MessageState::Created,
-                        start_time: 0,
-                        end_time: 0,
-                        r#type: "step".to_string(),
-                        uses: Some("package".to_string()),
-                        inputs: json!({}).to_string(),
-                        outputs: json!({}).to_string(),
                         chan_id: "test1".to_string(),
                         chan_pattern: "*:*:*:*".to_string(),
+                        status,
+                        retry_times: 0,
                         create_time: 0,
                         update_time: 0,
-                        retry_times: 0,
-                        timestamp: utils::time::timestamp(),
-                        status,
+                        timestamp: 0,
                         v: 0,
                     };
-                    store.messages().create(&msg).unwrap();
+                    store.deliveries().create(&msg).unwrap();
                 }
             }
             let base = Query::new().filter(Filter::and().expr(Expr::eq("pid", pid.clone())));
             for order in [Sort::Asc, Sort::Desc] {
                 let full: Vec<String> = store
-                    .messages()
+                    .deliveries()
                     .query(&base.clone().order("status", order.clone()).limit(100))
                     .unwrap()
                     .rows
@@ -2307,7 +2210,7 @@ macro_rules! gen_store_tests {
                 let mut seen = HashSet::new();
                 for (idx, offset) in [0usize, 7, 14].into_iter().enumerate() {
                     let page = store
-                        .messages()
+                        .deliveries()
                         .query(
                             &base
                                 .clone()
@@ -2357,13 +2260,8 @@ macro_rules! gen_store_tests {
                     uses: Some("package".to_string()),
                     inputs: json!({}).to_string(),
                     outputs: json!({}).to_string(),
-                    chan_id: "test1".to_string(),
-                    chan_pattern: "*:*:*:*".to_string(),
                     create_time: 0,
-                    update_time: 0,
-                    retry_times: 0,
                     timestamp: ts,
-                    status: MessageStatus::Created,
                     v: 0,
                 };
                 store.messages().create(&msg).unwrap();
@@ -2413,29 +2311,45 @@ macro_rules! gen_store_tests {
             assert_eq!(ret.rows[0].timestamp, 500);
 
             // Filter by status=Created (indexed integer field, value=0).
-            // All 6 messages were created with status=Created, so count should be 6.
+            // Since the split, status lives on the separated deliveries
+            // collection: seed six deliveries (status=Created) for this pid.
+            for _ in 0..6 {
+                let msg = Delivery {
+                    id: utils::shortid(),
+                    msg_id: utils::shortid(),
+                    pid: pid.clone(),
+                    tid: tid.clone(),
+                    chan_id: "test1".to_string(),
+                    chan_pattern: "*:*:*:*".to_string(),
+                    status: MessageStatus::Created,
+                    retry_times: 0,
+                    create_time: 0,
+                    update_time: 0,
+                    timestamp: 0,
+                    v: 0,
+                };
+                store.deliveries().create(&msg).unwrap();
+            }
             let q = Query::new()
                 .filter(
                     Filter::and()
                         .expr(Expr::eq("pid", pid.clone()))
                         .expr(Expr::eq("status", MessageStatus::Created as i32)),
                 )
-                .order("timestamp", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).unwrap();
             assert_eq!(ret.count, 6);
-            // Double-check: filter for a status that no message has
+            // Double-check: filter for a status that no delivery has
             let q = Query::new()
                 .filter(
                     Filter::and()
                         .expr(Expr::eq("pid", pid.clone()))
                         .expr(Expr::eq("status", MessageStatus::Error as i32)),
                 )
-                .order("timestamp", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).unwrap();
             assert_eq!(ret.count, 0);
         }
 
@@ -2466,13 +2380,8 @@ macro_rules! gen_store_tests {
                     uses: Some("package".to_string()),
                     inputs: json!({}).to_string(),
                     outputs: json!({}).to_string(),
-                    chan_id: "test1".to_string(),
-                    chan_pattern: "*:*:*:*".to_string(),
                     create_time: 0,
-                    update_time: 0,
-                    retry_times: 0,
                     timestamp: ts,
-                    status: MessageStatus::Created,
                     v: 0,
                 };
                 store.messages().create(&msg).unwrap();
@@ -2651,32 +2560,23 @@ macro_rules! gen_store_tests {
                 MessageStatus::Completed,
                 MessageStatus::Error,
             ];
-            for (i, &status) in statuses.iter().enumerate() {
-                for j in 0..5 {
-                    let msg = Message {
+            for &status in &statuses {
+                for _ in 0..5 {
+                    let msg = Delivery {
                         id: utils::shortid(),
-                        name: format!("st-{}-{}", i, j),
+                        msg_id: utils::shortid(),
                         pid: pid.clone(),
                         tid: tid.clone(),
-                        nid: utils::shortid(),
-                        mid: utils::shortid(),
-                        state: MessageState::Created,
-                        start_time: 0,
-                        end_time: 0,
-                        r#type: "step".to_string(),
-                        uses: Some("package".to_string()),
-                        inputs: json!({}).to_string(),
-                        outputs: json!({}).to_string(),
                         chan_id: "test1".to_string(),
                         chan_pattern: "*:*:*:*".to_string(),
+                        status,
+                        retry_times: 0,
                         create_time: 0,
                         update_time: 0,
-                        retry_times: 0,
-                        timestamp: utils::time::timestamp(),
-                        status,
+                        timestamp: 0,
                         v: 0,
                     };
-                    store.messages().create(&msg).unwrap();
+                    store.deliveries().create(&msg).unwrap();
                 }
             }
 
@@ -2696,7 +2596,7 @@ macro_rules! gen_store_tests {
                 .order("status", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).unwrap();
             assert_eq!(ret.count, 10); // 5 Created + 5 Completed
 
             // Verify all results have the correct status
@@ -2715,7 +2615,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).unwrap();
             assert_eq!(ret.count, 5); // 5 Error
 
             // In with no matching values
@@ -2727,7 +2627,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).unwrap();
             assert_eq!(ret.count, 0);
         }
 
@@ -2878,13 +2778,8 @@ macro_rules! gen_store_tests {
                     uses: Some("package".to_string()),
                     inputs: json!({}).to_string(),
                     outputs: json!({}).to_string(),
-                    chan_id: "test1".to_string(),
-                    chan_pattern: "*:*:*:*".to_string(),
                     create_time: 0,
-                    update_time: 0,
-                    retry_times: 0,
                     timestamp: ts,
-                    status: MessageStatus::Created,
                     v: 0,
                 };
                 store.messages().create(&msg).unwrap();
@@ -2922,30 +2817,21 @@ macro_rules! gen_store_tests {
                     2 => MessageStatus::Completed,
                     _ => MessageStatus::Error,
                 };
-                let msg = Message {
+                let msg = Delivery {
                     id: utils::shortid(),
-                    name: format!("pg-in-{:02}", i),
+                    msg_id: utils::shortid(),
                     pid: pid.clone(),
                     tid: tid.clone(),
-                    nid: utils::shortid(),
-                    mid: utils::shortid(),
-                    state: MessageState::Created,
-                    start_time: 0,
-                    end_time: 0,
-                    r#type: "step".to_string(),
-                    uses: Some("package".to_string()),
-                    inputs: json!({}).to_string(),
-                    outputs: json!({}).to_string(),
                     chan_id: "test1".to_string(),
                     chan_pattern: "*:*:*:*".to_string(),
+                    status,
+                    retry_times: 0,
                     create_time: 0,
                     update_time: 0,
-                    retry_times: 0,
-                    timestamp: utils::time::timestamp(),
-                    status,
+                    timestamp: 0,
                     v: 0,
                 };
-                store.messages().create(&msg).unwrap();
+                store.deliveries().create(&msg).unwrap();
             }
 
             // In with Created(0) and Acked(1) → 10 records
@@ -2961,7 +2847,7 @@ macro_rules! gen_store_tests {
                 .order("status", Sort::Asc)
                 .offset(0)
                 .limit(7);
-            let page1 = store.messages().query(&q).unwrap();
+            let page1 = store.deliveries().query(&q).unwrap();
             assert_eq!(page1.count, 10);
             assert_eq!(page1.rows.len(), 7);
             assert_eq!(page1.page_size, 7);
@@ -2993,7 +2879,7 @@ macro_rules! gen_store_tests {
                 .order("status", Sort::Asc)
                 .offset(7)
                 .limit(7);
-            let page2 = store.messages().query(&q).unwrap();
+            let page2 = store.deliveries().query(&q).unwrap();
             assert_eq!(page2.count, 10);
             assert_eq!(page2.rows.len(), 3); // 3 remaining
             assert_eq!(page2.page_num, 2);
@@ -3011,75 +2897,66 @@ macro_rules! gen_store_tests {
             let pid = utils::longid();
             let tid = utils::shortid();
 
-            for &(ts, status) in &[
-                (100, MessageStatus::Created),
-                (200, MessageStatus::Created),
-                (300, MessageStatus::Acked),
-                (400, MessageStatus::Acked),
-                (500, MessageStatus::Completed),
+            for &(rt, status) in &[
+                (0, MessageStatus::Created),
+                (1, MessageStatus::Created),
+                (2, MessageStatus::Acked),
+                (3, MessageStatus::Acked),
+                (4, MessageStatus::Completed),
             ] {
-                let msg = Message {
+                let msg = Delivery {
                     id: utils::shortid(),
-                    name: format!("combo-{}", ts),
+                    msg_id: utils::shortid(),
                     pid: pid.clone(),
                     tid: tid.clone(),
-                    nid: utils::shortid(),
-                    mid: utils::shortid(),
-                    state: MessageState::Created,
-                    start_time: 0,
-                    end_time: 0,
-                    r#type: "step".to_string(),
-                    uses: Some("package".to_string()),
-                    inputs: json!({}).to_string(),
-                    outputs: json!({}).to_string(),
                     chan_id: "test1".to_string(),
                     chan_pattern: "*:*:*:*".to_string(),
+                    status,
+                    retry_times: rt,
                     create_time: 0,
                     update_time: 0,
-                    retry_times: 0,
-                    timestamp: ts,
-                    status,
+                    timestamp: 0,
                     v: 0,
                 };
-                store.messages().create(&msg).unwrap();
+                store.deliveries().create(&msg).unwrap();
             }
 
-            // Between timestamp AND status=Created
-            // Range 150-450 = {200,300,400}. AND status=Created → only 200 matches.
+            // Between retry_times AND status=Created
+            // Range 1-3 = {rt 1,2,3}. AND status=Created → only rt=1 matches.
             let q = Query::new()
                 .filter(
                     Filter::and()
                         .expr(Expr::eq("pid", pid.clone()))
-                        .expr(Expr::between("timestamp", 150, 450))
+                        .expr(Expr::between("retry_times", 1, 3))
                         .expr(Expr::eq("status", MessageStatus::Created as i32)),
                 )
-                .order("timestamp", Sort::Asc)
+                .order("retry_times", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).unwrap();
             assert_eq!(ret.count, 1);
-            assert_eq!(ret.rows[0].timestamp, 200);
+            assert_eq!(ret.rows[0].retry_times, 1);
 
-            // Between timestamp OR status=Completed
-            // Range 150-450 = {200,300,400}. OR status=Completed → {200,300,400,500} = 4
+            // Between retry_times OR status=Completed
+            // Range 1-3 = {rt 1,2,3}. OR status=Completed → {1,2,3,4} = 4
             let q = Query::new()
                 .filter(
                     Filter::and().expr(Expr::eq("pid", pid.clone())).push(
                         Filter::or()
-                            .expr(Expr::between("timestamp", 150, 450))
+                            .expr(Expr::between("retry_times", 1, 3))
                             .expr(Expr::eq("status", MessageStatus::Completed as i32)),
                     ),
                 )
-                .order("timestamp", Sort::Asc)
+                .order("retry_times", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).unwrap();
             assert_eq!(ret.count, 4);
-            let ts_values: Vec<i64> = ret.rows.iter().map(|r| r.timestamp).collect();
-            assert!(ts_values.contains(&200));
-            assert!(ts_values.contains(&300));
-            assert!(ts_values.contains(&400));
-            assert!(ts_values.contains(&500));
+            let rt_values: Vec<i32> = ret.rows.iter().map(|r| r.retry_times).collect();
+            assert!(rt_values.contains(&1));
+            assert!(rt_values.contains(&2));
+            assert!(rt_values.contains(&3));
+            assert!(rt_values.contains(&4));
         }
 
         #[tokio::test(flavor = "multi_thread")]
@@ -3195,30 +3072,21 @@ macro_rules! gen_store_tests {
             ];
             for &status in &statuses {
                 for _ in 0..5 {
-                    let msg = Message {
+                    let msg = Delivery {
                         id: utils::shortid(),
-                        name: format!("ne-{}", utils::shortid()),
+                        msg_id: utils::shortid(),
                         pid: pid.clone(),
                         tid: tid.clone(),
-                        nid: utils::shortid(),
-                        mid: utils::shortid(),
-                        state: MessageState::Created,
-                        start_time: 0,
-                        end_time: 0,
-                        r#type: "step".to_string(),
-                        uses: Some("package".to_string()),
-                        inputs: json!({}).to_string(),
-                        outputs: json!({}).to_string(),
                         chan_id: "test1".to_string(),
                         chan_pattern: "*:*:*:*".to_string(),
+                        status,
+                        retry_times: 0,
                         create_time: 0,
                         update_time: 0,
-                        retry_times: 0,
-                        timestamp: utils::time::timestamp(),
-                        status,
+                        timestamp: 0,
                         v: 0,
                     };
-                    store.messages().create(&msg).unwrap();
+                    store.deliveries().create(&msg).unwrap();
                 }
             }
 
@@ -3231,7 +3099,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).unwrap();
             assert_eq!(ret.count, 15);
             for row in &ret.rows {
                 assert_ne!(row.status, MessageStatus::Created);
@@ -3246,7 +3114,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).unwrap();
             assert_eq!(ret.count, 20);
         }
 
@@ -3346,13 +3214,8 @@ macro_rules! gen_store_tests {
                     uses: Some("package".to_string()),
                     inputs: json!({}).to_string(),
                     outputs: json!({}).to_string(),
-                    chan_id: "test1".to_string(),
-                    chan_pattern: "*:*:*:*".to_string(),
                     create_time: 0,
-                    update_time: 0,
-                    retry_times: 0,
                     timestamp: ts,
-                    status: MessageStatus::Created,
                     v: 0,
                 };
                 store.messages().create(&msg).unwrap();
@@ -3452,13 +3315,8 @@ macro_rules! gen_store_tests {
                     uses: Some("package".to_string()),
                     inputs: json!({}).to_string(),
                     outputs: json!({}).to_string(),
-                    chan_id: "test1".to_string(),
-                    chan_pattern: "*:*:*:*".to_string(),
                     create_time: 0,
-                    update_time: 0,
-                    retry_times: 0,
                     timestamp: ts,
-                    status: MessageStatus::Created,
                     v: 0,
                 };
                 store.messages().create(&msg).unwrap();
@@ -3501,32 +3359,23 @@ macro_rules! gen_store_tests {
             let tid = utils::shortid();
 
             let retry_times_vals: Vec<i32> = vec![0, 1, 2, 3, 4];
-            for (i, &rt) in retry_times_vals.iter().enumerate() {
+            for &rt in &retry_times_vals {
                 for _ in 0..3 {
-                    let msg = Message {
+                    let msg = Delivery {
                         id: utils::shortid(),
-                        name: format!("gt-nonidx-{}-{}", rt, i),
+                        msg_id: utils::shortid(),
                         pid: pid.clone(),
                         tid: tid.clone(),
-                        nid: utils::shortid(),
-                        mid: utils::shortid(),
-                        state: MessageState::Created,
-                        start_time: 0,
-                        end_time: 0,
-                        r#type: "step".to_string(),
-                        uses: Some("package".to_string()),
-                        inputs: json!({}).to_string(),
-                        outputs: json!({}).to_string(),
                         chan_id: "test1".to_string(),
                         chan_pattern: "*:*:*:*".to_string(),
+                        status: MessageStatus::Created,
+                        retry_times: rt,
                         create_time: 0,
                         update_time: 0,
-                        retry_times: rt,
-                        timestamp: utils::time::timestamp(),
-                        status: MessageStatus::Created,
+                        timestamp: 0,
                         v: 0,
                     };
-                    store.messages().create(&msg).unwrap();
+                    store.deliveries().create(&msg).unwrap();
                 }
             }
 
@@ -3540,7 +3389,7 @@ macro_rules! gen_store_tests {
                 .order("retry_times", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).unwrap();
             assert_eq!(ret.count, 6);
             for row in &ret.rows {
                 assert!(row.retry_times > 2);
@@ -3555,7 +3404,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).unwrap();
             assert_eq!(ret.count, 0);
         }
 
@@ -3584,13 +3433,8 @@ macro_rules! gen_store_tests {
                     uses: Some("package".to_string()),
                     inputs: json!({}).to_string(),
                     outputs: json!({}).to_string(),
-                    chan_id: "test1".to_string(),
-                    chan_pattern: "*:*:*:*".to_string(),
                     create_time: 0,
-                    update_time: 0,
-                    retry_times: 0,
                     timestamp: ts,
-                    status: MessageStatus::Created,
                     v: 0,
                 };
                 store.messages().create(&msg).unwrap();
@@ -3633,32 +3477,23 @@ macro_rules! gen_store_tests {
             let tid = utils::shortid();
 
             let retry_times_vals: Vec<i32> = vec![0, 1, 2, 3, 4];
-            for (i, &rt) in retry_times_vals.iter().enumerate() {
+            for &rt in &retry_times_vals {
                 for _ in 0..3 {
-                    let msg = Message {
+                    let msg = Delivery {
                         id: utils::shortid(),
-                        name: format!("ge-nonidx-{}-{}", rt, i),
+                        msg_id: utils::shortid(),
                         pid: pid.clone(),
                         tid: tid.clone(),
-                        nid: utils::shortid(),
-                        mid: utils::shortid(),
-                        state: MessageState::Created,
-                        start_time: 0,
-                        end_time: 0,
-                        r#type: "step".to_string(),
-                        uses: Some("package".to_string()),
-                        inputs: json!({}).to_string(),
-                        outputs: json!({}).to_string(),
                         chan_id: "test1".to_string(),
                         chan_pattern: "*:*:*:*".to_string(),
+                        status: MessageStatus::Created,
+                        retry_times: rt,
                         create_time: 0,
                         update_time: 0,
-                        retry_times: rt,
-                        timestamp: utils::time::timestamp(),
-                        status: MessageStatus::Created,
+                        timestamp: 0,
                         v: 0,
                     };
-                    store.messages().create(&msg).unwrap();
+                    store.deliveries().create(&msg).unwrap();
                 }
             }
 
@@ -3672,7 +3507,7 @@ macro_rules! gen_store_tests {
                 .order("retry_times", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).unwrap();
             assert_eq!(ret.count, 9);
             for row in &ret.rows {
                 assert!(row.retry_times >= 2);
@@ -3687,7 +3522,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).unwrap();
             assert_eq!(ret.count, 0);
         }
 
@@ -3716,13 +3551,8 @@ macro_rules! gen_store_tests {
                     uses: Some("package".to_string()),
                     inputs: json!({}).to_string(),
                     outputs: json!({}).to_string(),
-                    chan_id: "test1".to_string(),
-                    chan_pattern: "*:*:*:*".to_string(),
                     create_time: 0,
-                    update_time: 0,
-                    retry_times: 0,
                     timestamp: ts,
-                    status: MessageStatus::Created,
                     v: 0,
                 };
                 store.messages().create(&msg).unwrap();
@@ -3765,32 +3595,23 @@ macro_rules! gen_store_tests {
             let tid = utils::shortid();
 
             let retry_times_vals: Vec<i32> = vec![0, 1, 2, 3, 4];
-            for (i, &rt) in retry_times_vals.iter().enumerate() {
+            for &rt in &retry_times_vals {
                 for _ in 0..3 {
-                    let msg = Message {
+                    let msg = Delivery {
                         id: utils::shortid(),
-                        name: format!("lt-nonidx-{}-{}", rt, i),
+                        msg_id: utils::shortid(),
                         pid: pid.clone(),
                         tid: tid.clone(),
-                        nid: utils::shortid(),
-                        mid: utils::shortid(),
-                        state: MessageState::Created,
-                        start_time: 0,
-                        end_time: 0,
-                        r#type: "step".to_string(),
-                        uses: Some("package".to_string()),
-                        inputs: json!({}).to_string(),
-                        outputs: json!({}).to_string(),
                         chan_id: "test1".to_string(),
                         chan_pattern: "*:*:*:*".to_string(),
+                        status: MessageStatus::Created,
+                        retry_times: rt,
                         create_time: 0,
                         update_time: 0,
-                        retry_times: rt,
-                        timestamp: utils::time::timestamp(),
-                        status: MessageStatus::Created,
+                        timestamp: 0,
                         v: 0,
                     };
-                    store.messages().create(&msg).unwrap();
+                    store.deliveries().create(&msg).unwrap();
                 }
             }
 
@@ -3804,7 +3625,7 @@ macro_rules! gen_store_tests {
                 .order("retry_times", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).unwrap();
             assert_eq!(ret.count, 6);
             for row in &ret.rows {
                 assert!(row.retry_times < 2);
@@ -3819,7 +3640,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).unwrap();
             assert_eq!(ret.count, 0);
         }
 
@@ -3848,13 +3669,8 @@ macro_rules! gen_store_tests {
                     uses: Some("package".to_string()),
                     inputs: json!({}).to_string(),
                     outputs: json!({}).to_string(),
-                    chan_id: "test1".to_string(),
-                    chan_pattern: "*:*:*:*".to_string(),
                     create_time: 0,
-                    update_time: 0,
-                    retry_times: 0,
                     timestamp: ts,
-                    status: MessageStatus::Created,
                     v: 0,
                 };
                 store.messages().create(&msg).unwrap();
@@ -3896,32 +3712,23 @@ macro_rules! gen_store_tests {
             let tid = utils::shortid();
 
             let retry_times_vals: Vec<i32> = vec![0, 1, 2, 3, 4];
-            for (i, &rt) in retry_times_vals.iter().enumerate() {
+            for &rt in &retry_times_vals {
                 for _ in 0..3 {
-                    let msg = Message {
+                    let msg = Delivery {
                         id: utils::shortid(),
-                        name: format!("le-nonidx-{}-{}", rt, i),
+                        msg_id: utils::shortid(),
                         pid: pid.clone(),
                         tid: tid.clone(),
-                        nid: utils::shortid(),
-                        mid: utils::shortid(),
-                        state: MessageState::Created,
-                        start_time: 0,
-                        end_time: 0,
-                        r#type: "step".to_string(),
-                        uses: Some("package".to_string()),
-                        inputs: json!({}).to_string(),
-                        outputs: json!({}).to_string(),
                         chan_id: "test1".to_string(),
                         chan_pattern: "*:*:*:*".to_string(),
+                        status: MessageStatus::Created,
+                        retry_times: rt,
                         create_time: 0,
                         update_time: 0,
-                        retry_times: rt,
-                        timestamp: utils::time::timestamp(),
-                        status: MessageStatus::Created,
+                        timestamp: 0,
                         v: 0,
                     };
-                    store.messages().create(&msg).unwrap();
+                    store.deliveries().create(&msg).unwrap();
                 }
             }
 
@@ -3935,7 +3742,7 @@ macro_rules! gen_store_tests {
                 .order("retry_times", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).unwrap();
             assert_eq!(ret.count, 9);
             for row in &ret.rows {
                 assert!(row.retry_times <= 2);
@@ -3950,7 +3757,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).unwrap();
             assert_eq!(ret.count, 0);
         }
 
@@ -4067,13 +3874,8 @@ macro_rules! gen_store_tests {
                     uses: Some("package".to_string()),
                     inputs: json!({}).to_string(),
                     outputs: json!({}).to_string(),
-                    chan_id: "test1".to_string(),
-                    chan_pattern: "*:*:*:*".to_string(),
                     create_time: 0,
-                    update_time: 0,
-                    retry_times: 0,
                     timestamp: ts,
-                    status: MessageStatus::Created,
                     v: 0,
                 };
                 store.messages().create(&msg).unwrap();

@@ -124,7 +124,7 @@ impl StoreWriter {
         match op {
             WriteOp::Task(task) => Self::apply_task(store, &task),
             WriteOp::MessageStatus { pid, tid, status } => {
-                store.set_message_with(&pid, &tid, status)?;
+                store.set_deliveries_with(&pid, &tid, status)?;
                 Ok(())
             }
             WriteOp::EnqueueNext { pid, tid } => {

@@ -39,6 +39,12 @@ pub struct Message {
     /// message id
     pub id: String,
 
+    /// delivery id — set when the message is stored for an ack channel;
+    /// identifies this channel's delivery of the message. Ack/retry/clear/
+    /// redo operate on it. `None` for broadcasts and non-ack channels.
+    #[serde(default)]
+    pub delivery_id: Option<String>,
+
     /// task id
     pub tid: String,
 
@@ -148,30 +154,46 @@ impl Message {
         false
     }
 
-    pub fn into(&self, emit_id: &str, pat: &str) -> data::Message {
-        let value = self.clone();
+    /// The canonical stored record of the emitted message — the payload and
+    /// workflow context are stored once per message id; delivery state is
+    /// tracked separately in the `deliveries` collection.
+    pub fn into_message(&self) -> data::Message {
         data::Message {
-            id: value.id,
-            tid: value.tid,
-            name: value.name,
-            state: value.state,
-            r#type: value.r#type,
-            pid: value.pid,
-            nid: value.nid,
-            mid: value.mid,
-            uses: value.uses,
-            inputs: value.inputs.to_string(),
-            outputs: value.outputs.to_string(),
-            start_time: value.start_time,
-            end_time: value.end_time,
-            chan_id: emit_id.to_string(),
-            chan_pattern: pat.to_string(),
+            id: self.id.clone(),
+            tid: self.tid.clone(),
+            name: self.name.clone(),
+            state: self.state,
+            r#type: self.r#type.clone(),
+            pid: self.pid.clone(),
+            nid: self.nid.clone(),
+            mid: self.mid.clone(),
+            uses: self.uses.clone(),
+            inputs: self.inputs.to_string(),
+            outputs: self.outputs.to_string(),
+            start_time: self.start_time,
+            end_time: self.end_time,
+            create_time: utils::time::time_millis(),
+            timestamp: self.timestamp,
+            v: data::Message::version(),
+        }
+    }
+
+    /// The delivery row of this message to one channel. The delivery gets its
+    /// own delivery id; the message id is shared by every channel delivery.
+    pub fn into_delivery(&self, chan_id: &str, pattern: &str) -> data::Delivery {
+        data::Delivery {
+            id: utils::longid(),
+            msg_id: self.id.clone(),
+            pid: self.pid.clone(),
+            tid: self.tid.clone(),
+            chan_id: chan_id.to_string(),
+            chan_pattern: pattern.to_string(),
+            status: data::MessageStatus::Created,
+            retry_times: 0,
             create_time: utils::time::time_millis(),
             update_time: 0,
-            retry_times: 0,
-            timestamp: value.timestamp,
-            status: data::MessageStatus::Created,
-            v: data::Message::version(),
+            timestamp: self.timestamp,
+            v: data::Delivery::version(),
         }
     }
 
@@ -228,10 +250,14 @@ impl From<MessageState> for String {
         state.as_ref().to_string()
     }
 }
+
+/// Rebuild the emitted message from its canonical stored record. The event
+/// carries no delivery id — the redelivery paths tag it afterwards.
 impl From<data::Message> for Message {
     fn from(v: data::Message) -> Self {
         Self {
             id: v.id,
+            delivery_id: None,
             tid: v.tid,
             name: v.name,
             state: v.state,
@@ -244,7 +270,7 @@ impl From<data::Message> for Message {
             outputs: serde_json::from_str(&v.outputs).unwrap_or_default(),
             start_time: v.start_time,
             end_time: v.end_time,
-            retry_times: v.retry_times,
+            retry_times: 0,
             timestamp: v.timestamp,
         }
     }
