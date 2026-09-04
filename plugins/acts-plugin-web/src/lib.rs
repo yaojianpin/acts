@@ -41,6 +41,7 @@ impl ActPlugin for WebPlugin {
 
         let app = Router::new()
             .route("/health", get(|| async { "ok" }))
+            .route("/hooks/{event_id}", post(routes::hook))
             .nest(
                 "/api",
                 Router::new()

@@ -259,3 +259,12 @@
 - feat: message manager ops — `msg:ack`, `msg:get`, `msg:rm` key on delivery ids; `msg:clear`/`msg:redo` accept an `id` for one delivery while keeping the batch `pid`/all forms (`MessageExecutor::clear_delivery`, `redeliver`)
 - feat: delivery rows expose `msg_id`/`chan_id` indexes; `MessageInfo` joins delivery state with its canonical message
 - migration: existing v1 merged message rows read as canonical messages (delivery state is not carried over); run `Store::rebuild_indexes` once when upgrading existing stores
+
+# 0.24.0
+- BREAKING: `Workflow.on` entries are now triggers (`kind` + `params`), not `Act`s — replace `uses: acts.event.manual|hook|chat` with `kind: manual|chat|hook`. Triggers only declare the workflow start surface; `Act` stays for in-process steps/actions
+- feat: add `Trigger` model (`kind`: `manual`/`chat`/`hook`/`schedule`, or a registered event package id for custom triggers); `EventInfo` exposes `kind` + schedule run state
+- feat: `schedule` triggers — engine timer polls due cron rows (`sec min hour day month dow`) and starts the workflow; run state (`last_run`/`next_run`) is persisted on the trigger row, survives restarts, and manual firing is refused
+- feat: web URL triggers — a `manual` trigger fired over HTTP doubles as a webhook; `acts-plugin-web` adds `POST /hooks/{model-id}:{trigger-id}` that starts the declared trigger with the request body as payload and returns the process id (no separate `webhook` kind)
+- fix: model re-deploy now reconciles trigger rows — changed triggers update, removed triggers are deleted (previously stale rows stayed fireable); trigger rows keep their schedule state across re-deploys unless the cron changed
+- BREAKING: remove the `acts.event.manual|hook|chat` packages (superseded by trigger kinds)
+- migration: existing v0 `events` rows (`uses: acts.event.X`) are upcast to `kind` on load

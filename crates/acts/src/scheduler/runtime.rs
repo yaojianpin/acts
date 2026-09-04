@@ -607,4 +607,86 @@ impl Runtime {
             .do_action(&action)
             .map_err(|err| error!(error = %err, "return to act failed"));
     }
+    /// Schedule-trigger timer — periodically fires every due `schedule`
+    /// trigger row and rolls its `next_run` forward. Deployed rows arm with
+    /// `next_run = now`, so a fresh schedule fires on the first tick.
+    pub fn init_trigger_timer(self: &Arc<Self>) {
+        #[cfg(not(test))]
+        let interval_ms = {
+            let secs = self.config().tick_interval_secs();
+            if secs > 0 {
+                (secs * 1000) as u64
+            } else {
+                15_000
+            }
+        };
+        #[cfg(test)]
+        let interval_ms = 800u64;
+
+        let store = self.store();
+        let shutdown = self.shutdown.clone();
+        let rt = self.clone();
+        tokio::spawn(async move {
+            let mut intv = time::interval(Duration::from_millis(interval_ms));
+            loop {
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    _ = intv.tick() => {}
+                }
+                let now = crate::utils::time::time_millis();
+                let due = match store.events().query(
+                    &crate::query::Query::new().limit(1000).filter(
+                        crate::query::Filter::and()
+                            .expr(crate::query::Expr::eq("kind", "schedule"))
+                            .expr(crate::query::Expr::le("next_run", now)),
+                    ),
+                ) {
+                    Ok(rows) => rows.rows,
+                    Err(err) => {
+                        error!(error = %err, "schedule query failed");
+                        continue;
+                    }
+                };
+                for event in due {
+                    if let Err(err) = rt.fire_schedule(&event) {
+                        error!(event = %event.id, error = %err, "schedule trigger failed");
+                    }
+                }
+            }
+        });
+    }
+
+    /// fire one due schedule trigger: start the workflow with the trigger's
+    /// default params and roll `last_run`/`next_run` forward. The row state
+    /// is persisted after the start, so a crash between start and state roll
+    /// may re-fire the trigger on recovery (at-least-once).
+    fn fire_schedule(self: &Arc<Self>, event: &data::Event) -> Result<()> {
+        let model = self.cache.store().models().find(&event.mid)?;
+        let model: crate::ModelInfo = model.into();
+        let workflow = model.workflow()?;
+
+        let payload = event.default_params();
+        let inputs = match payload {
+            serde_json::Value::Null => Vars::new(),
+            value => serde_json::from_value::<Vars>(value)
+                .map_err(|e| ActError::Convert(format!("invalid trigger payload: {e}")))?,
+        };
+        let started = self.start(&workflow, inputs);
+
+        // roll the schedule forward even when the start failed, so a failing
+        // trigger does not hot-loop on every tick; the error is logged by the
+        // caller (at-least-once delivery)
+        let mut event = event.clone();
+        event.last_run = crate::utils::time::time_millis();
+        event.next_run = match event.schedule.as_deref() {
+            Some(schedule) => super::cron::Cron::parse(schedule)
+                .ok()
+                .and_then(|cron| cron.next())
+                .map(|next| next.timestamp_millis())
+                .unwrap_or(0),
+            None => 0,
+        };
+        self.cache.store().events().update(&event)?;
+        started.map(|_| ())
+    }
 }

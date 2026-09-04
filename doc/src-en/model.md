@@ -29,10 +29,10 @@ outputs:
     data:
       type: object
 
-# Start events
+# Start triggers
 on:
   - id: event1
-    uses: acts.event.manual
+    kind: manual
 
 # Execution options
 options:

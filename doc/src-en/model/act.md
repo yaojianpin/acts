@@ -56,6 +56,3 @@ steps:
 | `acts.core.action` | MSG | Engine action |
 | `acts.transform.set` | MSG | Set variable values |
 | `acts.transform.code` | IRQ | Execute JavaScript |
-| `acts.event.manual` | Event | Manual event trigger |
-| `acts.event.hook` | Event | Hook event |
-| `acts.event.chat` | Event | Chat event |

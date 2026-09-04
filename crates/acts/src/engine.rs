@@ -237,6 +237,9 @@ impl Engine {
         // init retry timer
         rt.init_retry_timer()?;
 
+        // schedule trigger timer
+        rt.init_trigger_timer();
+
         info!("engine started");
 
         Ok(self)

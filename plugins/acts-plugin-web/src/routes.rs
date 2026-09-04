@@ -2,7 +2,7 @@ use crate::objects::{AppError, RespData};
 use acts::{Engine, Workflow, query::Query as ActsQuery};
 use axum::{
     Json,
-    extract::State,
+    extract::{Path, State},
     response::{IntoResponse, Result},
 };
 use serde::Deserialize;
@@ -197,5 +197,21 @@ pub async fn pack_get(
     Json(package): Json<PackageIdRequest>,
 ) -> Result<impl IntoResponse, AppError> {
     let ret = state.executor().pack().get(&package.id)?;
+    Ok(RespData::ok(ret))
+}
+
+/// Fire a deployed trigger from an HTTP POST whose JSON body becomes the
+/// trigger payload — a webhook-style URL trigger is just a `manual` trigger
+/// reached over HTTP.
+///
+/// `event_id` is `{model-id}:{trigger-id}`; the engine answers with the same
+/// result as `executor.evt().start()`.
+pub async fn hook(
+    State(state): State<Arc<Engine>>,
+    Path(event_id): Path<String>,
+    body: Option<Json<serde_json::Value>>,
+) -> Result<impl IntoResponse, AppError> {
+    let payload = body.map(|Json(v)| v).unwrap_or(serde_json::Value::Null);
+    let ret = state.executor().evt().start(&event_id, &payload)?;
     Ok(RespData::ok(ret))
 }

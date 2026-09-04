@@ -2,6 +2,7 @@ mod act;
 mod branch;
 mod info;
 mod step;
+mod trigger;
 mod var;
 mod workflow;
 
@@ -12,6 +13,9 @@ pub use act::{Act, Catch, Retry, Timeout, TimeoutLimit};
 pub use branch::Branch;
 pub use info::{EventInfo, MessageInfo, ModelInfo, PackageInfo, ProcInfo, TaskInfo};
 pub use step::Step;
+pub use trigger::{
+    TRIGGER_CHAT, TRIGGER_HOOK, TRIGGER_MANUAL, TRIGGER_SCHEDULE, Trigger, TriggerKind,
+};
 pub use var::{ActSchema, Variant, VariantTypes, Vars};
 pub use workflow::Workflow;
 

@@ -6,7 +6,7 @@ use crate::{
     store::query::*,
     utils::{
         self, consts,
-        test::{USES_IRQ, auto_complete},
+        test::{USES_IRQ, USES_SET, auto_complete},
     },
 };
 use parking_lot::Mutex;
@@ -479,8 +479,8 @@ async fn export_manager_model_remove_with_events() {
     let engine = Engine::new().start().unwrap();
     let manager = engine.executor();
     let mut model = Workflow::new()
-        .with_on(|act| act.with_id("event1").with_uses("acts.event.manual"))
-        .with_on(|act| act.with_id("event2").with_uses("acts.event.manual"))
+        .with_trigger(|t| t.with_id("event1").with_kind("manual"))
+        .with_trigger(|t| t.with_id("event2").with_kind("manual"))
         .with_step(|step| step.with_id("step1"));
 
     model.set_id(&utils::longid());
@@ -2671,7 +2671,6 @@ async fn export_emitter_options_custom_key() {
     let ret = sig.timeout(100).await;
     assert_eq!(ret.len(), 1);
 }
-
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn export_emitter_options_missing_key() {
@@ -2695,4 +2694,367 @@ async fn export_emitter_options_missing_key() {
 
     let ret = sig.timeout(100).await;
     assert_eq!(ret.len(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn export_trigger_deploy_all_kinds() {
+    let engine = Engine::new().start().unwrap();
+    let manager = engine.executor();
+    let model = Workflow::new()
+        .with_id("trigger-model")
+        .with_trigger(|t| t.with_id("e-manual").with_kind("manual"))
+        .with_trigger(|t| t.with_id("e-chat").with_kind("chat"))
+        .with_trigger(|t| t.with_id("e-hook").with_kind("hook"))
+        .with_trigger(|t| {
+            t.with_id("e-schedule")
+                .with_kind("schedule")
+                .with_schedule("* * * * * *")
+        })
+        .with_step(|step| step.with_id("step1"));
+
+    manager.model().deploy(&model, None).unwrap();
+
+    let rows = manager
+        .evt()
+        .list(&Query::new().filter(Filter::and().expr(Expr::eq(consts::MODEL_ID, "trigger-model"))))
+        .unwrap();
+    assert_eq!(rows.count, 4);
+
+    let manual = manager.evt().get("trigger-model:e-manual").unwrap();
+    assert_eq!(manual.kind, "manual");
+    let schedule = manager.evt().get("trigger-model:e-schedule").unwrap();
+    assert_eq!(schedule.kind, "schedule");
+    assert!(schedule.next_run > 0, "schedule must be armed on deploy");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn export_trigger_redeploy_removes_stale_rows() {
+    let engine = Engine::new().start().unwrap();
+    let manager = engine.executor();
+    let mut model = Workflow::new()
+        .with_id("trigger-reconcile")
+        .with_trigger(|t| t.with_id("e1").with_kind("manual"))
+        .with_trigger(|t| t.with_id("e2").with_kind("manual"))
+        .with_step(|step| step.with_id("step1"));
+
+    manager.model().deploy(&model, None).unwrap();
+    assert_eq!(
+        manager.evt().get("trigger-reconcile:e2").unwrap().kind,
+        "manual"
+    );
+
+    // redeploy without e2 — the stale row must be cleaned up
+    model.on = vec![crate::Trigger {
+        id: "e1".to_string(),
+        kind: "manual".to_string(),
+        ..Default::default()
+    }];
+    manager.model().deploy(&model, None).unwrap();
+
+    assert!(manager.evt().get("trigger-reconcile:e2").is_err());
+    assert!(manager.evt().get("trigger-reconcile:e1").is_ok());
+}
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn export_trigger_redeploy_keeps_schedule_state() {
+    let engine = Engine::new().start().unwrap();
+    let manager = engine.executor();
+    let mut model = Workflow::new()
+        .with_id("trigger-reconcile-state")
+        .with_trigger(|t| {
+            t.with_id("e1")
+                .with_kind("schedule")
+                .with_schedule("0 0 12 * * *")
+                .with_params_vars(|vars| vars.with("a", 1))
+        })
+        .with_step(|step| step.with_id("step1"));
+
+    manager.model().deploy(&model, None).unwrap();
+    let first = manager.evt().get("trigger-reconcile-state:e1").unwrap();
+    assert_eq!(first.kind, "schedule");
+    assert!(first.next_run > 0, "schedule must be armed on deploy");
+
+    // params-only change: row updates, run state (next_run) is preserved
+    model.on = vec![crate::Trigger {
+        id: "e1".to_string(),
+        kind: "schedule".to_string(),
+        schedule: Some("0 0 12 * * *".to_string()),
+        params: serde_json::json!({"a": 2}),
+        ..Default::default()
+    }];
+    let before = manager.evt().get("trigger-reconcile-state:e1").unwrap();
+    manager.model().deploy(&model, None).unwrap();
+    let after = manager.evt().get("trigger-reconcile-state:e1").unwrap();
+    assert_eq!(after.params, "{\"a\":2}");
+    assert_eq!(after.next_run, before.next_run, "schedule state preserved");
+    assert_eq!(after.last_run, before.last_run);
+
+    // cron change: state is kept but the row is re-armed on the next tick
+    let armed_at = utils::time::time_millis();
+    model.on = vec![crate::Trigger {
+        id: "e1".to_string(),
+        kind: "schedule".to_string(),
+        schedule: Some("0 0 6 * * *".to_string()),
+        params: serde_json::json!({"a": 2}),
+        ..Default::default()
+    }];
+    manager.model().deploy(&model, None).unwrap();
+    let rearmed = manager.evt().get("trigger-reconcile-state:e1").unwrap();
+    assert_eq!(
+        rearmed.last_run, after.last_run,
+        "last_run kept on cron change"
+    );
+    assert!(
+        rearmed.next_run >= armed_at,
+        "cron change must re-arm next_run"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn export_trigger_manual_start() {
+    let engine = Engine::new().start().unwrap();
+    let manager = engine.executor();
+    let model = Workflow::new()
+        .with_id("trigger-manual")
+        .with_trigger(|t| {
+            t.with_id("event1")
+                .with_kind("manual")
+                .with_params_vars(|vars| vars.with("test", 10))
+        })
+        .with_step(|step| step.with_id("step1"));
+
+    manager.model().deploy(&model, None).unwrap();
+    let ret = manager
+        .evt()
+        .start("trigger-manual:event1", &Vars::new().into())
+        .unwrap();
+    assert!(ret.unwrap().get::<String>("pid").is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn export_trigger_chat_start() {
+    let engine = Engine::new().start().unwrap();
+    let manager = engine.executor();
+    let model = Workflow::new()
+        .with_id("trigger-chat")
+        .with_trigger(|t| t.with_id("event1").with_kind("chat"))
+        .with_step(|step| step.with_id("step1"));
+
+    manager.model().deploy(&model, None).unwrap();
+    let ret = manager
+        .evt()
+        .start("trigger-chat:event1", &"hello".into())
+        .unwrap();
+    assert!(ret.unwrap().get::<String>("pid").is_some());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn export_trigger_hook_start() {
+    let engine = Engine::new().start().unwrap();
+    let manager = engine.executor();
+    let model = Workflow::new()
+        .with_var("ret", 0)
+        .with_expose(Variant::create("ret", json!(null)))
+        .with_id("trigger-hook")
+        .with_trigger(|t| {
+            t.with_id("event1")
+                .with_kind("hook")
+                .with_params_vars(|vars| vars.with("var1", 10))
+        })
+        .with_step(|step| {
+            step.with_id("step1")
+                .with_uses(USES_SET, Vars::new().with("ret", 100))
+        });
+
+    manager.model().deploy(&model, None).unwrap();
+    let ret = manager
+        .evt()
+        .start("trigger-hook:event1", &Vars::new().into())
+        .unwrap();
+    assert_eq!(ret.unwrap().get::<i32>("ret").unwrap(), 100);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn export_trigger_schedule_cannot_start_manually() {
+    let engine = Engine::new().start().unwrap();
+    let manager = engine.executor();
+    let model = Workflow::new()
+        .with_id("trigger-schedule-blocked")
+        .with_trigger(|t| {
+            t.with_id("event1")
+                .with_kind("schedule")
+                .with_schedule("* * * * * *")
+        })
+        .with_step(|step| step.with_id("step1"));
+
+    manager.model().deploy(&model, None).unwrap();
+    assert!(
+        manager
+            .evt()
+            .start("trigger-schedule-blocked:event1", &Vars::new().into())
+            .is_err()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn export_trigger_schedule_auto_fire() {
+    let engine = Engine::new().start().unwrap();
+    let manager = engine.executor();
+    let model = Workflow::new()
+        .with_id("trigger-schedule")
+        .with_trigger(|t| {
+            t.with_id("every-sec")
+                .with_kind("schedule")
+                .with_schedule("* * * * * *")
+        })
+        .with_step(|step| step.with_id("step1"));
+
+    manager.model().deploy(&model, None).unwrap();
+    let evt = manager.evt().get("trigger-schedule:every-sec").unwrap();
+    assert_eq!(evt.kind, "schedule");
+
+    // the timer (800ms tick under test cfg) must fire it and roll the state
+    let mut fired = false;
+    for _ in 0..40 {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let evt = manager.evt().get("trigger-schedule:every-sec").unwrap();
+        if evt.last_run > 0 && evt.next_run > evt.last_run {
+            fired = true;
+            break;
+        }
+    }
+    assert!(fired, "schedule trigger never fired");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn export_trigger_deploy_invalid() {
+    let engine = Engine::new().start().unwrap();
+    let manager = engine.executor();
+
+    // dup trigger id
+    let workflow = r#"
+    id: "trigger-invalid"
+    on:
+      - id: event1
+        kind: manual
+      - id: event1
+        kind: manual
+    steps:
+      - id: step1
+    "#;
+    let workflow = Workflow::from_yml(workflow).unwrap();
+    assert!(manager.model().deploy(&workflow, None).is_err());
+
+    // empty id
+    let workflow = r#"
+    id: "trigger-invalid"
+    on:
+      - kind: manual
+    steps:
+      - id: step1
+    "#;
+    let workflow = Workflow::from_yml(workflow).unwrap();
+    assert!(manager.model().deploy(&workflow, None).is_err());
+
+    // schedule without cron expression
+    let workflow = r#"
+    id: "trigger-invalid"
+    on:
+      - id: event1
+        kind: schedule
+    steps:
+      - id: step1
+    "#;
+    let workflow = Workflow::from_yml(workflow).unwrap();
+    assert!(manager.model().deploy(&workflow, None).is_err());
+
+    // schedule with an invalid cron expression
+    let workflow = r#"
+    id: "trigger-invalid"
+    on:
+      - id: event1
+        kind: schedule
+        schedule: "not a cron"
+    steps:
+      - id: step1
+    "#;
+    let workflow = Workflow::from_yml(workflow).unwrap();
+    assert!(manager.model().deploy(&workflow, None).is_err());
+}
+/// a registered `Func`/`Event`-catalog package fired as a custom trigger kind
+#[derive(Clone, serde::Deserialize)]
+struct TriggerTestPackage;
+
+#[async_trait::async_trait]
+impl crate::package::ActPackage for TriggerTestPackage {
+    fn new(_config: &crate::Config) -> crate::Result<Self> {
+        Ok(Self)
+    }
+    fn definition() -> crate::package::ActPackageDefinition {
+        crate::package::ActPackageDefinition {
+            id: "test.trigger.pkg",
+            name: "Test Trigger",
+            desc: "custom trigger kind test package",
+            icon: "",
+            doc: "",
+            version: "0.1.0",
+            schema: json!({}),
+            options: None,
+            run_as: crate::ActRunAs::Func,
+            resources: vec![],
+            catalog: crate::package::ActPackageCatalog::Event,
+        }
+    }
+    fn start(
+        &self,
+        rt: &Arc<crate::scheduler::Runtime>,
+        params: &serde_json::Value,
+        options: &Vars,
+    ) -> crate::Result<Option<Vars>> {
+        let mid = options
+            .get::<String>(consts::MODEL_ID)
+            .ok_or(crate::ActError::Runtime(format!(
+                "cannot find '{}' in options",
+                consts::MODEL_ID
+            )))?;
+        let model: crate::ModelInfo = rt.cache().store().models().find(&mid)?.into();
+        let workflow = model.workflow()?;
+        let start_params = serde_json::from_value::<Vars>(params.clone()).map_err(|e| {
+            crate::ActError::Package(format!("invalid trigger package params: {e}"))
+        })?;
+        let ret = rt.start(&workflow, start_params)?;
+        Ok(Some(Vars::new().with(consts::PROCESS_ID, ret.id())))
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn export_trigger_custom_kind_package() {
+    let engine = Engine::new()
+        .add_package::<TriggerTestPackage>()
+        .start()
+        .unwrap();
+    let manager = engine.executor();
+    let model = Workflow::new()
+        .with_id("trigger-custom")
+        .with_trigger(|t| t.with_id("event1").with_kind("test.trigger.pkg"))
+        .with_step(|step| step.with_id("step1"));
+    manager.model().deploy(&model, None).unwrap();
+
+    let evt = manager.evt().get("trigger-custom:event1").unwrap();
+    assert_eq!(evt.kind, "test.trigger.pkg");
+
+    let ret = manager
+        .evt()
+        .start("trigger-custom:event1", &json!({"var1": 10}))
+        .unwrap();
+    assert!(ret.unwrap().get::<String>("pid").is_some());
 }

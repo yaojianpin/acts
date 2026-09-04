@@ -7,7 +7,10 @@ use crate::utils::shortid;
 use crate::{ActError, Result, Workflow};
 use parking_lot::RwLock;
 use std::sync::Arc;
-use std::{cell::RefCell, collections::HashMap};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+};
 
 #[derive(Default, Clone)]
 pub struct NodeTree {
@@ -34,15 +37,15 @@ impl NodeTree {
 
     pub fn load(&mut self, model: &Workflow) -> Result<()> {
         let mut model = model.clone();
+        let mut on_ids = HashSet::new();
 
         for on in model.on.iter() {
-            let data = NodeContent::Act(on.clone());
-            // make an act node to check if the act is valid
-            // not to generate the on event node id
-            if on.id.is_empty() {
-                return Err(ActError::Model("workflow event id is empty".to_string()));
+            // validate trigger declarations (id/kind/config) — triggers are
+            // not process nodes, so nothing is inserted into the tree
+            on.valid()?;
+            if !on_ids.insert(on.id.as_str()) {
+                return Err(ActError::Model(format!("dup event id with '{}'", on.id)));
             }
-            self.make(&on.id, data, 0)?;
         }
 
         build::build_workflow(&mut model, self)

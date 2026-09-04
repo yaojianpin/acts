@@ -361,14 +361,15 @@ fn model_workflow_outputs_schema() {
 fn model_workflow_on_event() {
     let workflow = Workflow::new()
         .with_id("my-event-model")
-        .with_on(|act| {
-            act.with_id("event1")
-                .with_uses("acts.event.manual")
+        .with_trigger(|t| {
+            t.with_id("event1")
+                .with_kind("manual")
                 .with_params_vars(|vars| vars.with("test", 10))
         })
-        .with_on(|act| {
-            act.with_id("event2")
-                .with_uses("acts.event.manual")
+        .with_trigger(|t| {
+            t.with_id("event2")
+                .with_kind("schedule")
+                .with_schedule("* * * * * *")
                 .with_params_vars(|vars| vars.with("test", 20))
         })
         .with_step(|step| step.with_id("step1"));

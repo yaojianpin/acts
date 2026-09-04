@@ -29,10 +29,10 @@ outputs:
     data:
       type: object
 
-# 启动事件
+# 启动触发器
 on:
   - id: event1
-    uses: acts.event.manual
+    kind: manual
 
 # 执行选项
 options:

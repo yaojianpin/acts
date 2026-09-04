@@ -2,20 +2,30 @@ name: event model
 id: my-event-model
 ver: 0.1.0
 on:
-  # start event by manual and return the result directly
+  # start by manual and return the result directly
   - id: event-manual
-    uses: acts.event.manual
+    kind: manual
     name: start by manual
+    params:
+      result: 0
 
-  # start event by hook and return the result util the workflow completed
+  # start by hook and return the result until the workflow completes
   - id: event-hook
-    uses: acts.event.hook
+    kind: hook
     name: start by hook
 
-  # start event by chat string
+  # start by chat string
   - id: event-chat
-    uses: acts.event.chat
+    kind: chat
     name: start by chat
+
+  # start every minute by the engine timer (cron: sec min hour day month dow)
+  - id: event-schedule
+    kind: schedule
+    name: start by schedule
+    schedule: "0 * * * * *"
+    params:
+      result: 0
 
 steps:
   - name: step 1
@@ -23,4 +33,3 @@ steps:
     uses: acts.transform.set
     params:
       result: 100
-    

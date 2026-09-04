@@ -100,8 +100,17 @@ pub struct EventInfo {
     pub mid: String,
     pub ver: String,
 
-    pub uses: String,
+    /// trigger kind, see [`crate::Trigger`]
+    pub kind: String,
+    /// default start inputs (trigger params) as json text
     pub params: String,
+    /// kind=`schedule`: cron expression
+    pub schedule: Option<String>,
+
+    /// kind=`schedule`: last run time in millis
+    pub last_run: i64,
+    /// kind=`schedule`: next run time in millis
+    pub next_run: i64,
 
     pub create_time: i64,
     pub timestamp: i64,
@@ -290,8 +299,11 @@ impl From<&data::Event> for EventInfo {
             create_time: m.create_time,
             mid: m.mid.clone(),
             ver: m.ver.clone(),
-            uses: m.uses.clone(),
+            kind: m.kind.clone(),
             params: m.params.clone(),
+            schedule: m.schedule.clone(),
+            last_run: m.last_run,
+            next_run: m.next_run,
         }
     }
 }

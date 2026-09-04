@@ -145,15 +145,10 @@ inputs:
     desc:  Set value when starting workflow
     type: number
 
-outputs:
-  - name: data
-    title: Output data
-    type: object
-
-# the event to start the workflow
+# triggers to start the workflow
 on:
   - id: event1
-    uses: acts.event.manual
+    kind: manual
 # workflow steps
 steps:
   - name: step 1
@@ -419,11 +414,11 @@ acts:
     - [x] sequence
     - [x] subflow
 
-  - event
+  - triggers
     - [x] manual
     - [x] hook
     - [x] chat
-    - [ ] schedule
+    - [x] schedule
     
   - transform
     - [x] set

@@ -15,6 +15,7 @@ version.workspace = true
 tokio = { features = ["full", "macros"], workspace = true }
 async-trait = { workspace = true }
 chrono = { version = "0.4" }
+cron = { workspace = true }
 globset = { version = "0.4", default-features = false }
 inventory = "0.3.20"
 jsonschema = { version = "0.30.0", default-features = false }

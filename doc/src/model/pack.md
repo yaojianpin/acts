@@ -16,13 +16,7 @@
 | `acts.transform.set` | 变换 | 设置变量值 |
 | `acts.transform.code` | 变换 | 执行 JavaScript 代码 (QuickJS 运行时) |
 
-## 事件包
-
-| 包名 | 说明 |
-| ---- | ---- |
-| `acts.event.manual` | 同步手动触发事件 |
-| `acts.event.hook` | 钩子事件，等待工作流执行完成 |
-| `acts.event.chat` | 聊天事件，传入字符串启动工作流 |
+工作流的启动触发器通过 `on` 字段声明（manual/chat/hook/schedule），参见 [触发器](./hooks.md)。
 
 ## 使用示例
 

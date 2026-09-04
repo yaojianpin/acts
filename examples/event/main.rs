@@ -25,6 +25,12 @@ async fn main() -> Result<()> {
         .evt()
         .start("my-event-model:event-chat", &"hello world".into());
     println!("event-chat: {ret:?}");
+    // the schedule trigger fires on the engine timer; manual start is refused
+    let ret = executor
+        .evt()
+        .start("my-event-model:event-schedule", &Vars::new().into());
+    println!("event-schedule: {ret:?}");
 
+    engine.close();
     Ok(())
 }

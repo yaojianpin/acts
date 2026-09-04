@@ -23,13 +23,7 @@ Packages are reusable functional modules used via `uses` in steps and activities
 | `acts.transform.set` | MSG | Set variable values |
 | `acts.transform.code` | IRQ | Execute JavaScript code (QuickJS engine) |
 
-### Event Packages
-
-| Package | Type | Description |
-| ---- | ---- | ---- |
-| `acts.event.manual` | Event | Synchronous manual event |
-| `acts.event.hook` | Event | Hook event (waits for completion) |
-| `acts.event.chat` | Event | Chat event |
+Workflow start triggers are declared on the `on` field (manual/chat/hook/schedule); see [Triggers](../model/hooks.md).
 
 ## Usage Example
 

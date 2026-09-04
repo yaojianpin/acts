@@ -1,26 +1,26 @@
-# Step Events
+# Step Triggers
 
-Steps themselves do not have independent event hooks. Step events are managed through the workflow-level `on` field.
+Steps do not declare their own triggers. Workflow startup is managed through the workflow-level `on` field.
 
-## Workflow-Level Events
+## Workflow-Level Triggers
 
-Workflow events are triggered globally. See [Events](../hooks.md) for details.
+Workflow triggers are fired by the engine timer or by a caller. See [Triggers](../hooks.md) for details.
 
 ```yml
 name: test
 on:
   - id: event1
-    uses: acts.event.manual
+    kind: manual
 steps:
   - id: step1
     uses: acts.core.irq
 ```
 
-## Event Flow
+## Trigger Flow
 
-1. Client triggers an event
+1. A trigger fires (manual/chat/hook by a caller, schedule by the engine timer)
 2. The workflow instance starts
 3. All steps execute in sequence
 4. Steps complete, workflow ends
 
-Steps do not have their own independent event mechanisms; all event control is via the workflow-level `on` configuration.
+Steps have no trigger declarations of their own; all startup control is via the workflow-level `on` configuration.

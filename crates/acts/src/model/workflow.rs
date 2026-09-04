@@ -1,5 +1,5 @@
 use crate::{
-    Act, ActError, ActSchema, ModelBase, Result, Step, Variant, Vars, scheduler::NodeTree,
+    ActError, ActSchema, ModelBase, Result, Step, Trigger, Variant, Vars, scheduler::NodeTree,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -30,7 +30,7 @@ pub struct Workflow {
     pub inputs: ActSchema,
 
     #[serde(default)]
-    pub on: Vec<Act>,
+    pub on: Vec<Trigger>,
 
     #[serde(default)]
     pub ver: String,
@@ -242,9 +242,9 @@ impl Workflow {
         self
     }
 
-    pub fn with_on(mut self, build: fn(Act) -> Act) -> Self {
-        let act = build(Act::default());
-        self.on.push(act);
+    pub fn with_trigger(mut self, build: fn(Trigger) -> Trigger) -> Self {
+        let trigger = build(Trigger::new());
+        self.on.push(trigger);
         self
     }
 }
