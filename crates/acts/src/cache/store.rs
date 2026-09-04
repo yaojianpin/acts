@@ -273,13 +273,14 @@ impl Store {
                 message.update_time = utils::time::time_millis();
                 if message.retry_times < max_message_retry_times {
                     message.retry_times += 1;
-                    let _ = collection.update(&message);
-                    f(&message.into());
+                    if collection.update(&message)? {
+                        f(&message.into());
+                    }
                 } else {
                     // mark the message as error
                     // the error messages will re-send by manual through the manager command
                     message.status = MessageStatus::Error;
-                    let _ = collection.update(&message);
+                    collection.update(&message)?;
                 }
             }
         }
