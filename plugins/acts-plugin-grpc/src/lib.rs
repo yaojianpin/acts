@@ -399,7 +399,8 @@ impl GrpcServer {
                     .get::<String>("id")
                     .ok_or(Status::invalid_argument("event id is required"))?;
                 let params = options.get::<Value>("params").unwrap_or_default();
-                wrap_result!(ack, name, executor.evt().start(&id, &params))
+                let ret = executor.evt().start(&id, &params).await;
+                wrap_result!(ack, name, ret)
             }
             _ => Err(Status::not_found(format!("not found action '{name}'"))),
         }

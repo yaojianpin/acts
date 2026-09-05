@@ -2830,6 +2830,7 @@ async fn export_trigger_manual_start() {
     let ret = manager
         .evt()
         .start("trigger-manual:event1", &Vars::new().into())
+        .await
         .unwrap();
     assert!(ret.unwrap().get::<String>("pid").is_some());
 }
@@ -2848,6 +2849,7 @@ async fn export_trigger_chat_start() {
     let ret = manager
         .evt()
         .start("trigger-chat:event1", &"hello".into())
+        .await
         .unwrap();
     assert!(ret.unwrap().get::<String>("pid").is_some());
 }
@@ -2875,6 +2877,7 @@ async fn export_trigger_hook_start() {
     let ret = manager
         .evt()
         .start("trigger-hook:event1", &Vars::new().into())
+        .await
         .unwrap();
     assert_eq!(ret.unwrap().get::<i32>("ret").unwrap(), 100);
 }
@@ -2898,6 +2901,7 @@ async fn export_trigger_schedule_cannot_start_manually() {
         manager
             .evt()
             .start("trigger-schedule-blocked:event1", &Vars::new().into())
+            .await
             .is_err()
     );
 }
@@ -3055,6 +3059,7 @@ async fn export_trigger_custom_kind_package() {
     let ret = manager
         .evt()
         .start("trigger-custom:event1", &json!({"var1": 10}))
+        .await
         .unwrap();
     assert!(ret.unwrap().get::<String>("pid").is_some());
 }

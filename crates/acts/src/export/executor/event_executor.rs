@@ -50,9 +50,7 @@ impl EventExecutor {
     /// - `chat`: start the workflow with the string payload as `params`
     /// - `hook`: start the workflow and block until it completes, returning
     ///   its outputs
-    /// - `schedule`: cannot be fired manually — the engine timer fires it
-    /// - custom kinds: dispatched through the registered event package
-    pub fn start(&self, event_id: &str, params: &JsonValue) -> Result<Option<Vars>> {
+    pub async fn start(&self, event_id: &str, params: &JsonValue) -> Result<Option<Vars>> {
         let store = self.runtime.cache().store();
         let event = store.events().find(event_id)?;
 
@@ -90,7 +88,7 @@ impl EventExecutor {
                     params.clone()
                 };
                 let inputs = payload_to_vars(payload)?;
-                self.start_hook(&workflow, inputs)
+                self.start_hook(&workflow, inputs).await
             }
             Some(TriggerKind::Schedule) => Err(ActError::Runtime(format!(
                 "cannot start the schedule trigger '{event_id}' manually"
@@ -131,10 +129,7 @@ impl EventExecutor {
         Ok(ret)
     }
 
-    /// kind=`hook`: start and wait for the process to finish, return outputs.
-    /// Registers completion watchers *before* the start so a fast process
-    /// cannot complete before the handlers exist.
-    fn start_hook(&self, workflow: &Workflow, inputs: Vars) -> Result<Option<Vars>> {
+    async fn start_hook(&self, workflow: &Workflow, inputs: Vars) -> Result<Option<Vars>> {
         let rt = self.runtime.clone();
 
         let pid = utils::longid();
@@ -160,7 +155,7 @@ impl EventExecutor {
 
         rt.start(workflow, options)?;
 
-        let ret = crate::utils::sync::block_on(async move { sig.recv().await });
+        let ret = sig.recv().await;
         // neutralize the watchers; they are keyed per pid and no longer fire
         rt.emitter().on_complete(&key_c, |_| {});
         rt.emitter().on_error(&key_e, |_| {});

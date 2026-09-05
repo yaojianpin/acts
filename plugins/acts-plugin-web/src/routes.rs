@@ -212,6 +212,6 @@ pub async fn hook(
     body: Option<Json<serde_json::Value>>,
 ) -> Result<impl IntoResponse, AppError> {
     let payload = body.map(|Json(v)| v).unwrap_or(serde_json::Value::Null);
-    let ret = state.executor().evt().start(&event_id, &payload)?;
+    let ret = state.executor().evt().start(&event_id, &payload).await?;
     Ok(RespData::ok(ret))
 }
