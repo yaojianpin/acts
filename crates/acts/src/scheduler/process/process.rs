@@ -368,15 +368,25 @@ impl Process {
         info!(pid = %self.id, mid = %self.tree().model.id, name = %self.tree().model.name, "process started");
         let cache = self.runtime.cache().clone();
         let proc = self.clone();
-        cache.push_proc(&proc)?;
+
+        // Build the root task first, then persist the proc row and the root
+        // task row as ONE atomic store batch (a crash can never leave a
+        // durable proc row without its root task row — which would resume as
+        // an un-runnable, task-less process), cache the process and finally
+        // dispatch the root task to the in-memory queue.
+        let tr = self.tree();
+        let root = match &tr.root {
+            Some(root) => Some(self.create_task(root, None)?),
+            None => None,
+        };
+
+        cache.start_proc(&proc, root.as_ref())?;
 
         // Start per-process tick loop
         self.init_tick();
 
-        let tr = self.tree();
-        if let Some(root) = &tr.root {
-            let task = self.create_task(root, None)?;
-            self.runtime.push(&task)?;
+        if let Some(task) = root {
+            self.runtime.dispatch_root(&task)?;
         }
 
         Ok(())

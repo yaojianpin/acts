@@ -9,6 +9,7 @@ use tracing::trace;
 use crate::store::KvStore;
 use crate::{
     ActError, Result, Trigger, Workflow,
+    scheduler::{Process, Task},
     store::{Model, Package},
     utils,
 };
@@ -277,6 +278,53 @@ impl Store {
         self.kv.batch(&ops)?;
         Ok(true)
     }
+
+    /// Atomically remove a process and every row of it — task rows, durable
+    /// outbox (`ops`) rows and the proc row — in one batch: a crash during
+    /// removal can no longer leave a half-deleted process (some task rows
+    /// gone, others + the proc row still present) that would resurrect as a
+    /// broken process on the next restore. Removing an absent process is a
+    /// no-op that still returns `true`.
+    pub(crate) fn remove_proc_rows(&self, pid: &str) -> Result<bool> {
+        use super::query::{Expr, Filter, Query};
+
+        let procs = KvCollection::<data::Proc>::new(StoreIden::Procs.as_ref(), self.kv.clone());
+        let tasks = KvCollection::<data::Task>::new(StoreIden::Tasks.as_ref(), self.kv.clone());
+        let ops = KvCollection::<data::Op>::new(StoreIden::Ops.as_ref(), self.kv.clone());
+
+        let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", pid.to_string())));
+        let mut batch = Vec::new();
+        for row in tasks.query(&q)?.rows {
+            batch.extend(tasks.delete_ops(&row.id)?);
+        }
+        for row in ops.query(&q)?.rows {
+            batch.extend(ops.delete_ops(&row.id)?);
+        }
+        batch.extend(procs.delete_ops(pid)?);
+        self.kv.batch(&batch)?;
+        Ok(true)
+    }
+
+    /// Persist a process and its root task row as ONE atomic batch (upsert:
+    /// an existing row is updated, a missing row is created). The first
+    /// persist of a freshly started process goes through here, so a crash can
+    /// never leave a durable proc row without its root task row (or a root
+    /// task row whose proc row is missing — the writer skips such orphans).
+    pub(crate) fn upsert_proc_with_task(
+        &self,
+        proc: &Arc<Process>,
+        root: Option<&Arc<Task>>,
+    ) -> Result<()> {
+        let procs = KvCollection::<data::Proc>::new(StoreIden::Procs.as_ref(), self.kv.clone());
+        let tasks = KvCollection::<data::Task>::new(StoreIden::Tasks.as_ref(), self.kv.clone());
+
+        let mut ops = procs.update_ops(&proc.into_data()?)?;
+        if let Some(root) = root {
+            ops.extend(tasks.update_ops(&root.into_data()?)?);
+        }
+        self.kv.batch(&ops)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -506,5 +554,134 @@ mod tests {
 
         // removing an absent model is a no-op that still returns true
         assert!(store.rm_model("m1").unwrap());
+    }
+
+    fn seed_proc_rows(store: &Store, pid: &str) {
+        let now = crate::utils::time::time_millis();
+        let proc = crate::store::data::Proc {
+            id: pid.to_string(),
+            state: "running".to_string(),
+            mid: "m1".to_string(),
+            name: "t".to_string(),
+            start_time: now,
+            end_time: 0,
+            timestamp: now,
+            model: "{}".to_string(),
+            env: "{}".to_string(),
+            err: None,
+            v: 0,
+        };
+        store.procs().create(&proc).unwrap();
+        for tid in ["t1", "t2"] {
+            let task = crate::store::data::Task {
+                id: format!("{pid}{tid}"),
+                pid: pid.to_string(),
+                tid: tid.to_string(),
+                node_data: "{}".to_string(),
+                kind: "step".to_string(),
+                prev: None,
+                next: Vec::new(),
+                parent: None,
+                name: "t".to_string(),
+                state: "running".to_string(),
+                data: "{}".to_string(),
+                sealed: String::new(),
+                err: None,
+                start_time: now,
+                end_time: 0,
+                timestamp: now,
+                v: 0,
+            };
+            store.tasks().create(&task).unwrap();
+        }
+        let op = crate::store::data::Op {
+            id: format!("{pid}o1"),
+            pid: pid.to_string(),
+            tid: "t1".to_string(),
+            r#type: "next".to_string(),
+            status: "pending".to_string(),
+            event: None,
+            options: None,
+            create_time: now,
+            update_time: now,
+            v: 0,
+        };
+        store.ops().create(&op).unwrap();
+    }
+
+    #[test]
+    fn remove_proc_removes_all_rows_of_the_process_in_one_batch() {
+        let (kv, store) = counting_store();
+        seed_proc_rows(&store, "p1");
+        kv.batches.store(0, Ordering::SeqCst);
+
+        assert!(store.remove_proc("p1").unwrap());
+        assert_eq!(
+            kv.batches.load(Ordering::SeqCst),
+            1,
+            "remove_proc must be a single atomic batch"
+        );
+        assert_eq!(
+            (
+                kv.puts.load(Ordering::SeqCst),
+                kv.deletes.load(Ordering::SeqCst)
+            ),
+            (0, 0),
+            "remove_proc must not fall back to raw per-key writes"
+        );
+
+        let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", "p1".to_string())));
+        assert!(store.procs().find("p1").is_err(), "proc row must be gone");
+        assert!(
+            store.tasks().query(&q).unwrap().rows.is_empty(),
+            "task rows must be gone"
+        );
+        assert!(
+            store.ops().query(&q).unwrap().rows.is_empty(),
+            "outbox op rows must be gone"
+        );
+
+        // removing an absent process is a no-op that still returns true
+        assert!(store.remove_proc("p1").unwrap());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn process_first_persist_commits_proc_and_root_task_in_one_batch() {
+        let kv = Arc::new(CountingKv::default());
+        let engine = crate::Engine::new()
+            .set_store(Some(kv.clone()))
+            .start()
+            .unwrap();
+        let rt = engine.runtime().clone();
+
+        let proc = rt.create_proc("p1", &trigger_model("m1"));
+        let tr = proc.tree();
+        let root = tr.root.clone().expect("workflow root node");
+        let task = proc.create_task(&root, None).unwrap();
+
+        kv.batches.store(0, Ordering::SeqCst);
+        rt.cache().start_proc(&proc, Some(&task)).unwrap();
+
+        assert_eq!(
+            kv.batches.load(Ordering::SeqCst),
+            1,
+            "first persist must be a single atomic batch"
+        );
+        assert_eq!(
+            (
+                kv.puts.load(Ordering::SeqCst),
+                kv.deletes.load(Ordering::SeqCst)
+            ),
+            (0, 0),
+            "first persist must not fall back to raw per-key writes"
+        );
+
+        // proc row and root task row exist together — never one without the other
+        let store = rt.cache().store();
+        assert!(store.procs().find("p1").is_ok(), "proc row must exist");
+        let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", "p1".to_string())));
+        let rows = store.tasks().query(&q).unwrap().rows;
+        assert_eq!(rows.len(), 1, "root task row must exist with the proc row");
+        assert_eq!(rows[0].tid, "$", "the single row is the root task");
     }
 }

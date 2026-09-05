@@ -182,6 +182,17 @@ impl Runtime {
         Ok(())
     }
 
+    /// Dispatch a task to the in-memory queue WITHOUT queueing another store
+    /// write — used for the root task of a freshly started process, whose
+    /// proc row + root task row were already persisted atomically by
+    /// `Cache::start_proc`.
+    #[instrument(skip(self, task), fields(pid = %task.pid, tid = %task.id))]
+    pub(crate) fn dispatch_root(&self, task: &Arc<Task>) -> Result<()> {
+        debug!("root task dispatched");
+        self.queue.send(task)?;
+        Ok(())
+    }
+
     #[instrument(skip(self, action), fields(pid = %action.pid, tid = %action.tid, event = ?action.event))]
     pub fn do_action(self: &Arc<Self>, action: &Action) -> Result<()> {
         debug!("action received");

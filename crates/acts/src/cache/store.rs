@@ -90,14 +90,10 @@ impl Store {
 
     pub fn remove_proc(&self, pid: &str) -> Result<bool> {
         debug!("remove_proc pid={}", pid);
-        let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", pid.to_string())));
-        let tasks = self.tasks().query(&q)?;
-        for task in tasks.rows {
-            self.tasks().delete(&task.id)?;
-        }
-        self.remove_ops(pid)?;
-        self.procs().delete(pid)?;
-        Ok(true)
+        // All rows of the process — tasks, outbox ops and the proc row — are
+        // removed as ONE atomic batch, so a crash mid-removal cannot leave a
+        // half-deleted process behind.
+        self.remove_proc_rows(pid)
     }
 
     /// but not yet run. Deduplicated per `(pid, tid, type)` — at most one

@@ -154,6 +154,23 @@ impl Cache {
         Ok(())
     }
 
+    /// Persist a freshly started process and its root task as ONE atomic
+    /// store batch, then cache the process and register the root task in
+    /// memory — the very first durable write of a process, so a crash can
+    /// never leave a durable proc row without its root task row (which would
+    /// resume as a task-less, un-runnable process). The rows are durable
+    /// before the root task is dispatched to the queue.
+    #[instrument(skip(self, proc, root), fields(pid = %proc.id()))]
+    pub(crate) fn start_proc(&self, proc: &Arc<Process>, root: Option<&Arc<Task>>) -> Result<()> {
+        debug!("start process pid={}", proc.id());
+        self.store.upsert_proc_with_task(proc, root)?;
+        self.procs.insert(proc.id().to_string(), proc.clone());
+        if let Some(task) = root {
+            self.push_task_mem(task)?;
+        }
+        Ok(())
+    }
+
     pub(super) fn push_task_pri(&self, task: &Arc<Task>, save: bool) -> Result<()> {
         if save {
             self.persist_task(task)?;
