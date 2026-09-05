@@ -226,19 +226,34 @@ impl Engine {
 
         let rt = self.runtime();
 
-        self.prepare()?;
+        // Any failure below must not leave the partially started runtime
+        // behind: the store writer thread, the event loop, the recovery
+        // writes and (when reached) the retry/trigger timer tasks would keep
+        // running on an engine that never became usable — a leaked std
+        // thread and polling timers that also pin the whole runtime alive.
+        let init = (|| -> crate::Result<()> {
+            self.prepare()?;
 
-        // start event loop
-        rt.event_loop();
+            // start event loop
+            rt.event_loop();
 
-        // recover pending actions
-        rt.recover_actions()?;
+            // recover pending actions
+            rt.recover_actions()?;
 
-        // init retry timer
-        rt.init_retry_timer()?;
+            // init retry timer
+            rt.init_retry_timer()?;
 
-        // schedule trigger timer
-        rt.init_trigger_timer();
+            // schedule trigger timer
+            rt.init_trigger_timer();
+
+            Ok(())
+        })();
+
+        if let Err(err) = init {
+            rt.close();
+            self.runtime = None;
+            return Err(err);
+        }
 
         info!("engine started");
 

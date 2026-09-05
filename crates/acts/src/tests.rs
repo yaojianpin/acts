@@ -11,11 +11,59 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use serial_test::serial;
+
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn engine_start() {
     let engine = Engine::new().start();
     assert!(engine.is_ok());
+}
+
+/// Plugin whose `on_init` can fail on demand — used to exercise the
+/// engine-start failure path.
+#[derive(Clone)]
+struct FailPlugin {
+    fail: bool,
+}
+
+#[async_trait::async_trait]
+impl crate::ActPlugin for FailPlugin {
+    fn on_init(&self, _engine: &Engine) -> crate::Result<()> {
+        if self.fail {
+            return Err(crate::ActError::Action(
+                "injected plugin init failure".to_string(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn engine_start_failure_releases_runtime_resources() {
+    // a failing init makes `start()` return Err...
+    let started = Engine::builder()
+        .add_plugin(&FailPlugin { fail: true })
+        .build()
+        .start();
+    let err = match started {
+        Err(err) => err,
+        Ok(_) => panic!("start with a failing plugin must fail"),
+    };
+    assert!(
+        err.to_string().contains("injected"),
+        "expected the injected plugin failure, got: {err}"
+    );
+
+    // ...and the partially started runtime (store writer thread, event loop)
+    // must have been released: a healthy engine can still start right after
+    // without deadlocking or accumulating leaked timers/threads.
+    let engine = Engine::builder()
+        .add_plugin(&FailPlugin { fail: false })
+        .build()
+        .start()
+        .unwrap();
+    engine.close();
 }
 
 #[serial]
