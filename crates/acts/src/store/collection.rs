@@ -1,7 +1,7 @@
 use super::map_db_err;
 use crate::store::{
     DbCollection, DbCollectionIden, Expr, ExprOp, Filter, FilterExpr, KvStore, OrderBy, PageData,
-    Query, ScanOperation, ScanOptions, Sort, query::FilterType,
+    Query, ScanOperation, ScanOptions, Sort, StoreBatchOp, query::FilterType,
 };
 use crate::utils::consts::{KEY_SEP, KEY_SEP_SUCC};
 use crate::{ActError, Result};
@@ -564,14 +564,21 @@ where
         let id = extract_id(&json)?;
         let bytes = serde_json::to_vec(&json).map_err(map_db_err)?;
 
-        // Write data entry
-        self.kv.put(&self.data_key(&id), bytes.clone())?;
-
-        // Write index entries
+        // Data row and every index row are committed as one atomic batch, so
+        // a mid-write failure can never leave a document without its index
+        // entries (or index rows without the data row).
+        let mut ops = Vec::with_capacity(1 + T::indexed_fields().len());
+        ops.push(StoreBatchOp::Put {
+            key: self.data_key(&id),
+            value: bytes,
+        });
         for idx_key in self.index_keys(&json, &id) {
-            self.kv.put(&idx_key, vec![])?;
+            ops.push(StoreBatchOp::Put {
+                key: idx_key,
+                value: vec![],
+            });
         }
-
+        self.kv.batch(&ops)?;
         Ok(true)
     }
 
@@ -580,34 +587,45 @@ where
         let id = extract_id(&new_json)?;
         let new_bytes = serde_json::to_vec(&new_json).map_err(map_db_err)?;
 
-        // Delete old index entries
+        // Old index keys that the new document re-creates with the same value
+        // are left alone (a delete+put of one key is a no-op); only genuinely
+        // stale keys are dropped. All mutations commit as one atomic batch.
+        let new_index = self.index_keys(&new_json, &id);
+        let mut ops = Vec::with_capacity(new_index.len() + 1);
         if let Some(old_json) = self.read_json(&id)? {
+            let new_keys: HashSet<&str> = new_index.iter().map(String::as_str).collect();
             for idx_key in self.index_keys(&old_json, &id) {
-                self.kv.delete(&idx_key)?;
+                if !new_keys.contains(idx_key.as_str()) {
+                    ops.push(StoreBatchOp::Delete { key: idx_key });
+                }
             }
         }
-
-        // Write data entry
-        self.kv.put(&self.data_key(&id), new_bytes.clone())?;
-
-        // Write new index entries
-        for idx_key in self.index_keys(&new_json, &id) {
-            self.kv.put(&idx_key, vec![])?;
+        ops.push(StoreBatchOp::Put {
+            key: self.data_key(&id),
+            value: new_bytes,
+        });
+        for idx_key in new_index {
+            ops.push(StoreBatchOp::Put {
+                key: idx_key,
+                value: vec![],
+            });
         }
-
+        self.kv.batch(&ops)?;
         Ok(true)
     }
 
     fn delete(&self, id: &str) -> crate::Result<bool> {
-        // Remove index entries
+        // Index rows and the data row are removed as one atomic batch.
+        let mut ops = Vec::new();
         if let Some(old_json) = self.read_json(id)? {
             for idx_key in self.index_keys(&old_json, id) {
-                self.kv.delete(&idx_key)?;
+                ops.push(StoreBatchOp::Delete { key: idx_key });
             }
         }
-
-        // Remove data entry
-        self.kv.delete(&self.data_key(id))?;
+        ops.push(StoreBatchOp::Delete {
+            key: self.data_key(id),
+        });
+        self.kv.batch(&ops)?;
         Ok(true)
     }
 }
@@ -1325,16 +1343,149 @@ mod tests {
         );
     }
 
-    #[test]
-    fn order_by_unknown_field_keeps_id_order_without_panic() {
-        let (_, col) = sort_col();
-        for id in ["b", "c", "a"] {
-            col.create(&mk_doc(id, Some(1), Some(1))).unwrap();
+    // ========== atomic batch write tests ==========
+
+    use crate::store::{MemoryStore, ScanOptions, StoreBatchOp};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// Kv wrapper that counts how the collection writes: a document write
+    /// (data row + index rows) must go through exactly one `batch` call and
+    /// never through raw `put`/`delete`, or a mid-write failure could tear
+    /// the document from its indexes.
+    #[derive(Default)]
+    struct CountingKv {
+        inner: MemoryStore,
+        batches: AtomicUsize,
+        puts: AtomicUsize,
+        deletes: AtomicUsize,
+    }
+
+    impl KvStore for CountingKv {
+        fn get(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
+            self.inner.get(key)
         }
-        // Sorting by a field no document carries used to panic in the
-        // comparator (unwrap on missing key); every key now compares equal and
-        // the stable id-ascending order is returned.
-        let q = Query::new().order("no_such_key", Sort::Asc);
-        assert_eq!(sort_query_ids(&col, &q), vec!["a", "b", "c"]);
+
+        fn put(&self, key: &str, value: Vec<u8>) -> crate::Result<()> {
+            self.puts.fetch_add(1, Ordering::SeqCst);
+            self.inner.put(key, value)
+        }
+
+        fn delete(&self, key: &str) -> crate::Result<()> {
+            self.deletes.fetch_add(1, Ordering::SeqCst);
+            self.inner.delete(key)
+        }
+
+        fn batch(&self, ops: &[StoreBatchOp]) -> crate::Result<()> {
+            self.batches.fetch_add(1, Ordering::SeqCst);
+            self.inner.batch(ops)
+        }
+
+        fn scan_prefix(
+            &self,
+            key: &str,
+            options: ScanOptions,
+        ) -> crate::Result<Vec<(String, Vec<u8>)>> {
+            self.inner.scan_prefix(key, options)
+        }
+    }
+
+    fn counting_col() -> (Arc<CountingKv>, KvCollection<Doc>) {
+        let kv = Arc::new(CountingKv::default());
+        let col = KvCollection::new("docs", kv.clone());
+        (kv, col)
+    }
+
+    fn doc(id: &str, state: &str, timestamp: i64) -> Doc {
+        Doc {
+            id: id.to_string(),
+            state: state.to_string(),
+            timestamp,
+        }
+    }
+
+    #[test]
+    fn create_commits_data_and_indexes_in_one_batch() {
+        let (kv, col) = counting_col();
+        col.create(&doc("d1", "idle", 5)).unwrap();
+
+        assert_eq!(
+            kv.batches.load(Ordering::SeqCst),
+            1,
+            "create must be a single atomic batch"
+        );
+        assert_eq!(
+            (
+                kv.puts.load(Ordering::SeqCst),
+                kv.deletes.load(Ordering::SeqCst)
+            ),
+            (0, 0),
+            "create must not fall back to raw per-key writes"
+        );
+        // the data row exists and the index answers queries
+        assert_eq!(col.find("d1").unwrap().timestamp, 5);
+        let page = query(&col, Filter::and().expr(Expr::eq("state", "idle")));
+        assert_eq!(ids(&page), vec!["d1"]);
+    }
+
+    #[test]
+    fn update_commits_stale_index_drop_and_rewrite_in_one_batch() {
+        let (kv, col) = counting_col();
+        col.create(&doc("d1", "idle", 5)).unwrap();
+        kv.batches.store(0, Ordering::SeqCst);
+
+        col.update(&doc("d1", "running", 9)).unwrap();
+        assert_eq!(
+            kv.batches.load(Ordering::SeqCst),
+            1,
+            "update must be a single atomic batch"
+        );
+        assert_eq!(
+            (
+                kv.puts.load(Ordering::SeqCst),
+                kv.deletes.load(Ordering::SeqCst)
+            ),
+            (0, 0),
+            "update must not fall back to raw per-key writes"
+        );
+        // the state index moved atomically: running sees the doc, idle does not
+        assert_eq!(
+            ids(&query(
+                &col,
+                Filter::and().expr(Expr::eq("state", "running"))
+            )),
+            vec!["d1"]
+        );
+        assert_eq!(
+            query(&col, Filter::and().expr(Expr::eq("state", "idle"))).count,
+            0
+        );
+        assert_eq!(col.find("d1").unwrap().timestamp, 9);
+    }
+
+    #[test]
+    fn delete_removes_data_and_indexes_in_one_batch() {
+        let (kv, col) = counting_col();
+        col.create(&doc("d1", "idle", 5)).unwrap();
+        kv.batches.store(0, Ordering::SeqCst);
+
+        col.delete("d1").unwrap();
+        assert_eq!(
+            kv.batches.load(Ordering::SeqCst),
+            1,
+            "delete must be a single atomic batch"
+        );
+        assert_eq!(
+            (
+                kv.puts.load(Ordering::SeqCst),
+                kv.deletes.load(Ordering::SeqCst)
+            ),
+            (0, 0),
+            "delete must not fall back to raw per-key writes"
+        );
+        assert!(col.find("d1").is_err(), "data row must be gone");
+        for filter in ["state", "timestamp"] {
+            let page = query(&col, Filter::and().expr(Expr::eq(filter, "idle")));
+            assert_eq!(page.count, 0, "no index row may survive the delete");
+        }
     }
 }

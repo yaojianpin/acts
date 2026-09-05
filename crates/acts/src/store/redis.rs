@@ -1,6 +1,6 @@
 use crate::{
     ActError, KvStore, Result,
-    store::{ScanOperation, ScanOptions},
+    store::{ScanOperation, ScanOptions, StoreBatchOp},
 };
 use parking_lot::Mutex;
 use redis::{Client, Commands};
@@ -61,6 +61,37 @@ impl KvStore for RedisStore {
     fn delete(&self, key: &str) -> Result<()> {
         let mut conn = self.conn.lock();
         conn.del(key).map_err(|e| ActError::Store(e.to_string()))
+    }
+
+    fn batch(&self, ops: &[StoreBatchOp]) -> Result<()> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        if ops.len() == 1 {
+            // A single-key batch skips the MULTI/EXEC round trip.
+            return match &ops[0] {
+                StoreBatchOp::Put { key, value } => self.put(key, value.clone()),
+                StoreBatchOp::Delete { key } => self.delete(key),
+            };
+        }
+        // `atomic()` runs the commands through MULTI/EXEC on the single
+        // connection: everything is queued, then executed together, so no
+        // other client can observe a partially applied batch.
+        let mut conn = self.conn.lock();
+        let mut pipe = redis::pipe();
+        pipe.atomic();
+        for op in ops {
+            match op {
+                StoreBatchOp::Put { key, value } => {
+                    pipe.cmd("SET").arg(key.as_str()).arg(value.as_slice());
+                }
+                StoreBatchOp::Delete { key } => {
+                    pipe.cmd("DEL").arg(key.as_str());
+                }
+            }
+        }
+        pipe.query::<()>(&mut *conn)
+            .map_err(|e| ActError::Store(e.to_string()))
     }
 
     fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>> {

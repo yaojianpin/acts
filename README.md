@@ -395,6 +395,12 @@ acts:
   - [x] package register
   - [x] message channel
 
+- triggers
+  - [x] manual
+  - [x] hook
+  - [x] chat
+  - [x] schedule
+  
 - store
   - [x] memory
   - [x] sqlite
@@ -414,12 +420,6 @@ acts:
     - [x] sequence
     - [x] subflow
 
-  - triggers
-    - [x] manual
-    - [x] hook
-    - [x] chat
-    - [x] schedule
-    
   - transform
     - [x] set
     - [x] code

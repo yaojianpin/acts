@@ -160,10 +160,43 @@ pub enum ScanOperation {
     },
 }
 
+/// One mutation of an atomic [`KvStore::batch`] write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StoreBatchOp {
+    /// Store (overwrite) `value` under `key`.
+    Put { key: String, value: Vec<u8> },
+    /// Remove `key`.
+    Delete { key: String },
+}
+
 pub trait KvStore: Send + Sync {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>>;
     fn put(&self, key: &str, value: Vec<u8>) -> Result<()>;
     fn delete(&self, key: &str) -> Result<()>;
+
+    /// Apply every mutation of `ops` as one unit: on success all ops are
+    /// visible; on failure — for backends that commit atomically — none is.
+    /// The collection layer uses this for `create`/`update`/`delete` so a
+    /// document row and its index entries are written together instead of as
+    /// a sequence of independently committed keys that a mid-write failure
+    /// could tear.
+    ///
+    /// `MemoryStore`, `SledStore`, `SqliteStore`, `PostgresStore` and
+    /// `RedisStore` commit through a native transaction/batch (a single-op
+    /// batch falls back to `put`/`delete`, skipping transaction overhead).
+    /// A backend without cross-key transactions (`NatsStore` — JetStream KV
+    /// is per-key) inherits the default sequential loop: order is preserved,
+    /// but a mid-batch failure leaves the earlier ops applied.
+    fn batch(&self, ops: &[StoreBatchOp]) -> Result<()> {
+        for op in ops {
+            match op {
+                StoreBatchOp::Put { key, value } => self.put(key, value.clone())?,
+                StoreBatchOp::Delete { key } => self.delete(key)?,
+            }
+        }
+        Ok(())
+    }
+
     fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>>;
 }
 

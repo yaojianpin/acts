@@ -2,7 +2,7 @@ use crate::Result;
 use parking_lot::RwLock;
 use std::collections::BTreeMap;
 
-use crate::store::{KvStore, ScanOperation, ScanOptions};
+use crate::store::{KvStore, ScanOperation, ScanOptions, StoreBatchOp};
 
 #[derive(Debug)]
 pub struct MemoryStore {
@@ -60,6 +60,26 @@ impl KvStore for MemoryStore {
 
     fn delete(&self, key: &str) -> Result<()> {
         self.data.write().remove(key);
+        Ok(())
+    }
+
+    fn batch(&self, ops: &[StoreBatchOp]) -> Result<()> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        // One write lock for the whole batch: concurrent readers can never
+        // observe a partially applied batch.
+        let mut data = self.data.write();
+        for op in ops {
+            match op {
+                StoreBatchOp::Put { key, value } => {
+                    data.insert(key.clone(), value.clone());
+                }
+                StoreBatchOp::Delete { key } => {
+                    data.remove(key.as_str());
+                }
+            }
+        }
         Ok(())
     }
 

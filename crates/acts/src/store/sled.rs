@@ -1,4 +1,4 @@
-use crate::store::{ScanOperation, ScanOptions};
+use crate::store::{ScanOperation, ScanOptions, StoreBatchOp};
 use crate::{ActError, KvStore, Result};
 
 pub struct SledStore {
@@ -69,6 +69,31 @@ impl KvStore for SledStore {
         self.db
             .remove(key.as_bytes())
             .map_err(|e| ActError::Store(e.to_string()))?;
+        self.db
+            .flush()
+            .map(|_| ())
+            .map_err(|e| ActError::Store(e.to_string()))
+    }
+
+    fn batch(&self, ops: &[StoreBatchOp]) -> Result<()> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        let mut sled_batch = sled::Batch::default();
+        for op in ops {
+            match op {
+                StoreBatchOp::Put { key, value } => {
+                    sled_batch.insert(key.as_bytes(), value.as_slice());
+                }
+                StoreBatchOp::Delete { key } => {
+                    sled_batch.remove(key.as_bytes());
+                }
+            }
+        }
+        self.db
+            .apply_batch(sled_batch)
+            .map_err(|e| ActError::Store(e.to_string()))?;
+        // Ensure durability — flush to disk once for the whole batch
         self.db
             .flush()
             .map(|_| ())

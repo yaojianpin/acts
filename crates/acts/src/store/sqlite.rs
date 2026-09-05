@@ -1,6 +1,6 @@
 use crate::{
     ActError, KvStore, Result,
-    store::{ScanOperation, ScanOptions},
+    store::{ScanOperation, ScanOptions, StoreBatchOp},
     utils::{consts, sync},
 };
 use parking_lot::Mutex;
@@ -139,6 +139,62 @@ impl KvStore for SqliteStore {
             .await
             .map_err(|e| ActError::Store(e.to_string()))?;
             Ok(())
+        })
+    }
+
+    #[allow(clippy::await_holding_lock)]
+    fn batch(&self, ops: &[StoreBatchOp]) -> Result<()> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        if ops.len() == 1 {
+            // A single-key batch skips the BEGIN/COMMIT round trip.
+            return match &ops[0] {
+                StoreBatchOp::Put { key, value } => self.put(key, value.clone()),
+                StoreBatchOp::Delete { key } => self.delete(key),
+            };
+        }
+        let conn = self.conn.clone();
+        sync::block_on(async move {
+            let mut conn = conn.lock();
+            let table = consts::ACTS_STORE_NAME;
+            let res: std::result::Result<(), sqlx::Error> = async {
+                sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+                for op in ops {
+                    match op {
+                        StoreBatchOp::Put { key, value } => {
+                            sqlx::query(&format!(
+                                "INSERT INTO {} (key, value) VALUES (?, ?)
+                                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                                table
+                            ))
+                            .bind(key)
+                            .bind(value)
+                            .execute(&mut *conn)
+                            .await?;
+                        }
+                        StoreBatchOp::Delete { key } => {
+                            sqlx::query(&format!("DELETE FROM {} WHERE key = ?", table))
+                                .bind(key)
+                                .execute(&mut *conn)
+                                .await?;
+                        }
+                    }
+                }
+                sqlx::query("COMMIT").execute(&mut *conn).await?;
+                Ok(())
+            }
+            .await;
+            match res {
+                Ok(()) => Ok(()),
+                Err(err) => {
+                    // Roll back the failed batch: without this the partial
+                    // writes would stay in the open transaction, invisible
+                    // to readers but never committed.
+                    let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                    Err(ActError::Store(err.to_string()))
+                }
+            }
         })
     }
 

@@ -1,6 +1,6 @@
 use crate::{
     ActError, KvStore, Result,
-    store::{ScanOperation, ScanOptions},
+    store::{ScanOperation, ScanOptions, StoreBatchOp},
     utils::{consts, sync},
 };
 use sqlx::{Row, postgres::PgPoolOptions};
@@ -87,6 +87,59 @@ impl KvStore for PostgresStore {
             .execute(&pool)
             .await
             .map_err(|e| ActError::Store(e.to_string()))?;
+            Ok(())
+        })
+    }
+
+    fn batch(&self, ops: &[StoreBatchOp]) -> Result<()> {
+        if ops.is_empty() {
+            return Ok(());
+        }
+        if ops.len() == 1 {
+            // A single-key batch skips the BEGIN/COMMIT round trip.
+            return match &ops[0] {
+                StoreBatchOp::Put { key, value } => self.put(key, value.clone()),
+                StoreBatchOp::Delete { key } => self.delete(key),
+            };
+        }
+        let pool = self.pool.clone();
+        sync::block_on(async move {
+            // One connection for the whole batch: `tx` commits everything or,
+            // when an op fails and the closure returns early, is dropped and
+            // rolls the whole batch back.
+            let mut tx = pool
+                .begin()
+                .await
+                .map_err(|e| ActError::Store(e.to_string()))?;
+            for op in ops {
+                match op {
+                    StoreBatchOp::Put { key, value } => {
+                        sqlx::query(&format!(
+                            "INSERT INTO {} (key, value) VALUES ($1, $2)
+                             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+                            consts::ACTS_STORE_NAME
+                        ))
+                        .bind(key)
+                        .bind(value)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(|e| ActError::Store(e.to_string()))?;
+                    }
+                    StoreBatchOp::Delete { key } => {
+                        sqlx::query(&format!(
+                            "DELETE FROM {} WHERE key = $1",
+                            consts::ACTS_STORE_NAME
+                        ))
+                        .bind(key)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(|e| ActError::Store(e.to_string()))?;
+                    }
+                }
+            }
+            tx.commit()
+                .await
+                .map_err(|e| ActError::Store(e.to_string()))?;
             Ok(())
         })
     }
