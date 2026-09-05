@@ -57,6 +57,84 @@ impl<T> KvCollection<T> {
             .transpose()
     }
 
+    /// The mutations [`DbCollection::create`] would apply (data row + index
+    /// rows), without applying them. Lets a caller fold several document
+    /// writes — e.g. a model and its trigger rows on `deploy` — into one
+    /// atomic [`KvStore::batch`].
+    pub(crate) fn create_ops(&self, data: &T) -> Result<Vec<StoreBatchOp>>
+    where
+        T: DbCollectionIden + Serialize,
+    {
+        let json = serde_json::to_value(data).map_err(map_db_err)?;
+        let id = extract_id(&json)?;
+        let bytes = serde_json::to_vec(&json).map_err(map_db_err)?;
+
+        let mut ops = Vec::with_capacity(1 + T::indexed_fields().len());
+        ops.push(StoreBatchOp::Put {
+            key: self.data_key(&id),
+            value: bytes,
+        });
+        for idx_key in self.index_keys(&json, &id) {
+            ops.push(StoreBatchOp::Put {
+                key: idx_key,
+                value: vec![],
+            });
+        }
+        Ok(ops)
+    }
+
+    /// The mutations [`DbCollection::update`] would apply: drop the old index
+    /// keys the new document no longer carries (keys re-created with the same
+    /// value are left alone — a delete+put of one key is a no-op), then write
+    /// the data row and the new index rows.
+    pub(crate) fn update_ops(&self, data: &T) -> Result<Vec<StoreBatchOp>>
+    where
+        T: DbCollectionIden + Serialize,
+    {
+        let new_json = serde_json::to_value(data).map_err(map_db_err)?;
+        let id = extract_id(&new_json)?;
+        let new_bytes = serde_json::to_vec(&new_json).map_err(map_db_err)?;
+        let new_index = self.index_keys(&new_json, &id);
+        let mut ops = Vec::with_capacity(new_index.len() + 1);
+        if let Some(old_json) = self.read_json(&id)? {
+            let new_keys: HashSet<&str> = new_index.iter().map(String::as_str).collect();
+            for idx_key in self.index_keys(&old_json, &id) {
+                if !new_keys.contains(idx_key.as_str()) {
+                    ops.push(StoreBatchOp::Delete { key: idx_key });
+                }
+            }
+        }
+        ops.push(StoreBatchOp::Put {
+            key: self.data_key(&id),
+            value: new_bytes,
+        });
+        for idx_key in new_index {
+            ops.push(StoreBatchOp::Put {
+                key: idx_key,
+                value: vec![],
+            });
+        }
+        Ok(ops)
+    }
+
+    /// The mutations [`DbCollection::delete`] would apply: every index row of
+    /// the current document, then the data row itself.
+    pub(crate) fn delete_ops(&self, id: &str) -> Result<Vec<StoreBatchOp>>
+    where
+        T: DbCollectionIden,
+    {
+        let mut ops = Vec::new();
+        if let Some(old_json) = self.read_json(id)? {
+            for idx_key in self.index_keys(&old_json, id) {
+                ops.push(StoreBatchOp::Delete { key: idx_key });
+            }
+        }
+        ops.push(StoreBatchOp::Delete {
+            key: self.data_key(id),
+        });
+        Ok(ops)
+    }
+
     /// Compute the set of IDs matching a single expression.
     fn expr_ids(
         &self,
@@ -560,71 +638,24 @@ where
     }
 
     fn create(&self, data: &Self::Item) -> crate::Result<bool> {
-        let json = serde_json::to_value(data).map_err(map_db_err)?;
-        let id = extract_id(&json)?;
-        let bytes = serde_json::to_vec(&json).map_err(map_db_err)?;
-
-        // Data row and every index row are committed as one atomic batch, so
-        // a mid-write failure can never leave a document without its index
-        // entries (or index rows without the data row).
-        let mut ops = Vec::with_capacity(1 + T::indexed_fields().len());
-        ops.push(StoreBatchOp::Put {
-            key: self.data_key(&id),
-            value: bytes,
-        });
-        for idx_key in self.index_keys(&json, &id) {
-            ops.push(StoreBatchOp::Put {
-                key: idx_key,
-                value: vec![],
-            });
-        }
+        // Data row and index rows are committed as one atomic batch, so a
+        // mid-write failure can never leave a document without its indexes.
+        let ops = self.create_ops(data)?;
         self.kv.batch(&ops)?;
         Ok(true)
     }
 
     fn update(&self, data: &Self::Item) -> crate::Result<bool> {
-        let new_json = serde_json::to_value(data).map_err(map_db_err)?;
-        let id = extract_id(&new_json)?;
-        let new_bytes = serde_json::to_vec(&new_json).map_err(map_db_err)?;
-
-        // Old index keys that the new document re-creates with the same value
-        // are left alone (a delete+put of one key is a no-op); only genuinely
-        // stale keys are dropped. All mutations commit as one atomic batch.
-        let new_index = self.index_keys(&new_json, &id);
-        let mut ops = Vec::with_capacity(new_index.len() + 1);
-        if let Some(old_json) = self.read_json(&id)? {
-            let new_keys: HashSet<&str> = new_index.iter().map(String::as_str).collect();
-            for idx_key in self.index_keys(&old_json, &id) {
-                if !new_keys.contains(idx_key.as_str()) {
-                    ops.push(StoreBatchOp::Delete { key: idx_key });
-                }
-            }
-        }
-        ops.push(StoreBatchOp::Put {
-            key: self.data_key(&id),
-            value: new_bytes,
-        });
-        for idx_key in new_index {
-            ops.push(StoreBatchOp::Put {
-                key: idx_key,
-                value: vec![],
-            });
-        }
+        // Stale index drops, the data row and the new index rows commit as
+        // one atomic batch.
+        let ops = self.update_ops(data)?;
         self.kv.batch(&ops)?;
         Ok(true)
     }
 
     fn delete(&self, id: &str) -> crate::Result<bool> {
         // Index rows and the data row are removed as one atomic batch.
-        let mut ops = Vec::new();
-        if let Some(old_json) = self.read_json(id)? {
-            for idx_key in self.index_keys(&old_json, id) {
-                ops.push(StoreBatchOp::Delete { key: idx_key });
-            }
-        }
-        ops.push(StoreBatchOp::Delete {
-            key: self.data_key(id),
-        });
+        let ops = self.delete_ops(id)?;
         self.kv.batch(&ops)?;
         Ok(true)
     }
