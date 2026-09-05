@@ -136,15 +136,18 @@ async fn event_on_proc() {
         .with_id("m1")
         .with_step(|step| step.with_id("step1"));
 
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let evt = Emitter::new();
     let workflow2 = workflow.clone();
     evt.on_proc(move |e| {
-        assert_eq!(e.inner().state(), TaskState::Running);
-        assert_eq!(e.inner().model().id, workflow2.id);
+        let workflow2 = workflow2.clone();
+        async move {
+            assert_eq!(e.inner().state(), TaskState::Running);
+            assert_eq!(e.inner().model().id, workflow2.id);
+        }
     });
     proc.set_state(TaskState::Running);
-    engine.runtime().emitter().emit_proc_event(&proc);
+    engine.runtime().emitter().emit_proc_event(&proc).await;
 }
 
 #[tokio::test]
@@ -153,9 +156,9 @@ async fn event_on_task() {
         .with_id("m1")
         .with_step(|step| step.with_id("step1"));
 
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let evt = Emitter::new();
-    evt.on_task(move |e| {
+    evt.on_task(move |e| async move {
         assert_eq!(e.inner().state(), TaskState::Running);
     });
     proc.set_state(TaskState::Running);
@@ -163,7 +166,12 @@ async fn event_on_task() {
         .create_task(proc.tree().root.as_ref().unwrap(), None)
         .unwrap();
     task.set_state(TaskState::Running);
-    engine.runtime().emitter().emit_task_event(&task).unwrap();
+    engine
+        .runtime()
+        .emitter()
+        .emit_task_event(&task)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -172,13 +180,16 @@ async fn event_start() {
         .with_id("m1")
         .with_step(|step| step.with_id("step1"));
 
-    let (_, proc) = create_proc(&workflow, &utils::longid());
+    let (_, proc) = create_proc(&workflow, &utils::longid()).await;
     let evt = Emitter::new();
     let workflow2 = workflow.clone();
     evt.on_start("k1", move |e| {
-        assert!(e.mid == workflow2.id);
+        let workflow2 = workflow2.clone();
+        async move {
+            assert!(e.mid == workflow2.id);
+        }
     });
-    proc.start().unwrap();
+    proc.start().await.unwrap();
     if let Some(root) = proc.root() {
         let message = root.create_message();
         evt.emit_start_event(&message);
@@ -190,14 +201,17 @@ async fn event_finished() {
     let workflow = Workflow::new()
         .with_id("m1")
         .with_step(|step| step.with_id("step1"));
-    let (_, proc) = create_proc(&workflow, &utils::longid());
+    let (_, proc) = create_proc(&workflow, &utils::longid()).await;
     let evt = Emitter::new();
     let workflow2 = workflow.clone();
     evt.on_complete("k1", move |e| {
-        assert!(e.mid == workflow2.id);
+        let workflow2 = workflow2.clone();
+        async move {
+            assert!(e.mid == workflow2.id);
+        }
     });
 
-    proc.start().unwrap();
+    proc.start().await.unwrap();
     if let Some(root) = proc.root() {
         let message = root.create_message();
         evt.emit_complete_event(&message);
@@ -210,14 +224,17 @@ async fn event_error() {
         .with_id("m1")
         .with_step(|step| step.with_id("step1"));
     let workflow_id = workflow.id.clone();
-    let (_, proc) = create_proc(&workflow, &utils::longid());
+    let (_, proc) = create_proc(&workflow, &utils::longid()).await;
 
     let evt = Emitter::new();
     evt.on_error("k1", move |e| {
-        assert!(e.mid == workflow_id);
+        let workflow_id = workflow_id.clone();
+        async move {
+            assert!(e.mid == workflow_id);
+        }
     });
 
-    proc.start().unwrap();
+    proc.start().await.unwrap();
     if let Some(root) = proc.root() {
         let message = root.create_message();
         evt.emit_error(&message);
@@ -230,15 +247,19 @@ async fn event_message_default() {
         .with_id("m1")
         .with_step(|step| step.with_id("step1"));
     let workflow_id = workflow.id.clone();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
 
     let (s1, s2) = engine.signal(false).double();
     let evt = Emitter::new();
     evt.on_message("k1", move |e| {
-        s1.send(e.mid == workflow_id);
+        let s1 = s1.clone();
+        let workflow_id = workflow_id.clone();
+        async move {
+            s1.send(e.mid == workflow_id);
+        }
     });
 
-    proc.start().unwrap();
+    proc.start().await.unwrap();
     if let Some(root) = proc.root() {
         let message = root.create_message();
         evt.emit_message(&message);
@@ -253,16 +274,20 @@ async fn event_message_dup_key() {
         .with_id("m1")
         .with_step(|step| step.with_id("step1"));
     let workflow_id = workflow.id.clone();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
 
     let (s1, s2) = engine.signal(false).double();
     let evt = Emitter::new();
-    evt.on_message("k1", move |_| {});
+    evt.on_message("k1", move |_| async {});
     evt.on_message("k1", move |e| {
-        s1.send(e.mid == workflow_id);
+        let s1 = s1.clone();
+        let workflow_id = workflow_id.clone();
+        async move {
+            s1.send(e.mid == workflow_id);
+        }
     });
 
-    proc.start().unwrap();
+    proc.start().await.unwrap();
     if let Some(root) = proc.root() {
         let message = root.create_message();
         evt.emit_message(&message);
@@ -276,20 +301,23 @@ async fn event_message_fifo_order() {
     let workflow = Workflow::new()
         .with_id("m1")
         .with_step(|step| step.with_id("step1"));
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
 
     let (s1, s2) = engine.signal(Vec::new()).double();
     let evt = Emitter::new();
     evt.on_message("k1", move |e| {
-        let is_last = e.mid == "mid-2";
-        let mid = e.mid.clone();
-        s1.update(move |data| data.push(mid.clone()));
-        if is_last {
-            s1.close();
+        let s1 = s1.clone();
+        async move {
+            let is_last = e.mid == "mid-2";
+            let mid = e.mid.clone();
+            s1.update(move |data| data.push(mid.clone()));
+            if is_last {
+                s1.close();
+            }
         }
     });
 
-    proc.start().unwrap();
+    proc.start().await.unwrap();
     for i in 0..3 {
         let msg = crate::Message {
             mid: format!("mid-{i}"),

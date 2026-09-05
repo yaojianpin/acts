@@ -39,9 +39,12 @@ impl Extender {
     ///     }
     ///   }
     /// }
-    /// let engine = Engine::new().start().unwrap();
-    /// let module = test_module::TestModule;
-    /// engine.extender().register_var(&module);
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let engine = Engine::new().start().await.unwrap();
+    ///     let module = test_module::TestModule;
+    ///     engine.extender().register_var(&module);
+    /// }
     /// ```
     pub fn register_var<T: ActUserVar + Clone + 'static>(&self, module: &T) {
         self.runtime.env().register_var(module)
@@ -88,14 +91,18 @@ impl Extender {
     ///    }
     /// }
     ///
-    ///  #[tokio::main]
-    ///  async fn main() {
-    ///     let engine = acts::Engine::new().start().unwrap();
-    ///     engine.extender().register_package(&MyPackage::definition()).unwrap();
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let engine = acts::Engine::new().start().await.unwrap();
+    ///     engine.extender()
+    ///         .register_package(&MyPackage::definition())
+    ///         .await
+    ///         .unwrap();
     /// }
-    pub fn register_package(&self, def: &ActPackageDefinition) -> Result<()> {
+    /// ```
+    pub async fn register_package(&self, def: &ActPackageDefinition) -> Result<()> {
         let package = def.into_data()?;
-        self.runtime.cache().store().publish(&package)?;
+        self.runtime.cache().store().publish(&package).await?;
 
         Ok(())
     }

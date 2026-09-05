@@ -2,22 +2,21 @@ use crate::{
     ActError, KvStore, Result,
     store::{ScanOperation, ScanOptions, StoreBatchOp},
 };
-use parking_lot::Mutex;
-use redis::{Client, Commands};
+use redis::aio::MultiplexedConnection;
+use redis::{AsyncCommands, Client};
 
 pub struct RedisStore {
-    conn: Mutex<redis::Connection>,
+    conn: MultiplexedConnection,
 }
 
 impl RedisStore {
-    pub fn open(url: &str) -> Result<Self> {
+    pub async fn open(url: &str) -> Result<Self> {
         let client = Client::open(url).map_err(|e| ActError::Store(e.to_string()))?;
         let conn = client
-            .get_connection()
+            .get_multiplexed_async_connection()
+            .await
             .map_err(|e| ActError::Store(e.to_string()))?;
-        Ok(Self {
-            conn: Mutex::new(conn),
-        })
+        Ok(Self { conn })
     }
 }
 
@@ -46,38 +45,44 @@ fn key_matches(k: &str, key: &str, prefix: &str, op: &ScanOperation) -> bool {
     }
 }
 
+#[async_trait::async_trait]
 impl KvStore for RedisStore {
-    fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        let mut conn = self.conn.lock();
-        conn.get(key).map_err(|e| ActError::Store(e.to_string()))
-    }
-
-    fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
-        let mut conn = self.conn.lock();
-        conn.set(key, value)
+    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        let mut conn = self.conn.clone();
+        conn.get(key)
+            .await
             .map_err(|e| ActError::Store(e.to_string()))
     }
 
-    fn delete(&self, key: &str) -> Result<()> {
-        let mut conn = self.conn.lock();
-        conn.del(key).map_err(|e| ActError::Store(e.to_string()))
+    async fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
+        let mut conn = self.conn.clone();
+        conn.set(key, value)
+            .await
+            .map_err(|e| ActError::Store(e.to_string()))
     }
 
-    fn batch(&self, ops: &[StoreBatchOp]) -> Result<()> {
+    async fn delete(&self, key: &str) -> Result<()> {
+        let mut conn = self.conn.clone();
+        conn.del(key)
+            .await
+            .map_err(|e| ActError::Store(e.to_string()))
+    }
+
+    async fn batch(&self, ops: &[StoreBatchOp]) -> Result<()> {
         if ops.is_empty() {
             return Ok(());
         }
         if ops.len() == 1 {
             // A single-key batch skips the MULTI/EXEC round trip.
             return match &ops[0] {
-                StoreBatchOp::Put { key, value } => self.put(key, value.clone()),
-                StoreBatchOp::Delete { key } => self.delete(key),
+                StoreBatchOp::Put { key, value } => self.put(key, value.clone()).await,
+                StoreBatchOp::Delete { key } => self.delete(key).await,
             };
         }
         // `atomic()` runs the commands through MULTI/EXEC on the single
         // connection: everything is queued, then executed together, so no
         // other client can observe a partially applied batch.
-        let mut conn = self.conn.lock();
+        let mut conn = self.conn.clone();
         let mut pipe = redis::pipe();
         pipe.atomic();
         for op in ops {
@@ -90,17 +95,18 @@ impl KvStore for RedisStore {
                 }
             }
         }
-        pipe.query::<()>(&mut *conn)
+        pipe.query_async::<()>(&mut conn)
+            .await
             .map_err(|e| ActError::Store(e.to_string()))
     }
 
-    fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>> {
+    async fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>> {
         let ScanOptions {
             is_rev,
             op,
             ref prefix,
         } = options;
-        let mut conn = self.conn.lock();
+        let mut conn = self.conn.clone();
         let pattern = format!("{}*", prefix);
         let mut result = Vec::new();
         let mut cursor: String = "0".to_string();
@@ -111,7 +117,8 @@ impl KvStore for RedisStore {
                 .arg(&pattern)
                 .arg("COUNT")
                 .arg(100)
-                .query(&mut *conn)
+                .query_async(&mut conn)
+                .await
                 .map_err(|e| ActError::Store(e.to_string()))?;
             for key_str in keys {
                 if !key_matches(&key_str, key, prefix, &op) {
@@ -119,6 +126,7 @@ impl KvStore for RedisStore {
                 }
                 let val: Option<Vec<u8>> = conn
                     .get(&key_str)
+                    .await
                     .map_err(|e| ActError::Store(e.to_string()))?;
                 if let Some(v) = val {
                     result.push((key_str, v));

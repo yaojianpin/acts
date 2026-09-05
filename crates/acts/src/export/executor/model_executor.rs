@@ -16,17 +16,17 @@ impl ModelExecutor {
     }
 
     #[instrument(skip(self, model, view), fields(id = %model.id, name = %model.name))]
-    pub fn deploy(&self, model: &Workflow, view: Option<&JsonValue>) -> Result<bool> {
+    pub async fn deploy(&self, model: &Workflow, view: Option<&JsonValue>) -> Result<bool> {
         model.valid()?;
 
         // The model row and its trigger (`events`) rows are reconciled and
         // committed as one atomic batch inside `Store::deploy`.
-        self.runtime.cache().store().deploy(model, view)
+        self.runtime.cache().store().deploy(model, view).await
     }
 
     #[instrument(skip(self, q))]
-    pub fn list(&self, q: &Query) -> Result<PageData<ModelInfo>> {
-        match self.runtime.cache().store().models().query(q) {
+    pub async fn list(&self, q: &Query) -> Result<PageData<ModelInfo>> {
+        match self.runtime.cache().store().models().query(q).await {
             Ok(models) => Ok(PageData {
                 count: models.count,
                 page_size: models.page_size,
@@ -39,8 +39,8 @@ impl ModelExecutor {
     }
 
     #[instrument(skip(self), fields(id = %id))]
-    pub fn get(&self, id: &str, fmt: &str) -> Result<ModelInfo> {
-        match self.runtime.cache().store().models().find(id) {
+    pub async fn get(&self, id: &str, fmt: &str) -> Result<ModelInfo> {
+        match self.runtime.cache().store().models().find(id).await {
             Ok(m) => {
                 let mut model: ModelInfo = m.into();
                 match fmt {
@@ -65,9 +65,9 @@ impl ModelExecutor {
     }
 
     #[instrument(skip(self), fields(id = %id))]
-    pub fn rm(&self, id: &str) -> Result<bool> {
+    pub async fn rm(&self, id: &str) -> Result<bool> {
         // The model row and its trigger (`events`) rows are removed as one
         // atomic batch inside `Store::rm_model`.
-        self.runtime.cache().store().rm_model(id)
+        self.runtime.cache().store().rm_model(id).await
     }
 }

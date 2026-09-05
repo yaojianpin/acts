@@ -20,17 +20,20 @@ async fn sch_act_params_no_expr_line() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let (tx, rx) = engine.signal(String::default()).double();
     auto_complete(&engine, &tx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            let params = e.params().unwrap().get::<String>("data").unwrap();
-            rx.send(params);
+        let rx = rx.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                let params = e.params().unwrap().get::<String>("data").unwrap();
+                rx.send(params);
+            }
         }
     });
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     let ret = tx.recv().await;
     proc.print();
 
@@ -50,17 +53,20 @@ async fn sch_act_params_expr_full_line() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let (tx, rx) = engine.signal(String::default()).double();
     auto_complete(&engine, &tx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            let params = e.params().unwrap().get::<String>("data").unwrap();
-            rx.send(params);
+        let rx = rx.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                let params = e.params().unwrap().get::<String>("data").unwrap();
+                rx.send(params);
+            }
         }
     });
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     let ret = tx.recv().await;
     proc.print();
 
@@ -80,17 +86,20 @@ async fn sch_act_params_expr_partial_line() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let (tx, rx) = engine.signal(String::default()).double();
     auto_complete(&engine, &tx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            let params = e.params().unwrap().get::<String>("data").unwrap();
-            rx.send(params);
+        let rx = rx.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                let params = e.params().unwrap().get::<String>("data").unwrap();
+                rx.send(params);
+            }
         }
     });
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     let ret = tx.recv().await;
     proc.print();
 
@@ -111,17 +120,20 @@ async fn sch_act_params_expr_multi_statements() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let (tx, rx) = engine.signal(String::default()).double();
     auto_complete(&engine, &tx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            let params = e.params().unwrap().get::<String>("data").unwrap();
-            rx.send(params);
+        let rx = rx.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                let params = e.params().unwrap().get::<String>("data").unwrap();
+                rx.send(params);
+            }
         }
     });
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     let ret = tx.recv().await;
     proc.print();
 
@@ -148,17 +160,20 @@ async fn sch_act_params_expr_multi_line() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let (tx, rx) = engine.signal(String::default()).double();
     auto_complete(&engine, &tx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            let params = e.params().unwrap().get::<String>("data").unwrap();
-            rx.send(params);
+        let rx = rx.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                let params = e.params().unwrap().get::<String>("data").unwrap();
+                rx.send(params);
+            }
         }
     });
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     let ret = tx.recv().await;
     proc.print();
 
@@ -188,17 +203,20 @@ async fn sch_act_params_multi_expr_str() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let (tx, rx) = engine.signal(String::default()).double();
     auto_complete(&engine, &tx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            let params = e.params().unwrap().get::<String>("data").unwrap();
-            rx.send(params);
+        let rx = rx.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                let params = e.params().unwrap().get::<String>("data").unwrap();
+                rx.send(params);
+            }
         }
     });
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     let ret = tx.recv().await;
     proc.print();
 
@@ -229,17 +247,20 @@ async fn sch_act_params_multi_expr_bool() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let (tx, rx) = engine.signal(String::default()).double();
     auto_complete(&engine, &tx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            let params = e.params().unwrap().get::<String>("data").unwrap();
-            rx.send(params);
+        let rx = rx.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                let params = e.params().unwrap().get::<String>("data").unwrap();
+                rx.send(params);
+            }
         }
     });
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     let ret = tx.recv().await;
     proc.print();
 
@@ -271,17 +292,20 @@ async fn sch_act_params_multi_expr_others() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let (tx, rx) = engine.signal(String::default()).double();
     auto_complete(&engine, &tx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            let params = e.params().unwrap().get::<String>("data").unwrap();
-            rx.send(params);
+        let rx = rx.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                let params = e.params().unwrap().get::<String>("data").unwrap();
+                rx.send(params);
+            }
         }
     });
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     let ret = tx.recv().await;
     proc.print();
 

@@ -22,19 +22,29 @@ steps:
     let engine = Engine::new()
         .with_config(&config)
         .start()
+        .await
         .expect("failed to start engine");
-    engine.executor().model().deploy(&workflow, None).unwrap();
+    engine
+        .executor()
+        .model()
+        .deploy(&workflow, None)
+        .await
+        .unwrap();
 
     let (s, sig) = engine.signal(()).double();
     let tasks = Arc::new(Mutex::new(Vec::new()));
     let tasks2 = tasks.clone();
     let chan = engine.channel();
     chan.on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            let mut t = tasks2.lock();
-            t.push((e.pid.clone(), e.tid.clone()));
-            if t.len() >= iters as usize {
-                s.close();
+        let tasks2 = tasks2.clone();
+        let s = s.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                let mut t = tasks2.lock();
+                t.push((e.pid.clone(), e.tid.clone()));
+                if t.len() >= iters as usize {
+                    s.close();
+                }
             }
         }
     });
@@ -44,15 +54,23 @@ steps:
             .executor()
             .proc()
             .start(&workflow.id, Vars::new())
+            .await
             .unwrap();
     }
     sig.recv().await;
-    let tasks = tasks.lock();
-    println!("pre-created {} tasks", tasks.len());
+    let tasks = {
+        let guard = tasks.lock();
+        println!("pre-created {} tasks", guard.len());
+        guard.clone()
+    };
 
     // warmup
     let (pid, tid) = &tasks[0];
-    let _ = engine.executor().act().complete(pid, tid, Vars::new());
+    let _ = engine
+        .executor()
+        .act()
+        .complete(pid, tid, Vars::new())
+        .await;
 
     let start = Instant::now();
     for (pid, tid) in tasks.iter().skip(1) {
@@ -60,6 +78,7 @@ steps:
             .executor()
             .act()
             .complete(pid, tid, Vars::new())
+            .await
             .unwrap();
     }
     let total = start.elapsed();

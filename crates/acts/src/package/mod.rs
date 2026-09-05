@@ -38,7 +38,7 @@ pub trait ActPackage: Send + Sync {
         Ok(None)
     }
     /// start with non-context, such as workflow event
-    fn start(
+    async fn start(
         &self,
         _rt: &Arc<Runtime>,
         _params: &serde_json::Value,
@@ -234,14 +234,14 @@ impl ActPackageDefinition {
 
 inventory::collect!(ActPackageRegister);
 
-pub fn init(engine: &Engine) -> Result<()> {
+pub async fn init(engine: &Engine) -> Result<()> {
     for register in inventory::iter::<ActPackageRegister> {
         let meta = (register.meta)();
         debug!("package: {}", meta.name);
 
         let mut pack = meta.into_data()?;
         pack.built_in = true;
-        engine.executor().pack().publish(&pack)?;
+        engine.executor().pack().publish(&pack).await?;
         engine.runtime().package().register(meta.id, register);
     }
     Ok(())

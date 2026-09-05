@@ -9,7 +9,8 @@ async fn main() -> acts::Result<()> {
         .add_package::<pack1::Pack1>()
         .add_package::<pack2::Pack2>()
         .build()
-        .start()?;
+        .start()
+        .await?;
 
     let (s1, s2, sig) = engine.signal(()).triple();
     let executor = engine.executor();
@@ -22,23 +23,29 @@ async fn main() -> acts::Result<()> {
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text)?;
     workflow.print();
-    engine.executor().model().deploy(&workflow, None)?;
+    engine.executor().model().deploy(&workflow, None).await?;
 
-    executor.proc().start(&workflow.id, vars)?;
+    executor.proc().start(&workflow.id, vars).await?;
     let chan = engine.channel();
 
     chan.on_complete(move |e| {
-        println!(
-            "on_workflow_complete: state={} cost={}ms output={:?}",
-            e.state,
-            e.cost(),
-            e.outputs
-        );
-        s1.close();
+        let s1 = s1.clone();
+        async move {
+            println!(
+                "on_workflow_complete: state={} cost={}ms output={:?}",
+                e.state,
+                e.cost(),
+                e.outputs
+            );
+            s1.close();
+        }
     });
     chan.on_error(move |e| {
-        println!("on_error: state={:?}", e);
-        s2.close();
+        let s2 = s2.clone();
+        async move {
+            println!("on_error: state={:?}", e);
+            s2.close();
+        }
     });
     sig.recv().await;
 

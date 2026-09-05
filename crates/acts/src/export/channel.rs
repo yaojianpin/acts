@@ -1,4 +1,7 @@
-use crate::{Event, Message, Result, Vars, scheduler::Runtime, utils};
+use crate::{
+    Event, Message, Result, Vars, event::ActWorkflowMessageHandle, scheduler::Runtime, utils,
+};
+use std::pin::Pin;
 use std::sync::Arc;
 use tracing::{debug, error, info};
 
@@ -112,69 +115,120 @@ impl Channel {
     ///
     /// #[tokio::main]
     /// async fn main() {
-    ///     let engine = Engine::new().start().unwrap();
+    ///     let engine = Engine::new().start().await.unwrap();
     ///     let workflow = Workflow::new().with_id("m1").with_step(|step| {
     ///             step.with_id("step1").with_uses("acts.core.irq", Vars::new().with("var1", 10))
     ///     });
     ///
-    ///     engine.channel().on_message(move |e| {
+    ///     engine.channel().on_message(move |e| async move {
     ///         if let Some(uses) = &e.uses && e.r#type == "act" && uses == "acts.core.irq" {
     ///             println!("act message: state={} inputs={:?} outputs={:?}", e.state, e.inputs, e.outputs);
     ///         }
     ///     });
     ///     let exec = engine.executor();
-    ///     exec.model().deploy(&workflow, None).expect("fail to deploy workflow");
+    ///     exec.model().deploy(&workflow, None).await.expect("fail to deploy workflow");
     ///     let mut vars = Vars::new();
     ///     vars.set("pid", "w1");
-    ///     exec.proc().start(
-    ///        &workflow.id,
-    ///        vars,
-    ///    );
+    ///     exec.proc().start(&workflow.id, vars).await.unwrap();
     /// }
     /// ```
-    pub fn on_message(self: &Arc<Self>, f: impl Fn(&Event<Message>) + Send + Sync + 'static) {
+    pub fn on_message<F, Fut>(self: &Arc<Self>, f: F)
+    where
+        F: Fn(Event<Message>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
         let glob = self.glob.clone();
         let runtime = self.runtime.clone();
         let ack = self.ack;
         let chan_id = self.chan_id.clone();
         let pattern = self.pattern.clone();
+        let handle: ActWorkflowMessageHandle =
+            Arc::new(move |e| -> Pin<Box<dyn Future<Output = ()> + Send>> { Box::pin(f(e)) });
+        let chan = chan_id.clone();
         self.runtime.emitter().on_message(&self.chan_id, move |e| {
-            debug!(chan = %chan_id, "on message");
-            deliver(&glob, &runtime, ack, &chan_id, &pattern, &f, e);
+            debug!(chan = %chan, "on message");
+            let glob = glob.clone();
+            let runtime = runtime.clone();
+            let handle = handle.clone();
+            let chan_id = chan_id.clone();
+            let pattern = pattern.clone();
+            async move {
+                deliver(&glob, &runtime, ack, &chan_id, &pattern, &handle, e).await;
+            }
         });
     }
 
-    pub fn on_start(self: &Arc<Self>, f: impl Fn(&Event<Message>) + Send + Sync + 'static) {
+    pub fn on_start<F, Fut>(self: &Arc<Self>, f: F)
+    where
+        F: Fn(Event<Message>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
         let glob = self.glob.clone();
         let runtime = self.runtime.clone();
         let ack = self.ack;
         let chan_id = self.chan_id.clone();
         let pattern = self.pattern.clone();
+        let handle: ActWorkflowMessageHandle =
+            Arc::new(move |e| -> Pin<Box<dyn Future<Output = ()> + Send>> { Box::pin(f(e)) });
         self.runtime.emitter().on_start(&self.chan_id, move |e| {
-            deliver(&glob, &runtime, ack, &chan_id, &pattern, &f, e);
+            let glob = glob.clone();
+            let runtime = runtime.clone();
+            let handle = handle.clone();
+            let chan_id = chan_id.clone();
+            let pattern = pattern.clone();
+            async move {
+                deliver(&glob, &runtime, ack, &chan_id, &pattern, &handle, e).await;
+            }
         });
     }
 
-    pub fn on_complete(self: &Arc<Self>, f: impl Fn(&Event<Message>) + Send + Sync + 'static) {
+    pub fn on_complete<F, Fut>(self: &Arc<Self>, f: F)
+    where
+        F: Fn(Event<Message>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
         let glob = self.glob.clone();
         let runtime = self.runtime.clone();
         let ack = self.ack;
         let chan_id = self.chan_id.clone();
         let pattern = self.pattern.clone();
+        let handle: ActWorkflowMessageHandle =
+            Arc::new(move |e| -> Pin<Box<dyn Future<Output = ()> + Send>> { Box::pin(f(e)) });
+        let chan = chan_id.clone();
         self.runtime.emitter().on_complete(&self.chan_id, move |e| {
-            debug!(chan = %chan_id, "on complete");
-            deliver(&glob, &runtime, ack, &chan_id, &pattern, &f, e);
+            debug!(chan = %chan, "on complete");
+            let glob = glob.clone();
+            let runtime = runtime.clone();
+            let handle = handle.clone();
+            let chan_id = chan_id.clone();
+            let pattern = pattern.clone();
+            async move {
+                deliver(&glob, &runtime, ack, &chan_id, &pattern, &handle, e).await;
+            }
         });
     }
 
-    pub fn on_error(self: &Arc<Self>, f: impl Fn(&Event<Message>) + Send + Sync + 'static) {
+    pub fn on_error<F, Fut>(self: &Arc<Self>, f: F)
+    where
+        F: Fn(Event<Message>) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
         let glob = self.glob.clone();
         let runtime = self.runtime.clone();
         let ack = self.ack;
         let chan_id = self.chan_id.clone();
         let pattern = self.pattern.clone();
+        let handle: ActWorkflowMessageHandle =
+            Arc::new(move |e| -> Pin<Box<dyn Future<Output = ()> + Send>> { Box::pin(f(e)) });
         self.runtime.emitter().on_error(&self.chan_id, move |e| {
-            deliver(&glob, &runtime, ack, &chan_id, &pattern, &f, e);
+            let glob = glob.clone();
+            let runtime = runtime.clone();
+            let handle = handle.clone();
+            let chan_id = chan_id.clone();
+            let pattern = pattern.clone();
+            async move {
+                deliver(&glob, &runtime, ack, &chan_id, &pattern, &handle, e).await;
+            }
         });
     }
 
@@ -189,29 +243,29 @@ impl Channel {
 /// tagged with the new delivery id so the client can ack this exact delivery.
 /// Redeliveries already carry their delivery id and pass through untouched.
 /// If a required store fails the message is not delivered.
-fn deliver<F>(
+async fn deliver(
     glob: &GlobSet,
     runtime: &Arc<Runtime>,
     ack: bool,
     chan_id: &str,
     pattern: &str,
-    f: &F,
-    e: &Event<Message>,
-) where
-    F: Fn(&Event<Message>) + Send + Sync + 'static,
-{
-    if !is_match(glob, e) {
+    f: &ActWorkflowMessageHandle,
+    e: Event<Message>,
+) {
+    if !is_match(glob, &e) {
         return;
     }
 
-    match store_if(runtime, ack, chan_id, pattern, e) {
+    match store_if(runtime, ack, chan_id, pattern, &e).await {
         Ok(Some(delivery_id)) => {
             let mut msg = e.inner().clone();
             msg.delivery_id = Some(delivery_id);
             let event = Event::from_inner(msg);
-            f(&event);
+            f(event).await;
         }
-        Ok(None) => f(e),
+        Ok(None) => {
+            f(e).await;
+        }
         Err(err) => error!(error = %err, chan = %chan_id, "delivery store failed, message dropped"),
     }
 }
@@ -222,7 +276,7 @@ fn deliver<F>(
 /// `Ok(Some(delivery_id))` when a fresh delivery row was stored, `Ok(None)`
 /// when nothing needs storing (non-ack channel or a redelivery that already
 /// has its row), `Err` when the store failed.
-fn store_if(
+async fn store_if(
     runtime: &Arc<Runtime>,
     ack: bool,
     chan_id: &str,
@@ -235,13 +289,13 @@ fn store_if(
 
         // the canonical message is stored once per message id — later
         // channel deliveries of the same event reuse the row
-        if !store.messages().exists(&message.id)? {
-            store.messages().create(&message.into_message())?;
+        if !store.messages().exists(&message.id).await? {
+            store.messages().create(&message.into_message()).await?;
         }
 
         // each channel delivery gets its own delivery row
         let delivery = message.into_delivery(chan_id, pattern);
-        match store.deliveries().create(&delivery) {
+        match store.deliveries().create(&delivery).await {
             Ok(_) => Ok(Some(delivery.id)),
             Err(err) => {
                 error!(error = %err, "channel store failure");

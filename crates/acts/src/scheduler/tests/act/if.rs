@@ -26,17 +26,20 @@ async fn sch_act_if_true() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
     let channel = engine.channel();
 
     channel.on_message(move |e| {
-        if e.is_msg() {
-            rx.close();
+        let rx = rx.clone();
+        async move {
+            if e.is_msg() {
+                rx.close();
+            }
         }
     });
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -62,11 +65,11 @@ async fn sch_act_if_false() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
 
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -92,17 +95,20 @@ async fn sch_act_if_null_error() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
     let channel = engine.channel();
 
     channel.on_message(move |e| {
-        if e.is_msg() {
-            rx.close();
+        let rx = rx.clone();
+        async move {
+            if e.is_msg() {
+                rx.close();
+            }
         }
     });
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(

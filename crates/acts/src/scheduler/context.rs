@@ -322,45 +322,45 @@ impl Context {
         Ok(())
     }
 
-    pub fn back_task(&self, task: &Arc<Task>, paths: &Vec<Arc<Task>>) -> Result<()> {
+    pub async fn back_task(&self, task: &Arc<Task>, paths: &Vec<Arc<Task>>) -> Result<()> {
         for task in task.siblings().iter() {
             if task.state().is_completed() {
                 continue;
             }
             task.set_state(TaskState::Skipped);
-            self.emit_task(task)?;
+            self.emit_task(task).await?;
         }
 
         task.set_state(TaskState::Backed);
-        self.emit_task(task)?;
+        self.emit_task(task).await?;
 
         // marks the state in the paths
         for p in paths {
             if p.state().is_running() {
                 p.set_state(TaskState::Completed);
-                self.emit_task(p)?;
+                self.emit_task(p).await?;
             } else if p.state().is_pending() {
                 p.set_state(TaskState::Skipped);
-                self.emit_task(p)?;
+                self.emit_task(p).await?;
             }
         }
 
         Ok(())
     }
 
-    pub fn abort_task(&self, task: &Arc<Task>) -> Result<()> {
+    pub async fn abort_task(&self, task: &Arc<Task>) -> Result<()> {
         // abort all task's acts
         for task in task.siblings().iter() {
             if task.state().is_completed() {
                 continue;
             }
             task.set_state(TaskState::Skipped);
-            self.emit_task(task)?;
+            self.emit_task(task).await?;
         }
 
         task.set_state(TaskState::Aborted);
         task.set_data(&self.vars());
-        self.emit_task(task)?;
+        self.emit_task(task).await?;
 
         // abort all running task
         let ctx = self;
@@ -373,15 +373,15 @@ impl Context {
                 // act task's data will update to parent
                 task.update_data(&prev.outputs());
             }
-            ctx.emit_task(&ctx.task())?;
+            ctx.emit_task(&ctx.task()).await?;
 
             for t in task.children() {
                 if t.state().is_pending() {
                     t.set_state(TaskState::Skipped);
-                    ctx.emit_task(&t)?;
+                    ctx.emit_task(&t).await?;
                 } else if t.state().is_running() {
                     t.set_state(TaskState::Aborted);
-                    ctx.emit_task(&t)?;
+                    ctx.emit_task(&t).await?;
                 }
             }
 
@@ -393,7 +393,7 @@ impl Context {
 
     /// undo task
     /// the undo task is a step task, set the task as completed and set the children acts as cancelled
-    pub fn undo_task(&self, task: &Arc<Task>) -> Result<()> {
+    pub async fn undo_task(&self, task: &Arc<Task>) -> Result<()> {
         if task.state().is_completed() {
             return Err(ActError::Action(format!(
                 "task('{}') is not allowed to cancel",
@@ -410,23 +410,23 @@ impl Context {
                     continue;
                 }
                 t.set_state(TaskState::Cancelled);
-                self.emit_task(t)?;
+                self.emit_task(t).await?;
                 nexts.extend_from_slice(&t.children());
             }
 
             children = nexts;
         }
         task.set_state(TaskState::Completed);
-        self.emit_task(task)?;
+        self.emit_task(task).await?;
 
         Ok(())
     }
 
-    pub fn emit_error(&self) -> Result<()> {
+    pub async fn emit_error(&self) -> Result<()> {
         let task = self.task();
         debug!(pid = %task.pid, tid = %task.id, "emit error");
         if task.state().is_error() {
-            self.emit_task(&task)?;
+            self.emit_task(&task).await?;
 
             // after emitting, re-check the task state
             if task.state().is_error()
@@ -438,14 +438,16 @@ impl Context {
                     // act task's data will update to parent
                     parent.update_data(&task.outputs());
                 }
-                return parent.on_error(self);
+                // boxed: the parent chain can recurse back into `emit_error`
+                // through `Task::on_error` (async recursion requires boxing)
+                return Box::pin(parent.on_error(self)).await;
             }
         }
 
         Ok(())
     }
 
-    pub fn emit_task(&self, task: &Arc<Task>) -> Result<()> {
+    pub async fn emit_task(&self, task: &Arc<Task>) -> Result<()> {
         debug!(pid = %task.pid, tid = %task.id, state = %task.state(), "emit task");
 
         // on workflow start
@@ -455,10 +457,10 @@ impl Context {
             if self.proc.state().is_none() {
                 self.proc.set_state(TaskState::Running);
             }
-            self.runtime.emitter().emit_proc_event(&self.proc);
+            self.runtime.emitter().emit_proc_event(&self.proc).await;
         }
 
-        self.runtime.emitter().emit_task_event(task)?;
+        self.runtime.emitter().emit_task_event(task).await?;
 
         // on workflow complete
         if let NodeContent::Workflow(_) = &task.node().content
@@ -469,7 +471,7 @@ impl Context {
                 self.proc.set_err(&err);
             }
 
-            self.runtime.emitter().emit_proc_event(&self.proc);
+            self.runtime.emitter().emit_proc_event(&self.proc).await;
         }
 
         Ok(())

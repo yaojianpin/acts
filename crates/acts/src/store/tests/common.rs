@@ -12,8 +12,12 @@ macro_rules! gen_store_tests {
 
         static STORE: OnceLock<std::sync::Arc<$crate::store::Store>> = OnceLock::new();
 
-        fn store() -> &'static std::sync::Arc<$crate::store::Store> {
-            STORE.get_or_init(|| $init)
+        async fn store() -> &'static std::sync::Arc<$crate::store::Store> {
+            if STORE.get().is_none() {
+                let store = $init.await;
+                let _ = STORE.set(store);
+            }
+            STORE.get().unwrap()
         }
 
         fn create_workflow() -> Workflow {
@@ -41,7 +45,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_load_by_limit() {
-            let store = store();
+            let store = store().await;
 
             let prefix = utils::shortid();
             let name = utils::shortid();
@@ -50,13 +54,13 @@ macro_rules! gen_store_tests {
                 let workflow = create_workflow();
                 let mut proc = create_proc(&id, TaskState::None, &workflow);
                 proc.name = name.clone();
-                store.procs().create(&proc).expect("create process");
+                store.procs().create(&proc).await.expect("create process");
             }
 
             let q = Query::new()
                 .filter(Filter::and().expr(Expr::eq("name", name)))
                 .limit(10000);
-            let procs = store.procs().query(&q).unwrap();
+            let procs = store.procs().query(&q).await.unwrap();
             let procs = procs
                 .rows
                 .iter()
@@ -68,7 +72,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_load_by_state() {
-            let store = store();
+            let store = store().await;
 
             let prefix = utils::shortid();
             let name = utils::shortid();
@@ -77,7 +81,7 @@ macro_rules! gen_store_tests {
                 let workflow = create_workflow();
                 let mut proc = create_proc(&id, TaskState::Running, &workflow);
                 proc.name = name.clone();
-                store.procs().create(&proc).expect("create process");
+                store.procs().create(&proc).await.expect("create process");
             }
 
             for _ in 0..100 {
@@ -85,7 +89,7 @@ macro_rules! gen_store_tests {
                 let workflow = create_workflow();
                 let mut proc = create_proc(&id, TaskState::Pending, &workflow);
                 proc.name = name.clone();
-                store.procs().create(&proc).expect("create process");
+                store.procs().create(&proc).await.expect("create process");
             }
 
             for _ in 0..100 {
@@ -93,7 +97,7 @@ macro_rules! gen_store_tests {
                 let workflow = create_workflow();
                 let mut proc = create_proc(&id, TaskState::Completed, &workflow);
                 proc.name = name.clone();
-                store.procs().create(&proc).expect("create process");
+                store.procs().create(&proc).await.expect("create process");
             }
 
             let q = Query::new()
@@ -105,7 +109,7 @@ macro_rules! gen_store_tests {
                     ),
                 )
                 .limit(10000);
-            let procs = store.procs().query(&q).unwrap();
+            let procs = store.procs().query(&q).await.unwrap();
             let procs = procs
                 .rows
                 .iter()
@@ -117,26 +121,26 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_model_deploy_ok() {
-            let store = store();
+            let store = store().await;
             let workflow = create_workflow();
-            let ok = store.deploy(&workflow, None).unwrap();
+            let ok = store.deploy(&workflow, None).await.unwrap();
             assert!(ok);
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_models() {
-            let store = store();
+            let store = store().await;
 
             let mut workflow = create_workflow();
             workflow.id = utils::longid();
-            store.deploy(&workflow, None).unwrap();
+            store.deploy(&workflow, None).await.unwrap();
 
             workflow.id = utils::longid();
-            store.deploy(&workflow, None).unwrap();
+            store.deploy(&workflow, None).await.unwrap();
 
             let q = Query::new().limit(2);
-            let models = store.models().query(&q).unwrap();
+            let models = store.models().query(&q).await.unwrap();
 
             assert_eq!(models.rows.len(), 2);
         }
@@ -144,19 +148,19 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_model_get() {
-            let store = store();
+            let store = store().await;
             let mut workflow = create_workflow();
             workflow.id = utils::longid();
-            store.deploy(&workflow, None).unwrap();
+            store.deploy(&workflow, None).await.unwrap();
 
-            let model = store.models().find(&workflow.id).unwrap();
+            let model = store.models().find(&workflow.id).await.unwrap();
             assert_eq!(model.id, workflow.id);
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_model_query_by_id() {
-            let store = store();
+            let store = store().await;
             let model = Model {
                 id: utils::longid(),
                 name: "test".to_string(),
@@ -170,16 +174,16 @@ macro_rules! gen_store_tests {
                 timestamp: 0,
                 v: 0,
             };
-            store.models().create(&model).expect("create model");
+            store.models().create(&model).await.expect("create model");
             let q = Query::new().filter(Filter::and().expr(Expr::eq("id", model.id)));
-            let ret = store.messages().query(&q);
+            let ret = store.messages().query(&q).await;
             assert!(ret.is_ok());
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_model_query_by_offset_count() {
-            let store = store();
+            let store = store().await;
             let create_time = 100;
             let name = utils::shortid();
             for _ in 0..10 {
@@ -196,7 +200,7 @@ macro_rules! gen_store_tests {
                     timestamp: utils::time::timestamp(),
                     v: 0,
                 };
-                store.models().create(&model).expect("create model");
+                store.models().create(&model).await.expect("create model");
             }
 
             let q = Query::new()
@@ -207,7 +211,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(5);
-            let ret = store.models().query(&q).unwrap();
+            let ret = store.models().query(&q).await.unwrap();
             assert_eq!(ret.count, 10);
             assert_eq!(ret.rows.len(), 5);
 
@@ -219,7 +223,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(9)
                 .limit(5);
-            let ret = store.models().query(&q).unwrap();
+            let ret = store.models().query(&q).await.unwrap();
             assert_eq!(ret.count, 10);
             assert_eq!(ret.rows.len(), 1);
         }
@@ -227,7 +231,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_model_query_by_cond_and() {
-            let store = store();
+            let store = store().await;
             let create_time = 200;
             let name = utils::shortid();
             for _ in 0..10 {
@@ -244,7 +248,7 @@ macro_rules! gen_store_tests {
                     timestamp: utils::time::timestamp(),
                     v: 0,
                 };
-                store.models().create(&model).expect("create model");
+                store.models().create(&model).await.expect("create model");
             }
 
             let q = Query::new().offset(0).limit(10).filter(
@@ -253,7 +257,7 @@ macro_rules! gen_store_tests {
                     .expr(Expr::eq("create_time", create_time))
                     .expr(Expr::eq("size", 1234)),
             );
-            let ret = store.models().query(&q).unwrap();
+            let ret = store.models().query(&q).await.unwrap();
             assert_eq!(ret.count, 10);
 
             let q = Query::new().offset(0).limit(10).filter(
@@ -262,14 +266,14 @@ macro_rules! gen_store_tests {
                     .expr(Expr::eq("create_time", create_time))
                     .expr(Expr::eq("size", 1000)),
             );
-            let ret = store.models().query(&q).unwrap();
+            let ret = store.models().query(&q).await.unwrap();
             assert_eq!(ret.count, 0);
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_model_query_by_cond_or() {
-            let store = store();
+            let store = store().await;
             let create_time = 300;
             let name = utils::shortid();
             for _ in 0..10 {
@@ -286,7 +290,7 @@ macro_rules! gen_store_tests {
                     timestamp: utils::time::timestamp(),
                     v: 0,
                 };
-                store.models().create(&model).expect("create model");
+                store.models().create(&model).await.expect("create model");
             }
             for _ in 0..10 {
                 let model = Model {
@@ -302,7 +306,7 @@ macro_rules! gen_store_tests {
                     timestamp: utils::time::timestamp(),
                     v: 0,
                 };
-                store.models().create(&model).expect("create model");
+                store.models().create(&model).await.expect("create model");
             }
 
             let q = Query::new().offset(0).limit(100).filter(
@@ -315,14 +319,14 @@ macro_rules! gen_store_tests {
                             .expr(Expr::eq("size", 2000)),
                     ),
             );
-            let ret = store.models().query(&q).unwrap();
+            let ret = store.models().query(&q).await.unwrap();
             assert_eq!(ret.count, 20);
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_model_query_by_order() {
-            let store = store();
+            let store = store().await;
             let create_time = 400;
             let name = utils::shortid();
             for _ in 0..10 {
@@ -339,7 +343,7 @@ macro_rules! gen_store_tests {
                     timestamp: utils::time::timestamp(),
                     v: 0,
                 };
-                store.models().create(&model).expect("create model");
+                store.models().create(&model).await.expect("create model");
             }
 
             let q = Query::new()
@@ -351,7 +355,7 @@ macro_rules! gen_store_tests {
                         .expr(Expr::eq("create_time", create_time)),
                 )
                 .order("timestamp", Sort::Asc);
-            let ret = store.models().query(&q).unwrap();
+            let ret = store.models().query(&q).await.unwrap();
             assert_eq!(ret.rows.last().unwrap().name, name.clone());
 
             let q = Query::new()
@@ -363,35 +367,35 @@ macro_rules! gen_store_tests {
                         .expr(Expr::eq("create_time", create_time)),
                 )
                 .order("timestamp", Sort::Desc);
-            let ret = store.models().query(&q).unwrap();
+            let ret = store.models().query(&q).await.unwrap();
             assert_eq!(ret.rows.last().unwrap().name, name.clone());
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_model_remove() {
-            let store = store();
+            let store = store().await;
 
             let id = utils::longid();
             let mut workflow = create_workflow();
             workflow.id = id.clone();
-            store.deploy(&workflow, None).unwrap();
+            store.deploy(&workflow, None).await.unwrap();
 
-            let model = store.models().find(&id);
+            let model = store.models().find(&id).await;
             assert!(model.is_ok());
 
-            store.models().delete(&id).unwrap();
-            let model = store.models().find(&id);
+            store.models().delete(&id).await.unwrap();
+            let model = store.models().find(&id).await;
             assert!(model.is_err());
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_model_deploy_id_error() {
-            let store = store();
+            let store = store().await;
             let mut workflow = create_workflow();
             workflow.id = "".to_string();
-            let result = store.deploy(&workflow, None);
+            let result = store.deploy(&workflow, None).await;
 
             assert!(result.is_err());
         }
@@ -399,35 +403,35 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_proc_create() {
-            let store = store();
+            let store = store().await;
             let id = utils::longid();
             let workflow = create_workflow();
             let proc = create_proc(&id, TaskState::None, &workflow);
 
-            store.procs().create(&proc).expect("create process");
+            store.procs().create(&proc).await.expect("create process");
 
             let q = Query::new().limit(1);
-            let procs = store.procs().query(&q).unwrap();
+            let procs = store.procs().query(&q).await.unwrap();
             assert_eq!(procs.rows.len(), 1);
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_proc_find() {
-            let store = store();
+            let store = store().await;
 
             let id = utils::longid();
             let workflow = create_workflow();
             let proc = create_proc(&id, TaskState::None, &workflow);
-            store.procs().create(&proc).expect("create process");
-            let info = store.procs().find(&id).unwrap();
+            store.procs().create(&proc).await.expect("create process");
+            let info = store.procs().find(&id).await.unwrap();
             assert_eq!(proc.id, info.id);
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_proc_query_by_id() {
-            let store = store();
+            let store = store().await;
 
             let mid = utils::longid();
             let proc = Proc {
@@ -444,16 +448,16 @@ macro_rules! gen_store_tests {
                 v: 0,
             };
 
-            store.procs().create(&proc).expect("create process");
+            store.procs().create(&proc).await.expect("create process");
             let q = Query::new().filter(Filter::and().expr(Expr::eq("id", proc.id)));
-            let ret = store.procs().query(&q);
+            let ret = store.procs().query(&q).await;
             assert!(ret.is_ok());
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_proc_query_by_offset_count() {
-            let store = store();
+            let store = store().await;
             let mid = utils::longid();
             for i in 0..10 {
                 let proc = Proc {
@@ -469,14 +473,14 @@ macro_rules! gen_store_tests {
                     err: None,
                     v: 0,
                 };
-                store.procs().create(&proc).expect("create process");
+                store.procs().create(&proc).await.expect("create process");
             }
 
             let q = Query::new()
                 .filter(Filter::and().expr(Expr::eq("mid", mid.clone())))
                 .offset(0)
                 .limit(5);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 10);
             assert_eq!(ret.rows.len(), 5);
 
@@ -484,7 +488,7 @@ macro_rules! gen_store_tests {
                 .filter(Filter::and().expr(Expr::eq("mid", mid.clone())))
                 .offset(9)
                 .limit(5);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 10);
             assert_eq!(ret.rows.len(), 1);
         }
@@ -492,7 +496,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_proc_query_by_cond_and() {
-            let store = store();
+            let store = store().await;
             let mid = utils::longid();
             for i in 0..10 {
                 let proc = Proc {
@@ -508,7 +512,7 @@ macro_rules! gen_store_tests {
                     err: None,
                     v: 0,
                 };
-                store.procs().create(&proc).expect("create process");
+                store.procs().create(&proc).await.expect("create process");
             }
 
             let q = Query::new().offset(0).limit(10).filter(
@@ -516,7 +520,7 @@ macro_rules! gen_store_tests {
                     .expr(Expr::eq("mid", mid.clone()))
                     .expr(Expr::eq("state", "running")),
             );
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 10);
 
             let q = Query::new().offset(0).limit(10).filter(
@@ -524,14 +528,14 @@ macro_rules! gen_store_tests {
                     .expr(Expr::eq("mid", mid.clone()))
                     .expr(Expr::eq("state", "created")),
             );
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 0);
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_proc_query_by_cond_or() {
-            let store = store();
+            let store = store().await;
             let mid = utils::longid();
             for i in 0..10 {
                 let proc = Proc {
@@ -547,7 +551,7 @@ macro_rules! gen_store_tests {
                     err: None,
                     v: 0,
                 };
-                store.procs().create(&proc).expect("create process");
+                store.procs().create(&proc).await.expect("create process");
             }
 
             for i in 0..10 {
@@ -564,7 +568,7 @@ macro_rules! gen_store_tests {
                     err: None,
                     v: 0,
                 };
-                store.procs().create(&proc).expect("create process");
+                store.procs().create(&proc).await.expect("create process");
             }
 
             let q = Query::new().offset(0).limit(100).filter(
@@ -575,14 +579,14 @@ macro_rules! gen_store_tests {
                 ),
             );
 
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 20);
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_proc_query_by_order() {
-            let store = store();
+            let store = store().await;
             let mid = utils::longid();
             for i in 0..10 {
                 let proc = Proc {
@@ -598,7 +602,7 @@ macro_rules! gen_store_tests {
                     err: None,
                     v: 0,
                 };
-                store.procs().create(&proc).expect("create process");
+                store.procs().create(&proc).await.expect("create process");
             }
 
             let q = Query::new()
@@ -606,7 +610,7 @@ macro_rules! gen_store_tests {
                 .limit(100)
                 .filter(Filter::and().expr(Expr::eq("mid", mid.clone())))
                 .order("timestamp", Sort::Asc);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.rows.last().unwrap().name, "test-10");
 
             let q = Query::new()
@@ -614,25 +618,25 @@ macro_rules! gen_store_tests {
                 .limit(100)
                 .filter(Filter::and().expr(Expr::eq("mid", mid.clone())))
                 .order("timestamp", Sort::Desc);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.rows.last().unwrap().name, "test-1");
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_proc_update() {
-            let store = store();
+            let store = store().await;
 
             let id = utils::longid();
             let workflow = create_workflow();
             let mut proc = create_proc(&id, TaskState::None, &workflow);
 
-            store.procs().create(&proc).expect("create process");
+            store.procs().create(&proc).await.expect("create process");
 
             proc.state = TaskState::Running.to_string();
-            store.procs().update(&proc).expect("update process");
+            store.procs().update(&proc).await.expect("update process");
 
-            let p = store.procs().find(&proc.id).unwrap();
+            let p = store.procs().find(&proc.id).await.unwrap();
             assert_eq!(p.id, proc.id);
             assert_eq!(p.state, TaskState::Running.to_string());
         }
@@ -640,26 +644,26 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_proc_remove() {
-            let store = store();
+            let store = store().await;
 
             let id = utils::longid();
             let workflow = create_workflow();
             let proc = create_proc(&id, TaskState::None, &workflow);
 
-            store.procs().create(&proc).expect("create process");
+            store.procs().create(&proc).await.expect("create process");
 
-            let proc = store.procs().find(&id);
+            let proc = store.procs().find(&id).await;
             assert!(proc.is_ok());
 
-            store.procs().delete(&id).unwrap();
-            let proc = store.procs().find(&id);
+            store.procs().delete(&id).await.unwrap();
+            let proc = store.procs().find(&id).await;
             assert!(proc.is_err());
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_task_create() {
-            let store = store();
+            let store = store().await;
 
             let pid = utils::longid();
             let tid = utils::shortid();
@@ -684,17 +688,17 @@ macro_rules! gen_store_tests {
                 sealed: String::new(),
             };
 
-            store.tasks().create(&task).expect("create task");
+            store.tasks().create(&task).await.expect("create task");
 
             let id = utils::Id::new(&pid, &tid);
-            let ret = store.tasks().find(&id.id());
+            let ret = store.tasks().find(&id.id()).await;
             assert!(ret.is_ok());
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_task_query_by_id() {
-            let store = store();
+            let store = store().await;
 
             let pid = utils::longid();
             let tid = utils::shortid();
@@ -718,18 +722,18 @@ macro_rules! gen_store_tests {
                 sealed: String::new(),
             };
 
-            store.tasks().create(&task).expect("create task");
+            store.tasks().create(&task).await.expect("create task");
 
             let id = utils::Id::new(&pid, &tid);
             let q = Query::new().filter(Filter::and().expr(Expr::eq("id", id.id())));
-            let ret = store.messages().query(&q);
+            let ret = store.messages().query(&q).await;
             assert!(ret.is_ok());
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_task_query_by_offset_count() {
-            let store = store();
+            let store = store().await;
             let pid = utils::longid();
             for i in 0..10 {
                 let tid = utils::shortid();
@@ -752,14 +756,14 @@ macro_rules! gen_store_tests {
                     v: 0,
                     sealed: String::new(),
                 };
-                store.tasks().create(&task).expect("create task");
+                store.tasks().create(&task).await.expect("create task");
             }
 
             let q = Query::new()
                 .filter(Filter::and().expr(Expr::eq("pid", pid.clone())))
                 .offset(0)
                 .limit(5);
-            let ret = store.tasks().query(&q).unwrap();
+            let ret = store.tasks().query(&q).await.unwrap();
             assert_eq!(ret.count, 10);
             assert_eq!(ret.rows.len(), 5);
 
@@ -767,7 +771,7 @@ macro_rules! gen_store_tests {
                 .filter(Filter::and().expr(Expr::eq("pid", pid.clone())))
                 .offset(9)
                 .limit(5);
-            let ret = store.tasks().query(&q).unwrap();
+            let ret = store.tasks().query(&q).await.unwrap();
             assert_eq!(ret.count, 10);
             assert_eq!(ret.rows.len(), 1);
         }
@@ -775,7 +779,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_task_query_by_cond_and() {
-            let store = store();
+            let store = store().await;
             let pid = utils::longid();
             for i in 0..10 {
                 let tid = utils::shortid();
@@ -798,7 +802,7 @@ macro_rules! gen_store_tests {
                     v: 0,
                     sealed: String::new(),
                 };
-                store.tasks().create(&task).expect("create task");
+                store.tasks().create(&task).await.expect("create task");
             }
 
             let q = Query::new().offset(0).limit(10).filter(
@@ -806,7 +810,7 @@ macro_rules! gen_store_tests {
                     .expr(Expr::eq("pid", pid.clone()))
                     .expr(Expr::eq("state", "none")),
             );
-            let ret = store.tasks().query(&q).unwrap();
+            let ret = store.tasks().query(&q).await.unwrap();
             assert_eq!(ret.count, 10);
 
             let q = Query::new().offset(0).limit(10).filter(
@@ -814,14 +818,14 @@ macro_rules! gen_store_tests {
                     .expr(Expr::eq("pid", pid.clone()))
                     .expr(Expr::eq("state", "created")),
             );
-            let ret = store.tasks().query(&q).unwrap();
+            let ret = store.tasks().query(&q).await.unwrap();
             assert_eq!(ret.count, 0);
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_task_query_by_cond_or() {
-            let store = store();
+            let store = store().await;
             let pid = utils::longid();
             for i in 0..10 {
                 let tid = utils::shortid();
@@ -844,7 +848,7 @@ macro_rules! gen_store_tests {
                     v: 0,
                     sealed: String::new(),
                 };
-                store.tasks().create(&task).expect("create task");
+                store.tasks().create(&task).await.expect("create task");
             }
 
             for i in 0..10 {
@@ -868,7 +872,7 @@ macro_rules! gen_store_tests {
                     v: 0,
                     sealed: String::new(),
                 };
-                store.tasks().create(&task).expect("create task");
+                store.tasks().create(&task).await.expect("create task");
             }
 
             let q = Query::new().offset(0).limit(100).filter(
@@ -878,14 +882,14 @@ macro_rules! gen_store_tests {
                         .expr(Expr::eq("state", TaskState::None.to_string())),
                 ),
             );
-            let ret = store.tasks().query(&q).unwrap();
+            let ret = store.tasks().query(&q).await.unwrap();
             assert_eq!(ret.count, 20);
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_task_query_by_order() {
-            let store = store();
+            let store = store().await;
             let pid = utils::longid();
             for i in 0..10 {
                 let tid = utils::shortid();
@@ -908,7 +912,7 @@ macro_rules! gen_store_tests {
                     v: 0,
                     sealed: String::new(),
                 };
-                store.tasks().create(&task).expect("create task");
+                store.tasks().create(&task).await.expect("create task");
             }
 
             let q = Query::new()
@@ -916,7 +920,7 @@ macro_rules! gen_store_tests {
                 .limit(100)
                 .filter(Filter::and().expr(Expr::eq("pid", pid.clone())))
                 .order("timestamp", Sort::Asc);
-            let ret = store.tasks().query(&q).unwrap();
+            let ret = store.tasks().query(&q).await.unwrap();
             assert_eq!(ret.rows.last().unwrap().name, "test-10");
 
             let q = Query::new()
@@ -924,14 +928,14 @@ macro_rules! gen_store_tests {
                 .limit(100)
                 .filter(Filter::and().expr(Expr::eq("pid", pid.clone())))
                 .order("timestamp", Sort::Desc);
-            let ret = store.tasks().query(&q).unwrap();
+            let ret = store.tasks().query(&q).await.unwrap();
             assert_eq!(ret.rows.last().unwrap().name, "test-1");
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_task_update() {
-            let store = store();
+            let store = store().await;
 
             let pid = utils::longid();
             let tid = utils::shortid();
@@ -956,21 +960,21 @@ macro_rules! gen_store_tests {
                 sealed: String::new(),
             };
 
-            store.tasks().create(&task).expect("create task");
+            store.tasks().create(&task).await.expect("create task");
 
             let id = utils::Id::new(&pid, &tid);
-            let mut task = store.tasks().find(&id.id()).unwrap();
+            let mut task = store.tasks().find(&id.id()).await.unwrap();
             task.state = TaskState::Running.to_string();
-            store.tasks().update(&task).unwrap();
+            store.tasks().update(&task).await.unwrap();
 
-            let task2 = store.tasks().find(&id.id()).unwrap();
+            let task2 = store.tasks().find(&id.id()).await.unwrap();
             assert_eq!(task.state, task2.state);
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_task_remove() {
-            let store = store();
+            let store = store().await;
 
             let pid = utils::longid();
             let tid = utils::shortid();
@@ -995,17 +999,21 @@ macro_rules! gen_store_tests {
                 sealed: String::new(),
             };
 
-            store.tasks().create(&task).expect("create task");
-            store.tasks().delete(&task.id).expect("remove process");
+            store.tasks().create(&task).await.expect("create task");
+            store
+                .tasks()
+                .delete(&task.id)
+                .await
+                .expect("remove process");
 
-            let ret = store.tasks().find(&task.id);
+            let ret = store.tasks().find(&task.id).await;
             assert!(ret.is_err());
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_message_create() {
-            let store = store();
+            let store = store().await;
 
             let pid = utils::longid();
             let tid = utils::shortid();
@@ -1028,17 +1036,17 @@ macro_rules! gen_store_tests {
                 v: 0,
             };
 
-            store.messages().create(&msg).expect("create message");
+            store.messages().create(&msg).await.expect("create message");
 
             let id = utils::Id::new(&pid, &tid);
-            let ret = store.messages().find(&id.id());
+            let ret = store.messages().find(&id.id()).await;
             assert!(ret.is_ok());
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_message_query_by_id() {
-            let store = store();
+            let store = store().await;
 
             let pid = utils::longid();
             let tid = utils::shortid();
@@ -1061,18 +1069,18 @@ macro_rules! gen_store_tests {
                 v: 0,
             };
 
-            store.messages().create(&msg).unwrap();
+            store.messages().create(&msg).await.unwrap();
 
             let id = utils::Id::new(&pid, &tid);
             let q = Query::new().filter(Filter::and().expr(Expr::eq("id", id.id())));
-            let ret = store.messages().query(&q);
+            let ret = store.messages().query(&q).await;
             assert!(ret.is_ok());
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_message_query_by_offset_count() {
-            let store = store();
+            let store = store().await;
 
             let pid = utils::longid();
             let tid = utils::shortid();
@@ -1096,14 +1104,14 @@ macro_rules! gen_store_tests {
                     timestamp: 0,
                     v: 0,
                 };
-                store.messages().create(&msg).unwrap();
+                store.messages().create(&msg).await.unwrap();
             }
 
             let q = Query::new()
                 .offset(0)
                 .limit(10)
                 .filter(Filter::and().expr(Expr::eq("pid", pid.clone())));
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.messages().query(&q).await.unwrap();
             assert_eq!(ret.count, 100);
             assert_eq!(ret.rows.len(), 10);
 
@@ -1111,7 +1119,7 @@ macro_rules! gen_store_tests {
                 .offset(95)
                 .limit(10)
                 .filter(Filter::and().expr(Expr::eq("pid", pid.clone())));
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.messages().query(&q).await.unwrap();
             assert_eq!(ret.count, 100);
             assert_eq!(ret.rows.len(), 5);
         }
@@ -1119,7 +1127,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_message_query_by_cond_and() {
-            let store = store();
+            let store = store().await;
 
             let pid = utils::longid();
             let tid = utils::shortid();
@@ -1143,7 +1151,7 @@ macro_rules! gen_store_tests {
                     timestamp: 0,
                     v: 0,
                 };
-                store.messages().create(&msg).unwrap();
+                store.messages().create(&msg).await.unwrap();
             }
 
             let q = Query::new().offset(0).limit(10).filter(
@@ -1151,7 +1159,7 @@ macro_rules! gen_store_tests {
                     .expr(Expr::eq("pid", pid.clone()))
                     .expr(Expr::eq("type", "step")),
             );
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.messages().query(&q).await.unwrap();
             assert_eq!(ret.count, 100);
 
             let q = Query::new().offset(0).limit(10).filter(
@@ -1159,14 +1167,14 @@ macro_rules! gen_store_tests {
                     .expr(Expr::eq("pid", pid.clone()))
                     .expr(Expr::eq("type", "workflow")),
             );
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.messages().query(&q).await.unwrap();
             assert_eq!(ret.count, 0);
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_message_query_by_cond_or() {
-            let store = store();
+            let store = store().await;
 
             let pid = utils::longid();
             let tid = utils::shortid();
@@ -1190,7 +1198,7 @@ macro_rules! gen_store_tests {
                     timestamp: 0,
                     v: 0,
                 };
-                store.messages().create(&msg).unwrap();
+                store.messages().create(&msg).await.unwrap();
             }
 
             for _ in 0..10 {
@@ -1212,7 +1220,7 @@ macro_rules! gen_store_tests {
                     timestamp: 0,
                     v: 0,
                 };
-                store.messages().create(&msg).unwrap();
+                store.messages().create(&msg).await.unwrap();
             }
 
             let q = Query::new().offset(0).limit(100).filter(
@@ -1222,14 +1230,14 @@ macro_rules! gen_store_tests {
                         .expr(Expr::eq("state", "completed")),
                 ),
             );
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.messages().query(&q).await.unwrap();
             assert_eq!(ret.count, 20);
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_message_query_by_order() {
-            let store = store();
+            let store = store().await;
 
             let pid = utils::longid();
             let tid = utils::shortid();
@@ -1253,7 +1261,7 @@ macro_rules! gen_store_tests {
                     timestamp: utils::time::timestamp(),
                     v: 0,
                 };
-                store.messages().create(&msg).unwrap();
+                store.messages().create(&msg).await.unwrap();
             }
 
             let q = Query::new()
@@ -1261,7 +1269,7 @@ macro_rules! gen_store_tests {
                 .limit(100)
                 .filter(Filter::and().expr(Expr::eq("pid", pid.clone())))
                 .order("timestamp", Sort::Asc);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.messages().query(&q).await.unwrap();
             assert_eq!(ret.rows.last().unwrap().name, "test-100");
 
             let q = Query::new()
@@ -1269,14 +1277,14 @@ macro_rules! gen_store_tests {
                 .limit(100)
                 .filter(Filter::and().expr(Expr::eq("pid", pid.clone())))
                 .order("timestamp", Sort::Desc);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.messages().query(&q).await.unwrap();
             assert_eq!(ret.rows.last().unwrap().name, "test-1");
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_message_update() {
-            let store = store();
+            let store = store().await;
 
             let pid = utils::longid();
             let tid = utils::shortid();
@@ -1299,15 +1307,15 @@ macro_rules! gen_store_tests {
                 v: 0,
             };
 
-            store.messages().create(&msg).unwrap();
+            store.messages().create(&msg).await.unwrap();
 
             let id = utils::Id::new(&pid, &tid);
-            let mut msg = store.messages().find(&id.id()).unwrap();
+            let mut msg = store.messages().find(&id.id()).await.unwrap();
             msg.state = MessageState::Completed;
             msg.name = "updated".to_string();
-            store.messages().update(&msg).unwrap();
+            store.messages().update(&msg).await.unwrap();
 
-            let msg2 = store.messages().find(&id.id()).unwrap();
+            let msg2 = store.messages().find(&id.id()).await.unwrap();
             assert_eq!(msg2.state, MessageState::Completed);
             assert_eq!(msg2.name, "updated");
         }
@@ -1315,7 +1323,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_message_remove() {
-            let store = store();
+            let store = store().await;
 
             let pid = utils::longid();
             let tid = utils::shortid();
@@ -1338,17 +1346,17 @@ macro_rules! gen_store_tests {
                 v: 0,
             };
 
-            store.messages().create(&msg).unwrap();
-            store.messages().delete(&msg.id).unwrap();
+            store.messages().create(&msg).await.unwrap();
+            store.messages().delete(&msg.id).await.unwrap();
 
-            let ret = store.messages().find(&msg.id);
+            let ret = store.messages().find(&msg.id).await;
             assert!(ret.is_err());
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_package_create() {
-            let store = store();
+            let store = store().await;
 
             let id = utils::longid();
             let package = Package {
@@ -1370,15 +1378,15 @@ macro_rules! gen_store_tests {
                 v: 0,
             };
 
-            store.packages().create(&package).unwrap();
-            let ret = store.packages().find(&package.id);
+            store.packages().create(&package).await.unwrap();
+            let ret = store.packages().find(&package.id).await;
             assert!(ret.is_ok());
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_package_query_by_id() {
-            let store = store();
+            let store = store().await;
 
             let id = utils::longid();
             let package = Package {
@@ -1399,16 +1407,16 @@ macro_rules! gen_store_tests {
                 built_in: false,
                 v: 0,
             };
-            store.packages().create(&package).unwrap();
+            store.packages().create(&package).await.unwrap();
             let q = Query::new().filter(Filter::and().expr(Expr::eq("id", package.id)));
-            let ret = store.packages().query(&q);
+            let ret = store.packages().query(&q).await;
             assert!(ret.is_ok());
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_package_query_by_offset_count() {
-            let store = store();
+            let store = store().await;
             let name = utils::shortid();
             for _i in 0..10 {
                 let package = Package {
@@ -1429,7 +1437,7 @@ macro_rules! gen_store_tests {
                     built_in: false,
                     v: 0,
                 };
-                store.packages().create(&package).unwrap();
+                store.packages().create(&package).await.unwrap();
             }
 
             let q = Query::new()
@@ -1440,7 +1448,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(5);
-            let ret = store.packages().query(&q).unwrap();
+            let ret = store.packages().query(&q).await.unwrap();
             assert_eq!(ret.count, 10);
             assert_eq!(ret.rows.len(), 5);
 
@@ -1452,7 +1460,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(9)
                 .limit(5);
-            let ret = store.packages().query(&q).unwrap();
+            let ret = store.packages().query(&q).await.unwrap();
             assert_eq!(ret.count, 10);
             assert_eq!(ret.rows.len(), 1);
         }
@@ -1460,7 +1468,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_package_query_by_cond_and() {
-            let store = store();
+            let store = store().await;
             let name = utils::shortid();
             for _ in 0..10 {
                 let package = Package {
@@ -1481,7 +1489,7 @@ macro_rules! gen_store_tests {
                     built_in: false,
                     v: 0,
                 };
-                store.packages().create(&package).unwrap();
+                store.packages().create(&package).await.unwrap();
             }
 
             let q = Query::new().offset(0).limit(10).filter(
@@ -1491,7 +1499,7 @@ macro_rules! gen_store_tests {
                     .expr(Expr::eq("create_time", 200))
                     .expr(Expr::eq("update_time", 100)),
             );
-            let ret = store.packages().query(&q).unwrap();
+            let ret = store.packages().query(&q).await.unwrap();
             assert_eq!(ret.count, 10);
 
             let q = Query::new().offset(0).limit(10).filter(
@@ -1501,14 +1509,14 @@ macro_rules! gen_store_tests {
                     .expr(Expr::eq("create_time", 200))
                     .expr(Expr::eq("update_time", 200)),
             );
-            let ret = store.packages().query(&q).unwrap();
+            let ret = store.packages().query(&q).await.unwrap();
             assert_eq!(ret.count, 0);
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_package_query_by_cond_or() {
-            let store = store();
+            let store = store().await;
             let name = utils::shortid();
             for _ in 0..10 {
                 let package = Package {
@@ -1529,7 +1537,7 @@ macro_rules! gen_store_tests {
                     built_in: false,
                     v: 0,
                 };
-                store.packages().create(&package).unwrap();
+                store.packages().create(&package).await.unwrap();
             }
 
             for _ in 0..10 {
@@ -1551,7 +1559,7 @@ macro_rules! gen_store_tests {
                     built_in: false,
                     v: 0,
                 };
-                store.packages().create(&package).unwrap();
+                store.packages().create(&package).await.unwrap();
             }
 
             let q = Query::new().offset(0).limit(100).filter(
@@ -1564,14 +1572,14 @@ macro_rules! gen_store_tests {
                             .expr(Expr::eq("version", "0.2.0")),
                     ),
             );
-            let ret = store.packages().query(&q).unwrap();
+            let ret = store.packages().query(&q).await.unwrap();
             assert_eq!(ret.count, 20);
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_package_query_by_order() {
-            let store = store();
+            let store = store().await;
             let name = utils::shortid();
             for i in 0..10 {
                 let package = Package {
@@ -1592,7 +1600,7 @@ macro_rules! gen_store_tests {
                     built_in: false,
                     v: 0,
                 };
-                store.packages().create(&package).unwrap();
+                store.packages().create(&package).await.unwrap();
             }
 
             let q = Query::new()
@@ -1605,7 +1613,7 @@ macro_rules! gen_store_tests {
                         .expr(Expr::eq("create_time", 400)),
                 )
                 .order("timestamp", Sort::Asc);
-            let ret = store.packages().query(&q).unwrap();
+            let ret = store.packages().query(&q).await.unwrap();
             assert_eq!(ret.rows.last().unwrap().desc, "test-10");
 
             let q = Query::new()
@@ -1618,14 +1626,14 @@ macro_rules! gen_store_tests {
                         .expr(Expr::eq("create_time", 400)),
                 )
                 .order("timestamp", Sort::Desc);
-            let ret = store.packages().query(&q).unwrap();
+            let ret = store.packages().query(&q).await.unwrap();
             assert_eq!(ret.rows.last().unwrap().desc, "test-1");
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_package_update() {
-            let store = store();
+            let store = store().await;
 
             let id = utils::longid();
             let package = Package {
@@ -1646,13 +1654,13 @@ macro_rules! gen_store_tests {
                 built_in: false,
                 v: 0,
             };
-            store.packages().create(&package).unwrap();
-            let mut p = store.packages().find(&package.id).unwrap();
+            store.packages().create(&package).await.unwrap();
+            let mut p = store.packages().find(&package.id).await.unwrap();
             p.desc = "my desc".to_string();
             p.version = "0.2.0".to_string();
-            store.packages().update(&p).unwrap();
+            store.packages().update(&p).await.unwrap();
 
-            let p2 = store.packages().find(&package.id).unwrap();
+            let p2 = store.packages().find(&package.id).await.unwrap();
             assert_eq!(p2.desc, "my desc");
             assert_eq!(p2.version, "0.2.0");
         }
@@ -1660,7 +1668,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_package_remove() {
-            let store = store();
+            let store = store().await;
 
             let id = utils::longid();
             let package = Package {
@@ -1681,10 +1689,10 @@ macro_rules! gen_store_tests {
                 built_in: false,
                 v: 0,
             };
-            store.packages().create(&package).unwrap();
-            store.packages().delete(&package.id).unwrap();
+            store.packages().create(&package).await.unwrap();
+            store.packages().delete(&package.id).await.unwrap();
 
-            let ret = store.packages().find(&package.id);
+            let ret = store.packages().find(&package.id).await;
             assert!(ret.is_err());
         }
 
@@ -1693,7 +1701,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_upcast_model_version() {
-            let store = store();
+            let store = store().await;
             let model = Model {
                 id: utils::longid(),
                 name: "upcast-test".to_string(),
@@ -1707,10 +1715,10 @@ macro_rules! gen_store_tests {
                 timestamp: utils::time::timestamp(),
                 v: 0,
             };
-            store.models().create(&model).expect("create model");
+            store.models().create(&model).await.expect("create model");
 
             // find goes through upcast now
-            let found = store.models().find(&model.id).unwrap();
+            let found = store.models().find(&model.id).await.unwrap();
             assert_eq!(found.id, model.id);
             assert_eq!(found.name, model.name);
             assert_eq!(found.v, 0); // version preserved
@@ -1719,7 +1727,7 @@ macro_rules! gen_store_tests {
             let q = Query::new()
                 .filter(Filter::and().expr(Expr::eq("id", model.id.clone())))
                 .limit(1);
-            let page = store.models().query(&q).unwrap();
+            let page = store.models().query(&q).await.unwrap();
             assert_eq!(page.rows.len(), 1);
             assert_eq!(page.rows[0].v, 0);
         }
@@ -1727,7 +1735,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_upcast_proc_version() {
-            let store = store();
+            let store = store().await;
             let proc = Proc {
                 id: utils::shortid(),
                 name: "upcast-proc".to_string(),
@@ -1741,10 +1749,10 @@ macro_rules! gen_store_tests {
                 err: None,
                 v: 0,
             };
-            store.procs().create(&proc).expect("create proc");
+            store.procs().create(&proc).await.expect("create proc");
 
             // find goes through upcast
-            let found = store.procs().find(&proc.id).unwrap();
+            let found = store.procs().find(&proc.id).await.unwrap();
             assert_eq!(found.id, proc.id);
             assert_eq!(found.v, 0);
 
@@ -1752,7 +1760,7 @@ macro_rules! gen_store_tests {
             let q = Query::new()
                 .filter(Filter::and().expr(Expr::eq("id", proc.id.clone())))
                 .limit(1);
-            let page = store.procs().query(&q).unwrap();
+            let page = store.procs().query(&q).await.unwrap();
             assert_eq!(page.rows.len(), 1);
             assert_eq!(page.rows[0].v, 0);
         }
@@ -1760,7 +1768,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_upcast_task_version() {
-            let store = store();
+            let store = store().await;
             let pid = utils::longid();
             let tid = utils::shortid();
             let task = Task {
@@ -1782,10 +1790,10 @@ macro_rules! gen_store_tests {
                 v: 0,
                 sealed: String::new(),
             };
-            store.tasks().create(&task).expect("create task");
+            store.tasks().create(&task).await.expect("create task");
 
             // find goes through upcast
-            let found = store.tasks().find(&task.id).unwrap();
+            let found = store.tasks().find(&task.id).await.unwrap();
             assert_eq!(found.id, task.id);
             assert_eq!(found.v, 0);
 
@@ -1793,7 +1801,7 @@ macro_rules! gen_store_tests {
             let q = Query::new()
                 .filter(Filter::and().expr(Expr::eq("id", task.id.clone())))
                 .limit(1);
-            let page = store.tasks().query(&q).unwrap();
+            let page = store.tasks().query(&q).await.unwrap();
             assert_eq!(page.rows.len(), 1);
             assert_eq!(page.rows[0].v, 0);
         }
@@ -1801,7 +1809,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_upcast_message_version() {
-            let store = store();
+            let store = store().await;
             let msg = Message {
                 id: utils::shortid(),
                 name: "upcast-msg".to_string(),
@@ -1820,10 +1828,10 @@ macro_rules! gen_store_tests {
                 timestamp: 0,
                 v: 0,
             };
-            store.messages().create(&msg).expect("create message");
+            store.messages().create(&msg).await.expect("create message");
 
             // find goes through upcast
-            let found = store.messages().find(&msg.id).unwrap();
+            let found = store.messages().find(&msg.id).await.unwrap();
             assert_eq!(found.id, msg.id);
             assert_eq!(found.v, 2);
 
@@ -1831,7 +1839,7 @@ macro_rules! gen_store_tests {
             let q = Query::new()
                 .filter(Filter::and().expr(Expr::eq("id", msg.id.clone())))
                 .limit(1);
-            let page = store.messages().query(&q).unwrap();
+            let page = store.messages().query(&q).await.unwrap();
             assert_eq!(page.rows.len(), 1);
             assert_eq!(page.rows[0].v, 2);
         }
@@ -1839,7 +1847,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_upcast_package_version() {
-            let store = store();
+            let store = store().await;
             let package = Package {
                 id: utils::longid(),
                 name: "upcast-pkg".to_string(),
@@ -1858,10 +1866,14 @@ macro_rules! gen_store_tests {
                 built_in: false,
                 v: 0,
             };
-            store.packages().create(&package).expect("create package");
+            store
+                .packages()
+                .create(&package)
+                .await
+                .expect("create package");
 
             // find goes through upcast
-            let found = store.packages().find(&package.id).unwrap();
+            let found = store.packages().find(&package.id).await.unwrap();
             assert_eq!(found.id, package.id);
             assert_eq!(found.v, 0);
 
@@ -1869,7 +1881,7 @@ macro_rules! gen_store_tests {
             let q = Query::new()
                 .filter(Filter::and().expr(Expr::eq("id", package.id.clone())))
                 .limit(1);
-            let page = store.packages().query(&q).unwrap();
+            let page = store.packages().query(&q).await.unwrap();
             assert_eq!(page.rows.len(), 1);
             assert_eq!(page.rows[0].v, 0);
         }
@@ -1881,7 +1893,7 @@ macro_rules! gen_store_tests {
         async fn store_query_order_by_matches_indexed_field_asc() {
             // When order_by field matches an indexed field, the scan direction
             // should be determined by that field's direction (not .first()).
-            let store = store();
+            let store = store().await;
             let pid = utils::longid();
             let tid = utils::shortid();
 
@@ -1908,7 +1920,7 @@ macro_rules! gen_store_tests {
                         timestamp: 0,
                         v: 0,
                     };
-                    store.deliveries().create(&msg).unwrap();
+                    store.deliveries().create(&msg).await.unwrap();
                 }
             }
 
@@ -1918,7 +1930,7 @@ macro_rules! gen_store_tests {
                 .order("status", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.deliveries().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).await.unwrap();
             assert_eq!(ret.count, 20);
             for i in 1..ret.rows.len() {
                 let prev: i64 = ret.rows[i - 1].status.into();
@@ -1933,7 +1945,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_query_order_by_matches_indexed_field_desc() {
-            let store = store();
+            let store = store().await;
             let pid = utils::longid();
             let tid = utils::shortid();
 
@@ -1959,7 +1971,7 @@ macro_rules! gen_store_tests {
                         timestamp: 0,
                         v: 0,
                     };
-                    store.deliveries().create(&msg).unwrap();
+                    store.deliveries().create(&msg).await.unwrap();
                 }
             }
 
@@ -1969,7 +1981,7 @@ macro_rules! gen_store_tests {
                 .order("status", Sort::Desc)
                 .offset(0)
                 .limit(100);
-            let ret = store.deliveries().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).await.unwrap();
             assert_eq!(ret.count, 20);
             for i in 1..ret.rows.len() {
                 let prev: i64 = ret.rows[i - 1].status.into();
@@ -1987,7 +1999,7 @@ macro_rules! gen_store_tests {
             // When order_by has multiple entries and a non-first one matches
             // an indexed field, the scan direction is taken from the first
             // matching indexed field, not from the first order_by entry.
-            let store = store();
+            let store = store().await;
             let pid = utils::longid();
             let tid = utils::shortid();
 
@@ -2015,7 +2027,7 @@ macro_rules! gen_store_tests {
                     timestamp: 0,
                     v: 0,
                 };
-                store.deliveries().create(&msg).unwrap();
+                store.deliveries().create(&msg).await.unwrap();
             }
 
             // name is NOT indexed, status IS indexed.
@@ -2026,7 +2038,7 @@ macro_rules! gen_store_tests {
                 .order("status", Sort::Asc) // IS indexed — should determine is_rev
                 .offset(0)
                 .limit(100);
-            let ret = store.deliveries().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).await.unwrap();
             assert_eq!(ret.count, 20);
             for i in 1..ret.rows.len() {
                 let prev: i64 = ret.rows[i - 1].status.into();
@@ -2043,7 +2055,7 @@ macro_rules! gen_store_tests {
         async fn store_query_pagination_with_indexed_order_by() {
             // Verify that pagination metadata (count, page sizes) is correct
             // when order_by uses an indexed field.
-            let store = store();
+            let store = store().await;
             let pid = utils::longid();
             let tid = utils::shortid();
 
@@ -2069,7 +2081,7 @@ macro_rules! gen_store_tests {
                         timestamp: 0,
                         v: 0,
                     };
-                    store.deliveries().create(&msg).unwrap();
+                    store.deliveries().create(&msg).await.unwrap();
                 }
             }
 
@@ -2081,7 +2093,7 @@ macro_rules! gen_store_tests {
                     .order("status", Sort::Asc)
                     .offset(0)
                     .limit(7);
-                let page = store.deliveries().query(&q).unwrap();
+                let page = store.deliveries().query(&q).await.unwrap();
                 assert_eq!(page.count, 20);
                 assert_eq!(page.rows.len(), 7);
                 assert_eq!(page.page_size, 7);
@@ -2105,7 +2117,7 @@ macro_rules! gen_store_tests {
                     .order("status", Sort::Asc)
                     .offset(7)
                     .limit(7);
-                let page = store.deliveries().query(&q).unwrap();
+                let page = store.deliveries().query(&q).await.unwrap();
                 assert_eq!(page.count, 20);
                 assert_eq!(page.rows.len(), 7);
                 assert_eq!(page.page_num, 2);
@@ -2130,7 +2142,7 @@ macro_rules! gen_store_tests {
                     .order("status", Sort::Asc)
                     .offset(14)
                     .limit(7);
-                let page = store.deliveries().query(&q).unwrap();
+                let page = store.deliveries().query(&q).await.unwrap();
                 assert_eq!(page.count, 20);
                 assert_eq!(page.rows.len(), 6);
                 assert_eq!(page.page_num, 3);
@@ -2152,7 +2164,7 @@ macro_rules! gen_store_tests {
                     .order("status", Sort::Desc)
                     .offset(0)
                     .limit(7);
-                let page = store.deliveries().query(&q).unwrap();
+                let page = store.deliveries().query(&q).await.unwrap();
                 assert_eq!(page.count, 20);
                 assert_eq!(page.rows.len(), 7);
                 for i in 1..page.rows.len() {
@@ -2169,7 +2181,7 @@ macro_rules! gen_store_tests {
             // Regression: order_by used to run AFTER pagination, so a page was
             // an arbitrary id-sorted batch re-ordered in isolation. Pages must
             // now be consecutive slices of the globally sorted result.
-            let store = store();
+            let store = store().await;
             let pid = utils::longid();
             let tid = utils::shortid();
             for &status in &[
@@ -2193,7 +2205,7 @@ macro_rules! gen_store_tests {
                         timestamp: 0,
                         v: 0,
                     };
-                    store.deliveries().create(&msg).unwrap();
+                    store.deliveries().create(&msg).await.unwrap();
                 }
             }
             let base = Query::new().filter(Filter::and().expr(Expr::eq("pid", pid.clone())));
@@ -2201,6 +2213,7 @@ macro_rules! gen_store_tests {
                 let full: Vec<String> = store
                     .deliveries()
                     .query(&base.clone().order("status", order.clone()).limit(100))
+                    .await
                     .unwrap()
                     .rows
                     .iter()
@@ -2218,6 +2231,7 @@ macro_rules! gen_store_tests {
                                 .limit(7)
                                 .offset(offset),
                         )
+                        .await
                         .unwrap();
                     let expect = &full[offset..full.len().min(offset + 7)];
                     let got: Vec<String> = page.rows.iter().map(|m| m.id.clone()).collect();
@@ -2240,7 +2254,7 @@ macro_rules! gen_store_tests {
         async fn store_query_indexed_integer_filter() {
             // Verify that filtering by integer indexed fields works correctly
             // (tests zero-padded index key construction and scan_key matching).
-            let store = store();
+            let store = store().await;
             let pid = utils::longid();
             let tid = utils::shortid();
 
@@ -2264,7 +2278,7 @@ macro_rules! gen_store_tests {
                     timestamp: ts,
                     v: 0,
                 };
-                store.messages().create(&msg).unwrap();
+                store.messages().create(&msg).await.unwrap();
             }
 
             // Filter by timestamp=1 (tests zero-padded scan key "00000000000000000001")
@@ -2277,7 +2291,7 @@ macro_rules! gen_store_tests {
                 .order("timestamp", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.messages().query(&q).await.unwrap();
             assert_eq!(ret.count, 1);
             assert_eq!(ret.rows[0].timestamp, 1);
             assert_eq!(ret.rows[0].name, "ts-1");
@@ -2292,7 +2306,7 @@ macro_rules! gen_store_tests {
                 .order("timestamp", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.messages().query(&q).await.unwrap();
             assert_eq!(ret.count, 1);
             assert_eq!(ret.rows[0].timestamp, 100);
 
@@ -2306,7 +2320,7 @@ macro_rules! gen_store_tests {
                 .order("timestamp", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.messages().query(&q).await.unwrap();
             assert_eq!(ret.count, 1);
             assert_eq!(ret.rows[0].timestamp, 500);
 
@@ -2328,7 +2342,7 @@ macro_rules! gen_store_tests {
                     timestamp: 0,
                     v: 0,
                 };
-                store.deliveries().create(&msg).unwrap();
+                store.deliveries().create(&msg).await.unwrap();
             }
             let q = Query::new()
                 .filter(
@@ -2338,7 +2352,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.deliveries().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).await.unwrap();
             assert_eq!(ret.count, 6);
             // Double-check: filter for a status that no delivery has
             let q = Query::new()
@@ -2349,7 +2363,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.deliveries().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).await.unwrap();
             assert_eq!(ret.count, 0);
         }
 
@@ -2359,7 +2373,7 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_between_on_indexed_integer_field() {
             // Between on timestamp (indexed integer field) — inclusive range scan
-            let store = store();
+            let store = store().await;
             let pid = utils::longid();
             let tid = utils::shortid();
 
@@ -2384,7 +2398,7 @@ macro_rules! gen_store_tests {
                     timestamp: ts,
                     v: 0,
                 };
-                store.messages().create(&msg).unwrap();
+                store.messages().create(&msg).await.unwrap();
             }
 
             // Between 150 and 450 (inclusive) — should match 200, 300, 400
@@ -2397,7 +2411,7 @@ macro_rules! gen_store_tests {
                 .order("timestamp", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.messages().query(&q).await.unwrap();
             assert_eq!(ret.count, 3);
             assert_eq!(ret.rows[0].timestamp, 200);
             assert_eq!(ret.rows[1].timestamp, 300);
@@ -2413,7 +2427,7 @@ macro_rules! gen_store_tests {
                 .order("timestamp", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.messages().query(&q).await.unwrap();
             assert_eq!(ret.count, 2);
             assert_eq!(ret.rows[0].timestamp, 100);
             assert_eq!(ret.rows[1].timestamp, 200);
@@ -2427,7 +2441,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.messages().query(&q).await.unwrap();
             assert_eq!(ret.count, 1);
             assert_eq!(ret.rows[0].timestamp, 100);
 
@@ -2441,7 +2455,7 @@ macro_rules! gen_store_tests {
                 .order("timestamp", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.messages().query(&q).await.unwrap();
             assert_eq!(ret.count, 5);
 
             // Range that matches nothing (above all values)
@@ -2454,7 +2468,7 @@ macro_rules! gen_store_tests {
                 .order("timestamp", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.messages().query(&q).await.unwrap();
             assert_eq!(ret.count, 0);
 
             // Range that matches nothing (below all values)
@@ -2467,7 +2481,7 @@ macro_rules! gen_store_tests {
                 .order("timestamp", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.messages().query(&q).await.unwrap();
             assert_eq!(ret.count, 0);
         }
 
@@ -2476,7 +2490,7 @@ macro_rules! gen_store_tests {
         async fn store_query_between_on_indexed_string_field() {
             // Between on state (indexed string field on Proc)
             // Use unique state values to avoid collisions with data from other tests
-            let store = store();
+            let store = store().await;
             let workflow = create_workflow();
             let prefix = utils::shortid();
             let states: Vec<String> = vec![
@@ -2489,7 +2503,7 @@ macro_rules! gen_store_tests {
             for state in &states {
                 let mut proc = create_proc(&utils::shortid(), TaskState::None, &workflow);
                 proc.state = state.clone();
-                store.procs().create(&proc).expect("create proc");
+                store.procs().create(&proc).await.expect("create proc");
             }
 
             // Between on a string field with inclusive bounds (all five states
@@ -2503,7 +2517,7 @@ macro_rules! gen_store_tests {
                 )))
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 5, "all five states must match");
             let mut got: Vec<String> = ret.rows.iter().map(|p| p.state.clone()).collect();
             got.sort();
@@ -2516,7 +2530,7 @@ macro_rules! gen_store_tests {
             // Eq on an indexed string must not reach stored values that extend
             // the query value with a hyphen ("-" is KEY_SEP and is escaped in
             // the value encoding)
-            let store = store();
+            let store = store().await;
             let workflow = create_workflow();
             let base = format!("st-{}", utils::shortid());
 
@@ -2526,14 +2540,14 @@ macro_rules! gen_store_tests {
             {
                 let mut proc = create_proc(&format!("p{}", i), TaskState::None, &workflow);
                 proc.state = state;
-                store.procs().create(&proc).expect("create proc");
+                store.procs().create(&proc).await.expect("create proc");
             }
 
             let q = Query::new()
                 .filter(Filter::and().expr(Expr::eq("state", base.clone())))
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 1, "hyphen-extension value must not match Eq");
             assert_eq!(ret.rows[0].state, base);
 
@@ -2541,7 +2555,7 @@ macro_rules! gen_store_tests {
                 .filter(Filter::and().expr(Expr::eq("state", format!("{}-v2", base))))
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 1);
             assert_eq!(ret.rows[0].state, format!("{}-v2", base));
         }
@@ -2550,7 +2564,7 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_in_on_indexed_integer_field() {
             // In on status (indexed integer field on Message)
-            let store = store();
+            let store = store().await;
             let pid = utils::longid();
             let tid = utils::shortid();
 
@@ -2576,7 +2590,7 @@ macro_rules! gen_store_tests {
                         timestamp: 0,
                         v: 0,
                     };
-                    store.deliveries().create(&msg).unwrap();
+                    store.deliveries().create(&msg).await.unwrap();
                 }
             }
 
@@ -2596,7 +2610,7 @@ macro_rules! gen_store_tests {
                 .order("status", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.deliveries().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).await.unwrap();
             assert_eq!(ret.count, 10); // 5 Created + 5 Completed
 
             // Verify all results have the correct status
@@ -2615,7 +2629,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.deliveries().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).await.unwrap();
             assert_eq!(ret.count, 5); // 5 Error
 
             // In with no matching values
@@ -2627,7 +2641,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.deliveries().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).await.unwrap();
             assert_eq!(ret.count, 0);
         }
 
@@ -2636,7 +2650,7 @@ macro_rules! gen_store_tests {
         async fn store_query_in_on_indexed_string_field() {
             // In on state (indexed string field on Proc)
             // Use unique state values to avoid collisions with data from other tests
-            let store = store();
+            let store = store().await;
             let workflow = create_workflow();
             let prefix = utils::shortid();
             let states = vec![
@@ -2650,7 +2664,7 @@ macro_rules! gen_store_tests {
                 for _ in 0..5 {
                     let mut proc = create_proc(&utils::shortid(), TaskState::None, &workflow);
                     proc.state = state.clone();
-                    store.procs().create(&proc).expect("create proc");
+                    store.procs().create(&proc).await.expect("create proc");
                 }
             }
 
@@ -2662,7 +2676,7 @@ macro_rules! gen_store_tests {
                 )))
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 10); // 5 a + 5 b
             for row in &ret.rows {
                 assert!(
@@ -2677,7 +2691,7 @@ macro_rules! gen_store_tests {
         async fn store_query_between_on_non_indexed_field() {
             // Between on name (NOT an indexed field) — tests the fallback path
             // that scans all data and filters in-memory via Expr::op()
-            let store = store();
+            let store = store().await;
             let workflow = Workflow::new()
                 .with_id(&utils::shortid())
                 .with_step(|step| step.with_id("step1"));
@@ -2687,7 +2701,7 @@ macro_rules! gen_store_tests {
             for name in &names {
                 let mut proc = create_proc(&utils::shortid(), TaskState::None, &workflow);
                 proc.name = name.to_string();
-                store.procs().create(&proc).expect("create proc");
+                store.procs().create(&proc).await.expect("create proc");
             }
 
             // Between "bbb" and "ddd" (inclusive), scoped by unique mid
@@ -2699,7 +2713,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 3); // bbb, ccc, ddd
             let result_names: Vec<&str> = ret.rows.iter().map(|r| r.name.as_str()).collect();
             assert!(result_names.contains(&"bbb"));
@@ -2713,7 +2727,7 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_in_on_non_indexed_field() {
             // In on name (NOT an indexed field) — tests fallback path
-            let store = store();
+            let store = store().await;
             let workflow = Workflow::new()
                 .with_id(&utils::shortid())
                 .with_step(|step| step.with_id("step1"));
@@ -2722,7 +2736,7 @@ macro_rules! gen_store_tests {
             for name in &names {
                 let mut proc = create_proc(&utils::shortid(), TaskState::None, &workflow);
                 proc.name = name.to_string();
-                store.procs().create(&proc).expect("create proc");
+                store.procs().create(&proc).await.expect("create proc");
             }
 
             // In with three names
@@ -2734,7 +2748,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 3);
             let result_names: Vec<&str> = ret.rows.iter().map(|r| r.name.as_str()).collect();
             assert!(result_names.contains(&"alpha"));
@@ -2750,7 +2764,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 0);
         }
 
@@ -2758,7 +2772,7 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_between_with_order_by_desc() {
             // Between on indexed field with descending order
-            let store = store();
+            let store = store().await;
             let pid = utils::longid();
             let tid = utils::shortid();
 
@@ -2782,7 +2796,7 @@ macro_rules! gen_store_tests {
                     timestamp: ts,
                     v: 0,
                 };
-                store.messages().create(&msg).unwrap();
+                store.messages().create(&msg).await.unwrap();
             }
 
             // Between descending order
@@ -2795,7 +2809,7 @@ macro_rules! gen_store_tests {
                 .order("timestamp", Sort::Desc)
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.messages().query(&q).await.unwrap();
             assert_eq!(ret.count, 3); // 200, 300, 400
             assert_eq!(ret.rows[0].timestamp, 400);
             assert_eq!(ret.rows[1].timestamp, 300);
@@ -2806,7 +2820,7 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_in_with_pagination() {
             // In query with pagination — verify page_count, offset, uniqueness
-            let store = store();
+            let store = store().await;
             let pid = utils::longid();
             let tid = utils::shortid();
 
@@ -2831,7 +2845,7 @@ macro_rules! gen_store_tests {
                     timestamp: 0,
                     v: 0,
                 };
-                store.deliveries().create(&msg).unwrap();
+                store.deliveries().create(&msg).await.unwrap();
             }
 
             // In with Created(0) and Acked(1) → 10 records
@@ -2847,7 +2861,7 @@ macro_rules! gen_store_tests {
                 .order("status", Sort::Asc)
                 .offset(0)
                 .limit(7);
-            let page1 = store.deliveries().query(&q).unwrap();
+            let page1 = store.deliveries().query(&q).await.unwrap();
             assert_eq!(page1.count, 10);
             assert_eq!(page1.rows.len(), 7);
             assert_eq!(page1.page_size, 7);
@@ -2879,7 +2893,7 @@ macro_rules! gen_store_tests {
                 .order("status", Sort::Asc)
                 .offset(7)
                 .limit(7);
-            let page2 = store.deliveries().query(&q).unwrap();
+            let page2 = store.deliveries().query(&q).await.unwrap();
             assert_eq!(page2.count, 10);
             assert_eq!(page2.rows.len(), 3); // 3 remaining
             assert_eq!(page2.page_num, 2);
@@ -2893,7 +2907,7 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_between_and_other_cond() {
             // Combine Between with other conditions in AND/OR
-            let store = store();
+            let store = store().await;
             let pid = utils::longid();
             let tid = utils::shortid();
 
@@ -2918,7 +2932,7 @@ macro_rules! gen_store_tests {
                     timestamp: 0,
                     v: 0,
                 };
-                store.deliveries().create(&msg).unwrap();
+                store.deliveries().create(&msg).await.unwrap();
             }
 
             // Between retry_times AND status=Created
@@ -2933,7 +2947,7 @@ macro_rules! gen_store_tests {
                 .order("retry_times", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.deliveries().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).await.unwrap();
             assert_eq!(ret.count, 1);
             assert_eq!(ret.rows[0].retry_times, 1);
 
@@ -2950,7 +2964,7 @@ macro_rules! gen_store_tests {
                 .order("retry_times", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.deliveries().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).await.unwrap();
             assert_eq!(ret.count, 4);
             let rt_values: Vec<i32> = ret.rows.iter().map(|r| r.retry_times).collect();
             assert!(rt_values.contains(&1));
@@ -2963,7 +2977,7 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_between_and_in_combined() {
             // Combine Between and In in OR on non-indexed field (name)
-            let store = store();
+            let store = store().await;
             let workflow = create_workflow();
 
             // Create procs with sorted names a1..a5
@@ -2971,7 +2985,7 @@ macro_rules! gen_store_tests {
             for name in &names {
                 let mut proc = create_proc(&utils::shortid(), TaskState::None, &workflow);
                 proc.name = name.to_string();
-                store.procs().create(&proc).expect("create proc");
+                store.procs().create(&proc).await.expect("create proc");
             }
 
             // Between("a1","a2") OR In(["a4","a5"]) → {a1,a2,a4,a5}
@@ -2983,7 +2997,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert!(ret.count >= 4);
             let result_names: Vec<&str> = ret.rows.iter().map(|r| r.name.as_str()).collect();
             assert!(result_names.contains(&"a1"));
@@ -2998,10 +3012,10 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_limit_zero_rejected() {
             // limit=0 must be rejected before any scan happens
-            let store = store();
+            let store = store().await;
 
             let q = Query::new().limit(0);
-            let err = store.procs().query(&q).unwrap_err();
+            let err = store.procs().query(&q).await.unwrap_err();
             assert!(
                 err.to_string().contains("limit must be greater than 0"),
                 "unexpected error: {}",
@@ -3013,7 +3027,7 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_in_empty_rejected() {
             // In with an empty array or a non-array value is rejected on indexed fields
-            let store = store();
+            let store = store().await;
 
             for value in [json!([]), json!("not-an-array")] {
                 let expr = Expr {
@@ -3022,7 +3036,7 @@ macro_rules! gen_store_tests {
                     op: ExprOp::In,
                 };
                 let q = Query::new().filter(Filter::and().expr(expr));
-                let err = store.procs().query(&q).unwrap_err();
+                let err = store.procs().query(&q).await.unwrap_err();
                 assert!(
                     err.to_string()
                         .contains("In operator requires a non-empty array"),
@@ -3036,7 +3050,7 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_between_invalid_rejected() {
             // Between requires an array of exactly two values on indexed fields
-            let store = store();
+            let store = store().await;
 
             for value in [json!([]), json!([1]), json!("not-an-array")] {
                 let expr = Expr {
@@ -3045,7 +3059,7 @@ macro_rules! gen_store_tests {
                     op: ExprOp::Between,
                 };
                 let q = Query::new().filter(Filter::and().expr(expr));
-                let err = store.procs().query(&q).unwrap_err();
+                let err = store.procs().query(&q).await.unwrap_err();
                 assert!(
                     err.to_string()
                         .contains("Between operator requires an array of two values"),
@@ -3060,7 +3074,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_query_ne_on_indexed_integer_field() {
-            let store = store();
+            let store = store().await;
             let pid = utils::longid();
             let tid = utils::shortid();
 
@@ -3086,7 +3100,7 @@ macro_rules! gen_store_tests {
                         timestamp: 0,
                         v: 0,
                     };
-                    store.deliveries().create(&msg).unwrap();
+                    store.deliveries().create(&msg).await.unwrap();
                 }
             }
 
@@ -3099,7 +3113,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.deliveries().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).await.unwrap();
             assert_eq!(ret.count, 15);
             for row in &ret.rows {
                 assert_ne!(row.status, MessageStatus::Created);
@@ -3114,14 +3128,14 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.deliveries().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).await.unwrap();
             assert_eq!(ret.count, 20);
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_query_ne_on_indexed_string_field() {
-            let store = store();
+            let store = store().await;
             let workflow = Workflow::new()
                 .with_id(&utils::shortid())
                 .with_step(|step| step.with_id("step1"));
@@ -3136,7 +3150,7 @@ macro_rules! gen_store_tests {
                 for _ in 0..5 {
                     let mut proc = create_proc(&utils::shortid(), TaskState::None, &workflow);
                     proc.state = state.clone();
-                    store.procs().create(&proc).expect("create proc");
+                    store.procs().create(&proc).await.expect("create proc");
                 }
             }
 
@@ -3149,7 +3163,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 10);
             for row in &ret.rows {
                 assert_ne!(row.state, format!("{}-ne-s1", prefix));
@@ -3159,7 +3173,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_query_ne_on_non_indexed_field() {
-            let store = store();
+            let store = store().await;
             let workflow = Workflow::new()
                 .with_id(&utils::shortid())
                 .with_step(|step| step.with_id("step1"));
@@ -3168,7 +3182,7 @@ macro_rules! gen_store_tests {
             for name in &names {
                 let mut proc = create_proc(&utils::shortid(), TaskState::None, &workflow);
                 proc.name = name.to_string();
-                store.procs().create(&proc).expect("create proc");
+                store.procs().create(&proc).await.expect("create proc");
             }
 
             // NE(name, "aaa-ne") → 3 results
@@ -3180,7 +3194,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 3);
             for row in &ret.rows {
                 assert_ne!(row.name, "aaa-ne");
@@ -3194,7 +3208,7 @@ macro_rules! gen_store_tests {
         async fn store_query_single_sided_exact_value_boundary() {
             // Stored values collide with the comparison bound — Gt/Ge/Lt/Le
             // must be exact at `value == bound` on the indexed scan path.
-            let store = store();
+            let store = store().await;
             let pid = utils::longid();
             let tid = utils::shortid();
 
@@ -3218,7 +3232,7 @@ macro_rules! gen_store_tests {
                     timestamp: ts,
                     v: 0,
                 };
-                store.messages().create(&msg).unwrap();
+                store.messages().create(&msg).await.unwrap();
             }
 
             let q = Query::new()
@@ -3230,7 +3244,7 @@ macro_rules! gen_store_tests {
                 .order("timestamp", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.messages().query(&q).await.unwrap();
             let got: Vec<i64> = ret.rows.iter().map(|m| m.timestamp).collect();
             assert_eq!(got, vec![200, 300]);
             let q = Query::new()
@@ -3242,7 +3256,7 @@ macro_rules! gen_store_tests {
                 .order("timestamp", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.messages().query(&q).await.unwrap();
             let got: Vec<i64> = ret.rows.iter().map(|m| m.timestamp).collect();
             assert_eq!(got, vec![200, 300]);
             let q = Query::new()
@@ -3254,7 +3268,7 @@ macro_rules! gen_store_tests {
                 .order("timestamp", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.messages().query(&q).await.unwrap();
             let got: Vec<i64> = ret.rows.iter().map(|m| m.timestamp).collect();
             assert_eq!(got, vec![100]);
             let q = Query::new()
@@ -3266,7 +3280,7 @@ macro_rules! gen_store_tests {
                 .order("timestamp", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.messages().query(&q).await.unwrap();
             let got: Vec<i64> = ret.rows.iter().map(|m| m.timestamp).collect();
             assert_eq!(got, vec![100, 200]);
             let q = Query::new()
@@ -3277,7 +3291,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.messages().query(&q).await.unwrap();
             assert_eq!(ret.count, 0);
             let q = Query::new()
                 .filter(
@@ -3288,14 +3302,15 @@ macro_rules! gen_store_tests {
                 .order("timestamp", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.messages().query(&q).await.unwrap();
             let got: Vec<i64> = ret.rows.iter().map(|m| m.timestamp).collect();
             assert_eq!(got, vec![300]);
         }
 
+        #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_query_gt_on_indexed_integer_field() {
-            let store = store();
+            let store = store().await;
             let pid = utils::longid();
             let tid = utils::shortid();
 
@@ -3319,7 +3334,7 @@ macro_rules! gen_store_tests {
                     timestamp: ts,
                     v: 0,
                 };
-                store.messages().create(&msg).unwrap();
+                store.messages().create(&msg).await.unwrap();
             }
 
             // GT(timestamp, 250) → 300, 400, 500
@@ -3332,7 +3347,7 @@ macro_rules! gen_store_tests {
                 .order("timestamp", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.messages().query(&q).await.unwrap();
             assert_eq!(ret.count, 3);
             assert_eq!(ret.rows[0].timestamp, 300);
             assert_eq!(ret.rows[1].timestamp, 400);
@@ -3347,14 +3362,14 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.messages().query(&q).await.unwrap();
             assert_eq!(ret.count, 0);
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_query_gt_on_non_indexed_field() {
-            let store = store();
+            let store = store().await;
             let pid = utils::longid();
             let tid = utils::shortid();
 
@@ -3375,7 +3390,7 @@ macro_rules! gen_store_tests {
                         timestamp: 0,
                         v: 0,
                     };
-                    store.deliveries().create(&msg).unwrap();
+                    store.deliveries().create(&msg).await.unwrap();
                 }
             }
 
@@ -3389,7 +3404,7 @@ macro_rules! gen_store_tests {
                 .order("retry_times", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.deliveries().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).await.unwrap();
             assert_eq!(ret.count, 6);
             for row in &ret.rows {
                 assert!(row.retry_times > 2);
@@ -3404,7 +3419,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.deliveries().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).await.unwrap();
             assert_eq!(ret.count, 0);
         }
 
@@ -3413,7 +3428,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_query_ge_on_indexed_integer_field() {
-            let store = store();
+            let store = store().await;
             let pid = utils::longid();
             let tid = utils::shortid();
 
@@ -3437,7 +3452,7 @@ macro_rules! gen_store_tests {
                     timestamp: ts,
                     v: 0,
                 };
-                store.messages().create(&msg).unwrap();
+                store.messages().create(&msg).await.unwrap();
             }
 
             // GE(timestamp, 300) → 300, 400, 500
@@ -3450,7 +3465,7 @@ macro_rules! gen_store_tests {
                 .order("timestamp", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.messages().query(&q).await.unwrap();
             assert_eq!(ret.count, 3);
             assert_eq!(ret.rows[0].timestamp, 300);
             assert_eq!(ret.rows[1].timestamp, 400);
@@ -3465,14 +3480,14 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.messages().query(&q).await.unwrap();
             assert_eq!(ret.count, 0);
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_query_ge_on_non_indexed_field() {
-            let store = store();
+            let store = store().await;
             let pid = utils::longid();
             let tid = utils::shortid();
 
@@ -3493,7 +3508,7 @@ macro_rules! gen_store_tests {
                         timestamp: 0,
                         v: 0,
                     };
-                    store.deliveries().create(&msg).unwrap();
+                    store.deliveries().create(&msg).await.unwrap();
                 }
             }
 
@@ -3507,7 +3522,7 @@ macro_rules! gen_store_tests {
                 .order("retry_times", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.deliveries().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).await.unwrap();
             assert_eq!(ret.count, 9);
             for row in &ret.rows {
                 assert!(row.retry_times >= 2);
@@ -3522,7 +3537,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.deliveries().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).await.unwrap();
             assert_eq!(ret.count, 0);
         }
 
@@ -3531,7 +3546,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_query_lt_on_indexed_integer_field() {
-            let store = store();
+            let store = store().await;
             let pid = utils::longid();
             let tid = utils::shortid();
 
@@ -3555,7 +3570,7 @@ macro_rules! gen_store_tests {
                     timestamp: ts,
                     v: 0,
                 };
-                store.messages().create(&msg).unwrap();
+                store.messages().create(&msg).await.unwrap();
             }
 
             // LT(timestamp, 350) → 100, 200, 300
@@ -3568,7 +3583,7 @@ macro_rules! gen_store_tests {
                 .order("timestamp", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.messages().query(&q).await.unwrap();
             assert_eq!(ret.count, 3);
             assert_eq!(ret.rows[0].timestamp, 100);
             assert_eq!(ret.rows[1].timestamp, 200);
@@ -3583,14 +3598,14 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.messages().query(&q).await.unwrap();
             assert_eq!(ret.count, 0);
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_query_lt_on_non_indexed_field() {
-            let store = store();
+            let store = store().await;
             let pid = utils::longid();
             let tid = utils::shortid();
 
@@ -3611,7 +3626,7 @@ macro_rules! gen_store_tests {
                         timestamp: 0,
                         v: 0,
                     };
-                    store.deliveries().create(&msg).unwrap();
+                    store.deliveries().create(&msg).await.unwrap();
                 }
             }
 
@@ -3625,7 +3640,7 @@ macro_rules! gen_store_tests {
                 .order("retry_times", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.deliveries().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).await.unwrap();
             assert_eq!(ret.count, 6);
             for row in &ret.rows {
                 assert!(row.retry_times < 2);
@@ -3640,7 +3655,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.deliveries().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).await.unwrap();
             assert_eq!(ret.count, 0);
         }
 
@@ -3649,7 +3664,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_query_le_on_indexed_integer_field() {
-            let store = store();
+            let store = store().await;
             let pid = utils::longid();
             let tid = utils::shortid();
 
@@ -3673,7 +3688,7 @@ macro_rules! gen_store_tests {
                     timestamp: ts,
                     v: 0,
                 };
-                store.messages().create(&msg).unwrap();
+                store.messages().create(&msg).await.unwrap();
             }
 
             // LE(timestamp, 250) → 100, 200
@@ -3686,7 +3701,7 @@ macro_rules! gen_store_tests {
                 .order("timestamp", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.messages().query(&q).await.unwrap();
             assert_eq!(ret.count, 2);
             assert_eq!(ret.rows[0].timestamp, 100);
             assert_eq!(ret.rows[1].timestamp, 200);
@@ -3700,14 +3715,14 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.messages().query(&q).await.unwrap();
             assert_eq!(ret.count, 0);
         }
 
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_query_le_on_non_indexed_field() {
-            let store = store();
+            let store = store().await;
             let pid = utils::longid();
             let tid = utils::shortid();
 
@@ -3728,7 +3743,7 @@ macro_rules! gen_store_tests {
                         timestamp: 0,
                         v: 0,
                     };
-                    store.deliveries().create(&msg).unwrap();
+                    store.deliveries().create(&msg).await.unwrap();
                 }
             }
 
@@ -3742,7 +3757,7 @@ macro_rules! gen_store_tests {
                 .order("retry_times", Sort::Asc)
                 .offset(0)
                 .limit(100);
-            let ret = store.deliveries().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).await.unwrap();
             assert_eq!(ret.count, 9);
             for row in &ret.rows {
                 assert!(row.retry_times <= 2);
@@ -3757,7 +3772,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.deliveries().query(&q).unwrap();
+            let ret = store.deliveries().query(&q).await.unwrap();
             assert_eq!(ret.count, 0);
         }
 
@@ -3769,7 +3784,7 @@ macro_rules! gen_store_tests {
             // Match is substring (contains) semantics and is never served by
             // the index prefix scan — it runs the full-data fallback path even
             // when the field is indexed.
-            let store = store();
+            let store = store().await;
             let workflow = Workflow::new()
                 .with_id(&utils::shortid())
                 .with_step(|step| step.with_id("step1"));
@@ -3784,7 +3799,7 @@ macro_rules! gen_store_tests {
                 for _ in 0..3 {
                     let mut proc = create_proc(&utils::shortid(), TaskState::None, &workflow);
                     proc.state = state.clone();
-                    store.procs().create(&proc).expect("create proc");
+                    store.procs().create(&proc).await.expect("create proc");
                 }
             }
 
@@ -3797,7 +3812,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 3);
             for row in &ret.rows {
                 assert_eq!(row.state, format!("{}-m-a1", prefix));
@@ -3808,7 +3823,7 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_match_on_non_indexed_field() {
             // Match on name (non-indexed field) uses contains
-            let store = store();
+            let store = store().await;
             let workflow = Workflow::new()
                 .with_id(&utils::shortid())
                 .with_step(|step| step.with_id("step1"));
@@ -3817,7 +3832,7 @@ macro_rules! gen_store_tests {
             for name in &names {
                 let mut proc = create_proc(&utils::shortid(), TaskState::None, &workflow);
                 proc.name = name.to_string();
-                store.procs().create(&proc).expect("create proc");
+                store.procs().create(&proc).await.expect("create proc");
             }
 
             // Match(name, "hello") → hello-world, hello-mars
@@ -3829,7 +3844,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 2);
             let names_found: Vec<&str> = ret.rows.iter().map(|r| r.name.as_str()).collect();
             assert!(names_found.contains(&"hello-world"));
@@ -3844,7 +3859,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 1);
             assert_eq!(ret.rows[0].name, "goodbye-pluto");
         }
@@ -3854,7 +3869,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_query_gt_with_order_by_desc() {
-            let store = store();
+            let store = store().await;
             let pid = utils::longid();
             let tid = utils::shortid();
 
@@ -3878,7 +3893,7 @@ macro_rules! gen_store_tests {
                     timestamp: ts,
                     v: 0,
                 };
-                store.messages().create(&msg).unwrap();
+                store.messages().create(&msg).await.unwrap();
             }
 
             // GT(timestamp, 250) with desc order → 500, 400, 300
@@ -3891,7 +3906,7 @@ macro_rules! gen_store_tests {
                 .order("timestamp", Sort::Desc)
                 .offset(0)
                 .limit(100);
-            let ret = store.messages().query(&q).unwrap();
+            let ret = store.messages().query(&q).await.unwrap();
             assert_eq!(ret.count, 3);
             assert_eq!(ret.rows[0].timestamp, 500);
             assert_eq!(ret.rows[1].timestamp, 400);
@@ -3909,7 +3924,7 @@ macro_rules! gen_store_tests {
             // Test that special characters (%, |, \, _) are correctly handled as
             // literals in indexed field queries via the universal encode_key_str
             // mechanism. All four characters are tested on the indexed "state" field.
-            let store = store();
+            let store = store().await;
             let workflow = Workflow::new()
                 .with_id(&utils::shortid())
                 .with_step(|step| step.with_id("step1"));
@@ -3926,7 +3941,7 @@ macro_rules! gen_store_tests {
             for state in &states {
                 let mut proc = create_proc(&utils::shortid(), TaskState::None, &workflow);
                 proc.state = state.to_string();
-                store.procs().create(&proc).expect("create proc");
+                store.procs().create(&proc).await.expect("create proc");
             }
 
             // EQ on value containing |
@@ -3938,7 +3953,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 1);
             assert_eq!(ret.rows[0].state, "state_b_pipe|val");
 
@@ -3951,7 +3966,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 1);
             assert_eq!(ret.rows[0].state, "state_c_pct%val");
 
@@ -3964,7 +3979,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 1);
             assert_eq!(ret.rows[0].state, "state_d_bsl\\val");
 
@@ -3977,7 +3992,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 1);
             assert_eq!(ret.rows[0].state, "state_e_und_val");
 
@@ -3990,7 +4005,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 1);
             assert_eq!(ret.rows[0].state, "state_f_multi_%\\|");
 
@@ -4003,7 +4018,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 5); // all 6 except state_b_pipe|val
             for row in &ret.rows {
                 assert_ne!(row.state, "state_b_pipe|val");
@@ -4018,7 +4033,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 5); // all 6 except state_c_pct%val
             for row in &ret.rows {
                 assert_ne!(row.state, "state_c_pct%val");
@@ -4033,7 +4048,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 5); // all 6 except state_d_bsl\val
             for row in &ret.rows {
                 assert_ne!(row.state, "state_d_bsl\\val");
@@ -4048,7 +4063,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 5); // all 6 except state_a_plain
             for row in &ret.rows {
                 assert_ne!(row.state, "state_a_plain");
@@ -4058,7 +4073,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_query_special_chars_on_non_indexed_field() {
-            let store = store();
+            let store = store().await;
             let workflow = Workflow::new()
                 .with_id(&utils::shortid())
                 .with_step(|step| step.with_id("step1"));
@@ -4075,7 +4090,7 @@ macro_rules! gen_store_tests {
             for name in &names {
                 let mut proc = create_proc(&utils::shortid(), TaskState::None, &workflow);
                 proc.name = name.to_string();
-                store.procs().create(&proc).expect("create proc");
+                store.procs().create(&proc).await.expect("create proc");
             }
 
             // EQ on value containing |
@@ -4087,7 +4102,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 1);
             assert_eq!(ret.rows[0].name, "name_c|pipe");
 
@@ -4100,7 +4115,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 1);
             assert_eq!(ret.rows[0].name, "name_d%pct");
 
@@ -4113,7 +4128,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 1);
             assert_eq!(ret.rows[0].name, "name_e_und");
 
@@ -4126,7 +4141,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 5);
             for row in &ret.rows {
                 assert_ne!(row.name, "name_d%pct");
@@ -4141,7 +4156,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 5);
             for row in &ret.rows {
                 assert_ne!(row.name, "name_e_und");
@@ -4156,7 +4171,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 5);
             for row in &ret.rows {
                 assert_ne!(row.name, "name_c|pipe");
@@ -4166,7 +4181,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_query_match_with_special_chars() {
-            let store = store();
+            let store = store().await;
             let workflow = Workflow::new()
                 .with_id(&utils::shortid())
                 .with_step(|step| step.with_id("step1"));
@@ -4176,7 +4191,7 @@ macro_rules! gen_store_tests {
             for name in &names {
                 let mut proc = create_proc(&utils::shortid(), TaskState::None, &workflow);
                 proc.name = name.to_string();
-                store.procs().create(&proc).expect("create proc");
+                store.procs().create(&proc).await.expect("create proc");
             }
 
             // Match on non-indexed field containing _ (literal match, not wildcard)
@@ -4188,7 +4203,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 1);
             assert_eq!(ret.rows[0].name, "hello_world");
 
@@ -4201,7 +4216,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 1);
             assert_eq!(ret.rows[0].name, "50%off");
 
@@ -4214,7 +4229,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 1);
             assert_eq!(ret.rows[0].name, "a|b|c");
 
@@ -4227,7 +4242,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 1);
             assert_eq!(ret.rows[0].name, "hello_world");
 
@@ -4240,7 +4255,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 1);
             assert_eq!(ret.rows[0].name, "50%off");
 
@@ -4253,7 +4268,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 1);
             assert_eq!(ret.rows[0].name, "hello_world");
 
@@ -4268,7 +4283,7 @@ macro_rules! gen_store_tests {
             for state in &states {
                 let mut proc = create_proc(&utils::shortid(), TaskState::None, &workflow);
                 proc.state = state.to_string();
-                store.procs().create(&proc).expect("create proc");
+                store.procs().create(&proc).await.expect("create proc");
             }
 
             // Match on indexed field containing | (exact value match)
@@ -4280,7 +4295,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 1);
             assert_eq!(ret.rows[0].state, "match_beta|pct");
 
@@ -4293,7 +4308,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 1);
             assert_eq!(ret.rows[0].state, "match_gamma%bsl");
 
@@ -4306,7 +4321,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 1);
             assert_eq!(ret.rows[0].state, "match_delta\\und");
 
@@ -4319,7 +4334,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 1);
             assert_eq!(ret.rows[0].state, "match_alpha_x");
 
@@ -4332,7 +4347,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 1);
             assert_eq!(ret.rows[0].state, "match_alpha_x");
 
@@ -4345,7 +4360,7 @@ macro_rules! gen_store_tests {
                 )
                 .offset(0)
                 .limit(100);
-            let ret = store.procs().query(&q).unwrap();
+            let ret = store.procs().query(&q).await.unwrap();
             assert_eq!(ret.count, 1);
             assert_eq!(ret.rows[0].state, "match_beta|pct");
         }

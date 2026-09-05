@@ -2,16 +2,16 @@ use acts::{ChannelOptions, Engine, Result, Vars, Workflow};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let engine = Engine::new().start()?;
+    let engine = Engine::new().start().await?;
 
     let executor = engine.executor();
     let (s, sig) = engine.signal(()).double();
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text).unwrap();
     workflow.print();
-    engine.executor().model().deploy(&workflow, None)?;
+    engine.executor().model().deploy(&workflow, None).await?;
 
-    executor.proc().start(&workflow.id, Vars::new())?;
+    executor.proc().start(&workflow.id, Vars::new()).await?;
 
     // channel messages will store in db
     engine
@@ -19,7 +19,7 @@ async fn main() -> Result<()> {
             id: "client1".to_string(),
             ..Default::default()
         })
-        .on_message(move |message| {
+        .on_message(move |message| async move {
             println!(
                 "on_message: node id={} type={} state={} inputs={}",
                 message.nid, message.r#type, message.state, message.inputs
@@ -27,8 +27,11 @@ async fn main() -> Result<()> {
         });
 
     engine.channel().on_complete(move |e| {
-        println!("on_complete: {:?}", e.outputs);
-        s.close();
+        let s = s.clone();
+        async move {
+            println!("on_complete: {:?}", e.outputs);
+            s.close();
+        }
     });
     sig.recv().await;
 

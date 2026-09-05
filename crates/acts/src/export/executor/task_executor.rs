@@ -15,8 +15,8 @@ impl TaskExecutor {
     }
 
     #[instrument(skip(self))]
-    pub fn list(&self, q: &Query) -> Result<PageData<TaskInfo>> {
-        match self.runtime.cache().store().tasks().query(q) {
+    pub async fn list(&self, q: &Query) -> Result<PageData<TaskInfo>> {
+        match self.runtime.cache().store().tasks().query(q).await {
             Ok(tasks) => Ok(PageData {
                 count: tasks.count,
                 page_size: tasks.page_size,
@@ -29,9 +29,9 @@ impl TaskExecutor {
     }
 
     #[instrument(skip(self))]
-    pub fn get(&self, pid: &str, tid: &str) -> Result<TaskInfo> {
+    pub async fn get(&self, pid: &str, tid: &str) -> Result<TaskInfo> {
         let id = Id::new(pid, tid);
-        match self.runtime.cache().store().tasks().find(&id.id()) {
+        match self.runtime.cache().store().tasks().find(&id.id()).await {
             Ok(t) => Ok(t.into()),
             Err(err) => Err(err),
         }

@@ -1,8 +1,12 @@
+use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
+
 use acts::{Event, Executor, Message, MessageState, Result, Vars};
 use serde_json::json;
-use std::collections::HashMap;
 
-type ReqAction = fn(&Executor, &Event<Message>) -> Result<()>;
+type ReqActionFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+type ReqAction = fn(&Executor, &Event<Message>) -> ReqActionFuture;
 type MsgAction = fn(&Executor, &Event<Message>);
 pub struct Client {
     actions: HashMap<String, Box<ReqAction>>,
@@ -36,7 +40,7 @@ impl Client {
             if e.is_irq() && e.is_state(MessageState::Created) {
                 match self.actions.get(&key) {
                     Some(action) => {
-                        action(executor, e)?;
+                        action(executor, e).await?;
                         println!("action state: key={}", key);
                     }
                     None => println!("'{}' is waitting for timeout", key),
@@ -53,23 +57,25 @@ impl Client {
         Ok(())
     }
 
-    pub fn init<'a>(executor: &'a Executor, e: &'a Event<Message>) -> Result<()> {
+    pub fn init(executor: &Executor, e: &Event<Message>) -> ReqActionFuture {
         let executor = executor.clone();
         let pid = e.pid.clone();
         let tid = e.tid.clone();
         println!("req: {} inputs={}", pid, e.inputs);
-        let mut vars = Vars::new();
-        vars.insert("uid".to_string(), json!("u1"));
-        executor.act().complete(&pid, &tid, vars)
+        Box::pin(async move {
+            let mut vars = Vars::new();
+            vars.insert("uid".to_string(), json!("u1"));
+            executor.act().complete(&pid, &tid, vars).await
+        })
     }
 
     pub fn timeout_2s(_executor: &Executor, e: &Event<Message>) {
         println!("msg: {} inputs={}", e.name, e.inputs);
     }
-    pub fn timeout_5s<'a>(executor: &'a Executor, e: &'a Event<Message>) -> Result<()> {
+    pub fn timeout_5s(executor: &Executor, e: &Event<Message>) -> ReqActionFuture {
         let executor = executor.clone();
         let pid = e.pid.clone();
         let tid = e.tid.clone();
-        executor.act().complete(&pid, &tid, Vars::new())
+        Box::pin(async move { executor.act().complete(&pid, &tid, Vars::new()).await })
     }
 }

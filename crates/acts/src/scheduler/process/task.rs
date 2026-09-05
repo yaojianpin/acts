@@ -469,7 +469,7 @@ impl Task {
     }
 
     #[instrument(skip(self, ctx), fields(pid = %self.pid, tid = %self.id))]
-    pub fn update(self: &Arc<Self>, ctx: &Context) -> Result<()> {
+    pub async fn update(self: &Arc<Self>, ctx: &Context) -> Result<()> {
         debug!("task updated");
         let action = ctx.action().ok_or(ActError::Action(
             "cannot find action in context".to_string(),
@@ -487,7 +487,7 @@ impl Task {
             ctx.runtime.enqueue_action(&action)?;
         }
 
-        let result = (|| -> Result<()> {
+        let result: Result<()> = (async {
             match &action.event {
                 EventAction::Push => {
                     let package = ctx.get_var::<String>("uses").unwrap_or_default();
@@ -515,13 +515,13 @@ impl Task {
                 }
                 EventAction::Remove => {
                     self.set_state(TaskState::Removed);
-                    ctx.emit_task(self)?;
+                    ctx.emit_task(self).await?;
                     ctx.push_next()?;
                 }
                 EventAction::Submit => {
                     self.update_data(&ctx.vars());
                     self.set_state(TaskState::Submitted);
-                    ctx.emit_task(self)?;
+                    ctx.emit_task(self).await?;
                     ctx.push_next()?;
                 }
                 EventAction::Next => {
@@ -533,7 +533,7 @@ impl Task {
                     }
                     self.update_data(&ctx.vars());
                     self.set_state(TaskState::Completed);
-                    ctx.emit_task(self)?;
+                    ctx.emit_task(self).await?;
                     ctx.push_next()?;
                 }
                 EventAction::Back => {
@@ -559,7 +559,7 @@ impl Task {
                         "cannot find history task by nid '{nid}'",
                     )))?;
 
-                    ctx.back_task(&ctx.task(), &path_tasks)?;
+                    ctx.back_task(&ctx.task(), &path_tasks).await?;
                     ctx.redo_task(&task)?;
                 }
                 EventAction::Cancel => {
@@ -597,15 +597,15 @@ impl Task {
                     for p in path_tasks {
                         if p.state().is_running() {
                             p.set_state(TaskState::Completed);
-                            ctx.emit_task(&p)?;
+                            ctx.emit_task(&p).await?;
                         } else if p.state().is_pending() {
                             p.set_state(TaskState::Skipped);
-                            ctx.emit_task(&p)?;
+                            ctx.emit_task(&p).await?;
                         }
                     }
 
                     for next in &nexts {
-                        ctx.undo_task(next)?;
+                        ctx.undo_task(next).await?;
                     }
                     ctx.redo_task(&task)?;
                 }
@@ -616,7 +616,7 @@ impl Task {
                             self.pid, self.id
                         )));
                     }
-                    ctx.abort_task(&ctx.task())?;
+                    ctx.abort_task(&ctx.task()).await?;
                 }
                 EventAction::Skip => {
                     if self.state().is_completed() {
@@ -631,12 +631,12 @@ impl Task {
                             continue;
                         }
                         task.set_state(TaskState::Skipped);
-                        ctx.emit_task(&task)?;
+                        ctx.emit_task(&task).await?;
                     }
 
                     // set both current act and parent step to skip
                     self.set_state(TaskState::Skipped);
-                    ctx.emit_task(self)?;
+                    ctx.emit_task(self).await?;
                     ctx.push_next()?;
                 }
                 EventAction::Error => {
@@ -670,11 +670,11 @@ impl Task {
                             continue;
                         }
                         sub.set_state(TaskState::Skipped);
-                        ctx.emit_task(sub)?;
+                        ctx.emit_task(sub).await?;
                     }
                     task.set_err(&err);
                     task.set_data(&ctx.vars());
-                    task.on_error(ctx)?;
+                    task.on_error(ctx).await?;
                 }
                 EventAction::SetProcessVars => {
                     if self.state().is_completed() {
@@ -686,11 +686,12 @@ impl Task {
 
                     self.proc.set_data(&ctx.vars());
                     // emit the task change (issue #)
-                    ctx.emit_task(self)?;
+                    ctx.emit_task(self).await?;
                 }
             }
             Ok(())
-        })();
+        })
+        .await;
 
         if result.is_ok() && action.event != EventAction::Push {
             // update the message status after doing action (deferred to writer thread)
@@ -757,7 +758,7 @@ impl Task {
     pub async fn resume(self: &Arc<Self>, ctx: &Context) -> Result<()> {
         if self.is_ready() {
             self.set_state(TaskState::Running);
-            ctx.runtime.emitter().emit_task_event(self)?;
+            ctx.runtime.emitter().emit_task_event(self).await?;
             self.exec(ctx).await?;
         }
 
@@ -872,7 +873,7 @@ impl Task {
                 if task.state().is_pending() && task.is_ready() {
                     // resume task
                     task.set_state(TaskState::Ready);
-                    self.runtime.emitter().emit_task_event(task)?;
+                    self.runtime.emitter().emit_task_event(task).await?;
                     task.exec(ctx).await?;
                 }
                 if task.state().is_completed() {
@@ -930,7 +931,7 @@ impl Task {
                 if task.state().is_pending() && task.is_ready() {
                     // resume task
                     task.set_state(TaskState::Ready);
-                    self.runtime.emitter().emit_task_event(task)?;
+                    self.runtime.emitter().emit_task_event(task).await?;
                     task.exec(ctx).await?;
                 }
                 if task.state().is_completed() {
@@ -960,7 +961,7 @@ impl Task {
                         )
                     });
                     self.set_err(&err);
-                    ctx.emit_error()?;
+                    ctx.emit_error().await?;
                     return Ok(NextAction::Stop);
                 } else {
                     self.set_state(TaskState::Completed);
@@ -968,7 +969,7 @@ impl Task {
             }
 
             if self.state().is_completed() {
-                ctx.emit_task(self)?;
+                ctx.emit_task(self).await?;
             }
         }
 
@@ -991,7 +992,7 @@ impl ActTask for Arc<Task> {
                 NodeContent::Step(step) => step.init(ctx).await?,
                 NodeContent::Act(act) => act.init(ctx).await?,
             }
-            ctx.emit_task(&ctx.task())?;
+            ctx.emit_task(&ctx.task()).await?;
         }
 
         Ok(())
@@ -1010,7 +1011,7 @@ impl ActTask for Arc<Task> {
                 NodeContent::Act(act) => act.run(ctx).await,
             }?;
 
-            ctx.emit_task(&ctx.task())?;
+            ctx.emit_task(&ctx.task()).await?;
         }
 
         Ok(())
@@ -1082,23 +1083,25 @@ impl ActTask for Arc<Task> {
         Ok(NextAction::Continue)
     }
 
-    fn on_error(&self, ctx: &Context) -> Result<()> {
+    async fn on_error(&self, ctx: &Context) -> Result<()> {
         ctx.set_task(self);
         match &self.node.content {
-            NodeContent::Workflow(data) => data.on_error(ctx),
-            NodeContent::Step(data) => data.on_error(ctx),
-            NodeContent::Branch(data) => data.on_error(ctx),
-            NodeContent::Act(data) => data.on_error(ctx),
+            // boxed: an errored act's handler can bubble back into this task's
+            // `on_error` through `Context::emit_error` (async recursion)
+            NodeContent::Workflow(data) => Box::pin(data.on_error(ctx)).await,
+            NodeContent::Step(data) => Box::pin(data.on_error(ctx)).await,
+            NodeContent::Branch(data) => Box::pin(data.on_error(ctx)).await,
+            NodeContent::Act(data) => Box::pin(data.on_error(ctx)).await,
         }
     }
 
-    fn on_timeout(&self, ctx: &Context) -> Result<()> {
+    async fn on_timeout(&self, ctx: &Context) -> Result<()> {
         ctx.set_task(self);
         match &self.node.content {
-            NodeContent::Workflow(data) => data.on_timeout(ctx),
-            NodeContent::Step(data) => data.on_timeout(ctx),
-            NodeContent::Branch(data) => data.on_timeout(ctx),
-            NodeContent::Act(data) => data.on_timeout(ctx),
+            NodeContent::Workflow(data) => data.on_timeout(ctx).await,
+            NodeContent::Step(data) => data.on_timeout(ctx).await,
+            NodeContent::Branch(data) => data.on_timeout(ctx).await,
+            NodeContent::Act(data) => data.on_timeout(ctx).await,
         }
     }
 }

@@ -41,7 +41,8 @@ async fn main() -> Result<()> {
     let engine = Engine::builder()
         .add_resolver("profile", resolver)
         .build()
-        .start()?;
+        .start()
+        .await?;
 
     let (s, sig) = engine.signal(()).double();
 
@@ -71,17 +72,20 @@ async fn main() -> Result<()> {
     workflow.print();
 
     let executor = engine.executor();
-    executor.model().deploy(&workflow, None)?;
+    executor.model().deploy(&workflow, None).await?;
 
     let vars = Vars::new().with("pid", "r1");
-    executor.proc().start(&workflow.id, vars)?;
+    executor.proc().start(&workflow.id, vars).await?;
 
     engine.channel().on_complete(move |e| {
-        println!("on_complete: {:?}, cost={}ms", e.outputs, e.cost());
-        s.close();
+        let s = s.clone();
+        async move {
+            println!("on_complete: {:?}, cost={}ms", e.outputs, e.cost());
+            s.close();
+        }
     });
 
-    engine.channel().on_error(|e| {
+    engine.channel().on_error(move |e| async move {
         println!("on_error: {:?}", e.state);
     });
 

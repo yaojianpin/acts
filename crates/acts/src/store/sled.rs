@@ -46,15 +46,16 @@ fn key_matches(k: &str, key: &str, prefix: &str, op: &ScanOperation) -> bool {
     }
 }
 
+#[async_trait::async_trait]
 impl KvStore for SledStore {
-    fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         self.db
             .get(key.as_bytes())
             .map_err(|e| ActError::Store(e.to_string()))
             .map(|opt| opt.map(|ivec| ivec.to_vec()))
     }
 
-    fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
+    async fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
         self.db
             .insert(key.as_bytes(), value)
             .map_err(|e| ActError::Store(e.to_string()))?;
@@ -65,7 +66,7 @@ impl KvStore for SledStore {
             .map_err(|e| ActError::Store(e.to_string()))
     }
 
-    fn delete(&self, key: &str) -> Result<()> {
+    async fn delete(&self, key: &str) -> Result<()> {
         self.db
             .remove(key.as_bytes())
             .map_err(|e| ActError::Store(e.to_string()))?;
@@ -75,7 +76,7 @@ impl KvStore for SledStore {
             .map_err(|e| ActError::Store(e.to_string()))
     }
 
-    fn batch(&self, ops: &[StoreBatchOp]) -> Result<()> {
+    async fn batch(&self, ops: &[StoreBatchOp]) -> Result<()> {
         if ops.is_empty() {
             return Ok(());
         }
@@ -100,7 +101,7 @@ impl KvStore for SledStore {
             .map_err(|e| ActError::Store(e.to_string()))
     }
 
-    fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>> {
+    async fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>> {
         let ScanOptions {
             is_rev,
             op,

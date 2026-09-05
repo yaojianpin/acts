@@ -19,12 +19,12 @@ impl MessageExecutor {
     /// message id is `msg_id` and the message payload is joined from the
     /// `messages` collection.
     #[instrument(skip(self))]
-    pub fn list(&self, q: &Query) -> Result<PageData<MessageInfo>> {
-        match self.runtime.cache().store().deliveries().query(q) {
+    pub async fn list(&self, q: &Query) -> Result<PageData<MessageInfo>> {
+        match self.runtime.cache().store().deliveries().query(q).await {
             Ok(deliveries) => {
                 let mut rows = Vec::with_capacity(deliveries.rows.len());
                 for delivery in deliveries.rows.iter() {
-                    if let Some(info) = self.delivery_info(delivery)? {
+                    if let Some(info) = self.delivery_info(delivery).await? {
                         rows.push(info);
                     }
                 }
@@ -42,9 +42,9 @@ impl MessageExecutor {
 
     /// Get one delivery row (joined with its message) by its delivery id.
     #[instrument(skip(self))]
-    pub fn get(&self, id: &str) -> Result<MessageInfo> {
-        let delivery = &self.runtime.cache().store().deliveries().find(id)?;
-        match self.delivery_info(delivery)? {
+    pub async fn get(&self, id: &str) -> Result<MessageInfo> {
+        let delivery = &self.runtime.cache().store().deliveries().find(id).await?;
+        match self.delivery_info(delivery).await? {
             Some(info) => Ok(info),
             None => Err(crate::ActError::Store(format!(
                 "cannot find message for delivery '{}'",
@@ -54,13 +54,14 @@ impl MessageExecutor {
     }
 
     /// Join a delivery row with its canonical message.
-    fn delivery_info(&self, delivery: &crate::data::Delivery) -> Result<Option<MessageInfo>> {
+    async fn delivery_info(&self, delivery: &crate::data::Delivery) -> Result<Option<MessageInfo>> {
         match self
             .runtime
             .cache()
             .store()
             .messages()
             .find(&delivery.msg_id)
+            .await
         {
             Ok(message) => Ok(Some(MessageInfo::from_delivery(delivery, &message))),
             Err(err) => {
@@ -71,47 +72,57 @@ impl MessageExecutor {
     }
 
     /// Ack one delivery row by its delivery id.
-    pub fn ack(&self, id: &str) -> Result<()> {
-        self.runtime.ack(id)
+    pub async fn ack(&self, id: &str) -> Result<()> {
+        self.runtime.ack(id).await
     }
 
     /// Delete one delivery row by its delivery id.
     #[instrument(skip(self))]
-    pub fn rm(&self, id: &str) -> Result<bool> {
-        self.runtime.cache().store().deliveries().delete(id)
+    pub async fn rm(&self, id: &str) -> Result<bool> {
+        self.runtime.cache().store().deliveries().delete(id).await
     }
 
     /// Clear error delivery rows: all of them (`None`) or only those of one
     /// process (`Some(pid)`).
-    pub fn clear(&self, pid: Option<String>) -> Result<()> {
-        self.runtime.cache().store().clear_error_deliveries(pid)?;
+    pub async fn clear(&self, pid: Option<String>) -> Result<()> {
+        self.runtime
+            .cache()
+            .store()
+            .clear_error_deliveries(pid)
+            .await?;
         Ok(())
     }
 
     /// Re-send every error delivery row (reset to `Created`; the retry timer
     /// sends them to their own channels).
-    pub fn redo(&self) -> Result<()> {
-        self.runtime.cache().store().resend_error_deliveries()?;
+    pub async fn redo(&self) -> Result<()> {
+        self.runtime
+            .cache()
+            .store()
+            .resend_error_deliveries()
+            .await?;
         Ok(())
     }
 
     /// Delete one error delivery row by its delivery id.
-    pub fn clear_delivery(&self, delivery_id: &str) -> Result<()> {
+    pub async fn clear_delivery(&self, delivery_id: &str) -> Result<()> {
         self.runtime
             .cache()
             .store()
-            .clear_error_delivery(delivery_id)?;
+            .clear_error_delivery(delivery_id)
+            .await?;
         Ok(())
     }
 
     /// Reset one error delivery row and immediately re-send it to the channel
     /// it belongs to.
-    pub fn redeliver(&self, delivery_id: &str) -> Result<()> {
+    pub async fn redeliver(&self, delivery_id: &str) -> Result<()> {
         if let Some(delivery) = self
             .runtime
             .cache()
             .store()
-            .resend_error_delivery(delivery_id)?
+            .resend_error_delivery(delivery_id)
+            .await?
         {
             if let Ok(message) = self
                 .runtime
@@ -119,6 +130,7 @@ impl MessageExecutor {
                 .store()
                 .messages()
                 .find(&delivery.msg_id)
+                .await
             {
                 let mut msg: crate::Message = message.into();
                 msg.delivery_id = Some(delivery.id.clone());
@@ -137,7 +149,7 @@ impl MessageExecutor {
     }
 
     /// Unsubscribe a channel: no message is delivered to it any more.
-    pub fn unsub(&self, chan_id: &str) -> Result<()> {
+    pub async fn unsub(&self, chan_id: &str) -> Result<()> {
         self.runtime.emitter().remove(chan_id);
         Ok(())
     }

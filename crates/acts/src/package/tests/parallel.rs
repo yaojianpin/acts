@@ -24,12 +24,12 @@ async fn pack_parallel_setup_list() {
         });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
 
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     tx.timeout(500).await;
     proc.print();
     let tasks = proc.task_by_nid("act1");
@@ -61,23 +61,28 @@ async fn pack_parallel_var_exist() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(Vec::<Vars>::default()).double();
     auto_complete(&engine, &rx);
     let channel = engine.channel();
     channel.on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            rx.update(|data| {
-                let vars = e.inputs.get::<Vars>(consts::ACT_OPTIONS_KEY).unwrap();
-                data.push(vars);
-            });
-            rt.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
-                .unwrap();
+        let rx = rx.clone();
+        let rt = rt.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                rx.update(|data| {
+                    let vars = e.inputs.get::<Vars>(consts::ACT_OPTIONS_KEY).unwrap();
+                    data.push(vars);
+                });
+                rt.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
+                    .await
+                    .unwrap();
+            }
         }
     });
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     let ret = tx.recv().await;
     proc.print();
     let tasks = proc.task_by_nid("act1");
@@ -109,12 +114,12 @@ async fn pack_parallel_in_not_exist() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
 
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert!(proc.state().is_error());
@@ -135,17 +140,20 @@ async fn pack_parallel_in_code() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
     let channel = engine.channel();
     channel.on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_type("act") {
-            rx.close();
+        let rx = rx.clone();
+        async move {
+            if e.is_type("act") {
+                rx.close();
+            }
         }
     });
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(

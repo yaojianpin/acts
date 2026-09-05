@@ -21,7 +21,7 @@ pub const SERVER_ADDR: &str = "127.0.0.1";
 /// Start a gRPC test server on an OS-assigned port.
 /// Blocks until the server is accepting connections, then returns the port.
 async fn start_server(rx: Receiver<()>) -> u16 {
-    let engine = Arc::new(Engine::new().start().unwrap());
+    let engine = Arc::new(Engine::new().start().await.unwrap());
     let server = server::GrpcServer::new(engine);
     server.init().await;
     let grpc = ActsServiceServer::new(server);

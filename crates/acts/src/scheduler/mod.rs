@@ -71,11 +71,11 @@ pub trait ActTask: Clone + Send {
         Ok(NextAction::Parent)
     }
 
-    fn on_error(&self, ctx: &Context) -> Result<()> {
-        ctx.emit_error()
+    async fn on_error(&self, ctx: &Context) -> Result<()> {
+        ctx.emit_error().await
     }
 
-    fn on_timeout(&self, _ctx: &Context) -> Result<()> {
+    async fn on_timeout(&self, _ctx: &Context) -> Result<()> {
         Ok(())
     }
 }

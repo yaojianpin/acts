@@ -17,14 +17,14 @@ impl PackageExecutor {
     }
 
     #[instrument(skip(self, pack), fields(id = %pack.id))]
-    pub fn publish(&self, pack: &Package) -> Result<bool> {
-        let ret = self.runtime.cache().store().publish(pack)?;
+    pub async fn publish(&self, pack: &Package) -> Result<bool> {
+        let ret = self.runtime.cache().store().publish(pack).await?;
         Ok(ret)
     }
 
     #[instrument(skip(self, q))]
-    pub fn list(&self, q: &Query) -> Result<PageData<PackageInfo>> {
-        match self.runtime.cache().store().packages().query(q) {
+    pub async fn list(&self, q: &Query) -> Result<PageData<PackageInfo>> {
+        match self.runtime.cache().store().packages().query(q).await {
             Ok(packages) => Ok(PageData {
                 count: packages.count,
                 page_size: packages.page_size,
@@ -37,13 +37,13 @@ impl PackageExecutor {
     }
 
     #[instrument(skip(self), fields(id = %id))]
-    pub fn get(&self, id: &str) -> Result<PackageInfo> {
-        let package = &self.runtime.cache().store().packages().find(id)?;
+    pub async fn get(&self, id: &str) -> Result<PackageInfo> {
+        let package = &self.runtime.cache().store().packages().find(id).await?;
         Ok(package.into())
     }
 
     #[instrument(skip(self), fields(id = %id))]
-    pub fn rm(&self, id: &str) -> Result<bool> {
-        self.runtime.cache().store().packages().delete(id)
+    pub async fn rm(&self, id: &str) -> Result<bool> {
+        self.runtime.cache().store().packages().delete(id).await
     }
 }

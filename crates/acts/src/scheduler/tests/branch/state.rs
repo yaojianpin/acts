@@ -21,12 +21,12 @@ async fn sch_branch_skip() {
     });
 
     let id = utils::longid();
-    let (engine, proc) = create_proc(&workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id).await;
 
     let rt = engine.runtime();
     let (sig, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let _ = sig.recv().await;
     proc.print();
 
@@ -64,18 +64,21 @@ async fn sch_task_branch_needs_state() {
 
     workflow.print();
     let id = utils::longid();
-    let (engine, proc) = create_proc(&workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id).await;
     let rt = engine.runtime();
     let sig = engine.signal(());
     let rx = sig.clone();
     let emitter = engine.channel();
     emitter.on_message(move |e| {
-        println!("message: {:?}", e.inner());
-        if e.inner().is_type("act") {
-            rx.close();
+        let rx = rx.clone();
+        async move {
+            println!("message: {:?}", e.inner());
+            if e.inner().is_type("act") {
+                rx.close();
+            }
         }
     });
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let _ = sig.recv().await;
     proc.print();
     assert_eq!(

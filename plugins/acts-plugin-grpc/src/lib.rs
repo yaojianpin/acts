@@ -111,7 +111,7 @@ impl GrpcServer {
                 let tid = options
                     .pop::<String>("tid")
                     .ok_or(Status::invalid_argument("tid is required"))?;
-                wrap_result!(ack, name, executor.act().push(&pid, &tid, options))
+                wrap_result!(ack, name, executor.act().push(&pid, &tid, options).await)
             }
             "act:remove" => {
                 let mut options = options;
@@ -121,7 +121,7 @@ impl GrpcServer {
                 let tid = options
                     .pop::<String>("tid")
                     .ok_or(Status::invalid_argument("tid is required"))?;
-                wrap_result!(ack, name, executor.act().remove(&pid, &tid, options))
+                wrap_result!(ack, name, executor.act().remove(&pid, &tid, options).await)
             }
             "act:submit" => {
                 let mut options = options;
@@ -131,7 +131,7 @@ impl GrpcServer {
                 let tid = options
                     .pop::<String>("tid")
                     .ok_or(Status::invalid_argument("tid is required"))?;
-                wrap_result!(ack, name, executor.act().submit(&pid, &tid, options))
+                wrap_result!(ack, name, executor.act().submit(&pid, &tid, options).await)
             }
             "act:complete" => {
                 let mut options = options;
@@ -141,7 +141,11 @@ impl GrpcServer {
                 let tid = options
                     .pop::<String>("tid")
                     .ok_or(Status::invalid_argument("tid is required"))?;
-                wrap_result!(ack, name, executor.act().complete(&pid, &tid, options))
+                wrap_result!(
+                    ack,
+                    name,
+                    executor.act().complete(&pid, &tid, options).await
+                )
             }
             "act:abort" => {
                 let mut options = options;
@@ -151,7 +155,7 @@ impl GrpcServer {
                 let tid = options
                     .pop::<String>("tid")
                     .ok_or(Status::invalid_argument("tid is required"))?;
-                wrap_result!(ack, name, executor.act().abort(&pid, &tid, options))
+                wrap_result!(ack, name, executor.act().abort(&pid, &tid, options).await)
             }
             "act:cancel" => {
                 let mut options = options;
@@ -161,7 +165,7 @@ impl GrpcServer {
                 let tid = options
                     .pop::<String>("tid")
                     .ok_or(Status::invalid_argument("tid is required"))?;
-                wrap_result!(ack, name, executor.act().cancel(&pid, &tid, options))
+                wrap_result!(ack, name, executor.act().cancel(&pid, &tid, options).await)
             }
             "act:back" => {
                 let mut options = options;
@@ -171,7 +175,7 @@ impl GrpcServer {
                 let tid = options
                     .pop::<String>("tid")
                     .ok_or(Status::invalid_argument("tid is required"))?;
-                wrap_result!(ack, name, executor.act().back(&pid, &tid, options))
+                wrap_result!(ack, name, executor.act().back(&pid, &tid, options).await)
             }
             "act:skip" => {
                 let mut options = options;
@@ -181,7 +185,7 @@ impl GrpcServer {
                 let tid = options
                     .pop::<String>("tid")
                     .ok_or(Status::invalid_argument("tid is required"))?;
-                wrap_result!(ack, name, executor.act().skip(&pid, &tid, options))
+                wrap_result!(ack, name, executor.act().skip(&pid, &tid, options).await)
             }
             "act:error" => {
                 let mut options = options;
@@ -191,27 +195,27 @@ impl GrpcServer {
                 let tid = options
                     .pop::<String>("tid")
                     .ok_or(Status::invalid_argument("tid is required"))?;
-                wrap_result!(ack, name, executor.act().fail(&pid, &tid, options))
+                wrap_result!(ack, name, executor.act().fail(&pid, &tid, options).await)
             }
             // model
             "model:ls" => {
                 let query = options
                     .get::<acts::query::Query>("query")
                     .unwrap_or(acts::query::Query::new().limit(100));
-                wrap_result!(ack, name, executor.model().list(&query))
+                wrap_result!(ack, name, executor.model().list(&query).await)
             }
             "model:rm" => {
                 let id = options
                     .get::<String>("id")
                     .ok_or(Status::invalid_argument("id is required"))?;
-                wrap_result!(ack, name, executor.model().rm(&id))
+                wrap_result!(ack, name, executor.model().rm(&id).await)
             }
             "model:get" => {
                 let id = options
                     .get::<String>("id")
                     .ok_or(Status::invalid_argument("id is required"))?;
                 let fmt = options.get::<String>("fmt").unwrap_or("text".to_string());
-                wrap_result!(ack, name, executor.model().get(&id, &fmt))
+                wrap_result!(ack, name, executor.model().get(&id, &fmt).await)
             }
             "model:deploy" => {
                 let model_text = options
@@ -222,20 +226,20 @@ impl GrpcServer {
                 if let Some(mid) = options.get::<String>("mid") {
                     model.set_id(&mid);
                 }
-                wrap_result!(ack, name, executor.model().deploy(&model, None))
+                wrap_result!(ack, name, executor.model().deploy(&model, None).await)
             }
             // package
             "pack:ls" => {
                 let query = options
                     .get::<acts::query::Query>("query")
                     .unwrap_or(acts::query::Query::new().limit(100));
-                wrap_result!(ack, name, executor.pack().list(&query))
+                wrap_result!(ack, name, executor.pack().list(&query).await)
             }
             "pack:get" => {
                 let id = options
                     .get::<String>("id")
                     .ok_or(Status::invalid_argument("id is required"))?;
-                wrap_result!(ack, name, executor.pack().get(&id))
+                wrap_result!(ack, name, executor.pack().get(&id).await)
             }
             "pack:publish" => {
                 let id = options
@@ -275,13 +279,13 @@ impl GrpcServer {
                         .map_err(|_err| Status::invalid_argument("package 'catalog' is invalid"))?,
                     ..Default::default()
                 };
-                wrap_result!(ack, name, executor.pack().publish(&pack))
+                wrap_result!(ack, name, executor.pack().publish(&pack).await)
             }
             "pack:rm" => {
                 let id = options
                     .get::<String>("id")
                     .ok_or(Status::invalid_argument("id is required"))?;
-                wrap_result!(ack, name, executor.pack().rm(&id))
+                wrap_result!(ack, name, executor.pack().rm(&id).await)
             }
             // proc
             "proc:start" => {
@@ -289,7 +293,7 @@ impl GrpcServer {
                 let id = options
                     .pop::<String>("id")
                     .ok_or(Status::invalid_argument("id is required"))?;
-                wrap_result!(ack, name, executor.proc().start(&id, options))
+                wrap_result!(ack, name, executor.proc().start(&id, options).await)
             }
             "proc:start_from_model" => {
                 let mut options = options;
@@ -302,27 +306,30 @@ impl GrpcServer {
                 wrap_result!(
                     ack,
                     name,
-                    executor.proc().start_from_model(&model, &fmt, options)
+                    executor
+                        .proc()
+                        .start_from_model(&model, &fmt, options)
+                        .await
                 )
             }
             "proc:ls" => {
                 let query = options
                     .get::<acts::query::Query>("query")
                     .unwrap_or(acts::query::Query::new().limit(100));
-                wrap_result!(ack, name, executor.proc().list(&query))
+                wrap_result!(ack, name, executor.proc().list(&query).await)
             }
             "proc:get" => {
                 let pid = options
                     .get::<String>("pid")
                     .ok_or(Status::invalid_argument("pid is required"))?;
-                wrap_result!(ack, name, executor.proc().get(&pid))
+                wrap_result!(ack, name, executor.proc().get(&pid).await)
             }
             // task
             "task:ls" => {
                 let query = options
                     .get::<acts::query::Query>("query")
                     .unwrap_or(acts::query::Query::new().limit(100));
-                wrap_result!(ack, name, executor.task().list(&query))
+                wrap_result!(ack, name, executor.task().list(&query).await)
             }
             "task:get" => {
                 let pid = options
@@ -331,68 +338,68 @@ impl GrpcServer {
                 let tid = options
                     .get::<String>("tid")
                     .ok_or(Status::invalid_argument("tid is required"))?;
-                wrap_result!(ack, name, executor.task().get(&pid, &tid))
+                wrap_result!(ack, name, executor.task().get(&pid, &tid).await)
             }
             // msg
             "msg:ls" => {
                 let query = options
                     .get::<acts::query::Query>("query")
                     .unwrap_or(acts::query::Query::new().limit(100));
-                wrap_result!(ack, name, executor.msg().list(&query))
+                wrap_result!(ack, name, executor.msg().list(&query).await)
             }
             "msg:get" => {
                 let id = options
                     .get::<String>("id")
                     .ok_or(Status::invalid_argument("id is required"))?;
-                wrap_result!(ack, name, executor.msg().get(&id))
+                wrap_result!(ack, name, executor.msg().get(&id).await)
             }
             "msg:ack" => {
                 let id = options
                     .get::<String>("id")
                     .ok_or(Status::invalid_argument("id is required"))?;
-                wrap_result!(ack, name, executor.msg().ack(&id))
+                wrap_result!(ack, name, executor.msg().ack(&id).await)
             }
             "msg:redo" => {
                 match options.get::<String>("id") {
                     // re-send one error delivery to its channel
-                    Some(id) => wrap_result!(ack, name, executor.msg().redeliver(&id)),
+                    Some(id) => wrap_result!(ack, name, executor.msg().redeliver(&id).await),
                     // re-send every error delivery
-                    None => wrap_result!(ack, name, executor.msg().redo()),
+                    None => wrap_result!(ack, name, executor.msg().redo().await),
                 }
             }
             "msg:clear" => {
                 if let Some(id) = options.get::<String>("id") {
                     // clear one error delivery
-                    wrap_result!(ack, name, executor.msg().clear_delivery(&id))
+                    wrap_result!(ack, name, executor.msg().clear_delivery(&id).await)
                 } else {
                     let pid = options.get::<String>("pid");
-                    wrap_result!(ack, name, executor.msg().clear(pid))
+                    wrap_result!(ack, name, executor.msg().clear(pid).await)
                 }
             }
             "msg:rm" => {
                 let id = options
                     .get::<String>("id")
                     .ok_or(Status::invalid_argument("id is required"))?;
-                wrap_result!(ack, name, executor.msg().rm(&id))
+                wrap_result!(ack, name, executor.msg().rm(&id).await)
             }
             "msg:unsub" => {
                 let client_id = options
                     .get::<String>("client_id")
                     .ok_or(Status::invalid_argument("client id is required"))?;
-                wrap_result!(ack, name, executor.msg().unsub(&client_id))
+                wrap_result!(ack, name, executor.msg().unsub(&client_id).await)
             }
             // event
             "evt:ls" => {
                 let query = options
                     .get::<acts::query::Query>("query")
                     .unwrap_or(acts::query::Query::new().limit(100));
-                wrap_result!(ack, name, executor.evt().list(&query))
+                wrap_result!(ack, name, executor.evt().list(&query).await)
             }
             "evt:get" => {
                 let id = options
                     .get::<String>("id")
                     .ok_or(Status::invalid_argument("id is required"))?;
-                wrap_result!(ack, name, executor.evt().get(&id))
+                wrap_result!(ack, name, executor.evt().get(&id).await)
             }
             "evt:start" => {
                 let id = options
@@ -441,13 +448,16 @@ impl ActsService for GrpcServer {
         let chan = self.engine.channel_with_options(&client.options);
         tokio::spawn(async move {
             chan.on_message(move |e| {
-                let message = Message {
-                    name: e.name.clone(),
-                    seq: e.id.clone(),
-                    ack: None,
-                    data: Some(serde_json::to_vec(e.inner()).unwrap()),
-                };
-                client.send(message);
+                let client = client.clone();
+                async move {
+                    let message = Message {
+                        name: e.name.clone(),
+                        seq: e.id.clone(),
+                        ack: None,
+                        data: Some(serde_json::to_vec(e.inner()).unwrap()),
+                    };
+                    client.send(message);
+                }
             });
         });
 

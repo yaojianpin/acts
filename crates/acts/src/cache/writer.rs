@@ -1,7 +1,8 @@
-use std::sync::{Arc, mpsc};
-use std::thread::JoinHandle;
+use std::sync::Arc;
 
 use parking_lot::Mutex;
+use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinHandle;
 use tracing::error;
 
 use crate::{ActError, Result, data::MessageStatus, scheduler::Task, store::Store};
@@ -47,31 +48,35 @@ pub(crate) enum WriteOp {
     RemoveProc {
         pid: String,
     },
-    Barrier(mpsc::SyncSender<Result<()>>),
+    Barrier(oneshot::Sender<Result<()>>),
 }
 
 #[derive(Clone)]
 pub(crate) struct StoreWriter {
-    tx: Arc<Mutex<Option<mpsc::Sender<WriteOp>>>>,
-    thread: Arc<Mutex<Option<JoinHandle<()>>>>,
+    tx: Arc<Mutex<Option<mpsc::UnboundedSender<WriteOp>>>>,
+    task: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl StoreWriter {
     pub(crate) fn spawn(store: Arc<Store>) -> Self {
-        let (tx, rx) = mpsc::channel();
-        let thread = std::thread::spawn(move || {
+        let (tx, mut rx) = mpsc::unbounded_channel::<WriteOp>();
+        // Runs on the ambient tokio runtime. Ordering is preserved: a single
+        // consumer applies the ops in FIFO order, so the durability
+        // guarantees (task state durable before outbox records, removal after
+        // every pending write of the process) are unchanged.
+        let task = tokio::spawn(async move {
             // First failure of any write enqueued since the previous barrier.
             // Every failing write is logged as it happens; the next `flush()`
             // caller additionally learns about it through the barrier ack,
             // because a write that failed before the barrier is not durable.
             let mut failed: Option<ActError> = None;
-            while let Ok(op) = rx.recv() {
+            while let Some(op) = rx.recv().await {
                 let res = match op {
                     WriteOp::Barrier(ack) => {
                         let _ = ack.send(failed.take().map_or(Ok(()), Err));
                         Ok(())
                     }
-                    op => Self::apply(&store, op),
+                    op => Self::apply(&store, op).await,
                 };
                 if let Err(err) = res {
                     error!("store writer error: {}", err);
@@ -84,7 +89,7 @@ impl StoreWriter {
 
         Self {
             tx: Arc::new(Mutex::new(Some(tx))),
-            thread: Arc::new(Mutex::new(Some(thread))),
+            task: Arc::new(Mutex::new(Some(task))),
         }
     }
 
@@ -100,19 +105,17 @@ impl StoreWriter {
     /// flush: a flush only acks `Ok` when every write queued before the
     /// barrier was applied successfully, so callers can rely on the data
     /// being durable.
-    pub(crate) fn flush(&self) -> Result<()> {
+    pub(crate) async fn flush(&self) -> Result<()> {
         let sender = self.sender()?;
-        let (tx, rx) = mpsc::sync_channel(1);
+        let (tx, rx) = oneshot::channel();
         sender
             .send(WriteOp::Barrier(tx))
             .map_err(|_| ActError::Runtime("store writer channel closed".to_string()))?;
-        match rx.recv() {
-            Ok(res) => res,
-            Err(_) => Err(ActError::Runtime("store writer channel closed".to_string())),
-        }
+        rx.await
+            .map_err(|_| ActError::Runtime("store writer task dropped".to_string()))?
     }
 
-    fn sender(&self) -> Result<mpsc::Sender<WriteOp>> {
+    fn sender(&self) -> Result<mpsc::UnboundedSender<WriteOp>> {
         self.tx
             .lock()
             .as_ref()
@@ -120,15 +123,15 @@ impl StoreWriter {
             .ok_or_else(|| ActError::Runtime("store writer channel closed".to_string()))
     }
 
-    fn apply(store: &Store, op: WriteOp) -> Result<()> {
+    async fn apply(store: &Store, op: WriteOp) -> Result<()> {
         match op {
-            WriteOp::Task(task) => Self::apply_task(store, &task),
+            WriteOp::Task(task) => Self::apply_task(store, &task).await,
             WriteOp::MessageStatus { pid, tid, status } => {
-                store.set_deliveries_with(&pid, &tid, status)?;
+                store.set_deliveries_with(&pid, &tid, status).await?;
                 Ok(())
             }
             WriteOp::EnqueueNext { pid, tid } => {
-                store.enqueue_next_op(&pid, &tid)?;
+                store.enqueue_next_op(&pid, &tid).await?;
                 Ok(())
             }
             WriteOp::EnqueueAction {
@@ -137,15 +140,17 @@ impl StoreWriter {
                 event,
                 options,
             } => {
-                store.enqueue_action_op(&pid, &tid, &event, &options)?;
+                store
+                    .enqueue_action_op(&pid, &tid, &event, &options)
+                    .await?;
                 Ok(())
             }
             WriteOp::OpDone { pid, tid, r#type } => {
-                store.complete_ops(&pid, &tid, &r#type)?;
+                store.complete_ops(&pid, &tid, &r#type).await?;
                 Ok(())
             }
             WriteOp::RemoveProc { pid } => {
-                store.remove_proc(&pid)?;
+                store.remove_proc(&pid).await?;
                 Ok(())
             }
             // Acked by the writer loop before `apply`, never reached here.
@@ -153,21 +158,23 @@ impl StoreWriter {
         }
     }
 
-    fn apply_task(store: &Store, task: &Arc<Task>) -> Result<()> {
+    async fn apply_task(store: &Store, task: &Arc<Task>) -> Result<()> {
         // A task write that reaches the writer after its process was already
         // removed is dead data. Removal is queued on the writer too (FIFO),
         // so every write enqueued before the removal has already been applied
         // by now; skipping the late write keeps it from re-creating rows or
         // failing (missing procs row) for a process that no longer exists.
-        if !store.procs().exists(&task.pid)? {
+        if !store.procs().exists(&task.pid).await? {
             return Ok(());
         }
-        store.upsert_task(task)?;
+        store.upsert_task(task).await?;
         if let Some(root) = task.proc().root() {
-            store.upsert_task(&root)?;
+            store.upsert_task(&root).await?;
         }
         if task.proc().state().is_completed() {
-            store.mark_proc_complete(&task.pid, task.proc().end_time(), task.proc().state())?;
+            store
+                .mark_proc_complete(&task.pid, task.proc().end_time(), task.proc().state())
+                .await?;
         }
         Ok(())
     }
@@ -177,13 +184,14 @@ impl StoreWriter {
     /// every op enqueued before the thread stopped has been applied. Later
     /// `send`/`flush` calls fail with a channel-closed error, and calling
     /// `close` again is a no-op.
-    pub(crate) fn close(&self) {
+    pub(crate) async fn close(&self) {
         // Failures of the drained writes were already logged by the writer
-        // thread; do not let them abort the shutdown.
-        let _ = self.flush();
+        // task; do not let them abort the shutdown.
+        let _ = self.flush().await;
         self.tx.lock().take();
-        if let Some(thread) = self.thread.lock().take() {
-            let _ = thread.join();
+        let task = { self.task.lock().take() };
+        if let Some(task) = task {
+            let _ = task.await;
         }
     }
 }
@@ -197,7 +205,7 @@ mod tests {
 
     /// Memory kv that can be switched, from the test thread, to fail every
     /// `put` (a store outage) or to block every `put` (holding the writer
-    /// thread inside an in-flight write).
+    /// task inside an in-flight write).
     struct TestKv {
         inner: MemoryStore,
         fail_put: AtomicBool,
@@ -227,37 +235,43 @@ mod tests {
             self.gate.store(false, Ordering::SeqCst);
         }
 
-        fn wait_entered(&self) {
+        /// Yield until the writer task is parked inside a gated `put`.
+        async fn wait_entered(&self) {
             while !self.in_gate.load(Ordering::SeqCst) {
-                std::thread::yield_now();
+                tokio::task::yield_now().await;
             }
         }
     }
 
+    #[async_trait::async_trait]
     impl KvStore for TestKv {
-        fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
-            self.inner.get(key)
+        async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+            self.inner.get(key).await
         }
 
-        fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
+        async fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
             if self.gate.load(Ordering::SeqCst) {
                 self.in_gate.store(true, Ordering::SeqCst);
                 while self.gate.load(Ordering::SeqCst) {
-                    std::thread::sleep(Duration::from_millis(1));
+                    tokio::time::sleep(Duration::from_millis(1)).await;
                 }
             }
             if self.fail_put.load(Ordering::SeqCst) {
                 return Err(ActError::Runtime("injected put failure".to_string()));
             }
-            self.inner.put(key, value)
+            self.inner.put(key, value).await
         }
 
-        fn delete(&self, key: &str) -> Result<()> {
-            self.inner.delete(key)
+        async fn delete(&self, key: &str) -> Result<()> {
+            self.inner.delete(key).await
         }
 
-        fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>> {
-            self.inner.scan_prefix(key, options)
+        async fn scan_prefix(
+            &self,
+            key: &str,
+            options: ScanOptions,
+        ) -> Result<Vec<(String, Vec<u8>)>> {
+            self.inner.scan_prefix(key, options).await
         }
     }
 
@@ -277,9 +291,10 @@ mod tests {
             .unwrap();
     }
 
-    fn durable(store: &Store, pid: &str) -> bool {
+    async fn durable(store: &Store, pid: &str) -> bool {
         store
             .load_pending_ops()
+            .await
             .unwrap()
             .iter()
             .any(|op| op.pid == pid)
@@ -287,90 +302,90 @@ mod tests {
 
     /// `flush` acks `Ok` only when every write queued before the barrier was
     /// applied: a failing write is reported to the caller that flushes.
-    #[test]
-    fn flush_reports_earlier_write_failure_and_recovers() {
+    #[tokio::test]
+    async fn flush_reports_earlier_write_failure_and_recovers() {
         let (store, kv, writer) = test_writer();
 
         // healthy write lands
         enqueue(&writer, "ok1");
-        writer.flush().unwrap();
-        assert!(durable(&store, "ok1"));
+        writer.flush().await.unwrap();
+        assert!(durable(&store, "ok1").await);
 
         // store outage: queued writes fail, and the next flush surfaces it
         // instead of silently acking `Ok`
         kv.set_fail(true);
         enqueue(&writer, "lost1");
         enqueue(&writer, "lost2");
-        let err = writer.flush().unwrap_err();
+        let err = writer.flush().await.unwrap_err();
         assert!(
             err.to_string().contains("injected"),
             "flush should report the earlier write failure, got: {err}"
         );
-        assert!(!durable(&store, "lost1"));
-        assert!(!durable(&store, "lost2"));
+        assert!(!durable(&store, "lost1").await);
+        assert!(!durable(&store, "lost2").await);
 
         // outage over: the failure was consumed by the flush, later flushes
         // are clean and later writes are durable
         kv.set_fail(false);
         enqueue(&writer, "ok2");
-        writer.flush().unwrap();
-        assert!(durable(&store, "ok2"));
+        writer.flush().await.unwrap();
+        assert!(durable(&store, "ok2").await);
     }
 
     /// A flush with nothing failing acks cleanly even when the queue is empty.
-    #[test]
-    fn flush_is_clean_without_failures() {
+    #[tokio::test]
+    async fn flush_is_clean_without_failures() {
         let (_, _, writer) = test_writer();
-        writer.flush().unwrap();
+        writer.flush().await.unwrap();
     }
 
     /// `close` flushes pending writes first, waits for an in-flight write to
-    /// finish, and joins the writer thread, so nothing is left running when
-    /// it returns.
-    #[test]
-    fn close_waits_for_in_flight_write_and_joins_the_thread() {
+    /// finish, and joins the writer task, so nothing is left running when it
+    /// returns.
+    #[tokio::test]
+    async fn close_waits_for_in_flight_write_and_joins_the_thread() {
         let (store, kv, writer) = test_writer();
 
         // hold the writer inside a write so it cannot drain while close runs
         kv.arm_gate();
         enqueue(&writer, "p1");
-        kv.wait_entered();
+        kv.wait_entered().await;
 
         let closer = {
             let writer = writer.clone();
-            std::thread::spawn(move || writer.close())
+            tokio::spawn(async move { writer.close().await })
         };
 
         // close() flushes first, so it must not return while the write is
         // still in flight
-        std::thread::sleep(Duration::from_millis(50));
+        tokio::time::sleep(Duration::from_millis(50)).await;
         assert!(
             !closer.is_finished(),
             "close() returned while a write was in flight"
         );
 
         kv.disarm_gate();
-        closer.join().unwrap();
+        closer.await.unwrap();
 
         // the in-flight write was drained before close() returned
-        assert!(durable(&store, "p1"));
-        // and the writer thread was joined: nothing is left running
+        assert!(durable(&store, "p1").await);
+        // and the writer task was joined: nothing is left running
         assert!(
-            writer.thread.lock().is_none(),
-            "writer thread was not joined by close()"
+            writer.task.lock().is_none(),
+            "writer task was not joined by close()"
         );
     }
 
     /// After `close` the writer is gone: further sends fail, and `close` is
     /// idempotent.
-    #[test]
-    fn send_and_flush_fail_after_close() {
+    #[tokio::test]
+    async fn send_and_flush_fail_after_close() {
         let (store, _, writer) = test_writer();
         enqueue(&writer, "p1");
-        writer.close();
-        assert!(durable(&store, "p1"));
+        writer.close().await;
+        assert!(durable(&store, "p1").await);
 
-        writer.close(); // no-op
+        writer.close().await; // no-op
 
         let send_err = writer
             .send(WriteOp::EnqueueNext {
@@ -379,15 +394,15 @@ mod tests {
             })
             .unwrap_err();
         assert!(send_err.to_string().contains("closed"), "{send_err}");
-        let flush_err = writer.flush().unwrap_err();
+        let flush_err = writer.flush().await.unwrap_err();
         assert!(flush_err.to_string().contains("closed"), "{flush_err}");
     }
 
     /// `RemoveProc` is applied FIFO after the writes queued before it, then
     /// deletes the process's outbox records; one flush covers both and
     /// reports no failure. Removing an absent process is a no-op.
-    #[test]
-    fn remove_proc_deletes_outbox_rows_after_pending_writes() {
+    #[tokio::test]
+    async fn remove_proc_deletes_outbox_rows_after_pending_writes() {
         let (store, _, writer) = test_writer();
 
         // the enqueue is queued before the removal: it applies first, then
@@ -398,9 +413,9 @@ mod tests {
                 pid: "p1".to_string(),
             })
             .unwrap();
-        writer.flush().unwrap();
+        writer.flush().await.unwrap();
         assert!(
-            !durable(&store, "p1"),
+            !durable(&store, "p1").await,
             "RemoveProc must drop the op rows of the process"
         );
 
@@ -410,6 +425,6 @@ mod tests {
                 pid: "p1".to_string(),
             })
             .unwrap();
-        writer.flush().unwrap();
+        writer.flush().await.unwrap();
     }
 }

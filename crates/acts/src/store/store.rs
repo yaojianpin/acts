@@ -67,13 +67,15 @@ impl Store {
         self.collection()
     }
 
-    fn rebuild_one<DATA>(&self) -> Result<usize>
+    async fn rebuild_one<DATA>(&self) -> Result<usize>
     where
         DATA:
             DbCollectionIden + Serialize + DeserializeOwned + Send + Sync + Clone + Debug + 'static,
     {
         let prefix = DATA::iden().as_ref().to_string();
-        KvCollection::<DATA>::new(&prefix, self.kv.clone()).rebuild_index()
+        KvCollection::<DATA>::new(&prefix, self.kv.clone())
+            .rebuild_index()
+            .await
     }
 
     /// Rebuild all collection index entries from stored data documents.
@@ -81,50 +83,46 @@ impl Store {
     /// Run once after upgrading to a version whose index-key value encoding
     /// changed (see `KvCollection::rebuild_index`); calling it repeatedly is
     /// harmless (idempotent rewrite).
-    pub fn rebuild_indexes(&self) -> Result<usize> {
+    pub async fn rebuild_indexes(&self) -> Result<usize> {
         let mut total = 0;
-        for rebuild in [
-            Self::rebuild_one::<data::Task>,
-            Self::rebuild_one::<data::Proc>,
-            Self::rebuild_one::<data::Package>,
-            Self::rebuild_one::<data::Model>,
-            Self::rebuild_one::<data::Message>,
-            Self::rebuild_one::<data::Delivery>,
-            Self::rebuild_one::<data::Event>,
-            Self::rebuild_one::<data::Op>,
-        ] {
-            total += rebuild(self)?;
-        }
+        total += Self::rebuild_one::<data::Task>(self).await?;
+        total += Self::rebuild_one::<data::Proc>(self).await?;
+        total += Self::rebuild_one::<data::Package>(self).await?;
+        total += Self::rebuild_one::<data::Model>(self).await?;
+        total += Self::rebuild_one::<data::Message>(self).await?;
+        total += Self::rebuild_one::<data::Delivery>(self).await?;
+        total += Self::rebuild_one::<data::Event>(self).await?;
+        total += Self::rebuild_one::<data::Op>(self).await?;
         Ok(total)
     }
 
-    pub fn publish(&self, pack: &Package) -> Result<bool> {
+    pub async fn publish(&self, pack: &Package) -> Result<bool> {
         trace!(id = %pack.id, "store publish");
         if pack.id.is_empty() {
             return Err(ActError::Action("missing id in package".into()));
         }
 
         let packages = self.packages();
-        match packages.find(&pack.id) {
+        match packages.find(&pack.id).await {
             Ok(m) => {
                 let data = Package {
                     create_time: m.create_time,
                     update_time: utils::time::time_millis(),
                     ..pack.clone()
                 };
-                packages.update(&data)
+                packages.update(&data).await
             }
             Err(_) => {
                 let data = Package {
                     create_time: utils::time::time_millis(),
                     ..pack.clone()
                 };
-                packages.create(&data)
+                packages.create(&data).await
             }
         }
     }
 
-    pub fn deploy(&self, model: &Workflow, view: Option<&JsonValue>) -> Result<bool> {
+    pub async fn deploy(&self, model: &Workflow, view: Option<&JsonValue>) -> Result<bool> {
         trace!(id = %model.id, "store deploy");
         if model.id.is_empty() {
             return Err(ActError::Model("missing id in model".into()));
@@ -137,35 +135,39 @@ impl Store {
         // trigger rows are committed as ONE atomic batch: a mid-deploy
         // failure can no longer leave a model row with half-reconciled (or
         // missing) triggers, or stale triggers of a removed declaration.
-        let mut ops = self.model_deploy_ops(model, view)?;
-        ops.extend(self.trigger_ops(&model.on, &model.id, &model.ver)?);
-        self.kv.batch(&ops)?;
+        let mut ops = self.model_deploy_ops(model, view).await?;
+        ops.extend(self.trigger_ops(&model.on, &model.id, &model.ver).await?);
+        self.kv.batch(&ops).await?;
         Ok(true)
     }
 
     /// KV mutations of the model row itself (create or re-deploy update) —
     /// re-deploys keep the deployed version and the original creation time.
-    fn model_deploy_ops(
+    async fn model_deploy_ops(
         &self,
         model: &Workflow,
         view: Option<&JsonValue>,
     ) -> Result<Vec<StoreBatchOp>> {
         let models = KvCollection::<Model>::new(StoreIden::Models.as_ref(), self.kv.clone());
         let text = serde_yaml::to_string(model).unwrap();
-        match self.models().find(&model.id) {
-            Ok(m) => models.update_ops(&Model {
-                id: model.id.clone(),
-                name: model.name.clone(),
-                desc: model.desc.clone(),
-                data: text.clone(),
-                view: view.map(|v| v.to_string()),
-                ver: m.ver.clone(),
-                size: text.len() as i32,
-                create_time: m.create_time,
-                update_time: utils::time::time_millis(),
-                timestamp: utils::time::timestamp(),
-                v: Model::version(),
-            }),
+        match self.models().find(&model.id).await {
+            Ok(m) => {
+                models
+                    .update_ops(&Model {
+                        id: model.id.clone(),
+                        name: model.name.clone(),
+                        desc: model.desc.clone(),
+                        data: text.clone(),
+                        view: view.map(|v| v.to_string()),
+                        ver: m.ver.clone(),
+                        size: text.len() as i32,
+                        create_time: m.create_time,
+                        update_time: utils::time::time_millis(),
+                        timestamp: utils::time::timestamp(),
+                        v: Model::version(),
+                    })
+                    .await
+            }
             Err(_) => models.create_ops(&Model {
                 id: model.id.clone(),
                 name: model.name.clone(),
@@ -193,7 +195,12 @@ impl Store {
     /// `schedule` triggers keep their `last_run`/`next_run` state across
     /// re-deploys unless the cron expression itself changed (then the next
     /// run is re-armed to fire on the next tick).
-    fn trigger_ops(&self, triggers: &[Trigger], mid: &str, ver: &str) -> Result<Vec<StoreBatchOp>> {
+    async fn trigger_ops(
+        &self,
+        triggers: &[Trigger],
+        mid: &str,
+        ver: &str,
+    ) -> Result<Vec<StoreBatchOp>> {
         use super::query::{Expr, Filter, Query};
         use crate::utils::consts;
 
@@ -203,7 +210,8 @@ impl Store {
                 &Query::new()
                     .limit(1000)
                     .filter(Filter::and().expr(Expr::eq(consts::MODEL_ID, mid))),
-            )?
+            )
+            .await?
             .rows;
 
         let mut ops = Vec::new();
@@ -218,12 +226,12 @@ impl Store {
         // rows no longer declared: drop the stale trigger rows
         for row in existing.iter() {
             if !keep.contains(&row.id) {
-                ops.extend(events.delete_ops(&row.id)?);
+                ops.extend(events.delete_ops(&row.id).await?);
             }
         }
 
         for mut event in declared {
-            match events.find(&event.id) {
+            match events.find(&event.id).await {
                 Ok(evt) => {
                     let changed = evt.name != event.name
                         || evt.kind != event.kind
@@ -242,7 +250,7 @@ impl Store {
                     } else {
                         0
                     };
-                    ops.extend(events.update_ops(&event)?);
+                    ops.extend(events.update_ops(&event).await?);
                 }
                 Err(_) => {
                     // new trigger: arm `schedule` rows on the next tick
@@ -260,7 +268,7 @@ impl Store {
     /// one batch: a mid-removal failure can no longer leave stale trigger
     /// rows (or a half-cleared event set) behind. Removing an absent model is
     /// a no-op that still returns `true`.
-    pub fn rm_model(&self, id: &str) -> Result<bool> {
+    pub async fn rm_model(&self, id: &str) -> Result<bool> {
         use super::query::{Expr, Filter, Query};
         use crate::utils::consts;
 
@@ -269,13 +277,14 @@ impl Store {
 
         let mut ops = Vec::new();
         let rows = events
-            .query(&Query::new().filter(Filter::and().expr(Expr::eq(consts::MODEL_ID, id))))?
+            .query(&Query::new().filter(Filter::and().expr(Expr::eq(consts::MODEL_ID, id))))
+            .await?
             .rows;
         for row in rows {
-            ops.extend(events.delete_ops(&row.id)?);
+            ops.extend(events.delete_ops(&row.id).await?);
         }
-        ops.extend(models.delete_ops(id)?);
-        self.kv.batch(&ops)?;
+        ops.extend(models.delete_ops(id).await?);
+        self.kv.batch(&ops).await?;
         Ok(true)
     }
 
@@ -285,7 +294,7 @@ impl Store {
     /// gone, others + the proc row still present) that would resurrect as a
     /// broken process on the next restore. Removing an absent process is a
     /// no-op that still returns `true`.
-    pub(crate) fn remove_proc_rows(&self, pid: &str) -> Result<bool> {
+    pub(crate) async fn remove_proc_rows(&self, pid: &str) -> Result<bool> {
         use super::query::{Expr, Filter, Query};
 
         let procs = KvCollection::<data::Proc>::new(StoreIden::Procs.as_ref(), self.kv.clone());
@@ -294,14 +303,14 @@ impl Store {
 
         let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", pid.to_string())));
         let mut batch = Vec::new();
-        for row in tasks.query(&q)?.rows {
-            batch.extend(tasks.delete_ops(&row.id)?);
+        for row in tasks.query(&q).await?.rows {
+            batch.extend(tasks.delete_ops(&row.id).await?);
         }
-        for row in ops.query(&q)?.rows {
-            batch.extend(ops.delete_ops(&row.id)?);
+        for row in ops.query(&q).await?.rows {
+            batch.extend(ops.delete_ops(&row.id).await?);
         }
-        batch.extend(procs.delete_ops(pid)?);
-        self.kv.batch(&batch)?;
+        batch.extend(procs.delete_ops(pid).await?);
+        self.kv.batch(&batch).await?;
         Ok(true)
     }
 
@@ -310,7 +319,7 @@ impl Store {
     /// persist of a freshly started process goes through here, so a crash can
     /// never leave a durable proc row without its root task row (or a root
     /// task row whose proc row is missing — the writer skips such orphans).
-    pub(crate) fn upsert_proc_with_task(
+    pub(crate) async fn upsert_proc_with_task(
         &self,
         proc: &Arc<Process>,
         root: Option<&Arc<Task>>,
@@ -318,11 +327,11 @@ impl Store {
         let procs = KvCollection::<data::Proc>::new(StoreIden::Procs.as_ref(), self.kv.clone());
         let tasks = KvCollection::<data::Task>::new(StoreIden::Tasks.as_ref(), self.kv.clone());
 
-        let mut ops = procs.update_ops(&proc.into_data()?)?;
+        let mut ops = procs.update_ops(&proc.into_data()?).await?;
         if let Some(root) = root {
-            ops.extend(tasks.update_ops(&root.into_data()?)?);
+            ops.extend(tasks.update_ops(&root.into_data()?).await?);
         }
-        self.kv.batch(&ops)?;
+        self.kv.batch(&ops).await?;
         Ok(())
     }
 }
@@ -348,32 +357,33 @@ mod tests {
         deletes: AtomicUsize,
     }
 
+    #[async_trait::async_trait]
     impl KvStore for CountingKv {
-        fn get(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
-            self.inner.get(key)
+        async fn get(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
+            self.inner.get(key).await
         }
 
-        fn put(&self, key: &str, value: Vec<u8>) -> crate::Result<()> {
+        async fn put(&self, key: &str, value: Vec<u8>) -> crate::Result<()> {
             self.puts.fetch_add(1, Ordering::SeqCst);
-            self.inner.put(key, value)
+            self.inner.put(key, value).await
         }
 
-        fn delete(&self, key: &str) -> crate::Result<()> {
+        async fn delete(&self, key: &str) -> crate::Result<()> {
             self.deletes.fetch_add(1, Ordering::SeqCst);
-            self.inner.delete(key)
+            self.inner.delete(key).await
         }
 
-        fn batch(&self, ops: &[StoreBatchOp]) -> crate::Result<()> {
+        async fn batch(&self, ops: &[StoreBatchOp]) -> crate::Result<()> {
             self.batches.fetch_add(1, Ordering::SeqCst);
-            self.inner.batch(ops)
+            self.inner.batch(ops).await
         }
 
-        fn scan_prefix(
+        async fn scan_prefix(
             &self,
             key: &str,
             options: ScanOptions,
         ) -> crate::Result<Vec<(String, Vec<u8>)>> {
-            self.inner.scan_prefix(key, options)
+            self.inner.scan_prefix(key, options).await
         }
     }
 
@@ -383,10 +393,11 @@ mod tests {
         (kv, store)
     }
 
-    fn event_rows(store: &Store, mid: &str) -> Vec<crate::store::data::Event> {
+    async fn event_rows(store: &Store, mid: &str) -> Vec<crate::store::data::Event> {
         store
             .events()
             .query(&Query::new().filter(Filter::and().expr(Expr::eq(MODEL_ID, mid.to_string()))))
+            .await
             .unwrap()
             .rows
     }
@@ -397,8 +408,8 @@ mod tests {
             .with_step(|step| step.with_id("step1"))
     }
 
-    #[test]
-    fn deploy_commits_model_and_trigger_rows_in_one_batch() {
+    #[tokio::test]
+    async fn deploy_commits_model_and_trigger_rows_in_one_batch() {
         let (kv, store) = counting_store();
         let model = trigger_model("m1")
             .with_trigger(|t| t.with_id("t-manual").with_kind("manual"))
@@ -407,7 +418,7 @@ mod tests {
                     .with_kind("schedule")
                     .with_schedule("* * * * * *")
             });
-        store.deploy(&model, None).unwrap();
+        store.deploy(&model, None).await.unwrap();
 
         assert_eq!(
             kv.batches.load(Ordering::SeqCst),
@@ -424,8 +435,8 @@ mod tests {
         );
 
         // the model row and every trigger row are visible
-        assert!(store.models().find("m1").is_ok());
-        let rows = event_rows(&store, "m1");
+        assert!(store.models().find("m1").await.is_ok());
+        let rows = event_rows(&store, "m1").await;
         assert_eq!(rows.len(), 2);
         let manual = rows.iter().find(|e| e.id == "m1:t-manual").unwrap();
         assert_eq!(manual.kind, "manual");
@@ -437,8 +448,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn redeploy_reconciles_trigger_rows_in_one_batch() {
+    #[tokio::test]
+    async fn redeploy_reconciles_trigger_rows_in_one_batch() {
         let (kv, store) = counting_store();
         store
             .deploy(
@@ -447,6 +458,7 @@ mod tests {
                     .with_trigger(|t| t.with_id("drop").with_kind("manual")),
                 None,
             )
+            .await
             .unwrap();
         kv.batches.store(0, Ordering::SeqCst);
 
@@ -458,6 +470,7 @@ mod tests {
                     .with_trigger(|t| t.with_id("added").with_kind("manual")),
                 None,
             )
+            .await
             .unwrap();
 
         assert_eq!(
@@ -474,7 +487,7 @@ mod tests {
             "redeploy must not fall back to raw per-key writes"
         );
 
-        let rows = event_rows(&store, "m1");
+        let rows = event_rows(&store, "m1").await;
         let ids: Vec<String> = rows.iter().map(|e| e.id.clone()).collect();
         assert!(ids.contains(&"m1:keep".to_string()));
         assert!(ids.contains(&"m1:added".to_string()));
@@ -487,18 +500,19 @@ mod tests {
         assert_eq!(keep.kind, "chat");
     }
 
-    #[test]
-    fn redeploy_without_triggers_clears_event_rows_in_one_batch() {
+    #[tokio::test]
+    async fn redeploy_without_triggers_clears_event_rows_in_one_batch() {
         let (kv, store) = counting_store();
         store
             .deploy(
                 &trigger_model("m1").with_trigger(|t| t.with_id("gone").with_kind("manual")),
                 None,
             )
+            .await
             .unwrap();
         kv.batches.store(0, Ordering::SeqCst);
 
-        store.deploy(&trigger_model("m1"), None).unwrap();
+        store.deploy(&trigger_model("m1"), None).await.unwrap();
         assert_eq!(
             kv.batches.load(Ordering::SeqCst),
             1,
@@ -512,15 +526,18 @@ mod tests {
             (0, 0),
             "deploy must not fall back to raw per-key writes"
         );
-        assert!(store.models().find("m1").is_ok(), "model row survives");
         assert!(
-            event_rows(&store, "m1").is_empty(),
+            store.models().find("m1").await.is_ok(),
+            "model row survives"
+        );
+        assert!(
+            event_rows(&store, "m1").await.is_empty(),
             "trigger rows of the bare redeploy must be dropped"
         );
     }
 
-    #[test]
-    fn rm_model_removes_model_and_trigger_rows_in_one_batch() {
+    #[tokio::test]
+    async fn rm_model_removes_model_and_trigger_rows_in_one_batch() {
         let (kv, store) = counting_store();
         store
             .deploy(
@@ -529,10 +546,11 @@ mod tests {
                     .with_trigger(|t| t.with_id("t2").with_kind("manual")),
                 None,
             )
+            .await
             .unwrap();
         kv.batches.store(0, Ordering::SeqCst);
 
-        assert!(store.rm_model("m1").unwrap());
+        assert!(store.rm_model("m1").await.unwrap());
         assert_eq!(
             kv.batches.load(Ordering::SeqCst),
             1,
@@ -546,17 +564,20 @@ mod tests {
             (0, 0),
             "rm must not fall back to raw per-key writes"
         );
-        assert!(store.models().find("m1").is_err(), "model row must be gone");
         assert!(
-            event_rows(&store, "m1").is_empty(),
+            store.models().find("m1").await.is_err(),
+            "model row must be gone"
+        );
+        assert!(
+            event_rows(&store, "m1").await.is_empty(),
             "trigger rows must be gone with the model"
         );
 
         // removing an absent model is a no-op that still returns true
-        assert!(store.rm_model("m1").unwrap());
+        assert!(store.rm_model("m1").await.unwrap());
     }
 
-    fn seed_proc_rows(store: &Store, pid: &str) {
+    async fn seed_proc_rows(store: &Store, pid: &str) {
         let now = crate::utils::time::time_millis();
         let proc = crate::store::data::Proc {
             id: pid.to_string(),
@@ -571,7 +592,7 @@ mod tests {
             err: None,
             v: 0,
         };
-        store.procs().create(&proc).unwrap();
+        store.procs().create(&proc).await.unwrap();
         for tid in ["t1", "t2"] {
             let task = crate::store::data::Task {
                 id: format!("{pid}{tid}"),
@@ -592,7 +613,7 @@ mod tests {
                 timestamp: now,
                 v: 0,
             };
-            store.tasks().create(&task).unwrap();
+            store.tasks().create(&task).await.unwrap();
         }
         let op = crate::store::data::Op {
             id: format!("{pid}o1"),
@@ -606,16 +627,16 @@ mod tests {
             update_time: now,
             v: 0,
         };
-        store.ops().create(&op).unwrap();
+        store.ops().create(&op).await.unwrap();
     }
 
-    #[test]
-    fn remove_proc_removes_all_rows_of_the_process_in_one_batch() {
+    #[tokio::test]
+    async fn remove_proc_removes_all_rows_of_the_process_in_one_batch() {
         let (kv, store) = counting_store();
-        seed_proc_rows(&store, "p1");
+        seed_proc_rows(&store, "p1").await;
         kv.batches.store(0, Ordering::SeqCst);
 
-        assert!(store.remove_proc("p1").unwrap());
+        assert!(store.remove_proc_rows("p1").await.unwrap());
         assert_eq!(
             kv.batches.load(Ordering::SeqCst),
             1,
@@ -631,18 +652,21 @@ mod tests {
         );
 
         let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", "p1".to_string())));
-        assert!(store.procs().find("p1").is_err(), "proc row must be gone");
         assert!(
-            store.tasks().query(&q).unwrap().rows.is_empty(),
+            store.procs().find("p1").await.is_err(),
+            "proc row must be gone"
+        );
+        assert!(
+            store.tasks().query(&q).await.unwrap().rows.is_empty(),
             "task rows must be gone"
         );
         assert!(
-            store.ops().query(&q).unwrap().rows.is_empty(),
+            store.ops().query(&q).await.unwrap().rows.is_empty(),
             "outbox op rows must be gone"
         );
 
         // removing an absent process is a no-op that still returns true
-        assert!(store.remove_proc("p1").unwrap());
+        assert!(store.remove_proc_rows("p1").await.unwrap());
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -651,16 +675,21 @@ mod tests {
         let engine = crate::Engine::new()
             .set_store(Some(kv.clone()))
             .start()
+            .await
             .unwrap();
         let rt = engine.runtime().clone();
 
         let proc = rt.create_proc("p1", &trigger_model("m1"));
-        let tr = proc.tree();
-        let root = tr.root.clone().expect("workflow root node");
+        // scope the tree read guard: it must not live across the awaits below
+        let root = proc
+            .tree()
+            .root
+            .clone()
+            .expect("workflow root node");
         let task = proc.create_task(&root, None).unwrap();
 
         kv.batches.store(0, Ordering::SeqCst);
-        rt.cache().start_proc(&proc, Some(&task)).unwrap();
+        rt.cache().start_proc(&proc, Some(&task)).await.unwrap();
 
         assert_eq!(
             kv.batches.load(Ordering::SeqCst),
@@ -678,9 +707,12 @@ mod tests {
 
         // proc row and root task row exist together — never one without the other
         let store = rt.cache().store();
-        assert!(store.procs().find("p1").is_ok(), "proc row must exist");
+        assert!(
+            store.procs().find("p1").await.is_ok(),
+            "proc row must exist"
+        );
         let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", "p1".to_string())));
-        let rows = store.tasks().query(&q).unwrap().rows;
+        let rows = store.tasks().query(&q).await.unwrap().rows;
         assert_eq!(rows.len(), 1, "root task row must exist with the proc row");
         assert_eq!(rows[0].tid, "$", "the single row is the root task");
     }

@@ -51,13 +51,13 @@ impl Cache {
         self.procs.entry_count() as usize
     }
 
-    pub fn close(&self) {
-        self.writer.close();
+    pub async fn close(&self) {
+        self.writer.close().await;
     }
 
     #[instrument(skip(self, proc), fields(pid = %proc.id()))]
-    pub fn push_proc(&self, proc: &Arc<Process>) -> Result<()> {
-        self.push_proc_pri(proc, true)?;
+    pub async fn push_proc(&self, proc: &Arc<Process>) -> Result<()> {
+        self.push_proc_pri(proc, true).await?;
 
         Ok(())
     }
@@ -71,16 +71,16 @@ impl Cache {
     }
 
     #[instrument(skip(self, rt), fields(pid = %pid))]
-    pub fn proc(&self, pid: &str, rt: &Arc<Runtime>) -> Result<Option<Arc<Process>>> {
+    pub async fn proc(&self, pid: &str, rt: &Arc<Runtime>) -> Result<Option<Arc<Process>>> {
         debug!("process: pid={pid}");
         match self.get_proc(pid) {
             Some(proc) => Ok(Some(proc.clone())),
             None => {
-                self.flush()?;
-                if let Some(proc) = self.store.load_proc(pid, rt)? {
+                self.flush().await?;
+                if let Some(proc) = self.store.load_proc(pid, rt).await? {
                     debug!(pid = %pid, "loaded process");
                     // add to cache
-                    self.push_proc_pri(&proc, false)?;
+                    self.push_proc_pri(&proc, false).await?;
                     return Ok(Some(proc));
                 }
                 Ok(None)
@@ -89,23 +89,23 @@ impl Cache {
     }
 
     #[instrument(skip(self), fields(pid = %pid))]
-    pub fn remove(&self, pid: &str) -> Result<bool> {
+    pub async fn remove(&self, pid: &str) -> Result<bool> {
         debug!("remove pid={pid}");
         self.procs.remove(pid);
         // Removal is serialized through the writer (FIFO) so it can never
         // race writes still queued for the process — its completion markers
         // are applied first, then the rows are dropped. `flush` keeps the
-        // callers' synchronous contract: when this returns, the removal is
-        // durable and no pending write can resurrect the rows afterwards.
+        // callers' contract: when this returns, the removal is durable and
+        // no pending write can resurrect the rows afterwards.
         self.writer.send(WriteOp::RemoveProc {
             pid: pid.to_string(),
         })?;
-        self.writer.flush()?;
+        self.writer.flush().await?;
         Ok(true)
     }
 
     #[instrument(skip(self, rt))]
-    pub fn restore(&self, rt: &Arc<Runtime>) -> Result<()> {
+    pub async fn restore(&self, rt: &Arc<Runtime>) -> Result<()> {
         debug!("restore");
         let cap = self.cap();
         let count = self.count();
@@ -117,12 +117,12 @@ impl Cache {
             // skip procs already in the cache to avoid redundant deserialization
             let cached: HashSet<String> = self.procs().iter().map(|p| p.id().to_string()).collect();
             let cap = cap - count;
-            self.flush()?;
-            for ref proc in self.store.load(cap, rt, &cached)? {
+            self.flush().await?;
+            for ref proc in self.store.load(cap, rt, &cached).await? {
                 if !self.procs.contains_key(proc.id()) {
-                    self.push_proc_pri(proc, false)?;
+                    self.push_proc_pri(proc, false).await?;
                     if proc.state().is_none() {
-                        proc.start()?;
+                        proc.start().await?;
                     }
                 }
             }
@@ -131,8 +131,8 @@ impl Cache {
     }
 
     #[instrument(skip(self, task), fields(pid = %task.pid, tid = %task.id))]
-    pub fn upsert(&self, task: &Arc<Task>) -> Result<()> {
-        self.push_task_pri(task, true)
+    pub async fn upsert(&self, task: &Arc<Task>) -> Result<()> {
+        self.push_task_pri(task, true).await
     }
 
     #[cfg(test)]
@@ -144,10 +144,10 @@ impl Cache {
         self.procs.get(pid)
     }
 
-    pub(super) fn push_proc_pri(&self, proc: &Arc<Process>, save: bool) -> Result<()> {
+    pub(super) async fn push_proc_pri(&self, proc: &Arc<Process>, save: bool) -> Result<()> {
         debug!("push process pid={}", proc.id());
         if save {
-            self.store.upsert_proc(proc)?;
+            self.store.upsert_proc(proc).await?;
         }
         self.procs.insert(proc.id().to_string(), proc.clone());
 
@@ -161,9 +161,13 @@ impl Cache {
     /// resume as a task-less, un-runnable process). The rows are durable
     /// before the root task is dispatched to the queue.
     #[instrument(skip(self, proc, root), fields(pid = %proc.id()))]
-    pub(crate) fn start_proc(&self, proc: &Arc<Process>, root: Option<&Arc<Task>>) -> Result<()> {
+    pub(crate) async fn start_proc(
+        &self,
+        proc: &Arc<Process>,
+        root: Option<&Arc<Task>>,
+    ) -> Result<()> {
         debug!("start process pid={}", proc.id());
-        self.store.upsert_proc_with_task(proc, root)?;
+        self.store.upsert_proc_with_task(proc, root).await?;
         self.procs.insert(proc.id().to_string(), proc.clone());
         if let Some(task) = root {
             self.push_task_mem(task)?;
@@ -171,9 +175,9 @@ impl Cache {
         Ok(())
     }
 
-    pub(super) fn push_task_pri(&self, task: &Arc<Task>, save: bool) -> Result<()> {
+    pub(super) async fn push_task_pri(&self, task: &Arc<Task>, save: bool) -> Result<()> {
         if save {
-            self.persist_task(task)?;
+            self.persist_task(task).await?;
         }
         self.push_task_mem(task)?;
 
@@ -254,21 +258,22 @@ impl Cache {
         Ok(())
     }
 
-    pub(crate) fn flush(&self) -> Result<()> {
-        self.writer.flush()
+    pub(crate) async fn flush(&self) -> Result<()> {
+        self.writer.flush().await
     }
 
-    fn persist_task(&self, task: &Arc<Task>) -> Result<()> {
+    async fn persist_task(&self, task: &Arc<Task>) -> Result<()> {
         let p = task.proc();
-        self.store.upsert_task(task)?;
+        self.store.upsert_task(task).await?;
         // update root task data when updating task
         if let Some(root) = p.root() {
-            self.store.upsert_task(&root)?;
+            self.store.upsert_task(&root).await?;
         }
         // update process to store when process state is completed
         if p.state().is_completed() {
             self.store
-                .mark_proc_complete(&task.pid, p.end_time(), p.state())?;
+                .mark_proc_complete(&task.pid, p.end_time(), p.state())
+                .await?;
         }
 
         Ok(())

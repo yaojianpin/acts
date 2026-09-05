@@ -69,7 +69,7 @@ use acts::{Engine, Vars, Workflow};
 
 #[tokio::main]
 async fn main() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
 
     // create yaml workflow model
     let model = r#"
@@ -88,7 +88,11 @@ async fn main() {
     let workflow = Workflow::from_yml(model).unwrap();
 
     let executor = engine.executor();
-    executor.model().deploy(&workflow, None).expect("fail to deploy workflow");
+    executor
+        .model()
+        .deploy(&workflow, None)
+        .await
+        .expect("fail to deploy workflow");
 
     let mut vars = Vars::new();
 
@@ -99,24 +103,28 @@ async fn main() {
     vars.set("pid", "w1");
 
     // start workflow by model id
-    executor.proc().start(&workflow.id, vars).expect("fail to start workflow");
+    executor
+        .proc()
+        .start(&workflow.id, vars)
+        .await
+        .expect("fail to start workflow");
 
     // create channel to receive messages
     let chan = engine.channel();
 
-    chan.on_start(|e| {
+    chan.on_start(|e| async move {
         println!("start: {}", e.start_time);
     });
 
-    chan.on_message(|e| {
+    chan.on_message(|e| async move {
         println!("message: {:?}", e);
     });
 
-    chan.on_complete(|e| {
+    chan.on_complete(|e| async move {
         println!("outputs: {:?} end_time: {}", e.outputs, e.end_time);
     });
 
-    chan.on_error(|e| {
+    chan.on_error(|e| async move {
         println!("error on proc id: {} model id: {}", e.pid, e.mid);
     });
 }
@@ -204,14 +212,14 @@ use acts::{Engine, Vars, Workflow};
 
 #[tokio::main]
 async fn main() {
-  let engine = Engine::new().start().unwrap();
+  let engine = Engine::new().start().await.unwrap();
   let executor = engine.executor();
 
   let mut vars = Vars::new();
   vars.set("input", 3);
   vars.set("pid", "w2");
 
-  executor.proc().start("m1", vars);
+  executor.proc().start("m1", vars).await.unwrap();
 }
 ```
 
@@ -346,10 +354,12 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() {
+    let store = SqliteStore::open("data/acts.db").await.unwrap();
     let engine = Engine::builder()
-        .set_store(Arc::new(SqliteStore::open("data/acts.db").unwrap()))
+        .set_store(Arc::new(store))
         .build()
         .start()
+        .await
         .unwrap();
 }
 ```

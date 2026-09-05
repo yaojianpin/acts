@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use acts::{Engine, Result, Vars, Workflow};
 
 mod client;
@@ -6,35 +8,40 @@ mod client;
 async fn main() -> Result<()> {
     let mut client = client::Client::new();
     client.init();
+    let client = Arc::new(client);
 
-    let engine = Engine::new().start()?;
+    let engine = Engine::new().start().await?;
     let (s, sig) = engine.signal(()).double();
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text).unwrap();
     workflow.print();
 
     let executor = engine.executor().clone();
-    engine.executor().model().deploy(&workflow, None)?;
-    executor.proc().start(&workflow.id, Vars::new())?;
+    engine.executor().model().deploy(&workflow, None).await?;
+    executor.proc().start(&workflow.id, Vars::new()).await?;
 
     engine.channel().on_message(move |e| {
-        let ret = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(client.process(&executor, e))
-        });
-        if ret.is_err() {
-            eprintln!("{}", ret.err().unwrap());
-            std::process::exit(1);
+        let client = client.clone();
+        let executor = executor.clone();
+        async move {
+            if let Err(err) = client.process(&executor, &e).await {
+                eprintln!("{}", err);
+                std::process::exit(1);
+            }
         }
     });
 
     engine.channel().on_complete(move |e| {
-        println!(
-            "on_workflow_complete: pid={} cost={}ms outputs={:?}",
-            e.pid,
-            e.cost(),
-            e.outputs
-        );
-        s.close();
+        let s = s.clone();
+        async move {
+            println!(
+                "on_workflow_complete: pid={} cost={}ms outputs={:?}",
+                e.pid,
+                e.cost(),
+                e.outputs
+            );
+            s.close();
+        }
     });
     sig.recv().await;
 

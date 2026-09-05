@@ -2,7 +2,7 @@ use acts::{Engine, Result, Variant, Vars, Workflow};
 use nanoid::nanoid;
 #[tokio::main]
 async fn main() -> Result<()> {
-    let engine = Engine::new().start()?;
+    let engine = Engine::new().start().await?;
     let (s, sig) = engine.signal(()).double();
     let workflow = Workflow::new()
         .with_id("m1")
@@ -34,20 +34,23 @@ async fn main() -> Result<()> {
 
     workflow.print();
     let executor = engine.executor();
-    engine.executor().model().deploy(&workflow, None)?;
+    engine.executor().model().deploy(&workflow, None).await?;
 
     let mut vars = Vars::new();
     vars.insert("pid".to_string(), nanoid!().into());
     vars.insert("count".into(), 100.into());
-    executor.proc().start(&workflow.id, vars)?;
+    executor.proc().start(&workflow.id, vars).await?;
 
-    engine.channel().on_error(|e| {
+    engine.channel().on_error(move |e| async move {
         println!("error {:?}", e.state);
     });
 
     engine.channel().on_complete(move |e| {
-        println!("on_workflow_complete: {:?}, cost={}ms", e.outputs, e.cost());
-        s.close();
+        let s = s.clone();
+        async move {
+            println!("on_workflow_complete: {:?}, cost={}ms", e.outputs, e.cost());
+            s.close();
+        }
     });
     sig.recv().await;
 

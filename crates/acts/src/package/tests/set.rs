@@ -34,12 +34,12 @@ async fn pack_set_one() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
 
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -62,12 +62,12 @@ async fn pack_set_many() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
 
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -101,11 +101,11 @@ async fn pack_set_local_var() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -129,12 +129,12 @@ async fn pack_set_calc_str() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
 
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -158,16 +158,14 @@ async fn pack_set_calc_int() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
     let channel = engine.channel();
 
-    channel.on_message(move |e| {
-        println!("message: {e:?}");
-    });
-    rt.launch(&proc).unwrap();
+    channel.on_message(move |e| async move { println!("message: {e:?}") });
+    rt.launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -191,12 +189,12 @@ async fn pack_set_update_local() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
 
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -221,12 +219,12 @@ async fn sch_act_get_global_var() {
         });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
 
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -251,12 +249,12 @@ async fn pack_set_global_var() {
         });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
 
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(proc.data().get::<String>("b").unwrap(), "123");

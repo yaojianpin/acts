@@ -22,18 +22,21 @@ async fn sch_step_uses_msg() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(Vec::<Message>::default()).double();
     auto_complete(&engine, &rx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        if e.is_msg() && e.is_type("act") {
-            rx.update(|data| data.push(e.inner().clone()));
-            rx.close();
+        let rx = rx.clone();
+        async move {
+            if e.is_msg() && e.is_type("act") {
+                rx.update(|data| data.push(e.inner().clone()));
+                rx.close();
+            }
         }
     });
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(ret.len(), 1);
@@ -57,19 +60,22 @@ async fn sch_step_uses_irq() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(Vec::<Message>::default()).double();
     auto_complete(&engine, &rx);
 
     let channel = engine.channel();
     channel.on_message(move |e| {
-        if e.is_irq() && e.is_type("act") {
-            rx.update(|data| data.push(e.inner().clone()));
-            rx.close();
+        let rx = rx.clone();
+        async move {
+            if e.is_irq() && e.is_type("act") {
+                rx.update(|data| data.push(e.inner().clone()));
+                rx.close();
+            }
         }
     });
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(ret.len(), 1);
@@ -94,10 +100,10 @@ async fn sch_step_uses_set() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -122,18 +128,21 @@ async fn sch_step_uses_if_true() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
     let channel = engine.channel();
 
     channel.on_message(move |e| {
-        println!("message: {e:?}");
-        if e.is_type("act") {
-            rx.close();
+        let rx = rx.clone();
+        async move {
+            println!("message: {e:?}");
+            if e.is_type("act") {
+                rx.close();
+            }
         }
     });
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert!(
@@ -156,18 +165,21 @@ async fn sch_step_uses_if_false() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
     let channel = engine.channel();
 
     channel.on_message(move |e| {
-        println!("message: {e:?}");
-        if e.is_type("act") {
-            rx.close();
+        let rx = rx.clone();
+        async move {
+            println!("message: {e:?}");
+            if e.is_type("act") {
+                rx.close();
+            }
         }
     });
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -189,10 +201,10 @@ async fn sch_step_uses_action() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -218,10 +230,10 @@ async fn sch_step_uses_action_and_then_branch() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -246,17 +258,21 @@ async fn sch_step_uses_irq_and_then_branch() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
     let rt = engine.runtime();
     engine.channel().on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            rt.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new().with("a", 0))
-                .unwrap();
+        let rt = rt.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                rt.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new().with("a", 0))
+                    .await
+                    .unwrap();
+            }
         }
     });
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(

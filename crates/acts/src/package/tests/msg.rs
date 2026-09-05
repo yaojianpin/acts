@@ -17,18 +17,21 @@ async fn pack_msg() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let (tx, rx) = engine.signal(Vec::<Message>::default()).double();
     auto_complete(&engine, &rx);
     let channel = engine.channel();
 
     channel.on_message(move |e| {
-        if e.is_msg() && e.is_type("act") {
-            rx.update(|data| data.push(e.inner().clone()));
-            rx.close();
+        let rx = rx.clone();
+        async move {
+            if e.is_msg() && e.is_type("act") {
+                rx.update(|data| data.push(e.inner().clone()));
+                rx.close();
+            }
         }
     });
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(ret.len(), 1);
@@ -52,19 +55,22 @@ async fn pack_msg_with_params_value() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let (tx, rx) = engine.signal(Vec::<Message>::default()).double();
     auto_complete(&engine, &rx);
     let channel = engine.channel();
 
     channel.on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_msg() {
-            rx.update(|data| data.push(e.inner().clone()));
-            rx.close();
+        let rx = rx.clone();
+        async move {
+            if e.is_msg() {
+                rx.update(|data| data.push(e.inner().clone()));
+                rx.close();
+            }
         }
     });
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(ret.len(), 1);
@@ -99,19 +105,22 @@ async fn pack_msg_with_params_var() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let (tx, rx) = engine.signal(Vec::<Message>::default()).double();
     auto_complete(&engine, &rx);
     let channel = engine.channel();
 
     channel.on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_msg() {
-            rx.update(|data| data.push(e.inner().clone()));
-            rx.close();
+        let rx = rx.clone();
+        async move {
+            if e.is_msg() {
+                rx.update(|data| data.push(e.inner().clone()));
+                rx.close();
+            }
         }
     });
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(ret.len(), 1);
@@ -144,17 +153,20 @@ async fn pack_msg_with_key() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let (tx, rx) = engine.signal(Vec::<Message>::default()).double();
     auto_complete(&engine, &rx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        if e.is_msg() && e.is_type("act") {
-            rx.update(|data| data.push(e.inner().clone()));
-            rx.close();
+        let rx = rx.clone();
+        async move {
+            if e.is_msg() && e.is_type("act") {
+                rx.update(|data| data.push(e.inner().clone()));
+                rx.close();
+            }
         }
     });
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(ret.len(), 1);

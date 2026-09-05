@@ -127,14 +127,21 @@ async fn env_eval_sys_env() {
     unsafe {
         std::env::set_var("TOKEN", "abc");
     }
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    engine.channel().on_complete(move |_| s1.close());
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+    engine.channel().on_complete(move |_| {
+        let s1 = s1.clone();
+        async move { s1.close() }
+    });
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
     let script = r#"
@@ -151,14 +158,21 @@ async fn env_eval_sys_env() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_eval_null() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    engine.channel().on_complete(move |_| s1.close());
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+    engine.channel().on_complete(move |_| {
+        let s1 = s1.clone();
+        async move { s1.close() }
+    });
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
     let script = r#"
@@ -235,7 +249,7 @@ fn env_collection_difference() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_task_get_value() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -243,8 +257,15 @@ async fn env_task_get_value() {
     let workflow = Workflow::new()
         .with_var("a", 10)
         .with_step(|step| step.with_id("step1"));
-    engine.channel().on_complete(move |_| s1.close());
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+    engine.channel().on_complete(move |_| {
+        let s1 = s1.clone();
+        async move { s1.close() }
+    });
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
     let script = r#"
@@ -261,14 +282,21 @@ async fn env_task_get_value() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_task_get_var_not_exists() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    engine.channel().on_complete(move |_| s1.close());
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+    engine.channel().on_complete(move |_| {
+        let s1 = s1.clone();
+        async move { s1.close() }
+    });
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
     let script = r#"
@@ -285,14 +313,21 @@ async fn env_task_get_var_not_exists() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_task_get_fn_not_exists() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    engine.channel().on_complete(move |_| s1.close());
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+    engine.channel().on_complete(move |_| {
+        let s1 = s1.clone();
+        async move { s1.close() }
+    });
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
     let script = r#"
@@ -309,7 +344,7 @@ async fn env_task_get_fn_not_exists() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_task_set() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -317,8 +352,15 @@ async fn env_task_set() {
     let workflow = Workflow::new()
         .with_var("a", 10)
         .with_step(|step| step.with_id("step1"));
-    engine.channel().on_complete(move |_| s1.close());
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+    engine.channel().on_complete(move |_| {
+        let s1 = s1.clone();
+        async move { s1.close() }
+    });
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
     let script = r#"
@@ -334,14 +376,21 @@ async fn env_task_set() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_task_multi_line() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    engine.channel().on_complete(move |_| s1.close());
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+    engine.channel().on_complete(move |_| {
+        let s1 = s1.clone();
+        async move { s1.close() }
+    });
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
 
@@ -357,7 +406,7 @@ async fn env_task_multi_line() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_env_get_local() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -366,8 +415,15 @@ async fn env_env_get_local() {
         .with_env("a", 10)
         .with_step(|step| step.with_id("step1"));
 
-    engine.channel().on_complete(move |_| s1.close());
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+    engine.channel().on_complete(move |_| {
+        let s1 = s1.clone();
+        async move { s1.close() }
+    });
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
     let script = r#"
@@ -383,7 +439,7 @@ async fn env_env_get_local() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_env_set_proc_env() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -391,8 +447,15 @@ async fn env_env_set_proc_env() {
     let workflow = Workflow::new()
         .with_env("a", 100)
         .with_step(|step| step.with_id("step1"));
-    engine.channel().on_complete(move |_| s1.close());
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+    engine.channel().on_complete(move |_| {
+        let s1 = s1.clone();
+        async move { s1.close() }
+    });
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
 
     sig.recv().await;
     let task = proc.root().unwrap();
@@ -411,14 +474,21 @@ async fn env_env_set_proc_env() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_env_multi_line() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    engine.channel().on_complete(move |_| s1.close());
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+    engine.channel().on_complete(move |_| {
+        let s1 = s1.clone();
+        async move { s1.close() }
+    });
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
 
@@ -434,15 +504,22 @@ async fn env_env_multi_line() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_vars_set_num() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
     let workflow = Workflow::new()
         .with_env("a", 10)
         .with_step(|step| step.with_id("step1"));
-    engine.channel().on_complete(move |_| s1.close());
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+    engine.channel().on_complete(move |_| {
+        let s1 = s1.clone();
+        async move { s1.close() }
+    });
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
 
@@ -455,15 +532,22 @@ async fn env_vars_set_num() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_vars_set_str() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
     let workflow = Workflow::new()
         .with_env("a", "abc")
         .with_step(|step| step.with_id("step1"));
-    engine.channel().on_complete(move |_| s1.close());
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+    engine.channel().on_complete(move |_| {
+        let s1 = s1.clone();
+        async move { s1.close() }
+    });
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
 
@@ -476,15 +560,22 @@ async fn env_vars_set_str() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_vars_set_json() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
     let workflow = Workflow::new()
         .with_env("a", json!({ "count": 1 }))
         .with_step(|step| step.with_id("step1"));
-    engine.channel().on_complete(move |_| s1.close());
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+    engine.channel().on_complete(move |_| {
+        let s1 = s1.clone();
+        async move { s1.close() }
+    });
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
 
@@ -500,15 +591,22 @@ async fn env_vars_set_json() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_vars_update() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
     let workflow = Workflow::new()
         .with_env("a", 10)
         .with_step(|step| step.with_id("step1"));
-    engine.channel().on_complete(move |_| s1.close());
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+    engine.channel().on_complete(move |_| {
+        let s1 = s1.clone();
+        async move { s1.close() }
+    });
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
 
@@ -522,7 +620,7 @@ async fn env_vars_update() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_step_get_data_by_id() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -530,8 +628,15 @@ async fn env_step_get_data_by_id() {
     let workflow = Workflow::new()
         .with_step(|step| step.with_id("step1").with_var("a", 10))
         .with_step(|step| step.with_id("step2").with_var("b", "abc"));
-    engine.channel().on_complete(move |_| s1.close());
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+    engine.channel().on_complete(move |_| {
+        let s1 = s1.clone();
+        async move { s1.close() }
+    });
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
     let script = r#"
@@ -558,14 +663,21 @@ async fn env_step_get_data_by_id() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_step_get_data_null() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| step.with_id("step1").with_var("a", 10));
-    engine.channel().on_complete(move |_| s1.close());
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+    engine.channel().on_complete(move |_| {
+        let s1 = s1.clone();
+        async move { s1.close() }
+    });
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
     let script = r#"
@@ -583,14 +695,21 @@ async fn env_step_get_data_null() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_step_set_data_err_with_completed_state() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| step.with_id("step1").with_var("a", 10));
-    engine.channel().on_complete(move |_| s1.close());
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+    engine.channel().on_complete(move |_| {
+        let s1 = s1.clone();
+        async move { s1.close() }
+    });
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
     let script = r#"
@@ -608,7 +727,7 @@ async fn env_step_set_data_err_with_completed_state() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_step_set_data_ok_with_running_state() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -619,11 +738,18 @@ async fn env_step_set_data_ok_with_running_state() {
             .with_uses(USES_IRQ, Vars::new().with("key", "test"))
     });
     engine.channel().on_message(move |e| {
-        if e.is_irq() {
-            s1.close()
+        let s1 = s1.clone();
+        async move {
+            if e.is_irq() {
+                s1.close()
+            }
         }
     });
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
     let script = r#"
@@ -649,7 +775,7 @@ async fn env_step_set_data_ok_with_running_state() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_step_get_data() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -660,11 +786,18 @@ async fn env_step_get_data() {
             .with_uses(USES_IRQ, Vars::new().with("key", "test"))
     });
     engine.channel().on_message(move |e| {
-        if e.is_irq() {
-            s1.close()
+        let s1 = s1.clone();
+        async move {
+            if e.is_irq() {
+                s1.close()
+            }
         }
     });
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
     let script = r#"
@@ -683,7 +816,7 @@ async fn env_step_get_data() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_step_get_inputs() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -694,11 +827,18 @@ async fn env_step_get_inputs() {
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     engine.channel().on_message(move |e| {
-        if e.is_irq() {
-            s1.close()
+        let s1 = s1.clone();
+        async move {
+            if e.is_irq() {
+                s1.close()
+            }
         }
     });
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
     sig.recv().await;
     let task = proc.root().unwrap();
     let script = r#"
@@ -716,7 +856,7 @@ async fn env_step_get_inputs() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_act_get_inputs() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -727,11 +867,18 @@ async fn env_act_get_inputs() {
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     engine.channel().on_message(move |e| {
-        if e.is_irq() {
-            s1.close()
+        let s1 = s1.clone();
+        async move {
+            if e.is_irq() {
+                s1.close()
+            }
         }
     });
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
     sig.recv().await;
     let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
     let script = r#"
@@ -749,7 +896,7 @@ async fn env_act_get_inputs() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_act_get_data() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -759,11 +906,18 @@ async fn env_act_get_data() {
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     engine.channel().on_message(move |e| {
-        if e.is_irq() {
-            s1.close()
+        let s1 = s1.clone();
+        async move {
+            if e.is_irq() {
+                s1.close()
+            }
         }
     });
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
     sig.recv().await;
     let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
     let script = r#"
@@ -791,7 +945,7 @@ async fn env_user_var_get_from_context() {
         }
     }
 
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -803,8 +957,11 @@ async fn env_user_var_get_from_context() {
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     engine.channel().on_message(move |e| {
-        if e.is_irq() {
-            s1.close()
+        let s1 = s1.clone();
+        async move {
+            if e.is_irq() {
+                s1.close()
+            }
         }
     });
     let proc = engine
@@ -813,6 +970,7 @@ async fn env_user_var_get_from_context() {
             &workflow,
             Vars::new().with("test", Vars::new().with("var1", 10)),
         )
+        .await
         .unwrap();
     sig.recv().await;
     let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
@@ -844,7 +1002,7 @@ async fn env_user_var_get_default() {
         }
     }
 
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -856,11 +1014,18 @@ async fn env_user_var_get_default() {
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     engine.channel().on_message(move |e| {
-        if e.is_irq() {
-            s1.close()
+        let s1 = s1.clone();
+        async move {
+            if e.is_irq() {
+                s1.close()
+            }
         }
     });
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
     sig.recv().await;
     let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
     let script = r#"
@@ -878,7 +1043,7 @@ async fn env_user_var_get_default() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_user_var_secrets_get() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -888,8 +1053,11 @@ async fn env_user_var_secrets_get() {
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     engine.channel().on_message(move |e| {
-        if e.is_irq() {
-            s1.close()
+        let s1 = s1.clone();
+        async move {
+            if e.is_irq() {
+                s1.close()
+            }
         }
     });
     let proc = engine
@@ -898,6 +1066,7 @@ async fn env_user_var_secrets_get() {
             &workflow,
             Vars::new().with("secrets", Vars::new().with("TOKEN", "my_token")),
         )
+        .await
         .unwrap();
     sig.recv().await;
     let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
@@ -929,7 +1098,7 @@ async fn env_user_var_os_get() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_act_cost_get() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -940,11 +1109,18 @@ async fn env_act_cost_get() {
     });
     engine.channel().on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_irq() {
-            s1.close()
+        let s1 = s1.clone();
+        async move {
+            if e.is_irq() {
+                s1.close()
+            }
         }
     });
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
     sig.recv().await;
     let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
     let script = r#"
@@ -962,7 +1138,7 @@ async fn env_act_cost_get() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_act_cost_in_get() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -972,14 +1148,21 @@ async fn env_act_cost_in_get() {
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     engine.channel().on_message(move |e| {
-        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
-            && e.is_state(MessageState::Created)
-        {
-            std::thread::sleep(Duration::from_secs(2));
-            s1.close()
+        let s1 = s1.clone();
+        async move {
+            if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
+                && e.is_state(MessageState::Created)
+            {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                s1.close()
+            }
         }
     });
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
     sig.recv().await;
     let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
     let script = r#"
@@ -997,7 +1180,7 @@ async fn env_act_cost_in_get() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_act_ecode_get() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -1010,19 +1193,28 @@ async fn env_act_ecode_get() {
     let runtime = engine.runtime();
     engine.channel().on_message(move |e| {
         println!("on_message: {:?}", e);
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            runtime
-                .do_action2(
-                    &e.pid,
-                    &e.tid,
-                    EventAction::Error,
-                    Vars::new().with(consts::ACT_ERR_CODE, "err1"),
-                )
-                .unwrap();
-            s1.close()
+        let runtime = runtime.clone();
+        let s1 = s1.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                runtime
+                    .do_action2(
+                        &e.pid,
+                        &e.tid,
+                        EventAction::Error,
+                        Vars::new().with(consts::ACT_ERR_CODE, "err1"),
+                    )
+                    .await
+                    .unwrap();
+                s1.close()
+            }
         }
     });
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
     sig.recv().await;
     let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
     let script = r#"

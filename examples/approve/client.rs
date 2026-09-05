@@ -64,7 +64,8 @@ impl<'a> Client<'a> {
 
                 executor
                     .act()
-                    .complete(&message.pid, &message.tid, options)?;
+                    .complete(&message.pid, &message.tid, options)
+                    .await?;
                 println!("action state: id={} inputs={}", message.tid, message.inputs,);
             } else if key == "pm_act" && message.is_state(MessageState::Created) {
                 let mut options = Vars::new();
@@ -72,7 +73,8 @@ impl<'a> Client<'a> {
 
                 executor
                     .act()
-                    .complete(&message.pid, &message.tid, options)?;
+                    .complete(&message.pid, &message.tid, options)
+                    .await?;
                 println!("action state: id={} inputs={}", message.tid, message.inputs,);
             } else if key == "gm_act" && message.is_state(MessageState::Created) {
                 let mut options = Vars::new();
@@ -80,7 +82,8 @@ impl<'a> Client<'a> {
 
                 executor
                     .act()
-                    .complete(&message.pid, &message.tid, options)?;
+                    .complete(&message.pid, &message.tid, options)
+                    .await?;
                 println!("action state: id={} inputs={}", message.tid, message.inputs,);
             } else if key == "pm" && message.is_state(MessageState::Created) {
                 let params = message.inputs.get::<Vars>("params").unwrap();
@@ -92,7 +95,8 @@ impl<'a> Client<'a> {
                 );
                 executor
                     .act()
-                    .complete(&message.pid, &message.tid, options)?;
+                    .complete(&message.pid, &message.tid, options)
+                    .await?;
                 println!("action state: id={} inputs={}", message.tid, message.inputs,);
             } else if key == "gm" && message.is_state(MessageState::Created) {
                 let mut options = Vars::new();
@@ -105,7 +109,8 @@ impl<'a> Client<'a> {
 
                 executor
                     .act()
-                    .complete(&message.pid, &message.tid, options)?;
+                    .complete(&message.pid, &message.tid, options)
+                    .await?;
                 println!("action state: id={}", message.tid);
             }
         }

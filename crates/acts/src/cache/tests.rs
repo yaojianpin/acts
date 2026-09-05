@@ -10,7 +10,7 @@ use crate::{
 /// (which reads `task.node.next()`) keeps working after restore.
 #[tokio::test]
 async fn cache_restore_dynamic_acts() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let rt = engine.runtime();
     let store = rt.cache().store();
 
@@ -63,12 +63,12 @@ async fn cache_restore_dynamic_acts() {
         prev_task = task;
     }
     for task in proc.tasks() {
-        store.upsert_task(&task).unwrap();
+        store.upsert_task(&task).await.unwrap();
     }
-    store.upsert_proc(&proc).unwrap();
+    store.upsert_proc(&proc).await.unwrap();
 
     // restore the process from the store
-    let restored = store.load_proc(&pid, &rt).unwrap().unwrap();
+    let restored = store.load_proc(&pid, &rt).await.unwrap().unwrap();
     let act_tasks = restored
         .tasks()
         .into_iter()
@@ -93,32 +93,47 @@ async fn cache_restore_dynamic_acts() {
 
 #[tokio::test]
 async fn cache_count() {
-    let engine = Engine::builder().cache_size(10).build().start().unwrap();
+    let engine = Engine::builder()
+        .cache_size(10)
+        .build()
+        .start()
+        .await
+        .unwrap();
     let rt = engine.runtime();
     let cache = rt.cache();
 
     let proc = Process::new(&utils::longid(), &rt);
-    cache.push_proc(&proc).unwrap();
+    cache.push_proc(&proc).await.unwrap();
     assert_eq!(cache.count(), 1);
 }
 
 #[tokio::test]
 async fn cache_push_get() {
-    let engine = Engine::builder().cache_size(10).build().start().unwrap();
+    let engine = Engine::builder()
+        .cache_size(10)
+        .build()
+        .start()
+        .await
+        .unwrap();
     let rt = engine.runtime();
     let cache = rt.cache();
     let pid = utils::longid();
     let proc = Process::new(&pid, &rt);
-    cache.push_proc(&proc).unwrap();
+    cache.push_proc(&proc).await.unwrap();
     assert_eq!(cache.count(), 1);
 
-    let proc = cache.proc(&pid, &engine.runtime()).unwrap();
+    let proc = cache.proc(&pid, &engine.runtime()).await.unwrap();
     assert!(proc.is_some());
 }
 
 #[tokio::test]
 async fn cache_push_to_store() {
-    let engine = Engine::builder().cache_size(1).build().start().unwrap();
+    let engine = Engine::builder()
+        .cache_size(1)
+        .build()
+        .start()
+        .await
+        .unwrap();
     let rt = engine.runtime();
     let cache = rt.cache();
 
@@ -126,20 +141,25 @@ async fn cache_push_to_store() {
     for _ in 0..5 {
         let pid = utils::longid();
         let proc = Process::new(&pid, &rt);
-        cache.push_proc(&proc).unwrap();
+        cache.push_proc(&proc).await.unwrap();
         pids.push(pid);
     }
 
     assert_eq!(cache.count(), 1);
     for pid in pids.iter() {
-        let exists = cache.store().procs().exists(pid).unwrap();
+        let exists = cache.store().procs().exists(pid).await.unwrap();
         assert!(exists);
     }
 }
 
 #[tokio::test]
 async fn cache_remove() {
-    let engine = Engine::builder().cache_size(10).build().start().unwrap();
+    let engine = Engine::builder()
+        .cache_size(10)
+        .build()
+        .start()
+        .await
+        .unwrap();
     let rt = engine.runtime();
     let cache = rt.cache();
 
@@ -147,19 +167,19 @@ async fn cache_remove() {
     for _ in 0..5 {
         let pid = utils::longid();
         let proc = Process::new(&pid, &rt);
-        cache.push_proc(&proc).unwrap();
+        cache.push_proc(&proc).await.unwrap();
         pids.push(pid);
     }
 
     assert_eq!(cache.count(), 5);
     for pid in pids.iter() {
-        let exists = cache.store().procs().exists(pid).unwrap();
+        let exists = cache.store().procs().exists(pid).await.unwrap();
         assert!(exists);
 
-        cache.remove(pid).unwrap();
-        assert!(cache.proc(pid, &engine.runtime()).unwrap().is_none());
+        cache.remove(pid).await.unwrap();
+        assert!(cache.proc(pid, &engine.runtime()).await.unwrap().is_none());
 
-        let exists = cache.store().procs().exists(pid).unwrap();
+        let exists = cache.store().procs().exists(pid).await.unwrap();
         assert!(!exists);
     }
     assert_eq!(cache.count(), 0);
@@ -167,7 +187,12 @@ async fn cache_remove() {
 
 #[tokio::test]
 async fn cache_upsert() {
-    let engine = Engine::builder().cache_size(10).build().start().unwrap();
+    let engine = Engine::builder()
+        .cache_size(10)
+        .build()
+        .start()
+        .await
+        .unwrap();
     let rt = engine.runtime();
     let mut workflow = Workflow::new().with_step(|step| step.with_name("step1"));
 
@@ -176,16 +201,16 @@ async fn cache_upsert() {
 
     let cache = rt.cache();
     let proc = Process::new(&pid, &rt);
-    cache.push_proc(&proc).unwrap();
+    cache.push_proc(&proc).await.unwrap();
     assert_eq!(cache.count(), 1);
 
     let node = tree.root.as_ref().unwrap();
     let task = proc.create_task(node, None).unwrap();
 
     proc.set_state(TaskState::Running);
-    cache.upsert(&task).unwrap();
+    cache.upsert(&task).await.unwrap();
 
-    let proc = cache.proc(&pid, &engine.runtime()).unwrap().unwrap();
+    let proc = cache.proc(&pid, &engine.runtime()).await.unwrap().unwrap();
     assert_eq!(proc.state(), TaskState::Running);
 }
 
@@ -195,15 +220,20 @@ async fn cache_upsert() {
 /// failure, so removal can never race the writes still queued behind it.
 #[tokio::test]
 async fn cache_remove_after_writer_writes_drops_all_rows() {
-    let engine = Engine::builder().cache_size(10).build().start().unwrap();
+    let engine = Engine::builder()
+        .cache_size(10)
+        .build()
+        .start()
+        .await
+        .unwrap();
     let rt = engine.runtime();
     let cache = rt.cache();
     let store = cache.store();
 
     let pid = utils::longid();
     let proc = Process::new(&pid, &rt);
-    cache.push_proc(&proc).unwrap();
-    assert!(store.procs().exists(&pid).unwrap());
+    cache.push_proc(&proc).await.unwrap();
+    assert!(store.procs().exists(&pid).await.unwrap());
 
     let mut workflow = Workflow::new().with_step(|step| step.with_name("step1"));
     let tree = NodeTree::build(&mut workflow).unwrap();
@@ -218,12 +248,12 @@ async fn cache_remove_after_writer_writes_drops_all_rows() {
     // the rows
     proc.set_state(TaskState::Completed);
     cache.upsert_async(&task).unwrap();
-    cache.remove(&pid).unwrap();
+    cache.remove(&pid).await.unwrap();
 
-    assert!(!store.procs().exists(&pid).unwrap());
-    assert!(store.tasks().find(&task_row_id).is_err());
-    assert!(cache.proc(&pid, &rt).unwrap().is_none());
-    cache.flush().unwrap();
+    assert!(!store.procs().exists(&pid).await.unwrap());
+    assert!(store.tasks().find(&task_row_id).await.is_err());
+    assert!(cache.proc(&pid, &rt).await.unwrap().is_none());
+    cache.flush().await.unwrap();
 }
 
 /// A task write that reaches the writer after its process was removed is
@@ -231,14 +261,19 @@ async fn cache_remove_after_writer_writes_drops_all_rows() {
 /// rows) nor failed (which would poison a later flush).
 #[tokio::test]
 async fn cache_writes_after_remove_are_skipped() {
-    let engine = Engine::builder().cache_size(10).build().start().unwrap();
+    let engine = Engine::builder()
+        .cache_size(10)
+        .build()
+        .start()
+        .await
+        .unwrap();
     let rt = engine.runtime();
     let cache = rt.cache();
     let store = cache.store();
 
     let pid = utils::longid();
     let proc = Process::new(&pid, &rt);
-    cache.push_proc(&proc).unwrap();
+    cache.push_proc(&proc).await.unwrap();
 
     let mut workflow = Workflow::new().with_step(|step| step.with_name("step1"));
     let tree = NodeTree::build(&mut workflow).unwrap();
@@ -250,31 +285,36 @@ async fn cache_writes_after_remove_are_skipped() {
 
     proc.set_state(TaskState::Completed);
     cache.upsert_async(&task).unwrap();
-    cache.flush().unwrap();
-    assert!(store.tasks().find(&task_row_id).is_ok());
+    cache.flush().await.unwrap();
+    assert!(store.tasks().find(&task_row_id).await.is_ok());
 
-    cache.remove(&pid).unwrap();
-    assert!(store.tasks().find(&task_row_id).is_err());
+    cache.remove(&pid).await.unwrap();
+    assert!(store.tasks().find(&task_row_id).await.is_err());
 
     // late write for the removed process: skipped silently
     cache.upsert_async(&task).unwrap();
-    cache.flush().unwrap();
+    cache.flush().await.unwrap();
     assert!(
-        store.tasks().find(&task_row_id).is_err(),
+        store.tasks().find(&task_row_id).await.is_err(),
         "late write resurrected the task row of a removed process"
     );
-    assert!(!store.procs().exists(&pid).unwrap());
+    assert!(!store.procs().exists(&pid).await.unwrap());
 }
 
 #[tokio::test]
 async fn cache_restore_count() {
-    let engine = Engine::builder().cache_size(5).build().start().unwrap();
+    let engine = Engine::builder()
+        .cache_size(5)
+        .build()
+        .start()
+        .await
+        .unwrap();
     let model = Workflow::new()
         .with_id("m1")
         .with_step(|step| step.with_name("step1"));
     let rt = engine.runtime();
     let cache = rt.cache();
-    cache.store().deploy(&model, None).unwrap();
+    cache.store().deploy(&model, None).await.unwrap();
 
     assert_eq!(cache.count(), 0);
     for _ in 0..10 {
@@ -291,22 +331,27 @@ async fn cache_restore_count() {
             err: None,
             v: data::Proc::version(),
         };
-        cache.store().procs().create(&proc).unwrap();
+        cache.store().procs().create(&proc).await.unwrap();
     }
 
-    cache.restore(&engine.runtime()).unwrap();
+    cache.restore(&engine.runtime()).await.unwrap();
     assert_eq!(cache.count(), 5);
 }
 
 #[tokio::test]
 async fn cache_restore_working_state() {
-    let engine = Engine::builder().cache_size(5).build().start().unwrap();
+    let engine = Engine::builder()
+        .cache_size(5)
+        .build()
+        .start()
+        .await
+        .unwrap();
     let model = Workflow::new()
         .with_id("m1")
         .with_step(|step| step.with_name("step1"));
     let rt = engine.runtime();
     let cache = rt.cache();
-    cache.store().deploy(&model, None).unwrap();
+    cache.store().deploy(&model, None).await.unwrap();
 
     assert_eq!(cache.count(), 0);
 
@@ -336,22 +381,27 @@ async fn cache_restore_working_state() {
             err: None,
             v: data::Proc::version(),
         };
-        cache.store().procs().create(&proc).unwrap();
+        cache.store().procs().create(&proc).await.unwrap();
     }
 
-    cache.restore(&engine.runtime()).unwrap();
+    cache.restore(&engine.runtime()).await.unwrap();
     assert_eq!(cache.count(), 5);
 }
 
 #[tokio::test]
 async fn cache_restore_completed_state() {
-    let engine = Engine::builder().cache_size(5).build().start().unwrap();
+    let engine = Engine::builder()
+        .cache_size(5)
+        .build()
+        .start()
+        .await
+        .unwrap();
     let model = Workflow::new()
         .with_id("m1")
         .with_step(|step| step.with_name("step1"));
     let rt = engine.runtime();
     let cache = rt.cache();
-    cache.store().deploy(&model, None).unwrap();
+    cache.store().deploy(&model, None).await.unwrap();
 
     assert_eq!(cache.count(), 0);
 
@@ -381,22 +431,27 @@ async fn cache_restore_completed_state() {
             err: None,
             v: data::Proc::version(),
         };
-        cache.store().procs().create(&proc).unwrap();
+        cache.store().procs().create(&proc).await.unwrap();
     }
 
-    cache.restore(&engine.runtime()).unwrap();
+    cache.restore(&engine.runtime()).await.unwrap();
     assert_eq!(cache.count(), 0);
 }
 
 #[tokio::test]
 async fn cache_restore_less_cap() {
-    let engine = Engine::builder().cache_size(5).build().start().unwrap();
+    let engine = Engine::builder()
+        .cache_size(5)
+        .build()
+        .start()
+        .await
+        .unwrap();
     let model = Workflow::new()
         .with_id("m1")
         .with_step(|step| step.with_name("step1"));
     let rt = engine.runtime();
     let cache = rt.cache();
-    cache.store().deploy(&model, None).unwrap();
+    cache.store().deploy(&model, None).await.unwrap();
 
     assert_eq!(cache.count(), 0);
 
@@ -415,9 +470,9 @@ async fn cache_restore_less_cap() {
             err: None,
             v: data::Proc::version(),
         };
-        cache.store().procs().create(&proc).unwrap();
+        cache.store().procs().create(&proc).await.unwrap();
     }
 
-    cache.restore(&engine.runtime()).unwrap();
+    cache.restore(&engine.runtime()).await.unwrap();
     assert_eq!(cache.count(), 3);
 }

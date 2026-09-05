@@ -19,7 +19,7 @@ use std::sync::Arc;
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_action_duplicate_complete() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     let workflow =
@@ -28,20 +28,23 @@ async fn sch_action_duplicate_complete() {
     let sig = engine.signal((String::new(), String::new()));
     let (s, s2) = sig.double();
     engine.channel().on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            s2.update(|d| *d = (e.pid.clone(), e.tid.clone()));
-            s2.close();
+        let s2 = s2.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                s2.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+                s2.close();
+            }
         }
     });
     auto_complete(&engine, &rx);
 
     let proc = rt.create_proc(&utils::longid(), &workflow);
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let (pid, tid) = s.recv().await;
 
     let action = Action::new(&pid, &tid, EventAction::Next, Vars::new());
-    assert!(rt.do_action(&action).is_ok());
-    assert!(rt.do_action(&action).is_err());
+    assert!(rt.do_action(&action).await.is_ok());
+    assert!(rt.do_action(&action).await.is_err());
 
     tx.recv().await;
     assert!(proc.state().is_success());
@@ -52,7 +55,7 @@ async fn sch_action_duplicate_complete() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_action_recover_pending() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     let workflow =
@@ -61,15 +64,18 @@ async fn sch_action_recover_pending() {
     let sig = engine.signal((String::new(), String::new()));
     let (s, s2) = sig.double();
     engine.channel().on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            s2.update(|d| *d = (e.pid.clone(), e.tid.clone()));
-            s2.close();
+        let s2 = s2.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                s2.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+                s2.close();
+            }
         }
     });
     auto_complete(&engine, &rx);
 
     let proc = rt.create_proc(&utils::longid(), &workflow);
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let (pid, tid) = s.recv().await;
 
     // Simulate a crash right after the action was applied and the `next`
@@ -77,11 +83,15 @@ async fn sch_action_recover_pending() {
     // task state and the `Pending` record (bypassing the in-memory queue).
     let task = proc.task(&tid).unwrap();
     task.set_state(TaskState::Completed);
-    rt.cache().store().upsert_task(&task).unwrap();
-    rt.cache().store().enqueue_next_op(&pid, &tid).unwrap();
+    rt.cache().store().upsert_task(&task).await.unwrap();
+    rt.cache()
+        .store()
+        .enqueue_next_op(&pid, &tid)
+        .await
+        .unwrap();
 
     // Recovery re-dispatches the pending outbox record idempotently.
-    rt.recover_actions().unwrap();
+    rt.recover_actions().await.unwrap();
 
     tx.recv().await;
     assert!(proc.state().is_success());
@@ -103,6 +113,7 @@ async fn sch_action_recover_completed_next_is_noop() {
         .with_config(&config)
         .set_store(Some(store.clone()))
         .start()
+        .await
         .unwrap();
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
@@ -119,23 +130,29 @@ async fn sch_action_recover_completed_next_is_noop() {
     let sig1 = engine.signal((String::new(), String::new()));
     let (s1, s1c) = sig1.double();
     engine.channel().on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            s1c.update(|d| *d = (e.pid.clone(), e.tid.clone()));
-            s1c.close();
+        let s1c = s1c.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                s1c.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+                s1c.close();
+            }
         }
     });
     let sig2 = engine.signal((String::new(), String::new()));
     let (s2, s2c) = sig2.double();
     engine.channel().on_message(move |e| {
-        if e.is_params_key("act2") && e.is_state(MessageState::Created) {
-            s2c.update(|d| *d = (e.pid.clone(), e.tid.clone()));
-            s2c.close();
+        let s2c = s2c.clone();
+        async move {
+            if e.is_params_key("act2") && e.is_state(MessageState::Created) {
+                s2c.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+                s2c.close();
+            }
         }
     });
     auto_complete(&engine, &rx);
 
     let proc = rt.create_proc(&utils::longid(), &workflow);
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let (pid, act1_tid) = s1.recv().await;
     rt.do_action(&Action::new(
         &pid,
@@ -143,6 +160,7 @@ async fn sch_action_recover_completed_next_is_noop() {
         EventAction::Next,
         Vars::new(),
     ))
+    .await
     .unwrap();
 
     // s1's `next` schedules s2; complete act2 as well
@@ -153,14 +171,19 @@ async fn sch_action_recover_completed_next_is_noop() {
         EventAction::Next,
         Vars::new(),
     ))
+    .await
     .unwrap();
 
     tx.recv().await;
     assert!(proc.state().is_success());
 
     // simulate a crash that lost the outbox close for act1's already-run `next`
-    rt.cache().store().enqueue_next_op(&pid, &act1_tid).unwrap();
-    engine.close();
+    rt.cache()
+        .store()
+        .enqueue_next_op(&pid, &act1_tid)
+        .await
+        .unwrap();
+    engine.close().await;
 
     // reload from the same store: recovery re-dispatches the record, but the
     // durable NEXT_COMPLETE marker turns the re-run into a no-op
@@ -168,16 +191,17 @@ async fn sch_action_recover_completed_next_is_noop() {
         .with_config(&config)
         .set_store(Some(store.clone()))
         .start()
+        .await
         .unwrap();
     let rt2 = engine2.runtime();
     let store2 = rt2.cache().store();
     for _ in 0..100 {
-        if store2.load_pending_ops().unwrap().is_empty() {
+        if store2.load_pending_ops().await.unwrap().is_empty() {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    assert!(store2.load_pending_ops().unwrap().is_empty());
+    assert!(store2.load_pending_ops().await.unwrap().is_empty());
 
     // the outbox close is ordered after the persist: act1's stored row must
     // already carry the NEXT_COMPLETE marker (the async write was drained by
@@ -187,14 +211,14 @@ async fn sch_action_recover_completed_next_is_noop() {
             .expr(Expr::eq("pid", pid.clone()))
             .expr(Expr::eq("tid", act1_tid.clone())),
     );
-    let rows = store2.tasks().query(&q).unwrap().rows;
+    let rows = store2.tasks().query(&q).await.unwrap().rows;
     assert_eq!(rows.len(), 1);
     let data: Vars = serde_json::from_str(&rows[0].data).unwrap();
     let sign = data.get::<Sign>(consts::TASK_SIGN).unwrap();
     assert!(sign.contains(Sign::NEXT_COMPLETE));
 
     // the workflow was not re-propagated: same task set, no duplicates
-    let reloaded = rt2.proc(&pid).unwrap().unwrap();
+    let reloaded = rt2.proc(&pid).await.unwrap().unwrap();
     assert!(reloaded.state().is_success());
     assert_eq!(reloaded.tasks().len(), 5, "root + s1 + s2 + act1 + act2");
 }
@@ -208,6 +232,7 @@ async fn sch_action_recover_partial_next_no_duplicate() {
     let engine = Engine::new()
         .set_store(Some(store.clone()))
         .start()
+        .await
         .unwrap();
     let rt = engine.runtime();
 
@@ -242,29 +267,30 @@ async fn sch_action_recover_partial_next_no_duplicate() {
     s1.set_state(TaskState::Completed);
     s2.set_state(TaskState::Running);
     let store_ops = rt.cache().store();
-    store_ops.upsert_proc(&proc).unwrap();
-    store_ops.upsert_task(&root).unwrap();
-    store_ops.upsert_task(&s1).unwrap();
-    store_ops.upsert_task(&s2).unwrap();
-    store_ops.enqueue_next_op(&pid, &s1.id).unwrap();
-    engine.close();
+    store_ops.upsert_proc(&proc).await.unwrap();
+    store_ops.upsert_task(&root).await.unwrap();
+    store_ops.upsert_task(&s1).await.unwrap();
+    store_ops.upsert_task(&s2).await.unwrap();
+    store_ops.enqueue_next_op(&pid, &s1.id).await.unwrap();
+    engine.close().await;
 
     // reload: recovery re-dispatches s1's `next`; re-scheduling s2 is deduped
     let engine2 = Engine::new()
         .set_store(Some(store.clone()))
         .start()
+        .await
         .unwrap();
     let rt2 = engine2.runtime();
     let store2 = rt2.cache().store();
     for _ in 0..100 {
-        if store2.load_pending_ops().unwrap().is_empty() {
+        if store2.load_pending_ops().await.unwrap().is_empty() {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    assert!(store2.load_pending_ops().unwrap().is_empty());
+    assert!(store2.load_pending_ops().await.unwrap().is_empty());
 
-    let reloaded = rt2.proc(&pid).unwrap().unwrap();
+    let reloaded = rt2.proc(&pid).await.unwrap().unwrap();
     assert_eq!(reloaded.task_by_nid("s1").len(), 1);
     assert_eq!(reloaded.task_by_nid("s2").len(), 1);
     assert_eq!(reloaded.tasks().len(), 3, "root + s1 + s2, no duplicates");
@@ -277,7 +303,7 @@ async fn sch_action_recover_partial_next_no_duplicate() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_action_next_op_pending_until_children_complete() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     let workflow = Workflow::new().with_step(|step| {
@@ -288,15 +314,18 @@ async fn sch_action_next_op_pending_until_children_complete() {
     let sig = engine.signal((String::new(), String::new()));
     let (s, s2) = sig.double();
     engine.channel().on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            s2.update(|d| *d = (e.pid.clone(), e.tid.clone()));
-            s2.close();
+        let s2 = s2.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                s2.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+                s2.close();
+            }
         }
     });
     auto_complete(&engine, &rx);
 
     let proc = rt.create_proc(&utils::longid(), &workflow);
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let (pid, act1_tid) = s.recv().await;
     let step_tid = proc.task_by_nid("s1").first().unwrap().id.clone();
     let store = rt.cache().store();
@@ -308,6 +337,7 @@ async fn sch_action_next_op_pending_until_children_complete() {
     for _ in 0..100 {
         if store
             .load_pending_ops()
+            .await
             .unwrap()
             .iter()
             .any(|op| op.pid == pid && op.tid == step_tid)
@@ -326,7 +356,7 @@ async fn sch_action_next_op_pending_until_children_complete() {
             .expr(Expr::eq("pid", pid.clone()))
             .expr(Expr::eq("tid", step_tid.clone())),
     );
-    let rows = store.ops().query(&q).unwrap().rows;
+    let rows = store.ops().query(&q).await.unwrap().rows;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].status, "pending");
 
@@ -337,18 +367,19 @@ async fn sch_action_next_op_pending_until_children_complete() {
         EventAction::Next,
         Vars::new(),
     ))
+    .await
     .unwrap();
     tx.recv().await;
     assert!(proc.state().is_success());
 
     // both the act's and the step's records are eventually closed
     for _ in 0..100 {
-        if store.load_pending_ops().unwrap().is_empty() {
+        if store.load_pending_ops().await.unwrap().is_empty() {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    assert!(store.load_pending_ops().unwrap().is_empty());
+    assert!(store.load_pending_ops().await.unwrap().is_empty());
 }
 
 /// A non-`Next` action whose outbox record landed but whose task state write
@@ -364,6 +395,7 @@ async fn sch_action_recover_reapplies_lost_action() {
         .with_config(&config)
         .set_store(Some(store.clone()))
         .start()
+        .await
         .unwrap();
     let rt = engine.runtime();
     let workflow = Workflow::new().with_step(|step| {
@@ -374,14 +406,17 @@ async fn sch_action_recover_reapplies_lost_action() {
     let sig = engine.signal((String::new(), String::new()));
     let (s, s2) = sig.double();
     engine.channel().on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            s2.update(|d| *d = (e.pid.clone(), e.tid.clone()));
-            s2.close();
+        let s2 = s2.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                s2.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+                s2.close();
+            }
         }
     });
 
     let proc = rt.create_proc(&utils::longid(), &workflow);
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let (pid, act1_tid) = s.recv().await;
 
     // simulate a crash mid-action: the Skip was applied in memory and its
@@ -390,26 +425,28 @@ async fn sch_action_recover_reapplies_lost_action() {
     rt.cache()
         .store()
         .enqueue_action_op(&pid, &act1_tid, "skip", "{}")
+        .await
         .unwrap();
-    engine.close();
+    engine.close().await;
 
     // reload: recovery re-applies the Skip action, which closes the record
     let engine2 = Engine::new()
         .with_config(&config)
         .set_store(Some(store.clone()))
         .start()
+        .await
         .unwrap();
     let rt2 = engine2.runtime();
     let store2 = rt2.cache().store();
     for _ in 0..100 {
-        if store2.load_pending_ops().unwrap().is_empty() {
+        if store2.load_pending_ops().await.unwrap().is_empty() {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    assert!(store2.load_pending_ops().unwrap().is_empty());
+    assert!(store2.load_pending_ops().await.unwrap().is_empty());
 
-    let reloaded = rt2.proc(&pid).unwrap().unwrap();
+    let reloaded = rt2.proc(&pid).await.unwrap().unwrap();
     let act_task = reloaded.task(&act1_tid).unwrap();
     assert_eq!(act_task.state(), TaskState::Skipped);
 }
@@ -428,6 +465,7 @@ async fn sch_action_recover_reapplies_cancel() {
         .with_config(&config)
         .set_store(Some(store.clone()))
         .start()
+        .await
         .unwrap();
     let rt = engine.runtime();
     let workflow = Workflow::new()
@@ -443,22 +481,28 @@ async fn sch_action_recover_reapplies_cancel() {
     let sig = engine.signal((String::new(), String::new()));
     let (s, s2) = sig.double();
     engine.channel().on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            s2.update(|d| *d = (e.pid.clone(), e.tid.clone()));
-            s2.close();
+        let s2 = s2.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                s2.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+                s2.close();
+            }
         }
     });
     let sig2 = engine.signal((String::new(), String::new()));
     let (s3, s4) = sig2.double();
     engine.channel().on_message(move |e| {
-        if e.is_params_key("act2") && e.is_state(MessageState::Created) {
-            s4.update(|d| *d = (e.pid.clone(), e.tid.clone()));
-            s4.close();
+        let s4 = s4.clone();
+        async move {
+            if e.is_params_key("act2") && e.is_state(MessageState::Created) {
+                s4.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+                s4.close();
+            }
         }
     });
 
     let proc = rt.create_proc(&utils::longid(), &workflow);
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let (pid, act1_tid) = s.recv().await;
 
     // complete act1 so step1 completes and act2 is scheduled
@@ -468,6 +512,7 @@ async fn sch_action_recover_reapplies_cancel() {
         EventAction::Next,
         Vars::new(),
     ))
+    .await
     .unwrap();
     let (_, act2_tid) = s3.recv().await;
 
@@ -476,8 +521,9 @@ async fn sch_action_recover_reapplies_cancel() {
     rt.cache()
         .store()
         .enqueue_action_op(&pid, &act1_tid, "cancel", r#"{"to":"step1"}"#)
+        .await
         .unwrap();
-    engine.close();
+    engine.close().await;
 
     // reload: the cancel must be re-applied — act2 becomes Cancelled even
     // though act1 (the cancel target) is already Completed
@@ -485,6 +531,7 @@ async fn sch_action_recover_reapplies_cancel() {
         .with_config(&config)
         .set_store(Some(store.clone()))
         .start()
+        .await
         .unwrap();
     let rt2 = engine2.runtime();
     let store2 = rt2.cache().store();
@@ -492,7 +539,7 @@ async fn sch_action_recover_reapplies_cancel() {
     // redo act keep their `next` records open by design
     let mut drained = false;
     for _ in 0..100 {
-        let pending = store2.load_pending_ops().unwrap();
+        let pending = store2.load_pending_ops().await.unwrap();
         if pending.iter().all(|op| op.r#type != "action") {
             drained = true;
             break;
@@ -501,7 +548,7 @@ async fn sch_action_recover_reapplies_cancel() {
     }
     assert!(drained, "cancel action record was not closed");
 
-    let reloaded = rt2.proc(&pid).unwrap().unwrap();
+    let reloaded = rt2.proc(&pid).await.unwrap().unwrap();
     let act2_task = reloaded.task(&act2_tid).unwrap();
     assert_eq!(act2_task.state(), TaskState::Cancelled);
 }
@@ -518,6 +565,7 @@ async fn sch_action_recover_reapplies_abort() {
         .with_config(&config)
         .set_store(Some(store.clone()))
         .start()
+        .await
         .unwrap();
     let rt = engine.runtime();
     let workflow = Workflow::new().with_step(|step| {
@@ -528,34 +576,39 @@ async fn sch_action_recover_reapplies_abort() {
     let sig = engine.signal((String::new(), String::new()));
     let (s, s2) = sig.double();
     engine.channel().on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            s2.update(|d| *d = (e.pid.clone(), e.tid.clone()));
-            s2.close();
+        let s2 = s2.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                s2.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+                s2.close();
+            }
         }
     });
 
     let proc = rt.create_proc(&utils::longid(), &workflow);
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let (pid, act1_tid) = s.recv().await;
 
     // crash before the abort was durably applied: only the outbox record landed
     rt.cache()
         .store()
         .enqueue_action_op(&pid, &act1_tid, "abort", "{}")
+        .await
         .unwrap();
-    engine.close();
+    engine.close().await;
 
     // reload: recovery re-applies the abort to the act and its ancestors
     let engine2 = Engine::new()
         .with_config(&config)
         .set_store(Some(store.clone()))
         .start()
+        .await
         .unwrap();
     let rt2 = engine2.runtime();
     let store2 = rt2.cache().store();
     let mut drained = false;
     for _ in 0..100 {
-        let pending = store2.load_pending_ops().unwrap();
+        let pending = store2.load_pending_ops().await.unwrap();
         if pending.iter().all(|op| op.r#type != "action") {
             drained = true;
             break;
@@ -564,7 +617,7 @@ async fn sch_action_recover_reapplies_abort() {
     }
     assert!(drained, "abort action record was not closed");
 
-    let reloaded = rt2.proc(&pid).unwrap().unwrap();
+    let reloaded = rt2.proc(&pid).await.unwrap().unwrap();
     assert_eq!(
         reloaded.task(&act1_tid).unwrap().state(),
         TaskState::Aborted
@@ -587,6 +640,7 @@ async fn sch_action_recover_reapplies_error() {
         .with_config(&config)
         .set_store(Some(store.clone()))
         .start()
+        .await
         .unwrap();
     let rt = engine.runtime();
     let workflow = Workflow::new().with_step(|step| {
@@ -597,34 +651,39 @@ async fn sch_action_recover_reapplies_error() {
     let sig = engine.signal((String::new(), String::new()));
     let (s, s2) = sig.double();
     engine.channel().on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            s2.update(|d| *d = (e.pid.clone(), e.tid.clone()));
-            s2.close();
+        let s2 = s2.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                s2.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+                s2.close();
+            }
         }
     });
 
     let proc = rt.create_proc(&utils::longid(), &workflow);
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let (pid, act1_tid) = s.recv().await;
 
     // crash before the error was durably applied: only the outbox record landed
     rt.cache()
         .store()
         .enqueue_action_op(&pid, &act1_tid, "error", r#"{"ecode":"err1"}"#)
+        .await
         .unwrap();
-    engine.close();
+    engine.close().await;
 
     // reload: recovery re-applies the error with its code
     let engine2 = Engine::new()
         .with_config(&config)
         .set_store(Some(store.clone()))
         .start()
+        .await
         .unwrap();
     let rt2 = engine2.runtime();
     let store2 = rt2.cache().store();
     let mut drained = false;
     for _ in 0..100 {
-        let pending = store2.load_pending_ops().unwrap();
+        let pending = store2.load_pending_ops().await.unwrap();
         if pending.iter().all(|op| op.r#type != "action") {
             drained = true;
             break;
@@ -633,7 +692,7 @@ async fn sch_action_recover_reapplies_error() {
     }
     assert!(drained, "error action record was not closed");
 
-    let reloaded = rt2.proc(&pid).unwrap().unwrap();
+    let reloaded = rt2.proc(&pid).await.unwrap().unwrap();
     let act_task = reloaded.task(&act1_tid).unwrap();
     assert_eq!(act_task.state(), TaskState::Error);
     assert_eq!(act_task.err().unwrap().ecode, "err1");
@@ -651,6 +710,7 @@ async fn sch_action_recover_reapplies_back() {
         .with_config(&config)
         .set_store(Some(store.clone()))
         .start()
+        .await
         .unwrap();
     let rt = engine.runtime();
     let workflow = Workflow::new()
@@ -666,22 +726,28 @@ async fn sch_action_recover_reapplies_back() {
     let sig = engine.signal((String::new(), String::new()));
     let (s, s2) = sig.double();
     engine.channel().on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            s2.update(|d| *d = (e.pid.clone(), e.tid.clone()));
-            s2.close();
+        let s2 = s2.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                s2.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+                s2.close();
+            }
         }
     });
     let sig2 = engine.signal((String::new(), String::new()));
     let (s3, s4) = sig2.double();
     engine.channel().on_message(move |e| {
-        if e.is_params_key("act2") && e.is_state(MessageState::Created) {
-            s4.update(|d| *d = (e.pid.clone(), e.tid.clone()));
-            s4.close();
+        let s4 = s4.clone();
+        async move {
+            if e.is_params_key("act2") && e.is_state(MessageState::Created) {
+                s4.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+                s4.close();
+            }
         }
     });
 
     let proc = rt.create_proc(&utils::longid(), &workflow);
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let (pid, act1_tid) = s.recv().await;
 
     // complete act1 so step1 completes and act2 is scheduled
@@ -691,6 +757,7 @@ async fn sch_action_recover_reapplies_back() {
         EventAction::Next,
         Vars::new(),
     ))
+    .await
     .unwrap();
     let (_, act2_tid) = s3.recv().await;
 
@@ -698,20 +765,22 @@ async fn sch_action_recover_reapplies_back() {
     rt.cache()
         .store()
         .enqueue_action_op(&pid, &act2_tid, "back", r#"{"to":"step1"}"#)
+        .await
         .unwrap();
-    engine.close();
+    engine.close().await;
 
     // reload: recovery re-applies the back
     let engine2 = Engine::new()
         .with_config(&config)
         .set_store(Some(store.clone()))
         .start()
+        .await
         .unwrap();
     let rt2 = engine2.runtime();
     let store2 = rt2.cache().store();
     let mut drained = false;
     for _ in 0..100 {
-        let pending = store2.load_pending_ops().unwrap();
+        let pending = store2.load_pending_ops().await.unwrap();
         if pending.iter().all(|op| op.r#type != "action") {
             drained = true;
             break;
@@ -720,7 +789,7 @@ async fn sch_action_recover_reapplies_back() {
     }
     assert!(drained, "back action record was not closed");
 
-    let reloaded = rt2.proc(&pid).unwrap().unwrap();
+    let reloaded = rt2.proc(&pid).await.unwrap().unwrap();
     assert_eq!(reloaded.task(&act2_tid).unwrap().state(), TaskState::Backed);
 }
 
@@ -736,6 +805,7 @@ async fn sch_action_recover_closes_applied_back() {
         .with_config(&config)
         .set_store(Some(store.clone()))
         .start()
+        .await
         .unwrap();
     let rt = engine.runtime();
     let workflow = Workflow::new()
@@ -751,22 +821,28 @@ async fn sch_action_recover_closes_applied_back() {
     let sig = engine.signal((String::new(), String::new()));
     let (s, s2) = sig.double();
     engine.channel().on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            s2.update(|d| *d = (e.pid.clone(), e.tid.clone()));
-            s2.close();
+        let s2 = s2.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                s2.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+                s2.close();
+            }
         }
     });
     let sig2 = engine.signal((String::new(), String::new()));
     let (s3, s4) = sig2.double();
     engine.channel().on_message(move |e| {
-        if e.is_params_key("act2") && e.is_state(MessageState::Created) {
-            s4.update(|d| *d = (e.pid.clone(), e.tid.clone()));
-            s4.close();
+        let s4 = s4.clone();
+        async move {
+            if e.is_params_key("act2") && e.is_state(MessageState::Created) {
+                s4.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+                s4.close();
+            }
         }
     });
 
     let proc = rt.create_proc(&utils::longid(), &workflow);
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let (pid, act1_tid) = s.recv().await;
     rt.do_action(&Action::new(
         &pid,
@@ -774,6 +850,7 @@ async fn sch_action_recover_closes_applied_back() {
         EventAction::Next,
         Vars::new(),
     ))
+    .await
     .unwrap();
     let (_, act2_tid) = s3.recv().await;
 
@@ -782,12 +859,14 @@ async fn sch_action_recover_closes_applied_back() {
     let mut options = Vars::new();
     options.set("to", "step1");
     rt.do_action(&Action::new(&pid, &act2_tid, EventAction::Back, options))
+        .await
         .unwrap();
     rt.cache()
         .store()
         .enqueue_action_op(&pid, &act2_tid, "back", r#"{"to":"step1"}"#)
+        .await
         .unwrap();
-    engine.close();
+    engine.close().await;
 
     // reload: recovery sees act2 already Backed (terminal) and closes the
     // record without re-applying — no second redo task
@@ -795,12 +874,13 @@ async fn sch_action_recover_closes_applied_back() {
         .with_config(&config)
         .set_store(Some(store.clone()))
         .start()
+        .await
         .unwrap();
     let rt2 = engine2.runtime();
     let store2 = rt2.cache().store();
     let mut drained = false;
     for _ in 0..100 {
-        let pending = store2.load_pending_ops().unwrap();
+        let pending = store2.load_pending_ops().await.unwrap();
         if pending.iter().all(|op| op.r#type != "action") {
             drained = true;
             break;
@@ -809,7 +889,7 @@ async fn sch_action_recover_closes_applied_back() {
     }
     assert!(drained, "back action record was not closed");
 
-    let reloaded = rt2.proc(&pid).unwrap().unwrap();
+    let reloaded = rt2.proc(&pid).await.unwrap().unwrap();
     assert_eq!(reloaded.task(&act2_tid).unwrap().state(), TaskState::Backed);
     assert_eq!(
         reloaded.task_by_nid("step1").len(),
@@ -832,6 +912,7 @@ async fn sch_action_recover_closes_applied_action() {
         .with_config(&config)
         .set_store(Some(store.clone()))
         .start()
+        .await
         .unwrap();
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
@@ -849,15 +930,18 @@ async fn sch_action_recover_closes_applied_action() {
     let sig = engine.signal((String::new(), String::new()));
     let (s, s2) = sig.double();
     chan.on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            s2.update(|d| *d = (e.pid.clone(), e.tid.clone()));
-            s2.close();
+        let s2 = s2.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                s2.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+                s2.close();
+            }
         }
     });
     auto_complete(&engine, &rx);
 
     let proc = rt.create_proc(&utils::longid(), &workflow);
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let (pid, act1_tid) = s.recv().await;
 
     // apply the Skip action normally (durable), then simulate a crash that
@@ -868,13 +952,15 @@ async fn sch_action_recover_closes_applied_action() {
         EventAction::Skip,
         Vars::new(),
     ))
+    .await
     .unwrap();
     tx.recv().await;
     rt.cache()
         .store()
         .enqueue_action_op(&pid, &act1_tid, "skip", "{}")
+        .await
         .unwrap();
-    engine.close();
+    engine.close().await;
 
     // reload: recovery sees the task already Skipped (terminal) and closes the
     // record without re-applying; the act message is marked completed
@@ -882,18 +968,19 @@ async fn sch_action_recover_closes_applied_action() {
         .with_config(&config)
         .set_store(Some(store.clone()))
         .start()
+        .await
         .unwrap();
     let rt2 = engine2.runtime();
     let store2 = rt2.cache().store();
     for _ in 0..100 {
-        if store2.load_pending_ops().unwrap().is_empty() {
+        if store2.load_pending_ops().await.unwrap().is_empty() {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    assert!(store2.load_pending_ops().unwrap().is_empty());
+    assert!(store2.load_pending_ops().await.unwrap().is_empty());
 
-    let reloaded = rt2.proc(&pid).unwrap().unwrap();
+    let reloaded = rt2.proc(&pid).await.unwrap().unwrap();
     assert_eq!(reloaded.task_by_nid("s1").len(), 1);
     let act_task = reloaded.task(&act1_tid).unwrap();
     assert_eq!(act_task.state(), TaskState::Skipped);
@@ -904,7 +991,7 @@ async fn sch_action_recover_closes_applied_action() {
             .expr(Expr::eq("pid", pid.clone()))
             .expr(Expr::eq("tid", act1_tid.clone())),
     );
-    let deliveries = store2.deliveries().query(&q).unwrap().rows;
+    let deliveries = store2.deliveries().query(&q).await.unwrap().rows;
     assert!(!deliveries.is_empty());
     assert!(
         deliveries
@@ -929,30 +1016,34 @@ async fn sch_action_sibling_concurrent_complete() {
         )
     });
 
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
 
     let sig = engine.signal(Vec::<(String, String)>::default());
     let (s, s2) = sig.double();
     engine.channel().on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            s2.update(|d| {
-                d.push((e.pid.clone(), e.tid.clone()));
-                if d.len() >= 2 {
-                    s2.close();
-                }
-            });
+        let s2 = s2.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                s2.update(|d| {
+                    d.push((e.pid.clone(), e.tid.clone()));
+                    if d.len() >= 2 {
+                        s2.close();
+                    }
+                });
+            }
         }
     });
     auto_complete(&engine, &rx);
 
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let acts = s.recv().await;
     assert_eq!(acts.len(), 2);
 
     for (pid, tid) in &acts {
         rt.do_action(&Action::new(pid, tid, EventAction::Next, Vars::new()))
+            .await
             .unwrap();
     }
 

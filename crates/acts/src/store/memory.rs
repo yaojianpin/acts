@@ -48,22 +48,23 @@ fn key_matches(k: &str, key: &str, prefix: &str, op: &ScanOperation) -> bool {
     }
 }
 
+#[async_trait::async_trait]
 impl KvStore for MemoryStore {
-    fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
         Ok(self.data.read().get(key).cloned())
     }
 
-    fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
+    async fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
         self.data.write().insert(key.to_string(), value);
         Ok(())
     }
 
-    fn delete(&self, key: &str) -> Result<()> {
+    async fn delete(&self, key: &str) -> Result<()> {
         self.data.write().remove(key);
         Ok(())
     }
 
-    fn batch(&self, ops: &[StoreBatchOp]) -> Result<()> {
+    async fn batch(&self, ops: &[StoreBatchOp]) -> Result<()> {
         if ops.is_empty() {
             return Ok(());
         }
@@ -83,7 +84,7 @@ impl KvStore for MemoryStore {
         Ok(())
     }
 
-    fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>> {
+    async fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>> {
         let ScanOptions {
             is_rev,
             op,

@@ -20,11 +20,11 @@ async fn sch_task_branch_empty_if() {
     });
 
     let id = utils::longid();
-    let (engine, proc) = create_proc(&workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id).await;
     let rt = engine.runtime();
     let (sig, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let _ = sig.recv().await;
 
     assert_eq!(
@@ -57,12 +57,12 @@ async fn sch_task_branch_if_false_else_success() {
     });
 
     let id = utils::longid();
-    let (engine, proc) = create_proc(&workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id).await;
     let rt = engine.runtime();
     let (sig, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
 
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let _ = sig.recv().await;
     proc.print();
     assert_eq!(
@@ -96,19 +96,22 @@ async fn sch_task_branch_if_false_else_running() {
     });
 
     let id = utils::longid();
-    let (engine, proc) = create_proc(&workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id).await;
     let rt = engine.runtime();
     let sig = engine.signal(());
     let rx = sig.clone();
     let emitter = engine.channel();
     // process.tree().print();
     emitter.on_message(move |e| {
-        if e.is_params_key("act1") {
-            rx.close();
+        let rx = rx.clone();
+        async move {
+            if e.is_params_key("act1") {
+                rx.close();
+            }
         }
     });
 
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let _ = sig.recv().await;
 
     assert_eq!(
@@ -116,7 +119,7 @@ async fn sch_task_branch_if_false_else_running() {
         TaskState::Running
     );
 
-    rt.cache().flush().unwrap();
+    rt.cache().flush().await.unwrap();
 
     // check the branch state is updated to store
     let task = proc.task_by_nid("b1").first().unwrap().clone();
@@ -126,6 +129,7 @@ async fn sch_task_branch_if_false_else_running() {
             .store()
             .tasks()
             .find(&task_id.id())
+            .await
             .unwrap()
             .state,
         "running"
@@ -154,12 +158,12 @@ async fn sch_task_branch_if_true_else() {
     });
 
     let id = utils::longid();
-    let (engine, proc) = create_proc(&workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id).await;
     let rt = engine.runtime();
     let (sig, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
 
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let _ = sig.recv().await;
 
     assert_eq!(
@@ -194,12 +198,12 @@ async fn sch_task_branch_if_two_no_else() {
     });
 
     let id = utils::longid();
-    let (engine, proc) = create_proc(&workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id).await;
     let rt = engine.runtime();
     let (sig, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
 
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let _ = sig.recv().await;
 
     assert_eq!(
@@ -241,12 +245,12 @@ async fn sch_task_branch_if_mutli_true() {
     });
 
     let id = utils::longid();
-    let (engine, proc) = create_proc(&workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id).await;
     let rt = engine.runtime();
     let (sig, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
 
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let _ = sig.recv().await;
 
     assert_eq!(

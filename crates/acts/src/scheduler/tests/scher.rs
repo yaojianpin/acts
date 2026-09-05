@@ -16,11 +16,11 @@ async fn sch_scher_next() {
     let workflow = Workflow::new().with_id(&utils::longid());
 
     let s = runtime.clone();
-    store.deploy(&workflow, None).unwrap();
+    store.deploy(&workflow, None).await.unwrap();
     tokio::spawn(async move {
         let mut options = Vars::new();
         options.insert("pid".to_string(), json!(utils::longid()));
-        s.start(&workflow, options).unwrap();
+        s.start(&workflow, options).await.unwrap();
     });
 
     let ret = runtime.queue().next().await;
@@ -35,7 +35,7 @@ async fn sch_scher_task() {
     let workflow = Workflow::new();
     let pid = utils::longid();
     let proc = runtime.create_proc(&pid, &workflow);
-    runtime.launch(&proc).unwrap();
+    runtime.launch(&proc).await.unwrap();
     let ret = runtime.queue().next().await;
     assert!(ret.is_ok());
 }
@@ -46,7 +46,7 @@ async fn sch_scher_start_default() {
     let config = Config::default();
     let runtime = Runtime::new(&config, None).unwrap();
     let workflow = Workflow::new();
-    let result = runtime.start(&workflow, Vars::new());
+    let result = runtime.start(&workflow, Vars::new()).await;
     assert!(result.is_ok());
 }
 
@@ -60,7 +60,7 @@ async fn sch_scher_start_with_vars() {
     vars.insert("a".to_string(), json!(100));
     vars.insert("b".to_string(), json!("string"));
 
-    let proc = runtime.start(&workflow, vars).unwrap();
+    let proc = runtime.start(&workflow, vars).await.unwrap();
     let _ = runtime.queue().next().await;
 
     assert_eq!(proc.inputs().get::<i64>("a").unwrap(), 100);
@@ -75,7 +75,7 @@ async fn sch_scher_start_empty_pid_error() {
     let mut vars = Vars::new();
     vars.insert("pid".to_string(), json!(""));
 
-    let result = runtime.start(&workflow, vars);
+    let result = runtime.start(&workflow, vars).await;
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(
@@ -93,7 +93,7 @@ async fn sch_scher_start_pid_with_sep_error() {
     let mut vars = Vars::new();
     vars.insert("pid".to_string(), json!("proc-123"));
 
-    let result = runtime.start(&workflow, vars);
+    let result = runtime.start(&workflow, vars).await;
     assert!(result.is_err());
     let err = result.unwrap_err().to_string();
     assert!(
@@ -105,7 +105,7 @@ async fn sch_scher_start_pid_with_sep_error() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_scher_do_action() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     let workflow = Workflow::new().with_step(|step| {
@@ -115,17 +115,20 @@ async fn sch_scher_do_action() {
     });
     auto_complete(&engine, &rx);
     engine.channel().on_message(move |e| {
-        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
-            && e.is_state(MessageState::Created)
-        {
-            let mut options = Vars::new();
-            options.insert("uid".to_string(), json!("u1"));
-            let action = Action::new(&e.pid, &e.tid, EventAction::Next, options);
-            rt.do_action(&action).unwrap();
+        let rt = rt.clone();
+        async move {
+            if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
+                && e.is_state(MessageState::Created)
+            {
+                let mut options = Vars::new();
+                options.insert("uid".to_string(), json!("u1"));
+                let action = Action::new(&e.pid, &e.tid, EventAction::Next, options);
+                rt.do_action(&action).await.unwrap();
+            }
         }
     });
     let proc = engine.runtime().create_proc(&utils::longid(), &workflow);
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     tx.recv().await;
 
     assert!(proc.state().is_success());

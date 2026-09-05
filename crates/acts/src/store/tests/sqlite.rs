@@ -4,6 +4,8 @@ use crate::store::{Store, sqlite::SqliteStore};
 use std::sync::Arc;
 
 #[cfg(feature = "store-sqlite")]
-crate::gen_store_tests!(Arc::new(Store::new(Arc::new(
-    SqliteStore::open_in_memory().unwrap()
-))));
+crate::gen_store_tests!(async {
+    Arc::new(Store::new(Arc::new(
+        SqliteStore::open_in_memory().await.unwrap(),
+    )))
+});

@@ -8,6 +8,7 @@ mod tests;
 
 use crate::{ActError, Result};
 pub use action::Action;
+pub(crate) use emitter::ActWorkflowMessageHandle;
 pub use emitter::Emitter;
 pub use extra::TaskExtra;
 pub use message::{Message, MessageState};

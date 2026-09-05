@@ -23,23 +23,21 @@ use tracing::info;
 ///
 /// #[tokio::main]
 /// async fn main() {
-///     let engine = Engine::new().start().unwrap();
+///     let engine = Engine::new().start().await.unwrap();
 ///
 ///     let model = include_str!("../../../examples/simple/model.yml");
 ///     let workflow = Workflow::from_yml(model).unwrap();
 ///     
-///     engine.channel().on_complete(|e| {
+///     engine.channel().on_complete(|e| async move {
 ///         println!("{:?}", e.outputs);
 ///     });
 ///     let exec = engine.executor();
-///     exec.model().deploy(&workflow, None).expect("fail to deploy workflow");
+///     exec.model().deploy(&workflow, None).await.expect("fail to deploy workflow");
 ///
 ///     let mut vars = Vars::new();
 ///     vars.insert("input".into(), 3.into());
 ///     vars.insert("pid".into(), "test1".into());
-///     exec.proc().start(
-///        &workflow.id,
-///        vars);
+///     exec.proc().start(&workflow.id, vars).await.unwrap();
 /// }
 /// ```
 #[derive(Clone)]
@@ -97,16 +95,16 @@ impl Engine {
     /// impl ActPlugin for TestPlugin {
     ///     fn on_init(&self, engine: &Engine) -> Result<()> {
     ///         println!("TestPlugin");
-    ///         engine.channel().on_start(|e| {});
-    ///         engine.channel().on_complete(|e| {});
-    ///         engine.channel().on_message(|e| {});
+    ///         engine.channel().on_start(|_| async {});
+    ///         engine.channel().on_complete(|_| async {});
+    ///         engine.channel().on_message(|_| async {});
     ///         Ok(())       
     ///     }
     /// }
     ///
     /// #[tokio::main]
     /// async fn main() {
-    ///     let engine = Engine::builder().add_plugin(&TestPlugin::new()).build().start().unwrap();
+    ///     let engine = Engine::builder().add_plugin(&TestPlugin::new()).build().start().await.unwrap();
     /// }
     /// ```
     pub fn add_plugin<T>(mut self, plugin: &T) -> Self
@@ -168,20 +166,23 @@ impl Engine {
     /// if setting the emit_id by [`ChannelOptions`] it will check the status and re-send when not acking
     /// # Example
     /// ```no_run
-    /// use acts::{ Engine, ChannelOptions };
+    /// use acts::{Engine, ChannelOptions};
     ///
-    /// let engine = Engine::new().start().unwrap();
-    /// let chan = engine.channel_with_options(&ChannelOptions {  
-    ///     id: "chan1".to_string(),  
-    ///     ack: true,  
-    ///     r#type: "step".to_string(),
-    ///     state: "{created, completed}".to_string(),
-    ///     uses: "my_package".to_string(),
-    ///     ..Default::default()
-    /// });
-    /// chan.on_message(|e| {
-    ///     // do something
-    /// });
+    /// #[tokio::main]
+    /// async fn main() {
+    ///     let engine = Engine::new().start().await.unwrap();
+    ///     let chan = engine.channel_with_options(&ChannelOptions {
+    ///         id: "chan1".to_string(),
+    ///         ack: true,
+    ///         r#type: "step".to_string(),
+    ///         state: "{created, completed}".to_string(),
+    ///         uses: "my_package".to_string(),
+    ///         ..Default::default()
+    ///     });
+    ///     chan.on_message(|_| async {
+    ///         // do something
+    ///     });
+    /// }
     /// ```
     pub fn channel_with_options(&self, matcher: &ChannelOptions) -> Arc<Channel> {
         Arc::new(Channel::channel(&self.runtime(), matcher))
@@ -206,39 +207,38 @@ impl Engine {
     /// ## Example
     ///
     /// ```rust,no_run
-    /// use acts::{Engine, Workflow, Vars};
+    /// use acts::Engine;
     /// #[tokio::main]
     /// async fn main() {
-    ///     let engine = Engine::new().start().unwrap();
-    ///     engine.close();
+    ///     let engine = Engine::new().start().await.unwrap();
+    ///     engine.close().await;
     /// }
     /// ```
-    pub fn close(&self) {
-        self.runtime().close();
+    pub async fn close(&self) {
+        self.runtime().close().await;
     }
 
     pub fn signal<T: Clone>(&self, init: T) -> Signal<T> {
         Signal::new(init)
     }
 
-    pub fn start(mut self) -> crate::Result<Self> {
+    pub async fn start(mut self) -> crate::Result<Self> {
         self.runtime = Some(Runtime::new(&self.config(), self.store.clone())?);
 
         let rt = self.runtime();
 
         // Any failure below must not leave the partially started runtime
-        // behind: the store writer thread, the event loop, the recovery
-        // writes and (when reached) the retry/trigger timer tasks would keep
-        // running on an engine that never became usable — a leaked std
-        // thread and polling timers that also pin the whole runtime alive.
-        let init = (|| -> crate::Result<()> {
-            self.prepare()?;
+        // behind: the store writer task, the event loop, the recovery writes
+        // and (when reached) the retry/trigger timer tasks would keep running
+        // on an engine that never became usable.
+        let init = (|| async {
+            self.prepare().await?;
 
             // start event loop
             rt.event_loop();
 
             // recover pending actions
-            rt.recover_actions()?;
+            rt.recover_actions().await?;
 
             // init retry timer
             rt.init_retry_timer()?;
@@ -246,11 +246,12 @@ impl Engine {
             // schedule trigger timer
             rt.init_trigger_timer();
 
-            Ok(())
-        })();
+            Ok::<_, crate::ActError>(())
+        })()
+        .await;
 
         if let Err(err) = init {
-            rt.close();
+            rt.close().await;
             self.runtime = None;
             return Err(err);
         }
@@ -260,7 +261,7 @@ impl Engine {
         Ok(self)
     }
 
-    fn prepare(&self) -> crate::Result<()> {
+    async fn prepare(&self) -> crate::Result<()> {
         // register resolvers
         for (name, resolver) in self.resolvers.iter() {
             self.runtime().register_resolver(name, resolver.clone());
@@ -272,12 +273,12 @@ impl Engine {
         }
 
         // init built-in packages
-        package::init(self)?;
+        package::init(self).await?;
 
         // register packages
         for package_register in self.packages.iter() {
             let meta = (package_register.meta)();
-            self.extender().register_package(&meta)?;
+            self.extender().register_package(&meta).await?;
             if meta.run_as == crate::ActRunAs::Func {
                 self.runtime().package().register(meta.id, package_register);
             }

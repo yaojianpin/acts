@@ -20,18 +20,21 @@ async fn sch_step_timeout_one() {
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let (tx, rx) = engine.signal(false).double();
     auto_complete(&engine, &rx);
     let channel = engine.channel();
 
     channel.on_message(move |e| {
-        if e.is_params_key("msg1") {
-            rx.send(true);
+        let rx = rx.clone();
+        async move {
+            if e.is_params_key("msg1") {
+                rx.send(true);
+            }
         }
     });
 
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert!(ret)
@@ -55,22 +58,25 @@ async fn sch_step_timeout_many() {
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let (tx, rx) = engine.signal(Vec::<Message>::default()).double();
     let channel = engine.channel();
     channel.on_message(move |e| {
-        // println!("message: {e:?}");
-        if e.is_params_key("msg1") {
-            rx.update(|data| data.push(e.inner().clone()));
-        }
+        let rx = rx.clone();
+        async move {
+            // println!("message: {e:?}");
+            if e.is_params_key("msg1") {
+                rx.update(|data| data.push(e.inner().clone()));
+            }
 
-        if e.is_params_key("msg2") {
-            rx.update(|data| data.push(e.inner().clone()));
-            rx.close();
+            if e.is_params_key("msg2") {
+                rx.update(|data| data.push(e.inner().clone()));
+                rx.close();
+            }
         }
     });
 
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(ret.len(), 2)

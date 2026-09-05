@@ -1,4 +1,4 @@
-use crate::{ActPlugin, ActRunAs, Engine};
+use crate::{ActPackageDefinition, ActPlugin, ActRunAs, Engine};
 use parking_lot::Mutex;
 use std::sync::Arc;
 
@@ -7,7 +7,11 @@ use serial_test::serial;
 #[tokio::test(flavor = "multi_thread")]
 async fn plugin_common_register() {
     let test_plugin = TestPlugin::new();
-    Engine::new().add_plugin(&test_plugin).start().unwrap();
+    Engine::new()
+        .add_plugin(&test_plugin)
+        .start()
+        .await
+        .unwrap();
     assert!(*test_plugin.is_init.lock());
 }
 
@@ -15,11 +19,69 @@ async fn plugin_common_register() {
 #[tokio::test(flavor = "multi_thread")]
 async fn plugin_package_register() {
     let test_plugin = TestPackagePlugin;
-    let engine = Engine::new().add_plugin(&test_plugin).start().unwrap();
-    let pack1 = engine.executor().pack().get("test_package").unwrap();
+    let engine = Engine::new()
+        .add_plugin(&test_plugin)
+        .start()
+        .await
+        .unwrap();
+
+    engine
+        .extender()
+        .register_package(&ActPackageDefinition {
+            id: "test_package",
+            name: "test_package",
+            desc: "test package description",
+            icon: "test_package_icon",
+            doc: "test package doc",
+            version: "0.1.0",
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "v1": { "type": "number" }
+                }
+            }),
+            options: Some(serde_json::json!({
+                "v1": {
+                    "ui:widget": "text",
+                }
+            })),
+            run_as: crate::ActRunAs::Irq,
+            resources: vec![],
+            catalog: crate::ActPackageCatalog::App,
+        })
+        .await
+        .unwrap();
+    engine
+        .extender()
+        .register_package(&ActPackageDefinition {
+            id: "test_package2",
+            name: "test_package2",
+            desc: "test package description",
+            icon: "test_package_icon",
+            doc: "test package doc",
+            version: "0.1.0",
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "v1": { "type": "number" }
+                }
+            }),
+            options: Some(serde_json::json!({
+                "v1": {
+                    "ui:widget": "text",
+                }
+            })),
+            run_as: crate::ActRunAs::Msg,
+            resources: vec![],
+            catalog: crate::ActPackageCatalog::App,
+        })
+        .await
+        .unwrap();
+
+    let pack1 = engine.executor().pack().get("test_package").await.unwrap();
     assert_eq!(pack1.run_as, ActRunAs::Irq);
 
-    let pack2 = engine.executor().pack().get("test_package2").unwrap();
+    let pack2 = engine.executor().pack().get("test_package2").await.unwrap();
     assert_eq!(pack2.run_as, ActRunAs::Msg);
 }
 
@@ -44,10 +106,10 @@ impl ActPlugin for TestPlugin {
 
         // engine.register_module("name", module);
         let emitter = engine.channel();
-        emitter.on_start(|_w| {});
-        emitter.on_complete(|_w| {});
+        emitter.on_start(|_w| async {});
+        emitter.on_complete(|_w| async {});
 
-        emitter.on_message(|_msg| {});
+        emitter.on_message(|_msg| async {});
 
         Ok(())
     }
@@ -58,58 +120,8 @@ struct TestPackagePlugin;
 
 #[async_trait::async_trait]
 impl ActPlugin for TestPackagePlugin {
-    fn on_init(&self, engine: &Engine) -> crate::Result<()> {
+    fn on_init(&self, _engine: &Engine) -> crate::Result<()> {
         println!("TestPackagePlugin");
-
-        engine
-            .extender()
-            .register_package(&crate::ActPackageDefinition {
-                id: "test_package",
-                name: "test_package",
-                desc: "test package description",
-                icon: "test_package_icon",
-                doc: "test package doc",
-                version: "0.1.0",
-                schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "v1": { "type": "number" }
-                    }
-                }),
-                options: Some(serde_json::json!({
-                    "v1": {
-                        "ui:widget": "text",
-                    }
-                })),
-                run_as: crate::ActRunAs::Irq,
-                resources: vec![],
-                catalog: crate::ActPackageCatalog::App,
-            })?;
-
-        engine
-            .extender()
-            .register_package(&crate::ActPackageDefinition {
-                id: "test_package2",
-                name: "test_package2",
-                desc: "test package description",
-                icon: "test_package_icon",
-                doc: "test package doc",
-                version: "0.1.0",
-                schema: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "v1": { "type": "number" }
-                    }
-                }),
-                options: Some(serde_json::json!({
-                    "v1": {
-                        "ui:widget": "text",
-                    }
-                })),
-                run_as: crate::ActRunAs::Msg,
-                resources: vec![],
-                catalog: crate::ActPackageCatalog::App,
-            })?;
         Ok(())
     }
 }

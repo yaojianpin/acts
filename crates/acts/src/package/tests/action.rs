@@ -21,12 +21,12 @@ async fn pack_action_submit_on_step() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
 
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -58,12 +58,12 @@ async fn pack_action_sumit_on_step_with_inputs() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
 
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -106,12 +106,12 @@ async fn pack_action_submit_auto() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
 
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -148,12 +148,12 @@ async fn pack_action_complete_on_step() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
 
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -178,12 +178,12 @@ async fn pack_action_complete_on_step_with_inputs() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
 
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -210,12 +210,12 @@ async fn pack_action_abort_on_step() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
 
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -241,11 +241,11 @@ async fn pack_action_abort_on_step_with_inputs() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -280,12 +280,12 @@ async fn pack_action_error_on_step_normal() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
 
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -312,12 +312,12 @@ async fn pack_action_error_on_step_with_inputs() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
 
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     tx.recv().await;
 
     // async `next` propagates the error data after the error event fires;
@@ -351,10 +351,10 @@ async fn pack_action_error_on_step_with_no_err_code() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     tx.timeout(200).await;
     proc.print();
     assert_eq!(
@@ -380,11 +380,11 @@ async fn pack_action_skip_on_step() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
 
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -410,11 +410,11 @@ async fn pack_action_not_exist() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
 
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     tx.timeout(100).await;
     proc.print();
     assert!(

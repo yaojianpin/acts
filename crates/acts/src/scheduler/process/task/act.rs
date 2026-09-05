@@ -30,7 +30,7 @@ impl ActTask for Act {
     async fn run(&self, ctx: &Context) -> Result<()> {
         let task = ctx.task();
         task.set_emit(true);
-        let package = ctx.runtime.store().packages().find(&self.uses)?;
+        let package = ctx.runtime.store().packages().find(&self.uses).await?;
         let in_schema = serde_json::from_str::<JsonValue>(&package.schema)?;
         task.set_data_with(|data| data.set(consts::ACT_RUN_AS, package.run_as));
         match package.run_as {

@@ -1,7 +1,7 @@
 use crate::{
     ActError, KvStore, Result,
     store::{ScanOperation, ScanOptions},
-    utils::{consts, sync},
+    utils::consts,
 };
 use async_nats::jetstream;
 use futures::StreamExt;
@@ -11,26 +11,23 @@ pub struct NatsStore {
 }
 
 impl NatsStore {
-    pub fn open(url: &str) -> Result<Self> {
-        let url = url.to_string();
-        sync::block_on(async move {
-            let bucket = consts::ACTS_STORE_NAME;
-            let client = async_nats::connect(&url)
+    pub async fn open(url: &str) -> Result<Self> {
+        let bucket = consts::ACTS_STORE_NAME;
+        let client = async_nats::connect(url)
+            .await
+            .map_err(|e| ActError::Store(e.to_string()))?;
+        let jetstream = jetstream::new(client);
+        let kv = match jetstream.get_key_value(bucket).await {
+            Ok(store) => store,
+            Err(_) => jetstream
+                .create_key_value(jetstream::kv::Config {
+                    bucket: bucket.to_string(),
+                    ..Default::default()
+                })
                 .await
-                .map_err(|e| ActError::Store(e.to_string()))?;
-            let jetstream = jetstream::new(client);
-            let kv = match jetstream.get_key_value(bucket).await {
-                Ok(store) => store,
-                Err(_) => jetstream
-                    .create_key_value(jetstream::kv::Config {
-                        bucket: bucket.to_string(),
-                        ..Default::default()
-                    })
-                    .await
-                    .map_err(|e| ActError::Store(e.to_string()))?,
-            };
-            Ok(Self { kv })
-        })
+                .map_err(|e| ActError::Store(e.to_string()))?,
+        };
+        Ok(Self { kv })
     }
 }
 
@@ -59,70 +56,55 @@ fn key_matches(k: &str, key: &str, prefix: &str, op: &ScanOperation) -> bool {
     }
 }
 
+#[async_trait::async_trait]
 impl KvStore for NatsStore {
-    fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        let key = key.to_string();
-        let kv = self.kv.clone();
-        sync::block_on(async move {
-            kv.get(&key)
-                .await
-                .map(|entry| entry.map(|e| e.to_vec()))
-                .map_err(|e| ActError::Store(e.to_string()))
-        })
+    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        self.kv
+            .get(key)
+            .await
+            .map(|entry| entry.map(|e| e.to_vec()))
+            .map_err(|e| ActError::Store(e.to_string()))
     }
 
-    fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
-        let key = key.to_string();
-        let kv = self.kv.clone();
-        sync::block_on(async move {
-            kv.put(&key, value.into())
-                .await
-                .map(|_| ())
-                .map_err(|e| ActError::Store(e.to_string()))
-        })
+    async fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
+        self.kv
+            .put(key, value.into())
+            .await
+            .map(|_| ())
+            .map_err(|e| ActError::Store(e.to_string()))
     }
 
-    fn delete(&self, key: &str) -> Result<()> {
-        let key = key.to_string();
-        let kv = self.kv.clone();
-        sync::block_on(async move {
-            kv.delete(&key)
-                .await
-                .map_err(|e| ActError::Store(e.to_string()))
-        })
+    async fn delete(&self, key: &str) -> Result<()> {
+        self.kv
+            .delete(key)
+            .await
+            .map_err(|e| ActError::Store(e.to_string()))
     }
 
-    fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>> {
-        let ScanOptions {
-            is_rev,
-            op,
-            ref prefix,
-        } = options;
-        let prefix = prefix.clone();
-        let key = key.to_string();
-        let kv = self.kv.clone();
-        sync::block_on(async move {
-            let keys = kv
-                .keys()
-                .await
-                .map_err(|e| ActError::Store(e.to_string()))?;
-            futures::pin_mut!(keys);
-            let mut result = Vec::new();
-            while let Some(k) = keys.next().await {
-                let k = k.map_err(|e| ActError::Store(e.to_string()))?;
-                if key_matches(&k, &key, &prefix, &op)
-                    && let Some(entry) = kv
-                        .get(&k)
-                        .await
-                        .map_err(|e| ActError::Store(e.to_string()))?
-                {
-                    result.push((k, entry.to_vec()));
-                }
+    async fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>> {
+        let ScanOptions { is_rev, op, prefix } = options;
+        let keys = self
+            .kv
+            .keys()
+            .await
+            .map_err(|e| ActError::Store(e.to_string()))?;
+        futures::pin_mut!(keys);
+        let mut result = Vec::new();
+        while let Some(k) = keys.next().await {
+            let k = k.map_err(|e| ActError::Store(e.to_string()))?;
+            if key_matches(&k, key, &prefix, &op)
+                && let Some(entry) = self
+                    .kv
+                    .get(&k)
+                    .await
+                    .map_err(|e| ActError::Store(e.to_string()))?
+            {
+                result.push((k, entry.to_vec()));
             }
-            if is_rev {
-                result.reverse();
-            }
-            Ok(result)
-        })
+        }
+        if is_rev {
+            result.reverse();
+        }
+        Ok(result)
     }
 }

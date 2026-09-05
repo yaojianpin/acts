@@ -6,7 +6,8 @@ vars:
     value: 0  
 exposes:
   - name: result
-    value: '${{ v }}'
+    value: ${{ v }}
+    type: number
 steps:
   - name: prepare
     id: prepare

@@ -4,6 +4,8 @@ use crate::store::{Store, nats::NatsStore};
 use std::sync::Arc;
 
 #[cfg(feature = "store-nats")]
-crate::gen_store_tests!(Arc::new(Store::new(Arc::new(
-    NatsStore::open("nats://127.0.0.1:4222").unwrap()
-))));
+crate::gen_store_tests!(async {
+    Arc::new(Store::new(Arc::new(
+        NatsStore::open("nats://127.0.0.1:4222").await.unwrap(),
+    )))
+});

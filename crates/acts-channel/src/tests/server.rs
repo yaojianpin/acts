@@ -28,7 +28,7 @@ fn wrap_message<T: ?Sized + Serialize>(name: &str, value: &T) -> Message {
 
 macro_rules! wrap_result {
     ($seq: expr, $name:expr, $input: expr) => {
-        match $input {
+        match $input.await {
             Ok(data) => {
                 let mut message = wrap_message($name, &data);
                 message.ack = Some($seq.to_string());
@@ -101,15 +101,18 @@ impl GrpcServer {
             let chan = self.engine.channel_with_options(&client.options);
             let c = client.clone();
             chan.on_message(move |e| {
-                let m: &acts::Message = e;
-                let message = wrap_message(&m.name, m);
-                c.send(message);
+                let c = c.clone();
+                async move {
+                    let m = e.inner();
+                    let message = wrap_message(&m.name, m);
+                    c.send(message);
+                }
             });
         }
     }
 
     #[allow(clippy::result_large_err)]
-    fn do_action(&self, message: Message) -> Result<Response<Message>, Status> {
+    async fn do_action(&self, message: Message) -> Result<Response<Message>, Status> {
         let options =
             &serde_json::from_slice::<acts::Vars>(&message.data.unwrap_or_default()).unwrap();
         let name = message.name.as_str();
@@ -225,7 +228,8 @@ impl GrpcServer {
             // model
             "model:ls" => {
                 let count = options.get::<i64>("count").map_or(100, |v| v as usize);
-                let ret = executor.model().list(&Query::new().limit(count));
+                let q = Query::new().limit(count);
+                let ret = executor.model().list(&q);
                 wrap_result!(ack, name, ret)
             }
             "model:rm" => {
@@ -258,7 +262,8 @@ impl GrpcServer {
             // package
             "pack:ls" => {
                 let count = options.get::<i64>("count").map_or(100, |v| v as usize);
-                let ret = executor.pack().list(&Query::new().limit(count));
+                let q = Query::new().limit(count);
+                let ret = executor.pack().list(&q);
                 wrap_result!(ack, name, ret)
             }
             "pack:publish" => {
@@ -317,7 +322,8 @@ impl GrpcServer {
             }
             "proc:ls" => {
                 let count = options.get::<i64>("count").map_or(100, |v| v as usize);
-                let ret = executor.proc().list(&Query::new().limit(count));
+                let q = Query::new().limit(count);
+                let ret = executor.proc().list(&q);
                 wrap_result!(ack, name, ret)
             }
             "proc:get" => {
@@ -333,11 +339,10 @@ impl GrpcServer {
                     .get::<String>("pid")
                     .ok_or(Status::invalid_argument("pid is required"))?;
                 let count = options.get::<i64>("count").map_or(100, |v| v as usize);
-                let ret = executor.task().list(
-                    &Query::new()
-                        .limit(count)
-                        .filter(Filter::and().expr(Expr::eq("pid", pid))),
-                );
+                let q = Query::new()
+                    .limit(count)
+                    .filter(Filter::and().expr(Expr::eq("pid", pid)));
+                let ret = executor.task().list(&q);
                 wrap_result!(ack, name, ret)
             }
             "task:get" => {
@@ -356,11 +361,10 @@ impl GrpcServer {
                     .get::<String>("pid")
                     .ok_or(Status::invalid_argument("pid is required"))?;
                 let count = options.get::<i64>("count").map_or(100, |v| v as usize);
-                let ret = executor.msg().list(
-                    &Query::new()
-                        .limit(count)
-                        .filter(Filter::and().expr(Expr::eq("pid", pid))),
-                );
+                let q = Query::new()
+                    .limit(count)
+                    .filter(Filter::and().expr(Expr::eq("pid", pid)));
+                let ret = executor.msg().list(&q);
                 wrap_result!(ack, name, ret)
             }
             "msg:get" => {
@@ -399,7 +403,7 @@ impl ActsService for GrpcServer {
         &self,
         request: tonic::Request<Message>,
     ) -> Result<tonic::Response<Message>, tonic::Status> {
-        self.do_action(request.into_inner())
+        self.do_action(request.into_inner()).await
     }
 
     async fn on_message(
@@ -441,13 +445,16 @@ impl ActsService for GrpcServer {
         let chan = self.engine.channel_with_options(&client.options);
         let c = client.clone();
         chan.on_message(move |e| {
-            let message = Message {
-                name: e.name.clone(),
-                seq: e.id.clone(),
-                ack: None,
-                data: Some(serde_json::to_vec(e.inner()).unwrap()),
-            };
-            c.send(message);
+            let c = c.clone();
+            async move {
+                let message = Message {
+                    name: e.name.clone(),
+                    seq: e.id.clone(),
+                    ack: None,
+                    data: Some(serde_json::to_vec(e.inner()).unwrap()),
+                };
+                c.send(message);
+            }
         });
 
         let out_stream = ReceiverStream::new(rx);

@@ -87,10 +87,10 @@ impl Runtime {
         resolvers.insert(name.to_string(), resolver);
     }
 
-    pub fn close(&self) {
+    pub async fn close(&self) {
         self.shutdown.cancel();
         self.queue.abort();
-        self.cache.close();
+        self.cache.close().await;
         self.emitter.close();
     }
 
@@ -99,7 +99,7 @@ impl Runtime {
     }
 
     #[instrument(skip(self, model, options), fields(mid = %model.id, name = %model.name))]
-    pub fn start(self: &Arc<Self>, model: &Workflow, options: Vars) -> Result<Arc<Process>> {
+    pub async fn start(self: &Arc<Self>, model: &Workflow, options: Vars) -> Result<Arc<Process>> {
         debug!("process starting");
 
         let mut proc_id = utils::longid();
@@ -121,7 +121,7 @@ impl Runtime {
                 )));
             }
         }
-        let proc = self.cache.proc(&proc_id, self)?;
+        let proc = self.cache.proc(&proc_id, self).await?;
         if proc.is_some() {
             return Err(ActError::Action(format!(
                 "proc_id({proc_id}) is duplicated in running process list"
@@ -147,21 +147,21 @@ impl Runtime {
         let proc = Process::new(&proc_id, self);
         proc.load(&model)?;
 
-        self.launch(&proc)?;
+        self.launch(&proc).await?;
 
         info!(pid = %proc_id, mid = %model.id, name = %model.name, "process started");
         Ok(proc)
     }
 
-    pub fn proc(self: &Arc<Self>, pid: &str) -> Result<Option<Arc<Process>>> {
-        self.cache.proc(pid, self)
+    pub async fn proc(self: &Arc<Self>, pid: &str) -> Result<Option<Arc<Process>>> {
+        self.cache.proc(pid, self).await
     }
 
     #[instrument(skip(self, proc), fields(pid = %proc.id()))]
-    pub fn launch(self: &Arc<Self>, proc: &Arc<Process>) -> Result<()> {
+    pub async fn launch(self: &Arc<Self>, proc: &Arc<Process>) -> Result<()> {
         debug!("process launched");
         let proc = proc.clone();
-        proc.start()?;
+        proc.start().await?;
         Ok(())
     }
 
@@ -194,11 +194,11 @@ impl Runtime {
     }
 
     #[instrument(skip(self, action), fields(pid = %action.pid, tid = %action.tid, event = ?action.event))]
-    pub fn do_action(self: &Arc<Self>, action: &Action) -> Result<()> {
+    pub async fn do_action(self: &Arc<Self>, action: &Action) -> Result<()> {
         debug!("action received");
-        let proc = self.cache.proc(&action.pid, self)?;
+        let proc = self.cache.proc(&action.pid, self).await?;
         match proc {
-            Some(proc) => proc.do_action(action),
+            Some(proc) => proc.do_action(action).await,
             None => Err(ActError::Runtime(format!(
                 "cannot find process '{}' when do_action({:?})",
                 action.pid, action
@@ -262,36 +262,35 @@ impl Runtime {
     ///   and an already-applied one is rejected by the arm's guards;
     /// - action records of a task that never received the action are
     ///   re-applied, which also closes the record through the action path.
-    pub fn recover_actions(self: &Arc<Self>) -> Result<()> {
-        let ops = self.cache.store().load_pending_ops()?;
+    pub async fn recover_actions(self: &Arc<Self>) -> Result<()> {
+        let ops = self.cache.store().load_pending_ops().await?;
         for op in ops {
             let r#type = op.r#type.clone();
             let (pid, tid) = (op.pid, op.tid);
-            let close = |store: &Store| store.complete_ops(&pid, &tid, &r#type);
-            let Some(proc) = self.cache.proc(&pid, self)? else {
+            let Some(proc) = self.cache.proc(&pid, self).await? else {
                 // process is gone (removed while completing) — drop the orphan
-                close(&self.cache.store())?;
+                self.cache.store().complete_ops(&pid, &tid, &r#type).await?;
                 continue;
             };
             let Some(task) = proc.task(&tid) else {
-                close(&self.cache.store())?;
+                self.cache.store().complete_ops(&pid, &tid, &r#type).await?;
                 continue;
             };
             if r#type == data::OpType::Action.as_ref() {
                 let (Some(event), Some(options)) = (op.event.as_deref(), op.options.as_deref())
                 else {
                     // malformed action record — drop it
-                    close(&self.cache.store())?;
+                    self.cache.store().complete_ops(&pid, &tid, &r#type).await?;
                     continue;
                 };
                 let Ok(event) = EventAction::parse(event) else {
                     error!(pid = %pid, tid = %tid, event = %event, "cannot parse replayed action");
-                    close(&self.cache.store())?;
+                    self.cache.store().complete_ops(&pid, &tid, &r#type).await?;
                     continue;
                 };
                 let Ok(options) = serde_json::from_str::<Vars>(options) else {
                     error!(pid = %pid, tid = %tid, "cannot parse replayed action options");
-                    close(&self.cache.store())?;
+                    self.cache.store().complete_ops(&pid, &tid, &r#type).await?;
                     continue;
                 };
                 // `Cancel` and `Remove` never guard on the target task's state
@@ -304,30 +303,28 @@ impl Runtime {
                 if !always_reapply && task.state().is_completed() {
                     // already applied durably (the state write landed but the
                     // close was lost) — close and mark the messages completed
-                    close(&self.cache.store())?;
-                    self.cache.store().set_deliveries_with(
-                        &pid,
-                        &tid,
-                        data::MessageStatus::Completed,
-                    )?;
+                    self.cache.store().complete_ops(&pid, &tid, &r#type).await?;
+                    self.cache
+                        .store()
+                        .set_deliveries_with(&pid, &tid, data::MessageStatus::Completed)
+                        .await?;
                     continue;
                 }
                 // the action was never durably applied — re-apply it; the
                 // action path (Task::update) closes the record itself
                 let action = Action::new(&pid, &tid, event, options);
-                if let Err(err) = proc.do_action(&action) {
+                if let Err(err) = proc.do_action(&action).await {
                     error!(error = %err, pid = %pid, tid = %tid, "replayed action failed");
-                    close(&self.cache.store())?;
+                    self.cache.store().complete_ops(&pid, &tid, &r#type).await?;
                 }
             } else if task.is_sign(Sign::NEXT_COMPLETE) {
                 // propagation already completed durably; just close the record
                 // and mark the deliveries completed
-                close(&self.cache.store())?;
-                self.cache.store().set_deliveries_with(
-                    &pid,
-                    &tid,
-                    data::MessageStatus::Completed,
-                )?;
+                self.cache.store().complete_ops(&pid, &tid, &r#type).await?;
+                self.cache
+                    .store()
+                    .set_deliveries_with(&pid, &tid, data::MessageStatus::Completed)
+                    .await?;
                 continue;
             } else {
                 self.queue.send_next(&task)?;
@@ -337,7 +334,7 @@ impl Runtime {
     }
 
     #[cfg(test)]
-    pub fn do_action2(
+    pub async fn do_action2(
         self: &Arc<Self>,
         pid: &str,
         tid: &str,
@@ -345,13 +342,15 @@ impl Runtime {
         options: crate::Vars,
     ) -> Result<()> {
         self.do_action(&Action::new(pid, tid, action, options))
+            .await
     }
 
     /// Ack one delivery row (by its delivery id).
-    pub fn ack(&self, id: &str) -> Result<()> {
+    pub async fn ack(&self, id: &str) -> Result<()> {
         self.cache
             .store()
             .set_delivery(id, data::MessageStatus::Acked)
+            .await
     }
 
     pub fn event_loop(self: &Arc<Self>) {
@@ -371,7 +370,7 @@ impl Runtime {
                                 error!(error = %err, "task.exec failed");
                                 task.set_err(&err.clone().into());
                                 ctx.set_task(&task);
-                                ctx.emit_error().ok();
+                                ctx.emit_error().await.ok();
                             }
                         }
                         QueueData::Next(task) => {
@@ -381,7 +380,7 @@ impl Runtime {
                                 error!(error = %err, "task.next failed");
                                 task.set_err(&err.clone().into());
                                 ctx.set_task(&task);
-                                ctx.emit_error().ok();
+                                ctx.emit_error().await.ok();
                                 // the propagation ended in error (terminal):
                                 // close the outbox record so recovery does not
                                 // replay the failed `next`
@@ -437,6 +436,9 @@ impl Runtime {
             let cache = self.cache.clone();
             let rt = self.clone();
             self.emitter.on_proc(move |proc| {
+                let cache = cache.clone();
+                let rt = rt.clone();
+                async move {
                 debug!(pid = %proc.id(), "proc event");
                 if let Some(root) = proc.root() {
                     let state = proc.state();
@@ -489,27 +491,27 @@ impl Runtime {
                         // if the process is a sub process
                         // call the parent act
                         if let Some((ppid, ptid)) = proc.parent() {
-                            rt.return_to_act(&ppid, &ptid, proc);
+                            rt.return_to_act(&ppid, &ptid, &proc).await;
                         }
 
                         if !rt.config.keep_processes() {
                             debug!(pid = %proc.id(), "remove process");
                             let cache = cache.clone();
                             let pid = proc.id().to_string();
-                            cache.remove(&pid).unwrap_or_else(|err| {
+                            if let Err(err) = cache.remove(&pid).await {
                                 error!(error = %err, "process remove failed");
-                                false
-                            });
+                            }
                         }
 
                         let cache = cache.clone();
                         let rt = rt.clone();
-                        cache
-                            .restore(&rt)
-                            .unwrap_or_else(|err| error!(error = %err, "process restore failed"));
+                        if let Err(err) = cache.restore(&rt).await {
+                            error!(error = %err, "process restore failed");
+                        }
                     }
                 } else {
                     error!(pid = %proc.id(), "cannot find root task");
+                }
                 }
             });
         }
@@ -517,19 +519,23 @@ impl Runtime {
             let cache = self.cache.clone();
             let rt = self.clone();
             self.emitter.on_task(move |e| {
-                debug!(pid = %e.inner().pid, tid = %e.inner().id, "task event");
                 let cache = cache.clone();
-                let e_clone = e.clone();
-                cache
-                    .upsert_async(&e_clone)
-                    .unwrap_or_else(|err| error!(error = %err, "task upsert failed"));
+                let rt = rt.clone();
+                async move {
+                    debug!(pid = %e.inner().pid, tid = %e.inner().id, "task event");
+                    let cache = cache.clone();
+                    let e_clone = e.clone();
+                    cache
+                        .upsert_async(&e_clone)
+                        .unwrap_or_else(|err| error!(error = %err, "task upsert failed"));
 
-                // check task is allowed to emit message to client
-                if !e.state().is_pending() && !e.state().is_running() && e.is_emit() {
-                    let msg = e.create_message();
-                    debug!(pid = %msg.pid, tid = %msg.tid, name = %msg.name, "emit message");
-                    let emitter = rt.emitter().clone();
-                    emitter.emit_message(&msg);
+                    // check task is allowed to emit message to client
+                    if !e.state().is_pending() && !e.state().is_running() && e.is_emit() {
+                        let msg = e.create_message();
+                        debug!(pid = %msg.pid, tid = %msg.tid, name = %msg.name, "emit message");
+                        let emitter = rt.emitter().clone();
+                        emitter.emit_message(&msg);
+                    }
                 }
             });
         }
@@ -564,34 +570,41 @@ impl Runtime {
                 }
                 // each not-yet-acked delivery row is re-sent to the channel it
                 // belongs to only
-                let _ = cache.store().with_no_response_deliveries(
-                    interval_ms as i64,
-                    max_message_retry_times,
-                    |d| {
-                        let store = cache.store();
-                        match store.messages().find(&d.msg_id) {
-                            Ok(message) => {
-                                let emitter = evt.clone();
-                                let mut msg: crate::event::Message = message.into();
-                                msg.delivery_id = Some(d.id.clone());
-                                emitter.emit_delivery(&d.chan_id, &msg);
-                            }
-                            Err(err) => {
-                                // orphan delivery: its canonical message is
-                                // gone, it can never be re-sent — drop it
-                                error!(delivery_id = %d.id, msg_id = %d.msg_id, error = %err, "delivery without canonical message dropped");
-                                let _ = store.deliveries().delete(&d.id);
+                match cache
+                    .store()
+                    .with_no_response_deliveries(interval_ms as i64, max_message_retry_times)
+                    .await
+                {
+                    Ok(rearmed) => {
+                        for d in rearmed {
+                            let store = cache.store();
+                            match store.messages().find(&d.msg_id).await {
+                                Ok(message) => {
+                                    let emitter = evt.clone();
+                                    let mut msg: crate::event::Message = message.into();
+                                    msg.delivery_id = Some(d.id.clone());
+                                    emitter.emit_delivery(&d.chan_id, &msg);
+                                }
+                                Err(err) => {
+                                    // orphan delivery: its canonical message
+                                    // is gone, it can never be re-sent — drop it
+                                    error!(delivery_id = %d.id, msg_id = %d.msg_id, error = %err, "delivery without canonical message dropped");
+                                    if let Err(e) = store.deliveries().delete(&d.id).await {
+                                        error!(error = %e, "orphan delivery delete failed");
+                                    }
+                                }
                             }
                         }
-                    },
-                );
+                    }
+                    Err(err) => error!(error = %err, "no-response deliveries query failed"),
+                }
             }
         });
 
         Ok(())
     }
 
-    fn return_to_act(self: &Arc<Self>, pid: &str, tid: &str, proc: &Process) {
+    async fn return_to_act(self: &Arc<Self>, pid: &str, tid: &str, proc: &Process) {
         debug!(pid = %pid, tid = %tid, "return to act");
         let state = proc.state();
         // process.print();
@@ -614,9 +627,9 @@ impl Runtime {
 
         let action = Action::new(pid, tid, event, vars);
         let scher = self.clone();
-        let _ = scher
-            .do_action(&action)
-            .map_err(|err| error!(error = %err, "return to act failed"));
+        if let Err(err) = scher.do_action(&action).await {
+            error!(error = %err, "return to act failed");
+        }
     }
     /// Schedule-trigger timer — periodically fires every due `schedule`
     /// trigger row and rolls its `next_run` forward. Deployed rows arm with
@@ -645,13 +658,17 @@ impl Runtime {
                     _ = intv.tick() => {}
                 }
                 let now = crate::utils::time::time_millis();
-                let due = match store.events().query(
-                    &crate::query::Query::new().limit(1000).filter(
-                        crate::query::Filter::and()
-                            .expr(crate::query::Expr::eq("kind", "schedule"))
-                            .expr(crate::query::Expr::le("next_run", now)),
-                    ),
-                ) {
+                let due = match store
+                    .events()
+                    .query(
+                        &crate::query::Query::new().limit(1000).filter(
+                            crate::query::Filter::and()
+                                .expr(crate::query::Expr::eq("kind", "schedule"))
+                                .expr(crate::query::Expr::le("next_run", now)),
+                        ),
+                    )
+                    .await
+                {
                     Ok(rows) => rows.rows,
                     Err(err) => {
                         error!(error = %err, "schedule query failed");
@@ -659,7 +676,7 @@ impl Runtime {
                     }
                 };
                 for event in due {
-                    if let Err(err) = rt.fire_schedule(&event) {
+                    if let Err(err) = rt.fire_schedule(&event).await {
                         error!(event = %event.id, error = %err, "schedule trigger failed");
                     }
                 }
@@ -671,8 +688,8 @@ impl Runtime {
     /// default params and roll `last_run`/`next_run` forward. The row state
     /// is persisted after the start, so a crash between start and state roll
     /// may re-fire the trigger on recovery (at-least-once).
-    fn fire_schedule(self: &Arc<Self>, event: &data::Event) -> Result<()> {
-        let model = self.cache.store().models().find(&event.mid)?;
+    async fn fire_schedule(self: &Arc<Self>, event: &data::Event) -> Result<()> {
+        let model = self.cache.store().models().find(&event.mid).await?;
         let model: crate::ModelInfo = model.into();
         let workflow = model.workflow()?;
 
@@ -682,7 +699,7 @@ impl Runtime {
             value => serde_json::from_value::<Vars>(value)
                 .map_err(|e| ActError::Convert(format!("invalid trigger payload: {e}")))?,
         };
-        let started = self.start(&workflow, inputs);
+        let started = self.start(&workflow, inputs).await;
 
         // roll the schedule forward even when the start failed, so a failing
         // trigger does not hot-loop on every tick; the error is logged by the
@@ -697,7 +714,7 @@ impl Runtime {
                 .unwrap_or(0),
             None => 0,
         };
-        self.cache.store().events().update(&event)?;
+        self.cache.store().events().update(&event).await?;
         started.map(|_| ())
     }
 }

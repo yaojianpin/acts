@@ -28,23 +28,28 @@ async fn pack_sequence_chain_list() {
     });
 
     main.print();
-    let (engine, proc) = create_proc(&main, &utils::longid());
+    let (engine, proc) = create_proc(&main, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(Vec::<String>::default()).double();
     auto_complete(&engine, &rx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            rx.update(|data| {
-                let vars = e.inputs.get::<Vars>(consts::ACT_OPTIONS_KEY).unwrap();
-                data.push(vars.get::<String>(consts::ACT_VALUE).unwrap());
-            });
-            rt.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
-                .unwrap();
+        let rx = rx.clone();
+        let rt = rt.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                rx.update(|data| {
+                    let vars = e.inputs.get::<Vars>(consts::ACT_OPTIONS_KEY).unwrap();
+                    data.push(vars.get::<String>(consts::ACT_VALUE).unwrap());
+                });
+                rt.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
+                    .await
+                    .unwrap();
+            }
         }
     });
 
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(ret, ["u1", "u2"]);
@@ -66,7 +71,7 @@ async fn pack_sequence_chain_order() {
     });
 
     main.print();
-    let (engine, proc) = create_proc(&main, &utils::longid());
+    let (engine, proc) = create_proc(&main, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(Vec::<i64>::default()).double();
     auto_complete(&engine, &rx);
@@ -74,15 +79,20 @@ async fn pack_sequence_chain_order() {
 
     channel.on_message(move |e| {
         println!("message: {:?}", e.inner());
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            rx.update(|data| data.push(e.start_time));
-            std::thread::sleep(std::time::Duration::from_secs(1));
-            rt.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
-                .unwrap();
+        let rx = rx.clone();
+        let rt = rt.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                rx.update(|data| data.push(e.start_time));
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                rt.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
+                    .await
+                    .unwrap();
+            }
         }
     });
 
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     let ret = tx.recv().await;
     proc.print();
     let time1 = ret.first().unwrap();
@@ -108,23 +118,28 @@ async fn pack_sequence_chain_var() {
     });
 
     main.print();
-    let (engine, proc) = create_proc(&main, &utils::longid());
+    let (engine, proc) = create_proc(&main, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(Vec::<String>::default()).double();
     auto_complete(&engine, &rx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            rx.update(|data| {
-                let vars = e.inputs.get::<Vars>(consts::ACT_OPTIONS_KEY).unwrap();
-                data.push(vars.get::<String>(consts::ACT_VALUE).unwrap());
-            });
-            rt.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
-                .unwrap();
+        let rx = rx.clone();
+        let rt = rt.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                rx.update(|data| {
+                    let vars = e.inputs.get::<Vars>(consts::ACT_OPTIONS_KEY).unwrap();
+                    data.push(vars.get::<String>(consts::ACT_VALUE).unwrap());
+                });
+                rt.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
+                    .await
+                    .unwrap();
+            }
         }
     });
 
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(ret, ["u1", "u2"]);
@@ -146,11 +161,11 @@ async fn pack_sequence_chain_var_not_exist() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert!(proc.state().is_error());

@@ -26,18 +26,21 @@ async fn pack_block_sequence() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let (tx, rx) = engine.signal(Vec::<Message>::default()).double();
     auto_complete(&engine, &rx);
     let channel = engine.channel();
 
     channel.on_message(move |e| {
-        if e.is_msg() {
-            // std::thread::sleep(std::time::Duration::from_millis(200));
-            rx.update(|data| data.push(e.inner().clone()));
+        let rx = rx.clone();
+        async move {
+            if e.is_msg() {
+                // std::thread::sleep(std::time::Duration::from_millis(200));
+                rx.update(|data| data.push(e.inner().clone()));
+            }
         }
     });
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(
@@ -77,17 +80,20 @@ async fn pack_block_parallel() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let (tx, rx) = engine.signal(Vec::<Message>::default()).double();
     auto_complete(&engine, &rx);
     let channel = engine.channel();
 
     channel.on_message(move |e| {
-        if e.is_irq() && e.is_type("act") {
-            rx.update(|data| data.push(e.inner().clone()));
+        let rx = rx.clone();
+        async move {
+            if e.is_irq() && e.is_type("act") {
+                rx.update(|data| data.push(e.inner().clone()));
+            }
         }
     });
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     let ret = tx.timeout(400).await;
     proc.print();
     assert!(ret.iter().any(|iter| iter.is_params_key("act1")));

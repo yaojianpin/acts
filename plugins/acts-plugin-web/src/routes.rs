@@ -48,7 +48,8 @@ pub async fn deploy(
     let ret = state
         .executor()
         .model()
-        .deploy(&workflow, Some(&req.view))?;
+        .deploy(&workflow, Some(&req.view))
+        .await?;
     Ok(RespData::ok(ret))
 }
 
@@ -56,7 +57,7 @@ pub async fn get(
     State(state): State<Arc<Engine>>,
     Json(req): Json<PacakgeGet>,
 ) -> Result<impl IntoResponse, AppError> {
-    let ret = state.executor().model().get(&req.id, &req.fmt)?;
+    let ret = state.executor().model().get(&req.id, &req.fmt).await?;
     Ok(RespData::ok(ret))
 }
 
@@ -64,7 +65,7 @@ pub async fn rm(
     State(state): State<Arc<Engine>>,
     Json(req): Json<PacakgeId>,
 ) -> Result<impl IntoResponse, AppError> {
-    let ret = state.executor().model().rm(&req.id)?;
+    let ret = state.executor().model().rm(&req.id).await?;
     Ok(RespData::ok(ret))
 }
 
@@ -72,7 +73,7 @@ pub async fn list(
     State(state): State<Arc<Engine>>,
     Json(req): Json<ActsQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    let ret = state.executor().model().list(&req)?;
+    let ret = state.executor().model().list(&req).await?;
     Ok(RespData::ok(ret))
 }
 
@@ -88,11 +89,12 @@ pub async fn proc_start(
             state
                 .executor()
                 .proc()
-                .start_from_model(&model.to_string(), &fmt, options)?
+                .start_from_model(&model.to_string(), &fmt, options)
+                .await?
         }
         "id" => {
             let id = data.id.ok_or("id is required")?;
-            state.executor().proc().start(&id, options)?
+            state.executor().proc().start(&id, options).await?
         }
         _ => return Err("mode is not correct, it should be one of 'model' or 'id'".into()),
     };
@@ -144,7 +146,7 @@ pub async fn pack_list(
         }
     }
     query = query.filter(filter);
-    let ret = state.executor().pack().list(&query)?;
+    let ret = state.executor().pack().list(&query).await?;
     Ok(RespData::ok(ret))
 }
 
@@ -196,7 +198,7 @@ pub async fn pack_get(
     State(state): State<Arc<Engine>>,
     Json(package): Json<PackageIdRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let ret = state.executor().pack().get(&package.id)?;
+    let ret = state.executor().pack().get(&package.id).await?;
     Ok(RespData::ok(ret))
 }
 

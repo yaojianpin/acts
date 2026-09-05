@@ -98,16 +98,16 @@ impl EngineBuilder {
     /// impl ActPlugin for TestPlugin {
     ///     fn on_init(&self, engine: &Engine) -> Result<()> {
     ///         println!("TestPlugin");
-    ///         engine.channel().on_start(|e| {});
-    ///         engine.channel().on_complete(|e| {});
-    ///         engine.channel().on_message(|e| {});
+    ///         engine.channel().on_start(|_| async {});
+    ///         engine.channel().on_complete(|_| async {});
+    ///         engine.channel().on_message(|_| async {});
     ///         Ok(())       
     ///     }
     /// }
     ///
     /// #[tokio::main]
     /// async fn main() {
-    ///     let engine = Engine::builder().add_plugin(&TestPlugin::new()).build().start().unwrap();
+    ///     let engine = Engine::builder().add_plugin(&TestPlugin::new()).build().start().await.unwrap();
     /// }
     /// ```
     pub fn add_plugin<T>(mut self, plugin: &T) -> Self
@@ -157,7 +157,7 @@ impl EngineBuilder {
     /// }
     /// #[tokio::main]
     /// async fn main() {
-    ///     let engine = Engine::builder().add_package::<MyPackage>().build().start().unwrap();
+    ///     let engine = Engine::builder().add_package::<MyPackage>().build().start().await.unwrap();
     /// }
     /// ```
     pub fn add_package<T>(mut self) -> Self
@@ -202,6 +202,7 @@ impl EngineBuilder {
     ///         .add_resolver("profile", resolver)
     ///         .build()
     ///         .start()
+    ///         .await
     ///         .unwrap();
     /// }
     /// ```
@@ -233,6 +234,7 @@ impl EngineBuilder {
     ///         .set_store(Arc::new(MemoryStore::new()))
     ///         .build()
     ///         .start()
+    ///         .await
     ///         .unwrap();
     /// }
     /// ```

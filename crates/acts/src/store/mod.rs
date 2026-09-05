@@ -169,10 +169,11 @@ pub enum StoreBatchOp {
     Delete { key: String },
 }
 
+#[async_trait::async_trait]
 pub trait KvStore: Send + Sync {
-    fn get(&self, key: &str) -> Result<Option<Vec<u8>>>;
-    fn put(&self, key: &str, value: Vec<u8>) -> Result<()>;
-    fn delete(&self, key: &str) -> Result<()>;
+    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>>;
+    async fn put(&self, key: &str, value: Vec<u8>) -> Result<()>;
+    async fn delete(&self, key: &str) -> Result<()>;
 
     /// Apply every mutation of `ops` as one unit: on success all ops are
     /// visible; on failure — for backends that commit atomically — none is.
@@ -187,25 +188,26 @@ pub trait KvStore: Send + Sync {
     /// A backend without cross-key transactions (`NatsStore` — JetStream KV
     /// is per-key) inherits the default sequential loop: order is preserved,
     /// but a mid-batch failure leaves the earlier ops applied.
-    fn batch(&self, ops: &[StoreBatchOp]) -> Result<()> {
+    async fn batch(&self, ops: &[StoreBatchOp]) -> Result<()> {
         for op in ops {
             match op {
-                StoreBatchOp::Put { key, value } => self.put(key, value.clone())?,
-                StoreBatchOp::Delete { key } => self.delete(key)?,
+                StoreBatchOp::Put { key, value } => self.put(key, value.clone()).await?,
+                StoreBatchOp::Delete { key } => self.delete(key).await?,
             }
         }
         Ok(())
     }
 
-    fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>>;
+    async fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>>;
 }
 
+#[async_trait::async_trait]
 pub trait DbCollection: Send + Sync {
     type Item;
-    fn exists(&self, id: &str) -> Result<bool>;
-    fn find(&self, id: &str) -> Result<Self::Item>;
-    fn query(&self, query: &Query) -> Result<PageData<Self::Item>>;
-    fn create(&self, data: &Self::Item) -> Result<bool>;
-    fn update(&self, data: &Self::Item) -> Result<bool>;
-    fn delete(&self, id: &str) -> Result<bool>;
+    async fn exists(&self, id: &str) -> Result<bool>;
+    async fn find(&self, id: &str) -> Result<Self::Item>;
+    async fn query(&self, query: &Query) -> Result<PageData<Self::Item>>;
+    async fn create(&self, data: &Self::Item) -> Result<bool>;
+    async fn update(&self, data: &Self::Item) -> Result<bool>;
+    async fn delete(&self, id: &str) -> Result<bool>;
 }

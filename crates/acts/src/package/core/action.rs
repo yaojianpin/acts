@@ -77,7 +77,7 @@ impl ActPackage for ActionPackage {
             params.action.clone(),
             params.options.unwrap_or_default().clone(),
         ))?;
-        task.update(ctx)?;
+        task.update(ctx).await?;
         Ok(None)
     }
 }

@@ -49,10 +49,11 @@ impl<T> KvCollection<T> {
         keys
     }
 
-    fn read_json(&self, id: &str) -> Result<Option<JsonValue>> {
+    async fn read_json(&self, id: &str) -> Result<Option<JsonValue>> {
         let key = self.data_key(id);
         self.kv
-            .get(&key)?
+            .get(&key)
+            .await?
             .map(|data| serde_json::from_slice(&data).map_err(map_db_err))
             .transpose()
     }
@@ -87,7 +88,7 @@ impl<T> KvCollection<T> {
     /// keys the new document no longer carries (keys re-created with the same
     /// value are left alone — a delete+put of one key is a no-op), then write
     /// the data row and the new index rows.
-    pub(crate) fn update_ops(&self, data: &T) -> Result<Vec<StoreBatchOp>>
+    pub(crate) async fn update_ops(&self, data: &T) -> Result<Vec<StoreBatchOp>>
     where
         T: DbCollectionIden + Serialize,
     {
@@ -96,7 +97,7 @@ impl<T> KvCollection<T> {
         let new_bytes = serde_json::to_vec(&new_json).map_err(map_db_err)?;
         let new_index = self.index_keys(&new_json, &id);
         let mut ops = Vec::with_capacity(new_index.len() + 1);
-        if let Some(old_json) = self.read_json(&id)? {
+        if let Some(old_json) = self.read_json(&id).await? {
             let new_keys: HashSet<&str> = new_index.iter().map(String::as_str).collect();
             for idx_key in self.index_keys(&old_json, &id) {
                 if !new_keys.contains(idx_key.as_str()) {
@@ -119,12 +120,12 @@ impl<T> KvCollection<T> {
 
     /// The mutations [`DbCollection::delete`] would apply: every index row of
     /// the current document, then the data row itself.
-    pub(crate) fn delete_ops(&self, id: &str) -> Result<Vec<StoreBatchOp>>
+    pub(crate) async fn delete_ops(&self, id: &str) -> Result<Vec<StoreBatchOp>>
     where
         T: DbCollectionIden,
     {
         let mut ops = Vec::new();
-        if let Some(old_json) = self.read_json(id)? {
+        if let Some(old_json) = self.read_json(id).await? {
             for idx_key in self.index_keys(&old_json, id) {
                 ops.push(StoreBatchOp::Delete { key: idx_key });
             }
@@ -136,7 +137,7 @@ impl<T> KvCollection<T> {
     }
 
     /// Compute the set of IDs matching a single expression.
-    fn expr_ids(
+    async fn expr_ids(
         &self,
         expr: &Expr,
         indexed: &[&str],
@@ -275,7 +276,7 @@ impl<T> KvCollection<T> {
             };
 
             let options = ScanOptions::new(scan_op, field_prefix.clone(), is_rev);
-            let entries = self.kv.scan_prefix(&scan_key, options)?;
+            let entries = self.kv.scan_prefix(&scan_key, options).await?;
 
             let ids: HashSet<String> = match eq_prefix {
                 // Eq: every returned key starts with the value-key prefix
@@ -298,7 +299,7 @@ impl<T> KvCollection<T> {
             // Fallback: scan all data entries and filter in-memory
             let scan_key = format!("{}{}id{}", self.prefix, KEY_SEP, KEY_SEP);
             let options = ScanOptions::new(ScanOperation::Eq, scan_key.clone(), false);
-            let entries = self.kv.scan_prefix(&scan_key, options)?;
+            let entries = self.kv.scan_prefix(&scan_key, options).await?;
             let ids: HashSet<String> = entries
                 .iter()
                 .filter_map(|(_, bytes)| {
@@ -342,20 +343,23 @@ impl<T> KvCollection<T> {
     }
 
     /// Walk a single FilterExpr node and return matching IDs.
-    fn filter_expr_ids(
+    async fn filter_expr_ids(
         &self,
         filter_expr: &FilterExpr,
         indexed: &[&str],
         order_by: &[OrderBy],
     ) -> Result<HashSet<String>> {
         match filter_expr {
-            FilterExpr::Expr(expr) => self.expr_ids(expr, indexed, order_by),
-            FilterExpr::Filter(filter) => self.filter_ids(filter, indexed, order_by),
+            FilterExpr::Expr(expr) => self.expr_ids(expr, indexed, order_by).await,
+            // boxed: `filter_ids` recurses back here (mutual async recursion)
+            FilterExpr::Filter(filter) => {
+                Box::pin(self.filter_ids(filter, indexed, order_by)).await
+            }
         }
     }
 
     /// Walk the filter tree and combine ID sets using AND/OR.
-    fn filter_ids(
+    async fn filter_ids(
         &self,
         filter: &Filter,
         indexed: &[&str],
@@ -363,7 +367,8 @@ impl<T> KvCollection<T> {
     ) -> Result<HashSet<String>> {
         let mut result: Option<HashSet<String>> = None;
         for cond in &filter.exprs {
-            let ids = self.filter_expr_ids(cond, indexed, order_by)?;
+            // boxed: `filter_expr_ids` recurses back here (mutual async recursion)
+            let ids = Box::pin(self.filter_expr_ids(cond, indexed, order_by)).await?;
             result = Some(match result {
                 None => ids,
                 Some(existing) => match filter.r#type {
@@ -382,7 +387,7 @@ impl<T> KvCollection<T> {
     /// index keys written by older code encode values differently, so field
     /// scans silently miss or cross-match entries until the index region is
     /// recreated from the authoritative `{prefix}-id-` data region.
-    pub fn rebuild_index(&self) -> Result<usize>
+    pub async fn rebuild_index(&self) -> Result<usize>
     where
         T: DbCollectionIden,
     {
@@ -390,19 +395,19 @@ impl<T> KvCollection<T> {
         for field in T::indexed_fields() {
             let field_prefix = format!("{}{}{}{}", self.prefix, KEY_SEP, field, KEY_SEP);
             let options = ScanOptions::new(ScanOperation::Eq, field_prefix.clone(), false);
-            let stale = self.kv.scan_prefix(&field_prefix, options)?;
+            let stale = self.kv.scan_prefix(&field_prefix, options).await?;
             for (key, _) in stale {
-                self.kv.delete(&key)?;
+                self.kv.delete(&key).await?;
             }
         }
         let data_prefix = format!("{}{}id{}", self.prefix, KEY_SEP, KEY_SEP);
         let options = ScanOptions::new(ScanOperation::Eq, data_prefix.clone(), false);
-        let docs = self.kv.scan_prefix(&data_prefix, options)?;
+        let docs = self.kv.scan_prefix(&data_prefix, options).await?;
         for (_, bytes) in &docs {
             let json: JsonValue = serde_json::from_slice(bytes).map_err(map_db_err)?;
             let id = extract_id(&json)?;
             for idx_key in self.index_keys(&json, &id) {
-                self.kv.put(&idx_key, vec![])?;
+                self.kv.put(&idx_key, vec![]).await?;
             }
         }
         Ok(docs.len())
@@ -543,20 +548,21 @@ fn json_value_to_key_str(v: &JsonValue) -> String {
     }
 }
 
+#[async_trait::async_trait]
 impl<T> DbCollection for KvCollection<T>
 where
     T: DbCollectionIden + Serialize + DeserializeOwned + Send + Sync + Clone + Debug + 'static,
 {
     type Item = T;
 
-    fn exists(&self, id: &str) -> crate::Result<bool> {
+    async fn exists(&self, id: &str) -> crate::Result<bool> {
         let key = self.data_key(id);
-        self.kv.get(&key).map(|v| v.is_some())
+        self.kv.get(&key).await.map(|v| v.is_some())
     }
 
-    fn find(&self, id: &str) -> crate::Result<Self::Item> {
+    async fn find(&self, id: &str) -> crate::Result<Self::Item> {
         let key = self.data_key(id);
-        let data = self.kv.get(&key)?.ok_or(ActError::Store(format!(
+        let data = self.kv.get(&key).await?.ok_or(ActError::Store(format!(
             "cannot find {} by '{}'",
             self.prefix, id
         )))?;
@@ -564,7 +570,7 @@ where
         T::upcast(json)
     }
 
-    fn query(&self, q: &Query) -> crate::Result<PageData<Self::Item>> {
+    async fn query(&self, q: &Query) -> crate::Result<PageData<Self::Item>> {
         // Step 0: Validate query parameters
         if q.limit == 0 {
             return Err(ActError::Store(
@@ -575,12 +581,12 @@ where
 
         // Step 1 & 2: Compute matching ID set from filter and combine with AND/OR
         let id_set: HashSet<String> = if let Some(filter) = &q.filter {
-            self.filter_ids(filter, indexed, q.get_order_by())?
+            self.filter_ids(filter, indexed, q.get_order_by()).await?
         } else {
             // No filter – scan all data entries to collect all IDs
             let scan_key = format!("{}{}id{}", self.prefix, KEY_SEP, KEY_SEP);
             let options = ScanOptions::new(ScanOperation::Eq, scan_key.clone(), false);
-            let entries = self.kv.scan_prefix(&scan_key, options)?;
+            let entries = self.kv.scan_prefix(&scan_key, options).await?;
             entries
                 .iter()
                 .filter_map(|(_, bytes)| {
@@ -605,7 +611,7 @@ where
         let rows: Vec<T> = if order_by.is_empty() {
             let mut rows = Vec::new();
             for id in ids.into_iter().skip(q.offset).take(q.limit) {
-                if let Some(json) = self.read_json(&id)? {
+                if let Some(json) = self.read_json(&id).await? {
                     rows.push(T::upcast(json)?);
                 }
             }
@@ -613,7 +619,7 @@ where
         } else {
             let mut docs: Vec<JsonValue> = Vec::with_capacity(count);
             for id in &ids {
-                if let Some(json) = self.read_json(id)? {
+                if let Some(json) = self.read_json(id).await? {
                     docs.push(json);
                 }
             }
@@ -637,26 +643,26 @@ where
         })
     }
 
-    fn create(&self, data: &Self::Item) -> crate::Result<bool> {
+    async fn create(&self, data: &Self::Item) -> crate::Result<bool> {
         // Data row and index rows are committed as one atomic batch, so a
         // mid-write failure can never leave a document without its indexes.
         let ops = self.create_ops(data)?;
-        self.kv.batch(&ops)?;
+        self.kv.batch(&ops).await?;
         Ok(true)
     }
 
-    fn update(&self, data: &Self::Item) -> crate::Result<bool> {
+    async fn update(&self, data: &Self::Item) -> crate::Result<bool> {
         // Stale index drops, the data row and the new index rows commit as
         // one atomic batch.
-        let ops = self.update_ops(data)?;
-        self.kv.batch(&ops)?;
+        let ops = self.update_ops(data).await?;
+        self.kv.batch(&ops).await?;
         Ok(true)
     }
 
-    fn delete(&self, id: &str) -> crate::Result<bool> {
+    async fn delete(&self, id: &str) -> crate::Result<bool> {
         // Index rows and the data row are removed as one atomic batch.
-        let ops = self.delete_ops(id)?;
-        self.kv.batch(&ops)?;
+        let ops = self.delete_ops(id).await?;
+        self.kv.batch(&ops).await?;
         Ok(true)
     }
 }
@@ -1126,12 +1132,12 @@ mod tests {
         page.rows.iter().map(|d| d.id.clone()).collect()
     }
 
-    fn query(col: &KvCollection<Doc>, filter: Filter) -> crate::store::PageData<Doc> {
-        col.query(&Query::new().filter(filter)).unwrap()
+    async fn query(col: &KvCollection<Doc>, filter: Filter) -> crate::store::PageData<Doc> {
+        col.query(&Query::new().filter(filter)).await.unwrap()
     }
 
-    #[test]
-    fn index_range_closed_boundaries_exact() {
+    #[tokio::test]
+    async fn index_range_closed_boundaries_exact() {
         let kv: Arc<crate::store::MemoryStore> = Arc::new(crate::store::MemoryStore::new());
         let col = KvCollection::new("docs", kv.clone());
         for ts in [100i64, 200, 300] {
@@ -1140,34 +1146,37 @@ mod tests {
                 state: "idle".to_string(),
                 timestamp: ts,
             })
+            .await
             .unwrap();
         }
         // Inclusive Between keeps both exact boundaries (was: value == to dropped)
         let page = query(
             &col,
             Filter::and().expr(Expr::between("timestamp", 100, 200)),
-        );
+        )
+        .await;
         assert_eq!(ids(&page), vec!["d100", "d200"]);
         // Degenerate inclusive range returns the exact single value
         let page = query(
             &col,
             Filter::and().expr(Expr::between("timestamp", 100, 100)),
-        );
+        )
+        .await;
         assert_eq!(ids(&page), vec!["d100"]);
         // Single-sided comparisons are exact at the equality boundary
-        let page = query(&col, Filter::and().expr(Expr::gt("timestamp", 100)));
+        let page = query(&col, Filter::and().expr(Expr::gt("timestamp", 100))).await;
         assert_eq!(ids(&page), vec!["d200", "d300"]);
-        let page = query(&col, Filter::and().expr(Expr::ge("timestamp", 200)));
+        let page = query(&col, Filter::and().expr(Expr::ge("timestamp", 200))).await;
         assert_eq!(ids(&page), vec!["d200", "d300"]);
-        let page = query(&col, Filter::and().expr(Expr::lt("timestamp", 200)));
+        let page = query(&col, Filter::and().expr(Expr::lt("timestamp", 200))).await;
         assert_eq!(ids(&page), vec!["d100"]);
-        let page = query(&col, Filter::and().expr(Expr::le("timestamp", 200)));
+        let page = query(&col, Filter::and().expr(Expr::le("timestamp", 200))).await;
         assert_eq!(ids(&page), vec!["d100", "d200"]);
         // Rows are sorted by id, so ids() must be sorted before comparing
     }
 
-    #[test]
-    fn index_gate_falls_back_for_negative_bounds() {
+    #[tokio::test]
+    async fn index_gate_falls_back_for_negative_bounds() {
         // Negative bounds are not indexable (zero-padding reverses their
         // order), so range/inequality scans must fall back to the full-data
         // scan. Stored negative timestamps make any index-path mistake visible.
@@ -1179,6 +1188,7 @@ mod tests {
                 state: "idle".to_string(),
                 timestamp: ts,
             })
+            .await
             .unwrap();
         }
         fn ts(page: &crate::store::PageData<Doc>) -> Vec<i64> {
@@ -1187,19 +1197,21 @@ mod tests {
         let page = query(
             &col,
             Filter::and().expr(Expr::between("timestamp", -150, 150)),
-        );
+        )
+        .await;
         assert_eq!(ts(&page), vec![-100, 100]);
-        let page = query(&col, Filter::and().expr(Expr::ge("timestamp", -1)));
+        let page = query(&col, Filter::and().expr(Expr::ge("timestamp", -1))).await;
         assert_eq!(ts(&page), vec![100, 200]);
         let page = query(
             &col,
             Filter::and().expr(Expr::between("timestamp", -250, -50)),
-        );
+        )
+        .await;
         assert_eq!(ts(&page), vec![-200, -100]);
     }
 
-    #[test]
-    fn index_eq_isolates_hyphenated_values() {
+    #[tokio::test]
+    async fn index_eq_isolates_hyphenated_values() {
         let kv: Arc<crate::store::MemoryStore> = Arc::new(crate::store::MemoryStore::new());
         let col = KvCollection::new("docs", kv.clone());
         for (id, state) in [("a", "w9"), ("b", "w9-foo"), ("c", "other")] {
@@ -1208,19 +1220,20 @@ mod tests {
                 state: state.to_string(),
                 timestamp: 0,
             })
+            .await
             .unwrap();
         }
         // '-' is escaped in the value segment: Eq on "w9" must not reach "w9-foo"
-        let page = query(&col, Filter::and().expr(Expr::eq("state", "w9")));
+        let page = query(&col, Filter::and().expr(Expr::eq("state", "w9"))).await;
         assert_eq!(ids(&page), vec!["a"]);
-        let page = query(&col, Filter::and().expr(Expr::eq("state", "w9-foo")));
+        let page = query(&col, Filter::and().expr(Expr::eq("state", "w9-foo"))).await;
         assert_eq!(ids(&page), vec!["b"]);
-        let page = query(&col, Filter::and().expr(Expr::ne("state", "w9")));
+        let page = query(&col, Filter::and().expr(Expr::ne("state", "w9"))).await;
         assert_eq!(ids(&page), vec!["b", "c"]);
     }
 
-    #[test]
-    fn rebuild_index_repairs_stale_or_legacy_keys() {
+    #[tokio::test]
+    async fn rebuild_index_repairs_stale_or_legacy_keys() {
         let kv: Arc<crate::store::MemoryStore> = Arc::new(crate::store::MemoryStore::new());
         let col = KvCollection::new("docs", kv.clone());
         for (id, state) in [("a", "w9"), ("b", "w9-foo")] {
@@ -1229,27 +1242,34 @@ mod tests {
                 state: state.to_string(),
                 timestamp: 0,
             })
+            .await
             .unwrap();
         }
         // Simulate a pre-fix persisted index: value "-" not escaped, id suffixed
         let legacy = format!("docs-state-{}-{}", "w9-foo", "b");
-        kv.put(&legacy, vec![]).unwrap();
+        kv.put(&legacy, vec![]).await.unwrap();
         // Legacy key is a prefix-extension of the "w9" value group -> pollutes
         // Eq with a phantom id ("foo-b"), inflating count while the row is lost
-        let page = query(&col, Filter::and().expr(Expr::eq("state", "w9")));
+        let page = query(&col, Filter::and().expr(Expr::eq("state", "w9"))).await;
         assert_eq!(page.count, 2, "legacy phantom id inflates count");
         assert_eq!(ids(&page), vec!["a"], "phantom row cannot be fetched");
         // Drop the fresh index key of doc b, then rebuild restores exactness
         let fresh = format!("docs-state-{}-{}", encode_key_str("w9-foo"), "b");
-        kv.delete(&fresh).unwrap();
-        let page = query(&col, Filter::and().expr(Expr::eq("state", "w9-foo")));
+        kv.delete(&fresh).await.unwrap();
+        let page = query(&col, Filter::and().expr(Expr::eq("state", "w9-foo"))).await;
         assert_eq!(page.count, 0, "fresh key deleted, doc b unreachable");
-        assert!(col.rebuild_index().unwrap() >= 2);
-        assert!(kv.get(&legacy).unwrap().is_none(), "legacy key removed");
-        assert!(kv.get(&fresh).unwrap().is_some(), "fresh key restored");
-        let page = query(&col, Filter::and().expr(Expr::eq("state", "w9")));
+        assert!(col.rebuild_index().await.unwrap() >= 2);
+        assert!(
+            kv.get(&legacy).await.unwrap().is_none(),
+            "legacy key removed"
+        );
+        assert!(
+            kv.get(&fresh).await.unwrap().is_some(),
+            "fresh key restored"
+        );
+        let page = query(&col, Filter::and().expr(Expr::eq("state", "w9"))).await;
         assert_eq!(ids(&page), vec!["a"], "no pollution after rebuild");
-        let page = query(&col, Filter::and().expr(Expr::eq("state", "w9-foo")));
+        let page = query(&col, Filter::and().expr(Expr::eq("state", "w9-foo"))).await;
         assert_eq!(ids(&page), vec!["b"]);
     }
 
@@ -1289,8 +1309,9 @@ mod tests {
         }
     }
 
-    fn sort_query_ids(col: &KvCollection<SortDoc>, q: &Query) -> Vec<String> {
+    async fn sort_query_ids(col: &KvCollection<SortDoc>, q: &Query) -> Vec<String> {
         col.query(q)
+            .await
             .unwrap()
             .rows
             .iter()
@@ -1298,8 +1319,8 @@ mod tests {
             .collect()
     }
 
-    #[test]
-    fn order_by_sorts_before_pagination() {
+    #[tokio::test]
+    async fn order_by_sorts_before_pagination() {
         let (_, col) = sort_col();
         for (id, group, ord) in [
             ("a", Some(1), Some(3)),
@@ -1310,44 +1331,44 @@ mod tests {
             ("f", None, None),       // no value on every key: first under Asc
             ("g", Some(2), Some(5)), // ties with "e" -> id-ascending break
         ] {
-            col.create(&mk_doc(id, group, ord)).unwrap();
+            col.create(&mk_doc(id, group, ord)).await.unwrap();
         }
         // group asc, ord desc: f | a b d | e g c
         let order = Query::new()
             .order("group", Sort::Asc)
             .order("ord", Sort::Desc);
-        let full = sort_query_ids(&col, &order.clone().limit(100));
+        let full = sort_query_ids(&col, &order.clone().limit(100)).await;
         assert_eq!(full, vec!["f", "a", "b", "d", "e", "g", "c"]);
 
         // Each page must be the corresponding global slice, not a re-sorted
         // arbitrary batch: concatenated pages equal the full sorted order.
-        let page1 = sort_query_ids(&col, &order.clone().limit(2).offset(0));
-        let page2 = sort_query_ids(&col, &order.clone().limit(2).offset(2));
-        let page3 = sort_query_ids(&col, &order.clone().limit(2).offset(4));
-        let page4 = sort_query_ids(&col, &order.clone().limit(2).offset(6));
+        let page1 = sort_query_ids(&col, &order.clone().limit(2).offset(0)).await;
+        let page2 = sort_query_ids(&col, &order.clone().limit(2).offset(2)).await;
+        let page3 = sort_query_ids(&col, &order.clone().limit(2).offset(4)).await;
+        let page4 = sort_query_ids(&col, &order.clone().limit(2).offset(6)).await;
         assert_eq!(page1, vec!["f", "a"]);
         assert_eq!(page2, vec!["b", "d"]);
         assert_eq!(page3, vec!["e", "g"]);
         assert_eq!(page4, vec!["c"]);
-        let page = col.query(&order.clone().limit(2).offset(4)).unwrap();
+        let page = col.query(&order.clone().limit(2).offset(4)).await.unwrap();
         assert_eq!((page.count, page.page_num, page.page_count), (7, 3, 4));
     }
 
-    #[test]
-    fn order_by_numeric_not_lexicographic() {
+    #[tokio::test]
+    async fn order_by_numeric_not_lexicographic() {
         let (_, col) = sort_col();
         for (id, ord) in [("ten", Some(10)), ("nine", Some(9)), ("one", Some(1))] {
-            col.create(&mk_doc(id, Some(1), ord)).unwrap();
+            col.create(&mk_doc(id, Some(1), ord)).await.unwrap();
         }
         // "10" < "9" lexicographically; numeric order must give 1, 9, 10.
         let q = Query::new().order("ord", Sort::Asc);
-        assert_eq!(sort_query_ids(&col, &q), vec!["one", "nine", "ten"]);
+        assert_eq!(sort_query_ids(&col, &q).await, vec!["one", "nine", "ten"]);
         let q = Query::new().order("ord", Sort::Desc);
-        assert_eq!(sort_query_ids(&col, &q), vec!["ten", "nine", "one"]);
+        assert_eq!(sort_query_ids(&col, &q).await, vec!["ten", "nine", "one"]);
     }
 
-    #[test]
-    fn order_by_no_value_first_asc_last_desc() {
+    #[tokio::test]
+    async fn order_by_no_value_first_asc_last_desc() {
         let (kv, col) = sort_col();
         for (id, ord) in [
             ("low", Some(1)),
@@ -1355,21 +1376,22 @@ mod tests {
             ("high", Some(5)),
             ("mid", Some(3)),
         ] {
-            col.create(&mk_doc(id, None, ord)).unwrap();
+            col.create(&mk_doc(id, None, ord)).await.unwrap();
         }
         // Raw doc whose `ord` key is missing entirely must sort like null.
         let raw = serde_json::json!({"id": "absent", "group": null});
         kv.put(&col.data_key("absent"), serde_json::to_vec(&raw).unwrap())
+            .await
             .unwrap();
         let q = Query::new().order("ord", Sort::Asc);
         assert_eq!(
-            sort_query_ids(&col, &q),
+            sort_query_ids(&col, &q).await,
             vec!["absent", "nil", "low", "mid", "high"]
         );
         let q = Query::new().order("ord", Sort::Desc);
         // no-value rows land last; among them the id-ascending tie-break wins
         assert_eq!(
-            sort_query_ids(&col, &q),
+            sort_query_ids(&col, &q).await,
             vec!["high", "mid", "low", "absent", "nil"]
         );
     }
@@ -1391,32 +1413,33 @@ mod tests {
         deletes: AtomicUsize,
     }
 
+    #[async_trait::async_trait]
     impl KvStore for CountingKv {
-        fn get(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
-            self.inner.get(key)
+        async fn get(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
+            self.inner.get(key).await
         }
 
-        fn put(&self, key: &str, value: Vec<u8>) -> crate::Result<()> {
+        async fn put(&self, key: &str, value: Vec<u8>) -> crate::Result<()> {
             self.puts.fetch_add(1, Ordering::SeqCst);
-            self.inner.put(key, value)
+            self.inner.put(key, value).await
         }
 
-        fn delete(&self, key: &str) -> crate::Result<()> {
+        async fn delete(&self, key: &str) -> crate::Result<()> {
             self.deletes.fetch_add(1, Ordering::SeqCst);
-            self.inner.delete(key)
+            self.inner.delete(key).await
         }
 
-        fn batch(&self, ops: &[StoreBatchOp]) -> crate::Result<()> {
+        async fn batch(&self, ops: &[StoreBatchOp]) -> crate::Result<()> {
             self.batches.fetch_add(1, Ordering::SeqCst);
-            self.inner.batch(ops)
+            self.inner.batch(ops).await
         }
 
-        fn scan_prefix(
+        async fn scan_prefix(
             &self,
             key: &str,
             options: ScanOptions,
         ) -> crate::Result<Vec<(String, Vec<u8>)>> {
-            self.inner.scan_prefix(key, options)
+            self.inner.scan_prefix(key, options).await
         }
     }
 
@@ -1434,10 +1457,10 @@ mod tests {
         }
     }
 
-    #[test]
-    fn create_commits_data_and_indexes_in_one_batch() {
+    #[tokio::test]
+    async fn create_commits_data_and_indexes_in_one_batch() {
         let (kv, col) = counting_col();
-        col.create(&doc("d1", "idle", 5)).unwrap();
+        col.create(&doc("d1", "idle", 5)).await.unwrap();
 
         assert_eq!(
             kv.batches.load(Ordering::SeqCst),
@@ -1453,18 +1476,18 @@ mod tests {
             "create must not fall back to raw per-key writes"
         );
         // the data row exists and the index answers queries
-        assert_eq!(col.find("d1").unwrap().timestamp, 5);
-        let page = query(&col, Filter::and().expr(Expr::eq("state", "idle")));
+        assert_eq!(col.find("d1").await.unwrap().timestamp, 5);
+        let page = query(&col, Filter::and().expr(Expr::eq("state", "idle"))).await;
         assert_eq!(ids(&page), vec!["d1"]);
     }
 
-    #[test]
-    fn update_commits_stale_index_drop_and_rewrite_in_one_batch() {
+    #[tokio::test]
+    async fn update_commits_stale_index_drop_and_rewrite_in_one_batch() {
         let (kv, col) = counting_col();
-        col.create(&doc("d1", "idle", 5)).unwrap();
+        col.create(&doc("d1", "idle", 5)).await.unwrap();
         kv.batches.store(0, Ordering::SeqCst);
 
-        col.update(&doc("d1", "running", 9)).unwrap();
+        col.update(&doc("d1", "running", 9)).await.unwrap();
         assert_eq!(
             kv.batches.load(Ordering::SeqCst),
             1,
@@ -1480,26 +1503,25 @@ mod tests {
         );
         // the state index moved atomically: running sees the doc, idle does not
         assert_eq!(
-            ids(&query(
-                &col,
-                Filter::and().expr(Expr::eq("state", "running"))
-            )),
+            ids(&query(&col, Filter::and().expr(Expr::eq("state", "running"))).await),
             vec!["d1"]
         );
         assert_eq!(
-            query(&col, Filter::and().expr(Expr::eq("state", "idle"))).count,
+            query(&col, Filter::and().expr(Expr::eq("state", "idle")))
+                .await
+                .count,
             0
         );
-        assert_eq!(col.find("d1").unwrap().timestamp, 9);
+        assert_eq!(col.find("d1").await.unwrap().timestamp, 9);
     }
 
-    #[test]
-    fn delete_removes_data_and_indexes_in_one_batch() {
+    #[tokio::test]
+    async fn delete_removes_data_and_indexes_in_one_batch() {
         let (kv, col) = counting_col();
-        col.create(&doc("d1", "idle", 5)).unwrap();
+        col.create(&doc("d1", "idle", 5)).await.unwrap();
         kv.batches.store(0, Ordering::SeqCst);
 
-        col.delete("d1").unwrap();
+        col.delete("d1").await.unwrap();
         assert_eq!(
             kv.batches.load(Ordering::SeqCst),
             1,
@@ -1513,9 +1535,9 @@ mod tests {
             (0, 0),
             "delete must not fall back to raw per-key writes"
         );
-        assert!(col.find("d1").is_err(), "data row must be gone");
+        assert!(col.find("d1").await.is_err(), "data row must be gone");
         for filter in ["state", "timestamp"] {
-            let page = query(&col, Filter::and().expr(Expr::eq(filter, "idle")));
+            let page = query(&col, Filter::and().expr(Expr::eq(filter, "idle"))).await;
             assert_eq!(page.count, 0, "no index row may survive the delete");
         }
     }

@@ -77,7 +77,7 @@ impl ActTask for Step {
         Ok(NextAction::Parent)
     }
 
-    fn on_error(&self, ctx: &Context) -> Result<()> {
+    async fn on_error(&self, ctx: &Context) -> Result<()> {
         let task = ctx.task();
         let children = task.node().children_in(NodeOutputKind::Catch);
         if task.sign().is_none() && !children.is_empty() {
@@ -91,10 +91,10 @@ impl ActTask for Step {
                 )?;
             }
         }
-        ctx.emit_error()
+        ctx.emit_error().await
     }
 
-    fn on_timeout(&self, ctx: &Context) -> Result<()> {
+    async fn on_timeout(&self, ctx: &Context) -> Result<()> {
         let task = ctx.task();
         let children = task.node().children_in(NodeOutputKind::Timeout);
         if !children.is_empty() {

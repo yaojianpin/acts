@@ -15,7 +15,7 @@ use serial_test::serial;
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn engine_start() {
-    let engine = Engine::new().start();
+    let engine = Engine::new().start().await;
     assert!(engine.is_ok());
 }
 
@@ -45,7 +45,8 @@ async fn engine_start_failure_releases_runtime_resources() {
     let started = Engine::builder()
         .add_plugin(&FailPlugin { fail: true })
         .build()
-        .start();
+        .start()
+        .await;
     let err = match started {
         Err(err) => err,
         Ok(_) => panic!("start with a failing plugin must fail"),
@@ -62,14 +63,15 @@ async fn engine_start_failure_releases_runtime_resources() {
         .add_plugin(&FailPlugin { fail: false })
         .build()
         .start()
+        .await
         .unwrap();
-    engine.close();
+    engine.close().await;
 }
 
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn engine_event_on_message() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let sig = engine.signal("".to_string());
     let s = sig.clone();
     let mid = utils::longid();
@@ -78,18 +80,26 @@ async fn engine_event_on_message() {
         .with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "test")));
 
     engine.channel().on_message(move |e| {
-        if e.is_type("act") {
-            s.update(|data| *data = e.params().unwrap().get::<String>("key").unwrap());
-            s.close();
+        let s = s.clone();
+        async move {
+            if e.is_type("act") {
+                s.update(|data| *data = e.params().unwrap().get::<String>("key").unwrap());
+                s.close();
+            }
         }
     });
 
     let executor = engine.executor();
-    engine.executor().model().deploy(&workflow, None).unwrap();
+    engine
+        .executor()
+        .model()
+        .deploy(&workflow, None)
+        .await
+        .unwrap();
 
     let mut options = Vars::new();
     options.insert("pid".to_string(), json!(utils::longid()));
-    executor.proc().start(&workflow.id, options).unwrap();
+    executor.proc().start(&workflow.id, options).await.unwrap();
     let ret = sig.recv().await;
     assert_eq!(ret, "test");
 }
@@ -97,7 +107,7 @@ async fn engine_event_on_message() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn engine_event_on_start() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
 
     let sig = engine.signal("".to_string());
     let s = sig.clone();
@@ -107,15 +117,23 @@ async fn engine_event_on_start() {
         .with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "test")));
 
     engine.channel().on_start(move |e| {
-        s.send(e.mid.clone());
+        let s = s.clone();
+        async move {
+            s.send(e.mid.clone());
+        }
     });
 
     let executor = engine.executor();
-    engine.executor().model().deploy(&workflow, None).unwrap();
+    engine
+        .executor()
+        .model()
+        .deploy(&workflow, None)
+        .await
+        .unwrap();
 
     let mut options = Vars::new();
     options.insert("pid".to_string(), json!(utils::longid()));
-    executor.proc().start(&workflow.id, options).unwrap();
+    executor.proc().start(&workflow.id, options).await.unwrap();
     let ret = sig.recv().await;
     assert_eq!(ret, mid);
 }
@@ -123,7 +141,7 @@ async fn engine_event_on_start() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn engine_event_on_complete() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let sig = engine.signal(false);
     let s1 = sig.clone();
     let mid = utils::longid();
@@ -132,15 +150,24 @@ async fn engine_event_on_complete() {
         .with_step(|step| step.with_id("step1"));
 
     engine.channel().on_complete(move |e| {
-        s1.send(e.mid == mid);
+        let s1 = s1.clone();
+        let mid = mid.clone();
+        async move {
+            s1.send(e.mid == mid);
+        }
     });
 
     let executor = engine.executor();
-    engine.executor().model().deploy(&workflow, None).unwrap();
+    engine
+        .executor()
+        .model()
+        .deploy(&workflow, None)
+        .await
+        .unwrap();
 
     let mut options = Vars::new();
     options.insert("pid".to_string(), json!(utils::longid()));
-    executor.proc().start(&workflow.id, options).unwrap();
+    executor.proc().start(&workflow.id, options).await.unwrap();
     let ret = sig.recv().await;
     assert!(ret);
 }
@@ -148,7 +175,7 @@ async fn engine_event_on_complete() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn engine_event_on_error() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let mid = utils::longid();
     let workflow = Workflow::new().with_id(&mid).with_step(|step| {
         step.with_id("step1")
@@ -158,29 +185,37 @@ async fn engine_event_on_error() {
     let sig = engine.signal(false);
     let s1 = sig.clone();
     engine.channel().on_error(move |e| {
-        s1.send(e.mid == mid);
+        let s1 = s1.clone();
+        let mid = mid.clone();
+        async move {
+            s1.send(e.mid == mid);
+        }
     });
 
     let rt = engine.runtime();
     engine.channel().on_message(move |e| {
-        let mut options = Vars::new();
-        options.insert("uid".to_string(), json!("u1"));
-        options.set("ecode", "err1");
+        let rt = rt.clone();
+        async move {
+            let mut options = Vars::new();
+            options.insert("uid".to_string(), json!("u1"));
+            options.set("ecode", "err1");
 
-        if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
-            && e.is_state(MessageState::Created)
-        {
-            rt.do_action2(&e.pid, &e.tid, EventAction::Error, options)
-                .unwrap();
+            if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
+                && e.is_state(MessageState::Created)
+            {
+                rt.do_action2(&e.pid, &e.tid, EventAction::Error, options)
+                    .await
+                    .unwrap();
+            }
         }
     });
 
     let executor = engine.executor();
-    executor.model().deploy(&workflow, None).unwrap();
+    executor.model().deploy(&workflow, None).await.unwrap();
 
     let mut options = Vars::new();
     options.insert("pid".to_string(), json!(utils::longid()));
-    executor.proc().start(&workflow.id, options).unwrap();
+    executor.proc().start(&workflow.id, options).await.unwrap();
     let ret = sig.recv().await;
     assert!(ret);
 }
@@ -216,7 +251,12 @@ async fn engine_model_create() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn engine_build_cache_size() {
-    let engine = Engine::builder().cache_size(100).build().start().unwrap();
+    let engine = Engine::builder()
+        .cache_size(100)
+        .build()
+        .start()
+        .await
+        .unwrap();
     assert_eq!(engine.config().cache_cap(), 100)
 }
 
@@ -227,6 +267,7 @@ async fn engine_build_log_dir() {
         .log("test", "INFO")
         .build()
         .start()
+        .await
         .unwrap();
     assert_eq!(engine.config().log().dir, "test")
 }
@@ -238,6 +279,7 @@ async fn engine_build_log_level() {
         .log("log", "DEBUG")
         .build()
         .start()
+        .await
         .unwrap();
     assert_eq!(engine.config().log().level, "DEBUG")
 }
@@ -249,6 +291,7 @@ async fn engine_build_tick_interval_secs() {
         .tick_interval_secs(10)
         .build()
         .start()
+        .await
         .unwrap();
     assert_eq!(engine.config().tick_interval_secs(), 10)
 }
@@ -260,6 +303,7 @@ async fn engine_build_max_message_retry_times() {
         .max_message_retry_times(100)
         .build()
         .start()
+        .await
         .unwrap();
     assert_eq!(engine.config().max_message_retry_times(), 100)
 }
@@ -270,6 +314,7 @@ async fn engine_build_max_node_run_times() {
         .max_node_run_times(100)
         .build()
         .start()
+        .await
         .unwrap();
     assert_eq!(engine.config().max_node_run_times(), 100)
 }
@@ -277,9 +322,9 @@ async fn engine_build_max_node_run_times() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn engine_drop() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     drop(engine);
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     drop(engine)
 }
 
@@ -431,7 +476,7 @@ async fn config_resolver_injects_sealed_data() {
             .with("permissions", vec!["deploy", "read_logs"]),
     });
 
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     engine.add_resolver("profile", resolver);
 
     let workflow = Workflow::new().with_step(|step| {
@@ -443,14 +488,18 @@ async fn config_resolver_injects_sealed_data() {
     let s1 = sig.clone();
 
     engine.channel().on_message(move |e| {
-        if e.is_irq() {
-            s1.close();
+        let s1 = s1.clone();
+        async move {
+            if e.is_irq() {
+                s1.close();
+            }
         }
     });
 
     let proc = engine
         .runtime()
         .start(&workflow, Vars::new().with("unit", "u1"))
+        .await
         .unwrap();
 
     sig.recv().await;
@@ -473,7 +522,7 @@ async fn sealed_data_js_dollar_profile_access() {
             .with("secrets", Vars::new().with("TOKEN", "sk-123")),
     });
 
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     engine.add_resolver("profile", resolver);
 
     let env = engine.runtime().env().clone();
@@ -485,14 +534,18 @@ async fn sealed_data_js_dollar_profile_access() {
     let sig = engine.signal(());
     let s1 = sig.clone();
     engine.channel().on_message(move |e| {
-        if e.is_irq() {
-            s1.close();
+        let s1 = s1.clone();
+        async move {
+            if e.is_irq() {
+                s1.close();
+            }
         }
     });
 
     let proc = engine
         .runtime()
         .start(&workflow, Vars::new().with("unit", "u1"))
+        .await
         .unwrap();
 
     sig.recv().await;
@@ -530,7 +583,7 @@ async fn config_resolver_skips_when_required_params_missing() {
         }
     }
 
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     engine.add_resolver("profile", Arc::new(StrictResolver));
 
     let workflow = Workflow::new().with_step(|step| {
@@ -541,13 +594,20 @@ async fn config_resolver_skips_when_required_params_missing() {
     let sig = engine.signal(());
     let s1 = sig.clone();
     engine.channel().on_message(move |e| {
-        if e.is_irq() {
-            s1.close();
+        let s1 = s1.clone();
+        async move {
+            if e.is_irq() {
+                s1.close();
+            }
         }
     });
 
     // start WITHOUT required params
-    let proc = engine.runtime().start(&workflow, Vars::new()).unwrap();
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
 
     sig.recv().await;
 
@@ -563,7 +623,7 @@ async fn sealed_data_inherits_from_parent() {
         data: Vars::new().with("scope", "workflow"),
     });
 
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     engine.add_resolver("profile", resolver);
 
     let workflow = Workflow::new().with_step(|step| {
@@ -574,14 +634,18 @@ async fn sealed_data_inherits_from_parent() {
     let sig = engine.signal(());
     let s1 = sig.clone();
     engine.channel().on_message(move |e| {
-        if e.is_irq() {
-            s1.close();
+        let s1 = s1.clone();
+        async move {
+            if e.is_irq() {
+                s1.close();
+            }
         }
     });
 
     let proc = engine
         .runtime()
         .start(&workflow, Vars::new().with("unit", "u1"))
+        .await
         .unwrap();
 
     sig.recv().await;
@@ -599,9 +663,15 @@ async fn sealed_data_inherits_from_parent() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn engine_default_store_is_memory() {
-    let engine = Engine::new().start().unwrap();
+    let engine = Engine::new().start().await.unwrap();
     let store = engine.runtime().store();
-    assert!(store.procs().query(&crate::query::Query::new()).is_ok());
+    assert!(
+        store
+            .procs()
+            .query(&crate::query::Query::new())
+            .await
+            .is_ok()
+    );
 }
 
 #[serial]
@@ -611,24 +681,37 @@ async fn engine_set_store_memory() {
         .set_store(Arc::new(MemoryStore::new()))
         .build()
         .start()
+        .await
         .unwrap();
     let store = engine.runtime().store();
-    assert!(store.procs().query(&crate::query::Query::new()).is_ok());
+    assert!(
+        store
+            .procs()
+            .query(&crate::query::Query::new())
+            .await
+            .is_ok()
+    );
 }
 
 #[cfg(feature = "store-sqlite")]
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn engine_set_store_sqlite() {
+    let store = crate::store::SqliteStore::open(":memory:").await.unwrap();
     let engine = Engine::builder()
-        .set_store(Arc::new(
-            crate::store::SqliteStore::open(":memory:").unwrap(),
-        ))
+        .set_store(Arc::new(store))
         .build()
         .start()
+        .await
         .unwrap();
     let store = engine.runtime().store();
-    assert!(store.procs().query(&crate::query::Query::new()).is_ok());
+    assert!(
+        store
+            .procs()
+            .query(&crate::query::Query::new())
+            .await
+            .is_ok()
+    );
 }
 /// Custom `KvStore` implementation injected via [`EngineBuilder::set_store`].
 #[derive(Debug, Default)]
@@ -667,22 +750,23 @@ fn key_matches(k: &str, key: &str, prefix: &str, op: &ScanOperation) -> bool {
     }
 }
 
+#[async_trait::async_trait]
 impl KvStore for CustomStore {
-    fn get(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
+    async fn get(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
         Ok(self.data.lock().get(key).cloned())
     }
 
-    fn put(&self, key: &str, value: Vec<u8>) -> crate::Result<()> {
+    async fn put(&self, key: &str, value: Vec<u8>) -> crate::Result<()> {
         self.data.lock().insert(key.to_string(), value);
         Ok(())
     }
 
-    fn delete(&self, key: &str) -> crate::Result<()> {
+    async fn delete(&self, key: &str) -> crate::Result<()> {
         self.data.lock().remove(key);
         Ok(())
     }
 
-    fn scan_prefix(
+    async fn scan_prefix(
         &self,
         key: &str,
         options: ScanOptions,
@@ -714,16 +798,26 @@ async fn engine_set_store_custom() {
         .set_store(custom.clone())
         .build()
         .start()
+        .await
         .unwrap();
 
     // writes through the engine must land in the custom store
     let model = Workflow::new().with_id("custom_store_model");
-    engine.executor().model().deploy(&model, None).unwrap();
+    engine
+        .executor()
+        .model()
+        .deploy(&model, None)
+        .await
+        .unwrap();
 
     // reads must go through the custom store
     let store = engine.runtime().store();
-    assert!(store.models().find("custom_store_model").is_ok());
-    let page = store.models().query(&crate::query::Query::new()).unwrap();
+    assert!(store.models().find("custom_store_model").await.is_ok());
+    let page = store
+        .models()
+        .query(&crate::query::Query::new())
+        .await
+        .unwrap();
     assert_eq!(page.count, 1);
 
     // the raw key must physically exist in the custom store
@@ -742,4 +836,57 @@ fn engine_builder_set_store_duplicate() {
     let _ = Engine::builder()
         .set_store(Arc::new(MemoryStore::new()))
         .set_store(Arc::new(MemoryStore::new()));
+}
+
+/// Regression: an engine backed by a real (async-driver) store must work on a
+/// current-thread tokio runtime. Before the async store migration every
+/// async-context store op went through `tokio::task::block_in_place`, which
+/// panics on current-thread runtimes — the retry/schedule timers (and every
+/// task transition) hit that on their first tick.
+#[cfg(feature = "store-sqlite")]
+#[serial]
+#[tokio::test]
+async fn engine_sqlite_runs_on_current_thread_runtime() {
+    let store = crate::store::SqliteStore::open_in_memory().await.unwrap();
+    let engine = Engine::builder()
+        .set_store(Arc::new(store))
+        .tick_interval_secs(1)
+        .build()
+        .start()
+        .await
+        .unwrap();
+
+    let model = Workflow::new()
+        .with_id("current_thread_model")
+        .with_step(|step| {
+            step.with_id("step1")
+                .with_uses("acts.transform.set", Vars::new().with("a", 1))
+        });
+
+    let (done, sig) = engine.signal(bool::default()).double();
+    engine
+        .executor()
+        .model()
+        .deploy(&model, None)
+        .await
+        .unwrap();
+    engine.channel().on_complete(move |e| {
+        let done = done.clone();
+        async move {
+            if e.mid == "current_thread_model" {
+                done.send(true);
+            }
+        }
+    });
+    engine
+        .executor()
+        .proc()
+        .start("current_thread_model", Vars::new())
+        .await
+        .unwrap();
+
+    // long enough for the retry timer to tick (test builds tick every 800ms)
+    let ret = sig.timeout(4000).await;
+    assert!(ret, "workflow did not complete on a current-thread runtime");
+    engine.close().await;
 }

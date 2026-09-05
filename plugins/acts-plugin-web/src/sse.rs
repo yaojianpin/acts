@@ -45,9 +45,11 @@ pub async fn sse(
         options: query.options,
     });
     chan.on_message(move |e| {
-        let msg = e.inner().clone();
         let tx = tx.clone();
-        tokio::spawn(async move { tx.send(msg).await });
+        async move {
+            let msg = e.inner().clone();
+            tokio::spawn(async move { tx.send(msg).await });
+        }
     });
 
     let stream = async_stream::stream! {
@@ -65,6 +67,6 @@ pub async fn ack(
     State(state): State<Arc<Engine>>,
     Json(ack): Json<MessageAck>,
 ) -> Result<impl IntoResponse, AppError> {
-    state.executor().msg().ack(&ack.id)?;
+    state.executor().msg().ack(&ack.id).await?;
     Ok(RespData::ok(()))
 }

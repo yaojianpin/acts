@@ -23,9 +23,9 @@ mod tests;
 ///     fn on_init(&self, engine: &Engine) -> Result<()> {
 ///         println!("TestPlugin");
 ///         // engine.register_module("name", module);
-///         engine.channel().on_start(|e| {});
-///         engine.channel().on_complete(|e| {});
-///         engine.channel().on_message(|e| {});
+///         engine.channel().on_start(|_| async {});
+///         engine.channel().on_complete(|_| async {});
+///         engine.channel().on_message(|_| async {});
 ///         Ok(())
 ///     }
 /// }

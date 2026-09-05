@@ -18,15 +18,17 @@ pub const USES_CODE: &str = "acts.transform.code";
 /// Tests should get Runtime via `engine.runtime()`, create signals via
 /// `engine.signal()`, and manage their own signal/channel lifecycle.
 #[allow(clippy::type_complexity)]
-pub fn create_proc(workflow: &Workflow, pid: &str) -> (Engine, Arc<Process>) {
-    let engine = Engine::new().start().unwrap();
+pub async fn create_proc(workflow: &Workflow, pid: &str) -> (Engine, Arc<Process>) {
+    let engine = Engine::new().start().await.unwrap();
     let proc = engine.runtime().create_proc(pid, workflow);
-    engine.channel().on_message(|e| println!("message: {e:?}"));
+    engine
+        .channel()
+        .on_message(|e| async move { println!("message: {e:?}") });
     (engine, proc)
 }
 
 /// Like [`create_proc`] but uses [`EngineBuilder`] with a custom [`ConfigData`].
-pub(crate) fn create_proc_with_config(
+pub(crate) async fn create_proc_with_config(
     config: &Config,
     workflow: &Workflow,
     pid: &str,
@@ -35,9 +37,12 @@ pub(crate) fn create_proc_with_config(
         .set_config(config)
         .build()
         .start()
+        .await
         .unwrap();
     let proc = engine.runtime().create_proc(pid, workflow);
-    engine.channel().on_message(|e| println!("message: {e:?}"));
+    engine
+        .channel()
+        .on_message(|e| async move { println!("message: {e:?}") });
 
     (engine, proc)
 }
@@ -50,13 +55,19 @@ where
     let channel = engine.channel();
     channel.on_complete(move |e| {
         println!("on_complete: {e:?}");
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        s1.close();
+        let s1 = s1.clone();
+        async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            s1.close();
+        }
     });
 
     channel.on_error(move |e| {
         println!("on_error: {e:?}");
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        s2.close();
+        let s2 = s2.clone();
+        async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            s2.close();
+        }
     });
 }

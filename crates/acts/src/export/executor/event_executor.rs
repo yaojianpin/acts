@@ -22,8 +22,8 @@ impl EventExecutor {
     }
 
     #[instrument(skip(self))]
-    pub fn list(&self, q: &Query) -> Result<PageData<EventInfo>> {
-        match self.runtime.cache().store().events().query(q) {
+    pub async fn list(&self, q: &Query) -> Result<PageData<EventInfo>> {
+        match self.runtime.cache().store().events().query(q).await {
             Ok(events) => Ok(PageData {
                 count: events.count,
                 page_size: events.page_size,
@@ -36,8 +36,8 @@ impl EventExecutor {
     }
 
     #[instrument(skip(self))]
-    pub fn get(&self, id: &str) -> Result<EventInfo> {
-        let event = &self.runtime.cache().store().events().find(id)?;
+    pub async fn get(&self, id: &str) -> Result<EventInfo> {
+        let event = &self.runtime.cache().store().events().find(id).await?;
         Ok(event.into())
     }
 
@@ -52,22 +52,25 @@ impl EventExecutor {
     ///   its outputs
     pub async fn start(&self, event_id: &str, params: &JsonValue) -> Result<Option<Vars>> {
         let store = self.runtime.cache().store();
-        let event = store.events().find(event_id)?;
+        let event = store.events().find(event_id).await?;
 
         let kind = TriggerKind::parse(&event.kind);
         match kind {
             Some(TriggerKind::Manual) => {
-                let workflow = self.workflow(&event)?;
+                let workflow = self.workflow(&event).await?;
                 let payload = if params.is_null() {
                     event.default_params()
                 } else {
                     params.clone()
                 };
-                let proc = self.runtime.start(&workflow, payload_to_vars(payload)?)?;
+                let proc = self
+                    .runtime
+                    .start(&workflow, payload_to_vars(payload)?)
+                    .await?;
                 Ok(Some(Vars::new().with(consts::PROCESS_ID, proc.id())))
             }
             Some(TriggerKind::Chat) => {
-                let workflow = self.workflow(&event)?;
+                let workflow = self.workflow(&event).await?;
                 let mut start_params = Vars::new();
                 let payload = if params.is_null() {
                     event.default_params()
@@ -77,11 +80,11 @@ impl EventExecutor {
                 if let Some(v) = payload.as_str() {
                     start_params.set(consts::ACT_PARAMS_KEY, v);
                 }
-                let proc = self.runtime.start(&workflow, start_params)?;
+                let proc = self.runtime.start(&workflow, start_params).await?;
                 Ok(Some(Vars::new().with(consts::PROCESS_ID, proc.id())))
             }
             Some(TriggerKind::Hook) => {
-                let workflow = self.workflow(&event)?;
+                let workflow = self.workflow(&event).await?;
                 let payload = if params.is_null() {
                     event.default_params()
                 } else {
@@ -95,20 +98,26 @@ impl EventExecutor {
             ))),
             None => {
                 // custom kind: a registered event package id
-                self.start_package(&event, params)
+                self.start_package(&event, params).await
             }
         }
     }
 
-    fn workflow(&self, event: &data::Event) -> Result<Workflow> {
-        let model = self.runtime.cache().store().models().find(&event.mid)?;
+    async fn workflow(&self, event: &data::Event) -> Result<Workflow> {
+        let model = self
+            .runtime
+            .cache()
+            .store()
+            .models()
+            .find(&event.mid)
+            .await?;
         let model: crate::ModelInfo = model.into();
         model.workflow()
     }
 
     /// custom kinds — a registered package that exposes the non-context
     /// `start` entry (as `ActPackageCatalog::Event` used to)
-    fn start_package(&self, event: &data::Event, params: &JsonValue) -> Result<Option<Vars>> {
+    async fn start_package(&self, event: &data::Event, params: &JsonValue) -> Result<Option<Vars>> {
         let register = self
             .runtime
             .package()
@@ -125,7 +134,7 @@ impl EventExecutor {
                 .map_err(|err| ActError::Convert(format!("failed to deserialize params: {err}")))?;
         }
         let package = (register.create)(self.runtime.config())?;
-        let ret = package.start(&self.runtime, &params, &options)?;
+        let ret = package.start(&self.runtime, &params, &options).await?;
         Ok(ret)
     }
 
@@ -142,23 +151,31 @@ impl EventExecutor {
 
         let pid_c = pid.clone();
         rt.emitter().on_complete(&key_c, move |e| {
-            if e.pid == pid_c {
-                sig_c.send(e.outputs.clone());
+            let pid_c = pid_c.clone();
+            let sig_c = sig_c.clone();
+            async move {
+                if e.pid == pid_c {
+                    sig_c.send(e.outputs.clone());
+                }
             }
         });
         let pid_e = pid.clone();
         rt.emitter().on_error(&key_e, move |e| {
-            if e.pid == pid_e {
-                sig_e.send(e.outputs.clone());
+            let pid_e = pid_e.clone();
+            let sig_e = sig_e.clone();
+            async move {
+                if e.pid == pid_e {
+                    sig_e.send(e.outputs.clone());
+                }
             }
         });
 
-        rt.start(workflow, options)?;
+        rt.start(workflow, options).await?;
 
         let ret = sig.recv().await;
         // neutralize the watchers; they are keyed per pid and no longer fire
-        rt.emitter().on_complete(&key_c, |_| {});
-        rt.emitter().on_error(&key_e, |_| {});
+        rt.emitter().on_complete(&key_c, |_| async {});
+        rt.emitter().on_error(&key_e, |_| async {});
         Ok(Some(ret))
     }
 }

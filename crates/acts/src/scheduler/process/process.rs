@@ -286,7 +286,7 @@ impl Process {
         *self.env.write() = value.clone();
     }
 
-    pub(crate) fn do_tick(&self) {
+    pub(crate) async fn do_tick(&self) {
         // only run the timeout check for tasks that are running or interrupted, since
         // tasks that are completed or skipped will not be timed out
         let tasks = self.find_tasks(|t| {
@@ -294,12 +294,13 @@ impl Process {
         });
         for t in tasks.iter() {
             let ctx = t.create_context();
-            t.on_timeout(&ctx)
-                .unwrap_or_else(|err| error!(error = %err, "tick failed"));
+            if let Err(err) = t.on_timeout(&ctx).await {
+                error!(error = %err, "tick failed");
+            }
         }
     }
     #[instrument(skip(self, action), fields(pid = %self.id, tid = %action.tid, event = ?action.event))]
-    pub fn do_action(self: &Arc<Self>, action: &Action) -> Result<()> {
+    pub async fn do_action(self: &Arc<Self>, action: &Action) -> Result<()> {
         debug!("action received");
         let mut action = action.clone();
         let task = self.task(&action.tid).ok_or(ActError::Action(format!(
@@ -344,12 +345,12 @@ impl Process {
 
         let ctx = task.create_context();
         ctx.set_action(&action)?;
-        task.update(&ctx)?;
+        task.update(&ctx).await?;
         Ok(())
     }
 
     #[instrument(skip(self))]
-    pub fn start(self: &Arc<Self>) -> Result<()> {
+    pub async fn start(self: &Arc<Self>) -> Result<()> {
         // One-shot atomic start. The state lock guards the `None -> Running`
         // transition, so concurrent or repeated `start()` calls can never run
         // the start body twice: the root task is scheduled exactly once and
@@ -374,13 +375,15 @@ impl Process {
         // durable proc row without its root task row — which would resume as
         // an un-runnable, task-less process), cache the process and finally
         // dispatch the root task to the in-memory queue.
-        let tr = self.tree();
-        let root = match &tr.root {
-            Some(root) => Some(self.create_task(root, None)?),
-            None => None,
+        let root = {
+            let tr = self.tree();
+            match &tr.root {
+                Some(root) => Some(self.create_task(root, None)?),
+                None => None,
+            }
         };
 
-        cache.start_proc(&proc, root.as_ref())?;
+        cache.start_proc(&proc, root.as_ref()).await?;
 
         // Start per-process tick loop
         self.init_tick();
@@ -557,7 +560,7 @@ impl Process {
                 if !tick_proc.state().is_running() {
                     break;
                 }
-                tick_proc.do_tick();
+                tick_proc.do_tick().await;
             }
         });
     }

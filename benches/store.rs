@@ -55,11 +55,11 @@ fn store_create_qps(c: &mut Criterion) {
                     for i in 0..iters {
                         let id = format!("{}_{}", prefix, i);
                         ids.push(id.clone());
-                        procs.create(&make_proc(&id, &mid, i)).unwrap();
+                        procs.create(&make_proc(&id, &mid, i)).await.unwrap();
                     }
                     // Cleanup
                     for id in &ids {
-                        procs.delete(id).unwrap();
+                        procs.delete(id).await.unwrap();
                     }
                     start.elapsed()
                 })
@@ -76,35 +76,32 @@ fn store_find_qps(c: &mut Criterion) {
 
     for &batch_size in &[100, 1000] {
         group.bench_function(BenchmarkId::new("proc", batch_size.to_string()), |b| {
-            let store = memory_store();
-            let procs = store.procs();
-            let mid = format!("m_find_{}", batch_size);
-            let prefix = format!("p_find_{}", batch_size);
-            let mut ids = Vec::with_capacity(batch_size);
+            b.to_async(FuturesExecutor)
+                .iter_custom(move |iters| async move {
+                    let store = memory_store();
+                    let procs = store.procs();
+                    let mid = format!("m_find_{}", batch_size);
+                    let prefix = format!("p_find_{}", batch_size);
+                    let mut ids = Vec::with_capacity(batch_size);
 
-            // Pre-create records
-            for i in 0..batch_size {
-                let id = format!("{}_{}", prefix, i);
-                ids.push(id.clone());
-                procs.create(&make_proc(&id, &mid, i as u64)).unwrap();
-            }
+                    // Pre-create records
+                    for i in 0..batch_size {
+                        let id = format!("{}_{}", prefix, i);
+                        ids.push(id.clone());
+                        procs.create(&make_proc(&id, &mid, i as u64)).await.unwrap();
+                    }
 
-            b.to_async(FuturesExecutor).iter_custom(move |iters| {
-                let ids = ids.clone();
-                let procs = procs.clone();
-                async move {
                     let start = std::time::Instant::now();
                     for i in 0..iters {
                         let idx = (i as usize) % ids.len();
-                        let _ = procs.find(&ids[idx]).unwrap();
+                        let _ = procs.find(&ids[idx]).await.unwrap();
                     }
                     // Cleanup
                     for id in &ids {
-                        procs.delete(id).unwrap();
+                        procs.delete(id).await.unwrap();
                     }
                     start.elapsed()
-                }
-            });
+                })
         });
     }
     group.finish();
@@ -120,37 +117,33 @@ fn store_query_index_qps(c: &mut Criterion) {
         group.bench_function(
             BenchmarkId::new("proc_by_mid", batch_size.to_string()),
             |b| {
-                let store = memory_store();
-                let procs = store.procs();
-                let mid = format!("m_qidx_{}", batch_size);
-                let mut ids = Vec::with_capacity(batch_size);
+                b.to_async(FuturesExecutor)
+                    .iter_custom(move |iters| async move {
+                        let store = memory_store();
+                        let procs = store.procs();
+                        let mid = format!("m_qidx_{}", batch_size);
+                        let mut ids = Vec::with_capacity(batch_size);
 
-                // Pre-create records with indexed field
-                for i in 0..batch_size {
-                    let id = format!("qidx_{}_{}", batch_size, i);
-                    ids.push(id.clone());
-                    procs.create(&make_proc(&id, &mid, i as u64)).unwrap();
-                }
+                        // Pre-create records with indexed field
+                        for i in 0..batch_size {
+                            let id = format!("qidx_{}_{}", batch_size, i);
+                            ids.push(id.clone());
+                            procs.create(&make_proc(&id, &mid, i as u64)).await.unwrap();
+                        }
 
-                b.to_async(FuturesExecutor).iter_custom(move |iters| {
-                    let procs = procs.clone();
-                    let mid = mid.clone();
-                    let ids = ids.clone();
-                    async move {
                         let q = Query::new()
                             .filter(Filter::and().expr(Expr::eq("mid", mid)))
                             .limit(10);
                         let start = std::time::Instant::now();
                         for _ in 0..iters {
-                            let _ = procs.query(&q).unwrap();
+                            let _ = procs.query(&q).await.unwrap();
                         }
                         // Cleanup
                         for id in &ids {
-                            procs.delete(id).unwrap();
+                            procs.delete(id).await.unwrap();
                         }
                         start.elapsed()
-                    }
-                });
+                    })
             },
         );
     }
@@ -167,36 +160,33 @@ fn store_query_scan_qps(c: &mut Criterion) {
         group.bench_function(
             BenchmarkId::new("proc_by_name", batch_size.to_string()),
             |b| {
-                let store = memory_store();
-                let procs = store.procs();
-                let mid = format!("m_qscan_{}", batch_size);
-                let mut ids = Vec::with_capacity(batch_size);
+                b.to_async(FuturesExecutor)
+                    .iter_custom(move |iters| async move {
+                        let store = memory_store();
+                        let procs = store.procs();
+                        let mid = format!("m_qscan_{}", batch_size);
+                        let mut ids = Vec::with_capacity(batch_size);
 
-                for i in 0..batch_size {
-                    let id = format!("qscan_{}_{}", batch_size, i);
-                    ids.push(id.clone());
-                    procs.create(&make_proc(&id, &mid, i as u64)).unwrap();
-                }
+                        for i in 0..batch_size {
+                            let id = format!("qscan_{}_{}", batch_size, i);
+                            ids.push(id.clone());
+                            procs.create(&make_proc(&id, &mid, i as u64)).await.unwrap();
+                        }
 
-                b.to_async(FuturesExecutor).iter_custom(move |iters| {
-                    let procs = procs.clone();
-                    let ids = ids.clone();
-                    async move {
                         // Use 'name' filter (non-indexed field) to trigger full scan
                         let q = Query::new()
                             .filter(Filter::and().expr(Expr::eq("name", "bench-0")))
                             .limit(10);
                         let start = std::time::Instant::now();
                         for _ in 0..iters {
-                            let _ = procs.query(&q).unwrap();
+                            let _ = procs.query(&q).await.unwrap();
                         }
                         // Cleanup
                         for id in &ids {
-                            procs.delete(id).unwrap();
+                            procs.delete(id).await.unwrap();
                         }
                         start.elapsed()
-                    }
-                });
+                    })
             },
         );
     }
@@ -211,39 +201,35 @@ fn store_update_qps(c: &mut Criterion) {
 
     for &batch_size in &[100, 1000] {
         group.bench_function(BenchmarkId::new("proc", batch_size.to_string()), |b| {
-            let store = memory_store();
-            let procs = store.procs();
-            let mid = format!("m_upd_{}", batch_size);
-            let mut ids = Vec::with_capacity(batch_size);
+            b.to_async(FuturesExecutor)
+                .iter_custom(move |iters| async move {
+                    let store = memory_store();
+                    let procs = store.procs();
+                    let mid = format!("m_upd_{}", batch_size);
+                    let mut ids = Vec::with_capacity(batch_size);
 
-            // Pre-create records
-            for i in 0..batch_size {
-                let id = format!("upd_{}_{}", batch_size, i);
-                ids.push(id.clone());
-                procs.create(&make_proc(&id, &mid, i as u64)).unwrap();
-            }
+                    // Pre-create records
+                    for i in 0..batch_size {
+                        let id = format!("upd_{}_{}", batch_size, i);
+                        ids.push(id.clone());
+                        procs.create(&make_proc(&id, &mid, i as u64)).await.unwrap();
+                    }
 
-            let update_mid = format!("m_upd_new_{}", batch_size);
-            b.to_async(FuturesExecutor).iter_custom(move |iters| {
-                let procs = procs.clone();
-                let ids = ids.clone();
-                let update_mid = update_mid.clone();
-                async move {
+                    let update_mid = format!("m_upd_new_{}", batch_size);
                     let start = std::time::Instant::now();
                     for i in 0..iters {
                         let idx = (i as usize) % ids.len();
-                        let mut proc = procs.find(&ids[idx]).unwrap();
+                        let mut proc = procs.find(&ids[idx]).await.unwrap();
                         proc.state = "completed".to_string();
                         proc.mid = update_mid.clone();
-                        procs.update(&proc).unwrap();
+                        procs.update(&proc).await.unwrap();
                     }
                     // Cleanup
                     for id in &ids {
-                        procs.delete(id).unwrap();
+                        procs.delete(id).await.unwrap();
                     }
                     start.elapsed()
-                }
-            });
+                })
         });
     }
     group.finish();
@@ -268,12 +254,12 @@ fn store_delete_qps(c: &mut Criterion) {
                     for i in 0..iters {
                         let id = format!("del_{}_{}", batch_size, i);
                         ids.push(id.clone());
-                        procs.create(&make_proc(&id, &mid, i)).unwrap();
+                        procs.create(&make_proc(&id, &mid, i)).await.unwrap();
                     }
 
                     let start = std::time::Instant::now();
                     for id in &ids {
-                        procs.delete(id).unwrap();
+                        procs.delete(id).await.unwrap();
                     }
                     start.elapsed()
                 })
@@ -300,17 +286,17 @@ fn store_mixed_qps(c: &mut Criterion) {
                     for i in 0..iters {
                         let id = format!("mix_{}_{}", batch_size, i);
                         // Create
-                        procs.create(&make_proc(&id, &mid, i)).unwrap();
+                        procs.create(&make_proc(&id, &mid, i)).await.unwrap();
                         // Find
-                        let _ = procs.find(&id).unwrap();
+                        let _ = procs.find(&id).await.unwrap();
                         // Update
-                        let mut p = procs.find(&id).unwrap();
+                        let mut p = procs.find(&id).await.unwrap();
                         p.state = "completed".to_string();
-                        procs.update(&p).unwrap();
+                        procs.update(&p).await.unwrap();
                         // Find again
-                        let _ = procs.find(&id).unwrap();
+                        let _ = procs.find(&id).await.unwrap();
                         // Delete
-                        procs.delete(&id).unwrap();
+                        procs.delete(&id).await.unwrap();
                     }
                     start.elapsed()
                 })

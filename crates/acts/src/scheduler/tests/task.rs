@@ -12,14 +12,19 @@ use serial_test::serial;
 async fn sch_task_start() {
     let workflow =
         Workflow::new().with_step(|step| step.with_id("step1").with_uses(USES_IRQ, Vars::new()));
-    let (engine, proc) = create_proc(&workflow, "w1");
+    let (engine, proc) = create_proc(&workflow, "w1").await;
     let rt = engine.runtime();
     let sig = engine.signal(TaskState::default());
     let tx = sig.clone();
     let rx = sig.clone();
 
-    proc.start().unwrap();
-    rt.emitter().on_proc(move |e| rx.send(e.state()));
+    proc.start().await.unwrap();
+    rt.emitter().on_proc(move |e| {
+        let rx = rx.clone();
+        async move {
+            rx.send(e.state());
+        }
+    });
 
     let ret = tx.recv().await;
     proc.print();
@@ -39,20 +44,30 @@ async fn sch_task_steps() {
             step
         });
     let id = utils::longid();
-    let (engine, proc) = create_proc(&workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id).await;
     let rt = engine.runtime();
     let sig = engine.signal(());
     let emitter = engine.channel();
     emitter.on_complete({
         let sig = sig.clone();
-        move |_| sig.close()
+        move |_| {
+            let sig = sig.clone();
+            async move {
+                sig.close();
+            }
+        }
     });
     emitter.on_error({
         let sig = sig.clone();
-        move |_| sig.close()
+        move |_| {
+            let sig = sig.clone();
+            async move {
+                sig.close();
+            }
+        }
     });
 
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let _ = sig.recv().await;
     assert_eq!(proc.state(), TaskState::Completed);
 }
@@ -77,20 +92,30 @@ async fn sch_task_branch_basic() {
             })
     });
 
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let sig = engine.signal(());
     let emitter = engine.channel();
     emitter.on_complete({
         let sig = sig.clone();
-        move |_| sig.close()
+        move |_| {
+            let sig = sig.clone();
+            async move {
+                sig.close();
+            }
+        }
     });
     emitter.on_error({
         let sig = sig.clone();
-        move |_| sig.close()
+        move |_| {
+            let sig = sig.clone();
+            async move {
+                sig.close();
+            }
+        }
     });
 
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let _ = sig.recv().await;
     assert_eq!(proc.state(), TaskState::Completed);
 }
@@ -104,20 +129,23 @@ async fn sch_task_act_skip_with_inputs() {
             .with_uses(USES_IRQ, Vars::new().with("key", "act2"))
     });
 
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let sig = engine.signal(Vars::new());
     let rx = sig.clone();
     let emitter = engine.channel();
     emitter.on_message(move |e| {
-        if e.params().unwrap().get::<String>("key").as_deref() == Some("act2")
-            && e.is_state(MessageState::Created)
-        {
-            rx.send(e.inputs.clone());
+        let rx = rx.clone();
+        async move {
+            if e.params().unwrap().get::<String>("key").as_deref() == Some("act2")
+                && e.is_state(MessageState::Created)
+            {
+                rx.send(e.inputs.clone());
+            }
         }
     });
 
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let ret = sig.recv().await;
     assert_eq!(ret.get::<i32>("v1").unwrap(), 10);
 }
@@ -128,11 +156,11 @@ async fn sch_task_step_name() {
     let workflow = Workflow::new()
         .with_step(|step| step.with_id("step1").with_name("my_step_name"))
         .with_step(|step| step.with_id("step2"));
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     tx.recv().await;
     assert_eq!(proc.state(), TaskState::Completed);
     // verify the step name is preserved on the task node
@@ -149,11 +177,11 @@ async fn sch_task_step_desc() {
             .with_name("step1_name")
             .with_desc("this is a step description")
     });
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     tx.recv().await;
     assert_eq!(proc.state(), TaskState::Completed);
     // verify the step desc is preserved on the task node
@@ -172,11 +200,11 @@ async fn sch_task_step_id() {
     let workflow = Workflow::new()
         .with_step(|step| step.with_id("step_100").with_name("step one"))
         .with_step(|step| step.with_id("step_200").with_name("step two"));
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     tx.recv().await;
     assert_eq!(proc.state(), TaskState::Completed);
     // verify task lookup by step id works correctly
@@ -197,7 +225,7 @@ async fn sch_task_step_options() {
             .with_option("retry", 3)
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
@@ -205,15 +233,20 @@ async fn sch_task_step_options() {
     let captured2 = captured.clone();
     let rt2 = rt.clone();
     engine.channel().on_message(move |e| {
-        if e.is_type("step") && e.is_state(MessageState::Created) {
-            *captured2.lock() = e.inner().inputs.clone();
-        }
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            rt2.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
-                .unwrap();
+        let captured2 = captured2.clone();
+        let rt2 = rt2.clone();
+        async move {
+            if e.is_type("step") && e.is_state(MessageState::Created) {
+                *captured2.lock() = e.inner().inputs.clone();
+            }
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                rt2.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
+                    .await
+                    .unwrap();
+            }
         }
     });
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     tx.recv().await;
     assert_eq!(proc.state(), TaskState::Completed);
     // verify step options set via with_options are in message.inputs
@@ -232,11 +265,11 @@ async fn sch_task_step_metadata() {
             .with_metadata("color", "blue")
             .with_metadata("width", 200)
     });
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     tx.recv().await;
     assert_eq!(proc.state(), TaskState::Completed);
     // verify step metadata is preserved on the task node

@@ -9,7 +9,7 @@ use std::{collections::HashSet, sync::Arc};
 use tracing::debug;
 
 impl Store {
-    pub fn load(
+    pub async fn load(
         &self,
         cap: usize,
         rt: &Arc<Runtime>,
@@ -25,7 +25,7 @@ impl Store {
                     .expr(Expr::eq("state", TaskState::Running.to_string()))
                     .expr(Expr::eq("state", TaskState::Pending.to_string())),
             );
-            let procs = self.procs().query(&query)?;
+            let procs = self.procs().query(&query).await?;
             for p in procs.rows {
                 if skip.contains(&p.id) {
                     continue;
@@ -47,7 +47,7 @@ impl Store {
                     proc.set_pure_err(&err)
                 }
 
-                self.load_tasks(&proc, rt)?;
+                self.load_tasks(&proc, rt).await?;
                 ret.push(proc);
                 if ret.len() >= cap {
                     break;
@@ -58,13 +58,13 @@ impl Store {
         Ok(ret)
     }
 
-    pub fn load_proc(
+    pub async fn load_proc(
         &self,
         pid: &str,
         rt: &Arc<Runtime>,
     ) -> Result<Option<Arc<scheduler::Process>>> {
         debug!("load process pid={}", pid);
-        match self.procs().find(pid) {
+        match self.procs().find(pid).await {
             Ok(p) => {
                 // println!("process model={}", p.model);
                 let model = Workflow::from_json(&p.model)?;
@@ -76,7 +76,7 @@ impl Store {
                 proc.set_pure_state(p.state.into());
                 proc.set_start_time(p.start_time);
                 proc.set_env(&env_local.into());
-                self.load_tasks(&proc, rt)?;
+                self.load_tasks(&proc, rt).await?;
                 if let Some(err) = p.err {
                     let err: Error = serde_json::from_str(&err)
                         .map_err(|err| ActError::Store(err.to_string()))?;
@@ -88,12 +88,12 @@ impl Store {
         }
     }
 
-    pub fn remove_proc(&self, pid: &str) -> Result<bool> {
+    pub async fn remove_proc(&self, pid: &str) -> Result<bool> {
         debug!("remove_proc pid={}", pid);
         // All rows of the process — tasks, outbox ops and the proc row — are
         // removed as ONE atomic batch, so a crash mid-removal cannot leave a
         // half-deleted process behind.
-        self.remove_proc_rows(pid)
+        self.remove_proc_rows(pid).await
     }
 
     /// but not yet run. Deduplicated per `(pid, tid, type)` — at most one
@@ -101,8 +101,9 @@ impl Store {
     /// `Sign::NEXT_PENDING` semantics. Queued on the store writer (FIFO)
     /// *before* the in-memory queue dispatch, after the task state write, so a
     /// `Pending` record always has a durable task behind it.
-    pub fn enqueue_next_op(&self, pid: &str, tid: &str) -> Result<()> {
+    pub async fn enqueue_next_op(&self, pid: &str, tid: &str) -> Result<()> {
         self.enqueue_op(pid, tid, data::OpType::Next, None, None)
+            .await
     }
 
     /// Record a durable outbox entry for a client action (event + options).
@@ -111,7 +112,7 @@ impl Store {
     /// `Pending` while waiting for the client). Written before the action is
     /// applied so recovery can re-apply it when the crash happened before the
     /// task state write became durable.
-    pub fn enqueue_action_op(
+    pub async fn enqueue_action_op(
         &self,
         pid: &str,
         tid: &str,
@@ -125,9 +126,10 @@ impl Store {
             Some(event.to_string()),
             Some(options.to_string()),
         )
+        .await
     }
 
-    fn enqueue_op(
+    async fn enqueue_op(
         &self,
         pid: &str,
         tid: &str,
@@ -146,7 +148,7 @@ impl Store {
                 .expr(Expr::eq("pid", pid.to_string()))
                 .expr(Expr::eq("tid", tid.to_string())),
         );
-        let existing = collection.query(&q)?;
+        let existing = collection.query(&q).await?;
         if existing
             .rows
             .iter()
@@ -168,16 +170,16 @@ impl Store {
             update_time: now,
             v: data::Op::version(),
         };
-        collection.create(&op)?;
+        collection.create(&op).await?;
         Ok(())
     }
 
     /// Load every outbox record that was not durably completed — the crash
     /// replay set. Order is stable across restarts (creation time).
-    pub fn load_pending_ops(&self) -> Result<Vec<data::Op>> {
+    pub async fn load_pending_ops(&self) -> Result<Vec<data::Op>> {
         let q = Query::new()
             .filter(Filter::and().expr(Expr::eq("status", data::OpStatus::Pending.as_ref())));
-        Ok(self.ops().query(&q)?.rows)
+        Ok(self.ops().query(&q).await?.rows)
     }
 
     /// Close the in-flight outbox records of a task (`Pending` → `Done`),
@@ -186,39 +188,39 @@ impl Store {
     /// only be called after the operation's effects (the task state write,
     /// including the `NEXT_COMPLETE` marker) were durably persisted — the
     /// writer FIFO order guarantees this.
-    pub fn complete_ops(&self, pid: &str, tid: &str, r#type: &str) -> Result<()> {
+    pub async fn complete_ops(&self, pid: &str, tid: &str, r#type: &str) -> Result<()> {
         let collection = self.ops();
         let q = Query::new().filter(
             Filter::and()
                 .expr(Expr::eq("pid", pid.to_string()))
                 .expr(Expr::eq("tid", tid.to_string())),
         );
-        for mut op in collection.query(&q)?.rows {
+        for mut op in collection.query(&q).await?.rows {
             if op.r#type == r#type && op.status == data::OpStatus::Pending.as_ref() {
                 op.status = data::OpStatus::Done.as_ref().to_string();
                 op.update_time = utils::time::time_millis();
-                collection.update(&op)?;
+                collection.update(&op).await?;
             }
         }
         Ok(())
     }
 
     /// Drop every outbox record of a process (used when the process is removed).
-    pub fn remove_ops(&self, pid: &str) -> Result<()> {
+    pub async fn remove_ops(&self, pid: &str) -> Result<()> {
         let collection = self.ops();
         let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", pid.to_string())));
-        for op in collection.query(&q)?.rows {
-            collection.delete(&op.id)?;
+        for op in collection.query(&q).await?.rows {
+            collection.delete(&op.id).await?;
         }
         Ok(())
     }
 
     /// Ack one delivery row (by its delivery id): set its status.
-    pub fn set_delivery(&self, id: &str, status: MessageStatus) -> Result<()> {
-        if let Ok(mut delivery) = self.deliveries().find(id) {
+    pub async fn set_delivery(&self, id: &str, status: MessageStatus) -> Result<()> {
+        if let Ok(mut delivery) = self.deliveries().find(id).await {
             delivery.status = status;
             delivery.update_time = utils::time::time_millis();
-            self.deliveries().update(&delivery)?;
+            self.deliveries().update(&delivery).await?;
         }
 
         // it's ok there is no delivery
@@ -227,7 +229,12 @@ impl Store {
 
     /// Mark every delivery row of a task (pid, tid) with a status — used to
     /// close the deliveries when the task completes.
-    pub fn set_deliveries_with(&self, pid: &str, tid: &str, status: MessageStatus) -> Result<bool> {
+    pub async fn set_deliveries_with(
+        &self,
+        pid: &str,
+        tid: &str,
+        status: MessageStatus,
+    ) -> Result<bool> {
         debug!("set_deliveries_with pid={pid} tid={tid} status={status:?}");
         let q = Query::new().filter(
             Filter::and()
@@ -235,12 +242,12 @@ impl Store {
                 .expr(Expr::eq("tid", tid.to_string())),
         );
         let collection = self.deliveries();
-        if let Ok(deliveries) = collection.query(&q) {
+        if let Ok(deliveries) = collection.query(&q).await {
             for m in deliveries.rows.iter() {
                 let mut m = m.clone();
                 m.status = status;
                 m.update_time = utils::time::time_millis();
-                collection.update(&m)?;
+                collection.update(&m).await?;
             }
         }
 
@@ -250,15 +257,15 @@ impl Store {
         Ok(true)
     }
 
-    /// Collect deliveries with no response: re-send the not-yet-acked ones and
-    /// mark the ones that exceeded `max_delivery_retry_times` as errors. The
-    /// callback receives each delivery that was re-armed.
-    pub fn with_no_response_deliveries<F: Fn(&data::Delivery)>(
+    /// Collect deliveries with no response: re-arm the not-yet-acked ones and
+    /// mark the ones that exceeded `max_delivery_retry_times` as errors.
+    /// Returns every re-armed delivery (the caller re-sends them to their own
+    /// channels).
+    pub async fn with_no_response_deliveries(
         &self,
         timeout_millis: i64,
         max_delivery_retry_times: i32,
-        f: F,
-    ) -> Result<()> {
+    ) -> Result<Vec<data::Delivery>> {
         let q = Query::new().limit(300).filter(
             Filter::and()
                 .expr(Expr::eq("status", MessageStatus::Created))
@@ -268,37 +275,38 @@ impl Store {
                 )),
         );
         let collection = self.deliveries();
-        if let Ok(deliveries) = collection.query(&q) {
+        let mut rearmed = Vec::new();
+        if let Ok(deliveries) = collection.query(&q).await {
             for m in deliveries.rows.iter() {
                 let mut delivery = m.clone();
                 delivery.update_time = utils::time::time_millis();
                 if delivery.retry_times < max_delivery_retry_times {
                     delivery.retry_times += 1;
-                    if collection.update(&delivery)? {
-                        f(&delivery);
+                    if collection.update(&delivery).await? {
+                        rearmed.push(delivery);
                     }
                 } else {
                     // the delivery will re-send by manual through the manager command
                     delivery.status = MessageStatus::Error;
-                    collection.update(&delivery)?;
+                    collection.update(&delivery).await?;
                 }
             }
         }
-        Ok(())
+        Ok(rearmed)
     }
 
     /// Re-send every error delivery row (reset to `Created`; the retry timer
     /// sends them to their own channels).
-    pub fn resend_error_deliveries(&self) -> Result<()> {
+    pub async fn resend_error_deliveries(&self) -> Result<()> {
         let collection = self.deliveries();
         let q = Query::new().filter(Filter::and().expr(Expr::eq("status", MessageStatus::Error)));
-        if let Ok(deliveries) = collection.query(&q) {
+        if let Ok(deliveries) = collection.query(&q).await {
             for m in deliveries.rows.iter() {
                 let mut delivery = m.clone();
                 delivery.status = MessageStatus::Created;
                 delivery.retry_times = 0;
                 delivery.update_time = utils::time::time_millis();
-                collection.update(&delivery)?;
+                collection.update(&delivery).await?;
             }
         }
 
@@ -306,7 +314,7 @@ impl Store {
     }
 
     /// Delete error delivery rows: all of them or only those of one process.
-    pub fn clear_error_deliveries(&self, pid: Option<String>) -> Result<()> {
+    pub async fn clear_error_deliveries(&self, pid: Option<String>) -> Result<()> {
         let collection = self.deliveries();
         let mut cond = Filter::and().expr(Expr::eq("status", MessageStatus::Error));
         if let Some(pid) = &pid {
@@ -314,9 +322,9 @@ impl Store {
         }
 
         let q = Query::new().filter(cond);
-        if let Ok(deliveries) = collection.query(&q) {
+        if let Ok(deliveries) = collection.query(&q).await {
             for m in deliveries.rows.iter() {
-                collection.delete(&m.id)?;
+                collection.delete(&m.id).await?;
             }
         }
 
@@ -326,9 +334,9 @@ impl Store {
     /// Reset one error delivery row back to `Created` for redelivery. Returns
     /// the delivery when it was an error delivery and was reset, `None`
     /// otherwise.
-    pub fn resend_error_delivery(&self, delivery_id: &str) -> Result<Option<data::Delivery>> {
+    pub async fn resend_error_delivery(&self, delivery_id: &str) -> Result<Option<data::Delivery>> {
         let collection = self.deliveries();
-        let mut delivery = match collection.find(delivery_id) {
+        let mut delivery = match collection.find(delivery_id).await {
             Ok(delivery) => delivery,
             Err(_) => return Ok(None),
         };
@@ -339,7 +347,7 @@ impl Store {
         delivery.status = MessageStatus::Created;
         delivery.retry_times = 0;
         delivery.update_time = utils::time::time_millis();
-        if collection.update(&delivery)? {
+        if collection.update(&delivery).await? {
             Ok(Some(delivery))
         } else {
             Ok(None)
@@ -348,66 +356,71 @@ impl Store {
 
     /// Delete one error delivery row. Returns `true` when the row existed and
     /// was in error state and was deleted.
-    pub fn clear_error_delivery(&self, delivery_id: &str) -> Result<bool> {
+    pub async fn clear_error_delivery(&self, delivery_id: &str) -> Result<bool> {
         let collection = self.deliveries();
-        match collection.find(delivery_id) {
+        match collection.find(delivery_id).await {
             Ok(delivery) if delivery.status == MessageStatus::Error => {
-                collection.delete(delivery_id)
+                collection.delete(delivery_id).await
             }
             _ => Ok(false),
         }
     }
 
-    pub fn upsert_task(&self, task: &Arc<scheduler::Task>) -> Result<()> {
+    pub async fn upsert_task(&self, task: &Arc<scheduler::Task>) -> Result<()> {
         debug!(pid = %task.pid, tid = %task.id, "upsert task");
         let data: data::Task = task.into_data()?;
-        self.upsert_task_data(&data)
+        self.upsert_task_data(&data).await
     }
 
-    pub fn upsert_task_data(&self, data: &data::Task) -> Result<()> {
+    pub async fn upsert_task_data(&self, data: &data::Task) -> Result<()> {
         let collection = self.tasks();
-        match collection.find(&data.id) {
+        match collection.find(&data.id).await {
             Ok(_) => {
-                collection.update(data)?;
+                collection.update(data).await?;
             }
             Err(_) => {
-                collection.create(data)?;
+                collection.create(data).await?;
             }
         }
 
         Ok(())
     }
 
-    pub fn mark_proc_complete(&self, pid: &str, end_time: i64, state: TaskState) -> Result<()> {
+    pub async fn mark_proc_complete(
+        &self,
+        pid: &str,
+        end_time: i64,
+        state: TaskState,
+    ) -> Result<()> {
         let collection = self.procs();
-        let mut proc = collection.find(pid)?;
+        let mut proc = collection.find(pid).await?;
         proc.end_time = end_time;
         proc.state = state.into();
-        collection.update(&proc)?;
+        collection.update(&proc).await?;
         Ok(())
     }
 
-    pub fn upsert_proc(&self, proc: &Arc<scheduler::Process>) -> Result<()> {
+    pub async fn upsert_proc(&self, proc: &Arc<scheduler::Process>) -> Result<()> {
         debug!("upsert process: {}", proc.id());
         let collection = self.procs();
         let data: data::Proc = proc.into_data()?;
-        match collection.find(proc.id()) {
+        match collection.find(proc.id()).await {
             Ok(_) => {
-                collection.update(&data)?;
+                collection.update(&data).await?;
             }
             Err(_) => {
-                collection.create(&data)?;
+                collection.create(&data).await?;
             }
         }
 
         Ok(())
     }
 
-    fn load_tasks(&self, proc: &Arc<scheduler::Process>, rt: &Arc<Runtime>) -> Result<()> {
+    async fn load_tasks(&self, proc: &Arc<scheduler::Process>, rt: &Arc<Runtime>) -> Result<()> {
         debug!("load_tasks pid={}", proc.id());
         let collection = self.tasks();
         let query = Query::new().filter(Filter::and().expr(Expr::eq("pid", proc.id())));
-        let tasks = collection.query(&query)?;
+        let tasks = collection.query(&query).await?;
         let tree = &proc.tree();
 
         // phase 1: load tasks and register dynamic nodes into the tree map,

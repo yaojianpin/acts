@@ -11,17 +11,20 @@ use serial_test::serial;
 async fn sch_step_state_ready() {
     // Step task transitions to Ready state during init, observable via on_task
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(false).double();
     auto_complete(&engine, &rx);
     let tx2 = tx.clone();
     rt.emitter().on_task(move |e| {
-        if e.node().id == "step1" && e.state() == TaskState::Ready {
-            tx2.send(true);
+        let tx2 = tx2.clone();
+        async move {
+            if e.node().id == "step1" && e.state() == TaskState::Ready {
+                tx2.send(true);
+            }
         }
     });
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let ret = tx.recv().await;
     assert!(ret);
 }
@@ -51,7 +54,7 @@ async fn sch_step_state_pending() {
                     .with_step(|step| step.with_id("step21"))
             })
     });
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(false).double();
     auto_complete(&engine, &rx);
@@ -59,19 +62,25 @@ async fn sch_step_state_pending() {
     let rt2 = rt.clone();
     let proc2 = proc.clone();
     engine.channel().on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            // branch b1 should be Running and b2 should be Pending
-            if let Some(task) = proc2.task_by_nid("b2").first()
-                && task.state() == TaskState::Pending
-            {
-                tx2.send(true);
+        let tx2 = tx2.clone();
+        let rt2 = rt2.clone();
+        let proc2 = proc2.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                // branch b1 should be Running and b2 should be Pending
+                if let Some(task) = proc2.task_by_nid("b2").first()
+                    && task.state() == TaskState::Pending
+                {
+                    tx2.send(true);
+                }
+                // Complete the act so workflow can finish
+                rt2.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
+                    .await
+                    .unwrap();
             }
-            // Complete the act so workflow can finish
-            rt2.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
-                .unwrap();
         }
     });
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let ret = tx.recv().await;
     assert!(ret);
 }
@@ -84,7 +93,7 @@ async fn sch_step_state_running() {
         step.with_id("step1")
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(false).double();
     auto_complete(&engine, &rx);
@@ -92,19 +101,25 @@ async fn sch_step_state_running() {
     let rt2 = rt.clone();
     let proc2 = proc.clone();
     engine.channel().on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            // step task should be Running while act is being processed
-            if let Some(task) = proc2.task_by_nid("step1").first()
-                && task.state() == TaskState::Running
-            {
-                tx2.send(true);
+        let tx2 = tx2.clone();
+        let rt2 = rt2.clone();
+        let proc2 = proc2.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                // step task should be Running while act is being processed
+                if let Some(task) = proc2.task_by_nid("step1").first()
+                    && task.state() == TaskState::Running
+                {
+                    tx2.send(true);
+                }
+                // Complete the act so workflow can finish
+                rt2.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
+                    .await
+                    .unwrap();
             }
-            // Complete the act so workflow can finish
-            rt2.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
-                .unwrap();
         }
     });
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let ret = tx.recv().await;
     assert!(ret);
 }
@@ -114,11 +129,11 @@ async fn sch_step_state_running() {
 async fn sch_step_state_completed() {
     // Simple step completes successfully
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     tx.recv().await;
     // step task should be Completed
     let tasks = proc.task_by_nid("step1");
@@ -134,7 +149,7 @@ async fn sch_step_state_aborted() {
         step.with_id("step1")
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(false).double();
     auto_complete(&engine, &rx);
@@ -142,23 +157,29 @@ async fn sch_step_state_aborted() {
     let rt2 = rt.clone();
     let proc2 = proc.clone();
     engine.channel().on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            let mut options = Vars::new();
-            options.set("uid", "u1");
-            rt2.do_action2(&e.pid, &e.tid, EventAction::Abort, options)
-                .unwrap();
-        }
-        if e.is_params_key("act1") && e.is_state(MessageState::Aborted) {
-            // act task should be Aborted
-            let tasks = proc2.task_by_nid(&e.nid);
-            if let Some(task) = tasks.first()
-                && task.state() == TaskState::Aborted
-            {
-                tx2.send(true);
+        let tx2 = tx2.clone();
+        let rt2 = rt2.clone();
+        let proc2 = proc2.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                let mut options = Vars::new();
+                options.set("uid", "u1");
+                rt2.do_action2(&e.pid, &e.tid, EventAction::Abort, options)
+                    .await
+                    .unwrap();
+            }
+            if e.is_params_key("act1") && e.is_state(MessageState::Aborted) {
+                // act task should be Aborted
+                let tasks = proc2.task_by_nid(&e.nid);
+                if let Some(task) = tasks.first()
+                    && task.state() == TaskState::Aborted
+                {
+                    tx2.send(true);
+                }
             }
         }
     });
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert!(ret);
@@ -172,7 +193,7 @@ async fn sch_step_state_error() {
         step.with_id("step1")
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(false).double();
     auto_complete(&engine, &rx);
@@ -180,23 +201,29 @@ async fn sch_step_state_error() {
     let rt2 = rt.clone();
     let proc2 = proc.clone();
     engine.channel().on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            let mut options = Vars::new();
-            options.set("ecode", "err1");
-            rt2.do_action2(&e.pid, &e.tid, EventAction::Error, options)
-                .unwrap();
-        }
-        if e.is_params_key("act1") && e.is_state(MessageState::Error) {
-            // act task should be Error
-            let tasks = proc2.task_by_nid(&e.nid);
-            if let Some(task) = tasks.first()
-                && task.state() == TaskState::Error
-            {
-                tx2.send(true);
+        let tx2 = tx2.clone();
+        let rt2 = rt2.clone();
+        let proc2 = proc2.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                let mut options = Vars::new();
+                options.set("ecode", "err1");
+                rt2.do_action2(&e.pid, &e.tid, EventAction::Error, options)
+                    .await
+                    .unwrap();
+            }
+            if e.is_params_key("act1") && e.is_state(MessageState::Error) {
+                // act task should be Error
+                let tasks = proc2.task_by_nid(&e.nid);
+                if let Some(task) = tasks.first()
+                    && task.state() == TaskState::Error
+                {
+                    tx2.send(true);
+                }
             }
         }
     });
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert!(ret);

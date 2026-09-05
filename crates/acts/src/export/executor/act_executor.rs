@@ -14,47 +14,48 @@ impl ActExecutor {
         }
     }
 
-    pub fn submit(&self, pid: &str, tid: &str, options: Vars) -> Result<()> {
-        self.do_action(pid, tid, EventAction::Submit, options)
+    pub async fn submit(&self, pid: &str, tid: &str, options: Vars) -> Result<()> {
+        self.do_action(pid, tid, EventAction::Submit, options).await
     }
 
-    pub fn back(&self, pid: &str, tid: &str, options: Vars) -> Result<()> {
-        self.do_action(pid, tid, EventAction::Back, options)
+    pub async fn back(&self, pid: &str, tid: &str, options: Vars) -> Result<()> {
+        self.do_action(pid, tid, EventAction::Back, options).await
     }
 
-    pub fn cancel(&self, pid: &str, tid: &str, options: Vars) -> Result<()> {
-        self.do_action(pid, tid, EventAction::Cancel, options)
+    pub async fn cancel(&self, pid: &str, tid: &str, options: Vars) -> Result<()> {
+        self.do_action(pid, tid, EventAction::Cancel, options).await
     }
 
-    pub fn complete(&self, pid: &str, tid: &str, options: Vars) -> Result<()> {
-        self.do_action(pid, tid, EventAction::Next, options)
+    pub async fn complete(&self, pid: &str, tid: &str, options: Vars) -> Result<()> {
+        self.do_action(pid, tid, EventAction::Next, options).await
     }
 
-    pub fn abort(&self, pid: &str, tid: &str, options: Vars) -> Result<()> {
-        self.do_action(pid, tid, EventAction::Abort, options)
+    pub async fn abort(&self, pid: &str, tid: &str, options: Vars) -> Result<()> {
+        self.do_action(pid, tid, EventAction::Abort, options).await
     }
 
-    pub fn skip(&self, pid: &str, tid: &str, options: Vars) -> Result<()> {
-        self.do_action(pid, tid, EventAction::Skip, options)
+    pub async fn skip(&self, pid: &str, tid: &str, options: Vars) -> Result<()> {
+        self.do_action(pid, tid, EventAction::Skip, options).await
     }
 
-    pub fn fail(&self, pid: &str, tid: &str, options: Vars) -> Result<()> {
-        self.do_action(pid, tid, EventAction::Error, options)
+    pub async fn fail(&self, pid: &str, tid: &str, options: Vars) -> Result<()> {
+        self.do_action(pid, tid, EventAction::Error, options).await
     }
 
-    pub fn push(&self, pid: &str, tid: &str, options: Vars) -> Result<()> {
-        self.do_action(pid, tid, EventAction::Push, options)
+    pub async fn push(&self, pid: &str, tid: &str, options: Vars) -> Result<()> {
+        self.do_action(pid, tid, EventAction::Push, options).await
     }
 
-    pub fn remove(&self, pid: &str, tid: &str, options: Vars) -> Result<()> {
-        self.do_action(pid, tid, EventAction::Remove, options)
+    pub async fn remove(&self, pid: &str, tid: &str, options: Vars) -> Result<()> {
+        self.do_action(pid, tid, EventAction::Remove, options).await
     }
 
-    pub fn set_process_vars(&self, pid: &str, tid: &str, options: Vars) -> Result<()> {
+    pub async fn set_process_vars(&self, pid: &str, tid: &str, options: Vars) -> Result<()> {
         self.do_action(pid, tid, EventAction::SetProcessVars, options)
+            .await
     }
 
-    pub fn do_action(
+    pub async fn do_action(
         &self,
         pid: &str,
         tid: &str,
@@ -63,5 +64,6 @@ impl ActExecutor {
     ) -> Result<()> {
         self.runtime
             .do_action(&Action::new(pid, tid, action, options))
+            .await
     }
 }

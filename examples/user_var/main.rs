@@ -8,7 +8,8 @@ async fn main() -> Result<()> {
     let engine = Engine::builder()
         .add_plugin(&plugin::UserVarPlugin)
         .build()
-        .start()?;
+        .start()
+        .await?;
 
     let model = r#"
     id: my_model
@@ -38,6 +39,7 @@ async fn main() -> Result<()> {
     executor
         .model()
         .deploy(&workflow, None)
+        .await
         .expect("fail to deploy workflow");
 
     // set test data when start
@@ -48,18 +50,22 @@ async fn main() -> Result<()> {
     executor
         .proc()
         .start(&workflow.id, vars)
+        .await
         .expect("fail to start workflow");
     let chan = engine.channel();
 
-    chan.on_message(|e| {
+    chan.on_message(move |e| async move {
         if e.is_msg() {
             println!("msg.params: {:?}", e.inputs.get::<Vars>("params"));
         }
     });
 
     chan.on_complete(move |e| {
-        println!("outputs: {:?} cost: {}ms", e.outputs, e.cost());
-        s2.close();
+        let s2 = s2.clone();
+        async move {
+            println!("outputs: {:?} cost: {}ms", e.outputs, e.cost());
+            s2.close();
+        }
     });
 
     s1.recv().await;

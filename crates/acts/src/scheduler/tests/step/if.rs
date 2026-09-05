@@ -12,20 +12,30 @@ async fn sch_step_if_false() {
         .with_step(|step| step.with_id("step1").with_if("false"))
         .with_step(|step| step.with_id("step2"));
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let sig = engine.signal(());
     let emitter = engine.channel();
     emitter.on_complete({
         let sig = sig.clone();
-        move |_| sig.close()
+        move |_| {
+            let sig = sig.clone();
+            async move {
+                sig.close();
+            }
+        }
     });
     emitter.on_error({
         let sig = sig.clone();
-        move |_| sig.close()
+        move |_| {
+            let sig = sig.clone();
+            async move {
+                sig.close();
+            }
+        }
     });
 
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let _ = sig.recv().await;
 
     proc.print();
@@ -48,20 +58,30 @@ async fn sch_step_if_true() {
         .with_step(|step| step.with_id("step1").with_if("true"))
         .with_step(|step| step.with_id("step2"));
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let sig = engine.signal(());
     let emitter = engine.channel();
     emitter.on_complete({
         let sig = sig.clone();
-        move |_| sig.close()
+        move |_| {
+            let sig = sig.clone();
+            async move {
+                sig.close();
+            }
+        }
     });
     emitter.on_error({
         let sig = sig.clone();
-        move |_| sig.close()
+        move |_| {
+            let sig = sig.clone();
+            async move {
+                sig.close();
+            }
+        }
     });
 
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let _ = sig.recv().await;
 
     proc.print();

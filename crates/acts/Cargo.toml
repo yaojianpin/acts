@@ -32,7 +32,7 @@ thiserror = "2"
 tracing = "0.1"
 toml = "0.8.22"
 dashmap = "6.1.0"
-redis = { version = "0.27", optional = true }
+redis = { version = "0.27", optional = true, features = ["aio", "tokio-comp"] }
 sled = { version = "0.34", optional = true }
 async-nats = { version = "0.49.1", optional = true }
 futures = { version = "0.3", optional = true }
@@ -121,9 +121,3 @@ path = "../../examples/prof/main.rs"
 [[example]]
 name = "while"
 path = "../../examples/while/main.rs"
-
-[profile.release]
-codegen-units = 1
-lto = true
-opt-level = "z"
-strip = true

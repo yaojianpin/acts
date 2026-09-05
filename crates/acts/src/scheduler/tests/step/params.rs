@@ -18,20 +18,23 @@ async fn sch_step_params_basic() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(Vars::new()).double();
     auto_complete(&engine, &rx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        if e.is_params_key("act1")
-            && e.is_state(MessageState::Created)
-            && let Some(params) = e.params()
-        {
-            rx.send(params);
+        let rx = rx.clone();
+        async move {
+            if e.is_params_key("act1")
+                && e.is_state(MessageState::Created)
+                && let Some(params) = e.params()
+            {
+                rx.send(params);
+            }
         }
     });
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let ret = tx.recv().await;
     proc.print();
     // verify params contains the key we set
@@ -52,23 +55,28 @@ async fn sch_step_params_multiple() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(Vars::new()).double();
     auto_complete(&engine, &rx);
     let rt2 = rt.clone();
     let channel = engine.channel();
     channel.on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            if let Some(params) = e.params() {
-                rx.send(params);
+        let rx = rx.clone();
+        let rt2 = rt2.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                if let Some(params) = e.params() {
+                    rx.send(params);
+                }
+                // complete the act so workflow can finish
+                rt2.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
+                    .await
+                    .unwrap();
             }
-            // complete the act so workflow can finish
-            rt2.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
-                .unwrap();
         }
     });
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let ret = tx.recv().await;
     proc.print();
     // verify all params are accessible
@@ -90,10 +98,10 @@ async fn sch_step_params_from_node() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(proc.state(), crate::scheduler::TaskState::Completed);
@@ -118,10 +126,10 @@ async fn sch_step_params_empty() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let (tx, rx) = engine.signal(()).double();
     auto_complete(&engine, &rx);
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(proc.state(), crate::scheduler::TaskState::Completed);
@@ -142,23 +150,28 @@ async fn sch_step_params_with_vars() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(Vars::new()).double();
     auto_complete(&engine, &rx);
     let rt2 = rt.clone();
     let channel = engine.channel();
     channel.on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            if let Some(params) = e.params() {
-                rx.send(params);
+        let rx = rx.clone();
+        let rt2 = rt2.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                if let Some(params) = e.params() {
+                    rx.send(params);
+                }
+                // complete the act so workflow can finish
+                rt2.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
+                    .await
+                    .unwrap();
             }
-            // complete the act so workflow can finish
-            rt2.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
-                .unwrap();
         }
     });
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let ret = tx.recv().await;
     proc.print();
     // verify params contain both key and total
@@ -181,18 +194,21 @@ async fn sch_step_params_msg() {
     });
 
     workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(Vec::<Message>::default()).double();
     auto_complete(&engine, &rx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        if e.is_msg() && e.is_type("act") {
-            rx.update(|data| data.push(e.inner().clone()));
-            rx.close();
+        let rx = rx.clone();
+        async move {
+            if e.is_msg() && e.is_type("act") {
+                rx.update(|data| data.push(e.inner().clone()));
+                rx.close();
+            }
         }
     });
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert_eq!(ret.len(), 1);

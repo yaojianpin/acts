@@ -28,21 +28,24 @@ async fn pack_subflow_start() {
         .with_id("w2")
         .with_step(|step| step.with_id("step1"));
     main.print();
-    let (engine, proc) = create_proc(&main, &utils::longid());
+    let (engine, proc) = create_proc(&main, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(false).double();
     auto_complete(&engine, &rx);
     let channel = engine.channel();
 
     // deploy w2 workflow
-    Executor::new(&rt).model().deploy(&w2, None).unwrap();
+    Executor::new(&rt).model().deploy(&w2, None).await.unwrap();
     channel.on_start(move |e| {
-        if e.mid == "w2" {
-            rx.update(|data| *data = true);
+        let rx = rx.clone();
+        async move {
+            if e.mid == "w2" {
+                rx.update(|data| *data = true);
+            }
         }
     });
 
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     let ret = tx.recv().await;
     proc.print();
     assert!(ret)
@@ -57,12 +60,12 @@ async fn pack_subflow_not_found_error() {
     });
 
     main.print();
-    let (engine, proc) = create_proc(&main, &utils::longid());
+    let (engine, proc) = create_proc(&main, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(false).double();
     auto_complete(&engine, &rx);
 
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert!(proc.state().is_error())
@@ -86,24 +89,25 @@ async fn pack_subflow_act_running() {
     });
 
     main.print();
-    let (engine, proc) = create_proc(&main, &utils::longid());
+    let (engine, proc) = create_proc(&main, &utils::longid()).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(false).double();
     auto_complete(&engine, &rx);
 
-    Executor::new(&rt).model().deploy(&w2, None).unwrap();
+    Executor::new(&rt).model().deploy(&w2, None).await.unwrap();
     let channel = engine.channel();
-    channel.on_message(move |e| {
-        println!("message: {:?}", e.inner());
-    });
+    channel.on_message(move |e| async move { println!("message: {:?}", e.inner()) });
 
     channel.on_start(move |e| {
-        if e.mid == "w2" {
-            rx.close();
+        let rx = rx.clone();
+        async move {
+            if e.mid == "w2" {
+                rx.close();
+            }
         }
     });
 
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -131,25 +135,32 @@ async fn pack_subflow_act_complete() {
 
     main.print();
     let main_pid = utils::longid();
-    let (engine, proc) = create_proc(&main, &main_pid);
+    let (engine, proc) = create_proc(&main, &main_pid).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(false).double();
 
     let channel = engine.channel();
     channel.on_complete(move |e| {
-        if e.mid == "main" {
-            rx.close();
+        let rx = rx.clone();
+        async move {
+            if e.mid == "main" {
+                rx.close();
+            }
         }
     });
-    Executor::new(&rt).model().deploy(&w2, None).unwrap();
+    Executor::new(&rt).model().deploy(&w2, None).await.unwrap();
     channel.on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            rt.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
-                .unwrap();
+        let rt = rt.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                rt.do_action2(&e.pid, &e.tid, EventAction::Next, Vars::new())
+                    .await
+                    .unwrap();
+            }
         }
     });
 
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert_eq!(
@@ -177,24 +188,31 @@ async fn pack_subflow_act_skip() {
 
     main.print();
     let main_pid = utils::longid();
-    let (engine, proc) = create_proc(&main, &main_pid);
+    let (engine, proc) = create_proc(&main, &main_pid).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(false).double();
     let channel = engine.channel();
     channel.on_complete(move |e| {
-        if e.mid == "main" {
-            rx.close();
+        let rx = rx.clone();
+        async move {
+            if e.mid == "main" {
+                rx.close();
+            }
         }
     });
-    Executor::new(&rt).model().deploy(&w2, None).unwrap();
+    Executor::new(&rt).model().deploy(&w2, None).await.unwrap();
     channel.on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            rt.do_action2(&e.pid, &e.tid, EventAction::Skip, Vars::new())
-                .unwrap();
+        let rt = rt.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                rt.do_action2(&e.pid, &e.tid, EventAction::Skip, Vars::new())
+                    .await
+                    .unwrap();
+            }
         }
     });
 
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
 
@@ -224,25 +242,32 @@ async fn pack_subflow_act_abort() {
 
     main.print();
     let main_pid = utils::longid();
-    let (engine, proc) = create_proc(&main, &main_pid);
+    let (engine, proc) = create_proc(&main, &main_pid).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(false).double();
     // auto_complete(&engine, &rx);
     let channel = engine.channel();
 
-    Executor::new(&rt).model().deploy(&w2, None).unwrap();
+    Executor::new(&rt).model().deploy(&w2, None).await.unwrap();
     channel.on_message(move |e| {
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            rt.do_action2(&e.pid, &e.tid, EventAction::Abort, Vars::new())
-                .unwrap();
+        let rt = rt.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                rt.do_action2(&e.pid, &e.tid, EventAction::Abort, Vars::new())
+                    .await
+                    .unwrap();
+            }
         }
     });
     channel.on_complete(move |e| {
-        if e.mid == "main" {
-            rx.close();
+        let rx = rx.clone();
+        async move {
+            if e.mid == "main" {
+                rx.close();
+            }
         }
     });
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
 
@@ -271,29 +296,36 @@ async fn pack_subflow_act_error() {
 
     main.print();
     let main_pid = utils::longid();
-    let (engine, proc) = create_proc(&main, &main_pid);
+    let (engine, proc) = create_proc(&main, &main_pid).await;
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(false).double();
     let channel = engine.channel();
 
-    Executor::new(&rt).model().deploy(&w2, None).unwrap();
+    Executor::new(&rt).model().deploy(&w2, None).await.unwrap();
     channel.on_error(move |e| {
-        if e.mid == "main" {
-            rx.close();
+        let rx = rx.clone();
+        async move {
+            if e.mid == "main" {
+                rx.close();
+            }
         }
     });
     channel.on_message(move |e| {
         println!("message: {e:?}");
-        if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-            let mut options = Vars::new();
-            options.set(consts::ACT_ERR_CODE, "err1");
-            options.set(consts::ACT_ERR_MESSAGE, "sub workflow error");
-            rt.do_action2(&e.pid, &e.tid, EventAction::Error, options)
-                .unwrap();
+        let rt = rt.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                let mut options = Vars::new();
+                options.set(consts::ACT_ERR_CODE, "err1");
+                options.set(consts::ACT_ERR_MESSAGE, "sub workflow error");
+                rt.do_action2(&e.pid, &e.tid, EventAction::Error, options)
+                    .await
+                    .unwrap();
+            }
         }
     });
 
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     tx.recv().await;
     proc.print();
     assert!(

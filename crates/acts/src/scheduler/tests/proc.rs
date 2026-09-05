@@ -13,14 +13,14 @@ use serial_test::serial;
 async fn sch_proc_send() {
     let workflow = Workflow::default().with_step(|step| step.with_id("step1"));
     let id = utils::longid();
-    let (engine, proc) = create_proc(&workflow, &id);
+    let (engine, proc) = create_proc(&workflow, &id).await;
     let rt = engine.runtime();
     let sig = engine.signal(());
     auto_complete(&engine, &sig);
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     rt.queue().next().await.unwrap();
 
-    assert!(rt.proc(&id).unwrap().is_some())
+    assert!(rt.proc(&id).await.unwrap().is_some())
 }
 
 #[tokio::test]
@@ -28,7 +28,7 @@ async fn sch_proc_state() {
     let workflow = Workflow::default();
 
     let id = utils::longid();
-    let (_, proc) = create_proc(&workflow, &id);
+    let (_, proc) = create_proc(&workflow, &id).await;
 
     proc.set_state(TaskState::Skipped);
     assert_eq!(proc.state(), TaskState::Skipped)
@@ -38,7 +38,7 @@ async fn sch_proc_state() {
 async fn sch_proc_cost() {
     let workflow = Workflow::default();
     let id = utils::longid();
-    let (_, proc) = create_proc(&workflow, &id);
+    let (_, proc) = create_proc(&workflow, &id).await;
 
     proc.set_state(TaskState::Completed);
     proc.set_start_time(100);
@@ -50,11 +50,11 @@ async fn sch_proc_cost() {
 #[tokio::test]
 async fn sch_proc_time() {
     let workflow = Workflow::new().with_step(|step| step.with_name("step1"));
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let rt = engine.runtime();
     let tx = engine.signal(());
     auto_complete(&engine, &tx);
-    rt.launch(&proc).unwrap();
+    rt.launch(&proc).await.unwrap();
     tx.recv().await;
 
     assert!(proc.start_time() > 0);
@@ -67,7 +67,7 @@ async fn sch_proc_task() {
 
     let pid = utils::longid();
     let tr = NodeTree::build(&mut workflow).unwrap();
-    let (_, proc) = create_proc(&workflow, &pid);
+    let (_, proc) = create_proc(&workflow, &pid).await;
 
     let node = tr.root.as_ref().unwrap();
     let task = proc.create_task(node, None).unwrap();
@@ -84,17 +84,17 @@ async fn sch_proc_start_single_shot() {
     let workflow = Workflow::new()
         .with_id("w1")
         .with_step(|step| step.with_id("s1"));
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let sig = engine.signal(());
     auto_complete(&engine, &sig);
 
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     let start_time = proc.start_time();
     assert!(start_time > 0, "start must set the start time");
 
     // repeated start while the process is running (or already finished) is a
     // no-op — the start time must not be reset
-    proc.start().unwrap();
+    proc.start().await.unwrap();
     assert_eq!(
         proc.start_time(),
         start_time,
@@ -110,7 +110,7 @@ async fn sch_proc_start_single_shot() {
     );
 
     // even after completion a repeated start must not restart the process
-    proc.start().unwrap();
+    proc.start().await.unwrap();
     assert_eq!(proc.state(), TaskState::Completed);
     assert_eq!(proc.task_by_nid("s1").len(), 1);
     assert_eq!(proc.start_time(), start_time);
@@ -134,10 +134,10 @@ async fn sch_proc_node_self_loop_bounded() {
         },
         table: Default::default(),
     };
-    let (engine, proc) = create_proc_with_config(&config, &workflow, &utils::longid());
+    let (engine, proc) = create_proc_with_config(&config, &workflow, &utils::longid()).await;
     let sig = engine.signal(());
     auto_complete(&engine, &sig);
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     sig.recv().await;
 
     // the process ended in error, with exactly `max_node_run_times` task
@@ -163,11 +163,11 @@ async fn sch_proc_do_tick_skips_terminal_states() {
         TaskState::Aborted,
         TaskState::Skipped,
     ] {
-        let (engine, proc) = create_proc(&workflow, &utils::longid());
+        let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
         let s1 = proc.tree().node("s1").unwrap();
         let task = proc.create_task(&s1, None).unwrap();
         task.set_state(state.clone());
-        proc.do_tick();
+        proc.do_tick().await;
         assert!(
             proc.task_by_nid("t1").is_empty(),
             "a {state} task must not fire its timeouts"
@@ -176,11 +176,11 @@ async fn sch_proc_do_tick_skips_terminal_states() {
     }
 
     // control: a running task still fires its timeouts
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let s1 = proc.tree().node("s1").unwrap();
     let task = proc.create_task(&s1, None).unwrap();
     task.set_state(TaskState::Running);
-    proc.do_tick();
+    proc.do_tick().await;
     assert_eq!(proc.task_by_nid("t1").len(), 1);
     drop(engine);
 }
@@ -203,10 +203,10 @@ async fn sch_step_while_loop_self_next() {
         })
         .with_step(|step| step.with_id("end"));
 
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let sig = engine.signal(());
     auto_complete(&engine, &sig);
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     sig.recv().await;
 
     assert_eq!(proc.state(), TaskState::Completed);
@@ -245,10 +245,10 @@ async fn sch_step_while_attr_loops() {
         })
         .with_step(|step| step.with_id("end"));
 
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let sig = engine.signal(());
     auto_complete(&engine, &sig);
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     sig.recv().await;
 
     assert_eq!(proc.state(), TaskState::Completed);
@@ -282,10 +282,10 @@ async fn sch_step_if_false_self_next_falls_through() {
         .with_step(|step| step.with_id("s1").with_if("false").with_next("s1"))
         .with_step(|step| step.with_id("s2"));
 
-    let (engine, proc) = create_proc(&workflow, &utils::longid());
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let sig = engine.signal(());
     auto_complete(&engine, &sig);
-    engine.runtime().launch(&proc).unwrap();
+    engine.runtime().launch(&proc).await.unwrap();
     sig.recv().await;
 
     assert_eq!(proc.state(), TaskState::Completed);

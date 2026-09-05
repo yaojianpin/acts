@@ -1,9 +1,12 @@
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 
 use acts::{Event, Executor, Message, MessageState, Result, Vars};
 use serde_json::json;
 
-type Action = fn(&Executor, &Event<Message>) -> Result<()>;
+type ActionFuture = Pin<Box<dyn Future<Output = Result<()>> + Send>>;
+type Action = fn(&Executor, &Event<Message>) -> ActionFuture;
 pub struct Client {
     actions: HashMap<String, Box<Action>>,
 }
@@ -28,7 +31,7 @@ impl Client {
             match self.actions.get(&key) {
                 Some(action) => {
                     println!("action:{} inputs={:?}", key, e.inputs);
-                    action(executor, e)?;
+                    action(executor, e).await?;
                 }
                 None => eprintln!("cannot find action '{}'", key),
             }
@@ -37,53 +40,63 @@ impl Client {
         Ok(())
     }
 
-    pub fn init<'a>(executor: &'a Executor, e: &'a Event<Message>) -> Result<()> {
+    pub fn init(executor: &Executor, e: &Event<Message>) -> ActionFuture {
         let executor = executor.clone();
         let pid = e.pid.clone();
         let tid = e.tid.clone();
-        let mut vars = Vars::new();
-        vars.insert("uid".to_string(), json!("u1"));
-        executor.act().complete(&pid, &tid, vars)
+        Box::pin(async move {
+            let mut vars = Vars::new();
+            vars.insert("uid".to_string(), json!("u1"));
+            executor.act().complete(&pid, &tid, vars).await
+        })
     }
-    pub fn act1<'a>(executor: &'a Executor, e: &'a Event<Message>) -> Result<()> {
+    pub fn act1(executor: &Executor, e: &Event<Message>) -> ActionFuture {
         let executor = executor.clone();
         let pid = e.pid.clone();
         let tid = e.tid.clone();
-        let mut vars = Vars::new();
-        vars.insert("uid".to_string(), json!("u2"));
+        Box::pin(async move {
+            let mut vars = Vars::new();
+            vars.insert("uid".to_string(), json!("u2"));
 
-        // will catch by catch1
-        vars.set("ecode", "err1");
+            // will catch by catch1
+            vars.set("ecode", "err1");
 
-        // cause the error
-        executor.act().fail(&pid, &tid, vars)
+            // cause the error
+            executor.act().fail(&pid, &tid, vars).await
+        })
     }
-    pub fn catch1<'a>(executor: &'a Executor, e: &'a Event<Message>) -> Result<()> {
+    pub fn catch1(executor: &Executor, e: &Event<Message>) -> ActionFuture {
         let executor = executor.clone();
         let pid = e.pid.clone();
         let tid = e.tid.clone();
-        let mut vars = Vars::new();
-        vars.insert("uid".to_string(), json!("u3"));
-        vars.set("ecode", "err1");
+        Box::pin(async move {
+            let mut vars = Vars::new();
+            vars.insert("uid".to_string(), json!("u3"));
+            vars.set("ecode", "err1");
 
-        executor.act().complete(&pid, &tid, vars)
+            executor.act().complete(&pid, &tid, vars).await
+        })
     }
-    pub fn catch2<'a>(executor: &'a Executor, e: &'a Event<Message>) -> Result<()> {
+    pub fn catch2(executor: &Executor, e: &Event<Message>) -> ActionFuture {
         let executor = executor.clone();
         let pid = e.pid.clone();
         let tid = e.tid.clone();
-        let mut vars = Vars::new();
-        vars.insert("uid".to_string(), json!("u4"));
+        Box::pin(async move {
+            let mut vars = Vars::new();
+            vars.insert("uid".to_string(), json!("u4"));
 
-        executor.act().complete(&pid, &tid, vars)
+            executor.act().complete(&pid, &tid, vars).await
+        })
     }
 
-    pub fn catch_others<'a>(executor: &'a Executor, e: &'a Event<Message>) -> Result<()> {
+    pub fn catch_others(executor: &Executor, e: &Event<Message>) -> ActionFuture {
         let executor = executor.clone();
         let pid = e.pid.clone();
         let tid = e.tid.clone();
-        let mut vars = Vars::new();
-        vars.insert("uid".to_string(), json!("u5"));
-        executor.act().complete(&pid, &tid, vars)
+        Box::pin(async move {
+            let mut vars = Vars::new();
+            vars.insert("uid".to_string(), json!("u5"));
+            executor.act().complete(&pid, &tid, vars).await
+        })
     }
 }

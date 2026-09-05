@@ -79,7 +79,7 @@ impl ActPackage for SubflowPackage {
         let mut inputs = utils::fill_inputs(&params.options, ctx);
         inputs.set(consts::ACT_USE_PARENT_PROC_ID, &ctx.proc.id());
         inputs.set(consts::ACT_USE_PARENT_TASK_ID, &task.id);
-        executor.proc().start(&params.to, inputs)?;
+        executor.proc().start(&params.to, inputs).await?;
 
         Ok(None)
     }

@@ -30,7 +30,8 @@ impl Client {
                     let outputs = action(&params);
                     executor
                         .act()
-                        .complete(&message.pid, &message.tid, outputs.clone())?;
+                        .complete(&message.pid, &message.tid, outputs.clone())
+                        .await?;
                     println!("action state: key={}", key);
                     println!("inputs:{:?}", message.inputs);
                     println!("outputs:{outputs:?}");

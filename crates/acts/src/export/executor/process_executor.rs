@@ -20,15 +20,22 @@ impl ProcessExecutor {
     }
 
     #[instrument(skip(self, options), fields(mid = %mid))]
-    pub fn start(&self, mid: &str, options: Vars) -> Result<String> {
-        let model: ModelInfo = self.runtime.cache().store().models().find(mid)?.into();
+    pub async fn start(&self, mid: &str, options: Vars) -> Result<String> {
+        let model: ModelInfo = self
+            .runtime
+            .cache()
+            .store()
+            .models()
+            .find(mid)
+            .await?
+            .into();
         let workflow = model.workflow()?;
-        let proc = self.runtime.start(&workflow, options)?;
+        let proc = self.runtime.start(&workflow, options).await?;
         Ok(proc.id().to_string())
     }
 
     #[instrument(skip(self, model, options), fields(fmt = %fmt))]
-    pub fn start_from_model(&self, model: &str, fmt: &str, options: Vars) -> Result<String> {
+    pub async fn start_from_model(&self, model: &str, fmt: &str, options: Vars) -> Result<String> {
         let workflow = match fmt {
             "yaml" | "yml" => Workflow::from_yml(model),
             "json" => Workflow::from_json(model),
@@ -36,13 +43,13 @@ impl ProcessExecutor {
                 "'{fmt}' is invalid, it must be one of 'yaml' and 'json'"
             ))),
         }?;
-        let proc = self.runtime.start(&workflow, options)?;
+        let proc = self.runtime.start(&workflow, options).await?;
         Ok(proc.id().to_string())
     }
 
     #[instrument(skip(self, q))]
-    pub fn list(&self, q: &Query) -> Result<PageData<ProcInfo>> {
-        match self.runtime.cache().store().procs().query(q) {
+    pub async fn list(&self, q: &Query) -> Result<PageData<ProcInfo>> {
+        match self.runtime.cache().store().procs().query(q).await {
             Ok(procs) => Ok(PageData {
                 count: procs.count,
                 page_size: procs.page_size,
@@ -55,12 +62,12 @@ impl ProcessExecutor {
     }
 
     #[instrument(skip(self))]
-    pub fn get(&self, pid: &str) -> Result<ProcInfo> {
-        match self.runtime.cache().store().procs().find(pid) {
+    pub async fn get(&self, pid: &str) -> Result<ProcInfo> {
+        match self.runtime.cache().store().procs().find(pid).await {
             Ok(ref proc) => {
                 let mut info: ProcInfo = proc.into();
 
-                if let Some(proc) = self.runtime.proc(pid)? {
+                if let Some(proc) = self.runtime.proc(pid).await? {
                     let mut tasks: Vec<TaskInfo> =
                         proc.tasks().iter().map(TaskInfo::from).collect();
 
@@ -75,7 +82,7 @@ impl ProcessExecutor {
     }
 
     #[instrument(skip(self))]
-    pub fn get_process(&self, pid: &str) -> Result<Option<Arc<Process>>> {
-        self.runtime.proc(pid)
+    pub async fn get_process(&self, pid: &str) -> Result<Option<Arc<Process>>> {
+        self.runtime.proc(pid).await
     }
 }

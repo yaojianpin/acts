@@ -2,14 +2,14 @@ use acts::{Engine, Result, Vars, Workflow};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let engine = Engine::new().start()?;
+    let engine = Engine::new().start().await?;
 
     let executor = engine.executor();
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text).unwrap();
     workflow.print();
-    engine.executor().model().deploy(&workflow, None)?;
-    executor.proc().start(&workflow.id, Vars::new())?;
+    engine.executor().model().deploy(&workflow, None).await?;
+    executor.proc().start(&workflow.id, Vars::new()).await?;
 
     let ret = executor
         .evt()
@@ -39,6 +39,6 @@ async fn main() -> Result<()> {
         .await;
     println!("event-schedule: {ret:?}");
 
-    engine.close();
+    engine.close().await;
     Ok(())
 }
