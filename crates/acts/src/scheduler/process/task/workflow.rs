@@ -4,7 +4,7 @@ use crate::{
 };
 
 impl ActTask for Workflow {
-    fn init(&self, ctx: &Context) -> Result<()> {
+    async fn init(&self, ctx: &Context) -> Result<()> {
         // init process env
         if !self.env.is_empty() {
             ctx.proc.with_env_mut(|data| {

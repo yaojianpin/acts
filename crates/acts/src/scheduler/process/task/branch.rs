@@ -6,7 +6,7 @@ use crate::{
 use tracing::debug;
 
 impl ActTask for Branch {
-    fn init(&self, ctx: &Context) -> Result<()> {
+    async fn init(&self, ctx: &Context) -> Result<()> {
         let task = ctx.task();
         task.set_emit(false);
         if !self.needs.is_empty() {

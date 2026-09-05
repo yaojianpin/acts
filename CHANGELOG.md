@@ -272,3 +272,4 @@
 - fix: a process's first persist is atomic — `Process::start` now writes the proc row and its root task row as one `KvStore::batch` (`Cache::start_proc` → `Store::upsert_proc_with_task`) before the root task is dispatched, closing the crash window where a durable Running proc row had no task rows yet and would resume as an un-runnable, task-less process
 - fix: `Engine::start` failure now releases the partially started runtime — the store writer thread, event loop, recovery writes and any timer tasks are torn down (`rt.close()`) before returning the error, instead of leaking a live writer std-thread and polling timers on an engine that never became usable
 - BREAKING: `EventExecutor::start` (and its `start_hook` helper) is now `async` — the `hook` trigger awaits the completion signal directly (`sig.recv().await`) instead of parking a `sync::block_on`; callers of `executor.evt().start(...)` must `.await` it
+- BREAKING: change `ActTask::init` to `async`

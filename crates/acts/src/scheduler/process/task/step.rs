@@ -6,7 +6,7 @@ use crate::{
 };
 
 impl ActTask for Step {
-    fn init(&self, ctx: &Context) -> Result<()> {
+    async fn init(&self, ctx: &Context) -> Result<()> {
         let task = ctx.task();
         if let Some(expr) = &self.r#if {
             let cond = ctx.eval::<bool>(expr)?;

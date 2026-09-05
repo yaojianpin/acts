@@ -462,7 +462,7 @@ impl Task {
                 self.pid, self.id
             )));
         }
-        self.init(ctx)?;
+        self.init(ctx).await?;
         self.run(ctx).await?;
         ctx.push_next()?;
         Ok(())
@@ -979,17 +979,17 @@ impl Task {
 
 impl ActTask for Arc<Task> {
     #[instrument(skip(self, ctx), fields(pid = %self.pid, tid = %self.id))]
-    fn init(&self, ctx: &Context) -> Result<()> {
+    async fn init(&self, ctx: &Context) -> Result<()> {
         debug!("task init");
         ctx.set_task(self);
         if ctx.task().state().is_none() {
-            ctx.prepare()?;
+            ctx.prepare().await?;
             ctx.task().set_state(TaskState::Ready);
             match &self.node.content {
-                NodeContent::Workflow(workflow) => workflow.init(ctx)?,
-                NodeContent::Branch(branch) => branch.init(ctx)?,
-                NodeContent::Step(step) => step.init(ctx)?,
-                NodeContent::Act(act) => act.init(ctx)?,
+                NodeContent::Workflow(workflow) => workflow.init(ctx).await?,
+                NodeContent::Branch(branch) => branch.init(ctx).await?,
+                NodeContent::Step(step) => step.init(ctx).await?,
+                NodeContent::Act(act) => act.init(ctx).await?,
             }
             ctx.emit_task(&ctx.task())?;
         }

@@ -59,7 +59,7 @@ bitflags! {
 }
 
 pub trait ActTask: Clone + Send {
-    fn init(&self, _ctx: &Context) -> Result<()> {
+    async fn init(&self, _ctx: &Context) -> Result<()> {
         Ok(())
     }
 

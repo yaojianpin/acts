@@ -1,7 +1,7 @@
 use super::{ActTask, Runtime};
 use crate::{
-    Act, ActError, Executor, Message, MessageState, MissingParamAction, NodeKind, Result,
-    TaskState, Vars,
+    Act, ActError, ConfigResolver, Executor, Message, MessageState, MissingParamAction, NodeKind,
+    Result, TaskState, Vars,
     event::Action,
     scheduler::{
         Node, Process, Task,
@@ -102,19 +102,25 @@ impl Context {
         self.task.read().clone()
     }
 
-    pub fn prepare(&self) -> Result<()> {
+    pub async fn prepare(&self) -> Result<()> {
         self.init_vars(&self.task());
-        self.resolve_sealed()?;
+        self.resolve_sealed().await?;
         Ok(())
     }
 
-    fn resolve_sealed(&self) -> Result<()> {
-        let resolvers = self.runtime.resolvers.read();
+    pub async fn resolve_sealed(&self) -> Result<()> {
+        let resolvers: Vec<(String, Arc<dyn ConfigResolver>)> = {
+            let guard = self.runtime.resolvers.read();
+            guard
+                .iter()
+                .map(|(name, resolver)| (name.clone(), resolver.clone()))
+                .collect()
+        };
         if resolvers.is_empty() {
             return Ok(());
         }
         let task = self.task();
-        for (name, resolver) in resolvers.iter() {
+        for (name, resolver) in resolvers {
             // check required params via task.find() (walks parent chain)
             let required = resolver.required_params();
             let mut missing = vec![];
@@ -138,8 +144,8 @@ impl Context {
                     }
                 }
             }
-            let result = utils::sync::block_on(resolver.resolve(&ctx))?;
-            task.set_sealed(name, result);
+            let result = resolver.resolve(&ctx).await?;
+            task.set_sealed(&name, result);
         }
         Ok(())
     }
