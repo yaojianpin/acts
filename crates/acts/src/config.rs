@@ -23,8 +23,6 @@ pub struct ConfigData {
     // will delete message after the max retries
     // cancel the settings by setting to 0
     pub max_message_retry_times: Option<i32>,
-    // do not remove process and tasks on complete
-    pub keep_processes: Option<bool>,
     /// max times a tree node can be executed in one process; protects against
     /// unbounded task creation caused by a node self-loop / cyclic `next`.
     /// 0 disables the check
@@ -79,9 +77,6 @@ impl Config {
 
     pub fn cache_cap(&self) -> i64 {
         self.data.cache_cap.unwrap_or(1024)
-    }
-    pub fn keep_processes(&self) -> bool {
-        self.data.keep_processes.unwrap_or(false)
     }
     pub fn max_message_retry_times(&self) -> i32 {
         self.data.max_message_retry_times.unwrap_or(20)

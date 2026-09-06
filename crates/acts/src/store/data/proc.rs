@@ -16,6 +16,12 @@ pub struct Proc {
     pub model: String,
     pub env: String,
     pub err: Option<String>,
+    /// The process is finished and every delivery of its messages has settled
+    /// (acked/completed/errored — nothing left to send or retry). The engine
+    /// sweeper deletes the process rows. Defaults to false so rows written
+    /// before this field existed keep loading.
+    #[serde(default)]
+    pub removable: bool,
     pub v: i32,
 }
 

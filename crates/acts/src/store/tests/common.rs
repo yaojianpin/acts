@@ -5,7 +5,7 @@ macro_rules! gen_store_tests {
         use serial_test::serial;
         use std::collections::HashSet;
         use std::sync::OnceLock;
-        use $crate::store::data::{Delivery, Message, MessageStatus, Model, Package, Proc, Task};
+        use $crate::store::data::{Delivery, DeliveryStatus, Message, Model, Package, Proc, Task};
         use $crate::store::query::{Expr, ExprOp, Sort};
         use $crate::store::{Filter, Query};
         use $crate::{MessageState, TaskState, Workflow, scheduler::NodeKind, utils};
@@ -38,6 +38,7 @@ macro_rules! gen_store_tests {
                 model: model.to_json().unwrap(),
                 env: "{}".to_string(),
                 err: None,
+                removable: false,
                 v: 0,
             }
         }
@@ -445,6 +446,7 @@ macro_rules! gen_store_tests {
                 model: "{}".to_string(),
                 env: "{}".to_string(),
                 err: None,
+                removable: false,
                 v: 0,
             };
 
@@ -471,6 +473,7 @@ macro_rules! gen_store_tests {
                     model: "{}".to_string(),
                     env: "{}".to_string(),
                     err: None,
+                    removable: false,
                     v: 0,
                 };
                 store.procs().create(&proc).await.expect("create process");
@@ -510,6 +513,7 @@ macro_rules! gen_store_tests {
                     model: "{}".to_string(),
                     env: "{}".to_string(),
                     err: None,
+                    removable: false,
                     v: 0,
                 };
                 store.procs().create(&proc).await.expect("create process");
@@ -549,6 +553,7 @@ macro_rules! gen_store_tests {
                     model: "{}".to_string(),
                     env: "{}".to_string(),
                     err: None,
+                    removable: false,
                     v: 0,
                 };
                 store.procs().create(&proc).await.expect("create process");
@@ -566,6 +571,7 @@ macro_rules! gen_store_tests {
                     model: "{}".to_string(),
                     env: "{}".to_string(),
                     err: None,
+                    removable: false,
                     v: 0,
                 };
                 store.procs().create(&proc).await.expect("create process");
@@ -600,6 +606,7 @@ macro_rules! gen_store_tests {
                     model: "{}".to_string(),
                     env: "{}".to_string(),
                     err: None,
+                    removable: false,
                     v: 0,
                 };
                 store.procs().create(&proc).await.expect("create process");
@@ -1747,6 +1754,7 @@ macro_rules! gen_store_tests {
                 model: "{}".to_string(),
                 env: "{}".to_string(),
                 err: None,
+                removable: false,
                 v: 0,
             };
             store.procs().create(&proc).await.expect("create proc");
@@ -1899,10 +1907,10 @@ macro_rules! gen_store_tests {
 
             // Create messages with different status values (indexed field on Message)
             let statuses = [
-                MessageStatus::Completed, // 2
-                MessageStatus::Created,   // 0
-                MessageStatus::Acked,     // 1
-                MessageStatus::Error,     // 3
+                DeliveryStatus::Completed, // 2
+                DeliveryStatus::Created,   // 0
+                DeliveryStatus::Acked,     // 1
+                DeliveryStatus::Error,     // 3
             ];
             for &status in &statuses {
                 for _ in 0..5 {
@@ -1950,10 +1958,10 @@ macro_rules! gen_store_tests {
             let tid = utils::shortid();
 
             let statuses = [
-                MessageStatus::Created,   // 0
-                MessageStatus::Acked,     // 1
-                MessageStatus::Completed, // 2
-                MessageStatus::Error,     // 3
+                DeliveryStatus::Created,   // 0
+                DeliveryStatus::Acked,     // 1
+                DeliveryStatus::Completed, // 2
+                DeliveryStatus::Error,     // 3
             ];
             for &status in &statuses {
                 for _ in 0..5 {
@@ -2005,13 +2013,13 @@ macro_rules! gen_store_tests {
 
             for i in 0..20 {
                 let status = if i < 5 {
-                    MessageStatus::Created
+                    DeliveryStatus::Created
                 } else if i < 10 {
-                    MessageStatus::Acked
+                    DeliveryStatus::Acked
                 } else if i < 15 {
-                    MessageStatus::Completed
+                    DeliveryStatus::Completed
                 } else {
-                    MessageStatus::Error
+                    DeliveryStatus::Error
                 };
                 let msg = Delivery {
                     id: utils::shortid(),
@@ -2061,10 +2069,10 @@ macro_rules! gen_store_tests {
 
             // Insert 20 messages with status 0..3, 5 of each
             for &status in &[
-                MessageStatus::Created,
-                MessageStatus::Acked,
-                MessageStatus::Completed,
-                MessageStatus::Error,
+                DeliveryStatus::Created,
+                DeliveryStatus::Acked,
+                DeliveryStatus::Completed,
+                DeliveryStatus::Error,
             ] {
                 for _ in 0..5 {
                     let msg = Delivery {
@@ -2185,10 +2193,10 @@ macro_rules! gen_store_tests {
             let pid = utils::longid();
             let tid = utils::shortid();
             for &status in &[
-                MessageStatus::Created,
-                MessageStatus::Acked,
-                MessageStatus::Completed,
-                MessageStatus::Error,
+                DeliveryStatus::Created,
+                DeliveryStatus::Acked,
+                DeliveryStatus::Completed,
+                DeliveryStatus::Error,
             ] {
                 for _ in 0..5 {
                     let msg = Delivery {
@@ -2335,7 +2343,7 @@ macro_rules! gen_store_tests {
                     tid: tid.clone(),
                     chan_id: "test1".to_string(),
                     chan_pattern: "*:*:*:*".to_string(),
-                    status: MessageStatus::Created,
+                    status: DeliveryStatus::Created,
                     retry_times: 0,
                     create_time: 0,
                     update_time: 0,
@@ -2348,7 +2356,7 @@ macro_rules! gen_store_tests {
                 .filter(
                     Filter::and()
                         .expr(Expr::eq("pid", pid.clone()))
-                        .expr(Expr::eq("status", MessageStatus::Created as i32)),
+                        .expr(Expr::eq("status", DeliveryStatus::Created as i32)),
                 )
                 .offset(0)
                 .limit(100);
@@ -2359,7 +2367,7 @@ macro_rules! gen_store_tests {
                 .filter(
                     Filter::and()
                         .expr(Expr::eq("pid", pid.clone()))
-                        .expr(Expr::eq("status", MessageStatus::Error as i32)),
+                        .expr(Expr::eq("status", DeliveryStatus::Error as i32)),
                 )
                 .offset(0)
                 .limit(100);
@@ -2569,10 +2577,10 @@ macro_rules! gen_store_tests {
             let tid = utils::shortid();
 
             let statuses = vec![
-                MessageStatus::Created,
-                MessageStatus::Acked,
-                MessageStatus::Completed,
-                MessageStatus::Error,
+                DeliveryStatus::Created,
+                DeliveryStatus::Acked,
+                DeliveryStatus::Completed,
+                DeliveryStatus::Error,
             ];
             for &status in &statuses {
                 for _ in 0..5 {
@@ -2602,8 +2610,8 @@ macro_rules! gen_store_tests {
                         .expr(Expr::r#in(
                             "status",
                             vec![
-                                MessageStatus::Created as i32,
-                                MessageStatus::Completed as i32,
+                                DeliveryStatus::Created as i32,
+                                DeliveryStatus::Completed as i32,
                             ],
                         )),
                 )
@@ -2616,7 +2624,8 @@ macro_rules! gen_store_tests {
             // Verify all results have the correct status
             for row in &ret.rows {
                 assert!(
-                    row.status == MessageStatus::Created || row.status == MessageStatus::Completed
+                    row.status == DeliveryStatus::Created
+                        || row.status == DeliveryStatus::Completed
                 );
             }
 
@@ -2625,7 +2634,7 @@ macro_rules! gen_store_tests {
                 .filter(
                     Filter::and()
                         .expr(Expr::eq("pid", pid.clone()))
-                        .expr(Expr::r#in("status", vec![MessageStatus::Error as i32])),
+                        .expr(Expr::r#in("status", vec![DeliveryStatus::Error as i32])),
                 )
                 .offset(0)
                 .limit(100);
@@ -2826,10 +2835,10 @@ macro_rules! gen_store_tests {
 
             for i in 0..20 {
                 let status = match i % 4 {
-                    0 => MessageStatus::Created,
-                    1 => MessageStatus::Acked,
-                    2 => MessageStatus::Completed,
-                    _ => MessageStatus::Error,
+                    0 => DeliveryStatus::Created,
+                    1 => DeliveryStatus::Acked,
+                    2 => DeliveryStatus::Completed,
+                    _ => DeliveryStatus::Error,
                 };
                 let msg = Delivery {
                     id: utils::shortid(),
@@ -2855,7 +2864,7 @@ macro_rules! gen_store_tests {
                         .expr(Expr::eq("pid", pid.clone()))
                         .expr(Expr::r#in(
                             "status",
-                            vec![MessageStatus::Created as i32, MessageStatus::Acked as i32],
+                            vec![DeliveryStatus::Created as i32, DeliveryStatus::Acked as i32],
                         )),
                 )
                 .order("status", Sort::Asc)
@@ -2887,7 +2896,7 @@ macro_rules! gen_store_tests {
                         .expr(Expr::eq("pid", pid.clone()))
                         .expr(Expr::r#in(
                             "status",
-                            vec![MessageStatus::Created as i32, MessageStatus::Acked as i32],
+                            vec![DeliveryStatus::Created as i32, DeliveryStatus::Acked as i32],
                         )),
                 )
                 .order("status", Sort::Asc)
@@ -2912,11 +2921,11 @@ macro_rules! gen_store_tests {
             let tid = utils::shortid();
 
             for &(rt, status) in &[
-                (0, MessageStatus::Created),
-                (1, MessageStatus::Created),
-                (2, MessageStatus::Acked),
-                (3, MessageStatus::Acked),
-                (4, MessageStatus::Completed),
+                (0, DeliveryStatus::Created),
+                (1, DeliveryStatus::Created),
+                (2, DeliveryStatus::Acked),
+                (3, DeliveryStatus::Acked),
+                (4, DeliveryStatus::Completed),
             ] {
                 let msg = Delivery {
                     id: utils::shortid(),
@@ -2942,7 +2951,7 @@ macro_rules! gen_store_tests {
                     Filter::and()
                         .expr(Expr::eq("pid", pid.clone()))
                         .expr(Expr::between("retry_times", 1, 3))
-                        .expr(Expr::eq("status", MessageStatus::Created as i32)),
+                        .expr(Expr::eq("status", DeliveryStatus::Created as i32)),
                 )
                 .order("retry_times", Sort::Asc)
                 .offset(0)
@@ -2958,7 +2967,7 @@ macro_rules! gen_store_tests {
                     Filter::and().expr(Expr::eq("pid", pid.clone())).push(
                         Filter::or()
                             .expr(Expr::between("retry_times", 1, 3))
-                            .expr(Expr::eq("status", MessageStatus::Completed as i32)),
+                            .expr(Expr::eq("status", DeliveryStatus::Completed as i32)),
                     ),
                 )
                 .order("retry_times", Sort::Asc)
@@ -3079,10 +3088,10 @@ macro_rules! gen_store_tests {
             let tid = utils::shortid();
 
             let statuses = vec![
-                MessageStatus::Created,
-                MessageStatus::Acked,
-                MessageStatus::Completed,
-                MessageStatus::Error,
+                DeliveryStatus::Created,
+                DeliveryStatus::Acked,
+                DeliveryStatus::Completed,
+                DeliveryStatus::Error,
             ];
             for &status in &statuses {
                 for _ in 0..5 {
@@ -3109,14 +3118,14 @@ macro_rules! gen_store_tests {
                 .filter(
                     Filter::and()
                         .expr(Expr::eq("pid", pid.clone()))
-                        .expr(Expr::ne("status", MessageStatus::Created as i32)),
+                        .expr(Expr::ne("status", DeliveryStatus::Created as i32)),
                 )
                 .offset(0)
                 .limit(100);
             let ret = store.deliveries().query(&q).await.unwrap();
             assert_eq!(ret.count, 15);
             for row in &ret.rows {
-                assert_ne!(row.status, MessageStatus::Created);
+                assert_ne!(row.status, DeliveryStatus::Created);
             }
 
             // NE(status, 99) → all 20 results
@@ -3383,7 +3392,7 @@ macro_rules! gen_store_tests {
                         tid: tid.clone(),
                         chan_id: "test1".to_string(),
                         chan_pattern: "*:*:*:*".to_string(),
-                        status: MessageStatus::Created,
+                        status: DeliveryStatus::Created,
                         retry_times: rt,
                         create_time: 0,
                         update_time: 0,
@@ -3501,7 +3510,7 @@ macro_rules! gen_store_tests {
                         tid: tid.clone(),
                         chan_id: "test1".to_string(),
                         chan_pattern: "*:*:*:*".to_string(),
-                        status: MessageStatus::Created,
+                        status: DeliveryStatus::Created,
                         retry_times: rt,
                         create_time: 0,
                         update_time: 0,
@@ -3619,7 +3628,7 @@ macro_rules! gen_store_tests {
                         tid: tid.clone(),
                         chan_id: "test1".to_string(),
                         chan_pattern: "*:*:*:*".to_string(),
-                        status: MessageStatus::Created,
+                        status: DeliveryStatus::Created,
                         retry_times: rt,
                         create_time: 0,
                         update_time: 0,
@@ -3736,7 +3745,7 @@ macro_rules! gen_store_tests {
                         tid: tid.clone(),
                         chan_id: "test1".to_string(),
                         chan_pattern: "*:*:*:*".to_string(),
-                        status: MessageStatus::Created,
+                        status: DeliveryStatus::Created,
                         retry_times: rt,
                         create_time: 0,
                         update_time: 0,

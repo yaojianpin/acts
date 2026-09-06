@@ -1,7 +1,7 @@
 use super::writer::{StoreWriter, WriteOp};
 use crate::{
     Action, Config, Result,
-    data::MessageStatus,
+    data::DeliveryStatus,
     scheduler::{Process, Runtime, Task},
     store::{KvStore, MemoryStore, Store},
 };
@@ -104,6 +104,21 @@ impl Cache {
         Ok(true)
     }
 
+    /// The sweeper: delete every finished process whose deliveries have all
+    /// settled (see [`Store::sweep_settled_procs`]) and evict each from the
+    /// in-memory cache. Runs on the retry-timer tick; deletion is never
+    /// synchronous with the process completion — it waits for the deliveries
+    /// to settle. Removal goes through the writer (`RemoveProc`, FIFO after
+    /// any still-queued writes of the process), so it cannot race them.
+    #[instrument(skip(self))]
+    pub(crate) async fn sweep_removable(&self) -> Result<usize> {
+        let pids = self.store.sweep_settled_procs(256).await?;
+        for pid in &pids {
+            self.remove(pid).await?;
+        }
+        Ok(pids.len())
+    }
+
     #[instrument(skip(self, rt))]
     pub async fn restore(&self, rt: &Arc<Runtime>) -> Result<()> {
         debug!("restore");
@@ -195,9 +210,9 @@ impl Cache {
         &self,
         pid: &str,
         tid: &str,
-        status: MessageStatus,
+        status: DeliveryStatus,
     ) -> Result<()> {
-        self.writer.send(WriteOp::MessageStatus {
+        self.writer.send(WriteOp::DeliveryStatus {
             pid: pid.to_string(),
             tid: tid.to_string(),
             status,

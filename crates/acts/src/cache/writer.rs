@@ -5,17 +5,18 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::error;
 
-use crate::{ActError, Result, data::MessageStatus, scheduler::Task, store::Store};
+use crate::{ActError, Result, data::DeliveryStatus, scheduler::Task, store::Store};
 
 pub(crate) enum WriteOp {
     /// Persist a task, its root task, and mark the process complete when needed.
     /// Serialization happens on the writer thread, off the caller's hot path.
     Task(Arc<Task>),
-    /// Deferred message status update (marks a task's message as completed).
-    MessageStatus {
+    /// Deferred delivery-status update: closes every delivery row of a
+    /// finished task's message (the client is not asked to act again).
+    DeliveryStatus {
         pid: String,
         tid: String,
-        status: MessageStatus,
+        status: DeliveryStatus,
     },
     /// Durable outbox enqueue: record the task's `next` as pending. Ordered
     /// after the task write queued by the same caller, so when this record
@@ -42,9 +43,10 @@ pub(crate) enum WriteOp {
         tid: String,
         r#type: String,
     },
-    /// Drop a process and its rows (tasks, outbox ops). Queued on the writer
-    /// after any pending writes of the process, so removal can never race
-    /// them: the completion markers apply first, then the rows are dropped.
+    /// Drop a process and its rows (tasks, outbox ops, message/delivery rows).
+    /// Queued on the writer after any pending writes of the process, so
+    /// removal can never race them: the completion markers apply first, then
+    /// the rows are dropped.
     RemoveProc {
         pid: String,
     },
@@ -126,8 +128,12 @@ impl StoreWriter {
     async fn apply(store: &Store, op: WriteOp) -> Result<()> {
         match op {
             WriteOp::Task(task) => Self::apply_task(store, &task).await,
-            WriteOp::MessageStatus { pid, tid, status } => {
+            WriteOp::DeliveryStatus { pid, tid, status } => {
                 store.set_deliveries_with(&pid, &tid, status).await?;
+                // the task close may have settled the process's last open
+                // delivery — mark it removable when the process is finished
+                // and nothing is left open
+                let _ = store.try_mark_removable(&pid).await;
                 Ok(())
             }
             WriteOp::EnqueueNext { pid, tid } => {
@@ -175,6 +181,21 @@ impl StoreWriter {
             store
                 .mark_proc_complete(&task.pid, task.proc().end_time(), task.proc().state())
                 .await?;
+        }
+        // A message is done when it has no delivery rows (its own state is
+        // terminal — the message state is a projection of the task state) or
+        // when every delivery of it has settled. The task's terminal write is
+        // the authoritative point for both:
+        //  1. close the task's own delivery rows `Completed` — the client is
+        //     not asked to act on a finished task (this covers tasks
+        //     completed by the engine itself, with no client action ever);
+        //  2. re-check the removable mark — a process with no delivery rows
+        //     (or all settled) is marked here, so the sweeper deletes it.
+        if task.state().is_completed() {
+            store
+                .set_deliveries_with(&task.pid, &task.id, DeliveryStatus::Completed)
+                .await?;
+            let _ = store.try_mark_removable(&task.pid).await;
         }
         Ok(())
     }

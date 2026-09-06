@@ -1,7 +1,7 @@
 use serde_json::json;
 
 use crate::{
-    Act, Action, ChannelOptions, Config, Engine, MessageState, TaskState, Vars, Workflow,
+    Act, Action, ChannelOptions, Engine, MessageState, TaskState, Vars, Workflow,
     event::EventAction,
     scheduler::Sign,
     store::{
@@ -105,18 +105,15 @@ async fn sch_action_recover_pending() {
 async fn sch_action_recover_completed_next_is_noop() {
     // the shared store survives the "crash" (engine teardown + reload)
     let store: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
-    let mut config = Config::default();
-    config.data.keep_processes = Some(true);
 
     // first engine: run a two-step workflow to completion
     let engine = Engine::new()
-        .with_config(&config)
         .set_store(Some(store.clone()))
         .start()
         .await
         .unwrap();
     let rt = engine.runtime();
-    let (tx, rx) = engine.signal(()).double();
+    let (_, rx) = engine.signal(()).double();
     let workflow = Workflow::new()
         .with_step(|step| {
             step.with_id("s1")
@@ -163,21 +160,10 @@ async fn sch_action_recover_completed_next_is_noop() {
     .await
     .unwrap();
 
-    // s1's `next` schedules s2; complete act2 as well
+    // act2 is now in flight and the process is still running; simulate a crash
+    // that lost the outbox close for act1's already-run `next`
     let (_, act2_tid) = s2.recv().await;
-    rt.do_action(&Action::new(
-        &pid,
-        &act2_tid,
-        EventAction::Next,
-        Vars::new(),
-    ))
-    .await
-    .unwrap();
-
-    tx.recv().await;
-    assert!(proc.state().is_success());
-
-    // simulate a crash that lost the outbox close for act1's already-run `next`
+    assert!(proc.state().is_running());
     rt.cache()
         .store()
         .enqueue_next_op(&pid, &act1_tid)
@@ -188,20 +174,28 @@ async fn sch_action_recover_completed_next_is_noop() {
     // reload from the same store: recovery re-dispatches the record, but the
     // durable NEXT_COMPLETE marker turns the re-run into a no-op
     let engine2 = Engine::new()
-        .with_config(&config)
         .set_store(Some(store.clone()))
         .start()
         .await
         .unwrap();
     let rt2 = engine2.runtime();
     let store2 = rt2.cache().store();
+
+    // wait for the recovery to settle: act2 stays in flight, so the process
+    // keeps its legitimate pending outbox records — only the task set matters
+    // (the replayed `next` must not duplicate s2/act2)
+    let q_all = Query::new().filter(Filter::and().expr(Expr::eq("pid", pid.clone())));
     for _ in 0..100 {
-        if store2.load_pending_ops().await.unwrap().is_empty() {
+        if store2.tasks().query(&q_all).await.unwrap().rows.len() == 5 {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    assert!(store2.load_pending_ops().await.unwrap().is_empty());
+    assert_eq!(
+        store2.tasks().query(&q_all).await.unwrap().rows.len(),
+        5,
+        "root + s1 + s2 + act1 + act2 — the replayed next must not duplicate tasks"
+    );
 
     // the outbox close is ordered after the persist: act1's stored row must
     // already carry the NEXT_COMPLETE marker (the async write was drained by
@@ -217,10 +211,36 @@ async fn sch_action_recover_completed_next_is_noop() {
     let sign = data.get::<Sign>(consts::TASK_SIGN).unwrap();
     assert!(sign.contains(Sign::NEXT_COMPLETE));
 
-    // the workflow was not re-propagated: same task set, no duplicates
     let reloaded = rt2.proc(&pid).await.unwrap().unwrap();
-    assert!(reloaded.state().is_success());
-    assert_eq!(reloaded.tasks().len(), 5, "root + s1 + s2 + act1 + act2");
+    assert!(reloaded.state().is_running());
+
+    // finish the flow in the reloaded engine: act2 completes, the process
+    // finishes and every row of it is cleaned up
+    rt2.do_action(&Action::new(
+        &pid,
+        &act2_tid,
+        EventAction::Next,
+        Vars::new(),
+    ))
+    .await
+    .unwrap();
+    // deletion is driven by the sweeper once the deliveries settled — drive
+    // it directly instead of waiting for the timer tick
+    for _ in 0..150 {
+        if store2.procs().find(&pid).await.is_err() {
+            break;
+        }
+        let _ = rt2.cache().sweep_removable().await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        store2.procs().find(&pid).await.is_err(),
+        "the finished process must be removed once its deliveries settled"
+    );
+    assert!(
+        store2.tasks().query(&q_all).await.unwrap().rows.is_empty(),
+        "task rows must be gone with the process"
+    );
 }
 
 /// A crash mid-`next` (the next node was scheduled, propagation never finished)
@@ -389,19 +409,24 @@ async fn sch_action_next_op_pending_until_children_complete() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_action_recover_reapplies_lost_action() {
     let store: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
-    let mut config = Config::default();
-    config.data.keep_processes = Some(true);
     let engine = Engine::new()
-        .with_config(&config)
         .set_store(Some(store.clone()))
         .start()
         .await
         .unwrap();
     let rt = engine.runtime();
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_id("s1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
+    // two steps: skipping act1 must not finish the process — the re-applied
+    // skip advances to act2, which stays in flight, so the process rows
+    // survive for inspection
+    let workflow = Workflow::new()
+        .with_step(|step| {
+            step.with_id("s1")
+                .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+        })
+        .with_step(|step| {
+            step.with_id("s2")
+                .with_uses(USES_IRQ, Vars::new().with("key", "act2"))
+        });
 
     let sig = engine.signal((String::new(), String::new()));
     let (s, s2) = sig.double();
@@ -430,25 +455,36 @@ async fn sch_action_recover_reapplies_lost_action() {
     engine.close().await;
 
     // reload: recovery re-applies the Skip action, which closes the record
+    // (the process keeps its legitimate pending `next` records while act2 is
+    // in flight — only the action record must drain)
     let engine2 = Engine::new()
-        .with_config(&config)
         .set_store(Some(store.clone()))
         .start()
         .await
         .unwrap();
     let rt2 = engine2.runtime();
     let store2 = rt2.cache().store();
+    let mut drained = false;
     for _ in 0..100 {
-        if store2.load_pending_ops().await.unwrap().is_empty() {
+        let pending = store2.load_pending_ops().await.unwrap();
+        if pending.iter().all(|op| op.r#type != "action") {
+            drained = true;
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    assert!(store2.load_pending_ops().await.unwrap().is_empty());
+    assert!(drained, "skip action record was not closed");
 
+    // the process is still running (act2 in flight): its rows survive
     let reloaded = rt2.proc(&pid).await.unwrap().unwrap();
     let act_task = reloaded.task(&act1_tid).unwrap();
     assert_eq!(act_task.state(), TaskState::Skipped);
+    assert_eq!(
+        reloaded.task_by_nid("s2").len(),
+        1,
+        "the re-applied skip must advance to s2"
+    );
+    assert!(reloaded.state().is_running());
 }
 
 /// A `Cancel` action whose outbox record landed but whose effects were never
@@ -459,10 +495,7 @@ async fn sch_action_recover_reapplies_lost_action() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_action_recover_reapplies_cancel() {
     let store: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
-    let mut config = Config::default();
-    config.data.keep_processes = Some(true);
     let engine = Engine::new()
-        .with_config(&config)
         .set_store(Some(store.clone()))
         .start()
         .await
@@ -528,7 +561,6 @@ async fn sch_action_recover_reapplies_cancel() {
     // reload: the cancel must be re-applied — act2 becomes Cancelled even
     // though act1 (the cancel target) is already Completed
     let engine2 = Engine::new()
-        .with_config(&config)
         .set_store(Some(store.clone()))
         .start()
         .await
@@ -559,10 +591,7 @@ async fn sch_action_recover_reapplies_cancel() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_action_recover_reapplies_abort() {
     let store: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
-    let mut config = Config::default();
-    config.data.keep_processes = Some(true);
     let engine = Engine::new()
-        .with_config(&config)
         .set_store(Some(store.clone()))
         .start()
         .await
@@ -599,7 +628,6 @@ async fn sch_action_recover_reapplies_abort() {
 
     // reload: recovery re-applies the abort to the act and its ancestors
     let engine2 = Engine::new()
-        .with_config(&config)
         .set_store(Some(store.clone()))
         .start()
         .await
@@ -617,14 +645,25 @@ async fn sch_action_recover_reapplies_abort() {
     }
     assert!(drained, "abort action record was not closed");
 
-    let reloaded = rt2.proc(&pid).await.unwrap().unwrap();
-    assert_eq!(
-        reloaded.task(&act1_tid).unwrap().state(),
-        TaskState::Aborted
+    // the abort terminates the process; finished processes are cleaned up by
+    // the sweeper once their deliveries settled — if the recovery had
+    // silently dropped the abort, act1 would still be Interrupt and the
+    // process rows would survive
+    let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", pid.clone())));
+    for _ in 0..150 {
+        if store2.procs().find(&pid).await.is_err() {
+            break;
+        }
+        let _ = rt2.cache().sweep_removable().await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        store2.procs().find(&pid).await.is_err(),
+        "the aborted process must be removed after the re-applied abort"
     );
-    assert_eq!(
-        reloaded.task_by_nid("step1").first().unwrap().state(),
-        TaskState::Aborted
+    assert!(
+        store2.tasks().query(&q).await.unwrap().rows.is_empty(),
+        "the aborted process's task rows must be gone"
     );
 }
 
@@ -634,10 +673,7 @@ async fn sch_action_recover_reapplies_abort() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_action_recover_reapplies_error() {
     let store: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
-    let mut config = Config::default();
-    config.data.keep_processes = Some(true);
     let engine = Engine::new()
-        .with_config(&config)
         .set_store(Some(store.clone()))
         .start()
         .await
@@ -674,7 +710,6 @@ async fn sch_action_recover_reapplies_error() {
 
     // reload: recovery re-applies the error with its code
     let engine2 = Engine::new()
-        .with_config(&config)
         .set_store(Some(store.clone()))
         .start()
         .await
@@ -692,10 +727,26 @@ async fn sch_action_recover_reapplies_error() {
     }
     assert!(drained, "error action record was not closed");
 
-    let reloaded = rt2.proc(&pid).await.unwrap().unwrap();
-    let act_task = reloaded.task(&act1_tid).unwrap();
-    assert_eq!(act_task.state(), TaskState::Error);
-    assert_eq!(act_task.err().unwrap().ecode, "err1");
+    // the error terminates the process; finished processes are cleaned up by
+    // the sweeper once their deliveries settled — if the recovery had
+    // silently dropped the error, act1 would still be Interrupt and the
+    // process rows would survive
+    let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", pid.clone())));
+    for _ in 0..150 {
+        if store2.procs().find(&pid).await.is_err() {
+            break;
+        }
+        let _ = rt2.cache().sweep_removable().await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        store2.procs().find(&pid).await.is_err(),
+        "the errored process must be removed after the re-applied error"
+    );
+    assert!(
+        store2.tasks().query(&q).await.unwrap().rows.is_empty(),
+        "the errored process's task rows must be gone"
+    );
 }
 
 /// A `Back` action whose outbox record landed but whose task write was lost is
@@ -704,10 +755,7 @@ async fn sch_action_recover_reapplies_error() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_action_recover_reapplies_back() {
     let store: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
-    let mut config = Config::default();
-    config.data.keep_processes = Some(true);
     let engine = Engine::new()
-        .with_config(&config)
         .set_store(Some(store.clone()))
         .start()
         .await
@@ -771,7 +819,6 @@ async fn sch_action_recover_reapplies_back() {
 
     // reload: recovery re-applies the back
     let engine2 = Engine::new()
-        .with_config(&config)
         .set_store(Some(store.clone()))
         .start()
         .await
@@ -799,10 +846,7 @@ async fn sch_action_recover_reapplies_back() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_action_recover_closes_applied_back() {
     let store: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
-    let mut config = Config::default();
-    config.data.keep_processes = Some(true);
     let engine = Engine::new()
-        .with_config(&config)
         .set_store(Some(store.clone()))
         .start()
         .await
@@ -871,7 +915,6 @@ async fn sch_action_recover_closes_applied_back() {
     // reload: recovery sees act2 already Backed (terminal) and closes the
     // record without re-applying — no second redo task
     let engine2 = Engine::new()
-        .with_config(&config)
         .set_store(Some(store.clone()))
         .start()
         .await
@@ -906,20 +949,24 @@ async fn sch_action_recover_closes_applied_back() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_action_recover_closes_applied_action() {
     let store: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
-    let mut config = Config::default();
-    config.data.keep_processes = Some(true);
     let engine = Engine::new()
-        .with_config(&config)
         .set_store(Some(store.clone()))
         .start()
         .await
         .unwrap();
     let rt = engine.runtime();
-    let (tx, rx) = engine.signal(()).double();
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_id("s1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
+    let (_, rx) = engine.signal(()).double();
+    // two steps: the skipped act1 advances to act2, which stays in flight, so
+    // the process keeps running and its rows survive for inspection
+    let workflow = Workflow::new()
+        .with_step(|step| {
+            step.with_id("s1")
+                .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+        })
+        .with_step(|step| {
+            step.with_id("s2")
+                .with_uses(USES_IRQ, Vars::new().with("key", "act2"))
+        });
 
     // ack-enabled channel: messages are persisted to the store
     let chan = engine.channel_with_options(&ChannelOptions {
@@ -929,12 +976,18 @@ async fn sch_action_recover_closes_applied_action() {
     });
     let sig = engine.signal((String::new(), String::new()));
     let (s, s2) = sig.double();
+    let sig3 = engine.signal((String::new(), String::new()));
+    let (s3, s3c) = sig3.double();
     chan.on_message(move |e| {
         let s2 = s2.clone();
+        let s3c = s3c.clone();
         async move {
             if e.is_params_key("act1") && e.is_state(MessageState::Created) {
                 s2.update(|d| *d = (e.pid.clone(), e.tid.clone()));
                 s2.close();
+            } else if e.is_params_key("act2") && e.is_state(MessageState::Created) {
+                s3c.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+                s3c.close();
             }
         }
     });
@@ -954,7 +1007,9 @@ async fn sch_action_recover_closes_applied_action() {
     ))
     .await
     .unwrap();
-    tx.recv().await;
+    // the skip advanced the workflow: act2 is in flight, the process runs on
+    s3.recv().await;
+    assert!(proc.state().is_running());
     rt.cache()
         .store()
         .enqueue_action_op(&pid, &act1_tid, "skip", "{}")
@@ -963,27 +1018,37 @@ async fn sch_action_recover_closes_applied_action() {
     engine.close().await;
 
     // reload: recovery sees the task already Skipped (terminal) and closes the
-    // record without re-applying; the act message is marked completed
+    // record without re-applying (the process keeps its legitimate pending
+    // `next` records while act2 is in flight — only the action record drains);
+    // the act message is marked completed
     let engine2 = Engine::new()
-        .with_config(&config)
         .set_store(Some(store.clone()))
         .start()
         .await
         .unwrap();
     let rt2 = engine2.runtime();
     let store2 = rt2.cache().store();
+    let mut drained = false;
     for _ in 0..100 {
-        if store2.load_pending_ops().await.unwrap().is_empty() {
+        let pending = store2.load_pending_ops().await.unwrap();
+        if pending.iter().all(|op| op.r#type != "action") {
+            drained = true;
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    assert!(store2.load_pending_ops().await.unwrap().is_empty());
+    assert!(drained, "skip action record was not closed");
 
     let reloaded = rt2.proc(&pid).await.unwrap().unwrap();
     assert_eq!(reloaded.task_by_nid("s1").len(), 1);
     let act_task = reloaded.task(&act1_tid).unwrap();
     assert_eq!(act_task.state(), TaskState::Skipped);
+    assert_eq!(
+        reloaded.task_by_nid("s2").len(),
+        1,
+        "the process stays running at act2 — nothing was re-applied"
+    );
+    assert!(reloaded.state().is_running());
 
     // the act deliveries are completed: the client will not be asked again
     let q = Query::new().filter(
@@ -996,7 +1061,7 @@ async fn sch_action_recover_closes_applied_action() {
     assert!(
         deliveries
             .iter()
-            .all(|d| d.status == crate::data::MessageStatus::Completed)
+            .all(|d| d.status == crate::data::DeliveryStatus::Completed)
     );
 }
 
@@ -1051,4 +1116,105 @@ async fn sch_action_sibling_concurrent_complete() {
     let step_tasks = proc.task_by_nid("step1");
     let step_task = step_tasks.first().unwrap();
     assert_eq!(step_task.state(), TaskState::Completed);
+}
+
+/// A finished process is always cleaned up — proc/task/outbox rows AND the
+/// message/delivery rows its ack channel stored. Removal waits for the
+/// process's event worker to drain first (the terminal message was already
+/// delivered), so no in-flight emission can re-create rows afterwards.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_action_completed_proc_cleans_message_and_delivery_rows() {
+    let engine = Engine::new().start().await.unwrap();
+    let rt = engine.runtime();
+    let (tx, rx) = engine.signal(()).double();
+    let workflow = Workflow::new().with_step(|step| {
+        step.with_id("s1")
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+    });
+
+    // ack-enabled channel: every delivered event is stored as canonical
+    // message + delivery rows of the process
+    let chan = engine.channel_with_options(&ChannelOptions {
+        id: "chan-clean".to_string(),
+        ack: true,
+        ..Default::default()
+    });
+    let sig = engine.signal((String::new(), String::new()));
+    let (s, s2) = sig.double();
+    chan.on_message(move |e| {
+        let s2 = s2.clone();
+        async move {
+            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
+                s2.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+                s2.close();
+            }
+        }
+    });
+    auto_complete(&engine, &rx);
+
+    let proc = rt.create_proc(&utils::longid(), &workflow);
+    let pid = proc.id().to_string();
+    rt.launch(&proc).await.unwrap();
+    let (_, act1_tid) = s.recv().await;
+
+    // the running act's message was stored (delivery rows exist)
+    let store = rt.cache().store();
+    let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", pid.clone())));
+    assert!(
+        !store.messages().query(&q).await.unwrap().rows.is_empty(),
+        "the emitted message must be stored while the process runs"
+    );
+
+    // complete the act: the process finishes and is cleaned up
+    rt.do_action(&Action::new(
+        &pid,
+        &act1_tid,
+        EventAction::Next,
+        Vars::new(),
+    ))
+    .await
+    .unwrap();
+    tx.recv().await;
+
+    // deletion is driven by the sweeper once the deliveries settled — drive
+    // it directly instead of waiting for the timer tick
+    for _ in 0..150 {
+        if store.procs().find(&pid).await.is_err() {
+            break;
+        }
+        let _ = rt.cache().sweep_removable().await;
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        store.procs().find(&pid).await.is_err(),
+        "the finished process must be removed once its deliveries settled"
+    );
+    assert!(
+        store.tasks().query(&q).await.unwrap().rows.is_empty(),
+        "task rows must be gone with the process"
+    );
+    assert!(
+        store.ops().query(&q).await.unwrap().rows.is_empty(),
+        "outbox rows must be gone with the process"
+    );
+    assert!(
+        store.messages().query(&q).await.unwrap().rows.is_empty(),
+        "message rows must be gone with the process"
+    );
+    assert!(
+        store.deliveries().query(&q).await.unwrap().rows.is_empty(),
+        "delivery rows must be gone with the process"
+    );
+
+    // no in-flight worker emission re-created rows after the removal
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        store.messages().query(&q).await.unwrap().rows.is_empty(),
+        "no message row may reappear after the removal"
+    );
+    assert!(
+        store.deliveries().query(&q).await.unwrap().rows.is_empty(),
+        "no delivery row may reappear after the removal"
+    );
 }

@@ -191,6 +191,7 @@ async fn export_executor_start_dup_pid_error() {
         model: model.to_json().unwrap(),
         env: "{}".to_string(),
         err: None,
+        removable: false,
         v: 0,
     };
     store.procs().create(&proc).await.expect("create process");
@@ -2677,9 +2678,11 @@ async fn export_message_multi_channels_share_message_single_delivery_each() {
     engine.executor().msg().ack(&delivery_a).await.unwrap();
 
     let row_a = store.deliveries().find(&delivery_a).await.unwrap();
-    assert_eq!(row_a.status, data::MessageStatus::Acked);
+    assert_eq!(row_a.status, data::DeliveryStatus::Acked);
+    // channel b received the message but never acked it: its delivery was
+    // handed over (`Delivered`) and stays pending
     let row_b = store.deliveries().find(&delivery_b).await.unwrap();
-    assert_eq!(row_b.status, data::MessageStatus::Created);
+    assert_eq!(row_b.status, data::DeliveryStatus::Delivered);
 }
 
 #[serial]
@@ -2759,7 +2762,7 @@ async fn export_message_clear_error_messages_by_none() {
     let delivery = data::Delivery {
         id: utils::longid(),
         msg_id: utils::longid(),
-        status: data::MessageStatus::Error,
+        status: data::DeliveryStatus::Error,
         ..data::Delivery::default()
     };
     engine
@@ -2778,7 +2781,7 @@ async fn export_message_clear_error_messages_by_none() {
         .find(&delivery.id)
         .await
         .unwrap();
-    assert_eq!(ret.status, data::MessageStatus::Error);
+    assert_eq!(ret.status, data::DeliveryStatus::Error);
     engine.executor().msg().clear(None).await.unwrap();
     assert!(
         !engine
@@ -2806,7 +2809,7 @@ async fn export_message_clear_error_messages_by_pid() {
             id: utils::longid(),
             msg_id: utils::longid(),
             pid: pid.clone(),
-            status: data::MessageStatus::Error,
+            status: data::DeliveryStatus::Error,
             ..data::Delivery::default()
         })
         .await
@@ -2821,7 +2824,7 @@ async fn export_message_clear_error_messages_by_pid() {
             id: utils::longid(),
             msg_id: utils::longid(),
             pid: pid.clone(),
-            status: data::MessageStatus::Error,
+            status: data::DeliveryStatus::Error,
             ..data::Delivery::default()
         })
         .await
@@ -2841,7 +2844,7 @@ async fn export_message_clear_error_messages_by_pid() {
             &Query::new().filter(
                 Filter::and()
                     .expr(Expr::eq("pid", pid))
-                    .expr(Expr::eq("status", data::MessageStatus::Error)),
+                    .expr(Expr::eq("status", data::DeliveryStatus::Error)),
             ),
         )
         .await
@@ -2857,7 +2860,7 @@ async fn export_message_resend_error_messages() {
     let delivery = data::Delivery {
         id: utils::longid(),
         msg_id: utils::longid(),
-        status: data::MessageStatus::Error,
+        status: data::DeliveryStatus::Error,
         ..data::Delivery::default()
     };
     engine
@@ -2876,7 +2879,7 @@ async fn export_message_resend_error_messages() {
         .find(&delivery.id)
         .await
         .unwrap();
-    assert_eq!(ret.status, data::MessageStatus::Error);
+    assert_eq!(ret.status, data::DeliveryStatus::Error);
     engine.executor().msg().redo().await.unwrap();
 
     let ret = engine
@@ -2887,7 +2890,7 @@ async fn export_message_resend_error_messages() {
         .find(&delivery.id)
         .await
         .unwrap();
-    assert_eq!(ret.status, data::MessageStatus::Created);
+    assert_eq!(ret.status, data::DeliveryStatus::Created);
     assert_eq!(ret.retry_times, 0);
 }
 

@@ -329,6 +329,7 @@ async fn cache_restore_count() {
             model: model.to_json().unwrap(),
             env: "{}".to_string(),
             err: None,
+            removable: false,
             v: data::Proc::version(),
         };
         cache.store().procs().create(&proc).await.unwrap();
@@ -379,6 +380,7 @@ async fn cache_restore_working_state() {
             model: model.to_json().unwrap(),
             env: "{}".to_string(),
             err: None,
+            removable: false,
             v: data::Proc::version(),
         };
         cache.store().procs().create(&proc).await.unwrap();
@@ -429,6 +431,7 @@ async fn cache_restore_completed_state() {
             model: model.to_json().unwrap(),
             env: "{}".to_string(),
             err: None,
+            removable: false,
             v: data::Proc::version(),
         };
         cache.store().procs().create(&proc).await.unwrap();
@@ -468,6 +471,7 @@ async fn cache_restore_less_cap() {
             model: model.to_json().unwrap(),
             env: "{}".to_string(),
             err: None,
+            removable: false,
             v: data::Proc::version(),
         };
         cache.store().procs().create(&proc).await.unwrap();

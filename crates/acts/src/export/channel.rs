@@ -259,9 +259,18 @@ async fn deliver(
     match store_if(runtime, ack, chan_id, pattern, &e).await {
         Ok(Some(delivery_id)) => {
             let mut msg = e.inner().clone();
-            msg.delivery_id = Some(delivery_id);
+            msg.delivery_id = Some(delivery_id.clone());
             let event = Event::from_inner(msg);
             f(event).await;
+            // delivery succeeded: the channel handler ran to completion —
+            // record it explicitly (a handler that acked/closed the row while
+            // running is never downgraded). A row left `Created` means it was
+            // never successfully handed over (no handler / crash
+            // mid-dispatch) and still needs a (re-)dispatch; `Delivered` ones
+            // only wait for an ack or the task close.
+            if let Err(err) = runtime.cache().store().mark_delivered(&delivery_id).await {
+                error!(error = %err, delivery_id = %delivery_id, "mark delivery succeeded failed");
+            }
         }
         Ok(None) => {
             f(e).await;

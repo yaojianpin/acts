@@ -306,7 +306,7 @@ impl Runtime {
                     self.cache.store().complete_ops(&pid, &tid, &r#type).await?;
                     self.cache
                         .store()
-                        .set_deliveries_with(&pid, &tid, data::MessageStatus::Completed)
+                        .set_deliveries_with(&pid, &tid, data::DeliveryStatus::Completed)
                         .await?;
                     continue;
                 }
@@ -323,7 +323,7 @@ impl Runtime {
                 self.cache.store().complete_ops(&pid, &tid, &r#type).await?;
                 self.cache
                     .store()
-                    .set_deliveries_with(&pid, &tid, data::MessageStatus::Completed)
+                    .set_deliveries_with(&pid, &tid, data::DeliveryStatus::Completed)
                     .await?;
                 continue;
             } else {
@@ -349,7 +349,7 @@ impl Runtime {
     pub async fn ack(&self, id: &str) -> Result<()> {
         self.cache
             .store()
-            .set_delivery(id, data::MessageStatus::Acked)
+            .set_delivery(id, data::DeliveryStatus::Acked)
             .await
     }
 
@@ -494,14 +494,12 @@ impl Runtime {
                             rt.return_to_act(&ppid, &ptid, &proc).await;
                         }
 
-                        if !rt.config.keep_processes() {
-                            debug!(pid = %proc.id(), "remove process");
-                            let cache = cache.clone();
-                            let pid = proc.id().to_string();
-                            if let Err(err) = cache.remove(&pid).await {
-                                error!(error = %err, "process remove failed");
-                            }
-                        }
+                        // A finished process is left alone: its rows are
+                        // deleted by the sweeper only after every delivery of
+                        // its messages settled (see `Store::mark_removable` /
+                        // `sweep_settled_procs`) — delivery completion lags
+                        // the terminal state, so deleting here would race the
+                        // still-in-flight deliveries.
 
                         let cache = cache.clone();
                         let rt = rt.clone();
@@ -597,6 +595,13 @@ impl Runtime {
                         }
                     }
                     Err(err) => error!(error = %err, "no-response deliveries query failed"),
+                }
+
+                // delete finished processes whose deliveries have all settled
+                // (the proc completion itself never deletes rows — it waits
+                // for the deliveries that lag behind)
+                if let Err(err) = cache.sweep_removable().await {
+                    error!(error = %err, "settled-process sweep failed");
                 }
             }
         });

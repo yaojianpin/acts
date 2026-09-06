@@ -1,6 +1,6 @@
 use crate::{
     ActError, Error, Result, Workflow,
-    data::{self, MessageStatus},
+    data::{self, DeliveryStatus},
     scheduler::{self, Node, NodeData, Runtime, TaskState},
     store::{DbCollectionIden, Store, query::*},
     utils,
@@ -90,9 +90,10 @@ impl Store {
 
     pub async fn remove_proc(&self, pid: &str) -> Result<bool> {
         debug!("remove_proc pid={}", pid);
-        // All rows of the process — tasks, outbox ops and the proc row — are
-        // removed as ONE atomic batch, so a crash mid-removal cannot leave a
-        // half-deleted process behind.
+        // All rows of the process — tasks, outbox ops, its message/delivery
+        // rows and the proc row — are removed as ONE atomic batch, so a crash
+        // mid-removal cannot leave a half-deleted process behind nor orphaned
+        // message/delivery rows that would be retried forever.
         self.remove_proc_rows(pid).await
     }
 
@@ -215,12 +216,42 @@ impl Store {
         Ok(())
     }
 
+    /// Advance a stored delivery from `Created` to `Delivered` — the channel
+    /// handler ran to completion, so the delivery succeeded. Only rows still
+    /// `Created` move: a handler that acked (or was closed) while running
+    /// must never be downgraded.
+    pub async fn mark_delivered(&self, id: &str) -> Result<()> {
+        if let Ok(mut delivery) = self.deliveries().find(id).await
+            && delivery.status == DeliveryStatus::Created
+        {
+            delivery.status = DeliveryStatus::Delivered;
+            delivery.update_time = utils::time::time_millis();
+            self.deliveries().update(&delivery).await?;
+        }
+        Ok(())
+    }
+
     /// Ack one delivery row (by its delivery id): set its status.
-    pub async fn set_delivery(&self, id: &str, status: MessageStatus) -> Result<()> {
+    pub async fn set_delivery(&self, id: &str, status: DeliveryStatus) -> Result<()> {
         if let Ok(mut delivery) = self.deliveries().find(id).await {
+            // `Completed` is the final state (the engine closed the
+            // delivery) — a late ack must never downgrade it back to the
+            // intermediate `Acked`
+            if delivery.status == DeliveryStatus::Completed {
+                return Ok(());
+            }
+            let pid = delivery.pid.clone();
             delivery.status = status;
             delivery.update_time = utils::time::time_millis();
             self.deliveries().update(&delivery).await?;
+            // a delivery closed `Completed` by the engine may be the
+            // process's last unsettled one — if the process is finished and
+            // nothing is left unsettled, mark it removable for the sweeper.
+            // `Acked` is only an intermediate state and never triggers the
+            // mark. `Error` keeps the process alive for manual handling.
+            if status == DeliveryStatus::Completed {
+                let _ = self.try_mark_removable(&pid).await;
+            }
         }
 
         // it's ok there is no delivery
@@ -233,7 +264,7 @@ impl Store {
         &self,
         pid: &str,
         tid: &str,
-        status: MessageStatus,
+        status: DeliveryStatus,
     ) -> Result<bool> {
         debug!("set_deliveries_with pid={pid} tid={tid} status={status:?}");
         let q = Query::new().filter(
@@ -257,27 +288,33 @@ impl Store {
         Ok(true)
     }
 
-    /// Collect deliveries with no response: re-arm the not-yet-acked ones and
-    /// mark the ones that exceeded `max_delivery_retry_times` as errors.
-    /// Returns every re-armed delivery (the caller re-sends them to their own
-    /// channels).
+    /// Collect deliveries with no response: re-arm the ones that were handed
+    /// over but never acked (`Delivered` — as well as `Created` rows that were
+    /// never successfully dispatched) and mark the ones that exceeded
+    /// `max_delivery_retry_times` as errors. Returns every re-armed delivery
+    /// (the caller re-sends them to their own channels).
     pub async fn with_no_response_deliveries(
         &self,
         timeout_millis: i64,
         max_delivery_retry_times: i32,
     ) -> Result<Vec<data::Delivery>> {
-        let q = Query::new().limit(300).filter(
-            Filter::and()
-                .expr(Expr::eq("status", MessageStatus::Created))
-                .expr(Expr::lt(
-                    "update_time",
-                    utils::time::time_millis() - timeout_millis,
-                )),
-        );
+        let q = Query::new().limit(300).filter(Filter::and().expr(Expr::lt(
+            "update_time",
+            utils::time::time_millis() - timeout_millis,
+        )));
         let collection = self.deliveries();
         let mut rearmed = Vec::new();
         if let Ok(deliveries) = collection.query(&q).await {
             for m in deliveries.rows.iter() {
+                // only rows that still need a response: never successfully
+                // dispatched (`Created`) or handed over but not acked/closed
+                // (`Delivered`); settled ones are skipped
+                if !matches!(
+                    m.status,
+                    DeliveryStatus::Created | DeliveryStatus::Delivered
+                ) {
+                    continue;
+                }
                 let mut delivery = m.clone();
                 delivery.update_time = utils::time::time_millis();
                 if delivery.retry_times < max_delivery_retry_times {
@@ -286,8 +323,10 @@ impl Store {
                         rearmed.push(delivery);
                     }
                 } else {
-                    // the delivery will re-send by manual through the manager command
-                    delivery.status = MessageStatus::Error;
+                    // the delivery will re-send by manual through the manager
+                    // command — an errored delivery keeps its process alive
+                    // until a manual resend/clear resolves it
+                    delivery.status = DeliveryStatus::Error;
                     collection.update(&delivery).await?;
                 }
             }
@@ -299,11 +338,11 @@ impl Store {
     /// sends them to their own channels).
     pub async fn resend_error_deliveries(&self) -> Result<()> {
         let collection = self.deliveries();
-        let q = Query::new().filter(Filter::and().expr(Expr::eq("status", MessageStatus::Error)));
+        let q = Query::new().filter(Filter::and().expr(Expr::eq("status", DeliveryStatus::Error)));
         if let Ok(deliveries) = collection.query(&q).await {
             for m in deliveries.rows.iter() {
                 let mut delivery = m.clone();
-                delivery.status = MessageStatus::Created;
+                delivery.status = DeliveryStatus::Created;
                 delivery.retry_times = 0;
                 delivery.update_time = utils::time::time_millis();
                 collection.update(&delivery).await?;
@@ -316,7 +355,7 @@ impl Store {
     /// Delete error delivery rows: all of them or only those of one process.
     pub async fn clear_error_deliveries(&self, pid: Option<String>) -> Result<()> {
         let collection = self.deliveries();
-        let mut cond = Filter::and().expr(Expr::eq("status", MessageStatus::Error));
+        let mut cond = Filter::and().expr(Expr::eq("status", DeliveryStatus::Error));
         if let Some(pid) = &pid {
             cond = cond.expr(Expr::eq("pid", pid));
         }
@@ -340,11 +379,11 @@ impl Store {
             Ok(delivery) => delivery,
             Err(_) => return Ok(None),
         };
-        if delivery.status != MessageStatus::Error {
+        if delivery.status != DeliveryStatus::Error {
             return Ok(None);
         }
 
-        delivery.status = MessageStatus::Created;
+        delivery.status = DeliveryStatus::Created;
         delivery.retry_times = 0;
         delivery.update_time = utils::time::time_millis();
         if collection.update(&delivery).await? {
@@ -359,7 +398,7 @@ impl Store {
     pub async fn clear_error_delivery(&self, delivery_id: &str) -> Result<bool> {
         let collection = self.deliveries();
         match collection.find(delivery_id).await {
-            Ok(delivery) if delivery.status == MessageStatus::Error => {
+            Ok(delivery) if delivery.status == DeliveryStatus::Error => {
                 collection.delete(delivery_id).await
             }
             _ => Ok(false),

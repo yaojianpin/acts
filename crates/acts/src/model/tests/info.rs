@@ -54,6 +54,7 @@ fn model_info_proc() {
         model: "{}".to_string(),
         env: "".to_string(),
         err: None,
+        removable: false,
         v: 0,
     };
     let info: ProcInfo = proc.into();
@@ -206,6 +207,7 @@ fn model_info_proc_arr_to_value() {
         model: "{}".to_string(),
         env: "".to_string(),
         err: None,
+        removable: false,
         v: 0,
     };
     let info: ProcInfo = proc.into();

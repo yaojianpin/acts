@@ -188,7 +188,7 @@ impl Message {
             tid: self.tid.clone(),
             chan_id: chan_id.to_string(),
             chan_pattern: pattern.to_string(),
-            status: data::MessageStatus::Created,
+            status: data::DeliveryStatus::Created,
             retry_times: 0,
             create_time: utils::time::time_millis(),
             update_time: 0,

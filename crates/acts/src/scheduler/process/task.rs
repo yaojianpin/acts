@@ -10,7 +10,7 @@ use crate::utils::consts::TASK_ROOT_TID;
 use crate::{
     Act, ActError, ActTask, Error, Message, MessageState, NodeKind, Result, ShareLock, Variant,
     Vars,
-    data::{self, MessageStatus},
+    data::{self, DeliveryStatus},
     event::EventAction,
     scheduler::{
         Context, Process, Runtime, TaskState,
@@ -698,7 +698,7 @@ impl Task {
             ctx.runtime.cache().upsert_message_status(
                 &action.pid,
                 &action.tid,
-                MessageStatus::Completed,
+                DeliveryStatus::Completed,
             )?;
         }
 

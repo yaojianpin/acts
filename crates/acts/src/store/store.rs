@@ -9,13 +9,14 @@ use tracing::trace;
 use crate::store::KvStore;
 use crate::{
     ActError, Result, Trigger, Workflow,
-    scheduler::{Process, Task},
+    scheduler::{Process, Task, TaskState},
     store::{Model, Package},
     utils,
 };
 
 use super::{
     DbCollection, DbCollectionIden, StoreBatchOp, StoreIden, collection::KvCollection, data,
+    data::DeliveryStatus,
 };
 
 pub struct Store {
@@ -289,17 +290,23 @@ impl Store {
     }
 
     /// Atomically remove a process and every row of it — task rows, durable
-    /// outbox (`ops`) rows and the proc row — in one batch: a crash during
+    /// outbox (`ops`) rows, the process's message (`messages`) and delivery
+    /// (`deliveries`) rows and the proc row — in one batch: a crash during
     /// removal can no longer leave a half-deleted process (some task rows
     /// gone, others + the proc row still present) that would resurrect as a
-    /// broken process on the next restore. Removing an absent process is a
-    /// no-op that still returns `true`.
+    /// broken process on the next restore, nor orphaned message/delivery rows
+    /// that would be retried forever after the process is gone. Removing an
+    /// absent process is a no-op that still returns `true`.
     pub(crate) async fn remove_proc_rows(&self, pid: &str) -> Result<bool> {
         use super::query::{Expr, Filter, Query};
 
         let procs = KvCollection::<data::Proc>::new(StoreIden::Procs.as_ref(), self.kv.clone());
         let tasks = KvCollection::<data::Task>::new(StoreIden::Tasks.as_ref(), self.kv.clone());
         let ops = KvCollection::<data::Op>::new(StoreIden::Ops.as_ref(), self.kv.clone());
+        let messages =
+            KvCollection::<data::Message>::new(StoreIden::Messages.as_ref(), self.kv.clone());
+        let deliveries =
+            KvCollection::<data::Delivery>::new(StoreIden::Deliveries.as_ref(), self.kv.clone());
 
         let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", pid.to_string())));
         let mut batch = Vec::new();
@@ -309,9 +316,109 @@ impl Store {
         for row in ops.query(&q).await?.rows {
             batch.extend(ops.delete_ops(&row.id).await?);
         }
+        for row in messages.query(&q).await?.rows {
+            batch.extend(messages.delete_ops(&row.id).await?);
+        }
+        for row in deliveries.query(&q).await?.rows {
+            batch.extend(deliveries.delete_ops(&row.id).await?);
+        }
         batch.extend(procs.delete_ops(pid).await?);
         self.kv.batch(&batch).await?;
         Ok(true)
+    }
+
+    /// A process may be deleted once it is finished AND every delivery of its
+    /// messages has settled: a delivery is still open while it is `Created`
+    /// (never successfully handed over) or `Delivered` (handed over, waiting
+    /// for an ack or the task close) — delivery completion lags the process
+    /// terminal state, so rows must not be deleted while any delivery is
+    /// still open. Call this whenever a delivery of the process settles
+    /// (acked, closed by the task, or errored out): when the process is
+    /// terminal and nothing is left open it marks the proc row `removable`
+    /// for the sweeper.
+    pub(crate) async fn try_mark_removable(&self, pid: &str) -> Result<bool> {
+        let procs = KvCollection::<data::Proc>::new(StoreIden::Procs.as_ref(), self.kv.clone());
+        let Ok(proc) = procs.find(pid).await else {
+            return Ok(false);
+        };
+        let state = TaskState::from(proc.state.as_str());
+        if !state.is_completed() || proc.removable {
+            return Ok(false);
+        }
+        if self.has_unsettled_deliveries(pid).await? {
+            return Ok(false);
+        }
+        let mut proc = proc;
+        proc.removable = true;
+        procs.update(&proc).await?;
+        Ok(true)
+    }
+
+    /// Whether the process still has a delivery that keeps it from being
+    /// deleted. Only a row settled `Completed` (the task/message closed by
+    /// the engine) allows deletion — `Acked` is just an intermediate state
+    /// (the client confirmed receipt, the task may still need an action), and
+    /// `Created`/`Delivered` (still being sent/retried) or `Error` (retries
+    /// exhausted; only a manual resend/clear resolves it, the process must
+    /// stay until then) all block it. A process with no delivery rows at all
+    /// is deletable.
+    async fn has_unsettled_deliveries(&self, pid: &str) -> Result<bool> {
+        use super::query::{Expr, Filter, Query};
+        let q = Query::new()
+            .limit(500)
+            .filter(Filter::and().expr(Expr::eq("pid", pid.to_string())));
+        Ok(self
+            .deliveries()
+            .query(&q)
+            .await?
+            .rows
+            .iter()
+            .any(|d| d.status != DeliveryStatus::Completed))
+    }
+
+    /// The sweeper pass over finished processes. Deletion is decided ONLY by
+    /// the `removable` mark on the proc row — nothing else is consulted here:
+    /// a process is marked removable when it is finished and every delivery
+    /// settled `Completed` (see `try_mark_removable`, invoked when a delivery
+    /// settles); an `Error` delivery keeps the process alive until a manual
+    /// resend/clear, so it is never marked. Finished processes that are not
+    /// (yet) marked are left alone — no delivery rows are read or rewritten,
+    /// and no error lookup is needed. Returns the ids of the marked processes
+    /// in one query over the terminal states; the CALLER deletes them
+    /// (through the writer, so removal is ordered after any still-queued
+    /// writes of the process) and evicts them from memory.
+    pub(crate) async fn sweep_settled_procs(&self, limit: usize) -> Result<Vec<String>> {
+        use super::query::{Expr, Filter, Query};
+        use crate::scheduler::TaskState;
+
+        let procs = KvCollection::<data::Proc>::new(StoreIden::Procs.as_ref(), self.kv.clone());
+        let terminal: Vec<String> = [
+            TaskState::Completed,
+            TaskState::Cancelled,
+            TaskState::Submitted,
+            TaskState::Backed,
+            TaskState::Error,
+            TaskState::Skipped,
+            TaskState::Aborted,
+            TaskState::Removed,
+        ]
+        .iter()
+        .map(String::from)
+        .collect();
+        // one scan over every terminal state (`state` is indexed); the
+        // `removable` filter is applied in memory because the flag is not
+        // indexed
+        let q = Query::new()
+            .limit(limit)
+            .filter(Filter::and().expr(Expr::r#in("state", terminal)));
+        Ok(procs
+            .query(&q)
+            .await?
+            .rows
+            .into_iter()
+            .filter(|p| p.removable)
+            .map(|p| p.id)
+            .collect())
     }
 
     /// Persist a process and its root task row as ONE atomic batch (upsert:
@@ -577,96 +684,276 @@ mod tests {
         assert!(store.rm_model("m1").await.unwrap());
     }
 
-    async fn seed_proc_rows(store: &Store, pid: &str) {
+    /// A process is swept only once it is finished AND every delivery of its
+    /// messages settled `Completed`. `Acked` is only an intermediate state and
+    /// `Error` needs manual handling — both keep the process alive.
+    async fn seed_terminal_proc_with_delivery(
+        store: &Store,
+        pid: &str,
+        status: crate::store::data::DeliveryStatus,
+    ) {
         let now = crate::utils::time::time_millis();
         let proc = crate::store::data::Proc {
             id: pid.to_string(),
-            state: "running".to_string(),
+            state: "completed".to_string(),
             mid: "m1".to_string(),
             name: "t".to_string(),
             start_time: now,
-            end_time: 0,
+            end_time: now,
             timestamp: now,
             model: "{}".to_string(),
             env: "{}".to_string(),
             err: None,
+            removable: false,
             v: 0,
         };
         store.procs().create(&proc).await.unwrap();
-        for tid in ["t1", "t2"] {
-            let task = crate::store::data::Task {
-                id: format!("{pid}{tid}"),
-                pid: pid.to_string(),
-                tid: tid.to_string(),
-                node_data: "{}".to_string(),
-                kind: "step".to_string(),
-                prev: None,
-                next: Vec::new(),
-                parent: None,
-                name: "t".to_string(),
-                state: "running".to_string(),
-                data: "{}".to_string(),
-                sealed: String::new(),
-                err: None,
-                start_time: now,
-                end_time: 0,
-                timestamp: now,
-                v: 0,
-            };
-            store.tasks().create(&task).await.unwrap();
-        }
-        let op = crate::store::data::Op {
-            id: format!("{pid}o1"),
+        let message = crate::store::data::Message {
+            id: format!("{pid}m1"),
             pid: pid.to_string(),
             tid: "t1".to_string(),
-            r#type: "next".to_string(),
-            status: "pending".to_string(),
-            event: None,
-            options: None,
-            create_time: now,
-            update_time: now,
-            v: 0,
+            ..Default::default()
         };
-        store.ops().create(&op).await.unwrap();
+        store.messages().create(&message).await.unwrap();
+        let delivery = crate::store::data::Delivery {
+            id: format!("{pid}d1"),
+            msg_id: format!("{pid}m1"),
+            pid: pid.to_string(),
+            tid: "t1".to_string(),
+            status,
+            ..Default::default()
+        };
+        store.deliveries().create(&delivery).await.unwrap();
     }
 
     #[tokio::test]
-    async fn remove_proc_removes_all_rows_of_the_process_in_one_batch() {
-        let (kv, store) = counting_store();
-        seed_proc_rows(&store, "p1").await;
-        kv.batches.store(0, Ordering::SeqCst);
-
-        assert!(store.remove_proc_rows("p1").await.unwrap());
-        assert_eq!(
-            kv.batches.load(Ordering::SeqCst),
-            1,
-            "remove_proc must be a single atomic batch"
+    async fn only_completed_deliveries_mark_finished_proc_removable() {
+        let (_, store) = counting_store();
+        // Acked is an intermediate state: no mark, no sweep
+        seed_terminal_proc_with_delivery(
+            &store,
+            "p-acked",
+            crate::store::data::DeliveryStatus::Acked,
+        )
+        .await;
+        // Acked is only an intermediate state: it never *marks* the process
+        // removable by itself, and the sweeper only deletes marked processes
+        // — an Acked row is still awaiting the engine close, so the process
+        // stays
+        assert!(!store.try_mark_removable("p-acked").await.unwrap());
+        assert!(
+            !store
+                .sweep_settled_procs(10)
+                .await
+                .unwrap()
+                .contains(&"p-acked".to_string()),
+            "a process with an unclosed (Acked) delivery is not swept"
         );
-        assert_eq!(
-            (
-                kv.puts.load(Ordering::SeqCst),
-                kv.deletes.load(Ordering::SeqCst)
+        assert!(store.procs().find("p-acked").await.is_ok());
+
+        // Error needs manual handling: keeps the process alive
+        seed_terminal_proc_with_delivery(
+            &store,
+            "p-error",
+            crate::store::data::DeliveryStatus::Error,
+        )
+        .await;
+        assert!(!store.try_mark_removable("p-error").await.unwrap());
+        assert!(
+            !store
+                .sweep_settled_procs(10)
+                .await
+                .unwrap()
+                .contains(&"p-error".to_string())
+        );
+        assert!(
+            store.procs().find("p-error").await.is_ok(),
+            "an errored delivery keeps its process alive for manual handling"
+        );
+
+        // a finished process with no delivery rows at all is marked (nothing
+        // blocks it) and swept
+        seed_terminal_proc_with_delivery(
+            &store,
+            "p-none",
+            crate::store::data::DeliveryStatus::Completed,
+        )
+        .await;
+        store.deliveries().delete("p-noned1").await.unwrap();
+        assert!(store.try_mark_removable("p-none").await.unwrap());
+        assert!(
+            store
+                .sweep_settled_procs(10)
+                .await
+                .unwrap()
+                .contains(&"p-none".to_string()),
+            "a finished process without deliveries is deletable"
+        );
+
+        // all deliveries Completed: marked removable and collected by the
+        // sweeper; the caller then deletes the rows (through the writer)
+        seed_terminal_proc_with_delivery(
+            &store,
+            "p-completed",
+            crate::store::data::DeliveryStatus::Completed,
+        )
+        .await;
+        assert!(store.try_mark_removable("p-completed").await.unwrap());
+        assert!(
+            store
+                .sweep_settled_procs(10)
+                .await
+                .unwrap()
+                .contains(&"p-completed".to_string())
+        );
+        let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", "p-completed".to_string())));
+        assert!(store.remove_proc_rows("p-completed").await.unwrap());
+        assert!(store.procs().find("p-completed").await.is_err());
+        assert!(store.messages().query(&q).await.unwrap().rows.is_empty());
+        assert!(store.deliveries().query(&q).await.unwrap().rows.is_empty());
+    }
+
+    async fn delivery_count(store: &Store, q: &Query) -> usize {
+        store.deliveries().query(q).await.unwrap().rows.len()
+    }
+
+    /// `ExprOp::In` on an indexed field must behave exactly like the matching
+    /// `Eq` scans: single value, multiple values, and combined with other
+    /// ANDed clauses. Guards the index scan path against regressions.
+    #[tokio::test]
+    async fn store_in_query_matches_eq_on_indexed_field() {
+        let (_, store) = counting_store();
+        let delivery = crate::store::data::Delivery {
+            id: "d1".to_string(),
+            msg_id: "m1".to_string(),
+            pid: "p1".to_string(),
+            tid: "t1".to_string(),
+            status: crate::store::data::DeliveryStatus::Acked,
+            ..Default::default()
+        };
+        store.deliveries().create(&delivery).await.unwrap();
+
+        // a second delivery with a different status so the filters are
+        // discriminating
+        let other = crate::store::data::Delivery {
+            id: "d2".to_string(),
+            msg_id: "m1".to_string(),
+            pid: "p1".to_string(),
+            tid: "t2".to_string(),
+            status: crate::store::data::DeliveryStatus::Error,
+            ..Default::default()
+        };
+        store.deliveries().create(&other).await.unwrap();
+
+        let count = delivery_count;
+        let eq = count(
+            &store,
+            &Query::new().filter(Filter::and().expr(Expr::eq(
+                "status",
+                crate::store::data::DeliveryStatus::Acked as i8,
+            ))),
+        )
+        .await;
+        let single = count(
+            &store,
+            &Query::new().filter(Filter::and().expr(Expr::r#in(
+                "status",
+                vec![crate::store::data::DeliveryStatus::Acked as i8],
+            ))),
+        )
+        .await;
+        let multi = count(
+            &store,
+            &Query::new().filter(Filter::and().expr(Expr::r#in(
+                "status",
+                vec![
+                    crate::store::data::DeliveryStatus::Acked as i8,
+                    crate::store::data::DeliveryStatus::Error as i8,
+                ],
+            ))),
+        )
+        .await;
+        let with_pid = count(
+            &store,
+            &Query::new().filter(Filter::and().expr(Expr::eq("pid", "p1".to_string())).expr(
+                Expr::r#in(
+                    "status",
+                    vec![crate::store::data::DeliveryStatus::Acked as i8],
+                ),
+            )),
+        )
+        .await;
+        let with_range = count(
+            &store,
+            &Query::new().filter(
+                Filter::and()
+                    .expr(Expr::lt(
+                        "update_time",
+                        crate::utils::time::time_millis() + 1,
+                    ))
+                    .expr(Expr::r#in(
+                        "status",
+                        vec![crate::store::data::DeliveryStatus::Acked as i8],
+                    )),
             ),
-            (0, 0),
-            "remove_proc must not fall back to raw per-key writes"
-        );
+        )
+        .await;
 
-        let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", "p1".to_string())));
-        assert!(
-            store.procs().find("p1").await.is_err(),
-            "proc row must be gone"
-        );
-        assert!(
-            store.tasks().query(&q).await.unwrap().rows.is_empty(),
-            "task rows must be gone"
-        );
-        assert!(
-            store.ops().query(&q).await.unwrap().rows.is_empty(),
-            "outbox op rows must be gone"
-        );
+        assert_eq!(eq, 1, "eq finds only the Acked delivery");
+        assert_eq!(single, eq, "In with one value equals the eq scan");
+        assert_eq!(multi, 2, "In with both statuses finds both deliveries");
+        assert_eq!(with_pid, 1, "In combined with an ANDed pid eq");
+        assert_eq!(with_range, 1, "In combined with an ANDed range");
 
-        // removing an absent process is a no-op that still returns true
-        assert!(store.remove_proc_rows("p1").await.unwrap());
+        // string values across several indexed procs — the sweeper queries
+        // terminal proc states with exactly this shape
+        let proc = |id: &str, state: &str| crate::store::data::Proc {
+            id: id.to_string(),
+            state: state.to_string(),
+            mid: "m1".to_string(),
+            name: "t".to_string(),
+            start_time: 0,
+            end_time: 0,
+            timestamp: 0,
+            model: "{}".to_string(),
+            env: "{}".to_string(),
+            err: None,
+            removable: false,
+            v: 0,
+        };
+        // ids may contain `-` (e.g. user-supplied process ids): the index
+        // scan must recover the whole id, not truncate it at the last
+        // separator
+        store
+            .procs()
+            .create(&proc("sa", "completed"))
+            .await
+            .unwrap();
+        store.procs().create(&proc("p-2", "error")).await.unwrap();
+        store.procs().create(&proc("sc", "running")).await.unwrap();
+
+        let state_eq = store
+            .procs()
+            .query(
+                &Query::new()
+                    .filter(Filter::and().expr(Expr::eq("state", "completed".to_string()))),
+            )
+            .await
+            .unwrap()
+            .rows
+            .len();
+        let state_in = store
+            .procs()
+            .query(&Query::new().filter(Filter::and().expr(Expr::r#in(
+                "state",
+                vec!["completed".to_string(), "error".to_string()],
+            ))))
+            .await
+            .unwrap()
+            .rows
+            .len();
+        assert_eq!(state_eq, 1, "state eq finds the completed proc");
+        assert_eq!(state_in, 2, "state In finds both terminal procs");
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -681,11 +968,7 @@ mod tests {
 
         let proc = rt.create_proc("p1", &trigger_model("m1"));
         // scope the tree read guard: it must not live across the awaits below
-        let root = proc
-            .tree()
-            .root
-            .clone()
-            .expect("workflow root node");
+        let root = proc.tree().root.clone().expect("workflow root node");
         let task = proc.create_task(&root, None).unwrap();
 
         kv.batches.store(0, Ordering::SeqCst);

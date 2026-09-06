@@ -8,14 +8,38 @@ use crate::{
     store::{DbCollectionIden, StoreIden},
 };
 
+/// Lifecycle of ONE delivery of a message to one channel — distinct from the
+/// message's own state ([`MessageState`](crate::MessageState)), which comes
+/// from the task: a message is done when it has no deliveries (own state is
+/// terminal) or when every one of its deliveries reached its final state.
+///
+/// ```text
+/// Created ──► Delivered ──► Acked ──► Completed   (final: engine closes)
+///    │            │            │            ▲
+///    └────────────┴────────────┴────────────┘   (task/message close marks
+///    (any) ───────► Error      (retries exhausted — manual resend/clear)
+/// ```
+///
+/// `Acked` is only an intermediate state (the client confirmed receipt); the
+/// final state is `Completed` — the engine closed the delivery because the
+/// task/message finished. A process is deleted only after it is finished and
+/// every delivery is `Completed` (or it has no delivery rows): `Error` rows
+/// keep it alive for manual handling.
 #[derive(Default, Debug, Copy, PartialEq, Clone, Serialize_repr, Deserialize_repr)]
 #[repr(i8)]
-pub enum MessageStatus {
+pub enum DeliveryStatus {
     #[default]
     Created = 0,
     Acked = 1,
     Completed = 2,
     Error = 3,
+    /// Delivered = 4: the delivery row was handed to the channel's handler
+    /// and the handler ran to completion — the delivery succeeded. Distinct
+    /// from `Created` (row stored but not yet successfully handed over, e.g.
+    /// no handler is registered or the engine crashed mid-dispatch): a
+    /// `Delivered` delivery only needs an ack (or the task close) to finish,
+    /// a `Created` one still needs to be (re-)dispatched.
+    Delivered = 4,
 }
 
 /// Canonical emitted message — one row per message id. It records the message
@@ -111,46 +135,50 @@ impl Message {
     }
 }
 
-impl fmt::Display for MessageStatus {
+impl fmt::Display for DeliveryStatus {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            MessageStatus::Created => "created",
-            MessageStatus::Acked => "acked",
-            MessageStatus::Completed => "completed",
-            MessageStatus::Error => "error",
+            DeliveryStatus::Created => "created",
+            DeliveryStatus::Acked => "acked",
+            DeliveryStatus::Completed => "completed",
+            DeliveryStatus::Error => "error",
+            DeliveryStatus::Delivered => "delivered",
         })
     }
 }
 
-impl From<i8> for MessageStatus {
+impl From<i8> for DeliveryStatus {
     fn from(value: i8) -> Self {
         match value {
-            1 => MessageStatus::Acked,
-            2 => MessageStatus::Completed,
-            3 => MessageStatus::Error,
-            _ => MessageStatus::Created,
+            1 => DeliveryStatus::Acked,
+            2 => DeliveryStatus::Completed,
+            3 => DeliveryStatus::Error,
+            4 => DeliveryStatus::Delivered,
+            _ => DeliveryStatus::Created,
         }
     }
 }
 
-impl From<MessageStatus> for i8 {
-    fn from(val: MessageStatus) -> i8 {
+impl From<DeliveryStatus> for i8 {
+    fn from(val: DeliveryStatus) -> i8 {
         match val {
-            MessageStatus::Created => 0,
-            MessageStatus::Acked => 1,
-            MessageStatus::Completed => 2,
-            MessageStatus::Error => 3,
+            DeliveryStatus::Created => 0,
+            DeliveryStatus::Acked => 1,
+            DeliveryStatus::Completed => 2,
+            DeliveryStatus::Error => 3,
+            DeliveryStatus::Delivered => 4,
         }
     }
 }
 
-impl From<MessageStatus> for i64 {
-    fn from(val: MessageStatus) -> Self {
+impl From<DeliveryStatus> for i64 {
+    fn from(val: DeliveryStatus) -> Self {
         match val {
-            MessageStatus::Created => 0,
-            MessageStatus::Acked => 1,
-            MessageStatus::Completed => 2,
-            MessageStatus::Error => 3,
+            DeliveryStatus::Created => 0,
+            DeliveryStatus::Acked => 1,
+            DeliveryStatus::Completed => 2,
+            DeliveryStatus::Error => 3,
+            DeliveryStatus::Delivered => 4,
         }
     }
 }
@@ -162,43 +190,50 @@ mod tests {
 
     #[test]
     fn store_data_message_status_to_i8() {
-        let created: i8 = MessageStatus::Created.into();
+        let created: i8 = DeliveryStatus::Created.into();
         assert_eq!(created, 0);
 
-        let created: i8 = MessageStatus::Acked.into();
+        let created: i8 = DeliveryStatus::Acked.into();
         assert_eq!(created, 1);
 
-        let created: i8 = MessageStatus::Completed.into();
+        let created: i8 = DeliveryStatus::Completed.into();
         assert_eq!(created, 2);
 
-        let created: i8 = MessageStatus::Error.into();
+        let created: i8 = DeliveryStatus::Error.into();
         assert_eq!(created, 3);
+
+        let created: i8 = DeliveryStatus::Delivered.into();
+        assert_eq!(created, 4);
     }
 
     #[test]
     fn store_data_i8_to_message_status() {
-        let created: MessageStatus = 0.into();
-        assert_eq!(created, MessageStatus::Created);
+        let created: DeliveryStatus = 0.into();
+        assert_eq!(created, DeliveryStatus::Created);
 
-        let created: MessageStatus = 1.into();
-        assert_eq!(created, MessageStatus::Acked);
+        let created: DeliveryStatus = 1.into();
+        assert_eq!(created, DeliveryStatus::Acked);
 
-        let created: MessageStatus = 2.into();
-        assert_eq!(created, MessageStatus::Completed);
+        let created: DeliveryStatus = 2.into();
+        assert_eq!(created, DeliveryStatus::Completed);
 
-        let created: MessageStatus = 3.into();
-        assert_eq!(created, MessageStatus::Error);
+        let created: DeliveryStatus = 3.into();
+        assert_eq!(created, DeliveryStatus::Error);
 
-        let created: MessageStatus = 100.into();
-        assert_eq!(created, MessageStatus::Created);
+        let created: DeliveryStatus = 4.into();
+        assert_eq!(created, DeliveryStatus::Delivered);
+
+        let created: DeliveryStatus = 100.into();
+        assert_eq!(created, DeliveryStatus::Created);
     }
 
     #[test]
     fn store_data_message_status_to_string() {
-        assert_eq!(MessageStatus::Created.to_string(), "created");
-        assert_eq!(MessageStatus::Acked.to_string(), "acked");
-        assert_eq!(MessageStatus::Completed.to_string(), "completed");
-        assert_eq!(MessageStatus::Error.to_string(), "error");
+        assert_eq!(DeliveryStatus::Created.to_string(), "created");
+        assert_eq!(DeliveryStatus::Acked.to_string(), "acked");
+        assert_eq!(DeliveryStatus::Completed.to_string(), "completed");
+        assert_eq!(DeliveryStatus::Error.to_string(), "error");
+        assert_eq!(DeliveryStatus::Delivered.to_string(), "delivered");
     }
 
     fn message_json(v: i32, extra: bool) -> JsonValue {

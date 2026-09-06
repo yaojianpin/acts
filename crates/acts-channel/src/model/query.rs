@@ -253,7 +253,7 @@ impl TryFrom<Query> for JsonValue {
 mod tests {
     use super::Expr;
     use super::ExprOp;
-    use acts::data::MessageStatus;
+    use acts::data::DeliveryStatus;
     use serde_json::json;
 
     #[test]
@@ -338,9 +338,9 @@ mod tests {
 
     #[test]
     fn store_query_expr_enum() {
-        let expr = Expr::eq("a", MessageStatus::Acked);
+        let expr = Expr::eq("a", DeliveryStatus::Acked);
         assert_eq!(expr.key(), "a");
-        assert_eq!(expr.value(), &json!(MessageStatus::Acked));
+        assert_eq!(expr.value(), &json!(DeliveryStatus::Acked));
     }
 
     #[test]

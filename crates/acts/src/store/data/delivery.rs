@@ -6,7 +6,7 @@ use crate::{
     store::{DbCollectionIden, StoreIden},
 };
 
-use super::message::MessageStatus;
+use super::message::DeliveryStatus;
 
 /// One delivery of a canonical message to one channel/service — the unit
 /// Ack/Retry/Clear/Redo and the retry timer operate on. Rows are keyed by
@@ -29,7 +29,7 @@ pub struct Delivery {
     pub chan_id: String,
     pub chan_pattern: String,
 
-    pub status: MessageStatus,
+    pub status: DeliveryStatus,
     pub retry_times: i32,
     pub create_time: i64,
     pub update_time: i64,

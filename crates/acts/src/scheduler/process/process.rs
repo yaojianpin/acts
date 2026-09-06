@@ -530,6 +530,7 @@ impl Process {
             timestamp: self.timestamp(),
             env: self.env().to_string(),
             err: self.err().map(|err| err.to_string()),
+            removable: false,
             v: data::Proc::version(),
         })
     }

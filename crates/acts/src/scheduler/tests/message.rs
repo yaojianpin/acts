@@ -3,7 +3,7 @@ use crate::event::EventAction;
 use crate::{
     Action, ChannelOptions, Message, Variant, Vars, Workflow,
     config::ConfigData,
-    data::MessageStatus,
+    data::DeliveryStatus,
     event::MessageState,
     store::query::*,
     utils::test::{USES_IRQ, create_proc, create_proc_with_config},
@@ -1515,7 +1515,11 @@ async fn sch_message_ack_not_exist_message_in_store() {
 
 #[tokio::test]
 async fn sch_message_ack_exist_message_in_store() {
-    let workflow = Workflow::new();
+    // the irq act keeps the process running while the ack is asserted; a
+    // finished process would have its deliveries closed `Completed` by the
+    // engine instead
+    let workflow =
+        Workflow::new().with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "act1")));
     let id = utils::longid();
     let (engine, proc) = create_proc(&workflow, &id).await;
     let _rt = engine.runtime();
@@ -1575,7 +1579,9 @@ async fn sch_message_ack_exist_message_in_store() {
     assert_eq!(message.state, MessageState::Created);
     assert!(message.start_time > 0);
 
-    // the delivery row records the ack of this channel
+    // the delivery row records the ack of this channel (the irq act keeps
+    // the process running, so the engine close has not finalized the row
+    // yet — once the process finishes, the row becomes `Completed`)
     let delivery_id = ret.delivery_id.clone().unwrap();
     let delivery = e2
         .runtime()
@@ -1586,7 +1592,7 @@ async fn sch_message_ack_exist_message_in_store() {
         .await
         .unwrap();
     assert_eq!(delivery.chan_id, "e1");
-    assert_eq!(delivery.status, MessageStatus::Acked);
+    assert_eq!(delivery.status, DeliveryStatus::Acked);
 }
 
 #[tokio::test]
@@ -1684,7 +1690,7 @@ async fn sch_message_complete_message_in_store() {
         .find(&delivery_id)
         .await
         .unwrap();
-    assert_eq!(delivery.status, MessageStatus::Completed);
+    assert_eq!(delivery.status, DeliveryStatus::Completed);
     assert!(delivery.create_time > 0);
     assert!(delivery.update_time > 0);
 }
@@ -1806,7 +1812,8 @@ async fn sch_message_re_sent_if_not_ack() {
     assert_eq!(message.pid, id);
     assert_eq!(message.state, MessageState::Created);
 
-    // the delivery row keeps the retry state of this channel
+    // the delivery row keeps the retry state of this channel: it was handed
+    // over (`Delivered`) and never acked, so it keeps being re-sent
     let delivery = engine
         .runtime()
         .cache()
@@ -1815,7 +1822,7 @@ async fn sch_message_re_sent_if_not_ack() {
         .find(&m.delivery_id.clone().unwrap())
         .await
         .unwrap();
-    assert_eq!(delivery.status, MessageStatus::Created);
+    assert_eq!(delivery.status, DeliveryStatus::Delivered);
     assert!(delivery.create_time > 0);
     assert!(delivery.update_time > 0);
     assert!(delivery.retry_times > 0);
@@ -1823,6 +1830,9 @@ async fn sch_message_re_sent_if_not_ack() {
 
 #[tokio::test]
 async fn sch_message_error_if_not_ack_and_exceed_max_reties() {
+    // the irq act never completes: the process stays running while the
+    // unacked request deliveries exhaust their retries (a finished process's
+    // rows are closed and deleted by the sweeper instead)
     let workflow =
         Workflow::new().with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "act1")));
     let id = utils::longid();
@@ -1880,33 +1890,46 @@ async fn sch_message_error_if_not_ack_and_exceed_max_reties() {
         }
     });
     e2.runtime().launch(&proc).await.unwrap();
-    let ret = sig.timeout(4000).await;
-    assert!(ret.len() > 1);
+    // wait until the unacked request deliveries exhausted their retries and
+    // turned Error (the process stays running, so nothing closes them early)
+    let mut error_row = None;
+    for _ in 0..300 {
+        let pending = e2
+            .runtime()
+            .cache()
+            .store()
+            .deliveries()
+            .query(
+                &Query::new().filter(
+                    Filter::and()
+                        .expr(Expr::eq("pid", id.to_string()))
+                        .expr(Expr::eq("status", DeliveryStatus::Error as i8)),
+                ),
+            )
+            .await
+            .unwrap();
+        if let Some(row) = pending.rows.first() {
+            error_row = Some(row.clone());
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let delivery = error_row.expect("a delivery must turn Error after max retries");
 
-    let m = ret.first().unwrap();
-    // canonical message row
+    // canonical message row of the errored delivery
     let message = e2
         .runtime()
         .cache()
         .store()
         .messages()
-        .find(&m.id)
+        .find(&delivery.msg_id)
         .await
         .unwrap();
-    assert_eq!(message.r#type, "workflow");
     assert_eq!(message.pid, id);
     assert_eq!(message.state, MessageState::Created);
 
-    // the delivery row turns into error after max retries
-    let delivery = e2
-        .runtime()
-        .cache()
-        .store()
-        .deliveries()
-        .find(&m.delivery_id.clone().unwrap())
-        .await
-        .unwrap();
-    assert_eq!(delivery.status, MessageStatus::Error);
+    // the delivery row turned into error after max retries
+    assert_eq!(delivery.status, DeliveryStatus::Error);
     assert!(delivery.create_time > 0);
     assert!(delivery.update_time > 0);
     assert_eq!(delivery.retry_times, config.max_message_retry_times());
@@ -1916,8 +1939,11 @@ async fn sch_message_error_if_not_ack_and_exceed_max_reties() {
 async fn sch_message_redelivery_goes_to_owning_channel_only() {
     // two ack channels share the same emitted messages; channel a acks its
     // deliveries while channel b does not — the retry timer must re-send only
-    // channel b's deliveries, never acked channel a again
-    let workflow = Workflow::new();
+    // channel b's deliveries, never acked channel a again. The irq act keeps
+    // the process running (a finished process's open deliveries are closed
+    // and deleted by the sweeper instead of re-sent)
+    let workflow =
+        Workflow::new().with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "act1")));
     let id = utils::longid();
     let (engine, proc) = create_proc(&workflow, &id).await;
     let _rt = engine.runtime();

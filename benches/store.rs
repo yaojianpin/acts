@@ -31,6 +31,7 @@ fn make_proc(id: &str, mid: &str, i: u64) -> Proc {
         model: "{}".to_string(),
         env: "{}".to_string(),
         err: None,
+        removable: false,
         v: 0,
     }
 }

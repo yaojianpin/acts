@@ -284,12 +284,17 @@ impl<T> KvCollection<T> {
                     .iter()
                     .filter_map(|(key, _)| key.strip_prefix(&vk).map(str::to_string))
                     .collect(),
-                // Other ops: skip the field prefix and the value segment
+                // Other ops (In/Ne/range/Between): skip the field prefix and
+                // the value segment. The value can never contain `KEY_SEP`
+                // (it is escaped away by the key encoding), while the id MAY
+                // contain it (e.g. `p-acked`) — so the FIRST separator after
+                // the field prefix is the value/id boundary; the last one
+                // would sit inside the id and truncate it.
                 None => entries
                     .iter()
                     .filter_map(|(key, _)| {
                         let rest = key.strip_prefix(&field_prefix)?;
-                        let sep_pos = rest.rfind(KEY_SEP)?;
+                        let sep_pos = rest.find(KEY_SEP)?;
                         Some(rest[sep_pos + KEY_SEP.len()..].to_string())
                     })
                     .collect(),
