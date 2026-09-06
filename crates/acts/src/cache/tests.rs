@@ -323,7 +323,11 @@ async fn cache_restore_count() {
             id: utils::longid(),
             name: "test".to_string(),
             mid: "m1".to_string(),
-            state: TaskState::None.into(),
+            // `Ready` (not `None`): `restore` auto-starts only `None`-state
+            // processes — a freshly started seed would run to completion and
+            // (since terminal procs are now evicted on their proc event) race
+            // the count assertion below.
+            state: TaskState::Ready.into(),
             start_time: 0,
             end_time: 0,
             timestamp: 0,
@@ -357,10 +361,13 @@ async fn cache_restore_working_state() {
 
     assert_eq!(cache.count(), 0);
 
+    // `Ready` (not `None`) seeds: `restore` auto-starts `None` processes —
+    // a started seed would complete and (terminal procs are now evicted on
+    // their proc event) race the count assertion below.
     let states = [
-        TaskState::None,
-        TaskState::None,
-        TaskState::None,
+        TaskState::Ready,
+        TaskState::Ready,
+        TaskState::Ready,
         TaskState::Running,
         TaskState::Running,
         TaskState::Running,
@@ -459,7 +466,9 @@ async fn cache_restore_less_cap() {
 
     assert_eq!(cache.count(), 0);
 
-    let states = [TaskState::Running, TaskState::None, TaskState::Pending];
+    // `Ready` (not `None`): see `cache_restore_working_state` — auto-started
+    // seeds would complete and be evicted, racing the count assertion.
+    let states = [TaskState::Running, TaskState::Ready, TaskState::Pending];
     for state in &states {
         let proc = data::Proc {
             id: utils::longid(),
@@ -480,6 +489,84 @@ async fn cache_restore_less_cap() {
 
     cache.restore(&engine.runtime()).await.unwrap();
     assert_eq!(cache.count(), 3);
+}
+
+/// A finished process is evicted from the in-memory cache on its terminal
+/// proc event (its store rows stay — the sweeper deletes them only after the
+/// process's deliveries settled), so the freed slot lets the restore pass
+/// pull other persisted processes back into the cache and auto-start them
+/// (`None` state). Without the eviction, finished processes squat in the
+/// cache at/over the restore checkpoint (cap/2) and those processes starve.
+#[tokio::test(flavor = "multi_thread")]
+async fn cache_finished_proc_frees_slot_for_restore() {
+    let engine = Engine::builder()
+        .cache_size(4)
+        .build()
+        .start()
+        .await
+        .unwrap();
+    let rt = engine.runtime();
+    let cache = rt.cache();
+    let store = cache.store();
+
+    let model = Workflow::new()
+        .with_id("m1")
+        .with_step(|step| step.with_name("step1"));
+    store.deploy(&model, None).await.unwrap();
+
+    // three processes persisted but never started (a crash left them behind)
+    let mut seeds = Vec::new();
+    for _ in 0..3 {
+        let pid = utils::longid();
+        let proc = data::Proc {
+            id: pid.clone(),
+            name: "seed".to_string(),
+            mid: "m1".to_string(),
+            state: TaskState::None.into(),
+            start_time: 0,
+            end_time: 0,
+            timestamp: 0,
+            model: model.to_json().unwrap(),
+            env: "{}".to_string(),
+            err: None,
+            removable: false,
+            v: data::Proc::version(),
+        };
+        store.procs().create(&proc).await.unwrap();
+        seeds.push(pid);
+    }
+
+    // two real processes run concurrently; while both are resident the cache
+    // count (2) sits at the restore checkpoint of cap 4 (cap/2 = 2), so no
+    // restore pass starts — only their terminal eviction drops the count
+    // below the checkpoint and lets the seeds be restored
+    let (a, b) = tokio::join!(rt.start(&model, Vars::new()), rt.start(&model, Vars::new()));
+    let running = [a.unwrap(), b.unwrap()];
+    let mut pids = seeds.clone();
+    pids.extend(running.iter().map(|p| p.id().to_string()));
+
+    // every process — the two that ran and the three restored seeds — must
+    // end up terminal in the store (or gone, swept after its rows settled);
+    // under the old behavior the finished procs stayed cached and the seeds
+    // were never restored, so they would remain `None` forever
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            let mut done = true;
+            for pid in &pids {
+                if let Ok(row) = store.procs().find(pid).await
+                    && !TaskState::from(row.state.as_str()).is_completed()
+                {
+                    done = false;
+                }
+            }
+            if done {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("finished/restored processes never reached a terminal state in time");
 }
 /// Scope vars live in their own rows: a lifecycle-only persist (state/timing
 /// change, no data touched) must NOT write a vars row, and a data mutation

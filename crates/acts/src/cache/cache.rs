@@ -8,12 +8,19 @@ use crate::{
 use moka::sync::Cache as MokaCache;
 use std::{collections::HashSet, sync::Arc};
 use tracing::{debug, instrument};
+
 #[derive(Clone)]
 pub struct Cache {
     cap: usize,
     procs: MokaCache<String, Arc<Process>>,
     store: Arc<Store>,
     writer: StoreWriter,
+    /// Serializes whole `restore` passes. Terminal proc events of different
+    /// processes run concurrently, and each triggers a restore; without the
+    /// lock two passes could load — and auto-start — the same persisted
+    /// process twice (each `start` is guarded per `Process` instance, not
+    /// per pid, so the duplicate would run the workflow twice).
+    restore_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl std::fmt::Debug for Cache {
@@ -35,6 +42,7 @@ impl Cache {
             procs: MokaCache::new(config.cache_cap() as u64),
             store: store.clone(),
             writer: StoreWriter::spawn(store),
+            restore_lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -119,8 +127,22 @@ impl Cache {
         Ok(pids.len())
     }
 
+    /// Evict a process from the in-memory cache only — its durable rows are
+    /// left untouched. Called when a process finishes (its terminal proc
+    /// event): the freed slot lets [`Self::restore`] pull other persisted
+    /// processes into the cache. The store rows themselves are removed later
+    /// by the sweeper, once every delivery of the process's messages settled.
+    pub(crate) fn evict(&self, pid: &str) {
+        self.procs.remove(pid);
+    }
+
     #[instrument(skip(self, rt))]
     pub async fn restore(&self, rt: &Arc<Runtime>) -> Result<()> {
+        // Terminal proc events of different processes trigger restores
+        // concurrently (each completion evicts its process and calls back in
+        // here); serialize whole passes so two restores can never load — and
+        // auto-start — the same persisted process twice.
+        let _guard = self.restore_lock.lock().await;
         debug!("restore");
         let cap = self.cap();
         let count = self.count();
@@ -148,11 +170,6 @@ impl Cache {
     #[instrument(skip(self, task), fields(pid = %task.pid, tid = %task.id))]
     pub async fn upsert(&self, task: &Arc<Task>) -> Result<()> {
         self.push_task_pri(task, true).await
-    }
-
-    #[cfg(test)]
-    pub fn uncache(&self, pid: &str) {
-        self.procs.remove(pid);
     }
 
     fn get_proc(&self, pid: &str) -> Option<Arc<Process>> {

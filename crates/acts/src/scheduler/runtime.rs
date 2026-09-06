@@ -494,13 +494,18 @@ impl Runtime {
                             rt.return_to_act(&ppid, &ptid, &proc).await;
                         }
 
-                        // A finished process is left alone: its rows are
-                        // deleted by the sweeper only after every delivery of
-                        // its messages settled (see `Store::mark_removable` /
-                        // `sweep_settled_procs`) — delivery completion lags
-                        // the terminal state, so deleting here would race the
-                        // still-in-flight deliveries.
+                        // Finished: evict the process from the in-memory cache
+                        // right away — its slot is freed so `restore` can pull
+                        // in (and resume) other processes persisted in the
+                        // store. The durable rows are NOT deleted here: they
+                        // are removed by the sweeper only after every delivery
+                        // of the process's messages settled (see
+                        // `Store::mark_removable` / `sweep_settled_procs`) —
+                        // delivery completion lags the terminal state, so
+                        // deleting now would race the still-in-flight
+                        // deliveries.
 
+                        cache.evict(proc.id());
                         let cache = cache.clone();
                         let rt = rt.clone();
                         if let Err(err) = cache.restore(&rt).await {
