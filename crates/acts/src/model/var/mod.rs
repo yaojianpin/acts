@@ -51,27 +51,12 @@ impl ActSchema {
     pub fn schema(&self) -> serde_json::Value {
         match self {
             ActSchema::None => serde_json::json!({}),
-            ActSchema::Simple(var) => {
-                serde_json::json!({
-                    "name": var.name,
-                    "description": var.desc,
-                    "type": json!(var.r#type),
-                    "defaultValue": var.value,
-                })
-            }
+            ActSchema::Simple(var) => variant_property(var),
             ActSchema::Multiple(vars) => {
                 let mut properties = serde_json::Map::new();
                 let mut required = vec![];
                 for var in vars {
-                    properties.insert(
-                        var.name.clone(),
-                        serde_json::json!({
-                            "name": var.name,
-                            "description": var.desc,
-                            "type": json!(var.r#type),
-                            "defaultValue": var.value,
-                        }),
-                    );
+                    properties.insert(var.name.clone(), variant_property(var));
 
                     if var.required {
                         required.push(var.name.clone());
@@ -81,4 +66,18 @@ impl ActSchema {
             }
         }
     }
+}
+/// JSON-schema property for one variant. A variant whose `type` was not
+/// declared (`typed == false`) gets no `type` constraint, so any runtime
+/// JSON value is accepted and keeps its own type instead of defaulting
+/// to `string`.
+fn variant_property(var: &Variant) -> serde_json::Value {
+    let mut schema = serde_json::Map::new();
+    schema.insert("name".to_string(), json!(var.name));
+    schema.insert("description".to_string(), json!(var.desc));
+    if var.typed {
+        schema.insert("type".to_string(), json!(var.r#type));
+    }
+    schema.insert("defaultValue".to_string(), json!(var.value));
+    serde_json::Value::Object(schema)
 }

@@ -137,6 +137,69 @@ fn model_workflow_from_yml_inputs_simple() {
 }
 
 #[test]
+fn model_workflow_exposes_untyped_type_follows_value() {
+    // name-only exposes are validated by the runtime type of the exported
+    // value, not by a default `string` type
+    let text = r#"
+    exposes:
+        - name: result
+    "#;
+    let m = Workflow::from_yml(text).unwrap();
+    let exposes = m.exposes.first().unwrap();
+    assert_eq!(exposes.name, "result");
+    assert_eq!(exposes.r#type, VariantTypes::String);
+    assert!(!exposes.typed);
+
+    let schema = ActSchema::Multiple(m.exposes.clone());
+    assert!(
+        schema.validate(&json!({ "result": 10 })).is_ok(),
+        "a number export must not fail as if it were a string"
+    );
+    assert!(schema.validate(&json!({ "result": true })).is_ok());
+}
+
+#[test]
+fn model_workflow_exposes_literal_value_infers_type() {
+    // a literal value without `type` declares the matching concrete type
+    let text = r#"
+    exposes:
+        - name: result
+          value: 10
+    "#;
+    let m = Workflow::from_yml(text).unwrap();
+    let exposes = m.exposes.first().unwrap();
+    assert_eq!(exposes.r#type, VariantTypes::Number);
+    assert!(exposes.typed);
+}
+
+#[test]
+fn model_workflow_exposes_explicit_type_stays_strict() {
+    let text = r#"
+    exposes:
+        - name: result
+          type: string
+    "#;
+    let m = Workflow::from_yml(text).unwrap();
+    let schema = ActSchema::Multiple(m.exposes.clone());
+    assert!(schema.validate(&json!({ "result": "ok" })).is_ok());
+    assert!(schema.validate(&json!({ "result": 10 })).is_err());
+}
+
+#[test]
+fn model_workflow_exposes_untyped_roundtrip_yml() {
+    // serializing a model must not write back an implicit `type: string`
+    let text = r#"
+    exposes:
+        - name: result
+    "#;
+    let m = Workflow::from_yml(text).unwrap();
+    let yml = m.to_yml().unwrap();
+    assert!(!yml.contains("type"));
+    let m2 = Workflow::from_yml(&yml).unwrap();
+    assert!(!m2.exposes.first().unwrap().typed);
+}
+
+#[test]
 fn model_workflow_from_yml_inputs_multiple() {
     let text = r#"
     inputs:

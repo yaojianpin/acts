@@ -333,3 +333,27 @@ fn model_vars_value_validate_err_type() {
     let result = v.validate(&data);
     assert!(result.is_err());
 }
+#[test]
+fn model_vars_value_validate_ok_untyped() {
+    // a variant declared without `type` (a name-only `exposes` entry) is
+    // not forced to string — every runtime JSON value passes and keeps its
+    // own type
+    let v = ActSchema::Multiple(vec![Variant::new().name("name1")]);
+    let schema = v.schema();
+    assert!(schema["properties"]["name1"].get("type").is_none());
+
+    for data in [
+        json!({"name1": 42}),
+        json!({"name1": "text"}),
+        json!({"name1": true}),
+        json!({"name1": [1, 2]}),
+        json!({"name1": {"k": "v"}}),
+        json!({"name1": null}),
+    ] {
+        let result = v.validate(&data);
+        assert!(
+            result.is_ok(),
+            "untyped validation failed for {data:?}: {result:?}"
+        );
+    }
+}

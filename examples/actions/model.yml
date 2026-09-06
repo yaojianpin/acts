@@ -7,7 +7,6 @@ vars:
 exposes:
   - name: result
     value: ${{ v }}
-    type: number
 steps:
   - name: prepare
     id: prepare
