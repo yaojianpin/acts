@@ -6,6 +6,7 @@ macro_rules! gen_store_tests {
         use std::collections::HashSet;
         use std::sync::OnceLock;
         use $crate::store::data::{Delivery, DeliveryStatus, Message, Model, Package, Proc, Task};
+        use $crate::store::data::TaskVars;
         use $crate::store::query::{Expr, ExprOp, Sort};
         use $crate::store::{Filter, Query};
         use $crate::{MessageState, TaskState, Workflow, scheduler::NodeKind, utils};
@@ -689,10 +690,8 @@ macro_rules! gen_store_tests {
                 start_time: 0,
                 end_time: 0,
                 timestamp: 0,
-                data: "{}".to_string(),
                 err: None,
                 v: 0,
-                sealed: String::new(),
             };
 
             store.tasks().create(&task).await.expect("create task");
@@ -723,10 +722,8 @@ macro_rules! gen_store_tests {
                 start_time: 0,
                 end_time: 0,
                 timestamp: 0,
-                data: "{}".to_string(),
                 err: None,
                 v: 0,
-                sealed: String::new(),
             };
 
             store.tasks().create(&task).await.expect("create task");
@@ -758,10 +755,8 @@ macro_rules! gen_store_tests {
                     start_time: 0,
                     end_time: 0,
                     timestamp: 0,
-                    data: "{}".to_string(),
                     err: None,
                     v: 0,
-                    sealed: String::new(),
                 };
                 store.tasks().create(&task).await.expect("create task");
             }
@@ -804,10 +799,8 @@ macro_rules! gen_store_tests {
                     start_time: 0,
                     end_time: 0,
                     timestamp: 0,
-                    data: "{}".to_string(),
                     err: None,
                     v: 0,
-                    sealed: String::new(),
                 };
                 store.tasks().create(&task).await.expect("create task");
             }
@@ -850,10 +843,8 @@ macro_rules! gen_store_tests {
                     start_time: 0,
                     end_time: 0,
                     timestamp: 0,
-                    data: "{}".to_string(),
                     err: None,
                     v: 0,
-                    sealed: String::new(),
                 };
                 store.tasks().create(&task).await.expect("create task");
             }
@@ -874,10 +865,8 @@ macro_rules! gen_store_tests {
                     start_time: 0,
                     end_time: 0,
                     timestamp: 0,
-                    data: "{}".to_string(),
                     err: None,
                     v: 0,
-                    sealed: String::new(),
                 };
                 store.tasks().create(&task).await.expect("create task");
             }
@@ -914,10 +903,8 @@ macro_rules! gen_store_tests {
                     start_time: 0,
                     end_time: 0,
                     timestamp: utils::time::timestamp(),
-                    data: "{}".to_string(),
                     err: None,
                     v: 0,
-                    sealed: String::new(),
                 };
                 store.tasks().create(&task).await.expect("create task");
             }
@@ -961,10 +948,8 @@ macro_rules! gen_store_tests {
                 start_time: 0,
                 end_time: 0,
                 timestamp: 0,
-                data: "{}".to_string(),
                 err: None,
                 v: 0,
-                sealed: String::new(),
             };
 
             store.tasks().create(&task).await.expect("create task");
@@ -1000,10 +985,8 @@ macro_rules! gen_store_tests {
                 start_time: 0,
                 end_time: 0,
                 timestamp: 0,
-                data: "{}".to_string(),
                 err: None,
                 v: 0,
-                sealed: String::new(),
             };
 
             store.tasks().create(&task).await.expect("create task");
@@ -1710,31 +1693,184 @@ macro_rules! gen_store_tests {
         async fn store_upcast_model_version() {
             let store = store().await;
             let model = Model {
-                id: utils::longid(),
-                name: "upcast-test".to_string(),
-                desc: "test upcast".to_string(),
+                id: utils::shortid(),
+                name: "upcast-model".to_string(),
+                desc: "desc".to_string(),
                 ver: "0.1.0".to_string(),
-                size: 100,
-                create_time: 500,
+                size: 1245,
+                create_time: 0,
                 update_time: 0,
                 data: "{}".to_string(),
                 view: None,
-                timestamp: utils::time::timestamp(),
+                timestamp: 0,
                 v: 0,
             };
             store.models().create(&model).await.expect("create model");
 
-            // find goes through upcast now
+            // find goes through upcast
             let found = store.models().find(&model.id).await.unwrap();
             assert_eq!(found.id, model.id);
-            assert_eq!(found.name, model.name);
-            assert_eq!(found.v, 0); // version preserved
+            assert_eq!(found.v, 0);
 
-            // query goes through upcast now
+            // query goes through upcast
             let q = Query::new()
                 .filter(Filter::and().expr(Expr::eq("id", model.id.clone())))
                 .limit(1);
             let page = store.models().query(&q).await.unwrap();
+            assert_eq!(page.rows.len(), 1);
+            assert_eq!(page.rows[0].v, 0);
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[serial(store_tests)]
+        async fn store_task_vars_create_and_find() {
+            let store = store().await;
+            let pid = utils::longid();
+            let vars = TaskVars {
+                id: utils::Id::new(&pid, "t1").id(),
+                pid: pid.clone(),
+                tid: "t1".to_string(),
+                data: json!({"a": 1, "name": "x"}).to_string(),
+                sealed: json!({"profile": {"scope": "workflow"}}).to_string(),
+                v: 0,
+            };
+            store.vars().create(&vars).await.expect("create task vars");
+
+            let found = store.vars().find(&vars.id).await.unwrap();
+            assert_eq!(found.id, vars.id);
+            assert_eq!(found.pid, pid);
+            assert_eq!(found.tid, "t1");
+            assert_eq!(found.data, vars.data);
+            assert_eq!(found.sealed, vars.sealed);
+            assert_eq!(found.v, 0);
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[serial(store_tests)]
+        async fn store_task_vars_query_by_pid() {
+            let store = store().await;
+            let pid = utils::longid();
+            for tid in ["t1", "t2", "t3"] {
+                let vars = TaskVars {
+                    id: utils::Id::new(&pid, tid).id(),
+                    pid: pid.clone(),
+                    tid: tid.to_string(),
+                    data: json!({"tid": tid}).to_string(),
+                    sealed: String::new(),
+                    v: 0,
+                };
+                store.vars().create(&vars).await.expect("create task vars");
+            }
+            // another process's rows must not leak into the pid query
+            let other_pid = utils::longid();
+            let other = TaskVars {
+                id: utils::Id::new(&other_pid, "tx").id(),
+                pid: other_pid.clone(),
+                tid: "tx".to_string(),
+                data: "{}".to_string(),
+                sealed: String::new(),
+                v: 0,
+            };
+            store.vars().create(&other).await.expect("create task vars");
+
+            let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", pid.clone())));
+            let page = store.vars().query(&q).await.unwrap();
+            assert_eq!(page.rows.len(), 3, "pid-scoped scan returns only this process's rows");
+            assert!(page.rows.iter().all(|r| r.pid == pid));
+
+            // tid is a secondary index
+            let q = Query::new().filter(
+                Filter::and()
+                    .expr(Expr::eq("pid", pid.clone()))
+                    .expr(Expr::eq("tid", "t2".to_string())),
+            );
+            let page = store.vars().query(&q).await.unwrap();
+            assert_eq!(page.rows.len(), 1);
+            assert_eq!(page.rows[0].tid, "t2");
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[serial(store_tests)]
+        async fn store_task_vars_update() {
+            let store = store().await;
+            let pid = utils::longid();
+            let vars = TaskVars {
+                id: utils::Id::new(&pid, "t1").id(),
+                pid: pid.clone(),
+                tid: "t1".to_string(),
+                data: json!({"a": 1}).to_string(),
+                sealed: String::new(),
+                v: 0,
+            };
+            store.vars().create(&vars).await.expect("create task vars");
+
+            let mut updated = vars.clone();
+            updated.data = json!({"a": 2, "b": 3}).to_string();
+            updated.sealed = json!({"s": 1}).to_string();
+            store.vars().update(&updated).await.expect("update task vars");
+
+            let found = store.vars().find(&vars.id).await.unwrap();
+            assert_eq!(found.data, updated.data);
+            assert_eq!(found.sealed, updated.sealed);
+
+            // update must not duplicate the row
+            let q = Query::new()
+                .filter(Filter::and().expr(Expr::eq("id", vars.id.clone())))
+                .limit(10);
+            let page = store.vars().query(&q).await.unwrap();
+            assert_eq!(page.rows.len(), 1);
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[serial(store_tests)]
+        async fn store_task_vars_remove() {
+            let store = store().await;
+            let pid = utils::longid();
+            let vars = TaskVars {
+                id: utils::Id::new(&pid, "t1").id(),
+                pid: pid.clone(),
+                tid: "t1".to_string(),
+                data: json!({"a": 1}).to_string(),
+                sealed: String::new(),
+                v: 0,
+            };
+            store.vars().create(&vars).await.expect("create task vars");
+
+            assert!(store.vars().delete(&vars.id).await.unwrap());
+            assert!(store.vars().find(&vars.id).await.is_err());
+
+            let q = Query::new()
+                .filter(Filter::and().expr(Expr::eq("pid", pid.clone())))
+                .limit(10);
+            let page = store.vars().query(&q).await.unwrap();
+            assert_eq!(page.rows.len(), 0, "index rows are removed with the data row");
+        }
+
+        #[tokio::test(flavor = "multi_thread")]
+        #[serial(store_tests)]
+        async fn store_upcast_task_vars_version() {
+            let store = store().await;
+            let pid = utils::longid();
+            let vars = TaskVars {
+                id: utils::Id::new(&pid, "t1").id(),
+                pid: pid.clone(),
+                tid: "t1".to_string(),
+                data: json!({"a": 1}).to_string(),
+                sealed: String::new(),
+                v: 0,
+            };
+            store.vars().create(&vars).await.expect("create task vars");
+
+            // find goes through upcast
+            let found = store.vars().find(&vars.id).await.unwrap();
+            assert_eq!(found.id, vars.id);
+            assert_eq!(found.v, 0);
+
+            // query goes through upcast
+            let q = Query::new()
+                .filter(Filter::and().expr(Expr::eq("id", vars.id.clone())))
+                .limit(1);
+            let page = store.vars().query(&q).await.unwrap();
             assert_eq!(page.rows.len(), 1);
             assert_eq!(page.rows[0].v, 0);
         }
@@ -1793,10 +1929,8 @@ macro_rules! gen_store_tests {
                 start_time: 0,
                 end_time: 0,
                 timestamp: utils::time::timestamp(),
-                data: "{}".to_string(),
                 err: None,
                 v: 0,
-                sealed: String::new(),
             };
             store.tasks().create(&task).await.expect("create task");
 

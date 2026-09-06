@@ -6,6 +6,9 @@ use crate::{
     store::{DbCollectionIden, StoreIden},
 };
 
+/// The lifecycle row of one task instance: identity, node link graph, state
+/// and timing. Scope variables live in the paired [`TaskVars`] row so state
+/// transitions never rewrite variable bytes.
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct Task {
     pub id: String,
@@ -19,9 +22,6 @@ pub struct Task {
 
     pub name: String,
     pub state: String,
-    pub data: String,
-    #[serde(default)]
-    pub sealed: String,
     pub err: Option<String>,
     pub start_time: i64,
     pub end_time: i64,
@@ -61,5 +61,47 @@ impl Task {
     }
     pub fn set_end_time(&mut self, time: i64) {
         self.end_time = time;
+    }
+}
+
+/// Scope vars of one task, stored apart from the task's lifecycle row so
+/// state transitions never rewrite variable bytes (and a variable write
+/// never needs to touch another task's row). One row per task scope, keyed by
+/// the same composite `pid + tid` id as its [`Task`] row; `data` holds the
+/// task's own variable scope, `sealed` the resolver-written sealed scope.
+/// Rows are written when a scope's vars actually change and are dropped with
+/// the process.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+pub struct TaskVars {
+    pub id: String,
+    pub pid: String,
+    pub tid: String,
+    #[serde(default)]
+    pub data: String,
+    #[serde(default)]
+    pub sealed: String,
+    pub v: i32,
+}
+
+impl DbCollectionIden for TaskVars {
+    fn iden() -> StoreIden {
+        StoreIden::Vars
+    }
+    fn indexed_fields() -> &'static [&'static str] {
+        &["pid", "tid"]
+    }
+    fn version() -> i32 {
+        0
+    }
+
+    fn upcast(value: JsonValue) -> Result<Self> {
+        let v = value.get("v").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        if v == Self::version() {
+            return Self::upcast_current(value);
+        }
+        Err(crate::ActError::Store(format!(
+            "unsupported task vars version: {}",
+            v
+        )))
     }
 }

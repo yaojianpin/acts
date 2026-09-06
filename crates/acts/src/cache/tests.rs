@@ -1,3 +1,4 @@
+use crate::Vars;
 use crate::{
     Act, Engine, Workflow, data,
     scheduler::NodeContent,
@@ -479,4 +480,166 @@ async fn cache_restore_less_cap() {
 
     cache.restore(&engine.runtime()).await.unwrap();
     assert_eq!(cache.count(), 3);
+}
+/// Scope vars live in their own rows: a lifecycle-only persist (state/timing
+/// change, no data touched) must NOT write a vars row, and a data mutation
+/// must create one with exactly that scope's content.
+#[tokio::test]
+async fn cache_vars_row_written_only_on_mutation() {
+    let engine = Engine::new().start().await.unwrap();
+    let rt = engine.runtime();
+    let store = rt.cache().store();
+
+    let workflow = Workflow::new()
+        .with_id("m1")
+        .with_step(|s| s.with_id("step1"));
+    let pid = utils::longid();
+    let proc = rt.create_proc(&pid, &workflow);
+    let root = proc
+        .create_task(&proc.tree().node("step1").unwrap(), None)
+        .unwrap();
+    let task_id = utils::Id::new(&pid, &root.id).id();
+    proc.set_state(TaskState::Running);
+
+    // 1. lifecycle-only write: state/time changed, vars untouched — no vars
+    // row is created and the lifecycle row carries no scope vars
+    root.set_pure_state(TaskState::Running);
+    root.set_start_time(1);
+    store.persist_task_rows(&root).await.unwrap();
+    assert!(
+        store.vars().find(&task_id).await.is_err(),
+        "a lifecycle-only write must not write a scope vars row"
+    );
+    let row = store.tasks().find(&task_id).await.unwrap();
+    let json = serde_json::to_string(&row).unwrap();
+    assert!(
+        !json.contains("\"data\"") && !json.contains("\"sealed\""),
+        "the lifecycle row must not carry scope vars: {json}"
+    );
+
+    // 2. a data mutation flushes exactly the mutated scope's vars row
+    root.set_data(&Vars::new().with("var1", 10));
+    store.persist_task_rows(&root).await.unwrap();
+    let vars = store.vars().find(&task_id).await.unwrap();
+    let data: Vars = serde_json::from_str(&vars.data).unwrap();
+    assert_eq!(data.get::<i32>("var1").unwrap(), 10);
+    assert!(
+        !root.is_vars_dirty(),
+        "vars dirty flag must clear after the flush"
+    );
+
+    // 3. a later lifecycle-only write does not rewrite the vars row
+    root.set_pure_state(TaskState::Completed);
+    root.set_end_time(2);
+    store.persist_task_rows(&root).await.unwrap();
+    let vars = store.vars().find(&task_id).await.unwrap();
+    let data: Vars = serde_json::from_str(&vars.data).unwrap();
+    assert_eq!(
+        data.get::<i32>("var1").unwrap(),
+        10,
+        "vars row must not be rewritten"
+    );
+}
+
+/// A data write that lands in an ancestor scope — the classic "child output
+/// folds up to the declaring owner" case — persists exactly that owner's
+/// vars row, and restore re-attaches it: the store round-trip keeps the
+/// ancestor's updated vars without ever touching the root row.
+#[tokio::test]
+async fn cache_vars_ancestor_scope_round_trip() {
+    let engine = Engine::new().start().await.unwrap();
+    let rt = engine.runtime();
+    let store = rt.cache().store();
+
+    let workflow = Workflow::new()
+        .with_id("m1")
+        .with_step(|s| s.with_id("step1"));
+    let pid = utils::longid();
+    let proc = rt.create_proc(&pid, &workflow);
+    proc.set_state(TaskState::Running);
+
+    // root (workflow) > step1 > act; the act's output folds up to step1,
+    // the scope that declares it
+    let root_node = proc.tree().root.clone().unwrap();
+    let root = proc.create_task(&root_node, None).unwrap();
+    let step1_node = proc.tree().node("step1").unwrap();
+    let step1 = proc.create_task(&step1_node, Some(root.clone())).unwrap();
+    let act_id = utils::shortid();
+    {
+        let tree = proc.tree();
+        let act = Act::irq(|r| r.with_params_vars(|v| v.with("key", "a1"))).with_id(&act_id);
+        let node = tree
+            .append_node(
+                &step1_node,
+                &act_id,
+                NodeContent::Act(act),
+                step1_node.level + 1,
+            )
+            .unwrap();
+        node.set_parent(&step1_node);
+    }
+    let act_node = proc.tree().node(&act_id).unwrap();
+    let act = proc.create_task(&act_node, Some(step1.clone())).unwrap();
+    let step1_tid = step1.id.clone();
+    let root_tid = root.id.clone();
+
+    // step1 declares `x`; the act writes it → step1's scope owns the value
+    step1.set_data_with(|data| data.set("x", 1));
+    store.persist_task_rows(&step1).await.unwrap();
+    store.persist_task_rows(&root).await.unwrap();
+    assert!(
+        store
+            .vars()
+            .find(&utils::Id::new(&pid, &root_tid).id())
+            .await
+            .is_err(),
+        "root scope has no vars row — it never mutated"
+    );
+
+    act.set_data_with(|data| data.set("x", 2));
+    act.update_data(&act.data());
+    assert!(
+        step1.is_vars_dirty(),
+        "the owner scope must be marked dirty"
+    );
+    assert!(!root.is_vars_dirty(), "the root scope must stay untouched");
+
+    store.persist_task_rows(&act).await.unwrap();
+    let step1_vars = store
+        .vars()
+        .find(&utils::Id::new(&pid, &step1_tid).id())
+        .await
+        .unwrap();
+    let step1_data: Vars = serde_json::from_str(&step1_vars.data).unwrap();
+    assert_eq!(
+        step1_data.get::<i32>("x").unwrap(),
+        2,
+        "owner scope row updated"
+    );
+    assert!(
+        store
+            .vars()
+            .find(&utils::Id::new(&pid, &root_tid).id())
+            .await
+            .is_err(),
+        "root scope still has no vars row"
+    );
+
+    // restore: the step scope's vars re-attach to the reloaded task
+    store.upsert_proc(&proc).await.unwrap();
+    let restored = store.load_proc(&pid, &rt).await.unwrap().unwrap();
+    let step1 = restored.task(&step1_tid).unwrap();
+    assert_eq!(
+        step1.with_data(|d| d.get::<i32>("x")),
+        Some(2),
+        "restored owner scope keeps its updated var"
+    );
+    assert_eq!(
+        restored
+            .task(&root_tid)
+            .unwrap()
+            .with_data(|d| d.get::<i32>("x")),
+        None,
+        "the untouched root scope stays empty"
+    );
 }

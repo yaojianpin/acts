@@ -173,10 +173,11 @@ impl StoreWriter {
         if !store.procs().exists(&task.pid).await? {
             return Ok(());
         }
-        store.upsert_task(task).await?;
-        if let Some(root) = task.proc().root() {
-            store.upsert_task(&root).await?;
-        }
+        // lifecycle row + the vars rows of every dirty scope on the parent
+        // chain (scope vars are decoupled from task state writes). FIFO order
+        // keeps the scope vars (e.g. the `NEXT_COMPLETE` marker) durable
+        // before any outbox record queued after this write.
+        store.persist_task_rows(task).await?;
         if task.proc().state().is_completed() {
             store
                 .mark_proc_complete(&task.pid, task.proc().end_time(), task.proc().state())

@@ -197,15 +197,15 @@ async fn sch_action_recover_completed_next_is_noop() {
         "root + s1 + s2 + act1 + act2 — the replayed next must not duplicate tasks"
     );
 
-    // the outbox close is ordered after the persist: act1's stored row must
-    // already carry the NEXT_COMPLETE marker (the async write was drained by
-    // the flush barrier before the op was marked `Done`)
+    // the outbox close is ordered after the persist: act1's stored vars row
+    // must already carry the NEXT_COMPLETE marker (the async write was drained
+    // by the flush barrier before the op was marked `Done`)
     let q = Query::new().filter(
         Filter::and()
             .expr(Expr::eq("pid", pid.clone()))
             .expr(Expr::eq("tid", act1_tid.clone())),
     );
-    let rows = store2.tasks().query(&q).await.unwrap().rows;
+    let rows = store2.vars().query(&q).await.unwrap().rows;
     assert_eq!(rows.len(), 1);
     let data: Vars = serde_json::from_str(&rows[0].data).unwrap();
     let sign = data.get::<Sign>(consts::TASK_SIGN).unwrap();

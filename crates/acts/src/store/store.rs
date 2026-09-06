@@ -44,6 +44,9 @@ impl Store {
     pub fn procs(&self) -> Arc<dyn DbCollection<Item = data::Proc>> {
         self.collection()
     }
+    pub fn vars(&self) -> Arc<dyn DbCollection<Item = data::TaskVars>> {
+        self.collection()
+    }
 
     pub fn packages(&self) -> Arc<dyn DbCollection<Item = data::Package>> {
         self.collection()
@@ -307,9 +310,13 @@ impl Store {
             KvCollection::<data::Message>::new(StoreIden::Messages.as_ref(), self.kv.clone());
         let deliveries =
             KvCollection::<data::Delivery>::new(StoreIden::Deliveries.as_ref(), self.kv.clone());
+        let vars = KvCollection::<data::TaskVars>::new(StoreIden::Vars.as_ref(), self.kv.clone());
 
         let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", pid.to_string())));
         let mut batch = Vec::new();
+        for row in vars.query(&q).await?.rows {
+            batch.extend(vars.delete_ops(&row.id).await?);
+        }
         for row in tasks.query(&q).await?.rows {
             batch.extend(tasks.delete_ops(&row.id).await?);
         }

@@ -397,12 +397,12 @@ async fn sch_act_state_set_process_var() {
     proc.print();
     engine.runtime().cache().flush().await.unwrap();
 
-    // test the new var is stored
+    // test the new var is stored in the root scope's vars row
     let id = utils::Id::new(proc.id(), utils::consts::TASK_ROOT_TID);
     let task_root = engine
         .runtime()
         .store()
-        .tasks()
+        .vars()
         .find(&id.id())
         .await
         .unwrap();

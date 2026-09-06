@@ -91,10 +91,8 @@ fn model_info_task() {
         start_time: 0,
         end_time: 0,
         timestamp: 0,
-        data: "{}".to_string(),
         err: None,
         v: 0,
-        sealed: String::new(),
     };
     let info: TaskInfo = task.clone().into();
     assert_eq!(info.id, task.tid);
@@ -105,7 +103,9 @@ fn model_info_task() {
     assert_eq!(info.end_time, task.end_time);
     assert_eq!(info.timestamp, task.timestamp);
     assert_eq!(info.pid, task.pid);
-    assert_eq!(info.data, task.data);
+    // durable lifecycle rows carry no scope vars — the manager view joins the
+    // paired vars row (see `TaskExecutor::join_vars`)
+    assert!(info.data.is_empty());
     assert_eq!(info.nid, "nid");
 }
 
@@ -258,10 +258,8 @@ fn model_info_task_arr_to_value() {
         start_time: 0,
         end_time: 0,
         timestamp: 0,
-        data: "{}".to_string(),
         err: None,
         v: 0,
-        sealed: String::new(),
     };
     let info: TaskInfo = task.clone().into();
 

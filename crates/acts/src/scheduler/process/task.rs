@@ -22,6 +22,7 @@ use parking_lot::RwLock;
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{debug, error, instrument};
 
 #[derive(Clone)]
@@ -39,6 +40,11 @@ pub struct Task {
 
     /// sealed data (read-only, written only by resolver)
     sealed_data: ShareLock<Vars>,
+
+    /// the scope's vars row (data + sealed) diverged from the store since the
+    /// last flush; set by every data mutation, cleared when the vars row is
+    /// persisted (see `Cache::persist_task`)
+    vars_dirty: Arc<AtomicBool>,
 
     /// task state
     state: ShareLock<TaskState>,
@@ -73,6 +79,7 @@ impl Task {
             node,
             data: Arc::new(RwLock::new(Vars::new())),
             sealed_data: Arc::new(RwLock::new(Vars::new())),
+            vars_dirty: Arc::new(AtomicBool::new(false)),
             state: Arc::new(RwLock::new(TaskState::None)),
             err: Arc::new(RwLock::new(None)),
             start_time: Arc::new(RwLock::new(0)),
@@ -778,13 +785,25 @@ impl Task {
             tid: self.id.clone(),
             node_data: self.node.to_string()?,
             state: self.state().into(),
-            data: self.data().to_string(),
-            sealed: self.sealed_data.read().to_string(),
             start_time: self.start_time(),
             end_time: self.end_time(),
             timestamp: self.timestamp,
             err: self.err().map(|err| err.to_string()),
             v: data::Task::version(),
+        })
+    }
+
+    /// The scope vars row paired with this task's lifecycle row: the task's
+    /// own `data` and `sealed`, stored apart from the lifecycle row.
+    pub fn into_data_vars(self: &Arc<Self>) -> Result<data::TaskVars> {
+        let id = utils::Id::new(&self.pid, &self.id);
+        Ok(data::TaskVars {
+            id: id.id(),
+            pid: self.pid.clone(),
+            tid: self.id.clone(),
+            data: self.data().to_string(),
+            sealed: self.sealed_data.read().to_string(),
+            v: data::TaskVars::version(),
         })
     }
 
@@ -1149,7 +1168,8 @@ impl Task {
 
     pub fn set_data_with<F: Fn(&mut Vars)>(&self, f: F) {
         let mut data = self.data.write();
-        f(&mut data)
+        f(&mut data);
+        self.vars_dirty.store(true, Ordering::Release);
     }
 
     pub fn set_data(&self, vars: &Vars) {
@@ -1157,23 +1177,51 @@ impl Task {
         for (name, value) in vars.iter() {
             data.set(name, value);
         }
+        self.vars_dirty.store(true, Ordering::Release);
     }
 
     pub fn update_data_if_exists<F: Fn(&mut Vars) -> bool>(&self, f: F) -> bool {
         let mut data = self.data.write();
-        f(&mut data)
+        let updated = f(&mut data);
+        if updated {
+            self.vars_dirty.store(true, Ordering::Release);
+        }
+        updated
+    }
+
+    /// Restore-time write of a scope's persisted vars — fills the in-memory
+    /// vars without marking them dirty (the row they came from is current).
+    pub(crate) fn set_pure_data(&self, vars: &Vars) {
+        let mut data = self.data.write();
+        for (name, value) in vars.iter() {
+            data.set(name, value);
+        }
     }
 
     pub(crate) fn set_sealed(&self, name: &str, value: Vars) {
         let mut sealed = self.sealed_data.write();
         sealed.set(name, value);
+        self.vars_dirty.store(true, Ordering::Release);
     }
 
-    pub(crate) fn set_sealed_data(&self, vars: &Vars) {
+    /// Restore-time write of a scope's persisted sealed vars.
+    pub(crate) fn set_pure_sealed_data(&self, vars: &Vars) {
         let mut data = self.sealed_data.write();
         for (name, value) in vars.iter() {
             data.set(name, value);
         }
+    }
+
+    /// The scope's vars row (data + sealed) diverged from the store since its
+    /// last flush.
+    pub fn is_vars_dirty(&self) -> bool {
+        self.vars_dirty.load(Ordering::Acquire)
+    }
+
+    /// Mark the scope's vars row as flushed. Called by the persist path right
+    /// after the vars row was durably written.
+    pub(crate) fn clear_vars_dirty(&self) {
+        self.vars_dirty.store(false, Ordering::Release);
     }
 
     /// Get sealed data by resolver name. Walks the parent chain

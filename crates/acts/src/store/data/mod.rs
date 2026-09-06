@@ -15,3 +15,4 @@ pub use op::{Op, OpStatus, OpType};
 pub use package::Package;
 pub use proc::Proc;
 pub use task::Task;
+pub use task::TaskVars;

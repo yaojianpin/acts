@@ -277,14 +277,13 @@ impl Cache {
         self.writer.flush().await
     }
 
+    /// Persist one task: its lifecycle row plus the vars rows of every dirty
+    /// scope on its parent chain (scope vars are decoupled from task state
+    /// writes, so a pure state transition persists a single small row), then
+    /// mark the proc row terminal when the process finished.
     async fn persist_task(&self, task: &Arc<Task>) -> Result<()> {
         let p = task.proc();
-        self.store.upsert_task(task).await?;
-        // update root task data when updating task
-        if let Some(root) = p.root() {
-            self.store.upsert_task(&root).await?;
-        }
-        // update process to store when process state is completed
+        self.store.persist_task_rows(task).await?;
         if p.state().is_completed() {
             self.store
                 .mark_proc_complete(&task.pid, p.end_time(), p.state())

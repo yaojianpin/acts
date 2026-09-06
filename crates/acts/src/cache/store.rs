@@ -410,7 +410,6 @@ impl Store {
         let data: data::Task = task.into_data()?;
         self.upsert_task_data(&data).await
     }
-
     pub async fn upsert_task_data(&self, data: &data::Task) -> Result<()> {
         let collection = self.tasks();
         match collection.find(&data.id).await {
@@ -422,6 +421,47 @@ impl Store {
             }
         }
 
+        Ok(())
+    }
+
+    /// Persist one task scope's vars row (data + sealed). Called by the
+    /// persist path only for scopes whose vars actually changed.
+    pub async fn upsert_task_vars(&self, task: &Arc<scheduler::Task>) -> Result<()> {
+        debug!(pid = %task.pid, tid = %task.id, "upsert task vars");
+        let data: data::TaskVars = task.into_data_vars()?;
+        let collection = self.vars();
+        match collection.find(&data.id).await {
+            Ok(_) => {
+                collection.update(&data).await?;
+            }
+            Err(_) => {
+                collection.create(&data).await?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Durable write of a task lifecycle row and every scope vars row that
+    /// diverged: the task's own row, then — walking the parent chain to the
+    /// root — each ancestor whose vars changed since its last flush (the
+    /// scope that owns an updated key, which `update_data` resolved at write
+    /// time). A lifecycle-only transition (state/timing change, no data
+    /// touched) writes just the one lifecycle row; scope vars rows are
+    /// written exactly when the owning scope actually mutated. The dirty
+    /// flags are cleared only after each row is durable, so a crash between
+    /// mutations and the next persist loses nothing that the previous design
+    /// would have kept.
+    pub async fn persist_task_rows(&self, task: &Arc<scheduler::Task>) -> Result<()> {
+        self.upsert_task(task).await?;
+        let mut scope = Some(task.clone());
+        while let Some(t) = scope {
+            if t.is_vars_dirty() {
+                self.upsert_task_vars(&t).await?;
+                t.clear_vars_dirty();
+            }
+            scope = t.parent();
+        }
         Ok(())
     }
 
@@ -460,67 +500,78 @@ impl Store {
         let collection = self.tasks();
         let query = Query::new().filter(Filter::and().expr(Expr::eq("pid", proc.id())));
         let tasks = collection.query(&query).await?;
-        let tree = &proc.tree();
 
-        // phase 1: load tasks and register dynamic nodes into the tree map,
-        // so node links (parent/prev/next) can be resolved afterwards
-        let mut dyn_nodes: Vec<(Arc<Node>, NodeData)> = Vec::new();
-        for t in tasks.rows {
-            let data: NodeData = serde_json::from_str(&t.node_data)
-                .map_err(|err| ActError::Store(err.to_string()))?;
-            let node = match tree.node(&data.id) {
-                Some(node) => node,
-                None => {
-                    let node = tree.get_or_make(&data.id, data.content.clone(), data.level)?;
-                    dyn_nodes.push((node.clone(), data));
-                    node
+        // phase 1 + 2: load tasks and register dynamic nodes into the tree
+        // map so node links (parent/prev/next) can be resolved afterwards,
+        // then rebuild the dynamic node graph. The tree guard is scoped to
+        // these synchronous phases — the vars attach below awaits.
+        {
+            let tree = &proc.tree();
+            let mut dyn_nodes: Vec<(Arc<Node>, NodeData)> = Vec::new();
+            for t in tasks.rows {
+                let data: NodeData = serde_json::from_str(&t.node_data)
+                    .map_err(|err| ActError::Store(err.to_string()))?;
+                let node = match tree.node(&data.id) {
+                    Some(node) => node,
+                    None => {
+                        let node = tree.get_or_make(&data.id, data.content.clone(), data.level)?;
+                        dyn_nodes.push((node.clone(), data));
+                        node
+                    }
+                };
+
+                let state: TaskState = t.state.into();
+                let mut task = scheduler::Task::new(proc, &t.tid, node, rt);
+                task.set_pure_state(state.clone());
+                task.set_start_time(t.start_time);
+                task.set_end_time(t.end_time);
+                task.timestamp = t.timestamp;
+                if let Some(prev) = &t.prev {
+                    task.set_prev(prev);
                 }
+
+                if let Some(parent) = &t.parent {
+                    task.set_parent(parent);
+                }
+
+                // resume next tasks
+                for next in t.next.iter() {
+                    task.set_next(next);
+                }
+
+                if let Some(err) = t.err {
+                    let err: Error = serde_json::from_str(&err)
+                        .map_err(|err| ActError::Store(err.to_string()))?;
+                    task.set_pure_err(&err)
+                }
+                proc.push_task(Arc::new(task))?;
+            }
+
+            for (node, data) in dyn_nodes.iter() {
+                node.restore_links(data, tree);
+            }
+            dyn_nodes
+        };
+
+        // phase 3: attach each task scope's persisted vars (its own data and
+        // sealed rows) onto the restored tasks — scope vars live in the vars
+        // collection, keyed by the same composite id as the lifecycle row
+        let vars = self.vars();
+        let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", proc.id())));
+        for row in vars.query(&q).await?.rows {
+            let Some(task) = proc.task(&row.tid) else {
+                continue;
             };
-
-            let state: TaskState = t.state.into();
-            let mut task = scheduler::Task::new(proc, &t.tid, node, rt);
-            task.set_pure_state(state.clone());
-            task.set_start_time(t.start_time);
-            task.set_end_time(t.end_time);
-            task.timestamp = t.timestamp;
-            if let Some(prev) = &t.prev {
-                task.set_prev(prev);
-            }
-
-            if let Some(parent) = &t.parent {
-                task.set_parent(parent);
-            }
-
-            // resume next tasks
-            for next in t.next.iter() {
-                task.set_next(next);
-            }
-
-            // resume data
-            if !t.data.is_empty() {
-                let data = serde_json::from_str(&t.data)
+            if !row.data.is_empty() {
+                let data = serde_json::from_str(&row.data)
                     .map_err(|err| ActError::Store(err.to_string()))?;
-                task.set_data(&data);
+                task.set_pure_data(&data);
             }
-
-            // resume task sealed data
-            if !t.sealed.is_empty() {
-                let data = serde_json::from_str(&t.sealed)
+            if !row.sealed.is_empty() {
+                let data = serde_json::from_str(&row.sealed)
                     .map_err(|err| ActError::Store(err.to_string()))?;
-                task.set_sealed_data(&data);
+                task.set_pure_sealed_data(&data);
             }
-
-            if let Some(err) = t.err {
-                let err: Error =
-                    serde_json::from_str(&err).map_err(|err| ActError::Store(err.to_string()))?;
-                task.set_pure_err(&err)
-            }
-            proc.push_task(Arc::new(task))?;
-        }
-
-        // phase 2: rebuild the node graph (parent/prev/next) of dynamic nodes
-        for (node, data) in dyn_nodes.iter() {
-            node.restore_links(data, tree);
         }
 
         Ok(())

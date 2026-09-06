@@ -199,14 +199,15 @@ impl From<data::Task> for TaskInfo {
             nid: node_data.id,
             r#type: t.kind,
             state: t.state,
-            data: t.data,
+            // scope vars live in the paired vars row — executors join it
+            // (`Store::vars`) when building manager views from durable rows
+            data: String::new(),
             start_time: t.start_time,
             end_time: t.end_time,
             timestamp: t.timestamp,
         }
     }
 }
-
 impl From<&data::Task> for TaskInfo {
     fn from(t: &data::Task) -> Self {
         t.clone().into()
