@@ -1,24 +1,69 @@
-#[macro_export]
 macro_rules! gen_store_tests {
     ($init:expr) => {
         use serde_json::json;
         use serial_test::serial;
         use std::collections::HashSet;
-        use std::sync::OnceLock;
-        use $crate::store::data::{Delivery, DeliveryStatus, Message, Model, Package, Proc, Task};
-        use $crate::store::data::TaskVars;
-        use $crate::store::query::{Expr, ExprOp, Sort};
-        use $crate::store::{Filter, Query};
-        use $crate::{MessageState, TaskState, Workflow, scheduler::NodeKind, utils};
+        use acts::data::{Delivery, DeliveryStatus, Message, Model, Package, Proc, Task, TaskVars};
+        use acts::query::{Expr, ExprOp, Filter, Query, Sort};
+        use acts::{MessageState, Workflow};
 
-        static STORE: OnceLock<std::sync::Arc<$crate::store::Store>> = OnceLock::new();
+        use nanoid::nanoid;
+        use std::time::{SystemTime, UNIX_EPOCH};
 
-        async fn store() -> &'static std::sync::Arc<$crate::store::Store> {
-            if STORE.get().is_none() {
-                let store = $init.await;
-                let _ = STORE.set(store);
+        const ALPHABETS: [char; 62] = [
+            '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i',
+            'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v', 'w', 'x', 'y', 'z', 'A', 'B',
+            'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U',
+            'V', 'W', 'X', 'Y', 'Z',
+        ];
+
+        fn shortid() -> String {
+            nanoid!(8, &ALPHABETS)
+        }
+
+        fn longid() -> String {
+            nanoid!(21, &ALPHABETS)
+        }
+
+        fn timestamp() -> i64 {
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_micros() as i64)
+                .unwrap_or(0)
+        }
+
+        /// Composite `pid + tid` row id helper mirroring acts' internal
+        /// `utils::Id`: concatenation with no separator; an empty `tid`
+        /// yields just `pid`.
+        #[derive(Clone, Copy)]
+        struct CompId<'a> {
+            pid: &'a str,
+            tid: &'a str,
+        }
+
+        impl<'a> CompId<'a> {
+            fn id(&self) -> String {
+                if self.tid.is_empty() {
+                    self.pid.to_string()
+                } else {
+                    format!("{}{}", self.pid, self.tid)
+                }
             }
-            STORE.get().unwrap()
+        }
+
+        fn comp_id<'a>(pid: &'a str, tid: &'a str) -> CompId<'a> {
+            CompId { pid, tid }
+        }
+
+        async fn store() -> std::sync::Arc<acts::Store> {
+            // One backend instance per test, created inside the calling test's
+            // own tokio runtime. nats/redis/sqlx spawn their connection tasks
+            // on the runtime that is current at `open()`, so an instance shared
+            // across `#[tokio::test]`s (each with its own runtime) would have
+            // its connection torn down with the first test that created it —
+            // every test is hermetic (unique keys), so a fresh store is
+            // equivalent and keeps each backend's tasks on a live runtime.
+            $init.await
         }
 
         fn create_workflow() -> Workflow {
@@ -27,7 +72,7 @@ macro_rules! gen_store_tests {
                 .with_step(|step| step.with_id("step1"))
         }
 
-        fn create_proc(id: &str, state: TaskState, model: &Workflow) -> Proc {
+        fn create_proc(id: &str, state: &str, model: &Workflow) -> Proc {
             Proc {
                 id: id.to_string(),
                 name: model.name.clone(),
@@ -35,7 +80,7 @@ macro_rules! gen_store_tests {
                 state: state.to_string(),
                 start_time: 0,
                 end_time: 0,
-                timestamp: utils::time::timestamp(),
+                timestamp: timestamp(),
                 model: model.to_json().unwrap(),
                 env: "{}".to_string(),
                 err: None,
@@ -49,12 +94,12 @@ macro_rules! gen_store_tests {
         async fn store_load_by_limit() {
             let store = store().await;
 
-            let prefix = utils::shortid();
-            let name = utils::shortid();
+            let prefix = shortid();
+            let name = shortid();
             for _ in 0..100 {
-                let id = format!("{}_{}", prefix, utils::longid());
+                let id = format!("{}_{}", prefix, longid());
                 let workflow = create_workflow();
-                let mut proc = create_proc(&id, TaskState::None, &workflow);
+                let mut proc = create_proc(&id, "none", &workflow);
                 proc.name = name.clone();
                 store.procs().create(&proc).await.expect("create process");
             }
@@ -76,28 +121,28 @@ macro_rules! gen_store_tests {
         async fn store_load_by_state() {
             let store = store().await;
 
-            let prefix = utils::shortid();
-            let name = utils::shortid();
+            let prefix = shortid();
+            let name = shortid();
             for _ in 0..100 {
-                let id = format!("{}_{}", prefix, utils::longid());
+                let id = format!("{}_{}", prefix, longid());
                 let workflow = create_workflow();
-                let mut proc = create_proc(&id, TaskState::Running, &workflow);
+                let mut proc = create_proc(&id, "running", &workflow);
                 proc.name = name.clone();
                 store.procs().create(&proc).await.expect("create process");
             }
 
             for _ in 0..100 {
-                let id = format!("{}_{}", prefix, utils::longid());
+                let id = format!("{}_{}", prefix, longid());
                 let workflow = create_workflow();
-                let mut proc = create_proc(&id, TaskState::Pending, &workflow);
+                let mut proc = create_proc(&id, "pending", &workflow);
                 proc.name = name.clone();
                 store.procs().create(&proc).await.expect("create process");
             }
 
             for _ in 0..100 {
-                let id = format!("{}_{}", prefix, utils::longid());
+                let id = format!("{}_{}", prefix, longid());
                 let workflow = create_workflow();
-                let mut proc = create_proc(&id, TaskState::Completed, &workflow);
+                let mut proc = create_proc(&id, "completed", &workflow);
                 proc.name = name.clone();
                 store.procs().create(&proc).await.expect("create process");
             }
@@ -135,10 +180,10 @@ macro_rules! gen_store_tests {
             let store = store().await;
 
             let mut workflow = create_workflow();
-            workflow.id = utils::longid();
+            workflow.id = longid();
             store.deploy(&workflow, None).await.unwrap();
 
-            workflow.id = utils::longid();
+            workflow.id = longid();
             store.deploy(&workflow, None).await.unwrap();
 
             let q = Query::new().limit(2);
@@ -152,7 +197,7 @@ macro_rules! gen_store_tests {
         async fn store_model_get() {
             let store = store().await;
             let mut workflow = create_workflow();
-            workflow.id = utils::longid();
+            workflow.id = longid();
             store.deploy(&workflow, None).await.unwrap();
 
             let model = store.models().find(&workflow.id).await.unwrap();
@@ -164,7 +209,7 @@ macro_rules! gen_store_tests {
         async fn store_model_query_by_id() {
             let store = store().await;
             let model = Model {
-                id: utils::longid(),
+                id: longid(),
                 name: "test".to_string(),
                 desc: "test desc".to_string(),
                 ver: "0.1.0".to_string(),
@@ -187,10 +232,10 @@ macro_rules! gen_store_tests {
         async fn store_model_query_by_offset_count() {
             let store = store().await;
             let create_time = 100;
-            let name = utils::shortid();
+            let name = shortid();
             for _ in 0..10 {
                 let model = Model {
-                    id: utils::longid(),
+                    id: longid(),
                     name: name.clone(),
                     desc: "test desc".to_string(),
                     ver: "0.1.0".to_string(),
@@ -199,7 +244,7 @@ macro_rules! gen_store_tests {
                     update_time: 0,
                     data: "{}".to_string(),
                     view: None,
-                    timestamp: utils::time::timestamp(),
+                    timestamp: timestamp(),
                     v: 0,
                 };
                 store.models().create(&model).await.expect("create model");
@@ -235,10 +280,10 @@ macro_rules! gen_store_tests {
         async fn store_model_query_by_cond_and() {
             let store = store().await;
             let create_time = 200;
-            let name = utils::shortid();
+            let name = shortid();
             for _ in 0..10 {
                 let model = Model {
-                    id: utils::longid(),
+                    id: longid(),
                     name: name.clone(),
                     desc: "test desc".to_string(),
                     ver: "0.1.0".to_string(),
@@ -247,7 +292,7 @@ macro_rules! gen_store_tests {
                     update_time: 0,
                     data: "{}".to_string(),
                     view: None,
-                    timestamp: utils::time::timestamp(),
+                    timestamp: timestamp(),
                     v: 0,
                 };
                 store.models().create(&model).await.expect("create model");
@@ -277,10 +322,10 @@ macro_rules! gen_store_tests {
         async fn store_model_query_by_cond_or() {
             let store = store().await;
             let create_time = 300;
-            let name = utils::shortid();
+            let name = shortid();
             for _ in 0..10 {
                 let model = Model {
-                    id: utils::longid(),
+                    id: longid(),
                     name: name.clone(),
                     desc: "test desc".to_string(),
                     ver: "0.1.0".to_string(),
@@ -289,14 +334,14 @@ macro_rules! gen_store_tests {
                     update_time: 0,
                     data: "{}".to_string(),
                     view: None,
-                    timestamp: utils::time::timestamp(),
+                    timestamp: timestamp(),
                     v: 0,
                 };
                 store.models().create(&model).await.expect("create model");
             }
             for _ in 0..10 {
                 let model = Model {
-                    id: utils::longid(),
+                    id: longid(),
                     name: name.clone(),
                     desc: "test desc".to_string(),
                     ver: "0.1.0".to_string(),
@@ -305,7 +350,7 @@ macro_rules! gen_store_tests {
                     update_time: 0,
                     data: "{}".to_string(),
                     view: None,
-                    timestamp: utils::time::timestamp(),
+                    timestamp: timestamp(),
                     v: 0,
                 };
                 store.models().create(&model).await.expect("create model");
@@ -330,10 +375,10 @@ macro_rules! gen_store_tests {
         async fn store_model_query_by_order() {
             let store = store().await;
             let create_time = 400;
-            let name = utils::shortid();
+            let name = shortid();
             for _ in 0..10 {
                 let model = Model {
-                    id: utils::longid(),
+                    id: longid(),
                     name: name.clone(),
                     desc: "test desc".to_string(),
                     ver: "0.1.0".to_string(),
@@ -342,7 +387,7 @@ macro_rules! gen_store_tests {
                     update_time: 0,
                     data: "{}".to_string(),
                     view: None,
-                    timestamp: utils::time::timestamp(),
+                    timestamp: timestamp(),
                     v: 0,
                 };
                 store.models().create(&model).await.expect("create model");
@@ -378,7 +423,7 @@ macro_rules! gen_store_tests {
         async fn store_model_remove() {
             let store = store().await;
 
-            let id = utils::longid();
+            let id = longid();
             let mut workflow = create_workflow();
             workflow.id = id.clone();
             store.deploy(&workflow, None).await.unwrap();
@@ -406,9 +451,9 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_proc_create() {
             let store = store().await;
-            let id = utils::longid();
+            let id = longid();
             let workflow = create_workflow();
-            let proc = create_proc(&id, TaskState::None, &workflow);
+            let proc = create_proc(&id, "none", &workflow);
 
             store.procs().create(&proc).await.expect("create process");
 
@@ -422,9 +467,9 @@ macro_rules! gen_store_tests {
         async fn store_proc_find() {
             let store = store().await;
 
-            let id = utils::longid();
+            let id = longid();
             let workflow = create_workflow();
-            let proc = create_proc(&id, TaskState::None, &workflow);
+            let proc = create_proc(&id, "none", &workflow);
             store.procs().create(&proc).await.expect("create process");
             let info = store.procs().find(&id).await.unwrap();
             assert_eq!(proc.id, info.id);
@@ -435,15 +480,15 @@ macro_rules! gen_store_tests {
         async fn store_proc_query_by_id() {
             let store = store().await;
 
-            let mid = utils::longid();
+            let mid = longid();
             let proc = Proc {
-                id: utils::shortid(),
+                id: shortid(),
                 name: "test".to_string(),
                 mid: mid.clone(),
                 state: "running".to_string(),
                 start_time: 0,
                 end_time: 0,
-                timestamp: utils::time::timestamp(),
+                timestamp: timestamp(),
                 model: "{}".to_string(),
                 env: "{}".to_string(),
                 err: None,
@@ -461,16 +506,16 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_proc_query_by_offset_count() {
             let store = store().await;
-            let mid = utils::longid();
+            let mid = longid();
             for i in 0..10 {
                 let proc = Proc {
-                    id: utils::shortid(),
+                    id: shortid(),
                     name: format!("test-{}", i + 1),
                     mid: mid.clone(),
                     state: "running".to_string(),
                     start_time: 0,
                     end_time: 0,
-                    timestamp: utils::time::timestamp(),
+                    timestamp: timestamp(),
                     model: "{}".to_string(),
                     env: "{}".to_string(),
                     err: None,
@@ -501,16 +546,16 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_proc_query_by_cond_and() {
             let store = store().await;
-            let mid = utils::longid();
+            let mid = longid();
             for i in 0..10 {
                 let proc = Proc {
-                    id: utils::shortid(),
+                    id: shortid(),
                     name: format!("test-{}", i + 1),
                     mid: mid.clone(),
                     state: "running".to_string(),
                     start_time: 0,
                     end_time: 0,
-                    timestamp: utils::time::timestamp(),
+                    timestamp: timestamp(),
                     model: "{}".to_string(),
                     env: "{}".to_string(),
                     err: None,
@@ -541,16 +586,16 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_proc_query_by_cond_or() {
             let store = store().await;
-            let mid = utils::longid();
+            let mid = longid();
             for i in 0..10 {
                 let proc = Proc {
-                    id: utils::shortid(),
+                    id: shortid(),
                     name: format!("test-{}", i + 1),
                     mid: mid.clone(),
                     state: "running".to_string(),
                     start_time: 0,
                     end_time: 0,
-                    timestamp: utils::time::timestamp(),
+                    timestamp: timestamp(),
                     model: "{}".to_string(),
                     env: "{}".to_string(),
                     err: None,
@@ -562,13 +607,13 @@ macro_rules! gen_store_tests {
 
             for i in 0..10 {
                 let proc = Proc {
-                    id: utils::shortid(),
+                    id: shortid(),
                     name: format!("test-{}", i + 1),
                     mid: mid.clone(),
                     state: "completed".to_string(),
                     start_time: 0,
                     end_time: 0,
-                    timestamp: utils::time::timestamp(),
+                    timestamp: timestamp(),
                     model: "{}".to_string(),
                     env: "{}".to_string(),
                     err: None,
@@ -594,16 +639,16 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_proc_query_by_order() {
             let store = store().await;
-            let mid = utils::longid();
+            let mid = longid();
             for i in 0..10 {
                 let proc = Proc {
-                    id: utils::shortid(),
+                    id: shortid(),
                     name: format!("test-{}", i + 1),
                     mid: mid.clone(),
                     state: "completed".to_string(),
                     start_time: 0,
                     end_time: 0,
-                    timestamp: utils::time::timestamp(),
+                    timestamp: timestamp(),
                     model: "{}".to_string(),
                     env: "{}".to_string(),
                     err: None,
@@ -635,18 +680,18 @@ macro_rules! gen_store_tests {
         async fn store_proc_update() {
             let store = store().await;
 
-            let id = utils::longid();
+            let id = longid();
             let workflow = create_workflow();
-            let mut proc = create_proc(&id, TaskState::None, &workflow);
+            let mut proc = create_proc(&id, "none", &workflow);
 
             store.procs().create(&proc).await.expect("create process");
 
-            proc.state = TaskState::Running.to_string();
+            proc.state = "running".to_string();
             store.procs().update(&proc).await.expect("update process");
 
             let p = store.procs().find(&proc.id).await.unwrap();
             assert_eq!(p.id, proc.id);
-            assert_eq!(p.state, TaskState::Running.to_string());
+            assert_eq!(p.state, "running".to_string());
         }
 
         #[tokio::test(flavor = "multi_thread")]
@@ -654,9 +699,9 @@ macro_rules! gen_store_tests {
         async fn store_proc_remove() {
             let store = store().await;
 
-            let id = utils::longid();
+            let id = longid();
             let workflow = create_workflow();
-            let proc = create_proc(&id, TaskState::None, &workflow);
+            let proc = create_proc(&id, "none", &workflow);
 
             store.procs().create(&proc).await.expect("create process");
 
@@ -673,20 +718,20 @@ macro_rules! gen_store_tests {
         async fn store_task_create() {
             let store = store().await;
 
-            let pid = utils::longid();
-            let tid = utils::shortid();
-            let nid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
+            let nid = shortid();
             let task = Task {
                 id: format!("{pid}{tid}"),
                 name: "test".to_string(),
                 prev: None,
                 next: vec![],
                 parent: None,
-                kind: NodeKind::Step.to_string(),
+                kind: "step".to_string(),
                 pid: pid.clone(),
                 tid: tid.clone(),
                 node_data: nid,
-                state: TaskState::None.to_string(),
+                state: "none".to_string(),
                 start_time: 0,
                 end_time: 0,
                 timestamp: 0,
@@ -696,7 +741,7 @@ macro_rules! gen_store_tests {
 
             store.tasks().create(&task).await.expect("create task");
 
-            let id = utils::Id::new(&pid, &tid);
+            let id = comp_id(&pid, &tid);
             let ret = store.tasks().find(&id.id()).await;
             assert!(ret.is_ok());
         }
@@ -706,19 +751,19 @@ macro_rules! gen_store_tests {
         async fn store_task_query_by_id() {
             let store = store().await;
 
-            let pid = utils::longid();
-            let tid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
             let task = Task {
                 id: format!("{pid}{tid}"),
                 name: "test".to_string(),
                 prev: None,
                 next: vec![],
                 parent: None,
-                kind: NodeKind::Step.to_string(),
+                kind: "step".to_string(),
                 pid: pid.clone(),
                 tid: tid.clone(),
                 node_data: "{}".to_string(),
-                state: TaskState::None.to_string(),
+                state: "none".to_string(),
                 start_time: 0,
                 end_time: 0,
                 timestamp: 0,
@@ -728,7 +773,7 @@ macro_rules! gen_store_tests {
 
             store.tasks().create(&task).await.expect("create task");
 
-            let id = utils::Id::new(&pid, &tid);
+            let id = comp_id(&pid, &tid);
             let q = Query::new().filter(Filter::and().expr(Expr::eq("id", id.id())));
             let ret = store.messages().query(&q).await;
             assert!(ret.is_ok());
@@ -738,20 +783,20 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_task_query_by_offset_count() {
             let store = store().await;
-            let pid = utils::longid();
+            let pid = longid();
             for i in 0..10 {
-                let tid = utils::shortid();
+                let tid = shortid();
                 let task = Task {
-                    id: utils::shortid(),
+                    id: shortid(),
                     name: format!("test-{}", i + 1),
                     prev: None,
                     next: vec![],
                     parent: None,
-                    kind: NodeKind::Step.to_string(),
+                    kind: "step".to_string(),
                     pid: pid.clone(),
                     tid: tid.clone(),
                     node_data: "{}".to_string(),
-                    state: TaskState::None.to_string(),
+                    state: "none".to_string(),
                     start_time: 0,
                     end_time: 0,
                     timestamp: 0,
@@ -782,20 +827,20 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_task_query_by_cond_and() {
             let store = store().await;
-            let pid = utils::longid();
+            let pid = longid();
             for i in 0..10 {
-                let tid = utils::shortid();
+                let tid = shortid();
                 let task = Task {
-                    id: utils::shortid(),
+                    id: shortid(),
                     name: format!("test-{}", i + 1),
                     prev: None,
                     next: vec![],
                     parent: None,
-                    kind: NodeKind::Step.to_string(),
+                    kind: "step".to_string(),
                     pid: pid.clone(),
                     tid: tid.clone(),
                     node_data: "{}".to_string(),
-                    state: TaskState::None.to_string(),
+                    state: "none".to_string(),
                     start_time: 0,
                     end_time: 0,
                     timestamp: 0,
@@ -826,20 +871,20 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_task_query_by_cond_or() {
             let store = store().await;
-            let pid = utils::longid();
+            let pid = longid();
             for i in 0..10 {
-                let tid = utils::shortid();
+                let tid = shortid();
                 let task = Task {
-                    id: utils::shortid(),
+                    id: shortid(),
                     name: format!("test-{}", i + 1),
                     prev: None,
                     next: vec![],
                     parent: None,
-                    kind: NodeKind::Step.to_string(),
+                    kind: "step".to_string(),
                     pid: pid.clone(),
                     tid: tid.clone(),
                     node_data: "{}".to_string(),
-                    state: TaskState::None.to_string(),
+                    state: "none".to_string(),
                     start_time: 0,
                     end_time: 0,
                     timestamp: 0,
@@ -850,18 +895,18 @@ macro_rules! gen_store_tests {
             }
 
             for i in 0..10 {
-                let tid = utils::shortid();
+                let tid = shortid();
                 let task = Task {
-                    id: utils::shortid(),
+                    id: shortid(),
                     name: format!("test-{}", i + 1),
                     prev: None,
                     next: vec![],
                     parent: None,
-                    kind: NodeKind::Step.to_string(),
+                    kind: "step".to_string(),
                     pid: pid.clone(),
                     tid: tid.clone(),
                     node_data: "{}".to_string(),
-                    state: TaskState::Interrupt.to_string(),
+                    state: "interrupted".to_string(),
                     start_time: 0,
                     end_time: 0,
                     timestamp: 0,
@@ -874,8 +919,8 @@ macro_rules! gen_store_tests {
             let q = Query::new().offset(0).limit(100).filter(
                 Filter::and().expr(Expr::eq("pid", pid.clone())).push(
                     Filter::or()
-                        .expr(Expr::eq("state", TaskState::Interrupt.to_string()))
-                        .expr(Expr::eq("state", TaskState::None.to_string())),
+                        .expr(Expr::eq("state", "interrupted".to_string()))
+                        .expr(Expr::eq("state", "none".to_string())),
                 ),
             );
             let ret = store.tasks().query(&q).await.unwrap();
@@ -886,23 +931,23 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_task_query_by_order() {
             let store = store().await;
-            let pid = utils::longid();
+            let pid = longid();
             for i in 0..10 {
-                let tid = utils::shortid();
+                let tid = shortid();
                 let task = Task {
-                    id: utils::shortid(),
+                    id: shortid(),
                     name: format!("test-{}", i + 1),
                     prev: None,
                     next: vec![],
                     parent: None,
-                    kind: NodeKind::Step.to_string(),
+                    kind: "step".to_string(),
                     pid: pid.clone(),
                     tid: tid.clone(),
                     node_data: "{}".to_string(),
-                    state: TaskState::None.to_string(),
+                    state: "none".to_string(),
                     start_time: 0,
                     end_time: 0,
-                    timestamp: utils::time::timestamp(),
+                    timestamp: timestamp(),
                     err: None,
                     v: 0,
                 };
@@ -931,20 +976,20 @@ macro_rules! gen_store_tests {
         async fn store_task_update() {
             let store = store().await;
 
-            let pid = utils::longid();
-            let tid = utils::shortid();
-            let nid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
+            let nid = shortid();
             let task = Task {
                 id: format!("{pid}{tid}"),
                 name: "test".to_string(),
                 prev: None,
                 next: vec![],
                 parent: None,
-                kind: NodeKind::Step.to_string(),
+                kind: "step".to_string(),
                 pid: pid.clone(),
                 tid: tid.clone(),
                 node_data: nid,
-                state: TaskState::None.to_string(),
+                state: "none".to_string(),
                 start_time: 0,
                 end_time: 0,
                 timestamp: 0,
@@ -954,9 +999,9 @@ macro_rules! gen_store_tests {
 
             store.tasks().create(&task).await.expect("create task");
 
-            let id = utils::Id::new(&pid, &tid);
+            let id = comp_id(&pid, &tid);
             let mut task = store.tasks().find(&id.id()).await.unwrap();
-            task.state = TaskState::Running.to_string();
+            task.state = "running".to_string();
             store.tasks().update(&task).await.unwrap();
 
             let task2 = store.tasks().find(&id.id()).await.unwrap();
@@ -968,20 +1013,20 @@ macro_rules! gen_store_tests {
         async fn store_task_remove() {
             let store = store().await;
 
-            let pid = utils::longid();
-            let tid = utils::shortid();
-            let nid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
+            let nid = shortid();
             let task = Task {
                 id: format!("{pid}{tid}"),
                 name: "test".to_string(),
                 prev: None,
                 next: vec![],
                 parent: None,
-                kind: NodeKind::Step.to_string(),
+                kind: "step".to_string(),
                 pid: pid.clone(),
                 tid: tid.clone(),
                 node_data: nid,
-                state: TaskState::None.to_string(),
+                state: "none".to_string(),
                 start_time: 0,
                 end_time: 0,
                 timestamp: 0,
@@ -1005,15 +1050,15 @@ macro_rules! gen_store_tests {
         async fn store_message_create() {
             let store = store().await;
 
-            let pid = utils::longid();
-            let tid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
             let msg = Message {
                 id: format!("{pid}{tid}"),
                 name: "test".to_string(),
                 pid: pid.clone(),
                 tid: tid.clone(),
-                nid: utils::shortid(),
-                mid: utils::shortid(),
+                nid: shortid(),
+                mid: shortid(),
                 state: MessageState::Created,
                 start_time: 0,
                 end_time: 0,
@@ -1028,7 +1073,7 @@ macro_rules! gen_store_tests {
 
             store.messages().create(&msg).await.expect("create message");
 
-            let id = utils::Id::new(&pid, &tid);
+            let id = comp_id(&pid, &tid);
             let ret = store.messages().find(&id.id()).await;
             assert!(ret.is_ok());
         }
@@ -1038,15 +1083,15 @@ macro_rules! gen_store_tests {
         async fn store_message_query_by_id() {
             let store = store().await;
 
-            let pid = utils::longid();
-            let tid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
             let msg = Message {
                 id: format!("{pid}{tid}"),
                 name: "test".to_string(),
                 pid: pid.clone(),
                 tid: tid.clone(),
-                nid: utils::shortid(),
-                mid: utils::shortid(),
+                nid: shortid(),
+                mid: shortid(),
                 state: MessageState::Created,
                 start_time: 0,
                 end_time: 0,
@@ -1061,7 +1106,7 @@ macro_rules! gen_store_tests {
 
             store.messages().create(&msg).await.unwrap();
 
-            let id = utils::Id::new(&pid, &tid);
+            let id = comp_id(&pid, &tid);
             let q = Query::new().filter(Filter::and().expr(Expr::eq("id", id.id())));
             let ret = store.messages().query(&q).await;
             assert!(ret.is_ok());
@@ -1072,17 +1117,17 @@ macro_rules! gen_store_tests {
         async fn store_message_query_by_offset_count() {
             let store = store().await;
 
-            let pid = utils::longid();
-            let tid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
 
             for _ in 0..100 {
                 let msg = Message {
-                    id: utils::shortid(),
+                    id: shortid(),
                     name: "test".to_string(),
                     pid: pid.clone(),
                     tid: tid.clone(),
-                    nid: utils::shortid(),
-                    mid: utils::shortid(),
+                    nid: shortid(),
+                    mid: shortid(),
                     state: MessageState::Created,
                     start_time: 0,
                     end_time: 0,
@@ -1119,17 +1164,17 @@ macro_rules! gen_store_tests {
         async fn store_message_query_by_cond_and() {
             let store = store().await;
 
-            let pid = utils::longid();
-            let tid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
 
             for _ in 0..100 {
                 let msg = Message {
-                    id: utils::shortid(),
+                    id: shortid(),
                     name: "test".to_string(),
                     pid: pid.clone(),
                     tid: tid.clone(),
-                    nid: utils::shortid(),
-                    mid: utils::shortid(),
+                    nid: shortid(),
+                    mid: shortid(),
                     state: MessageState::Created,
                     start_time: 0,
                     end_time: 0,
@@ -1166,17 +1211,17 @@ macro_rules! gen_store_tests {
         async fn store_message_query_by_cond_or() {
             let store = store().await;
 
-            let pid = utils::longid();
-            let tid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
 
             for _ in 0..10 {
                 let msg = Message {
-                    id: utils::shortid(),
+                    id: shortid(),
                     name: "test".to_string(),
                     pid: pid.clone(),
                     tid: tid.clone(),
-                    nid: utils::shortid(),
-                    mid: utils::shortid(),
+                    nid: shortid(),
+                    mid: shortid(),
                     state: MessageState::Created,
                     start_time: 0,
                     end_time: 0,
@@ -1193,12 +1238,12 @@ macro_rules! gen_store_tests {
 
             for _ in 0..10 {
                 let msg = Message {
-                    id: utils::shortid(),
+                    id: shortid(),
                     name: "test".to_string(),
                     pid: pid.clone(),
                     tid: tid.clone(),
-                    nid: utils::shortid(),
-                    mid: utils::shortid(),
+                    nid: shortid(),
+                    mid: shortid(),
                     state: MessageState::Completed,
                     start_time: 0,
                     end_time: 0,
@@ -1229,17 +1274,17 @@ macro_rules! gen_store_tests {
         async fn store_message_query_by_order() {
             let store = store().await;
 
-            let pid = utils::longid();
-            let tid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
 
             for i in 0..100 {
                 let msg = Message {
-                    id: utils::shortid(),
+                    id: shortid(),
                     name: format!("test-{}", i + 1),
                     pid: pid.clone(),
                     tid: tid.clone(),
-                    nid: utils::shortid(),
-                    mid: utils::shortid(),
+                    nid: shortid(),
+                    mid: shortid(),
                     state: MessageState::Created,
                     start_time: 0,
                     end_time: 0,
@@ -1248,7 +1293,7 @@ macro_rules! gen_store_tests {
                     inputs: json!({}).to_string(),
                     outputs: json!({}).to_string(),
                     create_time: 0,
-                    timestamp: utils::time::timestamp(),
+                    timestamp: timestamp(),
                     v: 0,
                 };
                 store.messages().create(&msg).await.unwrap();
@@ -1276,15 +1321,15 @@ macro_rules! gen_store_tests {
         async fn store_message_update() {
             let store = store().await;
 
-            let pid = utils::longid();
-            let tid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
             let msg = Message {
                 id: format!("{pid}{tid}"),
                 name: "test".to_string(),
                 pid: pid.clone(),
                 tid: tid.clone(),
-                nid: utils::shortid(),
-                mid: utils::shortid(),
+                nid: shortid(),
+                mid: shortid(),
                 state: MessageState::Created,
                 start_time: 0,
                 end_time: 0,
@@ -1299,7 +1344,7 @@ macro_rules! gen_store_tests {
 
             store.messages().create(&msg).await.unwrap();
 
-            let id = utils::Id::new(&pid, &tid);
+            let id = comp_id(&pid, &tid);
             let mut msg = store.messages().find(&id.id()).await.unwrap();
             msg.state = MessageState::Completed;
             msg.name = "updated".to_string();
@@ -1315,15 +1360,15 @@ macro_rules! gen_store_tests {
         async fn store_message_remove() {
             let store = store().await;
 
-            let pid = utils::longid();
-            let tid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
             let msg = Message {
                 id: format!("{pid}{tid}"),
                 name: "test".to_string(),
                 pid: pid.clone(),
                 tid: tid.clone(),
-                nid: utils::shortid(),
-                mid: utils::shortid(),
+                nid: shortid(),
+                mid: shortid(),
                 state: MessageState::Created,
                 start_time: 0,
                 end_time: 0,
@@ -1348,7 +1393,7 @@ macro_rules! gen_store_tests {
         async fn store_package_create() {
             let store = store().await;
 
-            let id = utils::longid();
+            let id = longid();
             let package = Package {
                 id,
                 name: "name".to_string(),
@@ -1358,9 +1403,9 @@ macro_rules! gen_store_tests {
                 version: "0.1.0".to_string(),
                 schema: "{}".to_string(),
                 options: None,
-                run_as: $crate::ActRunAs::Func,
+                run_as: acts::ActRunAs::Func,
                 resources: "[]".to_string(),
-                catalog: $crate::ActPackageCatalog::Core,
+                catalog: acts::ActPackageCatalog::Core,
                 create_time: 0,
                 update_time: 0,
                 timestamp: 0,
@@ -1378,7 +1423,7 @@ macro_rules! gen_store_tests {
         async fn store_package_query_by_id() {
             let store = store().await;
 
-            let id = utils::longid();
+            let id = longid();
             let package = Package {
                 id,
                 name: "test name".to_string(),
@@ -1388,9 +1433,9 @@ macro_rules! gen_store_tests {
                 version: "0.1.0".to_string(),
                 schema: "{}".to_string(),
                 options: None,
-                run_as: $crate::ActRunAs::Func,
+                run_as: acts::ActRunAs::Func,
                 resources: "[]".to_string(),
-                catalog: $crate::ActPackageCatalog::Core,
+                catalog: acts::ActPackageCatalog::Core,
                 create_time: 0,
                 update_time: 0,
                 timestamp: 0,
@@ -1407,10 +1452,10 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_package_query_by_offset_count() {
             let store = store().await;
-            let name = utils::shortid();
+            let name = shortid();
             for _i in 0..10 {
                 let package = Package {
-                    id: utils::shortid(),
+                    id: shortid(),
                     name: name.clone(),
                     desc: "desc".to_string(),
                     icon: "icon".to_string(),
@@ -1418,9 +1463,9 @@ macro_rules! gen_store_tests {
                     version: "0.1.0".to_string(),
                     schema: "{}".to_string(),
                     options: None,
-                    run_as: $crate::ActRunAs::Func,
+                    run_as: acts::ActRunAs::Func,
                     resources: "[]".to_string(),
-                    catalog: $crate::ActPackageCatalog::Core,
+                    catalog: acts::ActPackageCatalog::Core,
                     create_time: 100,
                     update_time: 0,
                     timestamp: 0,
@@ -1459,10 +1504,10 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_package_query_by_cond_and() {
             let store = store().await;
-            let name = utils::shortid();
+            let name = shortid();
             for _ in 0..10 {
                 let package = Package {
-                    id: utils::shortid(),
+                    id: shortid(),
                     name: name.clone(),
                     desc: "desc".to_string(),
                     icon: "icon".to_string(),
@@ -1470,9 +1515,9 @@ macro_rules! gen_store_tests {
                     version: "0.1.0".to_string(),
                     schema: "{}".to_string(),
                     options: None,
-                    run_as: $crate::ActRunAs::Func,
+                    run_as: acts::ActRunAs::Func,
                     resources: "[]".to_string(),
-                    catalog: $crate::ActPackageCatalog::Core,
+                    catalog: acts::ActPackageCatalog::Core,
                     create_time: 200,
                     update_time: 100,
                     timestamp: 0,
@@ -1507,10 +1552,10 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_package_query_by_cond_or() {
             let store = store().await;
-            let name = utils::shortid();
+            let name = shortid();
             for _ in 0..10 {
                 let package = Package {
-                    id: utils::shortid(),
+                    id: shortid(),
                     name: name.clone(),
                     desc: "desc".to_string(),
                     icon: "icon".to_string(),
@@ -1518,9 +1563,9 @@ macro_rules! gen_store_tests {
                     version: "0.1.0".to_string(),
                     schema: "{}".to_string(),
                     options: None,
-                    run_as: $crate::ActRunAs::Func,
+                    run_as: acts::ActRunAs::Func,
                     resources: "[]".to_string(),
-                    catalog: $crate::ActPackageCatalog::Core,
+                    catalog: acts::ActPackageCatalog::Core,
                     create_time: 300,
                     update_time: 0,
                     timestamp: 0,
@@ -1532,7 +1577,7 @@ macro_rules! gen_store_tests {
 
             for _ in 0..10 {
                 let package = Package {
-                    id: utils::shortid(),
+                    id: shortid(),
                     name: name.clone(),
                     desc: "desc".to_string(),
                     icon: "icon".to_string(),
@@ -1540,9 +1585,9 @@ macro_rules! gen_store_tests {
                     version: "0.2.0".to_string(),
                     schema: "{}".to_string(),
                     options: None,
-                    run_as: $crate::ActRunAs::Func,
+                    run_as: acts::ActRunAs::Func,
                     resources: "[]".to_string(),
-                    catalog: $crate::ActPackageCatalog::Core,
+                    catalog: acts::ActPackageCatalog::Core,
                     create_time: 300,
                     update_time: 0,
                     timestamp: 0,
@@ -1570,10 +1615,10 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_package_query_by_order() {
             let store = store().await;
-            let name = utils::shortid();
+            let name = shortid();
             for i in 0..10 {
                 let package = Package {
-                    id: utils::shortid(),
+                    id: shortid(),
                     name: name.clone(),
                     desc: format!("test-{}", i + 1),
                     icon: "icon".to_string(),
@@ -1581,12 +1626,12 @@ macro_rules! gen_store_tests {
                     version: "0.1.0".to_string(),
                     schema: "{}".to_string(),
                     options: None,
-                    run_as: $crate::ActRunAs::Func,
+                    run_as: acts::ActRunAs::Func,
                     resources: "[]".to_string(),
-                    catalog: $crate::ActPackageCatalog::Core,
+                    catalog: acts::ActPackageCatalog::Core,
                     create_time: 400,
                     update_time: 0,
-                    timestamp: utils::time::timestamp(),
+                    timestamp: timestamp(),
                     built_in: false,
                     v: 0,
                 };
@@ -1625,7 +1670,7 @@ macro_rules! gen_store_tests {
         async fn store_package_update() {
             let store = store().await;
 
-            let id = utils::longid();
+            let id = longid();
             let package = Package {
                 id,
                 name: "test name".to_string(),
@@ -1635,9 +1680,9 @@ macro_rules! gen_store_tests {
                 version: "0.1.0".to_string(),
                 schema: "{}".to_string(),
                 options: None,
-                run_as: $crate::ActRunAs::Func,
+                run_as: acts::ActRunAs::Func,
                 resources: "[]".to_string(),
-                catalog: $crate::ActPackageCatalog::Core,
+                catalog: acts::ActPackageCatalog::Core,
                 create_time: 0,
                 update_time: 0,
                 timestamp: 0,
@@ -1660,7 +1705,7 @@ macro_rules! gen_store_tests {
         async fn store_package_remove() {
             let store = store().await;
 
-            let id = utils::longid();
+            let id = longid();
             let package = Package {
                 id,
                 name: "test name".to_string(),
@@ -1670,9 +1715,9 @@ macro_rules! gen_store_tests {
                 version: "0.1.0".to_string(),
                 schema: "{}".to_string(),
                 options: None,
-                run_as: $crate::ActRunAs::Func,
+                run_as: acts::ActRunAs::Func,
                 resources: "[]".to_string(),
-                catalog: $crate::ActPackageCatalog::Core,
+                catalog: acts::ActPackageCatalog::Core,
                 create_time: 0,
                 update_time: 0,
                 timestamp: 0,
@@ -1693,7 +1738,7 @@ macro_rules! gen_store_tests {
         async fn store_upcast_model_version() {
             let store = store().await;
             let model = Model {
-                id: utils::shortid(),
+                id: shortid(),
                 name: "upcast-model".to_string(),
                 desc: "desc".to_string(),
                 ver: "0.1.0".to_string(),
@@ -1725,9 +1770,9 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_task_vars_create_and_find() {
             let store = store().await;
-            let pid = utils::longid();
+            let pid = longid();
             let vars = TaskVars {
-                id: utils::Id::new(&pid, "t1").id(),
+                id: comp_id(&pid, "t1").id(),
                 pid: pid.clone(),
                 tid: "t1".to_string(),
                 data: json!({"a": 1, "name": "x"}).to_string(),
@@ -1749,10 +1794,10 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_task_vars_query_by_pid() {
             let store = store().await;
-            let pid = utils::longid();
+            let pid = longid();
             for tid in ["t1", "t2", "t3"] {
                 let vars = TaskVars {
-                    id: utils::Id::new(&pid, tid).id(),
+                    id: comp_id(&pid, tid).id(),
                     pid: pid.clone(),
                     tid: tid.to_string(),
                     data: json!({"tid": tid}).to_string(),
@@ -1762,9 +1807,9 @@ macro_rules! gen_store_tests {
                 store.vars().create(&vars).await.expect("create task vars");
             }
             // another process's rows must not leak into the pid query
-            let other_pid = utils::longid();
+            let other_pid = longid();
             let other = TaskVars {
-                id: utils::Id::new(&other_pid, "tx").id(),
+                id: comp_id(&other_pid, "tx").id(),
                 pid: other_pid.clone(),
                 tid: "tx".to_string(),
                 data: "{}".to_string(),
@@ -1793,9 +1838,9 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_task_vars_update() {
             let store = store().await;
-            let pid = utils::longid();
+            let pid = longid();
             let vars = TaskVars {
-                id: utils::Id::new(&pid, "t1").id(),
+                id: comp_id(&pid, "t1").id(),
                 pid: pid.clone(),
                 tid: "t1".to_string(),
                 data: json!({"a": 1}).to_string(),
@@ -1825,9 +1870,9 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_task_vars_remove() {
             let store = store().await;
-            let pid = utils::longid();
+            let pid = longid();
             let vars = TaskVars {
-                id: utils::Id::new(&pid, "t1").id(),
+                id: comp_id(&pid, "t1").id(),
                 pid: pid.clone(),
                 tid: "t1".to_string(),
                 data: json!({"a": 1}).to_string(),
@@ -1850,9 +1895,9 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_upcast_task_vars_version() {
             let store = store().await;
-            let pid = utils::longid();
+            let pid = longid();
             let vars = TaskVars {
-                id: utils::Id::new(&pid, "t1").id(),
+                id: comp_id(&pid, "t1").id(),
                 pid: pid.clone(),
                 tid: "t1".to_string(),
                 data: json!({"a": 1}).to_string(),
@@ -1880,13 +1925,13 @@ macro_rules! gen_store_tests {
         async fn store_upcast_proc_version() {
             let store = store().await;
             let proc = Proc {
-                id: utils::shortid(),
+                id: shortid(),
                 name: "upcast-proc".to_string(),
-                mid: utils::longid(),
+                mid: longid(),
                 state: "running".to_string(),
                 start_time: 0,
                 end_time: 0,
-                timestamp: utils::time::timestamp(),
+                timestamp: timestamp(),
                 model: "{}".to_string(),
                 env: "{}".to_string(),
                 err: None,
@@ -1913,22 +1958,22 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_upcast_task_version() {
             let store = store().await;
-            let pid = utils::longid();
-            let tid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
             let task = Task {
-                id: utils::shortid(),
+                id: shortid(),
                 name: "upcast-task".to_string(),
                 prev: None,
                 next: vec![],
                 parent: None,
-                kind: $crate::scheduler::NodeKind::Step.to_string(),
+                kind: "step".to_string(),
                 pid: pid.clone(),
                 tid: tid.clone(),
                 node_data: "{}".to_string(),
-                state: TaskState::None.to_string(),
+                state: "none".to_string(),
                 start_time: 0,
                 end_time: 0,
-                timestamp: utils::time::timestamp(),
+                timestamp: timestamp(),
                 err: None,
                 v: 0,
             };
@@ -1953,12 +1998,12 @@ macro_rules! gen_store_tests {
         async fn store_upcast_message_version() {
             let store = store().await;
             let msg = Message {
-                id: utils::shortid(),
+                id: shortid(),
                 name: "upcast-msg".to_string(),
-                pid: utils::longid(),
-                tid: utils::shortid(),
-                nid: utils::shortid(),
-                mid: utils::shortid(),
+                pid: longid(),
+                tid: shortid(),
+                nid: shortid(),
+                mid: shortid(),
                 state: MessageState::Created,
                 start_time: 0,
                 end_time: 0,
@@ -1991,7 +2036,7 @@ macro_rules! gen_store_tests {
         async fn store_upcast_package_version() {
             let store = store().await;
             let package = Package {
-                id: utils::longid(),
+                id: longid(),
                 name: "upcast-pkg".to_string(),
                 desc: "desc".to_string(),
                 icon: "icon".to_string(),
@@ -1999,9 +2044,9 @@ macro_rules! gen_store_tests {
                 version: "0.1.0".to_string(),
                 schema: "{}".to_string(),
                 options: None,
-                run_as: $crate::ActRunAs::Func,
+                run_as: acts::ActRunAs::Func,
                 resources: "[]".to_string(),
-                catalog: $crate::ActPackageCatalog::Core,
+                catalog: acts::ActPackageCatalog::Core,
                 create_time: 0,
                 update_time: 0,
                 timestamp: 0,
@@ -2036,8 +2081,8 @@ macro_rules! gen_store_tests {
             // When order_by field matches an indexed field, the scan direction
             // should be determined by that field's direction (not .first()).
             let store = store().await;
-            let pid = utils::longid();
-            let tid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
 
             // Create messages with different status values (indexed field on Message)
             let statuses = [
@@ -2049,8 +2094,8 @@ macro_rules! gen_store_tests {
             for &status in &statuses {
                 for _ in 0..5 {
                     let msg = Delivery {
-                        id: utils::shortid(),
-                        msg_id: utils::shortid(),
+                        id: shortid(),
+                        msg_id: shortid(),
                         pid: pid.clone(),
                         tid: tid.clone(),
                         chan_id: "test1".to_string(),
@@ -2088,8 +2133,8 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_order_by_matches_indexed_field_desc() {
             let store = store().await;
-            let pid = utils::longid();
-            let tid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
 
             let statuses = [
                 DeliveryStatus::Created,   // 0
@@ -2100,8 +2145,8 @@ macro_rules! gen_store_tests {
             for &status in &statuses {
                 for _ in 0..5 {
                     let msg = Delivery {
-                        id: utils::shortid(),
-                        msg_id: utils::shortid(),
+                        id: shortid(),
+                        msg_id: shortid(),
                         pid: pid.clone(),
                         tid: tid.clone(),
                         chan_id: "test1".to_string(),
@@ -2142,8 +2187,8 @@ macro_rules! gen_store_tests {
             // an indexed field, the scan direction is taken from the first
             // matching indexed field, not from the first order_by entry.
             let store = store().await;
-            let pid = utils::longid();
-            let tid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
 
             for i in 0..20 {
                 let status = if i < 5 {
@@ -2156,8 +2201,8 @@ macro_rules! gen_store_tests {
                     DeliveryStatus::Error
                 };
                 let msg = Delivery {
-                    id: utils::shortid(),
-                    msg_id: utils::shortid(),
+                    id: shortid(),
+                    msg_id: shortid(),
                     pid: pid.clone(),
                     tid: tid.clone(),
                     chan_id: "test1".to_string(),
@@ -2198,8 +2243,8 @@ macro_rules! gen_store_tests {
             // Verify that pagination metadata (count, page sizes) is correct
             // when order_by uses an indexed field.
             let store = store().await;
-            let pid = utils::longid();
-            let tid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
 
             // Insert 20 messages with status 0..3, 5 of each
             for &status in &[
@@ -2210,8 +2255,8 @@ macro_rules! gen_store_tests {
             ] {
                 for _ in 0..5 {
                     let msg = Delivery {
-                        id: utils::shortid(),
-                        msg_id: utils::shortid(),
+                        id: shortid(),
+                        msg_id: shortid(),
                         pid: pid.clone(),
                         tid: tid.clone(),
                         chan_id: "test1".to_string(),
@@ -2324,8 +2369,8 @@ macro_rules! gen_store_tests {
             // an arbitrary id-sorted batch re-ordered in isolation. Pages must
             // now be consecutive slices of the globally sorted result.
             let store = store().await;
-            let pid = utils::longid();
-            let tid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
             for &status in &[
                 DeliveryStatus::Created,
                 DeliveryStatus::Acked,
@@ -2334,8 +2379,8 @@ macro_rules! gen_store_tests {
             ] {
                 for _ in 0..5 {
                     let msg = Delivery {
-                        id: utils::shortid(),
-                        msg_id: utils::shortid(),
+                        id: shortid(),
+                        msg_id: shortid(),
                         pid: pid.clone(),
                         tid: tid.clone(),
                         chan_id: "test1".to_string(),
@@ -2397,18 +2442,18 @@ macro_rules! gen_store_tests {
             // Verify that filtering by integer indexed fields works correctly
             // (tests zero-padded index key construction and scan_key matching).
             let store = store().await;
-            let pid = utils::longid();
-            let tid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
 
             let timestamps: Vec<i64> = vec![500, 1, 100, 5, 50, 10];
             for &ts in &timestamps {
                 let msg = Message {
-                    id: utils::shortid(),
+                    id: shortid(),
                     name: format!("ts-{}", ts),
                     pid: pid.clone(),
                     tid: tid.clone(),
-                    nid: utils::shortid(),
-                    mid: utils::shortid(),
+                    nid: shortid(),
+                    mid: shortid(),
                     state: MessageState::Created,
                     start_time: 0,
                     end_time: 0,
@@ -2471,8 +2516,8 @@ macro_rules! gen_store_tests {
             // collection: seed six deliveries (status=Created) for this pid.
             for _ in 0..6 {
                 let msg = Delivery {
-                    id: utils::shortid(),
-                    msg_id: utils::shortid(),
+                    id: shortid(),
+                    msg_id: shortid(),
                     pid: pid.clone(),
                     tid: tid.clone(),
                     chan_id: "test1".to_string(),
@@ -2516,19 +2561,19 @@ macro_rules! gen_store_tests {
         async fn store_query_between_on_indexed_integer_field() {
             // Between on timestamp (indexed integer field) — inclusive range scan
             let store = store().await;
-            let pid = utils::longid();
-            let tid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
 
             // Insert messages with timestamps 100, 200, 300, 400, 500
             let timestamps: Vec<i64> = vec![100, 200, 300, 400, 500];
             for &ts in &timestamps {
                 let msg = Message {
-                    id: utils::shortid(),
+                    id: shortid(),
                     name: format!("ts-{}", ts),
                     pid: pid.clone(),
                     tid: tid.clone(),
-                    nid: utils::shortid(),
-                    mid: utils::shortid(),
+                    nid: shortid(),
+                    mid: shortid(),
                     state: MessageState::Created,
                     start_time: 0,
                     end_time: 0,
@@ -2634,7 +2679,7 @@ macro_rules! gen_store_tests {
             // Use unique state values to avoid collisions with data from other tests
             let store = store().await;
             let workflow = create_workflow();
-            let prefix = utils::shortid();
+            let prefix = shortid();
             let states: Vec<String> = vec![
                 format!("{}-between-a", prefix),
                 format!("{}-between-b", prefix),
@@ -2643,7 +2688,7 @@ macro_rules! gen_store_tests {
                 format!("{}-between-e", prefix),
             ];
             for state in &states {
-                let mut proc = create_proc(&utils::shortid(), TaskState::None, &workflow);
+                let mut proc = create_proc(&shortid(), "none", &workflow);
                 proc.state = state.clone();
                 store.procs().create(&proc).await.expect("create proc");
             }
@@ -2674,13 +2719,13 @@ macro_rules! gen_store_tests {
             // the value encoding)
             let store = store().await;
             let workflow = create_workflow();
-            let base = format!("st-{}", utils::shortid());
+            let base = format!("st-{}", shortid());
 
             for (i, state) in [base.clone(), format!("{}-v2", base), "other-x".to_string()]
                 .into_iter()
                 .enumerate()
             {
-                let mut proc = create_proc(&format!("p{}", i), TaskState::None, &workflow);
+                let mut proc = create_proc(&format!("p{}", i), "none", &workflow);
                 proc.state = state;
                 store.procs().create(&proc).await.expect("create proc");
             }
@@ -2707,8 +2752,8 @@ macro_rules! gen_store_tests {
         async fn store_query_in_on_indexed_integer_field() {
             // In on status (indexed integer field on Message)
             let store = store().await;
-            let pid = utils::longid();
-            let tid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
 
             let statuses = vec![
                 DeliveryStatus::Created,
@@ -2719,8 +2764,8 @@ macro_rules! gen_store_tests {
             for &status in &statuses {
                 for _ in 0..5 {
                     let msg = Delivery {
-                        id: utils::shortid(),
-                        msg_id: utils::shortid(),
+                        id: shortid(),
+                        msg_id: shortid(),
                         pid: pid.clone(),
                         tid: tid.clone(),
                         chan_id: "test1".to_string(),
@@ -2795,7 +2840,7 @@ macro_rules! gen_store_tests {
             // Use unique state values to avoid collisions with data from other tests
             let store = store().await;
             let workflow = create_workflow();
-            let prefix = utils::shortid();
+            let prefix = shortid();
             let states = vec![
                 format!("{}-in-a", prefix),
                 format!("{}-in-b", prefix),
@@ -2805,7 +2850,7 @@ macro_rules! gen_store_tests {
             ];
             for state in &states {
                 for _ in 0..5 {
-                    let mut proc = create_proc(&utils::shortid(), TaskState::None, &workflow);
+                    let mut proc = create_proc(&shortid(), "none", &workflow);
                     proc.state = state.clone();
                     store.procs().create(&proc).await.expect("create proc");
                 }
@@ -2836,13 +2881,13 @@ macro_rules! gen_store_tests {
             // that scans all data and filters in-memory via Expr::op()
             let store = store().await;
             let workflow = Workflow::new()
-                .with_id(&utils::shortid())
+                .with_id(&shortid())
                 .with_step(|step| step.with_id("step1"));
 
             // Create procs with names that sort predictably
             let names = vec!["aaa", "bbb", "ccc", "ddd", "eee"];
             for name in &names {
-                let mut proc = create_proc(&utils::shortid(), TaskState::None, &workflow);
+                let mut proc = create_proc(&shortid(), "none", &workflow);
                 proc.name = name.to_string();
                 store.procs().create(&proc).await.expect("create proc");
             }
@@ -2872,12 +2917,12 @@ macro_rules! gen_store_tests {
             // In on name (NOT an indexed field) — tests fallback path
             let store = store().await;
             let workflow = Workflow::new()
-                .with_id(&utils::shortid())
+                .with_id(&shortid())
                 .with_step(|step| step.with_id("step1"));
 
             let names = vec!["alpha", "beta", "gamma", "delta", "epsilon"];
             for name in &names {
-                let mut proc = create_proc(&utils::shortid(), TaskState::None, &workflow);
+                let mut proc = create_proc(&shortid(), "none", &workflow);
                 proc.name = name.to_string();
                 store.procs().create(&proc).await.expect("create proc");
             }
@@ -2916,18 +2961,18 @@ macro_rules! gen_store_tests {
         async fn store_query_between_with_order_by_desc() {
             // Between on indexed field with descending order
             let store = store().await;
-            let pid = utils::longid();
-            let tid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
 
             let timestamps: Vec<i64> = vec![100, 200, 300, 400, 500];
             for &ts in &timestamps {
                 let msg = Message {
-                    id: utils::shortid(),
+                    id: shortid(),
                     name: format!("desc-{}", ts),
                     pid: pid.clone(),
                     tid: tid.clone(),
-                    nid: utils::shortid(),
-                    mid: utils::shortid(),
+                    nid: shortid(),
+                    mid: shortid(),
                     state: MessageState::Created,
                     start_time: 0,
                     end_time: 0,
@@ -2964,8 +3009,8 @@ macro_rules! gen_store_tests {
         async fn store_query_in_with_pagination() {
             // In query with pagination — verify page_count, offset, uniqueness
             let store = store().await;
-            let pid = utils::longid();
-            let tid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
 
             for i in 0..20 {
                 let status = match i % 4 {
@@ -2975,8 +3020,8 @@ macro_rules! gen_store_tests {
                     _ => DeliveryStatus::Error,
                 };
                 let msg = Delivery {
-                    id: utils::shortid(),
-                    msg_id: utils::shortid(),
+                    id: shortid(),
+                    msg_id: shortid(),
                     pid: pid.clone(),
                     tid: tid.clone(),
                     chan_id: "test1".to_string(),
@@ -3051,8 +3096,8 @@ macro_rules! gen_store_tests {
         async fn store_query_between_and_other_cond() {
             // Combine Between with other conditions in AND/OR
             let store = store().await;
-            let pid = utils::longid();
-            let tid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
 
             for &(rt, status) in &[
                 (0, DeliveryStatus::Created),
@@ -3062,8 +3107,8 @@ macro_rules! gen_store_tests {
                 (4, DeliveryStatus::Completed),
             ] {
                 let msg = Delivery {
-                    id: utils::shortid(),
-                    msg_id: utils::shortid(),
+                    id: shortid(),
+                    msg_id: shortid(),
                     pid: pid.clone(),
                     tid: tid.clone(),
                     chan_id: "test1".to_string(),
@@ -3126,7 +3171,7 @@ macro_rules! gen_store_tests {
             // Create procs with sorted names a1..a5
             let names = vec!["a1", "a2", "a3", "a4", "a5"];
             for name in &names {
-                let mut proc = create_proc(&utils::shortid(), TaskState::None, &workflow);
+                let mut proc = create_proc(&shortid(), "none", &workflow);
                 proc.name = name.to_string();
                 store.procs().create(&proc).await.expect("create proc");
             }
@@ -3218,8 +3263,8 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_ne_on_indexed_integer_field() {
             let store = store().await;
-            let pid = utils::longid();
-            let tid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
 
             let statuses = vec![
                 DeliveryStatus::Created,
@@ -3230,8 +3275,8 @@ macro_rules! gen_store_tests {
             for &status in &statuses {
                 for _ in 0..5 {
                     let msg = Delivery {
-                        id: utils::shortid(),
-                        msg_id: utils::shortid(),
+                        id: shortid(),
+                        msg_id: shortid(),
                         pid: pid.clone(),
                         tid: tid.clone(),
                         chan_id: "test1".to_string(),
@@ -3280,9 +3325,9 @@ macro_rules! gen_store_tests {
         async fn store_query_ne_on_indexed_string_field() {
             let store = store().await;
             let workflow = Workflow::new()
-                .with_id(&utils::shortid())
+                .with_id(&shortid())
                 .with_step(|step| step.with_id("step1"));
-            let prefix = utils::shortid();
+            let prefix = shortid();
 
             let states = vec![
                 format!("{}-ne-s1", prefix),
@@ -3291,7 +3336,7 @@ macro_rules! gen_store_tests {
             ];
             for state in &states {
                 for _ in 0..5 {
-                    let mut proc = create_proc(&utils::shortid(), TaskState::None, &workflow);
+                    let mut proc = create_proc(&shortid(), "none", &workflow);
                     proc.state = state.clone();
                     store.procs().create(&proc).await.expect("create proc");
                 }
@@ -3318,12 +3363,12 @@ macro_rules! gen_store_tests {
         async fn store_query_ne_on_non_indexed_field() {
             let store = store().await;
             let workflow = Workflow::new()
-                .with_id(&utils::shortid())
+                .with_id(&shortid())
                 .with_step(|step| step.with_id("step1"));
 
             let names = vec!["aaa-ne", "bbb-ne", "ccc-ne", "ddd-ne"];
             for name in &names {
-                let mut proc = create_proc(&utils::shortid(), TaskState::None, &workflow);
+                let mut proc = create_proc(&shortid(), "none", &workflow);
                 proc.name = name.to_string();
                 store.procs().create(&proc).await.expect("create proc");
             }
@@ -3352,18 +3397,18 @@ macro_rules! gen_store_tests {
             // Stored values collide with the comparison bound — Gt/Ge/Lt/Le
             // must be exact at `value == bound` on the indexed scan path.
             let store = store().await;
-            let pid = utils::longid();
-            let tid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
 
             let timestamps: Vec<i64> = vec![100, 200, 300];
             for &ts in &timestamps {
                 let msg = Message {
-                    id: utils::shortid(),
+                    id: shortid(),
                     name: format!("boundary-{}", ts),
                     pid: pid.clone(),
                     tid: tid.clone(),
-                    nid: utils::shortid(),
-                    mid: utils::shortid(),
+                    nid: shortid(),
+                    mid: shortid(),
                     state: MessageState::Created,
                     start_time: 0,
                     end_time: 0,
@@ -3454,18 +3499,18 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_gt_on_indexed_integer_field() {
             let store = store().await;
-            let pid = utils::longid();
-            let tid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
 
             let timestamps: Vec<i64> = vec![100, 200, 300, 400, 500];
             for &ts in &timestamps {
                 let msg = Message {
-                    id: utils::shortid(),
+                    id: shortid(),
                     name: format!("gt-{}", ts),
                     pid: pid.clone(),
                     tid: tid.clone(),
-                    nid: utils::shortid(),
-                    mid: utils::shortid(),
+                    nid: shortid(),
+                    mid: shortid(),
                     state: MessageState::Created,
                     start_time: 0,
                     end_time: 0,
@@ -3513,15 +3558,15 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_gt_on_non_indexed_field() {
             let store = store().await;
-            let pid = utils::longid();
-            let tid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
 
             let retry_times_vals: Vec<i32> = vec![0, 1, 2, 3, 4];
             for &rt in &retry_times_vals {
                 for _ in 0..3 {
                     let msg = Delivery {
-                        id: utils::shortid(),
-                        msg_id: utils::shortid(),
+                        id: shortid(),
+                        msg_id: shortid(),
                         pid: pid.clone(),
                         tid: tid.clone(),
                         chan_id: "test1".to_string(),
@@ -3572,18 +3617,18 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_ge_on_indexed_integer_field() {
             let store = store().await;
-            let pid = utils::longid();
-            let tid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
 
             let timestamps: Vec<i64> = vec![100, 200, 300, 400, 500];
             for &ts in &timestamps {
                 let msg = Message {
-                    id: utils::shortid(),
+                    id: shortid(),
                     name: format!("ge-{}", ts),
                     pid: pid.clone(),
                     tid: tid.clone(),
-                    nid: utils::shortid(),
-                    mid: utils::shortid(),
+                    nid: shortid(),
+                    mid: shortid(),
                     state: MessageState::Created,
                     start_time: 0,
                     end_time: 0,
@@ -3631,15 +3676,15 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_ge_on_non_indexed_field() {
             let store = store().await;
-            let pid = utils::longid();
-            let tid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
 
             let retry_times_vals: Vec<i32> = vec![0, 1, 2, 3, 4];
             for &rt in &retry_times_vals {
                 for _ in 0..3 {
                     let msg = Delivery {
-                        id: utils::shortid(),
-                        msg_id: utils::shortid(),
+                        id: shortid(),
+                        msg_id: shortid(),
                         pid: pid.clone(),
                         tid: tid.clone(),
                         chan_id: "test1".to_string(),
@@ -3690,18 +3735,18 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_lt_on_indexed_integer_field() {
             let store = store().await;
-            let pid = utils::longid();
-            let tid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
 
             let timestamps: Vec<i64> = vec![100, 200, 300, 400, 500];
             for &ts in &timestamps {
                 let msg = Message {
-                    id: utils::shortid(),
+                    id: shortid(),
                     name: format!("lt-{}", ts),
                     pid: pid.clone(),
                     tid: tid.clone(),
-                    nid: utils::shortid(),
-                    mid: utils::shortid(),
+                    nid: shortid(),
+                    mid: shortid(),
                     state: MessageState::Created,
                     start_time: 0,
                     end_time: 0,
@@ -3749,15 +3794,15 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_lt_on_non_indexed_field() {
             let store = store().await;
-            let pid = utils::longid();
-            let tid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
 
             let retry_times_vals: Vec<i32> = vec![0, 1, 2, 3, 4];
             for &rt in &retry_times_vals {
                 for _ in 0..3 {
                     let msg = Delivery {
-                        id: utils::shortid(),
-                        msg_id: utils::shortid(),
+                        id: shortid(),
+                        msg_id: shortid(),
                         pid: pid.clone(),
                         tid: tid.clone(),
                         chan_id: "test1".to_string(),
@@ -3808,18 +3853,18 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_le_on_indexed_integer_field() {
             let store = store().await;
-            let pid = utils::longid();
-            let tid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
 
             let timestamps: Vec<i64> = vec![100, 200, 300, 400, 500];
             for &ts in &timestamps {
                 let msg = Message {
-                    id: utils::shortid(),
+                    id: shortid(),
                     name: format!("le-{}", ts),
                     pid: pid.clone(),
                     tid: tid.clone(),
-                    nid: utils::shortid(),
-                    mid: utils::shortid(),
+                    nid: shortid(),
+                    mid: shortid(),
                     state: MessageState::Created,
                     start_time: 0,
                     end_time: 0,
@@ -3866,15 +3911,15 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_le_on_non_indexed_field() {
             let store = store().await;
-            let pid = utils::longid();
-            let tid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
 
             let retry_times_vals: Vec<i32> = vec![0, 1, 2, 3, 4];
             for &rt in &retry_times_vals {
                 for _ in 0..3 {
                     let msg = Delivery {
-                        id: utils::shortid(),
-                        msg_id: utils::shortid(),
+                        id: shortid(),
+                        msg_id: shortid(),
                         pid: pid.clone(),
                         tid: tid.clone(),
                         chan_id: "test1".to_string(),
@@ -3929,9 +3974,9 @@ macro_rules! gen_store_tests {
             // when the field is indexed.
             let store = store().await;
             let workflow = Workflow::new()
-                .with_id(&utils::shortid())
+                .with_id(&shortid())
                 .with_step(|step| step.with_id("step1"));
-            let prefix = utils::shortid();
+            let prefix = shortid();
 
             let states = vec![
                 format!("{}-m-a1", prefix),
@@ -3940,7 +3985,7 @@ macro_rules! gen_store_tests {
             ];
             for state in &states {
                 for _ in 0..3 {
-                    let mut proc = create_proc(&utils::shortid(), TaskState::None, &workflow);
+                    let mut proc = create_proc(&shortid(), "none", &workflow);
                     proc.state = state.clone();
                     store.procs().create(&proc).await.expect("create proc");
                 }
@@ -3968,12 +4013,12 @@ macro_rules! gen_store_tests {
             // Match on name (non-indexed field) uses contains
             let store = store().await;
             let workflow = Workflow::new()
-                .with_id(&utils::shortid())
+                .with_id(&shortid())
                 .with_step(|step| step.with_id("step1"));
 
             let names = vec!["hello-world", "hello-mars", "goodbye-pluto"];
             for name in &names {
-                let mut proc = create_proc(&utils::shortid(), TaskState::None, &workflow);
+                let mut proc = create_proc(&shortid(), "none", &workflow);
                 proc.name = name.to_string();
                 store.procs().create(&proc).await.expect("create proc");
             }
@@ -4013,18 +4058,18 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_gt_with_order_by_desc() {
             let store = store().await;
-            let pid = utils::longid();
-            let tid = utils::shortid();
+            let pid = longid();
+            let tid = shortid();
 
             let timestamps: Vec<i64> = vec![100, 200, 300, 400, 500];
             for &ts in &timestamps {
                 let msg = Message {
-                    id: utils::shortid(),
+                    id: shortid(),
                     name: format!("gtdesc-{}", ts),
                     pid: pid.clone(),
                     tid: tid.clone(),
-                    nid: utils::shortid(),
-                    mid: utils::shortid(),
+                    nid: shortid(),
+                    mid: shortid(),
                     state: MessageState::Created,
                     start_time: 0,
                     end_time: 0,
@@ -4069,7 +4114,7 @@ macro_rules! gen_store_tests {
             // mechanism. All four characters are tested on the indexed "state" field.
             let store = store().await;
             let workflow = Workflow::new()
-                .with_id(&utils::shortid())
+                .with_id(&shortid())
                 .with_step(|step| step.with_id("step1"));
 
             // Create procs with special characters in state (indexed field)
@@ -4082,7 +4127,7 @@ macro_rules! gen_store_tests {
                 "state_f_multi_%\\|",
             ];
             for state in &states {
-                let mut proc = create_proc(&utils::shortid(), TaskState::None, &workflow);
+                let mut proc = create_proc(&shortid(), "none", &workflow);
                 proc.state = state.to_string();
                 store.procs().create(&proc).await.expect("create proc");
             }
@@ -4218,7 +4263,7 @@ macro_rules! gen_store_tests {
         async fn store_query_special_chars_on_non_indexed_field() {
             let store = store().await;
             let workflow = Workflow::new()
-                .with_id(&utils::shortid())
+                .with_id(&shortid())
                 .with_step(|step| step.with_id("step1"));
 
             // Create procs with special characters in name (non-indexed field)
@@ -4231,7 +4276,7 @@ macro_rules! gen_store_tests {
                 "name_f\\bsl",
             ];
             for name in &names {
-                let mut proc = create_proc(&utils::shortid(), TaskState::None, &workflow);
+                let mut proc = create_proc(&shortid(), "none", &workflow);
                 proc.name = name.to_string();
                 store.procs().create(&proc).await.expect("create proc");
             }
@@ -4326,13 +4371,13 @@ macro_rules! gen_store_tests {
         async fn store_query_match_with_special_chars() {
             let store = store().await;
             let workflow = Workflow::new()
-                .with_id(&utils::shortid())
+                .with_id(&shortid())
                 .with_step(|step| step.with_id("step1"));
 
             // Create procs with special character names (non-indexed)
             let names = vec!["hello_world", "50%off", "a|b|c", "normal_name%extra"];
             for name in &names {
-                let mut proc = create_proc(&utils::shortid(), TaskState::None, &workflow);
+                let mut proc = create_proc(&shortid(), "none", &workflow);
                 proc.name = name.to_string();
                 store.procs().create(&proc).await.expect("create proc");
             }
@@ -4424,7 +4469,7 @@ macro_rules! gen_store_tests {
                 "match_delta\\und",
             ];
             for state in &states {
-                let mut proc = create_proc(&utils::shortid(), TaskState::None, &workflow);
+                let mut proc = create_proc(&shortid(), "none", &workflow);
                 proc.state = state.to_string();
                 store.procs().create(&proc).await.expect("create proc");
             }

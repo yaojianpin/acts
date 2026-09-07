@@ -1,8 +1,5 @@
-use crate::{
-    ActError, KvStore, Result,
-    store::{ScanOperation, ScanOptions},
-    utils::consts,
-};
+use crate::consts;
+use acts::{ActError, KvStore, Result, ScanOperation, ScanOptions};
 use async_nats::jetstream;
 use futures::StreamExt;
 

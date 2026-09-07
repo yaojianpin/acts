@@ -39,7 +39,7 @@ The lib size is about 4.6mb now.
 ### Extensiable
 
 - store collection extension
-  support creating external store, please refer to the code under `crates/src/store/postgres`.
+  support creating external store, please refer to the code under `crates/acts-store/src/postgres`.
 
 - pakcage extension
   support creating custom package, please refer to the code under `example/custom_pakcage`.
@@ -346,10 +346,16 @@ steps:
 For more acts example, please see [`examples`](https://github.com/yaojianpin/acts/tree/main/examples)
 
 The active backend is created externally and passed to
-`EngineBuilder::set_store` — when unset, an in-memory store is used:
+`EngineBuilder::set_store` — when unset, an in-memory store is used. The
+persistent backends live in the `acts-store` crate:
+
+```bash
+cargo add acts-store --features sqlite
+```
 
 ```rust,ignore
-use acts::{Engine, SqliteStore};
+use acts::Engine;
+use acts_store::SqliteStore; // or PostgresStore / RedisStore / NatsStore / SledStore
 use std::sync::Arc;
 
 #[tokio::main]
@@ -364,16 +370,16 @@ async fn main() {
 }
 ```
 
-Backends exported when the matching feature is enabled:
+Backends enabled by the matching `acts-store` feature:
 
-- `MemoryStore` — in-memory store, no persistence (default when unset)
-- `SqliteStore` — requires feature `store-sqlite`
-- `PostgresStore` — requires feature `store-postgres`
-- `RedisStore` — requires feature `store-redis`
-- `NatsStore` — requires feature `store-nats`
-- `SledStore` — requires feature `store-sled`
+- `MemoryStore` — built into `acts`, in-memory store, no persistence (default when unset)
+- `SqliteStore` — `acts-store` feature `sqlite`
+- `PostgresStore` — `acts-store` feature `postgres`
+- `RedisStore` — `acts-store` feature `redis`
+- `NatsStore` — `acts-store` feature `nats`
+- `SledStore` — `acts-store` feature `sled`
 
-Custom stores can be built by implementing `KvStore` and passed to
+Custom stores can be built by implementing `acts::KvStore` and passed to
 `set_store` the same way.
 
 ## Package

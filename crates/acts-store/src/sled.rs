@@ -1,5 +1,4 @@
-use crate::store::{ScanOperation, ScanOptions, StoreBatchOp};
-use crate::{ActError, KvStore, Result};
+use acts::{ActError, KvStore, Result, ScanOperation, ScanOptions, StoreBatchOp};
 
 pub struct SledStore {
     db: sled::Db,

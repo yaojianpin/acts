@@ -217,10 +217,9 @@ impl EngineBuilder {
 
     /// set the store
     ///
-    /// The `store-*` cargo features only control which backend structs are
-    /// compiled and exported; create the backend externally and set it here.
-    /// When unset, an in-memory store is used. Only one store can be set —
-    /// calling this again panics.
+    /// The store backend is created externally and set here. When unset, an
+    /// in-memory store is used. Only one store can be set — calling this
+    /// again panics.
     ///
     /// ## Example
     ///
@@ -239,9 +238,11 @@ impl EngineBuilder {
     /// }
     /// ```
     ///
-    /// `SqliteStore`, `PostgresStore`, `RedisStore`, `NatsStore` and
-    /// `SledStore` are exported from the crate when the matching `store-*`
-    /// feature is enabled, e.g. `set_store(Arc::new(SqliteStore::open(path)?))`.
+    /// The persistent backends live in the `acts-store` crate — enable its
+    /// matching feature and import the backend from there, e.g. with feature
+    /// `sqlite`: `use acts_store::SqliteStore;
+    /// set_store(Arc::new(SqliteStore::open(path).await?))`. Any type
+    /// implementing [`KvStore`](crate::KvStore) is accepted.
     pub fn set_store(mut self, store: Arc<dyn KvStore>) -> Self {
         assert!(
             self.store.is_none(),

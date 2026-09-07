@@ -3,22 +3,8 @@ pub mod data;
 mod memory;
 pub mod query;
 
-#[cfg(feature = "store-nats")]
-mod nats;
-#[cfg(feature = "store-postgres")]
-mod postgres;
-#[cfg(feature = "store-redis")]
-mod redis;
-#[cfg(feature = "store-sled")]
-mod sled;
-#[cfg(feature = "store-sqlite")]
-mod sqlite;
-
 #[allow(clippy::module_inception)]
 mod store;
-
-#[cfg(test)]
-mod tests;
 
 use data::*;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -33,22 +19,6 @@ use strum::{AsRefStr, EnumIter};
 
 #[allow(unused_imports)]
 pub use memory::MemoryStore;
-
-#[cfg(feature = "store-nats")]
-#[allow(unused_imports)]
-pub use nats::NatsStore;
-#[cfg(feature = "store-postgres")]
-#[allow(unused_imports)]
-pub use postgres::PostgresStore;
-#[cfg(feature = "store-redis")]
-#[allow(unused_imports)]
-pub use redis::RedisStore;
-#[cfg(feature = "store-sled")]
-#[allow(unused_imports)]
-pub use sled::SledStore;
-#[cfg(feature = "store-sqlite")]
-#[allow(unused_imports)]
-pub use sqlite::SqliteStore;
 
 fn map_db_err(err: impl Error) -> ActError {
     ActError::Store(err.to_string())
@@ -184,12 +154,13 @@ pub trait KvStore: Send + Sync {
     /// a sequence of independently committed keys that a mid-write failure
     /// could tear.
     ///
-    /// `MemoryStore`, `SledStore`, `SqliteStore`, `PostgresStore` and
-    /// `RedisStore` commit through a native transaction/batch (a single-op
-    /// batch falls back to `put`/`delete`, skipping transaction overhead).
-    /// A backend without cross-key transactions (`NatsStore` — JetStream KV
-    /// is per-key) inherits the default sequential loop: order is preserved,
-    /// but a mid-batch failure leaves the earlier ops applied.
+    /// `MemoryStore` (in `acts`) and the `acts-store` backends `SledStore`,
+    /// `SqliteStore`, `PostgresStore` and `RedisStore` commit through a
+    /// native transaction/batch (a single-op batch falls back to
+    /// `put`/`delete`, skipping transaction overhead). A backend without
+    /// cross-key transactions (`NatsStore` — JetStream KV is per-key)
+    /// inherits the default sequential loop: order is preserved, but a
+    /// mid-batch failure leaves the earlier ops applied.
     async fn batch(&self, ops: &[StoreBatchOp]) -> Result<()> {
         for op in ops {
             match op {

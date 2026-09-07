@@ -12,37 +12,48 @@ cargo add acts
 
 ## External Storage
 
-The following storage backends are available:
+The persistent storage backends (sqlite/postgres/redis/nats/sled) live in the
+`acts-store` crate — enable the matching feature and import the backend from
+`acts_store`, then pass it to `EngineBuilder::set_store` (when unset, an
+in-memory `MemoryStore` is used):
 
 ```bash
 # SQLite
-cargo add acts --features store-sqlite
+cargo add acts-store --features sqlite
 
 # PostgreSQL
-cargo add acts --features store-postgres
+cargo add acts-store --features postgres
 
 # NATS
-cargo add acts --features store-nats
+cargo add acts-store --features nats
 
-## Select the Store Backend
+# Redis
+cargo add acts-store --features redis
 
-The features only decide which backend structs are compiled and exported;
-create the backend externally and pass it to `EngineBuilder::set_store`
-(the default is an in-memory store):
-
-```rust
-use acts::{Engine, store::SqliteStore};
-use std::sync::Arc;
-
-let engine = Engine::builder()
-    .set_store(Arc::new(SqliteStore::open("data/acts.db").unwrap()))
-    .build()
-    .start()
-    .unwrap();
+# Sled
+cargo add acts-store --features sled
 ```
 
-When the matching feature is enabled, `SqliteStore`, `PostgresStore`,
-`RedisStore`, `NatsStore` and `SledStore` are exported from the crate.
+```rust
+use acts::Engine;
+use acts_store::SqliteStore; // or PostgresStore / RedisStore / NatsStore / SledStore
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> acts::Result<()> {
+    let store = SqliteStore::open("data/acts.db").await?;
+    let engine = Engine::builder()
+        .set_store(Arc::new(store))
+        .build()
+        .start()
+        .await?;
+    Ok(())
+}
+```
+
+`acts` itself ships only `MemoryStore` and the `KvStore` trait custom stores
+implement; a custom backend implementing `acts::KvStore` is injected the same
+way via `set_store`.
 
 ## Create Engine
 

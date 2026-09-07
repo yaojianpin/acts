@@ -1,7 +1,4 @@
-use crate::{
-    ActError, KvStore, Result,
-    store::{ScanOperation, ScanOptions, StoreBatchOp},
-};
+use acts::{ActError, KvStore, Result, ScanOperation, ScanOptions, StoreBatchOp};
 use redis::aio::MultiplexedConnection;
 use redis::{AsyncCommands, Client};
 

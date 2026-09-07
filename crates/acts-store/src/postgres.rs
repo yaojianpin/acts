@@ -1,8 +1,5 @@
-use crate::{
-    ActError, KvStore, Result,
-    store::{ScanOperation, ScanOptions, StoreBatchOp},
-    utils::consts,
-};
+use crate::consts;
+use acts::{ActError, KvStore, Result, ScanOperation, ScanOptions, StoreBatchOp};
 use sqlx::{Row, postgres::PgPoolOptions};
 use std::time::Duration;
 

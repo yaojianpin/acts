@@ -12,36 +12,46 @@ cargo add acts
 
 ## 安装外部存储
 
-支持以下外部存储：
+外部存储后端（sqlite/postgres/redis/nats/sled）在独立的 `acts-store` crate 中，
+启用对应 feature 后从 `acts_store` 导入后端，再通过 `EngineBuilder::set_store`
+指定（不设置时默认使用内存存储 `MemoryStore`）：
 
 ```bash
 # SQLite
-cargo add acts --features store-sqlite
+cargo add acts-store --features sqlite
 
 # PostgreSQL
-cargo add acts --features store-postgres
+cargo add acts-store --features postgres
 
 # NATS
-cargo add acts --features store-nats
+cargo add acts-store --features nats
 
-## 选择存储后端
+# Redis
+cargo add acts-store --features redis
 
-feature 只决定哪些后端会被编译，实际使用的后端在外部创建实例后通过
-`EngineBuilder::set_store` 指定（不设置时默认使用内存存储）：
-
-```rust
-use acts::{Engine, store::SqliteStore};
-use std::sync::Arc;
-
-let engine = Engine::builder()
-    .set_store(Arc::new(SqliteStore::open("data/acts.db").unwrap()))
-    .build()
-    .start()
-    .unwrap();
+# Sled
+cargo add acts-store --features sled
 ```
 
-启用对应 feature 时会从库中导出 `SqliteStore`、`PostgresStore`、`RedisStore`、
-`NatsStore`、`SledStore` 等后端结构体。
+```rust
+use acts::Engine;
+use acts_store::SqliteStore; // 或 PostgresStore / RedisStore / NatsStore / SledStore
+use std::sync::Arc;
+
+#[tokio::main]
+async fn main() -> acts::Result<()> {
+    let store = SqliteStore::open("data/acts.db").await?;
+    let engine = Engine::builder()
+        .set_store(Arc::new(store))
+        .build()
+        .start()
+        .await?;
+    Ok(())
+}
+```
+
+`acts` 本身只内置 `MemoryStore` 与自定义存储所需的 `KvStore` trait；实现
+`acts::KvStore` 的自定义后端同样通过 `set_store` 注入。
 
 ## 创建引擎
 

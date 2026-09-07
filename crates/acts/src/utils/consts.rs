@@ -51,9 +51,6 @@ pub const KEY_SEP: &str = "-";
 /// `.` never occurs inside an encoded value (`.` maps to `=2E`) or an id.
 pub const KEY_SEP_SUCC: &str = ".";
 
-#[allow(dead_code)]
-pub const ACTS_STORE_NAME: &str = "acts_store";
-
 /// check if the key is private
 /// these keys can only be as local data
 pub fn is_private_key(key: &str) -> bool {
