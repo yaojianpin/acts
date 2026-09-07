@@ -1,11 +1,13 @@
-use crate::Vars;
 use crate::{
-    Act, Engine, Workflow, data,
+    Act, Config, Engine, Vars, Workflow,
+    config::ConfigData,
+    data,
     scheduler::NodeContent,
-    scheduler::{NodeTree, Process, TaskState},
-    store::DbCollectionIden,
+    scheduler::{NodeTree, Process, Runtime, TaskState},
+    store::{DbCollectionIden, MemoryStore},
     utils,
 };
+use std::sync::Arc;
 /// Dynamic act chains must survive a store round-trip: node ids are persisted
 /// with parent/prev/next links and rebuilt on load, so `Task::move_next`
 /// (which reads `task.node.next()`) keeps working after restore.
@@ -146,7 +148,10 @@ async fn cache_push_to_store() {
         pids.push(pid);
     }
 
-    assert_eq!(cache.count(), 1);
+    // the resident set has no eviction policy — `cache_cap` gates *starts*
+    // (`Cache::admit` parks over-cap ones), it never evicts resident
+    // processes, so all five pushed processes stay in memory
+    assert_eq!(cache.count(), 5);
     for pid in pids.iter() {
         let exists = cache.store().procs().exists(pid).await.unwrap();
         assert!(exists);
@@ -302,201 +307,98 @@ async fn cache_writes_after_remove_are_skipped() {
     assert!(!store.procs().exists(&pid).await.unwrap());
 }
 
+/// `start_parked` touches ONLY parked rows (durable `None` state): it starts them
+/// into free slots and leaves every other row alone. Non-`None` non-terminal
+/// rows (`Ready`/`Running`/`Pending`) belong to processes with no in-memory
+/// executor to drive them — a live process's row is its resident instance
+/// (reloading it would create a second one), and a crash-left one is reached
+/// on demand (`proc()`) — so `start_parked` must NOT pull them into the cache, and
+/// terminal rows are never refilled either. Runtime built WITHOUT an event
+/// loop so the started seeds stay `Running` and every assertion is
+/// deterministic.
 #[tokio::test]
-async fn cache_restore_count() {
-    let engine = Engine::builder()
-        .cache_size(5)
-        .build()
-        .start()
-        .await
-        .unwrap();
+async fn cache_start_parked_refills_only_parked_none_rows() {
+    let config = Config {
+        data: ConfigData {
+            cache_cap: Some(5),
+            ..Default::default()
+        },
+        table: Default::default(),
+    };
+    let rt = Runtime::new(&config, None).unwrap();
+    let cache = rt.cache();
     let model = Workflow::new()
         .with_id("m1")
         .with_step(|step| step.with_name("step1"));
-    let rt = engine.runtime();
-    let cache = rt.cache();
     cache.store().deploy(&model, None).await.unwrap();
 
-    assert_eq!(cache.count(), 0);
-    for _ in 0..10 {
-        let proc = data::Proc {
-            id: utils::longid(),
-            name: "test".to_string(),
-            mid: "m1".to_string(),
-            // `Ready` (not `None`): `restore` auto-starts only `None`-state
-            // processes — a freshly started seed would run to completion and
-            // (since terminal procs are now evicted on their proc event) race
-            // the count assertion below.
-            state: TaskState::Ready.into(),
-            start_time: 0,
-            end_time: 0,
-            timestamp: 0,
-            model: model.to_json().unwrap(),
-            env: "{}".to_string(),
-            err: None,
-            removable: false,
-            v: data::Proc::version(),
-        };
-        cache.store().procs().create(&proc).await.unwrap();
-    }
-
-    cache.restore(&engine.runtime()).await.unwrap();
-    assert_eq!(cache.count(), 5);
-}
-
-#[tokio::test]
-async fn cache_restore_working_state() {
-    let engine = Engine::builder()
-        .cache_size(5)
-        .build()
-        .start()
-        .await
-        .unwrap();
-    let model = Workflow::new()
-        .with_id("m1")
-        .with_step(|step| step.with_name("step1"));
-    let rt = engine.runtime();
-    let cache = rt.cache();
-    cache.store().deploy(&model, None).await.unwrap();
+    let seed = |state: TaskState| data::Proc {
+        id: utils::longid(),
+        name: "test".to_string(),
+        mid: "m1".to_string(),
+        state: state.to_string(),
+        start_time: 0,
+        end_time: 0,
+        timestamp: 0,
+        model: model.to_json().unwrap(),
+        env: "{}".to_string(),
+        err: None,
+        removable: false,
+        v: data::Proc::version(),
+    };
 
     assert_eq!(cache.count(), 0);
 
-    // `Ready` (not `None`) seeds: `restore` auto-starts `None` processes —
-    // a started seed would complete and (terminal procs are now evicted on
-    // their proc event) race the count assertion below.
-    let states = [
-        TaskState::Ready,
-        TaskState::Ready,
-        TaskState::Ready,
-        TaskState::Running,
-        TaskState::Running,
-        TaskState::Running,
-        TaskState::Pending,
-        TaskState::Pending,
-        TaskState::Pending,
-        TaskState::Pending,
+    // parked (None) rows that restore MUST start, oldest first
+    let parked = [
+        seed(TaskState::None),
+        seed(TaskState::None),
+        seed(TaskState::None),
     ];
-    for state in &states {
-        let proc = data::Proc {
-            id: utils::longid(),
-            name: "test".to_string(),
-            mid: "m1".to_string(),
-            state: state.to_string(),
-            start_time: 0,
-            end_time: 0,
-            timestamp: 0,
-            model: model.to_json().unwrap(),
-            env: "{}".to_string(),
-            err: None,
-            removable: false,
-            v: data::Proc::version(),
-        };
-        cache.store().procs().create(&proc).await.unwrap();
-    }
-
-    cache.restore(&engine.runtime()).await.unwrap();
-    assert_eq!(cache.count(), 5);
-}
-
-#[tokio::test]
-async fn cache_restore_completed_state() {
-    let engine = Engine::builder()
-        .cache_size(5)
-        .build()
-        .start()
-        .await
-        .unwrap();
-    let model = Workflow::new()
-        .with_id("m1")
-        .with_step(|step| step.with_name("step1"));
-    let rt = engine.runtime();
-    let cache = rt.cache();
-    cache.store().deploy(&model, None).await.unwrap();
-
-    assert_eq!(cache.count(), 0);
-
-    let states = [
-        TaskState::Skipped,
-        TaskState::Skipped,
-        TaskState::Skipped,
-        TaskState::Aborted,
-        TaskState::Aborted,
-        TaskState::Aborted,
-        TaskState::Error,
-        TaskState::Error,
-        TaskState::Completed,
-        TaskState::Completed,
+    let parked_ids: Vec<String> = parked.iter().map(|p| p.id.clone()).collect();
+    // rows restore MUST leave alone: crash-left working states + finished
+    let ignored = [
+        seed(TaskState::Ready),
+        seed(TaskState::Running),
+        seed(TaskState::Pending),
+        seed(TaskState::Completed),
+        seed(TaskState::Error),
     ];
-    for state in &states {
-        let proc = data::Proc {
-            id: utils::longid(),
-            name: "test".to_string(),
-            mid: "m1".to_string(),
-            state: state.to_string(),
-            start_time: 0,
-            end_time: 0,
-            timestamp: 0,
-            model: model.to_json().unwrap(),
-            env: "{}".to_string(),
-            err: None,
-            removable: false,
-            v: data::Proc::version(),
-        };
+    for proc in parked.into_iter().chain(ignored.into_iter()) {
         cache.store().procs().create(&proc).await.unwrap();
     }
 
-    cache.restore(&engine.runtime()).await.unwrap();
-    assert_eq!(cache.count(), 0);
-}
+    cache.start_parked(&rt).await.unwrap();
 
-#[tokio::test]
-async fn cache_restore_less_cap() {
-    let engine = Engine::builder()
-        .cache_size(5)
-        .build()
-        .start()
-        .await
-        .unwrap();
-    let model = Workflow::new()
-        .with_id("m1")
-        .with_step(|step| step.with_name("step1"));
-    let rt = engine.runtime();
-    let cache = rt.cache();
-    cache.store().deploy(&model, None).await.unwrap();
-
-    assert_eq!(cache.count(), 0);
-
-    // `Ready` (not `None`): see `cache_restore_working_state` — auto-started
-    // seeds would complete and be evicted, racing the count assertion.
-    let states = [TaskState::Running, TaskState::Ready, TaskState::Pending];
-    for state in &states {
-        let proc = data::Proc {
-            id: utils::longid(),
-            name: "test".to_string(),
-            mid: "m1".to_string(),
-            state: state.to_string(),
-            start_time: 0,
-            end_time: 0,
-            timestamp: 0,
-            model: model.to_json().unwrap(),
-            env: "{}".to_string(),
-            err: None,
-            removable: false,
-            v: data::Proc::version(),
-        };
-        cache.store().procs().create(&proc).await.unwrap();
-    }
-
-    cache.restore(&engine.runtime()).await.unwrap();
+    // exactly the three parked rows were started — the non-None/terminal
+    // seeds stay out of the resident set
     assert_eq!(cache.count(), 3);
+    let resident: Vec<String> = cache.procs().iter().map(|p| p.id().to_string()).collect();
+    for pid in &parked_ids {
+        assert!(resident.contains(pid), "parked row {pid} must be started");
+        let row = cache.store().procs().find(pid).await.unwrap();
+        assert!(
+            TaskState::from(row.state.as_str()).is_running(),
+            "parked row {pid} must be Running"
+        );
+    }
+    let unexpected: Vec<&String> = resident
+        .iter()
+        .filter(|p| !parked_ids.contains(p))
+        .collect();
+    assert!(
+        unexpected.is_empty(),
+        "start_parked must not load non-parked rows: {unexpected:?}"
+    );
+
+    rt.close().await;
 }
 
 /// A finished process is evicted from the in-memory cache on its terminal
 /// proc event (its store rows stay — the sweeper deletes them only after the
 /// process's deliveries settled), so the freed slot lets the restore pass
-/// pull other persisted processes back into the cache and auto-start them
-/// (`None` state). Without the eviction, finished processes squat in the
-/// cache at/over the restore checkpoint (cap/2) and those processes starve.
+/// start parked processes (`None` state) into it. Without the eviction,
+/// finished processes would squat in the cache and block restoring others.
 #[tokio::test(flavor = "multi_thread")]
 async fn cache_finished_proc_frees_slot_for_restore() {
     let engine = Engine::builder()
@@ -568,6 +470,139 @@ async fn cache_finished_proc_frees_slot_for_restore() {
     .await
     .expect("finished/restored processes never reached a terminal state in time");
 }
+
+/// The resident set has no eviction policy: once it is full a new process is
+/// *parked* — its durable row stays `None` and it is NOT cached (a resident
+/// parked row would occupy a slot forever, since `restore` skips resident
+/// pids) — instead of evicting a live process to make room. A terminal event
+/// then frees a slot and `restore` starts the parked process, which runs to
+/// a terminal row of its own.
+#[tokio::test]
+async fn cache_park_over_cap_then_refill_on_terminal() {
+    let engine = Engine::builder()
+        .cache_size(2)
+        .build()
+        .start()
+        .await
+        .unwrap();
+    let rt = engine.runtime();
+    let cache = rt.cache();
+    let model = Workflow::new()
+        .with_id("m1")
+        .with_step(|step| step.with_name("step1"));
+    cache.store().deploy(&model, None).await.unwrap();
+
+    let make = |tag: &str| {
+        let pid = format!("park-{tag}");
+        let proc = Process::new(&pid, &rt);
+        proc.load(&model).unwrap();
+        (pid, proc)
+    };
+
+    let (pid1, p1) = make("1");
+    let (pid2, p2) = make("2");
+    let (pid3, p3) = make("3");
+
+    // two admitted starts fill the resident set exactly to cap
+    assert!(cache.admit(&p1).await.unwrap());
+    assert!(cache.admit(&p2).await.unwrap());
+    assert_eq!(cache.count(), 2);
+
+    // the third is parked: durable `None` row, no resident slot taken, and
+    // the admitted processes are never evicted to make room for it
+    assert!(!cache.admit(&p3).await.unwrap());
+    assert_eq!(cache.count(), 2);
+    let row = cache.store().procs().find(&pid3).await.unwrap();
+    assert_eq!(row.state, TaskState::None.to_string());
+    let resident: Vec<String> = cache.procs().iter().map(|p| p.id().to_string()).collect();
+    assert!(resident.contains(&pid1));
+    assert!(resident.contains(&pid2));
+    assert!(!resident.contains(&pid3));
+
+    // a demand load of a parked process must not cache it
+    let got = cache.proc(&pid3, &rt).await.unwrap().unwrap();
+    assert_eq!(got.id(), pid3);
+    assert!(got.state().is_none());
+    assert_eq!(cache.count(), 2);
+
+    // terminal event: pid1 frees its slot; restore refills it with the
+    // parked process and starts it
+    cache.evict(&pid1);
+    cache.start_parked(&rt).await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match cache.store().procs().find(&pid3).await {
+                Ok(row) if !TaskState::from(row.state.as_str()).is_completed() => {}
+                // completed, or already swept away after its rows settled
+                _ => break,
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("parked process never ran to completion after refill");
+}
+
+/// Parked rows refill FIFO (oldest first) and a refill never overshoots
+/// `cap`: freeing one slot starts exactly the oldest parked process; newer
+/// parked rows keep waiting for the next terminal event. The runtime is
+/// built WITHOUT an event loop, so started processes stay `Running` (their
+/// tasks sit in the queue) and every assertion is deterministic.
+#[tokio::test]
+async fn cache_parked_refill_is_oldest_first_within_cap() {
+    let config = Config {
+        data: ConfigData {
+            cache_cap: Some(2),
+            ..Default::default()
+        },
+        table: Default::default(),
+    };
+    let rt = Runtime::new(&config, None).unwrap();
+    let cache = rt.cache();
+    let model = Workflow::new()
+        .with_id("m1")
+        .with_step(|step| step.with_name("step1"));
+    cache.store().deploy(&model, None).await.unwrap();
+
+    let make = |tag: &str, ts: i64| {
+        let pid = format!("park-fifo-{tag}");
+        let proc = Process::new_with_timestamp(&pid, ts, &rt);
+        proc.load(&model).unwrap();
+        (pid, proc)
+    };
+
+    let (pid1, p1) = make("1", 100);
+    let (_pid2, p2) = make("2", 200);
+    let (old, p_old) = make("old", 10);
+    let (new, p_new) = make("new", 999);
+
+    assert!(cache.admit(&p1).await.unwrap());
+    assert!(cache.admit(&p2).await.unwrap());
+    assert_eq!(cache.count(), 2);
+
+    // two parked rows, older first
+    assert!(!cache.admit(&p_old).await.unwrap());
+    assert!(!cache.admit(&p_new).await.unwrap());
+
+    // freeing one slot starts only the oldest parked process — the newer one
+    // keeps waiting, so the resident set never exceeds cap
+    cache.evict(&pid1);
+    cache.start_parked(&rt).await.unwrap();
+    assert_eq!(cache.count(), 2);
+    let resident: Vec<String> = cache.procs().iter().map(|p| p.id().to_string()).collect();
+    assert!(
+        resident.contains(&old),
+        "oldest parked row must be refilled first: {resident:?}"
+    );
+    assert!(!resident.contains(&new));
+    let still = cache.store().procs().find(&new).await.unwrap();
+    assert_eq!(still.state, TaskState::None.to_string());
+    let started = cache.store().procs().find(&old).await.unwrap();
+    assert!(TaskState::from(started.state.as_str()).is_running());
+
+    rt.close().await;
+}
+
 /// Scope vars live in their own rows: a lifecycle-only persist (state/timing
 /// change, no data touched) must NOT write a vars row, and a data mutation
 /// must create one with exactly that scope's content.
@@ -729,4 +764,211 @@ async fn cache_vars_ancestor_scope_round_trip() {
         None,
         "the untouched root scope stays empty"
     );
+}
+
+/// Boot-time resume priority: in-flight (`Ready`/`Running`/`Pending`) rows
+/// are loaded into the resident set before parked (`None`) rows, both capped;
+/// everything beyond the cap waits. Deterministic — the runtime has no event
+/// loop, so nothing executes.
+#[tokio::test]
+async fn cache_resume_loads_in_flight_before_parked() {
+    let config = Config {
+        data: ConfigData {
+            cache_cap: Some(3),
+            ..Default::default()
+        },
+        table: Default::default(),
+    };
+    let rt = Runtime::new(&config, None).unwrap();
+    let cache = rt.cache();
+    let model = Workflow::new()
+        .with_id("m1")
+        .with_step(|step| step.with_id("step1"))
+        .with_step(|step| step.with_id("step2"));
+    cache.store().deploy(&model, None).await.unwrap();
+
+    // an in-flight process with a task graph (a crash mid-run)
+    let inflight = {
+        let proc = Process::new_with_timestamp("resume-inflight", 5, &rt);
+        proc.load(&model).unwrap();
+        proc.set_pure_state(TaskState::Running);
+        proc
+    };
+    let root = inflight
+        .create_task(&inflight.tree().root.clone().unwrap(), None)
+        .unwrap();
+    let step1 = inflight
+        .create_task(&inflight.tree().node("step1").unwrap(), Some(root.clone()))
+        .unwrap();
+    root.set_pure_state(TaskState::Running);
+    step1.set_pure_state(TaskState::Ready);
+    cache.store().upsert_proc(&inflight).await.unwrap();
+    cache.store().upsert_task(&root).await.unwrap();
+    cache.store().upsert_task(&step1).await.unwrap();
+
+    // three parked rows (never started): two fit the free slots left by the
+    // in-flight process under cap 3, the third must keep waiting
+    let mut parked = Vec::new();
+    for (tag, ts) in [("a", 10), ("b", 20), ("new", 999)] {
+        let pid = format!("resume-parked-{tag}");
+        let proc = Process::new_with_timestamp(&pid, ts, &rt);
+        proc.load(&model).unwrap();
+        proc.set_pure_state(TaskState::None);
+        cache.store().upsert_proc(&proc).await.unwrap();
+        parked.push(pid);
+    }
+
+    assert_eq!(cache.count(), 0);
+    rt.resume().await.unwrap();
+
+    // cap 3: the in-flight process is resumed first, then the two oldest
+    // parked rows are started into the free slots; the newest keeps waiting
+    assert_eq!(cache.count(), 3);
+    let resident: Vec<String> = cache.procs().iter().map(|p| p.id().to_string()).collect();
+    assert!(
+        resident.contains(&"resume-inflight".to_string()),
+        "in-flight process must be loaded first: {resident:?}"
+    );
+    assert!(resident.contains(&"resume-parked-a".to_string()));
+    assert!(resident.contains(&"resume-parked-b".to_string()));
+    assert!(!resident.contains(&"resume-parked-new".to_string()));
+    let waiting = cache
+        .store()
+        .procs()
+        .find("resume-parked-new")
+        .await
+        .unwrap();
+    assert_eq!(waiting.state, TaskState::None.to_string());
+
+    // the in-flight process's task graph was decoded and re-dispatched
+    let loaded = cache.proc("resume-inflight", &rt).await.unwrap().unwrap();
+    assert!(loaded.state().is_running());
+    assert_eq!(
+        loaded.task_by_nid("step1").first().unwrap().state(),
+        TaskState::Ready
+    );
+
+    rt.close().await;
+}
+
+/// A process that was mid-run when the engine died is resumed by a fresh
+/// engine on the same store: its in-flight tasks are re-dispatched and the
+/// workflow runs to its terminal state instead of hanging forever.
+#[tokio::test(flavor = "multi_thread")]
+async fn cache_resume_in_flight_proc_after_restart() {
+    let kv: Arc<dyn crate::store::KvStore> = Arc::new(MemoryStore::new());
+
+    // engine 1 seeds the store with a mid-run process, then "crashes"
+    let engine1 = Engine::builder()
+        .set_store(kv.clone())
+        .build()
+        .start()
+        .await
+        .unwrap();
+    let store = engine1.runtime().cache().store();
+    let model = Workflow::new()
+        .with_id("m1")
+        .with_step(|step| step.with_id("step1"))
+        .with_step(|step| step.with_id("step2"));
+    store.deploy(&model, None).await.unwrap();
+
+    let pid = "resume-restart".to_string();
+    let proc = engine1.runtime().create_proc(&pid, &model);
+    proc.set_pure_state(TaskState::Running);
+    let root = proc
+        .create_task(&proc.tree().root.clone().unwrap(), None)
+        .unwrap();
+    let step1 = proc
+        .create_task(&proc.tree().node("step1").unwrap(), Some(root.clone()))
+        .unwrap();
+    root.set_pure_state(TaskState::Running);
+    step1.set_pure_state(TaskState::Ready);
+    store.upsert_proc(&proc).await.unwrap();
+    store.upsert_task(&root).await.unwrap();
+    store.upsert_task(&step1).await.unwrap();
+    engine1.close().await;
+
+    // engine 2 on the same store resumes the process to completion
+    let engine2 = Engine::builder()
+        .set_store(kv.clone())
+        .build()
+        .start()
+        .await
+        .unwrap();
+    let store2 = engine2.runtime().cache().store();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        loop {
+            match store2.procs().find(&pid).await {
+                Ok(row) if !TaskState::from(row.state.as_str()).is_completed() => {
+                    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                }
+                // completed, or swept away after its rows settled
+                _ => break,
+            }
+        }
+    })
+    .await
+    .expect("resumed process never reached a terminal state after restart");
+    engine2.close().await;
+}
+
+/// Boot-resume overflow is not stranded: in-flight rows beyond the resident
+/// cap are queued, and every slot freed by a terminal event (`refill`) loads
+/// one of them back — `restore` alone could never, since it only refills
+/// parked (`None`) rows. Deterministic — no event loop, so nothing executes.
+#[tokio::test]
+async fn cache_resume_overflow_drains_on_free_slot() {
+    let config = Config {
+        data: ConfigData {
+            cache_cap: Some(2),
+            ..Default::default()
+        },
+        table: Default::default(),
+    };
+    let rt = Runtime::new(&config, None).unwrap();
+    let cache = rt.cache();
+    let model = Workflow::new()
+        .with_id("m1")
+        .with_step(|step| step.with_id("step1"));
+    cache.store().deploy(&model, None).await.unwrap();
+
+    // four in-flight rows, only two fit
+    let mut pids = Vec::new();
+    for i in 0..4 {
+        let pid = format!("overflow-{i}");
+        let proc = Process::new_with_timestamp(&pid, i as i64 + 1, &rt);
+        proc.load(&model).unwrap();
+        proc.set_pure_state(TaskState::Running);
+        cache.store().upsert_proc(&proc).await.unwrap();
+        pids.push(pid);
+    }
+
+    assert_eq!(cache.count(), 0);
+    rt.resume().await.unwrap();
+    assert_eq!(cache.count(), 2);
+    // the two overflow rows are queued for the next free slots
+    assert_eq!(
+        cache.pending_resume_ids(),
+        vec![pids[2].clone(), pids[3].clone()]
+    );
+
+    // a terminal event frees pid0's slot: the oldest queued process is loaded
+    cache.evict(&pids[0]);
+    rt.restore().await.unwrap();
+    assert_eq!(cache.count(), 2);
+    let resident: Vec<String> = cache.procs().iter().map(|p| p.id().to_string()).collect();
+    assert!(resident.contains(&pids[1]));
+    assert!(resident.contains(&pids[2]));
+    assert_eq!(cache.pending_resume_ids(), vec![pids[3].clone()]);
+
+    // another terminal event frees pid1's slot: the last queued row is loaded
+    cache.evict(&pids[1]);
+    rt.restore().await.unwrap();
+    assert_eq!(cache.count(), 2);
+    let resident: Vec<String> = cache.procs().iter().map(|p| p.id().to_string()).collect();
+    assert!(resident.contains(&pids[2]));
+    assert!(resident.contains(&pids[3]));
+    assert!(cache.pending_resume_ids().is_empty());
+
+    rt.close().await;
 }

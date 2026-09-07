@@ -149,7 +149,11 @@ impl Runtime {
 
         self.launch(&proc).await?;
 
-        info!(pid = %proc_id, mid = %model.id, name = %model.name, "process started");
+        if proc.state().is_none() {
+            info!(pid = %proc_id, mid = %model.id, name = %model.name, "process parked — waiting for a free slot");
+        } else {
+            info!(pid = %proc_id, mid = %model.id, name = %model.name, "process started");
+        }
         Ok(proc)
     }
 
@@ -161,7 +165,18 @@ impl Runtime {
     pub async fn launch(self: &Arc<Self>, proc: &Arc<Process>) -> Result<()> {
         debug!("process launched");
         let proc = proc.clone();
-        proc.start().await?;
+        // Capacity admission: when the resident set is full the process is
+        // *parked* (its durable row stays `None`) and started later by the
+        // restore pass that follows a terminal event — a running process is
+        // never evicted from memory to make room. A parked `start` returns
+        // here; `Process::start` itself is what runs the workflow.
+        if !self.cache.admit(&proc).await? {
+            return Ok(());
+        }
+        if let Err(err) = proc.start().await {
+            self.cache.evict(proc.id());
+            return Err(err);
+        }
         Ok(())
     }
 
@@ -333,6 +348,100 @@ impl Runtime {
         Ok(())
     }
 
+    /// Boot-time resume of processes that were in flight when the engine
+    /// crashed: load their durable `Ready`/`Running`/`Pending` rows into the
+    /// resident set first (up to `cap`, oldest first), then re-dispatch every
+    /// task that was cut off mid-flight through the normal queue so
+    /// `exec`/`next` carry it to its next durable checkpoint (at-least-once).
+    ///
+    /// A task is only re-dispatched when it has NO durable outbox record
+    /// pending: a task with one was already past its `run` (the record is
+    /// written after `exec` and closed at its terminal state), so
+    /// [`Self::recover_actions`] re-drives its propagation instead — re-
+    /// running it here would re-enter the parent's scheduling and duplicate
+    /// completed siblings (`schedule_once` treats a terminal instance as
+    /// "redo me"). Tasks waiting on a client action (`Interrupt`) or on
+    /// sibling branches (`Pending`) are not dispatched either.
+    pub(crate) async fn resume(self: &Arc<Self>) -> Result<()> {
+        let procs = self.cache.resume(self).await?;
+        // scan the whole resident set: `procs` only holds the rows freshly loaded
+        // here, but the outbox replay above already cached its own processes —
+        // their op-less mid-flight leaves need the same re-drive
+        let residents = self.cache.procs();
+        let redispatched = self.redispatch_resumed(&residents).await?;
+        if redispatched > 0 {
+            info!(
+                resumed = procs.len(),
+                redispatched, "in-flight processes resumed after restart"
+            );
+        }
+        // start parked (`None`) processes into the remaining free slots
+        self.cache.start_parked(self).await?;
+        Ok(())
+    }
+
+    /// Terminal-event restore: a process just finished and its terminal event
+    /// evicted it. Loads queued in-flight rows (boot-resume overflow that did
+    /// not fit the cap) into the freed slots and re-dispatches them, then
+    /// refills parked (`None`) rows — non-`None` first, matching boot
+    /// priority.
+    pub(crate) async fn restore(self: &Arc<Self>) -> Result<()> {
+        let loaded = self.cache.resume_from_queue(self).await?;
+        if !loaded.is_empty() {
+            let redispatched = self.redispatch_resumed(&loaded).await?;
+            info!(
+                loaded = loaded.len(),
+                redispatched, "queued in-flight processes resumed"
+            );
+        }
+        self.cache.start_parked(self).await?;
+        Ok(())
+    }
+
+    /// Re-dispatch the op-less mid-flight tasks of every resident process:
+    /// tasks with a pending outbox record are driven by `recover_actions` —
+    /// a task with one was already past its `run` (the record is written
+    /// after `exec` and closed at its terminal state), so re-running it here
+    /// would re-enter the parent's scheduling and duplicate completed
+    /// siblings (`schedule_once` treats a terminal instance as "redo me").
+    /// Of the rest, `None`/`Ready` tasks run from their entry, while a
+    /// `Running` task cut off mid-run is reset to `Ready` first — `exec`
+    /// only re-runs `run` for a `Ready` task — but only when it is a leaf: a
+    /// running parent's durable children are resumed on their own and drive
+    /// it to completion when they finish. Tasks waiting on a client action
+    /// (`Interrupt`) or on sibling branches (`Pending`) are not dispatched.
+    async fn redispatch_resumed(&self, procs: &[Arc<Process>]) -> Result<usize> {
+        let ops = self.cache.store().load_pending_ops().await?;
+        let in_flight: std::collections::HashSet<(String, String)> = ops
+            .iter()
+            .map(|op| (op.pid.clone(), op.tid.clone()))
+            .collect();
+        let mut redispatched = 0usize;
+        for proc in procs {
+            debug!(pid = %proc.id(), state = ?proc.state(), "process resumed");
+            for task in proc.tasks() {
+                if in_flight.contains(&(proc.id().to_string(), task.id.clone())) {
+                    continue;
+                }
+                let task = task.clone();
+                let state = task.state();
+                let redispatched_task = match state {
+                    TaskState::None | TaskState::Ready => Some(task),
+                    TaskState::Running if task.children().is_empty() => {
+                        task.set_pure_state(TaskState::Ready);
+                        Some(task)
+                    }
+                    _ => None,
+                };
+                if let Some(task) = redispatched_task {
+                    self.push(&task)?;
+                    redispatched += 1;
+                }
+            }
+        }
+        Ok(redispatched)
+    }
+
     #[cfg(test)]
     pub async fn do_action2(
         self: &Arc<Self>,
@@ -495,20 +604,21 @@ impl Runtime {
                         }
 
                         // Finished: evict the process from the in-memory cache
-                        // right away — its slot is freed so `restore` can pull
-                        // in (and resume) other processes persisted in the
-                        // store. The durable rows are NOT deleted here: they
-                        // are removed by the sweeper only after every delivery
-                        // of the process's messages settled (see
+                        // right away — its slot is freed so `restore` can
+                        // start a parked process into it. The durable rows are
+                        // NOT deleted here: they are removed by the sweeper
+                        // only after every delivery of the process's messages
+                        // settled (see
                         // `Store::mark_removable` / `sweep_settled_procs`) —
                         // delivery completion lags the terminal state, so
                         // deleting now would race the still-in-flight
                         // deliveries.
 
                         cache.evict(proc.id());
-                        let cache = cache.clone();
                         let rt = rt.clone();
-                        if let Err(err) = cache.restore(&rt).await {
+                        // the freed slot first resumes queued in-flight rows
+                        // (boot overflow), then refills parked (`None`) rows
+                        if let Err(err) = rt.restore().await {
                             error!(error = %err, "process restore failed");
                         }
                     }

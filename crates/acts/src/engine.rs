@@ -237,8 +237,16 @@ impl Engine {
             // start event loop
             rt.event_loop();
 
-            // recover pending actions
+            // outbox replay first: every task that has a durable pending
+            // record is driven deterministically to its next checkpoint
+            // (NEXT_COMPLETE / applied-action guards make the replay
+            // idempotent); resume runs after so it only sees what the replay
+            // left mid-flight and never overlaps the replay on the same task
             rt.recover_actions().await?;
+
+            // resume in-flight processes (durable Ready/Running/Pending rows)
+            // and start parked ones
+            rt.resume().await?;
 
             // init retry timer
             rt.init_retry_timer()?;

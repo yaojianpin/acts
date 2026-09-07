@@ -9,45 +9,31 @@ use std::{collections::HashSet, sync::Arc};
 use tracing::debug;
 
 impl Store {
-    pub async fn load(
+    /// Load up to `cap` parked processes: durable rows in `None` state — a
+    /// process was created while the resident set was full (see
+    /// `Cache::admit`) or a never-started leftover from a crash — and never
+    /// ran. Oldest first, so the restore pass refills slots FIFO. Parked rows
+    /// are never resident, so `skip` only guards against a row whose pid is
+    /// concurrently admitted (e.g. seeded by tests).
+    pub async fn load_parked(
         &self,
         cap: usize,
         rt: &Arc<Runtime>,
         skip: &HashSet<String>,
     ) -> Result<Vec<Arc<scheduler::Process>>> {
-        debug!("load cap={}", cap);
+        debug!("load_parked cap={}", cap);
         let mut ret = Vec::new();
         if cap > 0 {
-            let query = Query::new().filter(
-                Filter::or()
-                    .expr(Expr::eq("state", TaskState::None.to_string()))
-                    .expr(Expr::eq("state", TaskState::Ready.to_string()))
-                    .expr(Expr::eq("state", TaskState::Running.to_string()))
-                    .expr(Expr::eq("state", TaskState::Pending.to_string())),
-            );
+            let query = Query::new()
+                .filter(Filter::and().expr(Expr::eq("state", TaskState::None.to_string())))
+                .order("timestamp", Sort::Asc)
+                .limit(cap);
             let procs = self.procs().query(&query).await?;
             for p in procs.rows {
                 if skip.contains(&p.id) {
                     continue;
                 }
-                let model = Workflow::from_json(&p.model)?;
-                let env_local: serde_json::Value =
-                    serde_json::from_str(&p.env).map_err(|err| ActError::Store(err.to_string()))?;
-                let state = p.state.clone();
-                let proc = scheduler::Process::new_with_timestamp(&p.id, p.timestamp, rt);
-
-                proc.load(&model)?;
-                proc.set_pure_state(state.into());
-                proc.set_start_time(p.start_time);
-                proc.set_end_time(p.end_time);
-                proc.set_env(&env_local.into());
-                if let Some(err) = p.err {
-                    let err: Error = serde_json::from_str(&err)
-                        .map_err(|err| ActError::Store(err.to_string()))?;
-                    proc.set_pure_err(&err)
-                }
-
-                self.load_tasks(&proc, rt).await?;
+                let proc = self.decode_proc(p, rt).await?;
                 ret.push(proc);
                 if ret.len() >= cap {
                     break;
@@ -56,6 +42,87 @@ impl Store {
         }
 
         Ok(ret)
+    }
+
+    /// Load up to `cap` resumable processes: durable rows that were running
+    /// when the engine crashed (`Ready`/`Running`/`Pending`), oldest first —
+    /// the boot-resume working set. The number of matching rows beyond the
+    /// cap is found with [`Self::count_resumable`]; the caller queues their
+    /// pids for later slots. See `Runtime::resume`.
+    pub async fn load_resumable(
+        &self,
+        cap: usize,
+        rt: &Arc<Runtime>,
+        skip: &HashSet<String>,
+    ) -> Result<Vec<Arc<scheduler::Process>>> {
+        debug!("load_resumable cap={}", cap);
+        let mut ret = Vec::new();
+        if cap > 0 {
+            let query = Query::new()
+                .filter(
+                    Filter::or()
+                        .expr(Expr::eq("state", TaskState::Ready.to_string()))
+                        .expr(Expr::eq("state", TaskState::Running.to_string()))
+                        .expr(Expr::eq("state", TaskState::Pending.to_string())),
+                )
+                .order("timestamp", Sort::Asc)
+                .limit(cap);
+            let procs = self.procs().query(&query).await?;
+            for p in procs.rows {
+                if skip.contains(&p.id) {
+                    continue;
+                }
+                let proc = self.decode_proc(p, rt).await?;
+                ret.push(proc);
+                if ret.len() >= cap {
+                    break;
+                }
+            }
+        }
+        Ok(ret)
+    }
+
+    /// Count durable rows that were in flight when the engine crashed
+    /// (`Ready`/`Running`/`Pending`) — used at boot to detect processes that
+    /// do not fit the resident cap and must wait in the resume queue.
+    pub async fn count_resumable(&self) -> Result<usize> {
+        let query = Query::new()
+            .filter(
+                Filter::or()
+                    .expr(Expr::eq("state", TaskState::Ready.to_string()))
+                    .expr(Expr::eq("state", TaskState::Running.to_string()))
+                    .expr(Expr::eq("state", TaskState::Pending.to_string())),
+            )
+            .limit(1);
+        Ok(self.procs().query(&query).await?.count)
+    }
+
+    /// Decode one durable proc row into an in-memory process (model, state,
+    /// timings, env, error) and attach its persisted task graph.
+    async fn decode_proc(
+        &self,
+        p: data::Proc,
+        rt: &Arc<Runtime>,
+    ) -> Result<Arc<scheduler::Process>> {
+        let model = Workflow::from_json(&p.model)?;
+        let env_local: serde_json::Value =
+            serde_json::from_str(&p.env).map_err(|err| ActError::Store(err.to_string()))?;
+        let state = p.state.clone();
+        let proc = scheduler::Process::new_with_timestamp(&p.id, p.timestamp, rt);
+
+        proc.load(&model)?;
+        proc.set_pure_state(state.into());
+        proc.set_start_time(p.start_time);
+        proc.set_end_time(p.end_time);
+        proc.set_env(&env_local.into());
+        if let Some(err) = p.err {
+            let err: Error =
+                serde_json::from_str(&err).map_err(|err| ActError::Store(err.to_string()))?;
+            proc.set_pure_err(&err)
+        }
+
+        self.load_tasks(&proc, rt).await?;
+        Ok(proc)
     }
 
     pub async fn load_proc(

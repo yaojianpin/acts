@@ -294,7 +294,12 @@ async fn sch_action_recover_partial_next_no_duplicate() {
     store_ops.enqueue_next_op(&pid, &s1.id).await.unwrap();
     engine.close().await;
 
-    // reload: recovery re-dispatches s1's `next`; re-scheduling s2 is deduped
+    // reload: the boot resume re-drives the in-flight process (at-least-once),
+    // so s2 — whose irq act child was never built before the crash — re-runs
+    // and rebuilds exactly one act2; recovery re-dispatches s1's `next` on
+    // top, and re-scheduling s2 is deduped. act2 stays in flight, so the
+    // process keeps its legitimate pending outbox records; what matters is
+    // that nothing is duplicated.
     let engine2 = Engine::new()
         .set_store(Some(store.clone()))
         .start()
@@ -302,18 +307,29 @@ async fn sch_action_recover_partial_next_no_duplicate() {
         .unwrap();
     let rt2 = engine2.runtime();
     let store2 = rt2.cache().store();
+    // wait for the re-run to settle: root + s1 + s2 + the rebuilt act2
+    let q_all = Query::new().filter(Filter::and().expr(Expr::eq("pid", pid.clone())));
     for _ in 0..100 {
-        if store2.load_pending_ops().await.unwrap().is_empty() {
+        if store2.tasks().query(&q_all).await.unwrap().rows.len() == 4 {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    assert!(store2.load_pending_ops().await.unwrap().is_empty());
 
     let reloaded = rt2.proc(&pid).await.unwrap().unwrap();
     assert_eq!(reloaded.task_by_nid("s1").len(), 1);
     assert_eq!(reloaded.task_by_nid("s2").len(), 1);
-    assert_eq!(reloaded.tasks().len(), 3, "root + s1 + s2, no duplicates");
+    let acts = reloaded
+        .tasks()
+        .into_iter()
+        .filter(|t| t.node().kind() == crate::scheduler::NodeKind::Act)
+        .collect::<Vec<_>>();
+    assert_eq!(acts.len(), 1, "s2's act child rebuilt exactly once");
+    assert_eq!(
+        reloaded.tasks().len(),
+        4,
+        "root + s1 + s2 + act2, no duplicates"
+    );
 }
 
 /// A `next` that stops with children still in flight (the parent step stays

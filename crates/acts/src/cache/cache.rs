@@ -2,25 +2,46 @@ use super::writer::{StoreWriter, WriteOp};
 use crate::{
     Action, Config, Result,
     data::DeliveryStatus,
-    scheduler::{Process, Runtime, Task},
-    store::{KvStore, MemoryStore, Store},
+    query::{Expr, Filter, Query},
+    scheduler::{Process, Runtime, Task, TaskState},
+    store::{KvStore, MemoryStore, Store, query::Sort},
 };
-use moka::sync::Cache as MokaCache;
-use std::{collections::HashSet, sync::Arc};
-use tracing::{debug, instrument};
+use parking_lot::RwLock;
+use std::{
+    collections::{HashMap, HashSet, VecDeque},
+    sync::Arc,
+};
+use tracing::{debug, instrument, warn};
 
 #[derive(Clone)]
 pub struct Cache {
     cap: usize,
-    procs: MokaCache<String, Arc<Process>>,
+    /// Resident set: every process with a live in-memory instance, keyed by
+    /// pid. There is NO eviction policy — a resident process may be running
+    /// (it must stay reachable by pid for its whole life: reloading it from
+    /// the store would create a second instance racing the first) or a
+    /// finished process briefly waiting for its terminal event handler to
+    /// evict it. Capacity is enforced by [`Self::admit`] at start time, not
+    /// by cache pressure: processes beyond `cap` are parked in the store
+    /// (`None` state, no task rows) and started by [`Self::start_parked`] when a
+    /// terminal event frees a slot.
+    procs: Arc<RwLock<HashMap<String, Arc<Process>>>>,
+    /// Boot-resume overflow queue: pids of in-flight (`Ready`/`Running`/
+    /// `Pending`) rows that did not fit the resident cap at boot, oldest
+    /// first. [`Self::resume_from_queue`] drains them into free slots (the
+    /// terminal-event restore) — without it those rows would wait forever,
+    /// since [`Self::start_parked`] only refills parked `None` rows.
+    pending_resume: Arc<RwLock<VecDeque<String>>>,
     store: Arc<Store>,
     writer: StoreWriter,
-    /// Serializes whole `restore` passes. Terminal proc events of different
-    /// processes run concurrently, and each triggers a restore; without the
-    /// lock two passes could load — and auto-start — the same persisted
-    /// process twice (each `start` is guarded per `Process` instance, not
-    /// per pid, so the duplicate would run the workflow twice).
-    restore_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Serializes every admission decision and whole restore passes. Terminal
+    /// proc events of different processes run concurrently, and admission
+    /// (`admit`) and restore both mutate the resident set across store I/O —
+    /// without the lock two passes could load — and auto-start — the same
+    /// persisted process twice (each `start` is guarded per `Process`
+    /// instance, not per pid, so the duplicate would run the workflow twice),
+    /// and concurrent starts could overshoot `cap`.
+    lock: Arc<tokio::sync::Mutex<()>>,
 }
 
 impl std::fmt::Debug for Cache {
@@ -39,10 +60,11 @@ impl Cache {
         ));
         Ok(Self {
             cap: config.cache_cap() as usize,
-            procs: MokaCache::new(config.cache_cap() as u64),
+            procs: Arc::new(RwLock::new(HashMap::new())),
+            pending_resume: Arc::new(RwLock::new(VecDeque::new())),
             store: store.clone(),
             writer: StoreWriter::spawn(store),
-            restore_lock: Arc::new(tokio::sync::Mutex::new(())),
+            lock: Arc::new(tokio::sync::Mutex::new(())),
         })
     }
 
@@ -55,8 +77,13 @@ impl Cache {
     }
 
     pub fn count(&self) -> usize {
-        self.procs.run_pending_tasks();
-        self.procs.entry_count() as usize
+        self.procs.read().len()
+    }
+
+    /// Snapshot of the boot-resume overflow queue (test visibility).
+    #[cfg(test)]
+    pub(crate) fn pending_resume_ids(&self) -> Vec<String> {
+        self.pending_resume.read().iter().cloned().collect()
     }
 
     pub async fn close(&self) {
@@ -71,11 +98,7 @@ impl Cache {
     }
 
     pub fn procs(&self) -> Vec<Arc<Process>> {
-        let mut procs = Vec::new();
-        for (_, proc) in self.procs.iter() {
-            procs.push(proc.clone());
-        }
-        procs
+        self.procs.read().values().cloned().collect()
     }
 
     #[instrument(skip(self, rt), fields(pid = %pid))]
@@ -87,8 +110,13 @@ impl Cache {
                 self.flush().await?;
                 if let Some(proc) = self.store.load_proc(pid, rt).await? {
                     debug!(pid = %pid, "loaded process");
-                    // add to cache
-                    self.push_proc_pri(&proc, false).await?;
+                    // add to cache — unless it is parked: a durable `None`
+                    // row that was never started (the resident set was full at
+                    // start time). Caching it would occupy a slot forever —
+                    // `restore` skips resident pids, so it would never start.
+                    if !proc.state().is_none() && self.count() < self.cap() {
+                        self.push_proc_pri(&proc, false).await?;
+                    }
                     return Ok(Some(proc));
                 }
                 Ok(None)
@@ -99,7 +127,7 @@ impl Cache {
     #[instrument(skip(self), fields(pid = %pid))]
     pub async fn remove(&self, pid: &str) -> Result<bool> {
         debug!("remove pid={pid}");
-        self.procs.remove(pid);
+        self.procs.write().remove(pid);
         // Removal is serialized through the writer (FIFO) so it can never
         // race writes still queued for the process — its completion markers
         // are applied first, then the rows are dropped. `flush` keeps the
@@ -129,42 +157,204 @@ impl Cache {
 
     /// Evict a process from the in-memory cache only — its durable rows are
     /// left untouched. Called when a process finishes (its terminal proc
-    /// event): the freed slot lets [`Self::restore`] pull other persisted
-    /// processes into the cache. The store rows themselves are removed later
-    /// by the sweeper, once every delivery of the process's messages settled.
+    /// event): the freed slot lets [`Self::start_parked`] start a parked process
+    /// into it. The store rows themselves are removed later by the sweeper,
+    /// once every delivery of the process's messages settled.
     pub(crate) fn evict(&self, pid: &str) {
-        self.procs.remove(pid);
+        self.procs.write().remove(pid);
+    }
+
+    /// Capacity admission for a fresh start. Returns `true` when the process
+    /// was admitted to the resident set and the caller should run it now;
+    /// returns `false` when the set is full — the process is *parked*: its
+    /// durable row (state `None`, no task rows) is persisted and it is NOT
+    /// cached, and [`Self::start_parked`] starts it when a terminal event frees a
+    /// slot. A running process is never evicted to make room — eviction
+    /// would orphan the pid (its tasks/tick loop keep the old `Arc<Process>`
+    /// alive), and a later reload would create a second instance racing it.
+    ///
+    /// Parked child processes of a running workflow simply wait for any free
+    /// slot like everyone else; there is no lock-step dependency, so a full
+    /// resident set delays them but never deadlocks.
+    #[instrument(skip(self, proc), fields(pid = %proc.id()))]
+    pub(crate) async fn admit(&self, proc: &Arc<Process>) -> Result<bool> {
+        // Serialized with restore passes under the same lock: the admission
+        // decision mutates the resident set across store I/O on the park
+        // path, and a concurrent restore pass must never observe a half-made
+        // decision (e.g. start a row whose parking write is still in flight).
+        let _guard = self.lock.lock().await;
+        if self.count() >= self.cap {
+            debug!(pid = %proc.id(), "process parked, resident set full");
+            self.store.upsert_proc(proc).await?;
+            return Ok(false);
+        }
+        self.procs
+            .write()
+            .insert(proc.id().to_string(), proc.clone());
+        Ok(true)
     }
 
     #[instrument(skip(self, rt))]
-    pub async fn restore(&self, rt: &Arc<Runtime>) -> Result<()> {
+    pub async fn start_parked(&self, rt: &Arc<Runtime>) -> Result<()> {
         // Terminal proc events of different processes trigger restores
         // concurrently (each completion evicts its process and calls back in
-        // here); serialize whole passes so two restores can never load — and
-        // auto-start — the same persisted process twice.
-        let _guard = self.restore_lock.lock().await;
+        // here); the pass is serialized with admission (`admit`) under the
+        // same lock so two passes can never load — and auto-start — the same
+        // persisted process twice (each `start` is guarded per `Process`
+        // instance, not per pid, so the duplicate would run the workflow
+        // twice), and no start can slip past a half-done pass.
+        let _guard = self.lock.lock().await;
         debug!("restore");
         let cap = self.cap();
         let count = self.count();
-        let mut check_point = cap / 2;
-        if check_point == 0 {
-            check_point = cap;
+        if count >= cap {
+            return Ok(());
         }
-        if count < check_point {
-            // skip procs already in the cache to avoid redundant deserialization
-            let cached: HashSet<String> = self.procs().iter().map(|p| p.id().to_string()).collect();
-            let cap = cap - count;
-            self.flush().await?;
-            for ref proc in self.store.load(cap, rt, &cached).await? {
-                if !self.procs.contains_key(proc.id()) {
-                    self.push_proc_pri(proc, false).await?;
-                    if proc.state().is_none() {
-                        proc.start().await?;
-                    }
-                }
+
+        // Refill free slots from parked rows (`None` state), oldest first —
+        // overflow from a full resident set, or never-started seeds. Crashed
+        // in-flight rows (`Ready`/`Running`/`Pending`) are the job of
+        // [`Self::resume`], the boot pass that also re-dispatches their
+        // tasks; this restore only ever runs against a live engine, where
+        // non-`None` rows belong to resident processes (reloading one would
+        // create a second instance racing it).
+        let cached: HashSet<String> = self.procs().iter().map(|p| p.id().to_string()).collect();
+        let free = cap - count;
+        for proc in self.store.load_parked(free, rt, &cached).await? {
+            if !self.procs.read().contains_key(proc.id()) {
+                self.push_proc_pri(&proc, false).await?;
+                proc.start().await?;
             }
         }
         Ok(())
+    }
+
+    /// Boot-time resume: load processes that were in flight when the engine
+    /// crashed (durable `Ready`/`Running`/`Pending` rows) into the resident
+    /// set — oldest first, up to `cap`, and ahead of any parked `None` rows —
+    /// and return them so [`Runtime::resume`] can re-dispatch their tasks.
+    /// Each returned process becomes THE single instance for its pid; a
+    /// reloaded in-flight process is re-driven to its next durable
+    /// checkpoint by the caller (re-executing a task whose `run` crashed
+    /// mid-way is at-least-once, see `Runtime::resume`).
+    ///
+    /// Rows beyond the cap are NOT stranded: their pids are queued in
+    /// [`Self::pending_resume`] and [`Self::resume_from_queue`] loads them
+    /// when a terminal event frees a slot — [`Self::start_parked`] only refills
+    /// parked (`None`) rows, so without the queue an overflowed in-flight
+    /// process would wait forever.
+    #[instrument(skip(self, rt))]
+    pub(crate) async fn resume(&self, rt: &Arc<Runtime>) -> Result<Vec<Arc<Process>>> {
+        let _guard = self.lock.lock().await;
+        debug!("resume");
+        let cap = self.cap();
+        let count = self.count();
+        let mut resident = Vec::new();
+        let cached: HashSet<String> = self.procs().iter().map(|p| p.id().to_string()).collect();
+        if count < cap {
+            let free = cap - count;
+            let procs = self.store.load_resumable(free, rt, &cached).await?;
+            resident.reserve(procs.len());
+            for proc in procs {
+                if !self.procs.read().contains_key(proc.id()) {
+                    self.procs
+                        .write()
+                        .insert(proc.id().to_string(), proc.clone());
+                    resident.push(proc);
+                }
+            }
+            // queue every remaining non-resident in-flight row (rows at or
+            // past the cap window, plus any that were skipped above because
+            // the resident set was already full) so the terminal-event refill
+            // can load them into later-free slots
+            if cached.len() + resident.len() < self.store.count_resumable().await? {
+                self.enqueue_resume_overflow().await?;
+            }
+        } else if self.store.count_resumable().await? > cached.len() {
+            // resident set already at cap (the outbox replay cached its own
+            // processes before this ran) — anything else in flight waits
+            self.enqueue_resume_overflow().await?;
+        }
+        if !resident.is_empty() {
+            debug!(loaded = resident.len(), "in-flight processes loaded");
+        }
+        Ok(resident)
+    }
+
+    /// Queue the pids of every durable in-flight row that is not resident —
+    /// the boot-resume overflow. `resume_from_queue` drains the queue into
+    /// free slots; popping validates the row again (state, residency), so a
+    /// pid resumed or removed meanwhile is skipped safely.
+    async fn enqueue_resume_overflow(&self) -> Result<()> {
+        let resident: HashSet<String> = self.procs().iter().map(|p| p.id().to_string()).collect();
+        let query = Query::new()
+            .filter(
+                Filter::or()
+                    .expr(Expr::eq("state", TaskState::Ready.to_string()))
+                    .expr(Expr::eq("state", TaskState::Running.to_string()))
+                    .expr(Expr::eq("state", TaskState::Pending.to_string())),
+            )
+            .order("timestamp", Sort::Asc);
+        let page = self.store.procs().query(&query).await?;
+        let mut queued = 0usize;
+        {
+            let mut q = self.pending_resume.write();
+            for row in page.rows {
+                if !resident.contains(&row.id) {
+                    q.push_back(row.id.clone());
+                    queued += 1;
+                }
+            }
+        }
+        if queued > 0 {
+            warn!(
+                queued,
+                "in-flight processes exceed the resident cap — queued to resume as slots free"
+            );
+        }
+        Ok(())
+    }
+
+    /// Drain the boot-resume overflow queue into free resident slots, oldest
+    /// first. Called by the terminal-event restore ([`Runtime::restore`]) — the
+    /// durable rows of queued processes are untouched by [`Self::start_parked`]
+    /// (non-`None`), so this is the only path that brings them back. Returns
+    /// the newly resident processes for the caller to re-dispatch.
+    #[instrument(skip(self, rt))]
+    pub(crate) async fn resume_from_queue(&self, rt: &Arc<Runtime>) -> Result<Vec<Arc<Process>>> {
+        let _guard = self.lock.lock().await;
+        let mut resident = Vec::new();
+        loop {
+            let pid = match self.pending_resume.write().pop_front() {
+                Some(pid) => pid,
+                None => break,
+            };
+            if self.count() >= self.cap {
+                self.pending_resume.write().push_front(pid);
+                break;
+            }
+            if self.procs.read().contains_key(&pid) {
+                continue;
+            }
+            let state = match self.store.procs().find(&pid).await {
+                Ok(row) => TaskState::from(row.state.as_str()),
+                Err(_) => continue, // removed while queued
+            };
+            if !matches!(
+                state,
+                TaskState::Ready | TaskState::Running | TaskState::Pending
+            ) {
+                continue; // finished or parked while queued
+            }
+            if let Some(proc) = self.store.load_proc(&pid, rt).await? {
+                self.procs
+                    .write()
+                    .insert(proc.id().to_string(), proc.clone());
+                debug!(pid = %pid, "queued in-flight process resumed");
+                resident.push(proc);
+            }
+        }
+        Ok(resident)
     }
 
     #[instrument(skip(self, task), fields(pid = %task.pid, tid = %task.id))]
@@ -173,7 +363,7 @@ impl Cache {
     }
 
     fn get_proc(&self, pid: &str) -> Option<Arc<Process>> {
-        self.procs.get(pid)
+        self.procs.read().get(pid).cloned()
     }
 
     pub(super) async fn push_proc_pri(&self, proc: &Arc<Process>, save: bool) -> Result<()> {
@@ -181,7 +371,9 @@ impl Cache {
         if save {
             self.store.upsert_proc(proc).await?;
         }
-        self.procs.insert(proc.id().to_string(), proc.clone());
+        self.procs
+            .write()
+            .insert(proc.id().to_string(), proc.clone());
 
         Ok(())
     }
@@ -200,7 +392,9 @@ impl Cache {
     ) -> Result<()> {
         debug!("start process pid={}", proc.id());
         self.store.upsert_proc_with_task(proc, root).await?;
-        self.procs.insert(proc.id().to_string(), proc.clone());
+        self.procs
+            .write()
+            .insert(proc.id().to_string(), proc.clone());
         if let Some(task) = root {
             self.push_task_mem(task)?;
         }
@@ -312,7 +506,7 @@ impl Cache {
 
     fn push_task_mem(&self, task: &Arc<Task>) -> Result<()> {
         let p = task.proc();
-        if let Some(proc) = self.procs.get(&task.pid) {
+        if let Some(proc) = self.procs.read().get(&task.pid).cloned() {
             proc.set_pure_state(p.state());
             proc.set_end_time(p.end_time());
             proc.push_task(task.clone())?;
