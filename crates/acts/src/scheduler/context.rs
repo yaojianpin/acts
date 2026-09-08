@@ -1,7 +1,8 @@
 use super::{ActTask, Runtime};
+use crate::snapshot::{SnapshotPolicy, SnapshotStore, join_scope, resolve_scope_params};
 use crate::{
-    Act, ActError, ConfigResolver, Executor, Message, MessageState, MissingParamAction, NodeKind,
-    Result, TaskState, Vars,
+    Act, ActError, Executor, Message, MessageState, MissingParamAction, NodeKind, Result,
+    TaskState, Vars,
     event::Action,
     scheduler::{
         Node, Process, Task,
@@ -109,43 +110,48 @@ impl Context {
     }
 
     pub async fn resolve_sealed(&self) -> Result<()> {
-        let resolvers: Vec<(String, Arc<dyn ConfigResolver>)> = {
-            let guard = self.runtime.resolvers.read();
-            guard
-                .iter()
-                .map(|(name, resolver)| (name.clone(), resolver.clone()))
-                .collect()
-        };
-        if resolvers.is_empty() {
-            return Ok(());
-        }
-        let task = self.task();
-        for (name, resolver) in resolvers {
-            // check required params via task.find() (walks parent chain)
-            let required = resolver.required_params();
-            let mut missing = vec![];
-            let mut ctx = Vars::new();
-            // collect available params
-            for p in &required {
-                if let Some(v) = task.find::<serde_json::Value>(p) {
-                    ctx.set(p, v);
-                } else {
-                    missing.push(p);
-                    break;
-                }
+        // Snapshot-backed sealed data — a local cache read only. Feeds
+        // (gRPC/NATS/Kafka adapters or embedders calling
+        // `engine.snapshot().upsert`) write out-of-band, so this never does
+        // network I/O. Missing params / absent data follow the target's
+        // `on_missing` action.
+        let snapshots: Vec<(String, Arc<SnapshotStore>)> = self.runtime.snapshot_registry().list();
+        for (name, store) in snapshots {
+            let task = self.task();
+            let options = &store.options;
+            // per-proc: freeze on the first lineage seal; every descendant
+            // inherits the pinned value (sealed() walks the parent chain,
+            // so a resumed/retried task also keeps its first value)
+            if options.policy == SnapshotPolicy::PerProc && task.sealed(&name).is_some() {
+                continue;
             }
-            if !missing.is_empty() {
-                match resolver.on_missing_params() {
+            // retry determinism: this task row already carries a value
+            if task.has_sealed_local(&name) {
+                continue;
+            }
+            let values = match resolve_scope_params(&task, options) {
+                Ok(values) => values,
+                Err(missing) => match options.on_missing {
                     MissingParamAction::Skip => continue,
                     MissingParamAction::Error => {
                         return Err(ActError::Runtime(format!(
-                            "resolver '{name}' missing required params: {missing:?}"
+                            "snapshot '{name}' missing required params: {missing:?}"
                         )));
                     }
-                }
+                },
+            };
+            let scope = join_scope(&values);
+            match store.get(&scope) {
+                Some(entry) => task.set_sealed(&name, entry.data.clone()),
+                None => match options.on_missing {
+                    MissingParamAction::Skip => continue,
+                    MissingParamAction::Error => {
+                        return Err(ActError::Runtime(format!(
+                            "snapshot '{name}' has no data for scope '{scope}'"
+                        )));
+                    }
+                },
             }
-            let result = resolver.resolve(&ctx).await?;
-            task.set_sealed(&name, result);
         }
         Ok(())
     }

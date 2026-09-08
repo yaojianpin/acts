@@ -1,5 +1,5 @@
+use crate::Config;
 use crate::event::EventAction;
-use crate::{Config, ConfigResolver};
 use crate::{
     Context, Engine, KvStore, MemoryStore, MessageState, ScanOperation, ScanOptions, Vars,
     Workflow, utils, utils::test::USES_IRQ,
@@ -455,29 +455,20 @@ async fn engine_get_custom_config() {
     assert_eq!(custom.my_option, None);
 }
 
-struct TestResolver {
-    data: Vars,
-}
-
-#[async_trait::async_trait]
-impl ConfigResolver for TestResolver {
-    async fn resolve(&self, _ctx: &Vars) -> crate::Result<Vars> {
-        Ok(self.data.clone())
-    }
-}
-
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn config_resolver_injects_sealed_data() {
-    let resolver = Arc::new(TestResolver {
-        data: Vars::new()
+async fn snapshot_injects_sealed_data() {
+    let engine = Engine::new().start().await.unwrap();
+    engine.add_snapshot("profile", crate::SnapshotOptions::per_proc());
+    engine.snapshot().upsert(
+        "profile",
+        "",
+        1,
+        Vars::new()
             .with("secrets", Vars::new().with("TOKEN", "abc123"))
             .with("vars", Vars::new().with("DB_HOST", "10.0.0.1"))
             .with("permissions", vec!["deploy", "read_logs"]),
-    });
-
-    let engine = Engine::new().start().await.unwrap();
-    engine.add_resolver("profile", resolver);
+    );
 
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -516,14 +507,16 @@ async fn config_resolver_injects_sealed_data() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sealed_data_js_dollar_profile_access() {
-    let resolver = Arc::new(TestResolver {
-        data: Vars::new()
+    let engine = Engine::new().start().await.unwrap();
+    engine.add_snapshot("profile", crate::SnapshotOptions::per_task());
+    engine.snapshot().upsert(
+        "profile",
+        "",
+        1,
+        Vars::new()
             .with("permissions", vec!["deploy", "read_logs"])
             .with("secrets", Vars::new().with("TOKEN", "sk-123")),
-    });
-
-    let engine = Engine::new().start().await.unwrap();
-    engine.add_resolver("profile", resolver);
+    );
 
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| {
@@ -569,22 +562,21 @@ async fn sealed_data_js_dollar_profile_access() {
 
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn config_resolver_skips_when_required_params_missing() {
-    struct StrictResolver;
-
-    #[async_trait::async_trait]
-    impl ConfigResolver for StrictResolver {
-        fn required_params(&self) -> Vec<String> {
-            vec!["unit".into(), "project".into()]
-        }
-
-        async fn resolve(&self, _ctx: &Vars) -> crate::Result<Vars> {
-            Ok(Vars::new().with("result", "should not be called"))
-        }
-    }
-
+async fn snapshot_skips_when_key_params_missing() {
     let engine = Engine::new().start().await.unwrap();
-    engine.add_resolver("profile", Arc::new(StrictResolver));
+    engine.add_snapshot(
+        "profile",
+        crate::SnapshotOptions {
+            key_params: vec!["unit".into(), "project".into()],
+            ..Default::default()
+        },
+    );
+    engine.snapshot().upsert(
+        "profile",
+        "u1/p1",
+        1,
+        Vars::new().with("result", "not reachable without params"),
+    );
 
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -602,7 +594,8 @@ async fn config_resolver_skips_when_required_params_missing() {
         }
     });
 
-    // start WITHOUT required params
+    // start WITHOUT required params: the scope key cannot be derived, so
+    // nothing is sealed (Skip)
     let proc = engine
         .runtime()
         .start(&workflow, Vars::new())
@@ -612,19 +605,17 @@ async fn config_resolver_skips_when_required_params_missing() {
     sig.recv().await;
 
     let root = proc.root().unwrap();
-    // sealed_data should be empty since required params were missing
     assert!(!root.has_sealed());
 }
 
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn sealed_data_inherits_from_parent() {
-    let resolver = Arc::new(TestResolver {
-        data: Vars::new().with("scope", "workflow"),
-    });
-
+async fn snapshot_sealed_data_inherits_from_parent() {
     let engine = Engine::new().start().await.unwrap();
-    engine.add_resolver("profile", resolver);
+    engine.add_snapshot("profile", crate::SnapshotOptions::per_proc());
+    engine
+        .snapshot()
+        .upsert("profile", "", 1, Vars::new().with("scope", "workflow"));
 
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -816,4 +807,313 @@ fn engine_builder_set_store_duplicate() {
     let _ = Engine::builder()
         .set_store(Arc::new(MemoryStore::new()))
         .set_store(Arc::new(MemoryStore::new()));
+}
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn snapshot_per_proc_pins_value_until_process_ends() {
+    let engine = Engine::new().start().await.unwrap();
+    engine.add_snapshot("profile", crate::SnapshotOptions::per_proc());
+
+    // external system feeds v1 before the process starts
+    engine
+        .snapshot()
+        .upsert("profile", "", 1, Vars::new().with("val", 1));
+
+    let workflow = Workflow::new()
+        .with_id("snap_proc_pin")
+        .with_step(|step| {
+            step.with_id("s1")
+                .with_uses(USES_IRQ, Vars::new().with("key", "stop1"))
+        })
+        .with_step(|step| {
+            step.with_id("s2")
+                .with_uses(USES_IRQ, Vars::new().with("key", "stop2"))
+        });
+
+    let sig = engine.signal(String::new());
+    let s = sig.clone();
+    let eng = engine.clone();
+    let executor = engine.executor();
+    engine.channel().on_message(move |e| {
+        let s = s.clone();
+        let eng = eng.clone();
+        let executor = executor.clone();
+        async move {
+            if !e.is_irq() || !e.is_state(MessageState::Created) {
+                return;
+            }
+            let key = e.params().unwrap().get::<String>("key").unwrap_or_default();
+            if key == "stop1" {
+                // external system refreshes the snapshot mid-run
+                eng.snapshot()
+                    .upsert("profile", "", 2, Vars::new().with("val", 2));
+                executor
+                    .act()
+                    .complete(&e.pid, &e.tid, Vars::new())
+                    .await
+                    .unwrap();
+            } else if key == "stop2" {
+                executor
+                    .act()
+                    .complete(&e.pid, &e.tid, Vars::new())
+                    .await
+                    .unwrap();
+                s.update(|data| *data = "stop2".to_string());
+                s.close();
+            }
+        }
+    });
+
+    let pid = utils::longid();
+    engine
+        .runtime()
+        .start(&workflow, Vars::new().with("pid", pid.clone()))
+        .await
+        .unwrap();
+
+    sig.recv().await;
+
+    let proc = engine.runtime().proc(&pid).await.unwrap().unwrap();
+    let root = proc.root().unwrap();
+    let step2 = proc.task_by_params("key", "stop2").last().cloned().unwrap();
+
+    // root sealed the value once at process start
+    assert_eq!(
+        root.sealed("profile").unwrap().get::<i32>("val").unwrap(),
+        1
+    );
+    // the descendant did NOT re-resolve after the mid-run refresh — it
+    // inherited the pinned value from its lineage
+    assert!(!step2.has_sealed_local("profile"));
+    assert_eq!(
+        step2.sealed("profile").unwrap().get::<i32>("val").unwrap(),
+        1
+    );
+    // the cache itself moved on; the next process will see rev 2
+    assert_eq!(engine.snapshot().read("profile", "").unwrap().rev, 2);
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn snapshot_per_task_reads_latest_value() {
+    let engine = Engine::new().start().await.unwrap();
+    engine.add_snapshot("profile", crate::SnapshotOptions::per_task());
+
+    engine
+        .snapshot()
+        .upsert("profile", "", 1, Vars::new().with("val", 1));
+
+    let workflow = Workflow::new()
+        .with_id("snap_task_latest")
+        .with_step(|step| {
+            step.with_id("s1")
+                .with_uses(USES_IRQ, Vars::new().with("key", "stop1"))
+        })
+        .with_step(|step| {
+            step.with_id("s2")
+                .with_uses(USES_IRQ, Vars::new().with("key", "stop2"))
+        });
+
+    let sig = engine.signal(String::new());
+    let s = sig.clone();
+    let eng = engine.clone();
+    let executor = engine.executor();
+    engine.channel().on_message(move |e| {
+        let s = s.clone();
+        let eng = eng.clone();
+        let executor = executor.clone();
+        async move {
+            if !e.is_irq() || !e.is_state(MessageState::Created) {
+                return;
+            }
+            let key = e.params().unwrap().get::<String>("key").unwrap_or_default();
+            if key == "stop1" {
+                // external system refreshes the snapshot mid-run
+                eng.snapshot()
+                    .upsert("profile", "", 2, Vars::new().with("val", 2));
+                executor
+                    .act()
+                    .complete(&e.pid, &e.tid, Vars::new())
+                    .await
+                    .unwrap();
+            } else if key == "stop2" {
+                executor
+                    .act()
+                    .complete(&e.pid, &e.tid, Vars::new())
+                    .await
+                    .unwrap();
+                s.update(|data| *data = "stop2".to_string());
+                s.close();
+            }
+        }
+    });
+
+    let pid = utils::longid();
+    engine
+        .runtime()
+        .start(&workflow, Vars::new().with("pid", pid.clone()))
+        .await
+        .unwrap();
+
+    sig.recv().await;
+
+    let proc = engine.runtime().proc(&pid).await.unwrap().unwrap();
+    let root = proc.root().unwrap();
+    let step2 = proc.task_by_params("key", "stop2").last().cloned().unwrap();
+
+    // every new task re-reads the cache: step2 sees the refreshed v2
+    assert_eq!(
+        root.sealed("profile").unwrap().get::<i32>("val").unwrap(),
+        1
+    );
+    assert!(step2.has_sealed_local("profile"));
+    assert_eq!(
+        step2.sealed("profile").unwrap().get::<i32>("val").unwrap(),
+        2
+    );
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn snapshot_scope_keyed_by_task_params() {
+    let engine = Engine::new().start().await.unwrap();
+    engine.add_snapshot(
+        "profile",
+        crate::SnapshotOptions {
+            key_params: vec!["unit".to_string()],
+            ..Default::default()
+        },
+    );
+
+    engine
+        .snapshot()
+        .upsert("profile", "u1", 1, Vars::new().with("val", "A"));
+    engine
+        .snapshot()
+        .upsert("profile", "u2", 1, Vars::new().with("val", "B"));
+
+    let workflow = Workflow::new()
+        .with_id("snap_scope")
+        .with_step(|step| {
+            step.with_id("s1")
+                .with_var("unit", "u1")
+                .with_uses(USES_IRQ, Vars::new().with("key", "stop1"))
+        })
+        .with_step(|step| {
+            step.with_id("s2")
+                .with_var("unit", "u2")
+                .with_uses(USES_IRQ, Vars::new().with("key", "stop2"))
+        });
+
+    let sig = engine.signal(String::new());
+    let s = sig.clone();
+    let executor = engine.executor();
+    engine.channel().on_message(move |e| {
+        let s = s.clone();
+        let executor = executor.clone();
+        async move {
+            if !e.is_irq() || !e.is_state(MessageState::Created) {
+                return;
+            }
+            let key = e.params().unwrap().get::<String>("key").unwrap_or_default();
+            if key == "stop1" {
+                executor
+                    .act()
+                    .complete(&e.pid, &e.tid, Vars::new())
+                    .await
+                    .unwrap();
+            } else if key == "stop2" {
+                executor
+                    .act()
+                    .complete(&e.pid, &e.tid, Vars::new())
+                    .await
+                    .unwrap();
+                s.update(|data| *data = "stop2".to_string());
+                s.close();
+            }
+        }
+    });
+
+    let pid = utils::longid();
+    engine
+        .runtime()
+        .start(&workflow, Vars::new().with("pid", pid.clone()))
+        .await
+        .unwrap();
+
+    sig.recv().await;
+
+    let proc = engine.runtime().proc(&pid).await.unwrap().unwrap();
+    let step1 = proc.task_by_params("key", "stop1").last().cloned().unwrap();
+    let step2 = proc.task_by_params("key", "stop2").last().cloned().unwrap();
+
+    // each task seals the snapshot of ITS scope (unit param)
+    assert_eq!(
+        step1
+            .sealed("profile")
+            .unwrap()
+            .get::<String>("val")
+            .unwrap(),
+        "A"
+    );
+    assert_eq!(
+        step2
+            .sealed("profile")
+            .unwrap()
+            .get::<String>("val")
+            .unwrap(),
+        "B"
+    );
+}
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn snapshot_per_proc_js_access_inherits_on_child() {
+    // per-proc seals once on the root lineage; a child task has no local
+    // sealed data, yet its JS environment must still expose $profile
+    let engine = Engine::new().start().await.unwrap();
+    engine.add_snapshot("profile", crate::SnapshotOptions::per_proc());
+    engine.snapshot().upsert(
+        "profile",
+        "",
+        1,
+        Vars::new()
+            .with("permissions", vec!["deploy", "read_logs"])
+            .with("secrets", Vars::new().with("TOKEN", "sk-123")),
+    );
+
+    let env = engine.runtime().env().clone();
+    let workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+    });
+
+    let sig = engine.signal(());
+    let s1 = sig.clone();
+    engine.channel().on_message(move |e| {
+        let s1 = s1.clone();
+        async move {
+            if e.is_irq() && e.is_state(MessageState::Created) {
+                s1.close();
+            }
+        }
+    });
+
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new().with("unit", "u1"))
+        .await
+        .unwrap();
+
+    sig.recv().await;
+
+    let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
+    // the child itself must not carry sealed data — it inherits from root
+    assert!(!task.has_sealed_local("profile"));
+    let context = task.create_context();
+    Context::scope(context, || {
+        let result = env.eval::<Vec<String>>("$profile.permissions").unwrap();
+        assert_eq!(result, vec!["deploy".to_string(), "read_logs".to_string()]);
+        let token = env.eval::<String>("$profile.secrets.TOKEN").unwrap();
+        assert_eq!(token, "sk-123");
+    });
 }

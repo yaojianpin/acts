@@ -12,16 +12,26 @@ impl SealedModule {
 
 impl ActModule for SealedModule {
     fn init(&self, ctx: &rquickjs::Ctx<'_>) -> Result<()> {
-        // Only inject $name globals when inside a task context
+        // Inject $name globals from the task's sealed chain — local sealed
+        // data overrides the parents'. Snapshot `PerProc` targets seal once
+        // per lineage and descendants inherit, so the executing task usually
+        // has no sealed data of its own.
         if let Ok(cx) = Context::current() {
             let task = cx.task();
-            if task.has_sealed() {
-                let keys = task.sealed_keys();
-                for name in &keys {
-                    if let Some(data) = task.sealed(name) {
-                        ctx.globals()
-                            .set(format!("__sealed_{name}"), ActJsValue::new(data.into()))?;
+            let mut names: Vec<String> = Vec::new();
+            let mut cursor = Some(task.clone());
+            while let Some(t) = cursor {
+                for name in t.sealed_keys() {
+                    if !names.contains(&name) {
+                        names.push(name);
                     }
+                }
+                cursor = t.parent();
+            }
+            for name in &names {
+                if let Some(data) = task.sealed(name) {
+                    ctx.globals()
+                        .set(format!("__sealed_{name}"), ActJsValue::new(data.into()))?;
                 }
             }
         }

@@ -1,4 +1,3 @@
-use crate::{Result, Vars};
 use serde::Deserialize;
 use std::path::Path;
 use toml::Table;
@@ -96,31 +95,11 @@ impl Config {
     }
 }
 
-/// Resolves configuration for a named target at each task prepare step.
-///
-/// A Plugin registers one resolver per target name (e.g. "profile", "features")
-/// via `Engine::add_resolver()`. At each task's prepare, parameters are looked up
-/// via `task.find()` (parent-chain traversal). The result is stored in the task's
-/// sealed_data, which inherits from parent tasks.
-#[async_trait::async_trait]
-pub trait ConfigResolver: Send + Sync {
-    /// Required parameter names looked up via `task.find()` (walks parent chain).
-    fn required_params(&self) -> Vec<String> {
-        vec![]
-    }
-
-    /// Action when required params are missing.
-    fn on_missing_params(&self) -> MissingParamAction {
-        MissingParamAction::Skip
-    }
-
-    async fn resolve(&self, ctx: &Vars) -> Result<Vars>;
-}
-
-/// Controls behavior when `required_params()` are not found.
+/// Controls behavior when a snapshot target's key params or data are absent
+/// at a task's prepare step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MissingParamAction {
-    /// Silently skip this resolver for this task.
+    /// Silently skip sealing data for this task.
     Skip,
     /// Return an error listing the missing parameters.
     Error,

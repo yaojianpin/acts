@@ -1241,6 +1241,11 @@ impl Task {
         }
         None
     }
+    /// Whether this task's own row carries sealed data for `name` (does not
+    /// walk the parent chain) — used to keep the first-sealed value on retry.
+    pub(crate) fn has_sealed_local(&self, name: &str) -> bool {
+        self.sealed_data.read().get_value(name).is_some()
+    }
 
     pub fn has_sealed(&self) -> bool {
         !self.sealed_data.read().is_empty()

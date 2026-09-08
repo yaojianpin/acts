@@ -1,3 +1,4 @@
+use crate::snapshot::SnapshotOptions;
 use crate::{
     ActPackage, ActPlugin, Config, Engine, config::ConfigLog, package::ActPackageRegister,
     store::KvStore,
@@ -8,7 +9,7 @@ pub struct EngineBuilder {
     config: Config,
     plugins: Vec<Arc<dyn ActPlugin>>,
     packages: Vec<ActPackageRegister>,
-    resolvers: Vec<(String, Arc<dyn crate::config::ConfigResolver>)>,
+    snapshots: Vec<(String, SnapshotOptions)>,
     store: Option<Arc<dyn KvStore>>,
 }
 
@@ -35,7 +36,7 @@ impl EngineBuilder {
             config,
             plugins: Vec::new(),
             packages: Vec::new(),
-            resolvers: Vec::new(),
+            snapshots: Vec::new(),
             store: None,
         }
     }
@@ -169,49 +170,14 @@ impl EngineBuilder {
         self
     }
 
-    /// register config resolver
+    /// Pre-register a snapshot-backed sealed-data target before `start()`.
     ///
-    /// Resolvers are invoked at `proc.start()` on each task to inject
-    /// tenant-scoped configuration into sealed data, which inherits
-    /// from parent tasks.
-    ///
-    /// ## Example
-    ///
-    /// ```no_run
-    /// use acts::{ConfigResolver, Engine, Result, Vars};
-    /// use std::sync::Arc;
-    ///
-    /// struct MyResolver {
-    ///     data: Vars,
-    /// }
-    ///
-    /// #[async_trait::async_trait]
-    /// impl ConfigResolver for MyResolver {
-    ///     async fn resolve(&self, _ctx: &Vars) -> Result<Vars> {
-    ///         Ok(self.data.clone())
-    ///     }
-    /// }
-    ///
-    /// #[tokio::main]
-    /// async fn main() {
-    ///     let resolver = Arc::new(MyResolver {
-    ///         data: Vars::new()
-    ///             .with("secrets", Vars::new().with("TOKEN", "abc123")),
-    ///     });
-    ///     let engine = Engine::builder()
-    ///         .add_resolver("profile", resolver)
-    ///         .build()
-    ///         .start()
-    ///         .await
-    ///         .unwrap();
-    /// }
-    /// ```
-    pub fn add_resolver(
-        mut self,
-        name: &str,
-        resolver: Arc<dyn crate::config::ConfigResolver>,
-    ) -> Self {
-        self.resolvers.push((name.to_string(), resolver));
+    /// Data is fed later through [`Engine::snapshot`](crate::Engine::snapshot)
+    /// (message-channel adapters or the embedding application) and is sealed
+    /// into tasks at their prepare from the local cache — no network I/O on
+    /// the scheduling path.
+    pub fn add_snapshot(mut self, name: &str, options: SnapshotOptions) -> Self {
+        self.snapshots.push((name.to_string(), options));
         self
     }
 
@@ -257,7 +223,7 @@ impl EngineBuilder {
             .with_config(&self.config)
             .set_plugins(self.plugins.clone())
             .set_packages(self.packages.clone())
-            .set_resolvers(self.resolvers.clone())
+            .set_snapshots(self.snapshots.clone())
             .set_store(self.store)
     }
 }

@@ -1,8 +1,8 @@
 use super::{ActTask, Process, Sign, Task, TaskState};
+use crate::snapshot::{SnapshotOptions, SnapshotStore};
 use crate::{
     ActError, Action, Config, Error, Package, Result, ShareLock, Vars, Workflow,
     cache::Cache,
-    config::ConfigResolver,
     data,
     env::Enviroment,
     event::{Emitter, EventAction},
@@ -25,7 +25,51 @@ pub struct Runtime {
     emitter: Arc<Emitter>,
     package: Arc<Package>,
     shutdown: CancellationToken,
-    pub(crate) resolvers: ShareLock<HashMap<String, Arc<dyn ConfigResolver>>>,
+    pub(crate) snapshots: Arc<SnapshotRegistry>,
+}
+
+/// Registry of snapshot-backed sealed-data targets (see [`crate::snapshot`]).
+pub(crate) struct SnapshotRegistry {
+    stores: ShareLock<HashMap<String, Arc<SnapshotStore>>>,
+}
+
+impl SnapshotRegistry {
+    fn new() -> Self {
+        Self {
+            stores: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.stores.read().len()
+    }
+
+    /// Register (or replace) a snapshot target. Replacing a name drops its
+    /// cached values.
+    pub(crate) fn register(&self, name: &str, options: SnapshotOptions) -> Arc<SnapshotStore> {
+        let store = Arc::new(SnapshotStore::new(options));
+        self.stores.write().insert(name.to_string(), store.clone());
+        store
+    }
+
+    pub(crate) fn store(&self, name: &str) -> Option<Arc<SnapshotStore>> {
+        self.stores.read().get(name).cloned()
+    }
+
+    pub(crate) fn list(&self) -> Vec<(String, Arc<SnapshotStore>)> {
+        self.stores
+            .read()
+            .iter()
+            .map(|(name, store)| (name.clone(), store.clone()))
+            .collect()
+    }
+    /// Drop expired entries of every registered store (TTL sweep).
+    pub(crate) fn purge_expired(&self) -> usize {
+        self.list()
+            .into_iter()
+            .map(|(_, store)| store.purge_expired())
+            .sum()
+    }
 }
 
 impl std::fmt::Debug for Runtime {
@@ -38,14 +82,18 @@ impl std::fmt::Debug for Runtime {
             .field("emitter", &self.emitter)
             .field("package", &self.package)
             .field(
-                "resolvers",
-                &format_args!("<{} entries>", self.resolvers.read().len()),
+                "snapshots",
+                &format_args!("<{} entries>", self.snapshots.len()),
             )
             .finish()
     }
 }
 
 impl Runtime {
+    pub(crate) fn snapshot_registry(&self) -> Arc<SnapshotRegistry> {
+        self.snapshots.clone()
+    }
+
     pub fn new(config: &Config, store: Option<Arc<dyn KvStore>>) -> crate::Result<Arc<Self>> {
         let runtime = Self::create(config, store)?;
         Ok(runtime)
@@ -82,9 +130,16 @@ impl Runtime {
     pub fn config(&self) -> &Arc<Config> {
         &self.config
     }
-    pub fn register_resolver(&self, name: &str, resolver: Arc<dyn ConfigResolver>) {
-        let mut resolvers = self.resolvers.write();
-        resolvers.insert(name.to_string(), resolver);
+    pub(crate) fn register_snapshot(
+        &self,
+        name: &str,
+        options: SnapshotOptions,
+    ) -> Arc<SnapshotStore> {
+        self.snapshots.register(name, options)
+    }
+
+    pub(crate) fn snapshot_store(&self, name: &str) -> Option<Arc<SnapshotStore>> {
+        self.snapshots.store(name)
     }
 
     pub async fn close(&self) {
@@ -523,7 +578,7 @@ impl Runtime {
         let package = Arc::new(Package::new());
         let queue = Queue::new();
         let shutdown = CancellationToken::new();
-        let resolvers = Arc::new(RwLock::new(HashMap::new()));
+        let snapshots = Arc::new(SnapshotRegistry::new());
         let runtime = Arc::new(Runtime {
             config: Arc::new(config.clone()),
             emitter,
@@ -533,7 +588,7 @@ impl Runtime {
             cache,
             package,
             shutdown,
-            resolvers,
+            snapshots,
         });
 
         runtime.initialize()?;
@@ -799,6 +854,38 @@ impl Runtime {
                     if let Err(err) = rt.fire_schedule(&event).await {
                         error!(event = %event.id, error = %err, "schedule trigger failed");
                     }
+                }
+            }
+        });
+    }
+
+    /// Snapshot TTL sweep — periodically drops expired cache entries so
+    /// never-read, never-tombstoned scopes cannot grow the cache forever.
+    pub fn init_snapshot_timer(self: &Arc<Self>) {
+        #[cfg(not(test))]
+        let interval_ms = {
+            let secs = self.config().tick_interval_secs();
+            if secs > 0 {
+                (secs * 1000) as u64
+            } else {
+                15_000
+            }
+        };
+        #[cfg(test)]
+        let interval_ms = 800u64;
+
+        let registry = self.snapshot_registry();
+        let shutdown = self.shutdown.clone();
+        tokio::spawn(async move {
+            let mut intv = time::interval(Duration::from_millis(interval_ms));
+            loop {
+                tokio::select! {
+                    _ = shutdown.cancelled() => break,
+                    _ = intv.tick() => {}
+                }
+                let removed = registry.purge_expired();
+                if removed > 0 {
+                    debug!(removed, "expired snapshot entries purged");
                 }
             }
         });

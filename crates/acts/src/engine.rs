@@ -3,10 +3,11 @@ use serde::de::DeserializeOwned;
 use crate::{
     ActPackage, ActPlugin, ChannelOptions, Signal,
     builder::EngineBuilder,
-    config::{Config, ConfigResolver},
+    config::Config,
     export::{Channel, Executor, Extender},
     package::{self, ActPackageRegister},
     scheduler::Runtime,
+    snapshot::{SnapshotManager, SnapshotOptions},
     store::KvStore,
 };
 
@@ -45,7 +46,7 @@ pub struct Engine {
     config: Arc<Config>,
     plugins: Vec<Arc<dyn ActPlugin>>,
     packages: Vec<ActPackageRegister>,
-    resolvers: Vec<(String, Arc<dyn ConfigResolver>)>,
+    snapshots: Vec<(String, SnapshotOptions)>,
     store: Option<Arc<dyn KvStore>>,
     runtime: Option<Arc<Runtime>>,
 }
@@ -62,7 +63,7 @@ impl Engine {
             config: Arc::new(Config::default()),
             plugins: Vec::new(),
             packages: Vec::new(),
-            resolvers: Vec::new(),
+            snapshots: Vec::new(),
             store: None,
             runtime: None,
         }
@@ -129,22 +130,19 @@ impl Engine {
         self
     }
 
-    /// Register a named config resolver. Called by plugins in `on_init`,
-    /// or via [`EngineBuilder::add_resolver`] before starting the engine.
-    ///
-    /// Resolvers are invoked at `proc.start()` on each task to inject
-    /// tenant-scoped configuration into [`sealed_data`](crate::task::Task::sealed),
-    /// which inherits from parent tasks.
-    pub fn add_resolver(&self, name: &str, resolver: Arc<dyn ConfigResolver>) {
-        self.runtime().register_resolver(name, resolver);
+    /// Register (or replace) a snapshot-backed sealed-data target at runtime.
+    /// Prefer [`EngineBuilder::add_snapshot`] when the options are known
+    /// before `start()`.
+    pub fn add_snapshot(&self, name: &str, options: SnapshotOptions) {
+        self.runtime().register_snapshot(name, options);
     }
 
     pub fn set_packages(mut self, packages: Vec<ActPackageRegister>) -> Self {
         self.packages = packages;
         self
     }
-    pub fn set_resolvers(mut self, resolvers: Vec<(String, Arc<dyn ConfigResolver>)>) -> Self {
-        self.resolvers = resolvers;
+    pub fn set_snapshots(mut self, snapshots: Vec<(String, SnapshotOptions)>) -> Self {
+        self.snapshots = snapshots;
         self
     }
     pub fn set_store(mut self, store: Option<Arc<dyn KvStore>>) -> Self {
@@ -191,6 +189,14 @@ impl Engine {
     /// engine extender
     pub fn extender(&self) -> Arc<Extender> {
         Arc::new(Extender::new(&self.runtime()))
+    }
+    /// Snapshot manager — the write/read handle of snapshot-backed sealed
+    /// data. Feed adapters (gRPC/NATS/Kafka) call
+    /// [`upsert`](SnapshotManager::upsert)/[`remove`](SnapshotManager::remove)
+    /// when external data arrives; the scheduler reads the same store at each
+    /// task prepare without any network I/O.
+    pub fn snapshot(&self) -> Arc<SnapshotManager> {
+        Arc::new(SnapshotManager::new(&self.runtime()))
     }
 
     /// create engine builder
@@ -253,6 +259,8 @@ impl Engine {
 
             // schedule trigger timer
             rt.init_trigger_timer();
+            // snapshot TTL sweep
+            rt.init_snapshot_timer();
 
             Ok::<_, crate::ActError>(())
         })()
@@ -270,9 +278,9 @@ impl Engine {
     }
 
     async fn prepare(&self) -> crate::Result<()> {
-        // register resolvers
-        for (name, resolver) in self.resolvers.iter() {
-            self.runtime().register_resolver(name, resolver.clone());
+        // register snapshot targets (data feeds come from plugins/adapters)
+        for (name, options) in self.snapshots.iter() {
+            self.runtime().register_snapshot(name, options.clone());
         }
 
         // init plugins

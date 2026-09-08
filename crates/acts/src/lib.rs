@@ -15,6 +15,7 @@ mod package;
 mod plugin;
 mod scheduler;
 mod signal;
+mod snapshot;
 mod store;
 mod utils;
 
@@ -24,7 +25,7 @@ mod tests;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
-pub use config::{Config, ConfigResolver, MissingParamAction};
+pub use config::{Config, MissingParamAction};
 pub use engine::Engine;
 pub use env::ActUserVar;
 pub use error::{ActError, Error};
@@ -35,6 +36,7 @@ pub use package::{ActPackage, ActPackageCatalog, ActPackageDefinition, ActResour
 pub use plugin::ActPlugin;
 pub use scheduler::Context;
 pub use signal::Signal;
+pub use snapshot::{SnapshotEntry, SnapshotManager, SnapshotOptions, SnapshotPolicy};
 pub use store::*;
 pub type Result<T> = std::result::Result<T, ActError>;
 
