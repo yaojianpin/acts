@@ -68,7 +68,7 @@ waits for the reply on its NATS request inbox:
 }
 ```
 
-The plugin applies the action through the shared `acts-plugin-common`
+The plugin applies the action through the shared `acts::actions`
 dispatch table (the same one the gRPC plugin uses — `proc:start`,
 `model:deploy`, `act:*`, `msg:ack`, `evt:*`, …) and publishes the result back
 to the request's reply subject:

@@ -58,7 +58,7 @@ Plugin registration mirrors the config:
 ## Transports
 
 The three plugins share one action set (dispatch lives in
-`acts-plugin-common`): model/package/proc/task/message/act/event commands
+`acts::actions`): model/package/proc/task/message/act/event commands
 plus snapshot operations (`snap:upsert`, `snap:remove`, `snap:get`,
 `snap:ls`). Over HTTP the snapshot endpoints are `/api/snap/upsert`,
 `/api/snap/get`, `/api/snap/ls` and `/api/snap/remove`.

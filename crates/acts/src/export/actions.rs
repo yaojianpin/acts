@@ -1,19 +1,19 @@
-//! Shared message-action dispatch for acts transport plugins.
+//! Shared message-action dispatch for transport plugins and engine embedders.
 //!
 //! Every inbound channel message is a `name` plus a `Vars` payload. This
-//! crate maps the name to the matching engine operation (process/model/act/
-//! msg/evt/snapshot) and returns the JSON-serialized result — the same wire
-//! value the gRPC plugin used to produce. Transport plugins (`acts-plugin-grpc`,
-//! `acts-plugin-nats`) call [`apply`] and marshal the value or the [`Error`]
-//! into their own protocol, so every transport speaks one action set and the
-//! table is maintained in a single place.
+//! module maps the name to the matching engine operation (process/model/act/
+//! msg/evt/snapshot) and returns the JSON-serialized result. Transport plugins
+//! (`acts-plugin-grpc`, `acts-plugin-nats`, `acts-plugin-web`) call [`apply`]
+//! and marshal the value or the [`Error`] into their own protocol, so every
+//! transport speaks one action set and the table is maintained in a single
+//! place.
 //!
 //! Error kinds map to transport semantics:
 //! - [`Error::NotFound`] — unknown action name (`not found`)
 //! - [`Error::Invalid`] — malformed/missing payload fields (`invalid argument`)
 //! - [`Error::Internal`] — engine/store failure (`internal error`)
 
-use acts::{Engine, Vars, Workflow};
+use crate::{Engine, Vars, Workflow};
 use serde_json::{Value as JsonValue, json};
 use std::fmt;
 
@@ -43,7 +43,7 @@ impl std::error::Error for Error {}
 pub type Ret = std::result::Result<JsonValue, Error>;
 
 /// Serialize an already-resolved engine result into its wire value.
-fn value<T: serde::Serialize>(r: acts::Result<T>) -> Ret {
+fn value<T: serde::Serialize>(r: crate::Result<T>) -> Ret {
     serde_json::to_value(r.map_err(|e| Error::Internal(e.to_string()))?)
         .map_err(|e| Error::Internal(e.to_string()))
 }
@@ -110,8 +110,8 @@ pub async fn apply(engine: &Engine, name: &str, mut options: Vars) -> Ret {
         // model
         "model:ls" => {
             let query = options
-                .get::<acts::query::Query>("query")
-                .unwrap_or_else(|| acts::query::Query::new().limit(100));
+                .get::<crate::query::Query>("query")
+                .unwrap_or_else(|| crate::query::Query::new().limit(100));
             value(executor.model().list(&query).await)
         }
         "model:rm" => {
@@ -137,8 +137,8 @@ pub async fn apply(engine: &Engine, name: &str, mut options: Vars) -> Ret {
         // package
         "pack:ls" => {
             let query = options
-                .get::<acts::query::Query>("query")
-                .unwrap_or_else(|| acts::query::Query::new().limit(100));
+                .get::<crate::query::Query>("query")
+                .unwrap_or_else(|| crate::query::Query::new().limit(100));
             value(executor.pack().list(&query).await)
         }
         "pack:get" => {
@@ -162,10 +162,10 @@ pub async fn apply(engine: &Engine, name: &str, mut options: Vars) -> Ret {
                 .unwrap_or_default();
             let run_as = options.get::<String>("run_as").unwrap_or_default();
             let resources = options
-                .get::<Vec<acts::ActResource>>("resources")
+                .get::<Vec<crate::ActResource>>("resources")
                 .unwrap_or_default();
             let catalog = options.get::<String>("catalog").unwrap_or_default();
-            let pack = acts::data::Package {
+            let pack = crate::data::Package {
                 id,
                 name: pack_name,
                 desc,
@@ -205,8 +205,8 @@ pub async fn apply(engine: &Engine, name: &str, mut options: Vars) -> Ret {
         }
         "proc:ls" => {
             let query = options
-                .get::<acts::query::Query>("query")
-                .unwrap_or_else(|| acts::query::Query::new().limit(100));
+                .get::<crate::query::Query>("query")
+                .unwrap_or_else(|| crate::query::Query::new().limit(100));
             value(executor.proc().list(&query).await)
         }
         "proc:get" => {
@@ -216,8 +216,8 @@ pub async fn apply(engine: &Engine, name: &str, mut options: Vars) -> Ret {
         // task
         "task:ls" => {
             let query = options
-                .get::<acts::query::Query>("query")
-                .unwrap_or_else(|| acts::query::Query::new().limit(100));
+                .get::<crate::query::Query>("query")
+                .unwrap_or_else(|| crate::query::Query::new().limit(100));
             value(executor.task().list(&query).await)
         }
         "task:get" => {
@@ -228,8 +228,8 @@ pub async fn apply(engine: &Engine, name: &str, mut options: Vars) -> Ret {
         // msg
         "msg:ls" => {
             let query = options
-                .get::<acts::query::Query>("query")
-                .unwrap_or_else(|| acts::query::Query::new().limit(100));
+                .get::<crate::query::Query>("query")
+                .unwrap_or_else(|| crate::query::Query::new().limit(100));
             value(executor.msg().list(&query).await)
         }
         "msg:get" => {
@@ -266,8 +266,8 @@ pub async fn apply(engine: &Engine, name: &str, mut options: Vars) -> Ret {
         // event
         "evt:ls" => {
             let query = options
-                .get::<acts::query::Query>("query")
-                .unwrap_or_else(|| acts::query::Query::new().limit(100));
+                .get::<crate::query::Query>("query")
+                .unwrap_or_else(|| crate::query::Query::new().limit(100));
             value(executor.evt().list(&query).await)
         }
         "evt:get" => {
@@ -344,7 +344,7 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_upsert_remove_roundtrip() {
-        let engine = acts::Engine::new().start().await.unwrap();
+        let engine = crate::Engine::new().start().await.unwrap();
         let payload = Vars::new()
             .with("name", "profile")
             .with("scope", "u1")
@@ -370,7 +370,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_action_is_not_found() {
-        let engine = acts::Engine::new().start().await.unwrap();
+        let engine = crate::Engine::new().start().await.unwrap();
         let err = apply(&engine, "no:such", Vars::new()).await.unwrap_err();
         assert!(matches!(err, Error::NotFound(_)));
         assert_eq!(err.to_string(), "not found action 'no:such'");
@@ -378,7 +378,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_payload_is_invalid() {
-        let engine = acts::Engine::new().start().await.unwrap();
+        let engine = crate::Engine::new().start().await.unwrap();
         let err = apply(&engine, "snap:upsert", Vars::new())
             .await
             .unwrap_err();
@@ -388,7 +388,7 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_query_roundtrip() {
-        let engine = acts::Engine::new().start().await.unwrap();
+        let engine = crate::Engine::new().start().await.unwrap();
         for (scope, val) in [("u1", 1), ("u2", 2)] {
             let payload = Vars::new()
                 .with("name", "profile")
@@ -436,7 +436,7 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_query_unknown_target() {
-        let engine = acts::Engine::new().start().await.unwrap();
+        let engine = crate::Engine::new().start().await.unwrap();
         let ret = apply(&engine, "snap:ls", Vars::new().with("name", "none"))
             .await
             .unwrap();

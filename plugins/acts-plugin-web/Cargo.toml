@@ -13,7 +13,6 @@ acts = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
-acts-plugin-common = { workspace = true }
 axum = { workspace = true }
 async-trait = { workspace = true }
 validator = { workspace = true }

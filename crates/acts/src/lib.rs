@@ -3,6 +3,7 @@
 #![doc = include_str!("../../../README.md")]
 
 mod builder;
+
 mod cache;
 mod config;
 mod engine;
@@ -30,6 +31,7 @@ pub use engine::Engine;
 pub use env::ActUserVar;
 pub use error::{ActError, Error};
 pub use event::{Action, Event, Message, MessageState};
+pub use export::actions;
 pub use export::{Channel, ChannelOptions, Executor, Extender};
 pub use model::*;
 pub use package::{ActPackage, ActPackageCatalog, ActPackageDefinition, ActResource, ActRunAs};

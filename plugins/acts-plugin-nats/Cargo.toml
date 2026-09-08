@@ -10,7 +10,6 @@ edition.workspace = true
 
 [dependencies]
 acts = { workspace = true }
-acts-plugin-common = { workspace = true }
 async-nats = "0.50"
 async-trait = { workspace = true }
 futures-util = { workspace = true }

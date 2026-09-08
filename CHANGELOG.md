@@ -314,7 +314,7 @@
 - feat: snapshot TTL — `SnapshotOptions::ttl_secs` expires entries not refreshed in time; expired values are dropped on read and by a periodic purge timer, so dead scopes cannot grow the cache unboundedly (pairs with `remove()` tombstones); `SnapshotEntry::ts_ms` renamed `timestamp`
 - BREAKING: the callback-based `ConfigResolver` trait and `add_resolver`/`register_resolver` plumbing are removed — sealed data is snapshot-only; migrate by registering a target (`add_snapshot`) and feeding values through `Engine::snapshot().upsert()`
 - feat(acts-channel): client helpers `ActsChannel::upsert_snapshot` / `remove_snapshot` to feed and delete snapshot data over gRPC
-- feat(plugins): new private crate `acts-plugin-common` (`publish = false`) hosting the shared name→engine action dispatch; adds snapshot actions `snap:upsert` / `snap:remove` / `snap:get` (one scope, `null` when absent) / `snap:ls` (all scopes)
+- feat(acts): the transport-agnostic name→engine action dispatch now lives in the engine as `acts::actions` — `apply(&Engine, name, Vars)` maps channel-message action names (`act:`/`model:`/`pack:`/`proc:`/`task:`/`msg:`/`evt:`/`snap:`) to engine operations and returns the JSON wire value, with `NotFound`/`Invalid`/`Internal` error kinds mapping to transport semantics; adds snapshot actions `snap:upsert` / `snap:remove` / `snap:get` (one scope, `null` when absent) / `snap:ls` (all scopes)
 - feat(acts-plugin-grpc): `do_action` refactored onto the shared dispatch with unchanged wire/error semantics — snapshot feed and query are now available over gRPC; added an end-to-end test (client upsert/remove against a live plugin)
 - feat(acts-plugin-nats, new): exposes the same message surface as the gRPC plugin over NATS core — actions are request/reply on `<subject>.cmd` through the shared dispatch, engine events are forwarded per configured `[[nats.channels]]` (filters mirror `MessageOptions`), ack/redelivery keeps the gRPC semantics (`msg:ack`); adds README and live tests that skip when no broker is reachable (`ACTS_NATS_URL`)
 - feat(acts-plugin-web): `/api/snap/{upsert,remove,get,ls}` endpoints backed by the shared dispatch (missing scope answers `data: null`, same shape as the other transports)
@@ -324,3 +324,6 @@
 - fix: update `grpc`, `web` and `nats` config
 - fix: add snapshot-backed sealed-data config in acts.toml - default set with `profile` and `secrets` in `acts-server`
 - fix: adit error `RUSTSEC-2026-0258`
+
+# 0.23.1
+- fix: move `acts-plugin-common` to `acts` as `actions` and remove the origin common reference from all plugins 

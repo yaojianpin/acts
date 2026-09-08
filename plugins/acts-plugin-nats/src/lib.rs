@@ -5,7 +5,7 @@
 //!
 //! - **actions**: a remote publishes a JSON `{name, seq, data}` message to
 //!   the actions subject (default `acts.cmd`); the plugin applies the action
-//!   through the shared [`acts_plugin_common`] dispatch table — the same one
+//!   through the shared [`acts::actions`] dispatch table — the same one
 //!   the gRPC plugin uses — and publishes the result back to the request's
 //!   reply subject as `{name, ack, data, err}`. Snapshot updates work the
 //!   same way (`snap:upsert` / `snap:remove`).
@@ -180,7 +180,7 @@ async fn serve_actions(client: Client, subject: String, engine: Engine) {
                 cmd.ack
             );
             let options = cmd.data.clone().map(Vars::from).unwrap_or_default();
-            let result = acts_plugin_common::apply(&engine, &cmd.name, options).await;
+            let result = acts::actions::apply(&engine, &cmd.name, options).await;
             let reply = match result {
                 Ok(data) => WireReply {
                     name: cmd.name,

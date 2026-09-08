@@ -223,7 +223,7 @@ pub async fn pack_get(
     Ok(RespData::ok(ret))
 }
 /// Update or insert one snapshot value (feed write). Delegates to the shared
-/// dispatch table (`acts-plugin-common`), the same code the gRPC and NATS
+/// dispatch table (`acts::actions`), the same code the gRPC and NATS
 /// transports run, so all transports share one snapshot implementation.
 pub async fn snap_upsert(
     State(state): State<Arc<Engine>>,
@@ -235,7 +235,7 @@ pub async fn snap_upsert(
         .with("scope", scope)
         .with("rev", req.rev)
         .with("data", req.data);
-    let ret = acts_plugin_common::apply(&state, "snap:upsert", payload)
+    let ret = acts::actions::apply(&state, "snap:upsert", payload)
         .await
         .map_err(app_err)?;
     Ok(RespData::ok(ret))
@@ -250,7 +250,7 @@ pub async fn snap_remove(
     let payload = acts::Vars::new()
         .with("name", req.name.clone())
         .with("scope", scope);
-    let ret = acts_plugin_common::apply(&state, "snap:remove", payload)
+    let ret = acts::actions::apply(&state, "snap:remove", payload)
         .await
         .map_err(app_err)?;
     Ok(RespData::ok(ret))
@@ -266,7 +266,7 @@ pub async fn snap_get(
     let payload = acts::Vars::new()
         .with("name", req.name.clone())
         .with("scope", scope);
-    let ret = acts_plugin_common::apply(&state, "snap:get", payload)
+    let ret = acts::actions::apply(&state, "snap:get", payload)
         .await
         .map_err(app_err)?;
     Ok(RespData::ok(ret))
@@ -278,13 +278,13 @@ pub async fn snap_ls(
     Json(req): Json<SnapRef>,
 ) -> Result<impl IntoResponse, AppError> {
     let payload = acts::Vars::new().with("name", req.name.clone());
-    let ret = acts_plugin_common::apply(&state, "snap:ls", payload)
+    let ret = acts::actions::apply(&state, "snap:ls", payload)
         .await
         .map_err(app_err)?;
     Ok(RespData::ok(ret))
 }
 
-fn app_err(err: acts_plugin_common::Error) -> AppError {
+fn app_err(err: acts::actions::Error) -> AppError {
     AppError::from(err.to_string().as_str())
 }
 

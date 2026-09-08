@@ -73,15 +73,15 @@ impl GrpcServer {
         );
 
         let name = message.name.clone();
-        let value = match acts_plugin_common::apply(&self.engine, &name, options).await {
+        let value = match acts::actions::apply(&self.engine, &name, options).await {
             Ok(value) => value,
-            Err(acts_plugin_common::Error::NotFound(msg)) => {
+            Err(acts::actions::Error::NotFound(msg)) => {
                 return Err(Status::not_found(msg));
             }
-            Err(acts_plugin_common::Error::Invalid(msg)) => {
+            Err(acts::actions::Error::Invalid(msg)) => {
                 return Err(Status::invalid_argument(msg));
             }
-            Err(acts_plugin_common::Error::Internal(msg)) => {
+            Err(acts::actions::Error::Internal(msg)) => {
                 tracing::error!("do-action err={msg}");
                 return Err(Status::new(Code::Internal, msg));
             }
