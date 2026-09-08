@@ -409,6 +409,7 @@ acts:
   - [x] cache
   - [x] plugin register
   - [x] package register
+  - [x] snapshot register
   - [x] message channel
 
 - triggers
@@ -439,18 +440,21 @@ acts:
   - transform
     - [x] set
     - [x] code
+  - app
+    - [ ] form (plugins/form)
+    - [ ] ai (plugins/ai)
+    - [x] state (packages/acts-package-state)
+    - [x] http (packages/acts-package-http)
+    - [x] shell (packages/acts-package-shell) support nushell, bash and powershell
+    - [x] pubsub (packages/acts-package-nats)
+    - [ ] database (plugins/database)
+    - [ ] mail (plugins/mail)
 
 - [x] doc (doc/)
+
 - plugins
   - [x] grpc (plugins/acts-plugin-grpc)
   - [x] web (plugins/acts-plugin-web)
-- packages
-  - [ ] form (plugins/form)
-  - [ ] ai (plugins/ai)
-  - [x] state (packages/acts-package-state)
-  - [x] http (packages/acts-package-http)
-  - [x] shell (packages/acts-package-shell) support nushell, bash and powershell
-  - [x] pubsub (packages/acts-package-nats)
-  - [ ] observability (plugins/obs)
-  - [ ] database (plugins/database)
-  - [ ] mail (plugins/mail)
+  - [x] nats (plugins/acts-plugin-nats)
+  - [ ] obs (plugins/acts-plugin-obs)
+
