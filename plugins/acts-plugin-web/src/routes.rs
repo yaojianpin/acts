@@ -116,6 +116,27 @@ pub struct PackageParams {
 pub struct PackageIdRequest {
     pub id: String,
 }
+#[derive(Debug, Deserialize)]
+pub struct SnapUpsert {
+    /// snapshot target name, e.g. profile
+    pub name: String,
+    /// scope key of the snapshot
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// monotonic revision of the value
+    pub rev: u64,
+    /// snapshot data object
+    pub data: acts::Vars,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SnapRef {
+    /// snapshot target name, e.g. profile
+    pub name: String,
+    /// scope key of the snapshot
+    #[serde(default)]
+    pub scope: Option<String>,
+}
 
 pub async fn pack_list(
     State(state): State<Arc<Engine>>,
@@ -200,6 +221,71 @@ pub async fn pack_get(
 ) -> Result<impl IntoResponse, AppError> {
     let ret = state.executor().pack().get(&package.id).await?;
     Ok(RespData::ok(ret))
+}
+/// Update or insert one snapshot value (feed write). Delegates to the shared
+/// dispatch table (`acts-plugin-common`), the same code the gRPC and NATS
+/// transports run, so all transports share one snapshot implementation.
+pub async fn snap_upsert(
+    State(state): State<Arc<Engine>>,
+    Json(req): Json<SnapUpsert>,
+) -> Result<impl IntoResponse, AppError> {
+    let scope = req.scope.clone().unwrap_or_default();
+    let payload = acts::Vars::new()
+        .with("name", req.name.clone())
+        .with("scope", scope)
+        .with("rev", req.rev)
+        .with("data", req.data);
+    let ret = acts_plugin_common::apply(&state, "snap:upsert", payload)
+        .await
+        .map_err(app_err)?;
+    Ok(RespData::ok(ret))
+}
+
+/// Remove one snapshot value (tombstone).
+pub async fn snap_remove(
+    State(state): State<Arc<Engine>>,
+    Json(req): Json<SnapRef>,
+) -> Result<impl IntoResponse, AppError> {
+    let scope = req.scope.clone().unwrap_or_default();
+    let payload = acts::Vars::new()
+        .with("name", req.name.clone())
+        .with("scope", scope);
+    let ret = acts_plugin_common::apply(&state, "snap:remove", payload)
+        .await
+        .map_err(app_err)?;
+    Ok(RespData::ok(ret))
+}
+
+/// Query one snapshot value by name and scope. A scope without a value
+/// answers `data: null` (the same wire shape the other transports return).
+pub async fn snap_get(
+    State(state): State<Arc<Engine>>,
+    Json(req): Json<SnapRef>,
+) -> Result<impl IntoResponse, AppError> {
+    let scope = req.scope.clone().unwrap_or_default();
+    let payload = acts::Vars::new()
+        .with("name", req.name.clone())
+        .with("scope", scope);
+    let ret = acts_plugin_common::apply(&state, "snap:get", payload)
+        .await
+        .map_err(app_err)?;
+    Ok(RespData::ok(ret))
+}
+
+/// Query every scope of one snapshot target.
+pub async fn snap_ls(
+    State(state): State<Arc<Engine>>,
+    Json(req): Json<SnapRef>,
+) -> Result<impl IntoResponse, AppError> {
+    let payload = acts::Vars::new().with("name", req.name.clone());
+    let ret = acts_plugin_common::apply(&state, "snap:ls", payload)
+        .await
+        .map_err(app_err)?;
+    Ok(RespData::ok(ret))
+}
+
+fn app_err(err: acts_plugin_common::Error) -> AppError {
+    AppError::from(err.to_string().as_str())
 }
 
 /// Fire a deployed trigger from an HTTP POST whose JSON body becomes the

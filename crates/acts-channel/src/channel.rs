@@ -84,6 +84,34 @@ impl ActsChannel {
 
         self.send("pack:publish", options).await
     }
+    /// Update or insert one snapshot value on the server (feed write). The
+    /// snapshot target must be registered on the server (`snap:upsert`
+    /// auto-registers it with default options); scope key and revision are
+    /// supplied by the caller.
+    pub async fn upsert_snapshot(
+        &mut self,
+        name: &str,
+        scope: &str,
+        rev: u64,
+        data: Vars,
+    ) -> Result<ActionResult<bool>, Status> {
+        let options = Vars::new()
+            .with("name", name)
+            .with("scope", scope)
+            .with("rev", rev)
+            .with("data", data);
+        self.send("snap:upsert", options).await
+    }
+
+    /// Remove one snapshot value on the server (tombstone).
+    pub async fn remove_snapshot(
+        &mut self,
+        name: &str,
+        scope: &str,
+    ) -> Result<ActionResult<bool>, Status> {
+        let options = Vars::new().with("name", name).with("scope", scope);
+        self.send("snap:remove", options).await
+    }
 
     pub async fn start(&mut self, id: &str, vars: Vars) -> Result<ActionResult<String>, Status> {
         let options = Vars::new().with("id", id).extend(&vars);

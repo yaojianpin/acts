@@ -54,7 +54,11 @@ impl ActPlugin for WebPlugin {
                     .route("/pack/catalogs", get(routes::pack_catalogs))
                     .route("/pack", post(routes::pack_get))
                     .route("/msg/sse", get(sse::sse))
-                    .route("/msg/ack", post(sse::ack)),
+                    .route("/msg/ack", post(sse::ack))
+                    .route("/snap/upsert", post(routes::snap_upsert))
+                    .route("/snap/remove", post(routes::snap_remove))
+                    .route("/snap/get", post(routes::snap_get))
+                    .route("/snap/ls", post(routes::snap_ls)),
             )
             .with_state(engine.clone());
 

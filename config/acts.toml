@@ -7,3 +7,6 @@ max_node_run_times = 1000
 [log]
 dir = "data"
 level = "INFO"
+
+[db]
+database_url = "./data"

@@ -63,12 +63,12 @@ curl -N "http://127.0.0.1:10082/api/msg/sse/my-client?type=step&state=created"
 ```yml
 name: web example
 id: web-example
+ver: 0.1.0
 steps:
   - name: simple step
-    acts:
-      - uses: acts.core.set
-        params:
-          message: "Hello from Web!"
+    uses: acts.core.set
+    params:
+      message: "Hello from Web!"
 ```
 
 See `examples/plugins/web/` for a complete runnable example.

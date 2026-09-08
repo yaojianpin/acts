@@ -2,9 +2,8 @@
 // service trait, so suppress the large-Result lint.
 #![allow(clippy::result_large_err)]
 
-use acts::{ActPlugin, ChannelOptions, Engine, Vars, Workflow};
+use acts::{ActPlugin, ChannelOptions, Engine, Vars};
 use acts_channel::{Message, MessageOptions, acts_service_server::*};
-use serde_json::Value;
 use tokio::sync::mpsc::{self, Sender};
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Code, Response, Status, transport::Server};
@@ -15,31 +14,6 @@ mod config;
 
 type MessageStream =
     std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<Message, Status>> + Send>>;
-
-macro_rules! wrap_result {
-    ($seq:expr, $name:expr, $input:expr) => {
-        match $input {
-            Ok(data) => {
-                let mut message = wrap_message($name, &data);
-                message.ack = Some($seq.to_string());
-                Ok(Response::new(message))
-            }
-            Err(err) => {
-                tracing::error!("wrap_result err= {err:?}");
-                Err(Status::new(Code::Internal, err.to_string()))
-            }
-        }
-    };
-}
-
-fn wrap_message<T: ?Sized + serde::Serialize>(name: &str, value: &T) -> Message {
-    Message {
-        name: name.to_string(),
-        seq: acts_channel::create_seq(),
-        ack: None,
-        data: Some(serde_json::to_vec(value).unwrap()),
-    }
-}
 
 #[derive(Clone)]
 struct MessageClient {
@@ -98,319 +72,31 @@ impl GrpcServer {
             message.ack
         );
 
-        let name = message.name.as_str();
-        let ack = message.seq.as_str();
-        let executor = self.engine.executor();
-        match name {
-            // act
-            "act:push" => {
-                let mut options = options;
-                let pid = options
-                    .pop::<String>("pid")
-                    .ok_or(Status::invalid_argument("pid is required"))?;
-                let tid = options
-                    .pop::<String>("tid")
-                    .ok_or(Status::invalid_argument("tid is required"))?;
-                wrap_result!(ack, name, executor.act().push(&pid, &tid, options).await)
+        let name = message.name.clone();
+        let value = match acts_plugin_common::apply(&self.engine, &name, options).await {
+            Ok(value) => value,
+            Err(acts_plugin_common::Error::NotFound(msg)) => {
+                return Err(Status::not_found(msg));
             }
-            "act:remove" => {
-                let mut options = options;
-                let pid = options
-                    .pop::<String>("pid")
-                    .ok_or(Status::invalid_argument("pid is required"))?;
-                let tid = options
-                    .pop::<String>("tid")
-                    .ok_or(Status::invalid_argument("tid is required"))?;
-                wrap_result!(ack, name, executor.act().remove(&pid, &tid, options).await)
+            Err(acts_plugin_common::Error::Invalid(msg)) => {
+                return Err(Status::invalid_argument(msg));
             }
-            "act:submit" => {
-                let mut options = options;
-                let pid = options
-                    .pop::<String>("pid")
-                    .ok_or(Status::invalid_argument("pid is required"))?;
-                let tid = options
-                    .pop::<String>("tid")
-                    .ok_or(Status::invalid_argument("tid is required"))?;
-                wrap_result!(ack, name, executor.act().submit(&pid, &tid, options).await)
+            Err(acts_plugin_common::Error::Internal(msg)) => {
+                tracing::error!("do-action err={msg}");
+                return Err(Status::new(Code::Internal, msg));
             }
-            "act:complete" => {
-                let mut options = options;
-                let pid = options
-                    .pop::<String>("pid")
-                    .ok_or(Status::invalid_argument("pid is required"))?;
-                let tid = options
-                    .pop::<String>("tid")
-                    .ok_or(Status::invalid_argument("tid is required"))?;
-                wrap_result!(
-                    ack,
-                    name,
-                    executor.act().complete(&pid, &tid, options).await
-                )
-            }
-            "act:abort" => {
-                let mut options = options;
-                let pid = options
-                    .pop::<String>("pid")
-                    .ok_or(Status::invalid_argument("pid is required"))?;
-                let tid = options
-                    .pop::<String>("tid")
-                    .ok_or(Status::invalid_argument("tid is required"))?;
-                wrap_result!(ack, name, executor.act().abort(&pid, &tid, options).await)
-            }
-            "act:cancel" => {
-                let mut options = options;
-                let pid = options
-                    .pop::<String>("pid")
-                    .ok_or(Status::invalid_argument("pid is required"))?;
-                let tid = options
-                    .pop::<String>("tid")
-                    .ok_or(Status::invalid_argument("tid is required"))?;
-                wrap_result!(ack, name, executor.act().cancel(&pid, &tid, options).await)
-            }
-            "act:back" => {
-                let mut options = options;
-                let pid = options
-                    .pop::<String>("pid")
-                    .ok_or(Status::invalid_argument("pid is required"))?;
-                let tid = options
-                    .pop::<String>("tid")
-                    .ok_or(Status::invalid_argument("tid is required"))?;
-                wrap_result!(ack, name, executor.act().back(&pid, &tid, options).await)
-            }
-            "act:skip" => {
-                let mut options = options;
-                let pid = options
-                    .pop::<String>("pid")
-                    .ok_or(Status::invalid_argument("pid is required"))?;
-                let tid = options
-                    .pop::<String>("tid")
-                    .ok_or(Status::invalid_argument("tid is required"))?;
-                wrap_result!(ack, name, executor.act().skip(&pid, &tid, options).await)
-            }
-            "act:error" => {
-                let mut options = options;
-                let pid = options
-                    .pop::<String>("pid")
-                    .ok_or(Status::invalid_argument("pid is required"))?;
-                let tid = options
-                    .pop::<String>("tid")
-                    .ok_or(Status::invalid_argument("tid is required"))?;
-                wrap_result!(ack, name, executor.act().fail(&pid, &tid, options).await)
-            }
-            // model
-            "model:ls" => {
-                let query = options
-                    .get::<acts::query::Query>("query")
-                    .unwrap_or(acts::query::Query::new().limit(100));
-                wrap_result!(ack, name, executor.model().list(&query).await)
-            }
-            "model:rm" => {
-                let id = options
-                    .get::<String>("id")
-                    .ok_or(Status::invalid_argument("id is required"))?;
-                wrap_result!(ack, name, executor.model().rm(&id).await)
-            }
-            "model:get" => {
-                let id = options
-                    .get::<String>("id")
-                    .ok_or(Status::invalid_argument("id is required"))?;
-                let fmt = options.get::<String>("fmt").unwrap_or("text".to_string());
-                wrap_result!(ack, name, executor.model().get(&id, &fmt).await)
-            }
-            "model:deploy" => {
-                let model_text = options
-                    .get::<String>("model")
-                    .ok_or(Status::invalid_argument("model is required"))?;
-                let mut model = Workflow::from_yml(&model_text)
-                    .map_err(|e| Status::invalid_argument(e.to_string()))?;
-                if let Some(mid) = options.get::<String>("mid") {
-                    model.set_id(&mid);
-                }
-                wrap_result!(ack, name, executor.model().deploy(&model, None).await)
-            }
-            // package
-            "pack:ls" => {
-                let query = options
-                    .get::<acts::query::Query>("query")
-                    .unwrap_or(acts::query::Query::new().limit(100));
-                wrap_result!(ack, name, executor.pack().list(&query).await)
-            }
-            "pack:get" => {
-                let id = options
-                    .get::<String>("id")
-                    .ok_or(Status::invalid_argument("id is required"))?;
-                wrap_result!(ack, name, executor.pack().get(&id).await)
-            }
-            "pack:publish" => {
-                let id = options
-                    .get::<String>("id")
-                    .ok_or(Status::invalid_argument("package 'id' is required"))?;
-                let pack_name = options.get::<String>("name").unwrap_or_default();
-                let desc = options.get::<String>("desc").unwrap_or_default();
-                let icon = options.get::<String>("icon").unwrap_or_default();
-                let doc = options.get::<String>("doc").unwrap_or_default();
-                let version = options.get::<String>("version").unwrap_or_default();
-                let schema = options
-                    .get::<serde_json::Value>("schema")
-                    .unwrap_or_default();
-                let pack_options = options
-                    .get::<Option<serde_json::Value>>("options")
-                    .unwrap_or_default();
-                let run_as = options.get::<String>("run_as").unwrap_or_default();
-                let resources = options
-                    .get::<Vec<acts::ActResource>>("resources")
-                    .unwrap_or_default();
-                let catalog = options.get::<String>("catalog").unwrap_or_default();
-                let pack = acts::data::Package {
-                    id,
-                    name: pack_name,
-                    desc,
-                    icon,
-                    doc,
-                    version,
-                    schema: schema.to_string(),
-                    options: pack_options.map(|v| v.to_string()),
-                    run_as: std::str::FromStr::from_str(&run_as)
-                        .map_err(|_err| Status::invalid_argument("package 'run_as' is invalid"))?,
-                    resources: serde_json::to_string(&resources).map_err(|err| {
-                        Status::invalid_argument(format!("package 'resource' error: {}", err))
-                    })?,
-                    catalog: std::str::FromStr::from_str(&catalog)
-                        .map_err(|_err| Status::invalid_argument("package 'catalog' is invalid"))?,
-                    ..Default::default()
-                };
-                wrap_result!(ack, name, executor.pack().publish(&pack).await)
-            }
-            "pack:rm" => {
-                let id = options
-                    .get::<String>("id")
-                    .ok_or(Status::invalid_argument("id is required"))?;
-                wrap_result!(ack, name, executor.pack().rm(&id).await)
-            }
-            // proc
-            "proc:start" => {
-                let mut options = options;
-                let id = options
-                    .pop::<String>("id")
-                    .ok_or(Status::invalid_argument("id is required"))?;
-                wrap_result!(ack, name, executor.proc().start(&id, options).await)
-            }
-            "proc:start_from_model" => {
-                let mut options = options;
-                let fmt = options
-                    .pop::<String>("fmt")
-                    .ok_or(Status::invalid_argument("fmt is required"))?;
-                let model = options
-                    .pop::<String>("model")
-                    .ok_or(Status::invalid_argument("model is required"))?;
-                wrap_result!(
-                    ack,
-                    name,
-                    executor
-                        .proc()
-                        .start_from_model(&model, &fmt, options)
-                        .await
-                )
-            }
-            "proc:ls" => {
-                let query = options
-                    .get::<acts::query::Query>("query")
-                    .unwrap_or(acts::query::Query::new().limit(100));
-                wrap_result!(ack, name, executor.proc().list(&query).await)
-            }
-            "proc:get" => {
-                let pid = options
-                    .get::<String>("pid")
-                    .ok_or(Status::invalid_argument("pid is required"))?;
-                wrap_result!(ack, name, executor.proc().get(&pid).await)
-            }
-            // task
-            "task:ls" => {
-                let query = options
-                    .get::<acts::query::Query>("query")
-                    .unwrap_or(acts::query::Query::new().limit(100));
-                wrap_result!(ack, name, executor.task().list(&query).await)
-            }
-            "task:get" => {
-                let pid = options
-                    .get::<String>("pid")
-                    .ok_or(Status::invalid_argument("pid is required"))?;
-                let tid = options
-                    .get::<String>("tid")
-                    .ok_or(Status::invalid_argument("tid is required"))?;
-                wrap_result!(ack, name, executor.task().get(&pid, &tid).await)
-            }
-            // msg
-            "msg:ls" => {
-                let query = options
-                    .get::<acts::query::Query>("query")
-                    .unwrap_or(acts::query::Query::new().limit(100));
-                wrap_result!(ack, name, executor.msg().list(&query).await)
-            }
-            "msg:get" => {
-                let id = options
-                    .get::<String>("id")
-                    .ok_or(Status::invalid_argument("id is required"))?;
-                wrap_result!(ack, name, executor.msg().get(&id).await)
-            }
-            "msg:ack" => {
-                let id = options
-                    .get::<String>("id")
-                    .ok_or(Status::invalid_argument("id is required"))?;
-                wrap_result!(ack, name, executor.msg().ack(&id).await)
-            }
-            "msg:redo" => {
-                match options.get::<String>("id") {
-                    // re-send one error delivery to its channel
-                    Some(id) => wrap_result!(ack, name, executor.msg().redeliver(&id).await),
-                    // re-send every error delivery
-                    None => wrap_result!(ack, name, executor.msg().redo().await),
-                }
-            }
-            "msg:clear" => {
-                if let Some(id) = options.get::<String>("id") {
-                    // clear one error delivery
-                    wrap_result!(ack, name, executor.msg().clear_delivery(&id).await)
-                } else {
-                    let pid = options.get::<String>("pid");
-                    wrap_result!(ack, name, executor.msg().clear(pid).await)
-                }
-            }
-            "msg:rm" => {
-                let id = options
-                    .get::<String>("id")
-                    .ok_or(Status::invalid_argument("id is required"))?;
-                wrap_result!(ack, name, executor.msg().rm(&id).await)
-            }
-            "msg:unsub" => {
-                let client_id = options
-                    .get::<String>("client_id")
-                    .ok_or(Status::invalid_argument("client id is required"))?;
-                wrap_result!(ack, name, executor.msg().unsub(&client_id).await)
-            }
-            // event
-            "evt:ls" => {
-                let query = options
-                    .get::<acts::query::Query>("query")
-                    .unwrap_or(acts::query::Query::new().limit(100));
-                wrap_result!(ack, name, executor.evt().list(&query).await)
-            }
-            "evt:get" => {
-                let id = options
-                    .get::<String>("id")
-                    .ok_or(Status::invalid_argument("id is required"))?;
-                wrap_result!(ack, name, executor.evt().get(&id).await)
-            }
-            "evt:start" => {
-                let id = options
-                    .get::<String>("id")
-                    .ok_or(Status::invalid_argument("event id is required"))?;
-                let params = options.get::<Value>("params").unwrap_or_default();
-                let ret = executor.evt().start(&id, &params).await;
-                wrap_result!(ack, name, ret)
-            }
-            _ => Err(Status::not_found(format!("not found action '{name}'"))),
+        };
+
+        let mut response = Message {
+            name,
+            seq: acts_channel::create_seq(),
+            ack: None,
+            data: Some(serde_json::to_vec(&value).map_err(|e| Status::internal(e.to_string()))?),
+        };
+        if !message.seq.is_empty() {
+            response.ack = Some(message.seq.clone());
         }
+        Ok(Response::new(response))
     }
 }
 

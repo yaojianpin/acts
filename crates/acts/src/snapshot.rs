@@ -159,6 +159,15 @@ impl SnapshotStore {
         guard.retain(|_, e| now - e.timestamp <= ttl as i64 * 1000);
         before - guard.len()
     }
+
+    /// All entries of the store: `(scope, entry)` pairs.
+    pub(crate) fn list(&self) -> Vec<(String, SnapshotEntry)> {
+        self.entries
+            .read()
+            .iter()
+            .map(|(scope, entry)| (scope.clone(), entry.clone()))
+            .collect()
+    }
 }
 
 fn now_ms() -> i64 {
@@ -214,6 +223,13 @@ impl SnapshotManager {
     /// Current value of `name`/`scope`, if any.
     pub fn read(&self, name: &str, scope: &str) -> Option<SnapshotEntry> {
         self.runtime.snapshot_store(name)?.get(scope)
+    }
+    /// All current values of one snapshot target: `(scope, entry)` pairs.
+    pub fn list(&self, name: &str) -> Vec<(String, SnapshotEntry)> {
+        match self.runtime.snapshot_store(name) {
+            Some(store) => store.list(),
+            None => Vec::new(),
+        }
     }
 }
 

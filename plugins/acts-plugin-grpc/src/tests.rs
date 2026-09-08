@@ -1,4 +1,4 @@
-use crate::{GrpcConfig, GrpcPlugin, GrpcServer, wrap_message};
+use crate::{GrpcConfig, GrpcPlugin, GrpcServer};
 use acts::Engine;
 use serde_json::json;
 
@@ -23,27 +23,6 @@ fn test_grpc_config_deserialize_empty() {
 }
 
 #[test]
-fn test_wrap_message_basic() {
-    let msg = wrap_message("test.event", "hello");
-    assert_eq!(msg.name, "test.event");
-    assert!(!msg.seq.is_empty());
-    assert_eq!(msg.ack, None);
-    let data = msg.data.unwrap();
-    let text = String::from_utf8(data).unwrap();
-    assert_eq!(text, "\"hello\"");
-}
-
-#[test]
-fn test_wrap_message_json() {
-    let value = json!({"key": "val", "num": 42});
-    let msg = wrap_message("data.event", &value);
-    assert_eq!(msg.name, "data.event");
-    let data = msg.data.unwrap();
-    let back: serde_json::Value = serde_json::from_slice(&data).unwrap();
-    assert_eq!(back, value);
-}
-
-#[test]
 fn test_grpc_plugin_new() {
     let plugin = GrpcPlugin::new();
     let _ = plugin; // Ensure construction succeeds
@@ -53,6 +32,58 @@ fn test_grpc_plugin_new() {
 fn test_grpc_plugin_default() {
     let plugin = GrpcPlugin;
     let _ = plugin;
+}
+
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+fn engine_with_grpc(port: u16) -> Engine {
+    let table: toml::Table = toml::from_str(&format!("[grpc]\nport = {port}\n")).unwrap();
+    let cfg = acts::Config {
+        data: Default::default(),
+        table,
+    };
+    Engine::builder()
+        .set_config(&cfg)
+        .add_plugin(&GrpcPlugin::new())
+        .build()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn test_snapshot_upsert_remove_over_grpc() {
+    use acts_channel::{ActsChannel, Vars};
+
+    let port = free_port();
+    let engine = engine_with_grpc(port).start().await.unwrap();
+
+    // connect the client and wait until the server accepts
+    let url = format!("http://127.0.0.1:{port}");
+    let mut client = loop {
+        match ActsChannel::connect(&url).await {
+            Ok(c) => break c,
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+        }
+    };
+
+    let ok = client
+        .upsert_snapshot("profile", "u1", 5, Vars::new().with("val", "x"))
+        .await
+        .unwrap();
+    assert_eq!(ok.data, Some(true));
+    let entry = engine.snapshot().read("profile", "u1").unwrap();
+    assert_eq!(entry.rev, 5);
+    assert_eq!(entry.data.get::<String>("val").unwrap(), "x");
+
+    let ok = client.remove_snapshot("profile", "u1").await.unwrap();
+    assert_eq!(ok.data, Some(true));
+    assert!(engine.snapshot().read("profile", "u1").is_none());
+
+    engine.close().await;
 }
 
 #[test]
