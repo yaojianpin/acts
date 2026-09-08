@@ -41,7 +41,7 @@ tokio-stream = "0.1.12"
 acts = { path = "./crates/acts", version = "0.23.0" }
 acts-channel = { path = "./crates/acts-channel", version = "0.23.0" }
 acts-store = { path = "./crates/acts-store", version = "0.23.0" }
-
+acts-plugin-common = { path = "./plugins/acts-plugin-common", version = "0.23.0" }
 
 [profile.release]
 codegen-units = 1

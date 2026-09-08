@@ -10,7 +10,7 @@ edition.workspace = true
 
 [dependencies]
 acts = { workspace = true }
-acts-plugin-common = { path = "../acts-plugin-common", version = "0.22.0" }
+acts-plugin-common = { workspace = true }
 async-nats = "0.50"
 async-trait = { workspace = true }
 futures-util = { workspace = true }

@@ -11,7 +11,7 @@ edition.workspace = true
 [dependencies]
 acts = { workspace = true }
 acts-channel = { workspace = true }
-acts-plugin-common = { path = "../acts-plugin-common", version = "0.22.0" }
+acts-plugin-common = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
