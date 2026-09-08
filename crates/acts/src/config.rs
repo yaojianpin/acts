@@ -97,9 +97,11 @@ impl Config {
 
 /// Controls behavior when a snapshot target's key params or data are absent
 /// at a task's prepare step.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum MissingParamAction {
     /// Silently skip sealing data for this task.
+    #[default]
     Skip,
     /// Return an error listing the missing parameters.
     Error,

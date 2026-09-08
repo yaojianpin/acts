@@ -39,7 +39,8 @@ use std::{
 };
 
 /// When a snapshot value is frozen into the task's sealed data.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SnapshotPolicy {
     /// Seal once per task lineage (first resolver run); descendants inherit
     /// the pinned value — frozen for the whole process.
@@ -53,10 +54,10 @@ pub enum SnapshotPolicy {
 #[derive(Debug, Clone)]
 pub struct SnapshotOptions {
     pub policy: SnapshotPolicy,
-    /// Task parameters (found via parent-chain traversal) joined with `/`
-    /// into the snapshot scope key. Empty: one global scope per target.
-    pub key_params: Vec<String>,
-    /// What happens when a key param or the snapshot data is absent.
+    /// Task param names whose values join with `/` into this target's scope
+    /// key. Empty: one global scope per target.
+    pub scope: Vec<String>,
+    /// What happens when a scope param or the snapshot data is absent.
     pub on_missing: MissingParamAction,
     /// Seconds an entry stays valid after its last refresh; `None` never
     /// expires. Expired entries are dropped on read and by the periodic
@@ -69,7 +70,7 @@ impl Default for SnapshotOptions {
     fn default() -> Self {
         Self {
             policy: SnapshotPolicy::PerProc,
-            key_params: Vec::new(),
+            scope: Vec::new(),
             on_missing: MissingParamAction::Skip,
             ttl_secs: None,
         }
@@ -260,15 +261,15 @@ pub(crate) fn join_scope(values: &[serde_json::Value]) -> String {
     scope
 }
 
-/// Validate that every key param of `options` resolves on the task chain,
+/// Validate that every scope param of `options` resolves on the task chain,
 /// returning the raw values in order, or the missing names.
 pub(crate) fn resolve_scope_params(
     task: &crate::scheduler::Task,
     options: &SnapshotOptions,
 ) -> std::result::Result<Vec<serde_json::Value>, Vec<String>> {
-    let mut values = Vec::with_capacity(options.key_params.len());
+    let mut values = Vec::with_capacity(options.scope.len());
     let mut missing = Vec::new();
-    for p in &options.key_params {
+    for p in &options.scope {
         match task.find::<serde_json::Value>(p) {
             Some(v) => values.push(v),
             None => missing.push(p.clone()),

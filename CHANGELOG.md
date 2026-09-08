@@ -322,3 +322,4 @@
 - feat(acts-server): engine construction extracted into a library (`build_engine` + `ServerPlugins`) shared by the binary and its tests; the NATS plugin is registered when the config has a `[nats]` section; adds README and a NATS wiring test
 - ci: the GitHub Actions test job runs a NATS service container and sets `ACTS_NATS_URL`, so the NATS live tests (plugin and acts-server wiring) run against a real broker — they auto-skip when no server is reachable
 - fix: update `grpc`, `web` and `nats` config
+- fix: add snapshot-backed sealed-data config in acts.toml - default set with `profile` and `secrets` in `acts-server`

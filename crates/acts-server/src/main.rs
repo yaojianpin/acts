@@ -1,5 +1,3 @@
-mod db_config;
-
 use acts::Config;
 use acts_store::SledStore;
 use std::{path::Path, sync::Arc};
@@ -9,7 +7,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::create(Path::new("config/acts.toml"));
     init_log(&config);
 
-    let db = config.get::<db_config::DbConfig>("db")?;
+    let db = config.get::<acts_server::DbConfig>("db")?;
     let store: Arc<dyn acts::KvStore> = Arc::new(SledStore::open(&db.database_url)?);
     let engine = Arc::new(
         acts_server::build_engine(&config, store, &acts_server::ServerPlugins::full())

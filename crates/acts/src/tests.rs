@@ -562,12 +562,12 @@ async fn sealed_data_js_dollar_profile_access() {
 
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn snapshot_skips_when_key_params_missing() {
+async fn snapshot_skips_when_scope_params_missing() {
     let engine = Engine::new().start().await.unwrap();
     engine.add_snapshot(
         "profile",
         crate::SnapshotOptions {
-            key_params: vec!["unit".into(), "project".into()],
+            scope: vec!["unit".into(), "project".into()],
             ..Default::default()
         },
     );
@@ -980,7 +980,7 @@ async fn snapshot_scope_keyed_by_task_params() {
     engine.add_snapshot(
         "profile",
         crate::SnapshotOptions {
-            key_params: vec!["unit".to_string()],
+            scope: vec!["unit".to_string()],
             ..Default::default()
         },
     );
