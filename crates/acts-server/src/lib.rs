@@ -32,10 +32,10 @@ impl ServerPlugins {
 /// reach a broker.
 pub fn build_engine(config: &Config, store: Arc<dyn KvStore>, plugins: &ServerPlugins) -> Engine {
     let mut builder = Engine::builder().set_config(config).set_store(store);
-    if plugins.grpc {
+    if plugins.grpc && config.has("grpc") {
         builder = builder.add_plugin(&acts_plugin_grpc::GrpcPlugin::new());
     }
-    if plugins.web {
+    if plugins.web && config.has("web") {
         builder = builder.add_plugin(&acts_plugin_web::WebPlugin::new());
     }
     builder = builder

@@ -10,3 +10,18 @@ level = "INFO"
 
 [db]
 database_url = "./data"
+
+# grpc service
+[grpc]
+port = 10080
+
+# web service
+[web]
+port = 10082
+
+# nats service
+[nats]
+url = "nats://localhost:4222"
+
+[[nats.channels]]
+id = "c1"
