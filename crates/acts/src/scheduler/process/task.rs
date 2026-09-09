@@ -22,7 +22,7 @@ use parking_lot::RwLock;
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tracing::{debug, error, instrument};
 
 #[derive(Clone)]
@@ -45,6 +45,12 @@ pub struct Task {
     /// last flush; set by every data mutation, cleared when the vars row is
     /// persisted (see `Cache::persist_task`)
     vars_dirty: Arc<AtomicBool>,
+
+    /// bumped by every data mutation that dirties the scope — lets the
+    /// persist path tell "no mutation happened while the vars row was being
+    /// written" apart from "a mutation raced the write and must not be
+    /// cleared", so a concurrent mutation can never be lost to a stale clear
+    vars_gen: Arc<AtomicU64>,
 
     /// task state
     state: ShareLock<TaskState>,
@@ -80,6 +86,7 @@ impl Task {
             data: Arc::new(RwLock::new(Vars::new())),
             sealed_data: Arc::new(RwLock::new(Vars::new())),
             vars_dirty: Arc::new(AtomicBool::new(false)),
+            vars_gen: Arc::new(AtomicU64::new(0)),
             state: Arc::new(RwLock::new(TaskState::None)),
             err: Arc::new(RwLock::new(None)),
             start_time: Arc::new(RwLock::new(0)),
@@ -1166,10 +1173,18 @@ impl Task {
         f(&data)
     }
 
+    /// Mark the scope's vars as diverged. The generation is bumped before the
+    /// dirty flag so a persist that is writing the row concurrently can never
+    /// clear this mutation away (see [`Self::clear_vars_dirty`]).
+    fn mark_vars_dirty(&self) {
+        self.vars_gen.fetch_add(1, Ordering::Release);
+        self.vars_dirty.store(true, Ordering::Release);
+    }
+
     pub fn set_data_with<F: Fn(&mut Vars)>(&self, f: F) {
         let mut data = self.data.write();
         f(&mut data);
-        self.vars_dirty.store(true, Ordering::Release);
+        self.mark_vars_dirty();
     }
 
     pub fn set_data(&self, vars: &Vars) {
@@ -1177,14 +1192,14 @@ impl Task {
         for (name, value) in vars.iter() {
             data.set(name, value);
         }
-        self.vars_dirty.store(true, Ordering::Release);
+        self.mark_vars_dirty();
     }
 
     pub fn update_data_if_exists<F: Fn(&mut Vars) -> bool>(&self, f: F) -> bool {
         let mut data = self.data.write();
         let updated = f(&mut data);
         if updated {
-            self.vars_dirty.store(true, Ordering::Release);
+            self.mark_vars_dirty();
         }
         updated
     }
@@ -1201,7 +1216,7 @@ impl Task {
     pub(crate) fn set_sealed(&self, name: &str, value: Vars) {
         let mut sealed = self.sealed_data.write();
         sealed.set(name, value);
-        self.vars_dirty.store(true, Ordering::Release);
+        self.mark_vars_dirty();
     }
 
     /// Restore-time write of a scope's persisted sealed vars.
@@ -1216,6 +1231,14 @@ impl Task {
     /// last flush.
     pub fn is_vars_dirty(&self) -> bool {
         self.vars_dirty.load(Ordering::Acquire)
+    }
+
+    /// Generation counter bumped by every vars mutation since the task was
+    /// built. The persist path reads it before serializing the row and clears
+    /// the dirty flag only when it is unchanged afterwards — a mutation that
+    /// raced the write keeps the scope dirty so its data is persisted next.
+    pub(crate) fn vars_gen(&self) -> u64 {
+        self.vars_gen.load(Ordering::Acquire)
     }
 
     /// Mark the scope's vars row as flushed. Called by the persist path right

@@ -524,8 +524,19 @@ impl Store {
         let mut scope = Some(task.clone());
         while let Some(t) = scope {
             if t.is_vars_dirty() {
+                // the vars row must capture every mutation that happened
+                // before the serialization; the generation read here is
+                // compared again after the durable write, and the dirty flag
+                // is cleared only when no mutation raced it — a mutation that
+                // landed while the row was being written keeps the scope
+                // dirty so the next persist persists it (clearing it away
+                // would durably lose the mutation, e.g. a `NEXT_COMPLETE`
+                // marker that recovery relies on)
+                let generation = t.vars_gen();
                 self.upsert_task_vars(&t).await?;
-                t.clear_vars_dirty();
+                if t.vars_gen() == generation {
+                    t.clear_vars_dirty();
+                }
             }
             scope = t.parent();
         }
