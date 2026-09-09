@@ -74,6 +74,36 @@ impl Config {
         self.table.contains_key(name)
     }
 
+    /// Read another acts.toml and deep-merge it over this configuration: a
+    /// key present in `path` overrides the base value, nested tables merge
+    /// field by field (so an override file can change `[log].dir` while the
+    /// `[log].level` from the base is kept), and scalar/array values replace
+    /// wholesale. A missing file is a no-op; an unparsable file is an error.
+    /// Used by `acts-server` to let local `acts.toml` files override the
+    /// `~/.acts` defaults.
+    pub fn overlay_file(&mut self, path: &Path) -> crate::Result<()> {
+        if !path.exists() {
+            return Ok(());
+        }
+        let text = std::fs::read_to_string(path).map_err(|err| {
+            crate::ActError::Config(format!(
+                "failed to load config file {}: {err}",
+                path.display()
+            ))
+        })?;
+        let table = toml::from_str::<Table>(&text).map_err(|err| {
+            crate::ActError::Config(format!(
+                "failed to parse the toml file({}): {err}",
+                path.display()
+            ))
+        })?;
+        merge_table(&mut self.table, table);
+        self.data = ConfigData::deserialize(self.table.clone()).map_err(|err| {
+            crate::ActError::Config(format!("failed to parse the merged config: {err}"))
+        })?;
+        Ok(())
+    }
+
     pub fn cache_cap(&self) -> i64 {
         self.data.cache_cap.unwrap_or(1024)
     }
@@ -95,6 +125,23 @@ impl Config {
     }
 }
 
+/// Merge `over` into `base` in place: nested tables merge field by field,
+/// every other value replaces the base value for that key.
+fn merge_table(base: &mut Table, over: Table) {
+    for (key, value) in over {
+        if let Some(existing) = base.get_mut(&key) {
+            match (existing, value) {
+                (toml::Value::Table(base_table), toml::Value::Table(over_table)) => {
+                    merge_table(base_table, over_table);
+                }
+                (slot, value) => *slot = value,
+            }
+        } else {
+            base.insert(key, value);
+        }
+    }
+}
+
 /// Controls behavior when a snapshot target's key params or data are absent
 /// at a task's prepare step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -105,4 +152,111 @@ pub enum MissingParamAction {
     Skip,
     /// Return an error listing the missing parameters.
     Error,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Unique per-test scratch dir so parallel runs never collide.
+    fn scratch(name: &str) -> std::path::PathBuf {
+        let thread = std::thread::current()
+            .name()
+            .unwrap_or("t")
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect::<String>();
+        let dir = std::env::temp_dir().join(format!(
+            "acts-config-{}-{}-{}",
+            std::process::id(),
+            name,
+            thread
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn write(dir: &Path, name: &str, body: &str) -> std::path::PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn overlay_file_merges_nested_tables_field_by_field() {
+        let dir = scratch("merge");
+        let base = write(
+            &dir,
+            "base.toml",
+            r#"
+cache_cap = 1024
+[log]
+dir = "data"
+level = "INFO"
+"#,
+        );
+        let over = write(
+            &dir,
+            "over.toml",
+            r#"
+[log]
+dir = "other"
+"#,
+        );
+
+        let mut config = Config::create(&base);
+        config.overlay_file(&over).unwrap();
+
+        // the override's [log].dir won, the base's level survived
+        assert_eq!(config.log().dir, "other");
+        assert_eq!(config.log().level, "INFO");
+        assert_eq!(config.cache_cap(), 1024);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn overlay_file_replaces_scalars_and_adds_new_keys() {
+        let dir = scratch("scalar");
+        let base = write(
+            &dir,
+            "base.toml",
+            "cache_cap = 1024\n[log]\ndir = \"data\"\nlevel = \"INFO\"\n",
+        );
+        let over = write(&dir, "over.toml", "cache_cap = 512\n[web]\nport = 10082\n");
+
+        let mut config = Config::create(&base);
+        config.overlay_file(&over).unwrap();
+
+        assert_eq!(config.cache_cap(), 512);
+        assert!(config.has("web"));
+        assert_eq!(config.log().dir, "data");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn overlay_file_missing_is_a_noop_and_unparsable_is_an_error() {
+        let dir = scratch("missing");
+        let base = write(
+            &dir,
+            "base.toml",
+            "[log]\ndir = \"data\"\nlevel = \"INFO\"\n",
+        );
+
+        let mut config = Config::create(&base);
+        config.overlay_file(&dir.join("nope.toml")).unwrap();
+        assert_eq!(config.log().level, "INFO");
+
+        let bad = write(&dir, "bad.toml", "this is not [ valid toml");
+        assert!(config.overlay_file(&bad).is_err());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

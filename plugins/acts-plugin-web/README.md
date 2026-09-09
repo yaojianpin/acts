@@ -32,7 +32,7 @@ async fn main() {
 In `config/acts.toml`:
 
 ```toml
-[http]
+[web]
 port = 10082
 ```
 

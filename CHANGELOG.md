@@ -331,3 +331,8 @@
 
 # 0.24.0
 - feat: make sure `grpc` plugin is always included in `acts-server`
+- feat(acts-server): the server config moves to `~/.acts/acts.toml` (`$ACTS_CONFIG_DIR` overrides) — on first start acts-server creates the directory and writes an embedded default config (the template is compiled into the binary, so a `cargo install acts-server` binary auto-creates it too); a local `./acts.toml` in the working directory deep-merges per key over the `~/.acts` defaults
+- feat(acts-server): the `[db]` section is optional and defaults to the sled backend under the config dir; other stores are selected with `type` (`sqlite`/`postgres`/`redis`/`nats`) plus `database_url`, and the `ACTS_DATABASE_URL` env var overrides `database_url`; the server now compiles all `acts-store` backends
+- feat(acts): `Config::overlay_file` deep-merges a second acts.toml over a loaded config (nested tables merge per field, scalars/arrays replace) so layered configs can override single options
+- build: add a release workflow that builds `acts-server` and `acts-cli` for linux-x86_64 / macos-x86_64 / macos-aarch64 / windows-x86_64 and uploads them to the GitHub release on every `v*` tag
+- build: add `install.sh` (macOS/Linux) and `install.ps1` (Windows) that download the matching release archive and install both binaries to `~/.acts/bin`

@@ -2,40 +2,114 @@
 
 The acts workflow server: an embedded acts engine exposed over multiple
 transports. It registers the core packages plus the transport plugins
-selected by the server config.
+selected by the server config, and ships together with `acts-cli`.
 
-## Build & run
+## Install
+
+### Option 1 — GitHub release binaries (macOS / Linux / Windows)
+
+Every `v*` tag builds `acts-server` and `acts-cli` and uploads them to the
+[GitHub releases](https://github.com/yaojianpin/acts/releases) page. Each
+archive (`acts-<version>-<os>-<arch>.tar.gz` / `.zip`) contains **both**
+binaries — install them with the install scripts:
+
+macOS / Linux (bash):
 
 ```bash
-cargo run -p acts-server
+curl -fsSL https://raw.githubusercontent.com/yaojianpin/acts/main/install.sh | bash
 ```
 
-The server reads `config/acts.toml` from the working directory and keeps
-log files under the configured log dir. It blocks until interrupted.
+Windows (PowerShell):
 
-## Configuration (`config/acts.toml`)
+```powershell
+iwr -useb https://raw.githubusercontent.com/yaojianpin/acts/main/install.ps1 | iex
+```
+
+The binaries are installed to `~/.acts/bin` (override with
+`ACTS_INSTALL_DIR`); add that directory to your `PATH`. Or download the
+archive for your platform from the releases page and unpack it anywhere.
+
+### Option 2 — cargo install
+
+```bash
+cargo install acts-server
+```
+
+The first start auto-creates the config file (see below), so no setup is
+needed after the install.
+
+## Run & first start
+
+```bash
+acts-server
+```
+
+On the first run acts-server creates its config directory `~/.acts`
+(`$HOME/.acts`, `%USERPROFILE%\.acts` on Windows) and writes a default
+`acts.toml` there with a working sled database under `~/.acts/data` and logs
+under `~/.acts/log`. The server then blocks until interrupted.
+
+To point the config directory elsewhere, set `ACTS_CONFIG_DIR`.
+
+## Configuration
+
+The effective config is layered, each file deep-merged per key over the
+previous one (nested `[tables]` merge field by field, other values replace):
+
+1. `~/.acts/acts.toml` — server defaults, auto-created when missing
+2. `./acts.toml` in the working directory (if present)
+
+so a project can run its own server with a small local file:
+
+```toml
+# acts.toml — overrides only what it sets
+[web]
+port = 18082
+```
+
+Relative paths in a file are resolved from the working directory; the
+auto-created `~/.acts/acts.toml` uses absolute paths into the config dir.
+
+### Storage (`[db]`)
+
+The default store is **sled** (a directory under the config dir). Other
+backends are configured in the `[db]` table with a `type` and a
+`database_url`; the `ACTS_DATABASE_URL` env var overrides `database_url`:
 
 ```toml
 [db]
-database_url = "./data"          # sled store path
+type = "postgres"
+database_url = "postgres://user:pass@host:5432/acts"
+```
 
-[log]
-dir = "data"
-level = "INFO"
+| type     | database_url                          |
+| -------- | ------------------------------------- |
+| `sled`   | directory path (default)              |
+| `sqlite` | sqlite file path                      |
+| `postgres` | `postgres://user:pass@host:5432/db` |
+| `redis`  | `redis://host:6379`                   |
+| `nats`   | `nats://host:4222` (JetStream KV)     |
 
-# transport plugins (all optional):
+```toml
+[db]
+type = "sqlite"
+database_url = "./data/acts.db"   # or set ACTS_DATABASE_URL
+```
 
-[grpc]                           # acts-plugin-grpc
-port = 10080                     # default 10080
+### Transports
 
-[http]                           # acts-plugin-web
-port = 10082                     # default 10082
+```toml
+[grpc]                          # acts-plugin-grpc
+port = 10080                    # default 10080
 
-[nats]                           # acts-plugin-nats — only connected when
-url = "nats://127.0.0.1:4222"    # this section is present
+[web]                           # acts-plugin-web (only when this section exists)
+port = 10082                    # default 10082
+
+[nats]                          # acts-plugin-nats — only connected when
+url = "nats://127.0.0.1:4222"   # this section is present
 subject = "acts"
 
-[[nats.channels]]                # engine events forwarded to NATS
+[[nats.channels]]               # engine events forwarded to NATS
 id = "ops"
 type = "*"
 state = "*"
@@ -46,6 +120,19 @@ Plugin registration mirrors the config:
 - the gRPC and web plugins always start (default ports 10080 / 10082);
 - the NATS plugin is registered only when a `[nats]` section exists, so a
   server without NATS never tries to reach a broker.
+
+### Snapshot targets
+
+`[[snapshot]]` entries (see the default config) pre-register
+snapshot-backed sealed-data targets: data fed through the snapshot APIs is
+sealed into tasks at their prepare under each target's
+`policy`/`scope`/`on_missing`/`ttl` settings.
+
+## Build & run (development)
+
+```bash
+cargo run -p acts-server
+```
 
 ## Clients
 

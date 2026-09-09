@@ -33,7 +33,7 @@ impl ActPlugin for WebPlugin {
     fn on_init(&self, engine: &Engine) -> acts::Result<()> {
         let engine = Arc::new(engine.clone());
         let config = engine.config();
-        let web_config = config.get::<HttpConfig>("http").unwrap_or_default();
+        let web_config = config.get::<HttpConfig>("web").unwrap_or_default();
         let port = web_config.port.unwrap_or(10082);
         let addr = format!("0.0.0.0:{port}")
             .parse::<SocketAddr>()

@@ -30,7 +30,7 @@ acts-plugin-grpc = { workspace = true }
 acts-plugin-web = { workspace = true }
 acts-plugin-nats = { workspace = true }
 acts-channel = { workspace = true }
-acts-store = { workspace = true, features = ["sled"] }
+acts-store = { workspace = true, features = ["sled", "sqlite", "postgres", "redis", "nats"] }
 [dev-dependencies]
 async-nats = "0.50"
 

@@ -1,0 +1,98 @@
+# acts-server local override — copy this to where you run acts-server.
+#
+# When acts-server runs from a directory containing this file, acts.toml is
+# deep-merged (per key) over the server defaults in ~/.acts/acts.toml, so
+# every value here overrides the matching home value.
+
+# Max number of processes kept resident in memory at the same time. When the
+# limit is reached a new process is persisted and parked, then started as
+# soon as a resident process finishes and frees a slot.
+cache_cap = 1024
+
+# Engine scan interval in seconds: the periodic sweep that re-sends
+# unacknowledged message deliveries and resumes parked/queued processes.
+tick_interval_secs = 15
+
+# Max times an unacknowledged message delivery is re-sent before it turns
+# into an Error that needs manual handling (msg:resend / msg:clear). 0
+# disables the retry limit.
+max_message_retry_times = 20
+
+# Max times a single tree node can be executed inside one process. Protects
+# against unbounded task creation from a step that loops back on itself or
+# through a cyclic `next`. 0 disables the check.
+max_node_run_times = 1000
+
+# [log] — file logging: hourly rolling acts.log files under dir, at level
+# (the ACTS_LOG env var overrides level at runtime).
+[log]
+dir = "data"
+level = "INFO"
+
+# storage backend. The default is sled; other backends need both `type` and
+# `database_url` (the ACTS_DATABASE_URL env var overrides database_url):
+#   type = "sqlite"   database_url = "acts.db"
+#   type = "postgres" database_url = "postgres://user:pass@host:5432/acts"
+#   type = "redis"    database_url = "redis://127.0.0.1:6379"
+#   type = "nats"     database_url = "nats://127.0.0.1:4222"
+[db]
+type = "sled"
+database_url = "./data"
+
+# snapshot-backed sealed-data targets.
+# Data is fed through the web/grpc/nats snapshot APIs and sealed into tasks
+# at their prepare under each target's policy:
+#   policy     per_proc (default) = one value frozen per process lineage
+#              per_task           = every task reads the latest value
+#   scope      task param names whose values join with '/' into the scope
+#              key (default: one global scope per target)
+#   on_missing skip (default) | error
+#   ttl        how long an entry stays valid after its last refresh —
+#              suffixed duration ("2s", "5m", "3h", "1d") or bare seconds
+#              (default: never expire)
+[[snapshot]]
+name = "profile"
+policy = "per_proc"
+scope = ["uid"]
+
+[[snapshot]]
+name = "secrets"
+scope = ["uid"]
+policy = "per_task"
+ttl = "1h"
+
+
+# grpc service — acts-plugin-grpc. Endpoint used by acts-cli and the
+# acts-channel client libraries.
+[grpc]
+# port the gRPC server listens on
+port = 10080
+
+# web service — acts-plugin-web. Serves the HTTP API (/api/*) and workflow
+# hooks (/hooks/{model-id}:{trigger-id}). Only started when this [web]
+# section exists.
+[web]
+# port the web server listens on
+port = 10082
+
+# nats service — acts-plugin-nats. Only connected when this [nats] section
+# exists. Server actions are request/reply on "<subject>.cmd"; engine events
+# are forwarded per the [[nats.channels]] entries below.
+# [nats]
+# broker url to connect to
+# url = "nats://localhost:4222"
+# action/event subject prefix
+# subject = "acts"
+
+# [[nats.channels]]
+# forward engine events matching these filters to the given subject:
+#   id      channel name (for ack/redelivery bookkeeping)
+#   subject subject the events are published to
+#   type    event type filter  ("*" = all)
+#   state   task state filter  ("*" = all)
+#   uses    action/uses filter ("*" = all)
+# id = "c1"
+# subject = "acts.evt"
+# type = "*"
+# state = "*"
+# uses = "*"
