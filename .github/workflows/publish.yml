@@ -39,7 +39,7 @@ jobs:
       - name: Build
         run: cargo build --workspace --verbose
       - name: Run tests
-        run: cargo test --workspace --verbose
+        run: cargo test --workspace --verbose --exclude acts-store && cargo test --verbose -p acts-store --features sled,sqlite
       - name: Run Publish
         run: |
           cp README.md crates/acts/ &&

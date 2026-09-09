@@ -14,10 +14,20 @@ jobs:
     runs-on: ubuntu-latest
 
     services:
-      nats:
-        image: nats:2
+      # live backends for the acts-store cross-backend suites — acts-server
+      # enables every acts-store feature, so the workspace test run compiles
+      # and runs tests/{nats,postgres,redis}.rs; they need real services
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: yao
+          POSTGRES_DB: tests
         ports:
-          - 4222:4222
+          - 5433:5432 # acts-store/tests/postgres.rs connects to localhost:5433
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
 
     env:
       ACTS_NATS_URL: nats://127.0.0.1:4222
@@ -33,6 +43,14 @@ jobs:
         shell: bash
         run: |
           sudo apt install -y git g++ cmake ninja-build libssl-dev
+      # service-container `options` only accept docker-create flags, so the
+      # `-js` JetStream flag cannot be passed through the nats service; start
+      # it directly (a JetStream server also serves the core-NATS tests of
+      # acts-channel/acts-plugin-nats/acts-server)
+      - name: Start NATS (JetStream)
+        run: |
+          docker run -d --name nats -p 4222:4222 nats:2 -js
+          for i in $(seq 1 30); do nc -z 127.0.0.1 4222 && break; sleep 1; done
       - name: Build
         run: cargo build --verbose
       - name: Run tests
