@@ -327,3 +327,4 @@
 
 # 0.23.1
 - fix: move `acts-plugin-common` to `acts` as `actions` and remove the origin common reference from all plugins 
+- fix: `acts-server` dependencies version error for `acts-package-*` and `acts-plugin-*`

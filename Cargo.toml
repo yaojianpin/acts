@@ -40,6 +40,13 @@ tokio-stream = "0.1.12"
 acts = { path = "./crates/acts", version = "0.23.1" }
 acts-channel = { path = "./crates/acts-channel", version = "0.23.1" }
 acts-store = { path = "./crates/acts-store", version = "0.23.1" }
+acts-package-http = { path = "./packages/acts-package-http", version = "0.23.1" }
+acts-package-shell = { path = "./packages/acts-package-shell", version = "0.23.1" }
+acts-package-state = { path = "./packages/acts-package-state", version = "0.23.1" }
+acts-package-nats = { path = "./packages/acts-package-nats", version = "0.23.1" }
+acts-plugin-grpc = { path = "./plugins/acts-plugin-grpc", version = "0.23.1" }
+acts-plugin-web = { path = "./plugins/acts-plugin-web", version = "0.23.1" }
+acts-plugin-nats = { path = "./plugins/acts-plugin-nats", version = "0.23.1" }
 
 [profile.release]
 codegen-units = 1

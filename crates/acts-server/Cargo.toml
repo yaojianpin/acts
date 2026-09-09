@@ -22,13 +22,13 @@ tracing-subscriber = { version = "0.3.16", features = [
     "local-time",
     "env-filter",
 ] }
-acts-package-http = { path = "../../packages/acts-package-http" }
-acts-package-shell = { path = "../../packages/acts-package-shell" }
-acts-package-state = { path = "../../packages/acts-package-state" }
-acts-package-nats = { path = "../../packages/acts-package-nats" }
-acts-plugin-grpc = { path = "../../plugins/acts-plugin-grpc" }
-acts-plugin-web = { path = "../../plugins/acts-plugin-web" }
-acts-plugin-nats = { path = "../../plugins/acts-plugin-nats" }
+acts-package-http = { workspace = true }
+acts-package-shell = { workspace = true }
+acts-package-state = { workspace = true }
+acts-package-nats = { workspace = true }
+acts-plugin-grpc = { workspace = true }
+acts-plugin-web = { workspace = true }
+acts-plugin-nats = { workspace = true }
 acts-channel = { workspace = true }
 acts-store = { workspace = true, features = ["sled"] }
 [dev-dependencies]
