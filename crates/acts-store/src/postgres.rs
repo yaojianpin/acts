@@ -19,7 +19,7 @@ impl PostgresStore {
 
         sqlx::query(&format!(
             "CREATE TABLE IF NOT EXISTS {0} (
-                key TEXT PRIMARY KEY,
+                key TEXT COLLATE \"C\" PRIMARY KEY,
                 value BYTEA NOT NULL
             )",
             consts::ACTS_STORE_NAME
@@ -27,6 +27,17 @@ impl PostgresStore {
         .execute(&pool)
         .await
         .map_err(|e| ActError::Store(e.to_string()))?;
+
+        // The key column is a byte-ordered key space: index scans express
+        // their half-open ranges `[lower, upper)` with separator bytes
+        // (`KEY_SEP`, and `KEY_SEP_SUCC` as the exclusive bound) whose strict
+        // byte ordering the range comparisons rely on. A locale collation
+        // (e.g. en_US.UTF-8) gives those control bytes equal weights, so the
+        // boundaries leak one row (an exclusive `>` includes the bound, an
+        // inclusive upper excludes it). `COLLATE \"C\"` restores the byte
+        // order the other backends (memory/sled/sqlite) compare in.
+        // Pre-existing tables keep their original collation — recreate or
+        // `ALTER TABLE ... ALTER COLUMN key TYPE text COLLATE \"C\"` once.
 
         Ok(Self { pool })
     }
