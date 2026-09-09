@@ -328,3 +328,6 @@
 # 0.23.1
 - fix: move `acts-plugin-common` to `acts` as `actions` and remove the origin common reference from all plugins 
 - fix: `acts-server` dependencies version error for `acts-package-*` and `acts-plugin-*`
+
+# 0.24.0
+- feat: make sure `grpc` plugin is always included in `acts-server`

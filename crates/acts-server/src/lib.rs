@@ -142,7 +142,7 @@ pub fn build_engine(config: &Config, store: Arc<dyn KvStore>, plugins: &ServerPl
             builder = builder.add_snapshot(&target.name, target.clone().into());
         }
     }
-    if plugins.grpc && config.has("grpc") {
+    if plugins.grpc {
         builder = builder.add_plugin(&acts_plugin_grpc::GrpcPlugin::new());
     }
     if plugins.web && config.has("web") {
