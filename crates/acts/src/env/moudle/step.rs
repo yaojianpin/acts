@@ -17,7 +17,7 @@ mod step {
     #[rquickjs::function]
     pub fn get_step_value(nid: String, name: String) -> ActJsValue {
         Context::with(|ctx| {
-            let tasks = ctx.task().proc().find_tasks(|task| task.node().id() == nid);
+            let tasks = ctx.proc.find_tasks(|task| task.node().id() == nid);
             if !tasks.is_empty() {
                 let task = tasks.last().unwrap();
 
@@ -33,7 +33,7 @@ mod step {
     #[rquickjs::function]
     pub fn set_step_value(nid: String, name: String, value: ActJsValue) -> Result<()> {
         Context::with(|ctx| {
-            let tasks = ctx.task().proc().find_tasks(|task| task.node().id() == nid);
+            let tasks = ctx.proc.find_tasks(|task| task.node().id() == nid);
             if !tasks.is_empty() {
                 let task = tasks.last().unwrap();
                 if task.state().is_completed() {
@@ -51,8 +51,7 @@ mod step {
     pub fn get_steps() -> Vec<String> {
         if let Ok(ctx) = Context::current() {
             return ctx
-                .task()
-                .proc()
+                .proc
                 .tasks()
                 .iter()
                 .filter(|task| task.is_kind(crate::NodeKind::Step))
@@ -65,7 +64,7 @@ mod step {
     #[rquickjs::function]
     pub fn get_inputs(nid: String) -> ActJsValue {
         Context::with(|ctx| {
-            let tasks = ctx.task().proc().find_tasks(|task| task.node().id() == nid);
+            let tasks = ctx.proc.find_tasks(|task| task.node().id() == nid);
             if !tasks.is_empty() {
                 let task = tasks.last().unwrap();
                 return task.inputs().into();
@@ -77,7 +76,7 @@ mod step {
     #[rquickjs::function]
     pub fn get_data(nid: String) -> ActJsValue {
         Context::with(|ctx| {
-            let tasks = ctx.task().proc().find_tasks(|task| task.node().id() == nid);
+            let tasks = ctx.proc.find_tasks(|task| task.node().id() == nid);
             if !tasks.is_empty() {
                 let task = tasks.last().unwrap();
                 return task.data().into();

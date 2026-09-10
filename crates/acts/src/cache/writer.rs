@@ -5,7 +5,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::error;
 
-use crate::{ActError, Result, data::DeliveryStatus, scheduler::Task, store::Store};
+use crate::{ActError, Result, data::DeliveryStatus, scheduler::Task, store::Store, utils::consts};
 
 pub(crate) enum WriteOp {
     /// Persist a task, its root task, and mark the process complete when needed.
@@ -178,9 +178,19 @@ impl StoreWriter {
         // keeps the scope vars (e.g. the `NEXT_COMPLETE` marker) durable
         // before any outbox record queued after this write.
         store.persist_task_rows(task).await?;
-        if task.proc().state().is_completed() {
+        if let Some(p) = task.proc() {
+            if p.state().is_completed() {
+                store
+                    .mark_proc_complete(&task.pid, p.end_time(), p.state())
+                    .await?;
+            }
+        } else if task.id == consts::TASK_ROOT_TID && task.state().is_completed() {
+            // The process instance is already gone (evicted and deallocated
+            // while this write was queued) — the root task's own state is the
+            // faithful terminal stamp, so the proc row still settles and the
+            // sweeper can remove it
             store
-                .mark_proc_complete(&task.pid, task.proc().end_time(), task.proc().state())
+                .mark_proc_complete(&task.pid, task.end_time(), task.state())
                 .await?;
         }
         // A message is done when it has no delivery rows (its own state is

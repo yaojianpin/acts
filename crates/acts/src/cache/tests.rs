@@ -8,6 +8,48 @@ use crate::{
     utils,
 };
 use std::sync::Arc;
+
+/// Evicting a finished process must free its whole in-memory graph: the task
+/// tree is owned by the process and every task references its process, so a
+/// strong `Task.proc` would form a `Process → TaskTree → Task → Process`
+/// cycle and the evicted process would leak as unreachable cyclic garbage
+/// (`Arc` cannot collect a cycle with no external strong refs). `Task` holds
+/// its process `Weak`ly instead — while a caller still holds the process its
+/// tasks stay queryable, and once the last holder drops, everything frees.
+#[tokio::test]
+async fn cache_evict_breaks_proc_task_cycle() {
+    let engine = Engine::new().start().await.unwrap();
+    let rt = engine.runtime();
+    let cache = rt.cache();
+
+    let workflow = Workflow::new()
+        .with_id("m1")
+        .with_step(|s| s.with_id("step1"));
+    let pid = utils::longid();
+    let proc = rt.create_proc(&pid, &workflow);
+    let root = proc
+        .create_task(&proc.tree().node("step1").unwrap(), None)
+        .unwrap();
+    cache.start_proc(&proc, Some(&root)).await.unwrap();
+    assert_eq!(cache.count(), 1);
+    assert_eq!(proc.tasks().len(), 1);
+
+    let weak = Arc::downgrade(&proc);
+    cache.evict(&pid);
+    assert_eq!(cache.count(), 0);
+    // still held by the caller: the task tree stays queryable
+    assert_eq!(proc.tasks().len(), 1);
+    // last holder dropped: the process must be deallocated, not kept alive
+    // by its own tasks
+    drop(proc);
+    drop(root);
+    assert!(
+        weak.upgrade().is_none(),
+        "the evicted process must be deallocated — its tasks kept the cycle alive"
+    );
+
+    rt.close().await;
+}
 /// Dynamic act chains must survive a store round-trip: node ids are persisted
 /// with parent/prev/next links and rebuilt on load, so `Task::move_next`
 /// (which reads `task.node.next()`) keeps working after restore.

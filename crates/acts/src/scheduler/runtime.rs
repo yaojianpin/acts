@@ -528,7 +528,9 @@ impl Runtime {
                 };
                 match next {
                     Ok(data) => match data {
-                        QueueData::Task(task) => {
+                        QueueData::Task { task, proc: _proc } => {
+                            // Keep the queued process alive until the item has
+                            // fully executed; `_proc` is the execution lease.
                             let ctx = &task.create_context();
                             if let Err(err) = task.exec(ctx).await {
                                 error!(error = %err, "task.exec failed");
@@ -537,7 +539,9 @@ impl Runtime {
                                 ctx.emit_error().await.ok();
                             }
                         }
-                        QueueData::Next(task) => {
+                        QueueData::Next { task, proc: _proc } => {
+                            // Same as `Task`: the queue owns an execution lease
+                            // across terminal-event eviction races.
                             let ctx = &task.create_context();
                             let result = task.next(ctx).await;
                             if let Err(err) = result {

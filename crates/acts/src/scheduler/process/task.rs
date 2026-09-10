@@ -22,7 +22,10 @@ use parking_lot::RwLock;
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{
+    Weak,
+    atomic::{AtomicBool, AtomicU64, Ordering},
+};
 use tracing::{debug, error, instrument};
 
 #[derive(Clone)]
@@ -70,7 +73,11 @@ pub struct Task {
     // parent tid
     parent: ShareLock<Option<String>>,
 
-    proc: Arc<Process>,
+    /// The owning process — held `Weak` so the process owns its task tree
+    /// without a `Process → Task → Process` reference cycle: an evicted
+    /// finished process is freed even though its tasks still reference it
+    /// (see [`Self::proc`])
+    proc: Weak<Process>,
 
     node: Arc<Node>,
 
@@ -95,7 +102,7 @@ impl Task {
             next: Arc::new(RwLock::new(Vec::new())),
             parent: Arc::new(RwLock::new(None)),
             timestamp: utils::time::timestamp(),
-            proc: proc.clone(),
+            proc: Arc::downgrade(proc),
             runtime: rt.clone(),
         }
     }
@@ -104,8 +111,24 @@ impl Task {
         format!("{}:{}", self.pid, self.id)
     }
 
-    pub fn proc(&self) -> &Arc<Process> {
-        &self.proc
+    /// The process this task belongs to, if it is still alive. The task holds
+    /// its process only `Weak`ly (the process owns the task tree), so this is
+    /// `None` only for a task clone that outlived its evicted, finished
+    /// process — engine-driven paths always run against a live process.
+    pub fn proc(&self) -> Option<Arc<Process>> {
+        self.proc.upgrade()
+    }
+
+    /// The process for execution-time paths, which structurally require it to
+    /// be alive (a context, message or the process itself cannot be built for
+    /// a deallocated process).
+    fn expect_proc(&self) -> Arc<Process> {
+        self.proc.upgrade().unwrap_or_else(|| {
+            panic!(
+                "task '{}:{}' is used after its process was deallocated (evicted)",
+                self.pid, self.id
+            )
+        })
     }
 
     pub(crate) fn runtime(&self) -> &Arc<Runtime> {
@@ -199,11 +222,11 @@ impl Task {
         }
     }
     pub fn create_context(self: &Arc<Self>) -> Context {
-        self.proc.create_context(self)
+        self.expect_proc().create_context(self)
     }
 
     pub fn create_message(self: &Arc<Self>) -> Message {
-        let workflow = self.proc.model();
+        let workflow = self.expect_proc().model();
 
         // if it is act, insert the step_node_id and step_task_id to the inputs
         // it is necessary to find the relation between the step and it's children acts
@@ -284,24 +307,24 @@ impl Task {
     }
 
     pub fn parent(&self) -> Option<Arc<Task>> {
-        if let Some(parent) = self.parent.read().clone()
-            && let Some(task) = self.proc.task(&parent)
-        {
-            return Some(task.clone());
-        }
-
-        None
+        let parent = self.parent.read().clone()?;
+        self.proc()?.task(&parent)
     }
 
     pub fn children(&self) -> Vec<Arc<Self>> {
-        self.proc.children(&self.id)
+        self.proc()
+            .map(|proc| proc.children(&self.id))
+            .unwrap_or_default()
     }
 
     pub fn next(&self) -> Vec<Arc<Self>> {
+        let Some(proc) = self.proc() else {
+            return Vec::new();
+        };
         let mut ret = Vec::new();
         let nexts = self.next_ids();
         for tid in &nexts {
-            if let Some(task) = self.proc.task(tid) {
+            if let Some(task) = proc.task(tid) {
                 ret.push(task);
             }
         }
@@ -322,7 +345,7 @@ impl Task {
         let ctx = self.create_context();
         let mut inputs = Vars::new();
         if let Some(prev) = self.prev_id()
-            && let Some(prev_task) = self.proc.task(&prev)
+            && let Some(prev_task) = self.proc().and_then(|proc| proc.task(&prev))
         {
             // set the prev task's outputs as current inputs
             for (ref k, v) in &prev_task.outputs() {
@@ -385,8 +408,10 @@ impl Task {
         if state.is_completed() {
             self.set_end_time(utils::time::time_millis());
 
-            if self.id == TASK_ROOT_TID {
-                self.proc().set_state(state.clone());
+            if self.id == TASK_ROOT_TID
+                && let Some(proc) = self.proc()
+            {
+                proc.set_state(state.clone());
             }
         } else {
             // re-entering a non-terminal state: reset the propagation guard
@@ -698,7 +723,7 @@ impl Task {
                         )));
                     }
 
-                    self.proc.set_data(&ctx.vars());
+                    self.expect_proc().set_data(&ctx.vars());
                     // emit the task change (issue #)
                     ctx.emit_task(self).await?;
                 }
@@ -830,7 +855,7 @@ impl Task {
 
         let mut prev = self.prev_id();
         while let Some(tid) = &prev {
-            if let Some(task) = self.proc.task(tid) {
+            if let Some(task) = self.proc().and_then(|proc| proc.task(tid)) {
                 if predicate(&task) {
                     ret = Some(task.clone());
                     break;

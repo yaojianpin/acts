@@ -493,9 +493,10 @@ impl Cache {
     /// writes, so a pure state transition persists a single small row), then
     /// mark the proc row terminal when the process finished.
     async fn persist_task(&self, task: &Arc<Task>) -> Result<()> {
-        let p = task.proc();
         self.store.persist_task_rows(task).await?;
-        if p.state().is_completed() {
+        if let Some(p) = task.proc()
+            && p.state().is_completed()
+        {
             self.store
                 .mark_proc_complete(&task.pid, p.end_time(), p.state())
                 .await?;
@@ -505,7 +506,9 @@ impl Cache {
     }
 
     fn push_task_mem(&self, task: &Arc<Task>) -> Result<()> {
-        let p = task.proc();
+        let Some(p) = task.proc() else {
+            return Ok(());
+        };
         if let Some(proc) = self.procs.read().get(&task.pid).cloned() {
             proc.set_pure_state(p.state());
             proc.set_end_time(p.end_time());

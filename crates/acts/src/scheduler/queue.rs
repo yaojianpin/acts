@@ -1,5 +1,8 @@
 use crate::ActError;
-use crate::{Result, scheduler::Task};
+use crate::{
+    Result,
+    scheduler::{Process, Task},
+};
 use std::sync::Arc;
 use tokio::sync::{Mutex, mpsc};
 
@@ -11,8 +14,16 @@ pub struct Queue {
 
 #[derive(Debug)]
 pub enum QueueData {
-    Task(Arc<Task>),
-    Next(Arc<Task>),
+    Task {
+        task: Arc<Task>,
+        /// Execution-time lease: a queued task must remain executable even if
+        /// its finished process is evicted before the loop reaches this item.
+        proc: Arc<Process>,
+    },
+    Next {
+        task: Arc<Task>,
+        proc: Arc<Process>,
+    },
     Abort,
 }
 
@@ -35,15 +46,27 @@ impl Queue {
     }
 
     pub(crate) fn send(&self, task: &Arc<Task>) -> Result<()> {
+        let Some(proc) = task.proc() else {
+            return Ok(());
+        };
         self.sender
-            .send(QueueData::Task(task.clone()))
+            .send(QueueData::Task {
+                task: task.clone(),
+                proc,
+            })
             .map_err(|err| ActError::Runtime(err.to_string()))?;
         Ok(())
     }
 
     pub(crate) fn send_next(&self, task: &Arc<Task>) -> Result<()> {
+        let Some(proc) = task.proc() else {
+            return Ok(());
+        };
         self.sender
-            .send(QueueData::Next(task.clone()))
+            .send(QueueData::Next {
+                task: task.clone(),
+                proc,
+            })
             .map_err(|err| ActError::Runtime(err.to_string()))?;
         Ok(())
     }
