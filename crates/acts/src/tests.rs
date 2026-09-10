@@ -475,7 +475,7 @@ async fn engine_build_config_set_config() {
     )
     .unwrap();
 
-    let config = Config::create(path);
+    let config = Config::create(path).unwrap();
     let engine = Engine::builder().set_config(&config).build();
     assert_eq!(engine.config().cache_cap(), 100);
     assert_eq!(engine.config().log().dir, "data");
@@ -509,7 +509,7 @@ async fn engine_build_config_set_source() {
         "#,
     )
     .unwrap();
-    let engine = Engine::builder().set_config_source(path).build();
+    let engine = Engine::builder().set_config_source(path).unwrap().build();
     assert_eq!(engine.config().cache_cap(), 100);
     assert_eq!(engine.config().log().dir, "data");
     assert_eq!(engine.config().log().level, "INFO");

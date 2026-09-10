@@ -41,20 +41,29 @@ impl Default for Config {
 }
 
 impl Config {
-    pub fn create(path: &Path) -> Self {
-        #[allow(clippy::expect_fun_call)]
-        let data =
-            std::fs::read_to_string(path).expect(&format!("failed to load config file {path:?}"));
+    pub fn create(path: &Path) -> crate::Result<Self> {
+        let data = std::fs::read_to_string(path).map_err(|err| {
+            crate::ActError::Config(format!(
+                "failed to load config file {}: {err}",
+                path.display()
+            ))
+        })?;
 
-        #[allow(clippy::expect_fun_call)]
-        let table = toml::from_str::<Table>(data.as_str())
-            .expect(&format!("failed to parse the toml file({path:?})"));
+        let table = toml::from_str::<Table>(&data).map_err(|err| {
+            crate::ActError::Config(format!(
+                "failed to parse the toml file({}): {err}",
+                path.display()
+            ))
+        })?;
 
-        let data = ConfigData::deserialize(table.clone()).unwrap();
-        Self {
-            table: table.clone(),
-            data,
-        }
+        let data = ConfigData::deserialize(table.clone()).map_err(|err| {
+            crate::ActError::Config(format!(
+                "failed to parse the config file({}): {err}",
+                path.display()
+            ))
+        })?;
+
+        Ok(Self { table, data })
     }
 
     pub fn get<'de, T>(&self, name: &str) -> crate::Result<T>
@@ -210,7 +219,7 @@ dir = "other"
 "#,
         );
 
-        let mut config = Config::create(&base);
+        let mut config = Config::create(&base).unwrap();
         config.overlay_file(&over).unwrap();
 
         // the override's [log].dir won, the base's level survived
@@ -231,7 +240,7 @@ dir = "other"
         );
         let over = write(&dir, "over.toml", "cache_cap = 512\n[web]\nport = 10082\n");
 
-        let mut config = Config::create(&base);
+        let mut config = Config::create(&base).unwrap();
         config.overlay_file(&over).unwrap();
 
         assert_eq!(config.cache_cap(), 512);
@@ -250,12 +259,26 @@ dir = "other"
             "[log]\ndir = \"data\"\nlevel = \"INFO\"\n",
         );
 
-        let mut config = Config::create(&base);
+        let mut config = Config::create(&base).unwrap();
         config.overlay_file(&dir.join("nope.toml")).unwrap();
         assert_eq!(config.log().level, "INFO");
 
         let bad = write(&dir, "bad.toml", "this is not [ valid toml");
         assert!(config.overlay_file(&bad).is_err());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn create_reports_missing_and_invalid_files() {
+        let dir = std::env::temp_dir().join(format!("acts-config-create-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert!(Config::create(&dir.join("missing.toml")).is_err());
+
+        let path = dir.join("invalid.toml");
+        std::fs::write(&path, "this is not [ valid toml").unwrap();
+        assert!(Config::create(&path).is_err());
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -463,7 +463,7 @@ on_missing = "error"
 ttl = "5m"
 "#,
         );
-        let config = Config::create(&path);
+        let config = Config::create(&path).unwrap();
 
         // build_engine accepts a [[snapshot]] config and pre-registers the
         // targets through EngineBuilder::add_snapshot (a parse or mapping
@@ -502,7 +502,7 @@ ttl = "5m"
     #[test]
     fn snapshot_config_defaults_fill_missing_fields() {
         let (dir, path) = write_config("[[snapshot]]\nname = \"profile\"\n");
-        let config = Config::create(&path);
+        let config = Config::create(&path).unwrap();
         let targets = config.get::<Vec<SnapshotConfig>>("snapshot").unwrap();
         assert_eq!(targets[0].name, "profile");
         assert_eq!(targets[0].policy, SnapshotPolicy::PerProc);
@@ -534,7 +534,7 @@ ttl = "5m"
         }
         // a bare integer in the config counts seconds
         let (dir, path) = write_config("[[snapshot]]\nname = \"cron\"\nttl = 3600\n");
-        let config = Config::create(&path);
+        let config = Config::create(&path).unwrap();
         let targets = config.get::<Vec<SnapshotConfig>>("snapshot").unwrap();
         assert_eq!(targets[0].ttl, Some(3600));
         std::fs::remove_file(&path).ok();
@@ -574,7 +574,7 @@ ttl = "5m"
         assert!(!text.contains(CONFIG_DIR_MARKER));
         assert!(text.contains(&dir.to_string_lossy().replace('\\', "/")));
         // the file parses as a full server config with the sled default
-        let config = Config::create(&path);
+        let config = Config::create(&path).unwrap();
         assert!(config.has("db"));
         assert!(config.has("web"));
         assert_eq!(config.get::<DbConfig>("db").unwrap().kind, DbType::Sled);
@@ -599,7 +599,7 @@ ttl = "5m"
 
         let (dir, path) =
             write_config("[db]\ntype = \"postgres\"\ndatabase_url = \"postgres://h/db\"\n");
-        let config = Config::create(&path);
+        let config = Config::create(&path).unwrap();
         let db = config.get::<DbConfig>("db").unwrap();
         assert_eq!(db.kind, DbType::Postgres);
         assert_eq!(db.database_url.as_deref(), Some("postgres://h/db"));

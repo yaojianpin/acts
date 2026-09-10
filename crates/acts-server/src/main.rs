@@ -11,7 +11,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // A local `./acts.toml` in the working directory overrides the ~/.acts
     // defaults with a deep per-key merge.
-    let mut config = Config::create(&config_file);
+    let mut config = Config::create(&config_file)?;
     config.overlay_file(Path::new("acts.toml"))?;
 
     init_log(&config);

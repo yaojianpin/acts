@@ -4,6 +4,7 @@ use crate::{
     store::KvStore,
 };
 use std::{path::Path, sync::Arc};
+use tracing::warn;
 
 pub struct EngineBuilder {
     config: Config,
@@ -29,7 +30,12 @@ impl EngineBuilder {
         let file = Path::new("test/acts.toml");
 
         if file.exists() {
-            config = Config::create(file);
+            match Config::create(file) {
+                Ok(loaded) => config = loaded,
+                Err(err) => {
+                    warn!(error = %err, path = %file.display(), "failed to load default config; using default engine config")
+                }
+            }
         }
 
         Self {
@@ -46,9 +52,9 @@ impl EngineBuilder {
         self
     }
 
-    pub fn set_config_source(mut self, source: &Path) -> Self {
-        self.config = Config::create(source);
-        self
+    pub fn set_config_source(mut self, source: &Path) -> crate::Result<Self> {
+        self.config = Config::create(source)?;
+        Ok(self)
     }
 
     pub fn log(mut self, dir: &str, level: &str) -> Self {

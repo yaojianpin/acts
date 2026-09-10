@@ -353,3 +353,6 @@
 - fix: coalesce concurrent same-pid cache misses with per-pid single-flight, so every waiter receives the same loaded `Arc<Process>` instead of racing duplicate process instances
 - fix: admit external process ids through an atomic in-process pid claim, so concurrent starts that all miss the durable row fail as duplicates instead of creating two running or parked instances
 - fix: invalid `ChannelOptions` globs no longer panic the public `Channel::channel` / `engine.channel_with_options` path — invalid `type`, `state`, or `uses` patterns fall back to `*` with a warning (so remote channel-query input cannot turn an unclosed bracket into a handler panic), while invalid custom `options` globs remain skipped
+- fix: `Config::create` and `EngineBuilder::set_config_source` now return config errors instead of panicking on missing, unreadable, or malformed files; the builder's implicit default config falls back to defaults with a warning
+- fix: system environment values that cannot deserialize in `Context::get_env` are treated as absent with a warning instead of panicking the scheduler
+- fix: web and gRPC plugins no longer use `unwrap` for bind/serve, socket parsing, remote-peer access, or channel-message serialization; malformed input and runtime transport failures are logged or returned as `Status` errors

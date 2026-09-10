@@ -12,7 +12,7 @@ use crate::{
 };
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use std::{any::type_name, sync::Arc};
+use std::sync::Arc;
 use tracing::{debug, instrument};
 
 tokio::task_local! {
@@ -195,11 +195,17 @@ impl Context {
 
         // get from system env
         if let Ok(v) = std::env::var(name) {
-            #[allow(clippy::expect_fun_call)]
-            return Some(T::deserialize(serde_json::json!(v)).expect(&format!(
-                "cannot convert env '{name} to {}",
-                type_name::<T>()
-            )));
+            match T::deserialize(serde_json::json!(v)) {
+                Ok(value) => return Some(value),
+                Err(err) => {
+                    tracing::warn!(
+                        env = name,
+                        target_type = std::any::type_name::<T>(),
+                        error = %err,
+                        "cannot convert system environment variable; treating it as absent"
+                    );
+                }
+            }
         }
 
         None

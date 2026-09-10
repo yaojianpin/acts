@@ -64,7 +64,7 @@ async fn acts_server_handles_nats_snapshot_actions() {
          [nats]\nurl = \"nats://127.0.0.1:4222\"\nsubject = \"acts\"\n",
     )
     .unwrap();
-    let config = Config::create(&path);
+    let config = Config::create(&path).unwrap();
 
     // server plugins: NATS only — the same code path `acts-server` runs
     let engine = build_engine(

@@ -46,7 +46,7 @@ fn temp_config(nats_section: &str) -> (PathBuf, Config) {
         format!("[log]\ndir = \"acts-nats-test-log\"\nlevel = \"INFO\"\n\n{nats_section}"),
     )
     .unwrap();
-    let config = Config::create(&path);
+    let config = Config::create(&path).unwrap();
     (path, config)
 }
 

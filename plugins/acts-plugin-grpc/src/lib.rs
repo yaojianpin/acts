@@ -23,8 +23,8 @@ struct MessageClient {
 }
 
 impl MessageClient {
-    fn send(&self, message: Message) {
-        let msg = Ok(message);
+    fn send(&self, message: Result<Message, Status>) {
+        let msg = message;
         let client = self.clone();
         if client.sender.is_closed() {
             tracing::warn!("client {}({}) is closed", client.addr, client.options.id);
@@ -109,7 +109,10 @@ impl ActsService for GrpcServer {
         req: tonic::Request<MessageOptions>,
     ) -> Result<tonic::Response<Self::OnMessageStream>, tonic::Status> {
         let (tx, rx) = mpsc::channel::<Result<Message, Status>>(128);
-        let addr = req.remote_addr().unwrap();
+        let addr = req
+            .remote_addr()
+            .map(|addr| addr.to_string())
+            .unwrap_or_else(|| "unknown".to_string());
         let options = req.into_inner();
 
         tracing::info!("on_message: options={options:?}");
@@ -140,9 +143,19 @@ impl ActsService for GrpcServer {
                         name: e.name.clone(),
                         seq: e.id.clone(),
                         ack: None,
-                        data: Some(serde_json::to_vec(e.inner()).unwrap()),
+                        data: match serde_json::to_vec(e.inner()) {
+                            Ok(data) => Some(data),
+                            Err(err) => {
+                                tracing::error!(mid = %e.inner().id, error = %err, "failed to serialize channel message");
+                                client.send(Err(Status::internal(format!(
+                                    "failed to serialize message {}: {err}",
+                                    e.inner().id
+                                ))));
+                                return;
+                            }
+                        },
                     };
-                    client.send(message);
+                    client.send(Ok(message));
                 }
             });
         });
@@ -181,21 +194,18 @@ impl ActPlugin for GrpcPlugin {
         let config = engine.config();
         let grpc_config = config.get::<GrpcConfig>("grpc").unwrap_or_default();
         let port = grpc_config.port.unwrap_or(10080);
-        let addr = format!("0.0.0.0:{port}");
+        let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port as u16));
 
         tokio::spawn(async move {
-            let addr = addr.parse().unwrap();
             let server = GrpcServer::new(&engine);
             let grpc = ActsServiceServer::new(server);
             println!(
                 "The gRPC server is now ready to accept connections on port {}",
                 port
             );
-            Server::builder()
-                .add_service(grpc)
-                .serve(addr)
-                .await
-                .unwrap();
+            if let Err(err) = Server::builder().add_service(grpc).serve(addr).await {
+                tracing::error!(addr = %addr, error = %err, "gRPC server stopped");
+            }
         });
 
         Ok(())

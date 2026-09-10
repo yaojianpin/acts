@@ -5,6 +5,7 @@ use axum::{
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
+use tracing::info;
 
 mod config;
 mod objects;
@@ -35,9 +36,9 @@ impl ActPlugin for WebPlugin {
         let config = engine.config();
         let web_config = config.get::<HttpConfig>("web").unwrap_or_default();
         let port = web_config.port.unwrap_or(10082);
-        let addr = format!("0.0.0.0:{port}")
-            .parse::<SocketAddr>()
-            .map_err(|e| acts::ActError::Config(e.to_string()))?;
+        let addr: SocketAddr = format!("0.0.0.0:{port}")
+            .parse()
+            .map_err(|e| acts::ActError::Config(format!("invalid web bind address: {e}")))?;
 
         let app = Router::new()
             .route("/health", get(|| async { "ok" }))
@@ -63,12 +64,17 @@ impl ActPlugin for WebPlugin {
             .with_state(engine.clone());
 
         tokio::spawn(async move {
-            println!(
-                "The Web server is now ready to accept connections on port {}",
-                port
-            );
-            let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
-            axum::serve(listener, app).await.unwrap();
+            match tokio::net::TcpListener::bind(addr).await {
+                Ok(listener) => {
+                    info!(addr = %addr, "The Web server is now ready to accept connections");
+                    if let Err(err) = axum::serve(listener, app).await {
+                        tracing::error!(addr = %addr, error = %err, "web server stopped");
+                    }
+                }
+                Err(err) => {
+                    tracing::error!(addr = %addr, error = %err, "failed to bind web server");
+                }
+            }
         });
 
         Ok(())
