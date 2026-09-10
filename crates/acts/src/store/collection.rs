@@ -425,18 +425,11 @@ impl<T> KvCollection<T> {
 /// ordering matches numeric ordering (otherwise "10" < "5").
 /// Compare two JsonValues for ordering.
 ///
-/// Numbers are compared as f64; everything else is compared as a string.
+/// Numbers use the exact numeric order shared with `order_by`; everything
+/// else is compared as a string.
 fn cmp_json_val(a: &JsonValue, b: &JsonValue) -> Ordering {
     if let (JsonValue::Number(na), JsonValue::Number(nb)) = (a, b) {
-        let fa = na.as_f64().unwrap_or_default();
-        let fb = nb.as_f64().unwrap_or_default();
-        if fa < fb {
-            Ordering::Less
-        } else if fa > fb {
-            Ordering::Greater
-        } else {
-            Ordering::Equal
-        }
+        cmp_order_numbers(na, nb)
     } else {
         a.to_string().cmp(&b.to_string())
     }
@@ -686,49 +679,25 @@ impl Expr {
             ExprOp::NE => l != r,
             ExprOp::LT => {
                 if let (serde_json::Value::Number(v1), serde_json::Value::Number(v2)) = (l, r) {
-                    if v1.is_f64() {
-                        return v1.as_f64().unwrap() < v2.as_f64().unwrap_or_default();
-                    } else if v1.is_i64() {
-                        return v1.as_i64().unwrap() < v2.as_i64().unwrap_or_default();
-                    } else if v1.is_u64() {
-                        return v1.as_u64().unwrap() < v2.as_u64().unwrap_or_default();
-                    }
+                    return cmp_order_numbers(v1, v2) == Ordering::Less;
                 }
                 false
             }
             ExprOp::LE => {
                 if let (serde_json::Value::Number(v1), serde_json::Value::Number(v2)) = (l, r) {
-                    if v1.is_f64() {
-                        return v1.as_f64().unwrap() <= v2.as_f64().unwrap_or_default();
-                    } else if v1.is_i64() {
-                        return v1.as_i64().unwrap() <= v2.as_i64().unwrap_or_default();
-                    } else if v1.is_u64() {
-                        return v1.as_u64().unwrap() <= v2.as_u64().unwrap_or_default();
-                    }
+                    return cmp_order_numbers(v1, v2) != Ordering::Greater;
                 }
                 false
             }
             ExprOp::GT => {
                 if let (serde_json::Value::Number(v1), serde_json::Value::Number(v2)) = (l, r) {
-                    if v1.is_f64() {
-                        return v1.as_f64().unwrap() > v2.as_f64().unwrap_or_default();
-                    } else if v1.is_i64() {
-                        return v1.as_i64().unwrap() > v2.as_i64().unwrap_or_default();
-                    } else if v1.is_u64() {
-                        return v1.as_u64().unwrap() > v2.as_u64().unwrap_or_default();
-                    }
+                    return cmp_order_numbers(v1, v2) == Ordering::Greater;
                 }
                 false
             }
             ExprOp::GE => {
                 if let (serde_json::Value::Number(v1), serde_json::Value::Number(v2)) = (l, r) {
-                    if v1.is_f64() {
-                        return v1.as_f64().unwrap() >= v2.as_f64().unwrap_or_default();
-                    } else if v1.is_i64() {
-                        return v1.as_i64().unwrap() >= v2.as_i64().unwrap_or_default();
-                    } else if v1.is_u64() {
-                        return v1.as_u64().unwrap() >= v2.as_u64().unwrap_or_default();
-                    }
+                    return cmp_order_numbers(v1, v2) != Ordering::Less;
                 }
                 false
             }
@@ -1020,6 +989,41 @@ mod tests {
         assert_eq!(cmp_json_val(&json!(3.0), &json!(2.5)), Ordering::Greater);
     }
 
+    #[test]
+    fn store_cmp_json_val_exact_integers_beyond_f64_precision() {
+        use super::cmp_json_val;
+        use std::cmp::Ordering;
+
+        assert_eq!(
+            cmp_json_val(
+                &json!(9_007_199_254_740_992_u64),
+                &json!(9_007_199_254_740_993_u64)
+            ),
+            Ordering::Less
+        );
+        assert_eq!(
+            cmp_json_val(&json!(i64::MAX), &json!(u64::MAX)),
+            Ordering::Less
+        );
+    }
+
+    #[test]
+    fn store_expr_op_between_and_in_exact_large_integers() {
+        let between = Expr::between(
+            "field",
+            9_007_199_254_740_992_u64,
+            9_007_199_254_740_992_u64,
+        );
+        assert!(!between.op(
+            &json!(9_007_199_254_740_993_u64),
+            &json!([9_007_199_254_740_992_u64, 9_007_199_254_740_992_u64])
+        ));
+
+        let r#in = Expr::r#in("field", vec![u64::MAX - 1]);
+        assert!(r#in.op(&json!(u64::MAX - 1), &json!([u64::MAX - 1])));
+        assert!(!r#in.op(&json!(u64::MAX), &json!([u64::MAX - 1])));
+    }
+
     // ========== Expr::op() NE / LT / LE / GT / GE / Match tests ==========
 
     #[test]
@@ -1073,6 +1077,21 @@ mod tests {
     fn store_expr_op_le_non_number_returns_false() {
         let expr = Expr::le("field", 10);
         assert!(!expr.op(&json!("5"), &json!(10)));
+    }
+
+    #[test]
+    fn store_expr_op_range_numbers_exact_mixed_numeric_types() {
+        assert!(Expr::lt("field", 3.5).op(&json!(3), &json!(3.5)));
+        assert!(!Expr::ge("field", 3.5).op(&json!(3), &json!(3.5)));
+
+        assert!(Expr::lt("field", u64::MAX).op(&json!(5), &json!(u64::MAX)));
+        assert!(!Expr::gt("field", u64::MAX).op(&json!(5), &json!(u64::MAX)));
+
+        assert!(Expr::le("field", u64::MAX).op(&json!(i64::MAX), &json!(u64::MAX)));
+        assert!(!Expr::ge("field", u64::MAX).op(&json!(i64::MAX), &json!(u64::MAX)));
+
+        assert!(Expr::gt("field", -1).op(&json!(u64::MAX), &json!(-1)));
+        assert!(!Expr::lt("field", -1).op(&json!(u64::MAX), &json!(-1)));
     }
 
     #[test]
