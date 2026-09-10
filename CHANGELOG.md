@@ -347,3 +347,4 @@
 - fix: queue items now carry a process execution lease, so a queued task can still execute when a concurrent terminal event evicts its process before the scheduler reaches the item
 - fix: scheduler task execution is panic-isolated and takes the ordinary task-error path, while queue producers fail after the event loop exits instead of silently accumulating unbounded work
 - fix: JS value conversion propagates allocation/conversion errors instead of panicking; oversized BigInt results are rejected rather than silently wrapped
+- fix: remove unsafe impl Send/Sync

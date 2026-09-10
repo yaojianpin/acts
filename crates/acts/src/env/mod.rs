@@ -62,9 +62,6 @@ impl fmt::Debug for Enviroment {
     }
 }
 
-unsafe impl Send for Enviroment {}
-unsafe impl Sync for Enviroment {}
-
 impl Default for Enviroment {
     fn default() -> Self {
         Self::new()
