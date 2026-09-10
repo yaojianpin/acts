@@ -1,6 +1,6 @@
 use super::writer::{StoreWriter, WriteOp};
 use crate::{
-    Action, Config, Result,
+    ActError, Action, Config, Result,
     data::DeliveryStatus,
     query::{Expr, Filter, Query},
     scheduler::{Process, Runtime, Task, TaskState},
@@ -12,6 +12,55 @@ use std::{
     sync::Arc,
 };
 use tracing::{debug, instrument, warn};
+
+/// Result shared by all callers waiting for one `proc` load.
+type LoadedProc = Result<Option<Arc<Process>>>;
+
+/// A per-pid load shared with concurrent callers. The watch channel starts as
+/// `None` and is set exactly once when the leader finishes (or is cancelled).
+struct InflightProc {
+    rx: tokio::sync::watch::Receiver<Option<LoadedProc>>,
+}
+
+/// Removes an in-flight slot and wakes waiters if its owner is cancelled.
+struct InflightGuard {
+    pid: String,
+    inflight: Arc<InflightProc>,
+    tx: tokio::sync::watch::Sender<Option<LoadedProc>>,
+    loading: Arc<RwLock<HashMap<String, Arc<InflightProc>>>>,
+}
+
+impl InflightGuard {
+    fn finish(mut self, result: LoadedProc) {
+        self.tx.send_replace(Some(result));
+        self.remove();
+    }
+
+    fn remove(&mut self) {
+        let mut loading = self.loading.write();
+        if loading
+            .get(&self.pid)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.inflight))
+        {
+            loading.remove(&self.pid);
+        }
+    }
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        let mut loading = self.loading.write();
+        let is_owner = loading
+            .get(&self.pid)
+            .is_some_and(|current| Arc::ptr_eq(current, &self.inflight));
+        if is_owner {
+            loading.remove(&self.pid);
+            self.tx.send_replace(Some(Err(ActError::Runtime(
+                "process load cancelled".to_string(),
+            ))));
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct Cache {
@@ -26,6 +75,14 @@ pub struct Cache {
     /// (`None` state, no task rows) and started by [`Self::start_parked`] when a
     /// terminal event frees a slot.
     procs: Arc<RwLock<HashMap<String, Arc<Process>>>>,
+    /// In-flight store loads, keyed by pid. The first miss becomes the leader;
+    /// every later caller waits for and reuses its loaded `Arc<Process>`.
+    loading: Arc<RwLock<HashMap<String, Arc<InflightProc>>>>,
+    /// Pids claimed by an in-process admission (resident or parked). Unlike
+    /// durable rows, this check is synchronous and closes the start-time
+    /// lookup/admit race. It is process-local: multi-instance deployments still
+    /// need an external uniqueness guarantee for externally supplied pids.
+    claimed: Arc<RwLock<HashSet<String>>>,
     /// Boot-resume overflow queue: pids of in-flight (`Ready`/`Running`/
     /// `Pending`) rows that did not fit the resident cap at boot, oldest
     /// first. [`Self::resume_from_queue`] drains them into free slots (the
@@ -61,6 +118,8 @@ impl Cache {
         Ok(Self {
             cap: config.cache_cap() as usize,
             procs: Arc::new(RwLock::new(HashMap::new())),
+            loading: Arc::new(RwLock::new(HashMap::new())),
+            claimed: Arc::new(RwLock::new(HashSet::new())),
             pending_resume: Arc::new(RwLock::new(VecDeque::new())),
             store: store.clone(),
             writer: StoreWriter::spawn(store),
@@ -108,18 +167,54 @@ impl Cache {
             Some(proc) => Ok(Some(proc.clone())),
             None => {
                 self.flush().await?;
-                if let Some(proc) = self.store.load_proc(pid, rt).await? {
+                // Coalesce misses. The insert/remove critical section is short;
+                // only the leader performs store I/O, while waiters clone the
+                // same process pointer from the watch result.
+                let wait_rx = {
+                    let loading = self.loading.write();
+                    loading.get(pid).map(|inflight| inflight.rx.clone())
+                };
+                if let Some(mut rx) = wait_rx {
+                    while rx.borrow_and_update().is_none() {
+                        rx.changed().await.map_err(|_| {
+                            ActError::Runtime("process load leader was dropped".to_string())
+                        })?;
+                    }
+                    let result = rx.borrow_and_update().clone().ok_or_else(|| {
+                        ActError::Runtime("process load result missing".to_string())
+                    })?;
+                    return result;
+                }
+
+                let (tx, rx) = tokio::sync::watch::channel(None);
+                let inflight = Arc::new(InflightProc { rx: rx.clone() });
+                {
+                    let mut loading = self.loading.write();
+                    loading.insert(pid.to_string(), inflight.clone());
+                }
+                let guard = InflightGuard {
+                    pid: pid.to_string(),
+                    inflight,
+                    tx,
+                    loading: self.loading.clone(),
+                };
+                let loaded = self.store.load_proc(pid, rt).await;
+                if let Ok(Some(proc)) = &loaded {
                     debug!(pid = %pid, "loaded process");
                     // add to cache — unless it is parked: a durable `None`
                     // row that was never started (the resident set was full at
                     // start time). Caching it would occupy a slot forever —
                     // `restore` skips resident pids, so it would never start.
-                    if !proc.state().is_none() && self.count() < self.cap() {
-                        self.push_proc_pri(&proc, false).await?;
+                    if !proc.state().is_none()
+                        && self.count() < self.cap()
+                        && let Err(err) = self.push_proc_pri(proc, false).await
+                    {
+                        guard.finish(Err(err.clone()));
+                        return Err(err);
                     }
-                    return Ok(Some(proc));
                 }
-                Ok(None)
+                guard.finish(loaded.clone());
+                loaded
             }
         }
     }
@@ -128,6 +223,7 @@ impl Cache {
     pub async fn remove(&self, pid: &str) -> Result<bool> {
         debug!("remove pid={pid}");
         self.procs.write().remove(pid);
+        self.claimed.write().remove(pid);
         // Removal is serialized through the writer (FIFO) so it can never
         // race writes still queued for the process — its completion markers
         // are applied first, then the rows are dropped. `flush` keeps the
@@ -183,11 +279,36 @@ impl Cache {
         // path, and a concurrent restore pass must never observe a half-made
         // decision (e.g. start a row whose parking write is still in flight).
         let _guard = self.lock.lock().await;
+        // Claim the pid before any store I/O. Both resident and parked
+        // admissions leave this marker installed, so a second start for the
+        // same externally supplied pid fails deterministically even when both
+        // callers missed the durable row before either was admitted.
+        if !self.claimed.write().insert(proc.id().to_string()) {
+            return Err(ActError::Action(format!(
+                "proc_id({}) is duplicated in running process list",
+                proc.id()
+            )));
+        }
+
+        {
+            let procs = self.procs.read();
+            if procs.contains_key(proc.id()) {
+                return Err(ActError::Action(format!(
+                    "proc_id({}) is duplicated in running process list",
+                    proc.id()
+                )));
+            }
+        }
+
         if self.count() >= self.cap {
             debug!(pid = %proc.id(), "process parked, resident set full");
-            self.store.upsert_proc(proc).await?;
-            return Ok(false);
+            let result = self.store.upsert_proc(proc).await;
+            if result.is_err() {
+                self.claimed.write().remove(proc.id());
+            }
+            return result.map(|_| false);
         }
+
         self.procs
             .write()
             .insert(proc.id().to_string(), proc.clone());

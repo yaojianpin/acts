@@ -350,3 +350,5 @@
 - fix: remove unsafe impl Send/Sync
 - fix: store `Between`/`In` fallback filters compare integers exactly — `cmp_json_val` now uses the same exact numeric ordering as `order_by` instead of lossy `f64` conversion, so adjacent integers above `2^53` (including the full `u64` range) no longer compare equal in non-indexed scans
 - fix: store numeric range fallback filters handle mixed numeric types exactly — `LT`/`LE`/`GT`/`GE` now reuse the exact `order_by` numeric comparator instead of coercing the right side through the left side's integer type or `f64`, so cases such as `3 < 3.5`, `5 < u64::MAX`, and `i64::MAX < u64::MAX` no longer produce false negatives
+- fix: coalesce concurrent same-pid cache misses with per-pid single-flight, so every waiter receives the same loaded `Arc<Process>` instead of racing duplicate process instances
+- fix: admit external process ids through an atomic in-process pid claim, so concurrent starts that all miss the durable row fail as duplicates instead of creating two running or parked instances

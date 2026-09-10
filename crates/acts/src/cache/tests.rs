@@ -585,6 +585,104 @@ async fn cache_park_over_cap_then_refill_on_terminal() {
     .expect("parked process never ran to completion after refill");
 }
 
+/// Concurrent cache misses for the same pid must coalesce into one store load
+/// and one in-memory instance. Returning independently loaded `Arc<Process>`
+/// values would let callers drive the same durable process with two state trees.
+#[tokio::test(flavor = "multi_thread")]
+async fn cache_concurrent_proc_miss_returns_one_instance() {
+    let config = Config::default();
+    let rt = Runtime::new(&config, None).unwrap();
+    let cache = rt.cache();
+    let model = Workflow::new()
+        .with_id("m1")
+        .with_step(|step| step.with_name("step1"));
+    cache.store().deploy(&model, None).await.unwrap();
+
+    let pid = utils::longid();
+    let row = data::Proc {
+        id: pid.clone(),
+        name: "test".to_string(),
+        mid: "m1".to_string(),
+        state: TaskState::Running.to_string(),
+        start_time: 0,
+        end_time: 0,
+        timestamp: 0,
+        model: model.to_json().unwrap(),
+        env: "{}".to_string(),
+        err: None,
+        removable: false,
+        v: data::Proc::version(),
+    };
+    cache.store().procs().create(&row).await.unwrap();
+
+    let mut handles = Vec::new();
+    for _ in 0..50 {
+        let cache = cache.clone();
+        let rt = rt.clone();
+        let pid = pid.clone();
+        handles.push(tokio::spawn(async move {
+            cache.proc(&pid, &rt).await.unwrap().unwrap()
+        }));
+    }
+    let mut handles = handles.into_iter();
+    let first = handles.next().unwrap().await.unwrap();
+    let expected = Arc::as_ptr(&first);
+    let mut pointers = std::collections::HashSet::from([expected]);
+    for handle in handles {
+        let proc = handle.await.unwrap();
+        assert!(Arc::ptr_eq(&first, &proc));
+        pointers.insert(Arc::as_ptr(&proc));
+    }
+    assert_eq!(pointers.len(), 1);
+    assert_eq!(cache.count(), 1);
+
+    rt.close().await;
+}
+
+/// Admission claims a pid atomically. Concurrent fresh starts that all missed
+/// the durable row can therefore produce only one executable instance.
+#[tokio::test(flavor = "multi_thread")]
+async fn cache_admit_same_pid_has_single_winner() {
+    let config = Config {
+        data: ConfigData {
+            cache_cap: Some(1),
+            ..Default::default()
+        },
+        table: Default::default(),
+    };
+    let rt = Runtime::new(&config, None).unwrap();
+    let cache = rt.cache();
+    let model = Workflow::new()
+        .with_id("m1")
+        .with_step(|step| step.with_name("step1"));
+
+    let pid = "concurrent-admit";
+    let make = || {
+        let proc = Process::new(pid, &rt);
+        proc.load(&model).unwrap();
+        proc
+    };
+
+    let mut handles = Vec::new();
+    for _ in 0..20 {
+        let cache = cache.clone();
+        let proc = make();
+        handles.push(tokio::spawn(async move { cache.admit(&proc).await }));
+    }
+    let mut admitted = 0;
+    for handle in handles {
+        match handle.await.unwrap() {
+            Ok(true) => admitted += 1,
+            Ok(false) => panic!("cap is 1, so no second process should be parked"),
+            Err(err) => assert!(err.to_string().contains("duplicated")),
+        }
+    }
+    assert_eq!(admitted, 1);
+    assert_eq!(cache.count(), 1);
+
+    rt.close().await;
+}
+
 /// Parked rows refill FIFO (oldest first) and a refill never overshoots
 /// `cap`: freeing one slot starts exactly the oldest parked process; newer
 /// parked rows keep waiting for the next terminal event. The runtime is

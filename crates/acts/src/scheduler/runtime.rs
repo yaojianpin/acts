@@ -202,6 +202,11 @@ impl Runtime {
         self.shutdown.clone()
     }
 
+    /// Start a workflow process.
+    ///
+    /// An externally supplied pid is unique within this runtime instance.
+    /// Deployments that run multiple runtime instances against one store must
+    /// enforce external pid uniqueness at their boundary.
     #[instrument(skip(self, model, options), fields(mid = %model.id, name = %model.name))]
     pub async fn start(self: &Arc<Self>, model: &Workflow, options: Vars) -> Result<Arc<Process>> {
         debug!("process starting");
