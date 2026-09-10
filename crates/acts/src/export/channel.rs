@@ -3,7 +3,7 @@ use crate::{
 };
 use std::pin::Pin;
 use std::sync::Arc;
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 /// channel match filters: (type, state, uses, options) globs
 type GlobSet = (
@@ -82,13 +82,9 @@ impl Channel {
     #[allow(clippy::self_named_constructors)]
     pub fn channel(rt: &Arc<Runtime>, options: &ChannelOptions) -> Self {
         debug!("channel created");
-        let pat_type = globset::Glob::new(&options.r#type)
-            .unwrap()
-            .compile_matcher();
-        let pat_state = globset::Glob::new(&options.state)
-            .unwrap()
-            .compile_matcher();
-        let pat_uses = globset::Glob::new(&options.uses).unwrap().compile_matcher();
+        let pat_type = compile_glob(&options.r#type, "type");
+        let pat_state = compile_glob(&options.state, "state");
+        let pat_uses = compile_glob(&options.uses, "uses");
         let opt_globs: Vec<(String, globset::GlobMatcher)> = options
             .options
             .iter()
@@ -336,4 +332,27 @@ fn is_match(glob: &GlobSet, e: &Event<Message>) -> bool {
         }
     }
     true
+}
+
+fn compile_glob(pattern: &str, field: &str) -> globset::GlobMatcher {
+    globset::Glob::new(pattern)
+        .map(|glob| glob.compile_matcher())
+        .unwrap_or_else(|err| {
+            warn!(field = field, pattern, error = %err, "invalid channel glob pattern; falling back to wildcard");
+            globset::Glob::new("*")
+                .expect("fallback glob is valid")
+                .compile_matcher()
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compile_glob;
+
+    #[test]
+    fn invalid_glob_falls_back_to_match_all() {
+        let matcher = compile_glob("[", "type");
+        assert!(matcher.is_match("act"));
+        assert!(matcher.is_match(""));
+    }
 }

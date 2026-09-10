@@ -2307,6 +2307,19 @@ async fn export_emitter_default() {
 
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
+async fn export_emitter_invalid_glob_does_not_panic() {
+    let engine = Engine::new().start().await.unwrap();
+    let emitter = engine.channel_with_options(&ChannelOptions {
+        r#type: "[".to_string(),
+        state: "[".to_string(),
+        uses: "[".to_string(),
+        ..Default::default()
+    });
+    emitter.close();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
 async fn export_emitter_type_match() {
     let engine = Engine::new().start().await.unwrap();
     let emitter = engine.channel_with_options(&ChannelOptions {
