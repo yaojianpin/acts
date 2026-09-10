@@ -198,7 +198,7 @@ impl Store {
     ///
     /// `schedule` triggers keep their `last_run`/`next_run` state across
     /// re-deploys unless the cron expression itself changed (then the next
-    /// run is re-armed to fire on the next tick).
+    /// run is re-armed to the new cron's next fire).
     async fn trigger_ops(
         &self,
         triggers: &[Trigger],
@@ -249,17 +249,19 @@ impl Store {
                     event.last_run = evt.last_run;
                     event.next_run = if evt.schedule == event.schedule {
                         evt.next_run
-                    } else if event.schedule.is_some() {
-                        utils::time::time_millis()
                     } else {
-                        0
+                        event
+                            .schedule
+                            .as_deref()
+                            .map(crate::scheduler::cron::Cron::next_fire_millis)
+                            .unwrap_or(0)
                     };
                     ops.extend(events.update_ops(&event).await?);
                 }
                 Err(_) => {
-                    // new trigger: arm `schedule` rows on the next tick
-                    if event.schedule.is_some() {
-                        event.next_run = utils::time::time_millis();
+                    // new trigger: arm `schedule` rows to their next cron fire
+                    if let Some(schedule) = event.schedule.as_deref() {
+                        event.next_run = crate::scheduler::cron::Cron::next_fire_millis(schedule);
                     }
                     ops.extend(events.create_ops(&event)?);
                 }

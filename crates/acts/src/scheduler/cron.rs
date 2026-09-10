@@ -29,6 +29,18 @@ impl Cron {
     pub fn next(&self) -> Option<DateTime<Local>> {
         self.next_after(Local::now())
     }
+
+    /// the next fire time of `expr` after now, in epoch millis — 0 when the
+    /// expression can't be parsed or has no next fire. Used to arm a
+    /// `schedule` trigger row on deploy and to roll its `next_run` forward
+    /// after firing.
+    pub fn next_fire_millis(expr: &str) -> i64 {
+        Self::parse(expr)
+            .ok()
+            .and_then(|cron| cron.next())
+            .map(|next| next.timestamp_millis())
+            .unwrap_or(0)
+    }
 }
 
 #[cfg(test)]

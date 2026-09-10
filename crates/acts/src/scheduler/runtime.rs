@@ -808,7 +808,7 @@ impl Runtime {
     }
     /// Schedule-trigger timer — periodically fires every due `schedule`
     /// trigger row and rolls its `next_run` forward. Deployed rows arm with
-    /// `next_run = now`, so a fresh schedule fires on the first tick.
+    /// their next cron fire; a changed schedule re-arms the same way.
     pub fn init_trigger_timer(self: &Arc<Self>) {
         #[cfg(not(test))]
         let interval_ms = {
@@ -914,11 +914,7 @@ impl Runtime {
         let mut event = event.clone();
         event.last_run = crate::utils::time::time_millis();
         event.next_run = match event.schedule.as_deref() {
-            Some(schedule) => super::cron::Cron::parse(schedule)
-                .ok()
-                .and_then(|cron| cron.next())
-                .map(|next| next.timestamp_millis())
-                .unwrap_or(0),
+            Some(schedule) => super::cron::Cron::next_fire_millis(schedule),
             None => 0,
         };
         self.cache.store().events().update(&event).await?;

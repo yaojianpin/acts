@@ -3129,7 +3129,7 @@ async fn export_trigger_redeploy_keeps_schedule_state() {
     assert_eq!(after.next_run, before.next_run, "schedule state preserved");
     assert_eq!(after.last_run, before.last_run);
 
-    // cron change: state is kept but the row is re-armed on the next tick
+    // cron change: last_run is kept but next_run re-arms to the new cron
     let armed_at = utils::time::time_millis();
     model.on = vec![crate::Trigger {
         id: "e1".to_string(),

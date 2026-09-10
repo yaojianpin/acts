@@ -26,7 +26,7 @@ pub struct Event {
     /// kind=`schedule`: last run time in millis (0 = never)
     #[serde(default)]
     pub last_run: i64,
-    /// kind=`schedule`: next run time in millis; 0 arms it on the next tick
+    /// kind=`schedule`: next run time in millis; 0 = not armed
     #[serde(default)]
     pub next_run: i64,
 
