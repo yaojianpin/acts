@@ -345,3 +345,5 @@
 - BREAKING: `Task::proc()` returns `Option<Arc<Process>>` instead of `&Arc<Process>` — `None` only for a task clone that outlived its evicted process (engine-driven paths always see a live process); a late root-task write from the store writer whose process is already gone falls back to the task's own state to stamp the proc row complete, so the sweeper still removes it
 - test: `cache_evict_breaks_proc_task_cycle` proves both sides of the contract — the task tree stays queryable while the caller holds the process, and the process is deallocated once the last holder drops
 - fix: queue items now carry a process execution lease, so a queued task can still execute when a concurrent terminal event evicts its process before the scheduler reaches the item
+- fix: scheduler task execution is panic-isolated and takes the ordinary task-error path, while queue producers fail after the event loop exits instead of silently accumulating unbounded work
+- fix: JS value conversion propagates allocation/conversion errors instead of panicking; oversized BigInt results are rejected rather than silently wrapped

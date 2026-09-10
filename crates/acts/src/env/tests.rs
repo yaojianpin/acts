@@ -86,6 +86,24 @@ fn env_eval_expr() {
 }
 
 #[test]
+fn env_eval_bigint_within_i64() {
+    let env = Enviroment::new();
+    let result = env.eval::<i64>("BigInt(42)");
+    assert_eq!(result.unwrap(), 42);
+}
+
+#[test]
+fn env_eval_bigint_outside_i64_is_error() {
+    let env = Enviroment::new();
+    let result = env.eval::<serde_json::Value>(r#"BigInt("1000000000000000000000000000000")"#);
+    let err = result.unwrap_err();
+    assert!(
+        err.to_string().contains("outside the i64 range"),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
 fn env_eval_array() {
     let env = Enviroment::new();
 

@@ -1,14 +1,105 @@
 use crate::Config;
 use crate::event::EventAction;
 use crate::{
-    Context, Engine, KvStore, MemoryStore, MessageState, ScanOperation, ScanOptions, Vars,
-    Workflow, utils, utils::test::USES_IRQ,
+    ActPackage, ActPackageCatalog, ActPackageDefinition, ActRunAs, Context, Engine, KvStore,
+    MemoryStore, MessageState, ScanOperation, ScanOptions, Vars, Workflow, utils,
+    utils::test::USES_IRQ,
 };
 use parking_lot::Mutex;
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use tokio::time::{Duration, timeout};
+
+/// A package that panics after engine startup. It verifies that user-code bugs
+/// cannot kill the scheduler's only queue consumer.
+#[derive(Debug, Clone)]
+struct PanicPackage;
+
+#[async_trait::async_trait]
+impl ActPackage for PanicPackage {
+    fn definition() -> ActPackageDefinition {
+        ActPackageDefinition {
+            id: "test.scheduler.panic",
+            name: "Panic",
+            desc: "panic after scheduler startup",
+            icon: "",
+            doc: "",
+            version: "0.1.0",
+            schema: json!({}),
+            options: None,
+            run_as: ActRunAs::Func,
+            resources: Vec::new(),
+            catalog: ActPackageCatalog::App,
+        }
+    }
+
+    fn new(_: &Config) -> crate::Result<Self> {
+        Ok(Self)
+    }
+
+    async fn execute(
+        &self,
+        _ctx: &Context,
+        _params: &serde_json::Value,
+    ) -> crate::Result<Option<Vars>> {
+        panic!("injected scheduler panic");
+    }
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn scheduler_event_loop_survives_task_panic() {
+    let engine = Engine::builder()
+        .add_package::<PanicPackage>()
+        .build()
+        .start()
+        .await
+        .unwrap();
+
+    // Queue and process a failing task. The panic hook will print, but the
+    // task must be reported as an error instead of silently killing the loop.
+    let (error_tx, error_rx) = engine.signal(()).double();
+    let error_signal = error_tx.clone();
+    engine.channel().on_error(move |_| {
+        let error_signal = error_signal.clone();
+        async move { error_signal.close() }
+    });
+    let panic_workflow = Workflow::new().with_id("panic-model").with_step(|step| {
+        step.with_id("panic-step")
+            .with_uses("test.scheduler.panic", Vars::new())
+    });
+    engine
+        .runtime()
+        .start(&panic_workflow, Vars::new())
+        .await
+        .unwrap();
+    timeout(Duration::from_secs(10), error_rx.recv())
+        .await
+        .expect("a panicked task must take the ordinary error path");
+
+    // A process launched after the panic must still run to completion.
+    let (tx, rx) = engine.signal(()).double();
+    let s = tx.clone();
+    engine.channel().on_complete(move |_| {
+        let s = s.clone();
+        async move { s.close() }
+    });
+    let healthy_workflow = Workflow::new()
+        .with_id("healthy-model")
+        .with_step(|step| step.with_id("healthy-step"));
+    engine
+        .runtime()
+        .start(&healthy_workflow, Vars::new())
+        .await
+        .unwrap();
+
+    timeout(Duration::from_secs(10), rx.recv())
+        .await
+        .expect("the scheduler must remain alive after a task panic");
+    engine.close().await;
+}
 
 use serial_test::serial;
 

@@ -1,4 +1,4 @@
-use super::{ActTask, Process, Sign, Task, TaskState};
+use super::{ActTask, Context, Process, Sign, Task, TaskState};
 use crate::snapshot::{SnapshotOptions, SnapshotStore};
 use crate::{
     ActError, Action, Config, Error, Package, Result, ShareLock, Vars, Workflow,
@@ -11,7 +11,16 @@ use crate::{
     utils::{self, consts},
 };
 use parking_lot::RwLock;
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    any::Any,
+    collections::HashMap,
+    future::Future,
+    panic::{AssertUnwindSafe, catch_unwind},
+    pin::Pin,
+    sync::Arc,
+    task::{Context as TaskContext, Poll},
+    time::Duration,
+};
 use tokio::{runtime::Handle, time};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument};
@@ -31,6 +40,46 @@ pub struct Runtime {
 /// Registry of snapshot-backed sealed-data targets (see [`crate::snapshot`]).
 pub(crate) struct SnapshotRegistry {
     stores: ShareLock<HashMap<String, Arc<SnapshotStore>>>,
+}
+
+/// Catches panics raised while polling an operation, without moving that
+/// operation to another task (which would change scheduler event ordering).
+struct CatchPanic<F> {
+    future: Option<F>,
+}
+
+impl<F> CatchPanic<F> {
+    fn new(future: F) -> Self {
+        Self {
+            future: Some(future),
+        }
+    }
+}
+
+impl<F: Future> Future for CatchPanic<F> {
+    type Output = std::result::Result<F::Output, Box<dyn Any + Send>>;
+
+    fn poll(self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
+        // The future is structurally pinned with the wrapper and is never moved
+        // or replaced after polling starts.
+        let this = unsafe { self.get_unchecked_mut() };
+        let Some(future) = this.future.as_mut() else {
+            panic!("CatchPanic was polled after completion");
+        };
+        let future = unsafe { Pin::new_unchecked(future) };
+
+        match catch_unwind(AssertUnwindSafe(move || future.poll(cx))) {
+            Ok(Poll::Ready(value)) => {
+                this.future = None;
+                Poll::Ready(Ok(value))
+            }
+            Ok(Poll::Pending) => Poll::Pending,
+            Err(payload) => {
+                this.future = None;
+                Poll::Ready(Err(payload))
+            }
+        }
+    }
 }
 
 impl SnapshotRegistry {
@@ -521,6 +570,10 @@ impl Runtime {
         let queue = self.queue.clone();
         let shutdown = self.shutdown.clone();
         tokio::spawn(async move {
+            // If this future is dropped or unwinds unexpectedly, make the
+            // failure visible to producers (`queue.send`) instead of letting an
+            // unbounded queue accumulate work for a dead scheduler.
+            let _consumer = queue.consumer_lease();
             loop {
                 let next = tokio::select! {
                     _ = shutdown.cancelled() => break,
@@ -528,38 +581,55 @@ impl Runtime {
                 };
                 match next {
                     Ok(data) => match data {
-                        QueueData::Task { task, proc: _proc } => {
-                            // Keep the queued process alive until the item has
-                            // fully executed; `_proc` is the execution lease.
-                            let ctx = &task.create_context();
-                            if let Err(err) = task.exec(ctx).await {
-                                error!(error = %err, "task.exec failed");
-                                task.set_err(&err.clone().into());
-                                ctx.set_task(&task);
-                                ctx.emit_error().await.ok();
-                            }
-                        }
-                        QueueData::Next { task, proc: _proc } => {
-                            // Same as `Task`: the queue owns an execution lease
-                            // across terminal-event eviction races.
-                            let ctx = &task.create_context();
-                            let result = task.next(ctx).await;
-                            if let Err(err) = result {
-                                error!(error = %err, "task.next failed");
-                                task.set_err(&err.clone().into());
-                                ctx.set_task(&task);
-                                ctx.emit_error().await.ok();
-                                // the propagation ended in error (terminal):
-                                // close the outbox record so recovery does not
-                                // replay the failed `next`
-                                if let Err(err) = task.runtime().complete_next(&task) {
-                                    error!(error = %err, "complete_next failed");
+                        QueueData::Task { task, proc } => {
+                            let Some(ctx) = Self::isolate_context(task.clone(), proc).await else {
+                                continue;
+                            };
+                            let result = CatchPanic::new({
+                                let task = task.clone();
+                                let ctx = ctx.clone();
+                                async move {
+                                    if let Err(err) = task.exec(&ctx).await {
+                                        error!(error = %err, "task.exec failed");
+                                        task.set_err(&err.clone().into());
+                                        ctx.set_task(&task);
+                                        ctx.emit_error().await.ok();
+                                    }
                                 }
-                            }
-                            // on success the record is closed inside `next`
-                            // once the task reaches a terminal state; outcomes
-                            // with children still in flight or an interrupt
-                            // leave it `Pending` for recovery to replay.
+                            })
+                            .await;
+                            Self::report_task_panic("task.exec", task, ctx, result).await;
+                        }
+                        QueueData::Next { task, proc } => {
+                            let Some(ctx) = Self::isolate_context(task.clone(), proc).await else {
+                                continue;
+                            };
+                            let result = CatchPanic::new({
+                                let task = task.clone();
+                                let ctx = ctx.clone();
+                                async move {
+                                    let result = task.next(&ctx).await;
+                                    if let Err(err) = result {
+                                        error!(error = %err, "task.next failed");
+                                        task.set_err(&err.clone().into());
+                                        ctx.set_task(&task);
+                                        ctx.emit_error().await.ok();
+                                        // the propagation ended in error (terminal):
+                                        // close the outbox record so recovery does not
+                                        // replay the failed `next`
+                                        if let Err(err) = task.runtime().complete_next(&task) {
+                                            error!(error = %err, "complete_next failed");
+                                        }
+                                    }
+                                    // On success the record is closed inside `next`
+                                    // once the task reaches a terminal state;
+                                    // outcomes with children still in flight or an
+                                    // interrupt leave it `Pending` for recovery to
+                                    // replay.
+                                }
+                            })
+                            .await;
+                            Self::report_task_panic("task.next", task, ctx, result).await;
                         }
                         QueueData::Abort => {
                             break;
@@ -572,6 +642,58 @@ impl Runtime {
                 }
             }
         });
+    }
+
+    /// Build an execution context while catching a panic at the poll boundary.
+    async fn isolate_context(task: Arc<Task>, proc: Arc<Process>) -> Option<Context> {
+        // Keep the queue item's process lease alive through context setup.
+        let _proc = proc;
+        match catch_unwind(AssertUnwindSafe(|| task.create_context())) {
+            Ok(ctx) => Some(ctx),
+            Err(payload) => {
+                error!(
+                    error = %Self::panic_payload_error(payload),
+                    "task context creation panicked"
+                );
+                None
+            }
+        }
+    }
+
+    /// Convert a panic that escaped `task.exec`/`task.next` into the ordinary
+    /// task-error path. The recovery work itself is isolated as well, because a
+    /// corrupted task may panic again while being reported.
+    async fn report_task_panic(
+        operation: &'static str,
+        task: Arc<Task>,
+        ctx: Context,
+        result: std::result::Result<(), Box<dyn Any + Send>>,
+    ) {
+        let Err(err) = result else {
+            return;
+        };
+        let err = Self::panic_payload_error(err);
+        error!(operation, error = %err, "scheduler operation panicked");
+        let report_result = CatchPanic::new(async move {
+            task.set_err(&err.clone().into());
+            ctx.set_task(&task);
+            ctx.emit_error().await.ok();
+        })
+        .await;
+        if report_result.is_err() {
+            error!(operation, "reporting the panicked task panicked");
+        }
+    }
+
+    fn panic_payload_error(payload: Box<dyn Any + Send>) -> ActError {
+        let message = if let Some(message) = payload.downcast_ref::<&str>() {
+            (*message).to_string()
+        } else if let Some(message) = payload.downcast_ref::<String>() {
+            message.clone()
+        } else {
+            "unknown panic payload".to_string()
+        };
+        ActError::Runtime(format!("scheduler task panicked: {message}"))
     }
 
     fn create(config: &Config, store: Option<Arc<dyn KvStore>>) -> crate::Result<Arc<Runtime>> {

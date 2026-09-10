@@ -1,7 +1,7 @@
 use crate::{ActError, Result, Vars};
 use rquickjs::{
-    Array as JsArray, FromJs, IntoAtom, IntoJs, Object as JsObject, String as JsString,
-    Value as JsValue,
+    Array as JsArray, FromJs, Function as JsFunction, IntoAtom, IntoJs, Object as JsObject,
+    String as JsString, Value as JsValue,
 };
 use serde::de::DeserializeOwned;
 
@@ -43,24 +43,20 @@ impl<'js> IntoJs<'js> for ActJsValue {
                 }
             }
             serde_json::Value::String(v) => {
-                JsValue::from_string(JsString::from_str(ctx.clone(), &v).unwrap())
+                JsValue::from_string(JsString::from_str(ctx.clone(), &v)?)
             }
             serde_json::Value::Array(v) => {
-                let arr = JsArray::new(ctx.clone()).unwrap();
+                let arr = JsArray::new(ctx.clone())?;
                 for (idx, v) in v.iter().enumerate() {
-                    let val = ActJsValue(v.clone()).into_js(ctx).unwrap();
-                    arr.set(idx, val).unwrap();
+                    let val = ActJsValue(v.clone()).into_js(ctx)?;
+                    arr.set(idx, val)?;
                 }
                 JsValue::from_array(arr)
             }
             serde_json::Value::Object(v) => {
-                let obj = JsObject::new(ctx.clone()).unwrap();
+                let obj = JsObject::new(ctx.clone())?;
                 for (k, v) in v {
-                    obj.set(
-                        k.into_atom(ctx).unwrap(),
-                        ActJsValue(v).into_js(ctx).unwrap(),
-                    )
-                    .unwrap();
+                    obj.set(k.into_atom(ctx)?, ActJsValue(v).into_js(ctx)?)?;
                 }
 
                 JsValue::from_object(obj)
@@ -82,22 +78,31 @@ impl<'js> FromJs<'js> for ActJsValue {
             rquickjs::Type::Float => Ok(serde_json::json!(v.as_float().unwrap_or(0.0))),
             rquickjs::Type::String => Ok(serde_json::json!(
                 v.as_string()
-                    .unwrap()
-                    .to_string()
-                    .unwrap_or(String::from(""))
+                    .ok_or_else(|| {
+                        rquickjs::Error::new_from_js_message(
+                            v.type_name(),
+                            "string",
+                            "expected a JS string",
+                        )
+                    })?
+                    .to_string()?
             )),
             rquickjs::Type::Array => {
-                let empty = &JsArray::new(ctx.clone())?;
-                Ok(serde_json::Value::Array(
-                    v.as_array()
-                        .unwrap_or(empty)
-                        .iter::<JsValue>()
-                        .filter_map(|v| {
-                            v.map(|v| ActJsValue::from_js(ctx, v.clone()).unwrap().into())
-                                .ok()
-                        })
-                        .collect(),
-                ))
+                let array = v.as_array().ok_or_else(|| {
+                    rquickjs::Error::new_from_js_message(
+                        v.type_name(),
+                        "Array",
+                        "expected a JS array",
+                    )
+                })?;
+                let values = array
+                    .iter::<JsValue>()
+                    .map(|item| {
+                        let item = item?;
+                        Ok(ActJsValue::from_js(ctx, item)?.into())
+                    })
+                    .collect::<rquickjs::Result<Vec<_>>>()?;
+                Ok(serde_json::Value::Array(values))
             }
             rquickjs::Type::Object => {
                 let mut value = serde_json::Map::<String, serde_json::Value>::new();
@@ -123,12 +128,58 @@ impl<'js> FromJs<'js> for ActJsValue {
                 Ok(serde_json::Value::Object(value))
             }
             rquickjs::Type::BigInt => {
-                let bigint = v.as_big_int().unwrap().clone();
-                let v = bigint.to_i64().unwrap();
+                let bigint = v.as_big_int().ok_or_else(|| {
+                    rquickjs::Error::new_from_js_message(
+                        v.type_name(),
+                        "BigInt",
+                        "expected a BigInt",
+                    )
+                })?;
+
+                // `JS_ToInt64` wraps oversized BigInts, so derive its canonical
+                // decimal representation and range-check it before narrowing.
+                let to_string = ctx.globals().get::<_, JsFunction>("String")?;
+                let text = to_string
+                    .call::<_, JsValue>((bigint.clone(),))?
+                    .as_string()
+                    .ok_or_else(|| {
+                        rquickjs::Error::new_from_js_message(
+                            v.type_name(),
+                            "string",
+                            "cannot stringify a BigInt",
+                        )
+                    })?
+                    .to_string()?;
+                let negative = text.starts_with('-');
+                let digits = text.trim_start_matches('-');
+                let magnitude: i128 = digits.parse().map_err(|_| {
+                    rquickjs::Error::new_from_js_message(
+                        v.type_name(),
+                        "i64",
+                        "invalid BigInt value",
+                    )
+                })?;
+                let signed = if negative { -magnitude } else { magnitude };
+                let v = i64::try_from(signed).map_err(|_| {
+                    rquickjs::Error::new_from_js_message(
+                        v.type_name(),
+                        "i64",
+                        "BigInt value is outside the i64 range",
+                    )
+                })?;
                 Ok(serde_json::json!(v))
             }
             rquickjs::Type::Exception => {
-                let ex = v.as_exception().unwrap().clone();
+                let ex = v
+                    .as_exception()
+                    .ok_or_else(|| {
+                        rquickjs::Error::new_from_js_message(
+                            v.type_name(),
+                            "Exception",
+                            "expected a JS exception",
+                        )
+                    })?
+                    .clone();
                 Err(ex.throw())
             }
             rquickjs::Type::Unknown

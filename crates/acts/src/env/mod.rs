@@ -128,12 +128,19 @@ impl Enviroment {
                 return Err(ActError::Script("Execution timeout".into()));
             }
             if let Err(rquickjs::Error::Exception) = result {
-                let exception = rquickjs::Exception::from_js(&ctx, ctx.catch()).unwrap();
-                eprintln!("error: {exception:?}");
-                return Err(ActError::Exception {
-                    ecode: "".to_string(),
-                    message: exception.message().unwrap_or_default(),
-                });
+                match rquickjs::Exception::from_js(&ctx, ctx.catch()) {
+                    Ok(exception) => {
+                        return Err(ActError::Exception {
+                            ecode: "".to_string(),
+                            message: exception.message().unwrap_or_default(),
+                        });
+                    }
+                    Err(exception) => {
+                        return Err(ActError::Script(format!(
+                            "failed to read the thrown exception: {exception}"
+                        )));
+                    }
+                }
             }
 
             let value = result.map_err(ActError::from)?;
