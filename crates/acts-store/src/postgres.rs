@@ -140,19 +140,22 @@ impl KvStore for PostgresStore {
             op,
             ref prefix,
         } = options;
-        let pattern = format!("{}%", prefix);
         let order = if is_rev { "DESC" } else { "ASC" };
         let mut sql = format!(
-            "SELECT key, value FROM {} WHERE key LIKE $1",
+            "SELECT key, value FROM {} WHERE key LIKE $1 ESCAPE '\\'",
             consts::ACTS_STORE_NAME
         );
-        let mut binds: Vec<String> = vec![pattern];
+        let mut binds: Vec<String> = vec![like_pattern(prefix)];
         let mut param_idx = 2;
         match &op {
-            ScanOperation::Eq => {}
+            ScanOperation::Eq => {
+                let n = binds.len() + 1;
+                sql.push_str(&format!(" AND key LIKE ${n} ESCAPE '\\'"));
+                binds.push(like_pattern(key));
+            }
             ScanOperation::Ne => {
-                sql.push_str(&format!(" AND key NOT LIKE ${}", param_idx));
-                binds.push(format!("{}%", key));
+                sql.push_str(&format!(" AND key NOT LIKE ${param_idx} ESCAPE '\\'"));
+                binds.push(like_pattern(key));
             }
             ScanOperation::Range { lower, upper } => {
                 if let Some(l) = lower {
@@ -172,8 +175,8 @@ impl KvStore for PostgresStore {
                     if i > 0 {
                         sql.push_str(" OR ");
                     }
-                    sql.push_str(&format!("key LIKE ${}", param_idx));
-                    binds.push(format!("{}%", v));
+                    sql.push_str(&format!("key LIKE ${param_idx} ESCAPE '\\'"));
+                    binds.push(like_pattern(v));
                     param_idx += 1;
                 }
                 sql.push(')');
@@ -190,4 +193,19 @@ impl KvStore for PostgresStore {
             .map_err(|e| ActError::Store(e.to_string()))?;
         Ok(rows)
     }
+}
+
+/// Turn a key prefix into a literal LIKE prefix. Values are encoded before
+/// they enter index keys, but escaping keeps direct callers and field prefixes
+/// safe if they contain SQL LIKE wildcards.
+fn like_pattern(prefix: &str) -> String {
+    let mut pattern = String::with_capacity(prefix.len() + 1);
+    for ch in prefix.chars() {
+        if matches!(ch, '%' | '_' | '\\') {
+            pattern.push('\\');
+        }
+        pattern.push(ch);
+    }
+    pattern.push('%');
+    pattern
 }

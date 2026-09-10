@@ -104,29 +104,42 @@ impl KvStore for RedisStore {
             ref prefix,
         } = options;
         let mut conn = self.conn.clone();
-        let pattern = format!("{}*", prefix);
         let mut result = Vec::new();
         let mut cursor: String = "0".to_string();
+        // Eq is an exact value-key prefix, so let Redis' cursor scan target
+        // that group instead of every key in the field region.
+        let scan_prefix = match &op {
+            ScanOperation::Eq if key.starts_with(prefix.as_str()) => key,
+            _ => prefix,
+        };
+        let pattern = glob_pattern(scan_prefix);
         loop {
             let (next_cursor, keys): (String, Vec<String>) = redis::cmd("SCAN")
                 .arg(&cursor)
                 .arg("MATCH")
                 .arg(&pattern)
                 .arg("COUNT")
-                .arg(100)
+                .arg(1000)
                 .query_async(&mut conn)
                 .await
                 .map_err(|e| ActError::Store(e.to_string()))?;
-            for key_str in keys {
-                if !key_matches(&key_str, key, prefix, &op) {
+            for chunk in keys.chunks(256) {
+                let matched_keys: Vec<&String> = chunk
+                    .iter()
+                    .filter(|key_str| key_matches(key_str, key, prefix, &op))
+                    .collect();
+                if matched_keys.is_empty() {
                     continue;
                 }
-                let val: Option<Vec<u8>> = conn
-                    .get(&key_str)
+                let values: Vec<Option<Vec<u8>>> = redis::cmd("MGET")
+                    .arg(&matched_keys)
+                    .query_async(&mut conn)
                     .await
                     .map_err(|e| ActError::Store(e.to_string()))?;
-                if let Some(v) = val {
-                    result.push((key_str, v));
+                for (key_str, value) in matched_keys.into_iter().zip(values) {
+                    if let Some(value) = value {
+                        result.push((key_str.clone(), value));
+                    }
                 }
             }
             if next_cursor == "0" {
@@ -139,4 +152,17 @@ impl KvStore for RedisStore {
         }
         Ok(result)
     }
+}
+
+/// Escape Redis glob metacharacters in a literal key prefix.
+fn glob_pattern(prefix: &str) -> String {
+    let mut pattern = String::with_capacity(prefix.len() + 1);
+    for ch in prefix.chars() {
+        if matches!(ch, '*' | '?' | '[' | ']' | '\\') {
+            pattern.push('\\');
+        }
+        pattern.push(ch);
+    }
+    pattern.push('*');
+    pattern
 }

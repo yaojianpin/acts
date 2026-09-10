@@ -91,15 +91,97 @@ impl KvStore for MemoryStore {
             ref prefix,
         } = options;
         let map = self.data.read();
-        let mut entries: Vec<(String, Vec<u8>)> = map
-            .range(prefix.clone()..)
-            .take_while(|(k, _)| k.starts_with(prefix.as_str()))
-            .filter(|(k, _)| key_matches(k, key, prefix, &op))
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+
+        // Start as close as possible to the matching keys. Eq is a full
+        // value-key prefix and Range carries an inclusive lower bound, so both
+        // provide a BTreeMap range start.
+        let start = match &op {
+            ScanOperation::Eq if key.starts_with(prefix.as_str()) => key.to_string(),
+            ScanOperation::Range {
+                lower: Some(lower), ..
+            } if lower.starts_with(prefix.as_str()) => lower.clone(),
+            _ => prefix.clone(),
+        };
+        // Guard against invalid direct caller bounds; collection bounds are
+        // always ordered.
+        let entries = if let ScanOperation::Range {
+            lower: Some(lower),
+            upper: Some(upper),
+        } = &op
+            && lower >= upper
+        {
+            Vec::new()
+        } else {
+            map.range(start..)
+                .take_while(|(k, _)| {
+                    if !k.starts_with(prefix.as_str()) {
+                        return false;
+                    }
+                    match &op {
+                        ScanOperation::Range {
+                            upper: Some(upper), ..
+                        } => k.as_str() < upper.as_str(),
+                        _ => true,
+                    }
+                })
+                .filter(|(k, _)| key_matches(k, key, prefix, &op))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect()
+        };
+        let mut entries = entries;
         if is_rev {
             entries.reverse();
         }
         Ok(entries)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    async fn scan(store: &MemoryStore, key: &str, op: ScanOperation, prefix: &str) -> Vec<String> {
+        store
+            .scan_prefix(key, ScanOptions::new(op, prefix.to_string(), false))
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|(key, _)| key)
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn eq_scans_only_the_value_group() {
+        let store = MemoryStore::new();
+        for id in ["1", "2", "3"] {
+            store
+                .put(&format!("tasks-pid-a-{id}"), vec![])
+                .await
+                .unwrap();
+        }
+        store.put("tasks-pid-b-1", vec![]).await.unwrap();
+
+        let keys = scan(&store, "tasks-pid-a-", ScanOperation::Eq, "tasks-pid-").await;
+        assert_eq!(keys, ["tasks-pid-a-1", "tasks-pid-a-2", "tasks-pid-a-3"]);
+    }
+
+    #[tokio::test]
+    async fn range_starts_at_lower_and_stops_at_upper() {
+        let store = MemoryStore::new();
+        for id in ["1", "2", "3", "4"] {
+            store.put(&format!("tasks-n-{id}"), vec![]).await.unwrap();
+        }
+
+        let keys = scan(
+            &store,
+            "tasks-n-",
+            ScanOperation::Range {
+                lower: Some("tasks-n-2".to_string()),
+                upper: Some("tasks-n-4".to_string()),
+            },
+            "tasks-n-",
+        )
+        .await;
+        assert_eq!(keys, ["tasks-n-2", "tasks-n-3"]);
     }
 }

@@ -106,14 +106,50 @@ impl KvStore for SledStore {
             op,
             ref prefix,
         } = options;
-        // Sled's scan_prefix returns keys in ascending order, bounded by prefix
         let mut result = Vec::new();
-        for entry in self.db.scan_prefix(prefix.as_bytes()) {
-            let (k, value) = entry.map_err(|e| ActError::Store(e.to_string()))?;
-            let key_str =
-                String::from_utf8(k.to_vec()).map_err(|e| ActError::Store(e.to_string()))?;
-            if key_matches(&key_str, key, prefix, &op) {
-                result.push((key_str, value.to_vec()));
+        match &op {
+            // A value-key prefix is itself a valid (and much narrower) sled
+            // prefix for Eq.
+            ScanOperation::Eq if key.starts_with(prefix.as_str()) => {
+                for entry in self.db.scan_prefix(key.as_bytes()) {
+                    let (k, value) = entry.map_err(|e| ActError::Store(e.to_string()))?;
+                    let key_str = String::from_utf8(k.to_vec())
+                        .map_err(|e| ActError::Store(e.to_string()))?;
+                    result.push((key_str, value.to_vec()));
+                }
+            }
+            ScanOperation::Range { lower, upper } => {
+                let start = lower.as_ref().filter(|l| l.starts_with(prefix.as_str()));
+                let iterator = match start {
+                    Some(lower) => self.db.range(lower.as_bytes()..),
+                    None => self.db.scan_prefix(prefix.as_bytes()),
+                };
+                for entry in iterator {
+                    let (k, value) = entry.map_err(|e| ActError::Store(e.to_string()))?;
+                    let key_str = String::from_utf8(k.to_vec())
+                        .map_err(|e| ActError::Store(e.to_string()))?;
+                    if !key_str.starts_with(prefix.as_str()) {
+                        break;
+                    }
+                    if let Some(upper) = upper
+                        && key_str.as_str() >= upper.as_str()
+                    {
+                        break;
+                    }
+                    if key_matches(&key_str, key, prefix, &op) {
+                        result.push((key_str, value.to_vec()));
+                    }
+                }
+            }
+            _ => {
+                for entry in self.db.scan_prefix(prefix.as_bytes()) {
+                    let (k, value) = entry.map_err(|e| ActError::Store(e.to_string()))?;
+                    let key_str = String::from_utf8(k.to_vec())
+                        .map_err(|e| ActError::Store(e.to_string()))?;
+                    if key_matches(&key_str, key, prefix, &op) {
+                        result.push((key_str, value.to_vec()));
+                    }
+                }
             }
         }
         if is_rev {

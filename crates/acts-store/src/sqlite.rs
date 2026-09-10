@@ -32,6 +32,10 @@ impl SqliteStore {
         .execute(&mut conn)
         .await
         .map_err(|e| ActError::Store(e.to_string()))?;
+        sqlx::query("PRAGMA case_sensitive_like = ON")
+            .execute(&mut conn)
+            .await
+            .map_err(|e| ActError::Store(e.to_string()))?;
         Ok(conn)
     }
 
@@ -52,10 +56,18 @@ impl SqliteStore {
 fn op_conditions(op: &ScanOperation, key: &str) -> (String, Vec<String>) {
     match op {
         ScanOperation::Eq => {
-            // keys LIKE 'key%' — handled by the LIKE pattern on prefix
-            (String::new(), vec![])
+            // `key` is the exact value-key prefix (including the field
+            // prefix), so push it into SQLite instead of scanning the whole
+            // field group and filtering in the collection layer.
+            (
+                " AND key LIKE ? ESCAPE '\\'".to_string(),
+                vec![like_pattern(key)],
+            )
         }
-        ScanOperation::Ne => (" AND key NOT LIKE ?".to_string(), vec![format!("{}%", key)]),
+        ScanOperation::Ne => (
+            " AND key NOT LIKE ? ESCAPE '\\'".to_string(),
+            vec![like_pattern(key)],
+        ),
         ScanOperation::Range { lower, upper } => {
             let mut conditions = String::new();
             let mut binds = Vec::new();
@@ -70,15 +82,30 @@ fn op_conditions(op: &ScanOperation, key: &str) -> (String, Vec<String>) {
             (conditions, binds)
         }
         ScanOperation::In { values } => {
-            let mut conditions = String::from(" AND (key LIKE ?");
+            let mut conditions = String::from(" AND (key LIKE ? ESCAPE '\\'");
             for _ in 1..values.len() {
-                conditions.push_str(" OR key LIKE ?");
+                conditions.push_str(" OR key LIKE ? ESCAPE '\\'");
             }
             conditions.push(')');
-            let binds: Vec<String> = values.iter().map(|v| format!("{}%", v)).collect();
+            let binds: Vec<String> = values.iter().map(|v| like_pattern(v)).collect();
             (conditions, binds)
         }
     }
+}
+
+/// Turn a key prefix into a literal LIKE prefix. Values are encoded before
+/// they enter index keys, but escaping keeps direct callers and field prefixes
+/// safe if they contain SQL LIKE wildcards.
+fn like_pattern(prefix: &str) -> String {
+    let mut pattern = String::with_capacity(prefix.len() + 1);
+    for ch in prefix.chars() {
+        if matches!(ch, '%' | '_' | '\\') {
+            pattern.push('\\');
+        }
+        pattern.push(ch);
+    }
+    pattern.push('%');
+    pattern
 }
 
 #[async_trait::async_trait]
@@ -187,12 +214,12 @@ impl KvStore for SqliteStore {
             op,
             ref prefix,
         } = options;
-        let pattern = format!("{}%", prefix);
+        let pattern = like_pattern(prefix);
         let (extra_sql, extra_binds) = op_conditions(&op, key);
         let mut conn = self.conn.lock().await;
         let order = if is_rev { "DESC" } else { "ASC" };
         let sql = format!(
-            "SELECT key, value FROM {} WHERE key LIKE ?{} ORDER BY key {}",
+            "SELECT key, value FROM {} WHERE key LIKE ? ESCAPE '\\'{} ORDER BY key {}",
             consts::ACTS_STORE_NAME,
             extra_sql,
             order
