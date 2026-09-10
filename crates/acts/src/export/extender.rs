@@ -102,7 +102,10 @@ impl Extender {
     /// ```
     pub async fn register_package(&self, def: &ActPackageDefinition) -> Result<()> {
         let package = def.into_data()?;
-        self.runtime.cache().store().publish(&package).await?;
+        let ret = self.runtime.cache().store().publish(&package).await?;
+        if ret {
+            self.runtime.schema_cache().invalidate_package(&package.id);
+        }
 
         Ok(())
     }

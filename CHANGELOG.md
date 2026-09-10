@@ -358,3 +358,9 @@
 - fix: web and gRPC plugins no longer use `unwrap` for bind/serve, socket parsing, remote-peer access, or channel-message serialization; malformed input and runtime transport failures are logged or returned as `Status` errors
 - BREAKING: `Engine` now represents a successfully started engine only — configuration lives solely on `EngineBuilder`, `EngineBuilder::start().await` returns `Engine`, and `Engine::new()`/`Engine::start()` are removed; update `Engine::new().start()` to `Engine::builder().start()`
 - fix: Index `Eq/Range` scans without value pushdown: all backends scan the entire field region, and SQLite/Postgres also return rows for the entire field region
+
+# Unreleased
+- perf: cache package definitions and compiled JSON Schema validators in `Runtime`, keyed by act `uses`; repeated `Irq`/`Msg`/`Func` acts no longer perform a package store lookup, reparse the schema text, or recompile the validator on every execution
+- perf: cache `ActSchema` validators by serialized schema content, reusing compiled validators for repeated workflow input/output validation
+- feat: validate `Func` package params against the package JSON Schema before creating and executing the package instance
+- fix: invalidate a runtime's cached package definition when the package is published, removed, or re-registered through the engine extender

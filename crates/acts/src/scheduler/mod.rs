@@ -5,6 +5,7 @@ mod queue;
 mod runtime;
 mod state;
 mod tree;
+mod validation;
 
 #[cfg(test)]
 mod tests;

@@ -19,6 +19,9 @@ impl PackageExecutor {
     #[instrument(skip(self, pack), fields(id = %pack.id))]
     pub async fn publish(&self, pack: &Package) -> Result<bool> {
         let ret = self.runtime.cache().store().publish(pack).await?;
+        if ret {
+            self.runtime.schema_cache().invalidate_package(&pack.id);
+        }
         Ok(ret)
     }
 
@@ -44,6 +47,10 @@ impl PackageExecutor {
 
     #[instrument(skip(self), fields(id = %id))]
     pub async fn rm(&self, id: &str) -> Result<bool> {
-        self.runtime.cache().store().packages().delete(id).await
+        let ret = self.runtime.cache().store().packages().delete(id).await?;
+        if ret {
+            self.runtime.schema_cache().invalidate_package(id);
+        }
+        Ok(ret)
     }
 }

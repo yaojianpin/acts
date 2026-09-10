@@ -2,11 +2,16 @@ mod variant;
 mod vars;
 
 use crate::{ActError, Result};
+use dashmap::DashMap;
+use jsonschema::Validator;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::sync::{Arc, LazyLock};
 
 pub use variant::{Variant, VariantTypes};
 pub use vars::Vars;
+
+static VALIDATORS: LazyLock<DashMap<String, Arc<Validator>>> = LazyLock::new(DashMap::new);
 
 #[derive(Deserialize, Serialize, Debug, Default, Clone)]
 #[serde(untagged)]
@@ -43,8 +48,29 @@ impl ActSchema {
     }
 
     pub fn validate(&self, value: &serde_json::Value) -> Result<()> {
-        let schema = self.schema();
-        jsonschema::validate(&schema, value)
+        if self.is_empty() {
+            return Ok(());
+        }
+
+        // Cache by the exact serialized schema instead of a hash. Serialization
+        // is much cheaper than schema compilation, and it avoids reusing a
+        // validator for a different schema on a hash collision.
+        let key = serde_json::to_string(self)
+            .map_err(|e| ActError::Model(format!("Schema serialization error: {e}")))?;
+        let validator = if let Some(validator) = VALIDATORS.get(&key) {
+            validator.clone()
+        } else {
+            let schema = self.schema();
+            let validator = Arc::new(
+                Validator::new(&schema)
+                    .map_err(|e| ActError::Model(format!("Schema compilation error: {e}")))?,
+            );
+            VALIDATORS.insert(key, validator.clone());
+            validator
+        };
+
+        validator
+            .validate(value)
             .map_err(|e| ActError::Model(format!("Validation error: {e}")))
     }
 

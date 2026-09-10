@@ -3,7 +3,6 @@ use crate::{
     scheduler::{Context, NextAction},
     utils::consts,
 };
-use serde_json::Value as JsonValue;
 
 impl ActTask for Act {
     async fn init(&self, ctx: &Context) -> Result<()> {
@@ -30,31 +29,24 @@ impl ActTask for Act {
     async fn run(&self, ctx: &Context) -> Result<()> {
         let task = ctx.task();
         task.set_emit(true);
-        let package = ctx.runtime.store().packages().find(&self.uses).await?;
-        let in_schema = serde_json::from_str::<JsonValue>(&package.schema)?;
-        task.set_data_with(|data| data.set(consts::ACT_RUN_AS, package.run_as));
-        match package.run_as {
+        let package = ctx.runtime.package_definition(&self.uses).await?;
+        task.set_data_with(|data| data.set(consts::ACT_RUN_AS, package.run_as()));
+        package.validate(&task.params())?;
+        match package.run_as() {
             ActRunAs::Irq => {
-                jsonschema::validate(&in_schema, &task.params()).map_err(|err| {
-                    ActError::Package(format!("package({}) validation error: {}", package.id, err))
-                })?;
                 // interrupt the state
                 // irq act will complete by client action
                 task.set_state(TaskState::Interrupt);
             }
-            ActRunAs::Msg => {
-                jsonschema::validate(&in_schema, &task.params()).map_err(|err| {
-                    ActError::Package(format!("package({}) validation error: {}", package.id, err))
-                })?;
-            }
+            ActRunAs::Msg => {}
             ActRunAs::Func => {
                 let register = ctx
                     .runtime
                     .package()
-                    .get(&package.id)
+                    .get(package.id())
                     .ok_or(ActError::Runtime(format!(
                         "cannot find Func package '{}'",
-                        package.id
+                        package.id()
                     )))?;
                 let package = (register.create)(ctx.runtime.config())?;
                 if let Some(vars) = package.execute(ctx, &ctx.task().params()).await? {

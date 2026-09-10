@@ -1,3 +1,4 @@
+use super::validation::SchemaCache;
 use super::{ActTask, Context, Process, Sign, Task, TaskState};
 use crate::snapshot::{SnapshotOptions, SnapshotStore};
 use crate::{
@@ -34,6 +35,7 @@ pub struct Runtime {
     emitter: Arc<Emitter>,
     package: Arc<Package>,
     shutdown: CancellationToken,
+    schema_cache: Arc<SchemaCache>,
     pub(crate) snapshots: Arc<SnapshotRegistry>,
 }
 
@@ -131,6 +133,10 @@ impl std::fmt::Debug for Runtime {
             .field("emitter", &self.emitter)
             .field("package", &self.package)
             .field(
+                "schema_cache",
+                &format_args!("<{} entries>", self.schema_cache.len()),
+            )
+            .field(
                 "snapshots",
                 &format_args!("<{} entries>", self.snapshots.len()),
             )
@@ -169,6 +175,18 @@ impl Runtime {
 
     pub fn package(&self) -> &Arc<Package> {
         &self.package
+    }
+
+    pub(crate) fn schema_cache(&self) -> &Arc<SchemaCache> {
+        &self.schema_cache
+    }
+
+    pub(crate) async fn package_definition(
+        &self,
+        uses: &str,
+    ) -> crate::Result<Arc<super::validation::CachedPackage>> {
+        let store = self.store();
+        self.schema_cache.package(&store, uses).await
     }
 
     pub fn store(&self) -> Arc<Store> {
@@ -709,6 +727,7 @@ impl Runtime {
         let package = Arc::new(Package::new());
         let queue = Queue::new();
         let shutdown = CancellationToken::new();
+        let schema_cache = Arc::new(SchemaCache::new());
         let snapshots = Arc::new(SnapshotRegistry::new());
         let runtime = Arc::new(Runtime {
             config: Arc::new(config.clone()),
@@ -719,6 +738,7 @@ impl Runtime {
             cache,
             package,
             shutdown,
+            schema_cache,
             snapshots,
         });
 
