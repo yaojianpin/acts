@@ -26,7 +26,7 @@ inputs:
 ```rust
 use acts::{Engine, Vars, Workflow};
 
-let engine = Engine::new().start().unwrap();
+let engine = Engine::builder().start().await.unwrap();
 let executor = engine.executor();
 
 let mut vars = Vars::new();

@@ -14,7 +14,6 @@ use acts::{Engine, Result, SnapshotOptions, Vars, Workflow};
 async fn main() -> Result<()> {
     let engine = Engine::builder()
         .add_snapshot("profile", SnapshotOptions::per_proc())
-        .build()
         .start()
         .await?;
 

@@ -356,3 +356,4 @@
 - fix: `Config::create` and `EngineBuilder::set_config_source` now return config errors instead of panicking on missing, unreadable, or malformed files; the builder's implicit default config falls back to defaults with a warning
 - fix: system environment values that cannot deserialize in `Context::get_env` are treated as absent with a warning instead of panicking the scheduler
 - fix: web and gRPC plugins no longer use `unwrap` for bind/serve, socket parsing, remote-peer access, or channel-message serialization; malformed input and runtime transport failures are logged or returned as `Status` errors
+- BREAKING: `Engine` now represents a successfully started engine only — configuration lives solely on `EngineBuilder`, `EngineBuilder::start().await` returns `Engine`, and `Engine::new()`/`Engine::start()` are removed; update `Engine::new().start()` to `Engine::builder().start()`

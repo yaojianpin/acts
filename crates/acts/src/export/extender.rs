@@ -41,7 +41,7 @@ impl Extender {
     /// }
     /// #[tokio::main]
     /// async fn main() {
-    ///     let engine = Engine::new().start().await.unwrap();
+    ///     let engine = Engine::builder().start().await.unwrap();
     ///     let module = test_module::TestModule;
     ///     engine.extender().register_var(&module);
     /// }
@@ -93,7 +93,7 @@ impl Extender {
     ///
     /// #[tokio::main]
     /// async fn main() {
-    ///     let engine = acts::Engine::new().start().await.unwrap();
+    ///     let engine = acts::Engine::builder().start().await.unwrap();
     ///     engine.extender()
     ///         .register_package(&MyPackage::definition())
     ///         .await

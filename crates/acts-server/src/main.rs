@@ -24,7 +24,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let store = acts_server::open_store(&config_dir, &db).await?;
     let engine = Arc::new(
-        acts_server::build_engine(&config, store, &acts_server::ServerPlugins::full())
+        acts_server::engine_builder(&config, store, &acts_server::ServerPlugins::full())
             .start()
             .await?,
     );

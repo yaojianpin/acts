@@ -42,7 +42,6 @@ steps:
 ```rust
 let engine = Engine::builder()
     .tick_interval_secs(1)
-    .build()
     .start()
     .unwrap();
 ```

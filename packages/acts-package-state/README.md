@@ -25,7 +25,6 @@ use acts_package_state::StatePackage;
 async fn main() {
     let engine = Engine::builder()
         .add_pacakge::<StatePackagePlugin>()
-        .build()
         .start();
 }
 ```

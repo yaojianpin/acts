@@ -5,7 +5,6 @@ use acts_plugin_web::WebPlugin;
 async fn main() -> Result<()> {
     let engine = Engine::builder()
         .add_plugin(&WebPlugin::new())
-        .build()
         .start()
         .await?;
 

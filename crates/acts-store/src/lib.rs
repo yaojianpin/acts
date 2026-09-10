@@ -2,8 +2,7 @@
 //!
 //! Each backend implements the [`KvStore`](acts::KvStore) trait defined by the
 //! `acts` crate and can be handed to
-//! [`EngineBuilder::set_store`](acts::Engine::builder) the same way as
-//! [`MemoryStore`](acts::MemoryStore):
+//! [`EngineBuilder::set_store`] the same way as [`MemoryStore`](acts::MemoryStore):
 //!
 //! ```rust,ignore
 //! use acts::Engine;
@@ -14,7 +13,6 @@
 //!     let store = acts_store::SqliteStore::open("data/acts.db").await?;
 //!     let engine = Engine::builder()
 //!         .set_store(Arc::new(store))
-//!         .build()
 //!         .start()
 //!         .await?;
 //!     Ok(())

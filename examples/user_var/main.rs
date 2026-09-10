@@ -7,7 +7,6 @@ use acts::{Engine, Result, Vars, Workflow};
 async fn main() -> Result<()> {
     let engine = Engine::builder()
         .add_plugin(&plugin::UserVarPlugin)
-        .build()
         .start()
         .await?;
 

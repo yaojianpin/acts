@@ -45,7 +45,10 @@ fn deploy(c: &mut Criterion) {
         b.to_async(&rt).iter_custom(move |iters| {
             let workflow = workflow.clone();
             async move {
-                let engine = Engine::new().start().await.expect("failed to start engine");
+                let engine = Engine::builder()
+                    .start()
+                    .await
+                    .expect("failed to start engine");
                 let start = std::time::Instant::now();
                 for _ in 0..iters {
                     engine
@@ -81,7 +84,10 @@ fn start(c: &mut Criterion) {
             let workflow = workflow.clone();
             let workflow_id = workflow_id.clone();
             async move {
-                let engine = Engine::new().start().await.expect("failed to start engine");
+                let engine = Engine::builder()
+                    .start()
+                    .await
+                    .expect("failed to start engine");
                 engine
                     .executor()
                     .model()
@@ -124,7 +130,10 @@ fn act(c: &mut Criterion) {
         b.to_async(&rt).iter_custom(move |iters| {
             let workflow = workflow.clone();
             async move {
-                let engine = Engine::new().start().await.expect("failed to start engine");
+                let engine = Engine::builder()
+                    .start()
+                    .await
+                    .expect("failed to start engine");
                 engine
                     .executor()
                     .model()

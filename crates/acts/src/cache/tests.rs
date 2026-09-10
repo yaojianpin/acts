@@ -18,7 +18,7 @@ use std::sync::Arc;
 /// tasks stay queryable, and once the last holder drops, everything frees.
 #[tokio::test]
 async fn cache_evict_breaks_proc_task_cycle() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let rt = engine.runtime();
     let cache = rt.cache();
 
@@ -55,7 +55,7 @@ async fn cache_evict_breaks_proc_task_cycle() {
 /// (which reads `task.node.next()`) keeps working after restore.
 #[tokio::test]
 async fn cache_restore_dynamic_acts() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let rt = engine.runtime();
     let store = rt.cache().store();
 
@@ -138,12 +138,7 @@ async fn cache_restore_dynamic_acts() {
 
 #[tokio::test]
 async fn cache_count() {
-    let engine = Engine::builder()
-        .cache_size(10)
-        .build()
-        .start()
-        .await
-        .unwrap();
+    let engine = Engine::builder().cache_size(10).start().await.unwrap();
     let rt = engine.runtime();
     let cache = rt.cache();
 
@@ -154,12 +149,7 @@ async fn cache_count() {
 
 #[tokio::test]
 async fn cache_push_get() {
-    let engine = Engine::builder()
-        .cache_size(10)
-        .build()
-        .start()
-        .await
-        .unwrap();
+    let engine = Engine::builder().cache_size(10).start().await.unwrap();
     let rt = engine.runtime();
     let cache = rt.cache();
     let pid = utils::longid();
@@ -173,12 +163,7 @@ async fn cache_push_get() {
 
 #[tokio::test]
 async fn cache_push_to_store() {
-    let engine = Engine::builder()
-        .cache_size(1)
-        .build()
-        .start()
-        .await
-        .unwrap();
+    let engine = Engine::builder().cache_size(1).start().await.unwrap();
     let rt = engine.runtime();
     let cache = rt.cache();
 
@@ -202,12 +187,7 @@ async fn cache_push_to_store() {
 
 #[tokio::test]
 async fn cache_remove() {
-    let engine = Engine::builder()
-        .cache_size(10)
-        .build()
-        .start()
-        .await
-        .unwrap();
+    let engine = Engine::builder().cache_size(10).start().await.unwrap();
     let rt = engine.runtime();
     let cache = rt.cache();
 
@@ -235,12 +215,7 @@ async fn cache_remove() {
 
 #[tokio::test]
 async fn cache_upsert() {
-    let engine = Engine::builder()
-        .cache_size(10)
-        .build()
-        .start()
-        .await
-        .unwrap();
+    let engine = Engine::builder().cache_size(10).start().await.unwrap();
     let rt = engine.runtime();
     let mut workflow = Workflow::new().with_step(|step| step.with_name("step1"));
 
@@ -268,12 +243,7 @@ async fn cache_upsert() {
 /// failure, so removal can never race the writes still queued behind it.
 #[tokio::test]
 async fn cache_remove_after_writer_writes_drops_all_rows() {
-    let engine = Engine::builder()
-        .cache_size(10)
-        .build()
-        .start()
-        .await
-        .unwrap();
+    let engine = Engine::builder().cache_size(10).start().await.unwrap();
     let rt = engine.runtime();
     let cache = rt.cache();
     let store = cache.store();
@@ -309,12 +279,7 @@ async fn cache_remove_after_writer_writes_drops_all_rows() {
 /// rows) nor failed (which would poison a later flush).
 #[tokio::test]
 async fn cache_writes_after_remove_are_skipped() {
-    let engine = Engine::builder()
-        .cache_size(10)
-        .build()
-        .start()
-        .await
-        .unwrap();
+    let engine = Engine::builder().cache_size(10).start().await.unwrap();
     let rt = engine.runtime();
     let cache = rt.cache();
     let store = cache.store();
@@ -443,12 +408,7 @@ async fn cache_start_parked_refills_only_parked_none_rows() {
 /// finished processes would squat in the cache and block restoring others.
 #[tokio::test(flavor = "multi_thread")]
 async fn cache_finished_proc_frees_slot_for_restore() {
-    let engine = Engine::builder()
-        .cache_size(4)
-        .build()
-        .start()
-        .await
-        .unwrap();
+    let engine = Engine::builder().cache_size(4).start().await.unwrap();
     let rt = engine.runtime();
     let cache = rt.cache();
     let store = cache.store();
@@ -521,12 +481,7 @@ async fn cache_finished_proc_frees_slot_for_restore() {
 /// a terminal row of its own.
 #[tokio::test]
 async fn cache_park_over_cap_then_refill_on_terminal() {
-    let engine = Engine::builder()
-        .cache_size(2)
-        .build()
-        .start()
-        .await
-        .unwrap();
+    let engine = Engine::builder().cache_size(2).start().await.unwrap();
     let rt = engine.runtime();
     let cache = rt.cache();
     let model = Workflow::new()
@@ -748,7 +703,7 @@ async fn cache_parked_refill_is_oldest_first_within_cap() {
 /// must create one with exactly that scope's content.
 #[tokio::test]
 async fn cache_vars_row_written_only_on_mutation() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let rt = engine.runtime();
     let store = rt.cache().store();
 
@@ -809,7 +764,7 @@ async fn cache_vars_row_written_only_on_mutation() {
 /// ancestor's updated vars without ever touching the root row.
 #[tokio::test]
 async fn cache_vars_ancestor_scope_round_trip() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let rt = engine.runtime();
     let store = rt.cache().store();
 
@@ -1001,7 +956,6 @@ async fn cache_resume_in_flight_proc_after_restart() {
     // engine 1 seeds the store with a mid-run process, then "crashes"
     let engine1 = Engine::builder()
         .set_store(kv.clone())
-        .build()
         .start()
         .await
         .unwrap();
@@ -1031,7 +985,6 @@ async fn cache_resume_in_flight_proc_after_restart() {
     // engine 2 on the same store resumes the process to completion
     let engine2 = Engine::builder()
         .set_store(kv.clone())
-        .build()
         .start()
         .await
         .unwrap();

@@ -19,7 +19,6 @@ use acts_package_http::HttpPackage;
 async fn main() {
     let engine = Engine::builder()
         .add_pacakge::<HttpPackage>()
-        .build()
         .start();
 }
 ```

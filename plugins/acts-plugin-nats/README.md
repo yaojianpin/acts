@@ -15,7 +15,6 @@ use acts::Engine;
 
 let engine = Engine::builder()
     .add_plugin(&acts_plugin_nats::NatsPlugin::new())
-    .build()
     .start()
     .await?;
 ```

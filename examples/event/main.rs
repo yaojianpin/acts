@@ -2,7 +2,7 @@ use acts::{Engine, Result, Vars, Workflow};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let engine = Engine::new().start().await?;
+    let engine = Engine::builder().start().await?;
 
     let executor = engine.executor();
     let text = include_str!("./model.yml");

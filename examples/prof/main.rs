@@ -19,8 +19,8 @@ steps:
 
     let mut config = acts::Config::default();
     config.data.cache_cap = Some(100_000);
-    let engine = Engine::new()
-        .with_config(&config)
+    let engine = Engine::builder()
+        .set_config(&config)
         .start()
         .await
         .expect("failed to start engine");

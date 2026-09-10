@@ -42,7 +42,7 @@ fn free_port() -> u16 {
         .port()
 }
 
-fn engine_with_grpc(port: u16) -> Engine {
+async fn engine_with_grpc(port: u16) -> Engine {
     let table: toml::Table = toml::from_str(&format!("[grpc]\nport = {port}\n")).unwrap();
     let cfg = acts::Config {
         data: Default::default(),
@@ -51,7 +51,9 @@ fn engine_with_grpc(port: u16) -> Engine {
     Engine::builder()
         .set_config(&cfg)
         .add_plugin(&GrpcPlugin::new())
-        .build()
+        .start()
+        .await
+        .unwrap()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -59,7 +61,7 @@ async fn test_snapshot_upsert_remove_over_grpc() {
     use acts_channel::{ActsChannel, Vars};
 
     let port = free_port();
-    let engine = engine_with_grpc(port).start().await.unwrap();
+    let engine = engine_with_grpc(port).await;
 
     // connect the client and wait until the server accepts
     let url = format!("http://127.0.0.1:{port}");
@@ -86,9 +88,10 @@ async fn test_snapshot_upsert_remove_over_grpc() {
     engine.close().await;
 }
 
-#[test]
-fn test_grpc_server_new() {
-    let engine = Engine::new();
+#[tokio::test(flavor = "multi_thread")]
+async fn test_grpc_server_new() {
+    let engine = Engine::builder().start().await.unwrap();
     let server = GrpcServer::new(&engine);
     let _ = server;
+    engine.close().await;
 }

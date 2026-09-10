@@ -105,7 +105,7 @@ async fn sch_scher_start_pid_with_sep_error() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_scher_do_action() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     let workflow = Workflow::new().with_step(|step| {

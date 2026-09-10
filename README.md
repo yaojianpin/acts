@@ -69,7 +69,7 @@ use acts::{Engine, Vars, Workflow};
 
 #[tokio::main]
 async fn main() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
 
     // create yaml workflow model
     let model = r#"
@@ -212,7 +212,7 @@ use acts::{Engine, Vars, Workflow};
 
 #[tokio::main]
 async fn main() {
-  let engine = Engine::new().start().await.unwrap();
+  let engine = Engine::builder().start().await.unwrap();
   let executor = engine.executor();
 
   let mut vars = Vars::new();
@@ -363,7 +363,6 @@ async fn main() {
     let store = SqliteStore::open("data/acts.db").await.unwrap();
     let engine = Engine::builder()
         .set_store(Arc::new(store))
-        .build()
         .start()
         .await
         .unwrap();

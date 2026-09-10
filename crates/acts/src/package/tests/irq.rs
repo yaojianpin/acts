@@ -50,12 +50,7 @@ async fn pack_irq_multi_threads() {
     });
 
     workflow.print();
-    let engine = Engine::builder()
-        .cache_size(10)
-        .build()
-        .start()
-        .await
-        .unwrap();
+    let engine = Engine::builder().cache_size(10).start().await.unwrap();
     engine
         .executor()
         .model()

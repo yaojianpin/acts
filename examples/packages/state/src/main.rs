@@ -5,7 +5,6 @@ use acts_package_state::StatePackage;
 async fn main() -> Result<()> {
     let engine = Engine::builder()
         .add_package::<StatePackage>()
-        .build()
         .start()
         .await?;
     let text = include_str!("./model.yml");

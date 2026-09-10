@@ -145,7 +145,7 @@ async fn env_eval_sys_env() {
     unsafe {
         std::env::set_var("TOKEN", "abc");
     }
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -176,7 +176,7 @@ async fn env_eval_sys_env() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_eval_null() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -267,7 +267,7 @@ fn env_collection_difference() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_task_get_value() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -300,7 +300,7 @@ async fn env_task_get_value() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_task_get_var_not_exists() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -331,7 +331,7 @@ async fn env_task_get_var_not_exists() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_task_get_fn_not_exists() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -362,7 +362,7 @@ async fn env_task_get_fn_not_exists() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_task_set() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -394,7 +394,7 @@ async fn env_task_set() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_task_multi_line() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -424,7 +424,7 @@ async fn env_task_multi_line() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_env_get_local() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -457,7 +457,7 @@ async fn env_env_get_local() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_env_set_proc_env() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -492,7 +492,7 @@ async fn env_env_set_proc_env() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_env_multi_line() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -522,7 +522,7 @@ async fn env_env_multi_line() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_vars_set_num() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -550,7 +550,7 @@ async fn env_vars_set_num() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_vars_set_str() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -578,7 +578,7 @@ async fn env_vars_set_str() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_vars_set_json() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -609,7 +609,7 @@ async fn env_vars_set_json() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_vars_update() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -638,7 +638,7 @@ async fn env_vars_update() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_step_get_data_by_id() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -681,7 +681,7 @@ async fn env_step_get_data_by_id() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_step_get_data_null() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -713,7 +713,7 @@ async fn env_step_get_data_null() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_step_set_data_err_with_completed_state() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -745,7 +745,7 @@ async fn env_step_set_data_err_with_completed_state() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_step_set_data_ok_with_running_state() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -793,7 +793,7 @@ async fn env_step_set_data_ok_with_running_state() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_step_get_data() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -834,7 +834,7 @@ async fn env_step_get_data() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_step_get_inputs() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -874,7 +874,7 @@ async fn env_step_get_inputs() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_act_get_inputs() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -914,7 +914,7 @@ async fn env_act_get_inputs() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_act_get_data() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -963,7 +963,7 @@ async fn env_user_var_get_from_context() {
         }
     }
 
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -1020,7 +1020,7 @@ async fn env_user_var_get_default() {
         }
     }
 
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -1061,7 +1061,7 @@ async fn env_user_var_get_default() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_user_var_secrets_get() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -1116,7 +1116,7 @@ async fn env_user_var_os_get() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_act_cost_get() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -1156,7 +1156,7 @@ async fn env_act_cost_get() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_act_cost_in_get() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 
@@ -1198,7 +1198,7 @@ async fn env_act_cost_in_get() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_act_ecode_get() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal(());
     let s1 = sig.clone();
 

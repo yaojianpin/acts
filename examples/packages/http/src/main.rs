@@ -32,7 +32,6 @@ async fn main() -> Result<()> {
 
     let engine = Engine::builder()
         .add_package::<HttpPackage>()
-        .build()
         .start()
         .await?;
     let text = include_str!("./model.yml");

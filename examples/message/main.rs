@@ -2,7 +2,7 @@ use acts::{ChannelOptions, Engine, Result, Vars, Workflow};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let engine = Engine::new().start().await?;
+    let engine = Engine::builder().start().await?;
 
     let executor = engine.executor();
     let (s, sig) = engine.signal(()).double();

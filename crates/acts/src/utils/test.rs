@@ -19,7 +19,7 @@ pub const USES_CODE: &str = "acts.transform.code";
 /// `engine.signal()`, and manage their own signal/channel lifecycle.
 #[allow(clippy::type_complexity)]
 pub async fn create_proc(workflow: &Workflow, pid: &str) -> (Engine, Arc<Process>) {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let proc = engine.runtime().create_proc(pid, workflow);
     engine
         .channel()
@@ -33,12 +33,7 @@ pub(crate) async fn create_proc_with_config(
     workflow: &Workflow,
     pid: &str,
 ) -> (Engine, Arc<Process>) {
-    let engine = Engine::builder()
-        .set_config(config)
-        .build()
-        .start()
-        .await
-        .unwrap();
+    let engine = Engine::builder().set_config(config).start().await.unwrap();
     let proc = engine.runtime().create_proc(pid, workflow);
     engine
         .channel()

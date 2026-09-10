@@ -1,7 +1,9 @@
 //! Engine construction for the acts server binary — shared with the
 //! integration tests so they exercise exactly what `acts-server` runs.
 
-use acts::{Config, Engine, KvStore, MissingParamAction, SnapshotOptions, SnapshotPolicy};
+use acts::{
+    Config, Engine, EngineBuilder, KvStore, MissingParamAction, SnapshotOptions, SnapshotPolicy,
+};
 use serde::Deserialize;
 use std::{
     path::{Path, PathBuf},
@@ -394,7 +396,11 @@ where
 /// reach a broker. `[[snapshot]]` targets declared in the config are
 /// pre-registered with [`acts::EngineBuilder::add_snapshot`] so the
 /// scheduler seals their values under the configured policy/scope.
-pub fn build_engine(config: &Config, store: Arc<dyn KvStore>, plugins: &ServerPlugins) -> Engine {
+pub fn engine_builder(
+    config: &Config,
+    store: Arc<dyn KvStore>,
+    plugins: &ServerPlugins,
+) -> EngineBuilder {
     let mut builder = Engine::builder().set_config(config).set_store(store);
     if config.has("snapshot") {
         let targets = config
@@ -418,7 +424,7 @@ pub fn build_engine(config: &Config, store: Arc<dyn KvStore>, plugins: &ServerPl
     if plugins.nats && config.has("nats") {
         builder = builder.add_plugin(&acts_plugin_nats::NatsPlugin::new());
     }
-    builder.build()
+    builder
 }
 
 #[cfg(test)]
@@ -465,10 +471,10 @@ ttl = "5m"
         );
         let config = Config::create(&path).unwrap();
 
-        // build_engine accepts a [[snapshot]] config and pre-registers the
+        // engine_builder accepts a [[snapshot]] config and pre-registers the
         // targets through EngineBuilder::add_snapshot (a parse or mapping
         // error would panic here).
-        build_engine(
+        engine_builder(
             &config,
             Arc::new(MemoryStore::new()),
             &ServerPlugins {

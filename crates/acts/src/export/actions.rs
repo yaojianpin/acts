@@ -344,7 +344,7 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_upsert_remove_roundtrip() {
-        let engine = crate::Engine::new().start().await.unwrap();
+        let engine = crate::Engine::builder().start().await.unwrap();
         let payload = Vars::new()
             .with("name", "profile")
             .with("scope", "u1")
@@ -370,7 +370,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_action_is_not_found() {
-        let engine = crate::Engine::new().start().await.unwrap();
+        let engine = crate::Engine::builder().start().await.unwrap();
         let err = apply(&engine, "no:such", Vars::new()).await.unwrap_err();
         assert!(matches!(err, Error::NotFound(_)));
         assert_eq!(err.to_string(), "not found action 'no:such'");
@@ -378,7 +378,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_payload_is_invalid() {
-        let engine = crate::Engine::new().start().await.unwrap();
+        let engine = crate::Engine::builder().start().await.unwrap();
         let err = apply(&engine, "snap:upsert", Vars::new())
             .await
             .unwrap_err();
@@ -388,7 +388,7 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_query_roundtrip() {
-        let engine = crate::Engine::new().start().await.unwrap();
+        let engine = crate::Engine::builder().start().await.unwrap();
         for (scope, val) in [("u1", 1), ("u2", 2)] {
             let payload = Vars::new()
                 .with("name", "profile")
@@ -436,7 +436,7 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_query_unknown_target() {
-        let engine = crate::Engine::new().start().await.unwrap();
+        let engine = crate::Engine::builder().start().await.unwrap();
         let ret = apply(&engine, "snap:ls", Vars::new().with("name", "none"))
             .await
             .unwrap();

@@ -8,7 +8,6 @@ async fn main() -> acts::Result<()> {
     let engine = Engine::builder()
         .add_package::<pack1::Pack1>()
         .add_package::<pack2::Pack2>()
-        .build()
         .start()
         .await?;
 

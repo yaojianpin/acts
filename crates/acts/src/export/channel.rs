@@ -111,7 +111,7 @@ impl Channel {
     ///
     /// #[tokio::main]
     /// async fn main() {
-    ///     let engine = Engine::new().start().await.unwrap();
+    ///     let engine = Engine::builder().start().await.unwrap();
     ///     let workflow = Workflow::new().with_id("m1").with_step(|step| {
     ///             step.with_id("step1").with_uses("acts.core.irq", Vars::new().with("var1", 10))
     ///     });

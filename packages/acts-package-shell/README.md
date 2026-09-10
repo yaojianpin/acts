@@ -17,7 +17,6 @@ use acts_package_shell::ShellPackagePlugin;
 async fn main() {
     let engine = Engine::builder()
         .add_plugin(&ShellPackagePlugin)
-        .build()
         .start();
 }
 ```

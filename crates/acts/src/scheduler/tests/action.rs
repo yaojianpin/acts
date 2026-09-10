@@ -19,7 +19,7 @@ use std::sync::Arc;
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_action_duplicate_complete() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     let workflow =
@@ -55,7 +55,7 @@ async fn sch_action_duplicate_complete() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_action_recover_pending() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     let workflow =
@@ -107,8 +107,8 @@ async fn sch_action_recover_completed_next_is_noop() {
     let store: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
 
     // first engine: run a two-step workflow to completion
-    let engine = Engine::new()
-        .set_store(Some(store.clone()))
+    let engine = Engine::builder()
+        .set_store(store.clone())
         .start()
         .await
         .unwrap();
@@ -173,8 +173,8 @@ async fn sch_action_recover_completed_next_is_noop() {
 
     // reload from the same store: recovery re-dispatches the record, but the
     // durable NEXT_COMPLETE marker turns the re-run into a no-op
-    let engine2 = Engine::new()
-        .set_store(Some(store.clone()))
+    let engine2 = Engine::builder()
+        .set_store(store.clone())
         .start()
         .await
         .unwrap();
@@ -249,8 +249,8 @@ async fn sch_action_recover_completed_next_is_noop() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_action_recover_partial_next_no_duplicate() {
     let store: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
-    let engine = Engine::new()
-        .set_store(Some(store.clone()))
+    let engine = Engine::builder()
+        .set_store(store.clone())
         .start()
         .await
         .unwrap();
@@ -300,8 +300,8 @@ async fn sch_action_recover_partial_next_no_duplicate() {
     // top, and re-scheduling s2 is deduped. act2 stays in flight, so the
     // process keeps its legitimate pending outbox records; what matters is
     // that nothing is duplicated.
-    let engine2 = Engine::new()
-        .set_store(Some(store.clone()))
+    let engine2 = Engine::builder()
+        .set_store(store.clone())
         .start()
         .await
         .unwrap();
@@ -339,7 +339,7 @@ async fn sch_action_recover_partial_next_no_duplicate() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_action_next_op_pending_until_children_complete() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     let workflow = Workflow::new().with_step(|step| {
@@ -425,8 +425,8 @@ async fn sch_action_next_op_pending_until_children_complete() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_action_recover_reapplies_lost_action() {
     let store: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
-    let engine = Engine::new()
-        .set_store(Some(store.clone()))
+    let engine = Engine::builder()
+        .set_store(store.clone())
         .start()
         .await
         .unwrap();
@@ -473,8 +473,8 @@ async fn sch_action_recover_reapplies_lost_action() {
     // reload: recovery re-applies the Skip action, which closes the record
     // (the process keeps its legitimate pending `next` records while act2 is
     // in flight — only the action record must drain)
-    let engine2 = Engine::new()
-        .set_store(Some(store.clone()))
+    let engine2 = Engine::builder()
+        .set_store(store.clone())
         .start()
         .await
         .unwrap();
@@ -511,8 +511,8 @@ async fn sch_action_recover_reapplies_lost_action() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_action_recover_reapplies_cancel() {
     let store: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
-    let engine = Engine::new()
-        .set_store(Some(store.clone()))
+    let engine = Engine::builder()
+        .set_store(store.clone())
         .start()
         .await
         .unwrap();
@@ -576,8 +576,8 @@ async fn sch_action_recover_reapplies_cancel() {
 
     // reload: the cancel must be re-applied — act2 becomes Cancelled even
     // though act1 (the cancel target) is already Completed
-    let engine2 = Engine::new()
-        .set_store(Some(store.clone()))
+    let engine2 = Engine::builder()
+        .set_store(store.clone())
         .start()
         .await
         .unwrap();
@@ -607,8 +607,8 @@ async fn sch_action_recover_reapplies_cancel() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_action_recover_reapplies_abort() {
     let store: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
-    let engine = Engine::new()
-        .set_store(Some(store.clone()))
+    let engine = Engine::builder()
+        .set_store(store.clone())
         .start()
         .await
         .unwrap();
@@ -643,8 +643,8 @@ async fn sch_action_recover_reapplies_abort() {
     engine.close().await;
 
     // reload: recovery re-applies the abort to the act and its ancestors
-    let engine2 = Engine::new()
-        .set_store(Some(store.clone()))
+    let engine2 = Engine::builder()
+        .set_store(store.clone())
         .start()
         .await
         .unwrap();
@@ -689,8 +689,8 @@ async fn sch_action_recover_reapplies_abort() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_action_recover_reapplies_error() {
     let store: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
-    let engine = Engine::new()
-        .set_store(Some(store.clone()))
+    let engine = Engine::builder()
+        .set_store(store.clone())
         .start()
         .await
         .unwrap();
@@ -725,8 +725,8 @@ async fn sch_action_recover_reapplies_error() {
     engine.close().await;
 
     // reload: recovery re-applies the error with its code
-    let engine2 = Engine::new()
-        .set_store(Some(store.clone()))
+    let engine2 = Engine::builder()
+        .set_store(store.clone())
         .start()
         .await
         .unwrap();
@@ -771,8 +771,8 @@ async fn sch_action_recover_reapplies_error() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_action_recover_reapplies_back() {
     let store: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
-    let engine = Engine::new()
-        .set_store(Some(store.clone()))
+    let engine = Engine::builder()
+        .set_store(store.clone())
         .start()
         .await
         .unwrap();
@@ -834,8 +834,8 @@ async fn sch_action_recover_reapplies_back() {
     engine.close().await;
 
     // reload: recovery re-applies the back
-    let engine2 = Engine::new()
-        .set_store(Some(store.clone()))
+    let engine2 = Engine::builder()
+        .set_store(store.clone())
         .start()
         .await
         .unwrap();
@@ -862,8 +862,8 @@ async fn sch_action_recover_reapplies_back() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_action_recover_closes_applied_back() {
     let store: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
-    let engine = Engine::new()
-        .set_store(Some(store.clone()))
+    let engine = Engine::builder()
+        .set_store(store.clone())
         .start()
         .await
         .unwrap();
@@ -930,8 +930,8 @@ async fn sch_action_recover_closes_applied_back() {
 
     // reload: recovery sees act2 already Backed (terminal) and closes the
     // record without re-applying — no second redo task
-    let engine2 = Engine::new()
-        .set_store(Some(store.clone()))
+    let engine2 = Engine::builder()
+        .set_store(store.clone())
         .start()
         .await
         .unwrap();
@@ -965,8 +965,8 @@ async fn sch_action_recover_closes_applied_back() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_action_recover_closes_applied_action() {
     let store: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
-    let engine = Engine::new()
-        .set_store(Some(store.clone()))
+    let engine = Engine::builder()
+        .set_store(store.clone())
         .start()
         .await
         .unwrap();
@@ -1037,8 +1037,8 @@ async fn sch_action_recover_closes_applied_action() {
     // record without re-applying (the process keeps its legitimate pending
     // `next` records while act2 is in flight — only the action record drains);
     // the act message is marked completed
-    let engine2 = Engine::new()
-        .set_store(Some(store.clone()))
+    let engine2 = Engine::builder()
+        .set_store(store.clone())
         .start()
         .await
         .unwrap();
@@ -1141,7 +1141,7 @@ async fn sch_action_sibling_concurrent_complete() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_action_completed_proc_cleans_message_and_delivery_rows() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let rt = engine.runtime();
     let (tx, rx) = engine.signal(()).double();
     let workflow = Workflow::new().with_step(|step| {

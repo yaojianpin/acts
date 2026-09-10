@@ -7,7 +7,7 @@ mod client;
 async fn main() -> Result<()> {
     let client = Arc::new(client::Client::new());
 
-    let engine = Engine::new().start().await?;
+    let engine = Engine::builder().start().await?;
     let (s1, s2, sig) = engine.signal(()).triple();
     let exec = engine.executor();
     deploy_model(&exec, include_str!("./model/main.yml")).await?;

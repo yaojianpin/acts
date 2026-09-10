@@ -8,7 +8,7 @@ mod client;
 async fn main() -> Result<()> {
     let client = Arc::new(client::Client::new());
 
-    let engine = Engine::new().start().await?;
+    let engine = Engine::builder().start().await?;
     let (s, sig) = engine.signal(()).double();
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text).unwrap();

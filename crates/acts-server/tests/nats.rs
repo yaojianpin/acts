@@ -7,7 +7,7 @@
 //! stays green. CI runs it against a NATS service container.
 
 use acts::{Config, MemoryStore};
-use acts_server::{ServerPlugins, build_engine};
+use acts_server::{ServerPlugins, engine_builder};
 use async_nats::Client;
 use serde_json::{Value as JsonValue, json};
 use std::{
@@ -67,7 +67,7 @@ async fn acts_server_handles_nats_snapshot_actions() {
     let config = Config::create(&path).unwrap();
 
     // server plugins: NATS only — the same code path `acts-server` runs
-    let engine = build_engine(
+    let engine = engine_builder(
         &config,
         Arc::new(MemoryStore::new()),
         &ServerPlugins {

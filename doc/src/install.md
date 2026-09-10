@@ -43,7 +43,6 @@ async fn main() -> acts::Result<()> {
     let store = SqliteStore::open("data/acts.db").await?;
     let engine = Engine::builder()
         .set_store(Arc::new(store))
-        .build()
         .start()
         .await?;
     Ok(())
@@ -58,7 +57,7 @@ async fn main() -> acts::Result<()> {
 ```rust
 use acts::Engine;
 
-let engine = Engine::new().start().unwrap();
+let engine = Engine::builder().start().await.unwrap();
 let executor = engine.executor();
 ```
 
@@ -67,7 +66,7 @@ let executor = engine.executor();
 ```rust
 use acts::{Engine, Vars, Workflow};
 
-let engine = Engine::new().start().unwrap();
+let engine = Engine::builder().start().await.unwrap();
 
 // 加载 YAML 模型
 let model = r#"

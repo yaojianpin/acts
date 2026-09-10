@@ -50,11 +50,13 @@ fn temp_config(nats_section: &str) -> (PathBuf, Config) {
     (path, config)
 }
 
-fn engine_with_nats(config: &Config) -> Engine {
+async fn engine_with_nats(config: &Config) -> Engine {
     Engine::builder()
         .set_config(config)
         .add_plugin(&NatsPlugin::new())
-        .build()
+        .start()
+        .await
+        .unwrap()
 }
 
 /// Publish one action and await its reply; retries while the plugin's
@@ -83,7 +85,7 @@ async fn snapshot_actions_over_nats() {
 
     let (path, config) =
         temp_config("[nats]\nurl = \"nats://127.0.0.1:4222\"\nsubject = \"acts\"\n");
-    let engine = engine_with_nats(&config).start().await.unwrap();
+    let engine = engine_with_nats(&config).await;
 
     // upsert
     let reply = request_action(
@@ -155,7 +157,7 @@ async fn engine_events_forwarded_to_nats() {
          state = \"*\"\n\
          uses = \"*\"\n",
     );
-    let engine = engine_with_nats(&config).start().await.unwrap();
+    let engine = engine_with_nats(&config).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     let mut sub = client.subscribe("acts.evt.t2").await.unwrap();

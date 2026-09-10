@@ -53,7 +53,6 @@ impl ActPackage for PanicPackage {
 async fn scheduler_event_loop_survives_task_panic() {
     let engine = Engine::builder()
         .add_package::<PanicPackage>()
-        .build()
         .start()
         .await
         .unwrap();
@@ -106,7 +105,7 @@ use serial_test::serial;
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn engine_start() {
-    let engine = Engine::new().start().await;
+    let engine = Engine::builder().start().await;
     assert!(engine.is_ok());
 }
 
@@ -135,7 +134,6 @@ async fn engine_start_failure_releases_runtime_resources() {
     // a failing init makes `start()` return Err...
     let started = Engine::builder()
         .add_plugin(&FailPlugin { fail: true })
-        .build()
         .start()
         .await;
     let err = match started {
@@ -152,7 +150,6 @@ async fn engine_start_failure_releases_runtime_resources() {
     // without deadlocking or accumulating leaked timers/threads.
     let engine = Engine::builder()
         .add_plugin(&FailPlugin { fail: false })
-        .build()
         .start()
         .await
         .unwrap();
@@ -162,7 +159,7 @@ async fn engine_start_failure_releases_runtime_resources() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn engine_event_on_message() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal("".to_string());
     let s = sig.clone();
     let mid = utils::longid();
@@ -198,7 +195,7 @@ async fn engine_event_on_message() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn engine_event_on_start() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
 
     let sig = engine.signal("".to_string());
     let s = sig.clone();
@@ -232,7 +229,7 @@ async fn engine_event_on_start() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn engine_event_on_complete() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let sig = engine.signal(false);
     let s1 = sig.clone();
     let mid = utils::longid();
@@ -266,7 +263,7 @@ async fn engine_event_on_complete() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn engine_event_on_error() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let mid = utils::longid();
     let workflow = Workflow::new().with_id(&mid).with_step(|step| {
         step.with_id("step1")
@@ -342,36 +339,21 @@ async fn engine_model_create() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn engine_build_cache_size() {
-    let engine = Engine::builder()
-        .cache_size(100)
-        .build()
-        .start()
-        .await
-        .unwrap();
+    let engine = Engine::builder().cache_size(100).start().await.unwrap();
     assert_eq!(engine.config().cache_cap(), 100)
 }
 
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn engine_build_log_dir() {
-    let engine = Engine::builder()
-        .log("test", "INFO")
-        .build()
-        .start()
-        .await
-        .unwrap();
+    let engine = Engine::builder().log("test", "INFO").start().await.unwrap();
     assert_eq!(engine.config().log().dir, "test")
 }
 
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn engine_build_log_level() {
-    let engine = Engine::builder()
-        .log("log", "DEBUG")
-        .build()
-        .start()
-        .await
-        .unwrap();
+    let engine = Engine::builder().log("log", "DEBUG").start().await.unwrap();
     assert_eq!(engine.config().log().level, "DEBUG")
 }
 
@@ -380,7 +362,6 @@ async fn engine_build_log_level() {
 async fn engine_build_tick_interval_secs() {
     let engine = Engine::builder()
         .tick_interval_secs(10)
-        .build()
         .start()
         .await
         .unwrap();
@@ -392,7 +373,6 @@ async fn engine_build_tick_interval_secs() {
 async fn engine_build_max_message_retry_times() {
     let engine = Engine::builder()
         .max_message_retry_times(100)
-        .build()
         .start()
         .await
         .unwrap();
@@ -403,7 +383,6 @@ async fn engine_build_max_message_retry_times() {
 async fn engine_build_max_node_run_times() {
     let engine = Engine::builder()
         .max_node_run_times(100)
-        .build()
         .start()
         .await
         .unwrap();
@@ -413,9 +392,9 @@ async fn engine_build_max_node_run_times() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn engine_drop() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     drop(engine);
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     drop(engine)
 }
 
@@ -441,11 +420,12 @@ async fn engine_build_config_default() {
         "#,
     )
     .unwrap();
-    let engine = Engine::builder().build();
-    assert_eq!(engine.config().cache_cap(), 100);
-    assert_eq!(engine.config().log().dir, "data");
-    assert_eq!(engine.config().log().level, "INFO");
-    assert_eq!(engine.config().tick_interval_secs(), 200);
+    let builder = Engine::builder();
+    let config = builder.config();
+    assert_eq!(config.cache_cap(), 100);
+    assert_eq!(config.log().dir, "data");
+    assert_eq!(config.log().level, "INFO");
+    assert_eq!(config.tick_interval_secs(), 200);
 }
 
 #[serial]
@@ -476,11 +456,11 @@ async fn engine_build_config_set_config() {
     .unwrap();
 
     let config = Config::create(path).unwrap();
-    let engine = Engine::builder().set_config(&config).build();
-    assert_eq!(engine.config().cache_cap(), 100);
-    assert_eq!(engine.config().log().dir, "data");
-    assert_eq!(engine.config().log().level, "INFO");
-    assert_eq!(engine.config().tick_interval_secs(), 200);
+    let config = Engine::builder().set_config(&config).config();
+    assert_eq!(config.cache_cap(), 100);
+    assert_eq!(config.log().dir, "data");
+    assert_eq!(config.log().level, "INFO");
+    assert_eq!(config.tick_interval_secs(), 200);
 }
 
 #[serial]
@@ -509,11 +489,11 @@ async fn engine_build_config_set_source() {
         "#,
     )
     .unwrap();
-    let engine = Engine::builder().set_config_source(path).unwrap().build();
-    assert_eq!(engine.config().cache_cap(), 100);
-    assert_eq!(engine.config().log().dir, "data");
-    assert_eq!(engine.config().log().level, "INFO");
-    assert_eq!(engine.config().tick_interval_secs(), 200);
+    let config = Engine::builder().set_config_source(path).unwrap().config();
+    assert_eq!(config.cache_cap(), 100);
+    assert_eq!(config.log().dir, "data");
+    assert_eq!(config.log().level, "INFO");
+    assert_eq!(config.tick_interval_secs(), 200);
 }
 
 #[serial]
@@ -539,8 +519,8 @@ async fn engine_get_custom_config() {
         "#,
     )
     .unwrap();
-    let engine = Engine::builder().build();
-    let custom = engine.config().get::<Custom>("custom").unwrap();
+    let config = Engine::builder().config();
+    let custom = config.get::<Custom>("custom").unwrap();
     assert_eq!(custom.myint, 100);
     assert_eq!(custom.mystr, "myData");
     assert_eq!(custom.my_option, None);
@@ -549,7 +529,7 @@ async fn engine_get_custom_config() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn snapshot_injects_sealed_data() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     engine.add_snapshot("profile", crate::SnapshotOptions::per_proc());
     engine.snapshot().upsert(
         "profile",
@@ -598,7 +578,7 @@ async fn snapshot_injects_sealed_data() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sealed_data_js_dollar_profile_access() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     engine.add_snapshot("profile", crate::SnapshotOptions::per_task());
     engine.snapshot().upsert(
         "profile",
@@ -654,7 +634,7 @@ async fn sealed_data_js_dollar_profile_access() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn snapshot_skips_when_scope_params_missing() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     engine.add_snapshot(
         "profile",
         crate::SnapshotOptions {
@@ -702,7 +682,7 @@ async fn snapshot_skips_when_scope_params_missing() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn snapshot_sealed_data_inherits_from_parent() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     engine.add_snapshot("profile", crate::SnapshotOptions::per_proc());
     engine
         .snapshot()
@@ -745,7 +725,7 @@ async fn snapshot_sealed_data_inherits_from_parent() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn engine_default_store_is_memory() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     let store = engine.runtime().store();
     assert!(
         store
@@ -761,7 +741,6 @@ async fn engine_default_store_is_memory() {
 async fn engine_set_store_memory() {
     let engine = Engine::builder()
         .set_store(Arc::new(MemoryStore::new()))
-        .build()
         .start()
         .await
         .unwrap();
@@ -858,7 +837,6 @@ async fn engine_set_store_custom() {
     let custom = Arc::new(CustomStore::new());
     let engine = Engine::builder()
         .set_store(custom.clone())
-        .build()
         .start()
         .await
         .unwrap();
@@ -902,7 +880,7 @@ fn engine_builder_set_store_duplicate() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn snapshot_per_proc_pins_value_until_process_ends() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     engine.add_snapshot("profile", crate::SnapshotOptions::per_proc());
 
     // external system feeds v1 before the process starts
@@ -987,7 +965,7 @@ async fn snapshot_per_proc_pins_value_until_process_ends() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn snapshot_per_task_reads_latest_value() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     engine.add_snapshot("profile", crate::SnapshotOptions::per_task());
 
     engine
@@ -1067,7 +1045,7 @@ async fn snapshot_per_task_reads_latest_value() {
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn snapshot_scope_keyed_by_task_params() {
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     engine.add_snapshot(
         "profile",
         crate::SnapshotOptions {
@@ -1161,7 +1139,7 @@ async fn snapshot_scope_keyed_by_task_params() {
 async fn snapshot_per_proc_js_access_inherits_on_child() {
     // per-proc seals once on the root lineage; a child task has no local
     // sealed data, yet its JS environment must still expose $profile
-    let engine = Engine::new().start().await.unwrap();
+    let engine = Engine::builder().start().await.unwrap();
     engine.add_snapshot("profile", crate::SnapshotOptions::per_proc());
     engine.snapshot().upsert(
         "profile",

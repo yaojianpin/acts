@@ -7,7 +7,7 @@ use serial_test::serial;
 #[tokio::test(flavor = "multi_thread")]
 async fn plugin_common_register() {
     let test_plugin = TestPlugin::new();
-    Engine::new()
+    Engine::builder()
         .add_plugin(&test_plugin)
         .start()
         .await
@@ -19,7 +19,7 @@ async fn plugin_common_register() {
 #[tokio::test(flavor = "multi_thread")]
 async fn plugin_package_register() {
     let test_plugin = TestPackagePlugin;
-    let engine = Engine::new()
+    let engine = Engine::builder()
         .add_plugin(&test_plugin)
         .start()
         .await

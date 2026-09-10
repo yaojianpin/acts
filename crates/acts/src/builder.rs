@@ -1,10 +1,10 @@
 use crate::snapshot::SnapshotOptions;
 use crate::{
     ActPackage, ActPlugin, Config, Engine, config::ConfigLog, package::ActPackageRegister,
-    store::KvStore,
+    scheduler::Runtime, store::KvStore,
 };
 use std::{path::Path, sync::Arc};
-use tracing::warn;
+use tracing::{info, warn};
 
 pub struct EngineBuilder {
     config: Config,
@@ -52,13 +52,17 @@ impl EngineBuilder {
         self
     }
 
+    pub fn config(&self) -> Config {
+        self.config.clone()
+    }
+
     pub fn set_config_source(mut self, source: &Path) -> crate::Result<Self> {
         self.config = Config::create(source)?;
         Ok(self)
     }
 
     pub fn log(mut self, dir: &str, level: &str) -> Self {
-        self.config.data.log = Some(ConfigLog {
+        self.config_mut().data.log = Some(ConfigLog {
             dir: dir.to_string(),
             level: level.to_string(),
         });
@@ -66,24 +70,24 @@ impl EngineBuilder {
     }
 
     pub fn cache_size(mut self, size: i64) -> Self {
-        self.config.data.cache_cap = Some(size);
+        self.config_mut().data.cache_cap = Some(size);
         self
     }
 
     pub fn tick_interval_secs(mut self, secs: i64) -> Self {
-        self.config.data.tick_interval_secs = Some(secs);
+        self.config_mut().data.tick_interval_secs = Some(secs);
         self
     }
 
     pub fn max_message_retry_times(mut self, retry_times: i32) -> Self {
-        self.config.data.max_message_retry_times = Some(retry_times);
+        self.config_mut().data.max_message_retry_times = Some(retry_times);
         self
     }
     /// bound the times a tree node can be executed in one process (protects
     /// against unbounded task creation caused by a node self-loop or a cyclic
     /// `next`); 0 disables the check
     pub fn max_node_run_times(mut self, times: i64) -> Self {
-        self.config.data.max_node_run_times = Some(times);
+        self.config_mut().data.max_node_run_times = Some(times);
         self
     }
 
@@ -114,7 +118,7 @@ impl EngineBuilder {
     ///
     /// #[tokio::main]
     /// async fn main() {
-    ///     let engine = Engine::builder().add_plugin(&TestPlugin::new()).build().start().await.unwrap();
+    ///     let engine = Engine::builder().add_plugin(&TestPlugin::new()).start().await.unwrap();
     /// }
     /// ```
     pub fn add_plugin<T>(mut self, plugin: &T) -> Self
@@ -164,7 +168,7 @@ impl EngineBuilder {
     /// }
     /// #[tokio::main]
     /// async fn main() {
-    ///     let engine = Engine::builder().add_package::<MyPackage>().build().start().await.unwrap();
+    ///     let engine = Engine::builder().add_package::<MyPackage>().start().await.unwrap();
     /// }
     /// ```
     pub fn add_package<T>(mut self) -> Self
@@ -203,7 +207,6 @@ impl EngineBuilder {
     /// async fn main() {
     ///     let engine = Engine::builder()
     ///         .set_store(Arc::new(MemoryStore::new()))
-    ///         .build()
     ///         .start()
     ///         .await
     ///         .unwrap();
@@ -224,12 +227,32 @@ impl EngineBuilder {
         self
     }
 
-    pub fn build(self) -> Engine {
-        Engine::new()
-            .with_config(&self.config)
-            .set_plugins(self.plugins.clone())
-            .set_packages(self.packages.clone())
-            .set_snapshots(self.snapshots.clone())
-            .set_store(self.store)
+    pub async fn start(self) -> crate::Result<Engine> {
+        let Self {
+            config,
+            plugins,
+            packages,
+            snapshots,
+            store,
+        } = self;
+        let config = Arc::new(config);
+
+        let runtime = Runtime::new(&config, store)?;
+        let engine = Engine::with_runtime(config, runtime.clone());
+
+        match engine.initialize(snapshots, plugins, packages).await {
+            Ok(()) => {
+                info!("engine started");
+                Ok(engine)
+            }
+            Err(err) => {
+                runtime.close().await;
+                Err(err)
+            }
+        }
+    }
+
+    fn config_mut(&mut self) -> &mut Config {
+        &mut self.config
     }
 }

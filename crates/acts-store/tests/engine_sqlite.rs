@@ -15,7 +15,6 @@ async fn engine_set_store_sqlite() {
     let store = SqliteStore::open(":memory:").await.unwrap();
     let engine = Engine::builder()
         .set_store(Arc::new(store))
-        .build()
         .start()
         .await
         .unwrap();
@@ -51,7 +50,6 @@ async fn engine_sqlite_runs_on_current_thread_runtime() {
     let engine = Engine::builder()
         .set_store(Arc::new(store))
         .tick_interval_secs(1)
-        .build()
         .start()
         .await
         .unwrap();

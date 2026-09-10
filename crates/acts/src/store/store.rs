@@ -968,8 +968,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn process_first_persist_commits_proc_and_root_task_in_one_batch() {
         let kv = Arc::new(CountingKv::default());
-        let engine = crate::Engine::new()
-            .set_store(Some(kv.clone()))
+        let engine = crate::Engine::builder()
+            .set_store(kv.clone())
             .start()
             .await
             .unwrap();

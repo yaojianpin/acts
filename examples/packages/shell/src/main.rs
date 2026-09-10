@@ -5,7 +5,6 @@ use acts_package_shell::ShellPackage;
 async fn main() -> Result<()> {
     let engine = Engine::builder()
         .add_package::<ShellPackage>()
-        .build()
         .start()
         .await?;
     let text = include_str!("./model.yml");

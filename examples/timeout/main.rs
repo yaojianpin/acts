@@ -7,11 +7,7 @@ mod client;
 #[tokio::main]
 async fn main() -> Result<()> {
     let client = Arc::new(client::Client::new());
-    let engine = Engine::builder()
-        .tick_interval_secs(1)
-        .build()
-        .start()
-        .await?;
+    let engine = Engine::builder().tick_interval_secs(1).start().await?;
     let (s1, s2, sig) = engine.signal(()).triple();
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text)?;

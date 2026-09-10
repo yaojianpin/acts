@@ -19,7 +19,6 @@ use acts_plugin_grpc::GrpcPlugin;
 async fn main() {
     let engine = Engine::builder()
         .add_plugin(&GrpcPlugin::new())
-        .build()
         .start()
         .unwrap();
 

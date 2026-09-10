@@ -26,6 +26,7 @@ mod tests;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
+pub use builder::EngineBuilder;
 pub use config::{Config, MissingParamAction};
 pub use engine::Engine;
 pub use env::ActUserVar;
