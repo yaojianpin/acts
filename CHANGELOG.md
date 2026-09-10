@@ -340,3 +340,4 @@
 
 # 0.24.1
 - fix: `schedule` triggers arm to their actual next cron fire instead of firing on the first engine tick — a freshly deployed or cron-changed schedule row now stores `next_run = cron.next()` (not `now`), so it fires at its first cron boundary, and re-deploying an unchanged schedule deterministically keeps `last_run`/`next_run` (previously the armed-now row fired immediately and rolled the run state between the deploy and the re-deploy, racing the reconcile)
+- ci: the release workflow builds `macos-x86_64` by cross-compiling `x86_64-apple-darwin` on `macos-latest` instead of the retired `macos-13` runners (jobs queued forever waiting for a runner that no longer exists); every target now declares its rust `target` triple and builds with `--target`
