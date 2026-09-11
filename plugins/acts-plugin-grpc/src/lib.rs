@@ -2,10 +2,13 @@
 // service trait, so suppress the large-Result lint.
 #![allow(clippy::result_large_err)]
 
-use acts::{ActPlugin, ChannelOptions, Engine, Vars};
+use acts::{ActPlugin, Channel, ChannelOptions, Engine, Vars};
 use acts_channel::{Message, MessageOptions, acts_service_server::*};
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context, Poll};
 use tokio::sync::mpsc::{self, Sender};
-use tokio_stream::wrappers::ReceiverStream;
+use tokio_stream::{Stream, wrappers::ReceiverStream};
 use tonic::{Code, Response, Status, transport::Server};
 
 pub use config::GrpcConfig;
@@ -14,6 +17,36 @@ mod config;
 
 type MessageStream =
     std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<Message, Status>> + Send>>;
+
+/// Deregisters the channel handler when the gRPC response stream is dropped
+/// (client disconnected or the RPC ended). Without this, every finished
+/// `on_message` RPC would leak a handler into the engine emitter: the map
+/// grows unboundedly and every future message pays glob matching plus
+/// ack-delivery store writes for dead clients.
+struct CloseChannelOnDrop {
+    chan: Arc<Channel>,
+}
+
+impl Drop for CloseChannelOnDrop {
+    fn drop(&mut self) {
+        self.chan.close();
+    }
+}
+
+/// Response stream wrapper that deregisters the channel handler when the
+/// stream is dropped by the transport.
+struct GuardedMessageStream {
+    inner: ReceiverStream<Result<Message, Status>>,
+    _guard: CloseChannelOnDrop,
+}
+
+impl Stream for GuardedMessageStream {
+    type Item = Result<Message, Status>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.inner).poll_next(cx)
+    }
+}
 
 #[derive(Clone)]
 struct MessageClient {
@@ -135,32 +168,35 @@ impl ActsService for GrpcServer {
             },
         };
         let chan = self.engine.channel_with_options(&client.options);
-        tokio::spawn(async move {
-            chan.on_message(move |e| {
-                let client = client.clone();
-                async move {
-                    let message = Message {
-                        name: e.name.clone(),
-                        seq: e.id.clone(),
-                        ack: None,
-                        data: match serde_json::to_vec(e.inner()) {
-                            Ok(data) => Some(data),
-                            Err(err) => {
-                                tracing::error!(mid = %e.inner().id, error = %err, "failed to serialize channel message");
-                                client.send(Err(Status::internal(format!(
-                                    "failed to serialize message {}: {err}",
-                                    e.inner().id
-                                ))));
-                                return;
-                            }
-                        },
-                    };
-                    client.send(Ok(message));
-                }
-            });
+        chan.on_message(move |e| {
+            let client = client.clone();
+            async move {
+                let message = Message {
+                    name: e.name.clone(),
+                    seq: e.id.clone(),
+                    ack: None,
+                    data: match serde_json::to_vec(e.inner()) {
+                        Ok(data) => Some(data),
+                        Err(err) => {
+                            tracing::error!(mid = %e.inner().id, error = %err, "failed to serialize channel message");
+                            client.send(Err(Status::internal(format!(
+                                "failed to serialize message {}: {err}",
+                                e.inner().id
+                            ))));
+                            return;
+                        }
+                    },
+                };
+                client.send(Ok(message));
+            }
         });
 
-        let chan_stream = Box::pin(ReceiverStream::new(rx));
+        // Dropping the response stream (client disconnect) closes the
+        // channel and deregisters the handler registered above.
+        let chan_stream = Box::pin(GuardedMessageStream {
+            inner: ReceiverStream::new(rx),
+            _guard: CloseChannelOnDrop { chan },
+        });
         Ok(Response::new(chan_stream))
     }
 

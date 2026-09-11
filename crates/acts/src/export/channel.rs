@@ -228,6 +228,12 @@ impl Channel {
         });
     }
 
+    /// Deregister this channel's handler from the engine emitter.
+    ///
+    /// Transport layers (SSE, gRPC, ...) must call this when a client
+    /// disconnects, otherwise dead handlers accumulate in the emitter map:
+    /// every future message pays glob matching plus ack-delivery store
+    /// writes for channels nobody listens on anymore.
     pub fn close(&self) {
         self.runtime.emitter().remove(&self.chan_id);
     }
