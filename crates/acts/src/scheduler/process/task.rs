@@ -227,7 +227,6 @@ impl Task {
 
     pub fn create_message(self: &Arc<Self>) -> Message {
         let workflow = self.expect_proc().model();
-
         // if it is act, insert the step_node_id and step_task_id to the inputs
         // it is necessary to find the relation between the step and it's children acts
         let mut inputs = self.inputs();
@@ -259,9 +258,9 @@ impl Task {
         inputs.set(
             consts::WORKFLOW_MODEL_KEY,
             Vars::new()
-                .with("id", workflow.id.clone())
-                .with("name", workflow.name)
-                .with("options", workflow.options),
+                .with("id", &workflow.id)
+                .with("name", &workflow.name)
+                .with("options", &workflow.options),
         );
 
         // add error to inputs

@@ -500,17 +500,18 @@ impl Context {
 
     pub async fn emit_message(&self, msg: &Act) -> Result<()> {
         debug!(uses = %msg.uses, name = %msg.name, "emit message");
-        let workflow = self.proc.model();
         let mut inputs = utils::fill_inputs(&msg.vars(), self);
 
         // append workflow model to inputs
-        inputs.set(
-            consts::WORKFLOW_MODEL_KEY,
-            Vars::new()
-                .with("id", workflow.id)
-                .with("name", workflow.name)
-                .with("options", workflow.options),
-        );
+        self.proc.with_model(|workflow| {
+            inputs.set(
+                consts::WORKFLOW_MODEL_KEY,
+                Vars::new()
+                    .with("id", &workflow.id)
+                    .with("name", &workflow.name)
+                    .with("options", &workflow.options),
+            );
+        });
 
         // append act.optins to inputs
         inputs.set(consts::ACT_OPTIONS_KEY, msg.options.clone());

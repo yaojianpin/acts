@@ -268,11 +268,8 @@ impl Runtime {
                 })?;
         }
 
-        let mut model = model.clone();
-        model.set_vars(&options);
-
         let proc = Process::new(&proc_id, self);
-        proc.load(&model)?;
+        proc.load_with_vars(model, &options)?;
 
         self.launch(&proc).await?;
 
@@ -768,7 +765,8 @@ impl Runtime {
                             emitter.emit_error(&message);
                         } else if state.is_completed() {
                             let mut is_validation_err = false;
-                            let exposes = &proc.model().exposes;
+                            let model = proc.model();
+                            let exposes = &model.exposes;
                             if !exposes.is_empty() {
                                 // validate the process outputs
                                 let schema = crate::ActSchema::Multiple(exposes.clone());
@@ -777,7 +775,7 @@ impl Runtime {
                                     .map_err(|err| {
                                         ActError::Model(format!(
                                             "model({}) outputs validation error: {}",
-                                            proc.model().id,
+                                            model.id,
                                             err
                                         ))
                                     })

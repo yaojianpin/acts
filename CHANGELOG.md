@@ -341,6 +341,9 @@
 # 0.24.1
 - fix: `schedule` triggers arm to their actual next cron fire instead of firing on the first engine tick — a freshly deployed or cron-changed schedule row now stores `next_run = cron.next()` (not `now`), so it fires at its first cron boundary, and re-deploying an unchanged schedule deterministically keeps `last_run`/`next_run` (previously the armed-now row fired immediately and rolled the run state between the deploy and the re-deploy, racing the reconcile)
 - ci: the release workflow builds `macos-x86_64` by cross-compiling `x86_64-apple-darwin` on `macos-latest` instead of the retired `macos-13` runners (jobs queued forever waiting for a runner that no longer exists); every target now declares its rust `target` triple and builds with `--target`
+
+
+# Unreleased
 - fix: break the `Process → TaskTree → Task → Process` reference cycle — a `Task` now holds its process `Weak`ly, so a finished process evicted from the cache is actually deallocated together with its whole task tree; previously the cycle kept every finished process and all of its tasks (with their scope data) alive forever as unreachable cyclic garbage — `evict` freed the resident-set slot but never the memory, so the `cache_cap` park/refill design still leaked unboundedly
 - BREAKING: `Task::proc()` returns `Option<Arc<Process>>` instead of `&Arc<Process>` — `None` only for a task clone that outlived its evicted process (engine-driven paths always see a live process); a late root-task write from the store writer whose process is already gone falls back to the task's own state to stamp the proc row complete, so the sweeper still removes it
 - test: `cache_evict_breaks_proc_task_cycle` proves both sides of the contract — the task tree stays queryable while the caller holds the process, and the process is deallocated once the last holder drops
@@ -350,7 +353,7 @@
 - fix: remove unsafe impl Send/Sync
 - fix: store `Between`/`In` fallback filters compare integers exactly — `cmp_json_val` now uses the same exact numeric ordering as `order_by` instead of lossy `f64` conversion, so adjacent integers above `2^53` (including the full `u64` range) no longer compare equal in non-indexed scans
 - fix: store numeric range fallback filters handle mixed numeric types exactly — `LT`/`LE`/`GT`/`GE` now reuse the exact `order_by` numeric comparator instead of coercing the right side through the left side's integer type or `f64`, so cases such as `3 < 3.5`, `5 < u64::MAX`, and `i64::MAX < u64::MAX` no longer produce false negatives
-- fix: coalesce concurrent same-pid cache misses with per-pid single-flight, so every waiter receives the same loaded `Arc<Process>` instead of racing duplicate process instances
+- fix: atomically claim per-pid cache-miss single-flight, so concurrent callers cannot pass the empty check before another leader inserts; every waiter now receives the same loaded `Arc<Process>` instead of racing duplicate process instances
 - fix: admit external process ids through an atomic in-process pid claim, so concurrent starts that all miss the durable row fail as duplicates instead of creating two running or parked instances
 - fix: invalid `ChannelOptions` globs no longer panic the public `Channel::channel` / `engine.channel_with_options` path — invalid `type`, `state`, or `uses` patterns fall back to `*` with a warning (so remote channel-query input cannot turn an unclosed bracket into a handler panic), while invalid custom `options` globs remain skipped
 - fix: `Config::create` and `EngineBuilder::set_config_source` now return config errors instead of panicking on missing, unreadable, or malformed files; the builder's implicit default config falls back to defaults with a warning
@@ -358,10 +361,9 @@
 - fix: web and gRPC plugins no longer use `unwrap` for bind/serve, socket parsing, remote-peer access, or channel-message serialization; malformed input and runtime transport failures are logged or returned as `Status` errors
 - BREAKING: `Engine` now represents a successfully started engine only — configuration lives solely on `EngineBuilder`, `EngineBuilder::start().await` returns `Engine`, and `Engine::new()`/`Engine::start()` are removed; update `Engine::new().start()` to `Engine::builder().start()`
 - fix: Index `Eq/Range` scans without value pushdown: all backends scan the entire field region, and SQLite/Postgres also return rows for the entire field region
-
-# Unreleased
 - perf: cache package definitions and compiled JSON Schema validators in `Runtime`, keyed by act `uses`; repeated `Irq`/`Msg`/`Func` acts no longer perform a package store lookup, reparse the schema text, or recompile the validator on every execution
 - perf: cache `ActSchema` validators by serialized schema content, reusing compiled validators for repeated workflow input/output validation
+- perf: share process workflow models with `Arc`, avoid deep-cloning the whole workflow while creating or emitting task messages, and reuse one model clone during process startup/build/restoration
 - feat: validate `Func` package params against the package JSON Schema before creating and executing the package instance
 - fix: invalidate a runtime's cached package definition when the package is published, removed, or re-registered through the engine extender
 - perf: pool QuickJS contexts in the expression environment and reuse initialized built-in modules instead of recreating a runtime, context, and all modules for every `${{...}}` expression

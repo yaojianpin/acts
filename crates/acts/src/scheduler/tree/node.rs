@@ -8,7 +8,7 @@ use super::{node_tree, visit::VisitRoot};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum NodeContent {
-    Workflow(Workflow),
+    Workflow(Arc<Workflow>),
     Branch(Branch),
     Step(Step),
     Act(Act),

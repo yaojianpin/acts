@@ -23,6 +23,17 @@ async fn sch_tree_from() {
 }
 
 #[tokio::test]
+async fn sch_tree_shares_workflow_model() {
+    let mut workflow = Workflow::from_yml(SIMPLE_WORKFLOW).unwrap();
+    let tr = NodeTree::build(&mut workflow).unwrap();
+
+    let NodeContent::Workflow(model) = &tr.root.unwrap().content else {
+        panic!("workflow root has invalid content");
+    };
+    assert!(Arc::ptr_eq(model, &tr.model));
+}
+
+#[tokio::test]
 async fn sch_tree_get() {
     let mut workflow = Workflow::from_yml(SIMPLE_WORKFLOW).unwrap();
     let tr = NodeTree::build(&mut workflow).unwrap();
@@ -37,7 +48,7 @@ async fn sch_tree_new() {
 
     let mut workflow = Workflow::default();
     workflow.set_id("1");
-    let data = NodeContent::Workflow(workflow);
+    let data = NodeContent::Workflow(Arc::new(workflow));
     let node = tr.make(&data.id(), data, 0).unwrap();
     tr.set_root(&node);
     assert!(tr.root.is_some());
@@ -49,12 +60,12 @@ async fn sch_tree_set_parent() {
     let tr = NodeTree::new();
     let mut workflow = Workflow::default();
     workflow.set_id("1");
-    let data = NodeContent::Workflow(workflow);
+    let data = NodeContent::Workflow(Arc::new(workflow));
     let parent = tr.make(&data.id(), data, 0).unwrap();
 
     let mut workflow = Workflow::default();
     workflow.set_id("2");
-    let data = NodeContent::Workflow(workflow);
+    let data = NodeContent::Workflow(Arc::new(workflow));
     let node = tr.make(&data.id(), data, 1).unwrap();
     node.set_parent(&parent);
 
@@ -68,12 +79,12 @@ async fn sch_tree_set_next() {
 
     let mut workflow = Workflow::default();
     workflow.set_id("1");
-    let data = NodeContent::Workflow(workflow);
+    let data = NodeContent::Workflow(Arc::new(workflow));
     let prev = tr.make(&data.id(), data, 0).unwrap();
 
     let mut workflow = Workflow::default();
     workflow.set_id("2");
-    let data = NodeContent::Workflow(workflow);
+    let data = NodeContent::Workflow(Arc::new(workflow));
     let node = tr.make(&data.id(), data, 1).unwrap();
     prev.set_next(&node, true);
 

@@ -34,7 +34,7 @@ impl fmt::Debug for Process {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Proc")
             .field("pid", &self.id)
-            .field("mid", &self.model().id)
+            .field("mid", &self.with_model(|model| model.id.clone()))
             .field("state", &self.state())
             .field("err", &self.err())
             .field("env", &self.env())
@@ -90,12 +90,28 @@ impl Process {
         tree.load(model)
     }
 
+    pub(crate) fn load_owned(&self, model: Workflow) -> Result<()> {
+        let tree = &mut self.tree.write();
+        tree.load_owned(model)
+    }
+
+    pub(crate) fn load_with_vars(&self, model: &Workflow, vars: &Vars) -> Result<()> {
+        let mut model = model.clone();
+        model.set_vars(vars);
+        let tree = &mut self.tree.write();
+        tree.load_owned(model)
+    }
+
     pub fn tree(&self) -> parking_lot::RwLockReadGuard<'_, NodeTree> {
         self.tree.read()
     }
 
-    pub fn model(&self) -> Box<Workflow> {
+    pub fn model(&self) -> Arc<Workflow> {
         self.tree().model.clone()
+    }
+
+    pub(crate) fn with_model<T>(&self, f: impl FnOnce(&Workflow) -> T) -> T {
+        f(&self.tree().model)
     }
 
     pub fn state(&self) -> TaskState {
@@ -150,8 +166,7 @@ impl Process {
     pub fn inputs(&self) -> Vars {
         if let Some(task) = self.root() {
             let ctx = task.create_context();
-            let vars = utils::fill_proc_vars(&task, &self.model().vars(), &ctx);
-            return vars;
+            return self.with_model(|model| utils::fill_proc_vars(&task, &model.vars(), &ctx));
         }
         Vars::new()
     }
@@ -168,8 +183,7 @@ impl Process {
     }
 
     pub fn info(&self) -> ProcInfo {
-        let workflow = self.model();
-        ProcInfo {
+        self.with_model(|workflow| ProcInfo {
             id: self.id.clone(),
             name: workflow.name.clone(),
             mid: workflow.id.clone(),
@@ -178,7 +192,7 @@ impl Process {
             end_time: self.end_time(),
             timestamp: self.timestamp,
             tasks: Vec::new(),
-        }
+        })
     }
 
     pub fn root(&self) -> Option<Arc<Task>> {
@@ -522,8 +536,8 @@ impl Process {
         Ok(data::Proc {
             id: self.id.clone(),
             model: model.to_json()?,
-            mid: model.id,
-            name: model.name,
+            mid: model.id.clone(),
+            name: model.name.clone(),
             state: self.state().into(),
             start_time: self.start_time(),
             end_time: self.end_time(),

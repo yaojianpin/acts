@@ -9,16 +9,23 @@ use crate::{
 use std::sync::Arc;
 
 pub fn build_workflow(workflow: &mut Workflow, tree: &mut NodeTree) -> Result<()> {
+    build_owned_workflow(workflow.clone(), tree)
+}
+
+pub(crate) fn build_owned_workflow(mut workflow: Workflow, tree: &mut NodeTree) -> Result<()> {
     let level = 0;
     if workflow.id.is_empty() {
         workflow.id = longid();
     }
 
+    prepare_workflow_ids(&mut workflow);
+
+    let workflow = Arc::new(workflow);
     let data = NodeContent::Workflow(workflow.clone());
     let root = tree.make(&data.id(), data, level)?;
 
     let mut prev = root.clone();
-    for step in workflow.steps.iter_mut() {
+    for step in workflow.steps.iter() {
         build_step(
             step,
             tree,
@@ -29,23 +36,20 @@ pub fn build_workflow(workflow: &mut Workflow, tree: &mut NodeTree) -> Result<()
         )?;
     }
 
-    *tree.model = workflow.clone();
+    tree.model = workflow;
     tree.set_root(&root);
 
     Ok(())
 }
 
 pub fn build_step(
-    step: &mut Step,
+    step: &Step,
     tree: &mut NodeTree,
     parent: &Arc<Node>,
     prev: &mut Arc<Node>,
     level: usize,
     typ: NodeOutputKind,
 ) -> Result<()> {
-    if step.id.is_empty() {
-        step.id = shortid();
-    }
     if step.next.is_some() && step.r#while.is_some() {
         return Err(ActError::Runtime(format!(
             "step '{}' cannot combine 'while' with 'next': a while loop always flows to the next declared step when its condition fails",
@@ -75,7 +79,7 @@ pub fn build_step(
         None => {
             if !step.branches.is_empty() {
                 let mut branch_prev = node.clone();
-                for branch in step.branches.iter_mut() {
+                for branch in step.branches.iter() {
                     build_branch(branch, tree, &node, &mut branch_prev, level + 1)?;
                 }
             }
@@ -84,7 +88,7 @@ pub fn build_step(
 
     if !step.catches.is_empty() {
         let mut catch_prev = node.clone();
-        for catch in step.catches.iter_mut() {
+        for catch in step.catches.iter() {
             build_step(
                 catch,
                 tree,
@@ -97,7 +101,7 @@ pub fn build_step(
     }
     if !step.timeouts.is_empty() {
         let mut timeout_prev = node.clone();
-        for timeout in step.timeouts.iter_mut() {
+        for timeout in step.timeouts.iter() {
             build_step(
                 timeout,
                 tree,
@@ -116,21 +120,18 @@ pub fn build_step(
 }
 
 pub fn build_branch(
-    branch: &mut Branch,
+    branch: &Branch,
     tree: &mut NodeTree,
     parent: &Arc<Node>,
     prev: &mut Arc<Node>,
     level: usize,
 ) -> Result<()> {
-    if branch.id.is_empty() {
-        branch.id = shortid();
-    }
     let data = NodeContent::Branch(branch.clone());
     let node = tree.make(&data.id(), data, level)?;
     node.set_parent(parent);
 
     let mut step_prev = node.clone();
-    for step in branch.steps.iter_mut() {
+    for step in branch.steps.iter() {
         build_step(
             step,
             tree,
@@ -144,6 +145,39 @@ pub fn build_branch(
     *prev = node;
 
     Ok(())
+}
+
+/// Assign identifiers before the workflow is shared as an immutable `Arc`.
+fn prepare_workflow_ids(workflow: &mut Workflow) {
+    for step in workflow.steps.iter_mut() {
+        prepare_step_ids(step);
+    }
+}
+
+fn prepare_step_ids(step: &mut Step) {
+    if step.id.is_empty() {
+        step.id = shortid();
+    }
+
+    for branch in step.branches.iter_mut() {
+        prepare_branch_ids(branch);
+    }
+    for catch in step.catches.iter_mut() {
+        prepare_step_ids(catch);
+    }
+    for timeout in step.timeouts.iter_mut() {
+        prepare_step_ids(timeout);
+    }
+}
+
+fn prepare_branch_ids(branch: &mut Branch) {
+    if branch.id.is_empty() {
+        branch.id = shortid();
+    }
+
+    for step in branch.steps.iter_mut() {
+        prepare_step_ids(step);
+    }
 }
 
 // pub fn build_act(

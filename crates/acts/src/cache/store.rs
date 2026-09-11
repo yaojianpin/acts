@@ -110,7 +110,7 @@ impl Store {
         let state = p.state.clone();
         let proc = scheduler::Process::new_with_timestamp(&p.id, p.timestamp, rt);
 
-        proc.load(&model)?;
+        proc.load_owned(model)?;
         proc.set_pure_state(state.into());
         proc.set_start_time(p.start_time);
         proc.set_end_time(p.end_time);
@@ -139,7 +139,7 @@ impl Store {
                 let env_local: serde_json::Value =
                     serde_json::from_str(&p.env).map_err(|err| ActError::Store(err.to_string()))?;
 
-                proc.load(&model)?;
+                proc.load_owned(model)?;
                 proc.set_pure_state(p.state.into());
                 proc.set_start_time(p.start_time);
                 proc.set_env(&env_local.into());

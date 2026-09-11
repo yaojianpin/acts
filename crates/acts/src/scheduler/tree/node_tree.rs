@@ -16,7 +16,7 @@ use std::{
 pub struct NodeTree {
     pub(crate) root: Option<Arc<Node>>,
     pub(crate) node_map: Arc<RwLock<HashMap<String, Arc<Node>>>>,
-    pub(crate) model: Box<Workflow>,
+    pub(crate) model: Arc<Workflow>,
 }
 
 impl NodeTree {
@@ -36,7 +36,10 @@ impl NodeTree {
     }
 
     pub fn load(&mut self, model: &Workflow) -> Result<()> {
-        let mut model = model.clone();
+        self.load_owned(model.clone())
+    }
+
+    pub(crate) fn load_owned(&mut self, model: Workflow) -> Result<()> {
         let mut on_ids = HashSet::new();
 
         for on in model.on.iter() {
@@ -48,7 +51,7 @@ impl NodeTree {
             }
         }
 
-        build::build_workflow(&mut model, self)
+        build::build_owned_workflow(model, self)
     }
 
     pub fn make(&self, id: &str, data: NodeContent, level: usize) -> Result<Arc<Node>> {

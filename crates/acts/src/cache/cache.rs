@@ -170,9 +170,25 @@ impl Cache {
                 // Coalesce misses. The insert/remove critical section is short;
                 // only the leader performs store I/O, while waiters clone the
                 // same process pointer from the watch result.
-                let wait_rx = {
-                    let loading = self.loading.write();
-                    loading.get(pid).map(|inflight| inflight.rx.clone())
+                // Check and claim leadership atomically; otherwise concurrent
+                // callers can all observe an empty map before any insert and
+                // start independent loads for the same pid.
+                let (leader, wait_rx) = {
+                    let mut loading = self.loading.write();
+                    if let Some(inflight) = loading.get(pid) {
+                        (None, Some(inflight.rx.clone()))
+                    } else {
+                        let (tx, rx) = tokio::sync::watch::channel(None);
+                        let inflight = Arc::new(InflightProc { rx: rx.clone() });
+                        loading.insert(pid.to_string(), inflight.clone());
+                        let guard = InflightGuard {
+                            pid: pid.to_string(),
+                            inflight,
+                            tx,
+                            loading: self.loading.clone(),
+                        };
+                        (Some(guard), None)
+                    }
                 };
                 if let Some(mut rx) = wait_rx {
                     while rx.borrow_and_update().is_none() {
@@ -186,18 +202,7 @@ impl Cache {
                     return result;
                 }
 
-                let (tx, rx) = tokio::sync::watch::channel(None);
-                let inflight = Arc::new(InflightProc { rx: rx.clone() });
-                {
-                    let mut loading = self.loading.write();
-                    loading.insert(pid.to_string(), inflight.clone());
-                }
-                let guard = InflightGuard {
-                    pid: pid.to_string(),
-                    inflight,
-                    tx,
-                    loading: self.loading.clone(),
-                };
+                let guard = leader.expect("process load leader must own its in-flight guard");
                 let loaded = self.store.load_proc(pid, rt).await;
                 if let Ok(Some(proc)) = &loaded {
                     debug!(pid = %pid, "loaded process");

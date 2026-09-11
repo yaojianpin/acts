@@ -22,7 +22,7 @@ jsonschema = { version = "0.30.0", default-features = false }
 nanoid = "0.4"
 regex = "1.10"
 rquickjs = { version = "0.9", features = ["macro", "parallel"] }
-serde = { features = ["derive"], workspace = true }
+serde = { features = ["derive", "rc"], workspace = true }
 serde_json = { workspace = true }
 serde_repr = "0.1"
 serde_yaml = "0.9"
