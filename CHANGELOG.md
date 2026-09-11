@@ -380,3 +380,4 @@
 - perf: use borrowed scheduler-context access for expression evaluation instead of cloning the scoped context for each nested call
 - perf(acts-store): move sled reads, writes, batches and scans onto tokio blocking threads so disk I/O no longer occupies async workers; batches keep one atomic apply-and-flush while single puts/deletes preserve their existing durability window
 - BREAKING: `Context::scope` now takes `&Context`; update callers from `Context::scope(context, ...)` to `Context::scope(&context, ...)`
+- perf(acts-store): pool SQLite file connections in WAL mode so reads can run concurrently and writes no longer queue behind large scans; batches keep their atomic `BEGIN IMMEDIATE` semantics while in-memory stores retain one shared pooled connection

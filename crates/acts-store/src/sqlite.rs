@@ -1,49 +1,62 @@
 use crate::consts;
 use acts::{ActError, KvStore, Result, ScanOperation, ScanOptions, StoreBatchOp};
-use sqlx::sqlite::SqliteConnectOptions;
-use sqlx::{Connection, Row};
-use tokio::sync::Mutex;
+use std::time::Duration;
+
+use sqlx::Row;
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 
 pub struct SqliteStore {
-    conn: Mutex<sqlx::SqliteConnection>,
+    pool: sqlx::SqlitePool,
 }
 
 impl SqliteStore {
-    async fn init_conn(path: &str) -> Result<sqlx::SqliteConnection> {
-        let opts = if path == ":memory:" {
-            SqliteConnectOptions::new()
-                .filename(":memory:")
-                .create_if_missing(true)
-        } else {
-            SqliteConnectOptions::new()
-                .filename(path)
-                .create_if_missing(true)
-        };
-        let mut conn = sqlx::SqliteConnection::connect_with(&opts)
+    async fn init_pool(path: &str) -> Result<sqlx::SqlitePool> {
+        let is_memory = path == ":memory:";
+        let mut opts = SqliteConnectOptions::new()
+            .filename(path)
+            .create_if_missing(true)
+            .busy_timeout(Duration::from_secs(5));
+
+        // WAL lets multiple pool connections read while a write is in
+        // progress. SQLite still serializes writers internally, which is the
+        // consistency model expected by this store.
+        if !is_memory {
+            opts = opts.journal_mode(SqliteJournalMode::Wal);
+        }
+
+        // In-memory databases are private to their connection. Keep one
+        // pooled connection so all operations share the same database.
+        let max_connections = if is_memory { 1 } else { 4 };
+        let table = consts::ACTS_STORE_NAME;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(max_connections)
+            .after_connect(move |conn, _meta| {
+                let table = table;
+                Box::pin(async move {
+                    sqlx::query(&format!(
+                        "CREATE TABLE IF NOT EXISTS {table} (
+                            key TEXT PRIMARY KEY,
+                            value BLOB NOT NULL
+                        )"
+                    ))
+                    .execute(&mut *conn)
+                    .await?;
+                    sqlx::query("PRAGMA case_sensitive_like = ON")
+                        .execute(&mut *conn)
+                        .await?;
+                    Ok(())
+                })
+            })
+            .connect_with(opts)
             .await
             .map_err(|e| ActError::Store(e.to_string()))?;
-        sqlx::query(&format!(
-            "CREATE TABLE IF NOT EXISTS {} (
-                    key TEXT PRIMARY KEY,
-                    value BLOB NOT NULL
-                )",
-            consts::ACTS_STORE_NAME
-        ))
-        .execute(&mut conn)
-        .await
-        .map_err(|e| ActError::Store(e.to_string()))?;
-        sqlx::query("PRAGMA case_sensitive_like = ON")
-            .execute(&mut conn)
-            .await
-            .map_err(|e| ActError::Store(e.to_string()))?;
-        Ok(conn)
+
+        Ok(pool)
     }
 
     pub async fn open(path: &str) -> Result<Self> {
-        let conn = Self::init_conn(path).await?;
-        Ok(Self {
-            conn: Mutex::new(conn),
-        })
+        let pool = Self::init_pool(path).await?;
+        Ok(Self { pool })
     }
 
     #[allow(dead_code)]
@@ -110,51 +123,46 @@ fn like_pattern(prefix: &str) -> String {
 
 #[async_trait::async_trait]
 impl KvStore for SqliteStore {
-    #[allow(clippy::await_holding_lock)]
     async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
-        let mut conn = self.conn.lock().await;
         sqlx::query(&format!(
             "SELECT value FROM {} WHERE key = ?",
             consts::ACTS_STORE_NAME
         ))
         .bind(key)
-        .fetch_optional(&mut *conn)
+        .fetch_optional(&self.pool)
         .await
-        .map_err(|e| ActError::Store(e.to_string()))
-        .map(|opt| opt.map(|row| row.get(0)))
+        .map_err(|e| ActError::Store(e.to_string()))?
+        .map(|row| row.get::<Vec<u8>, _>(0))
+        .map(Ok)
+        .transpose()
     }
 
-    #[allow(clippy::await_holding_lock)]
     async fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
-        let mut conn = self.conn.lock().await;
         sqlx::query(&format!(
             "INSERT INTO {} (key, value) VALUES (?, ?)
              ON CONFLICT(key) DO UPDATE SET value = excluded.value",
             consts::ACTS_STORE_NAME
         ))
         .bind(key)
-        .bind(&value)
-        .execute(&mut *conn)
+        .bind(value)
+        .execute(&self.pool)
         .await
         .map_err(|e| ActError::Store(e.to_string()))?;
         Ok(())
     }
 
-    #[allow(clippy::await_holding_lock)]
     async fn delete(&self, key: &str) -> Result<()> {
-        let mut conn = self.conn.lock().await;
         sqlx::query(&format!(
             "DELETE FROM {} WHERE key = ?",
             consts::ACTS_STORE_NAME
         ))
         .bind(key)
-        .execute(&mut *conn)
+        .execute(&self.pool)
         .await
         .map_err(|e| ActError::Store(e.to_string()))?;
         Ok(())
     }
 
-    #[allow(clippy::await_holding_lock)]
     async fn batch(&self, ops: &[StoreBatchOp]) -> Result<()> {
         if ops.is_empty() {
             return Ok(());
@@ -166,7 +174,15 @@ impl KvStore for SqliteStore {
                 StoreBatchOp::Delete { key } => self.delete(key).await,
             };
         }
-        let mut conn = self.conn.lock().await;
+
+        // Use an explicit immediate transaction so the batch waits for any
+        // active writer before taking SQLite's write lock. The pooled
+        // connection is returned on commit or rollback.
+        let mut conn = self
+            .pool
+            .acquire()
+            .await
+            .map_err(|e| ActError::Store(e.to_string()))?;
         let table = consts::ACTS_STORE_NAME;
         let res: std::result::Result<(), sqlx::Error> = async {
             sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
@@ -195,6 +211,7 @@ impl KvStore for SqliteStore {
             Ok(())
         }
         .await;
+
         match res {
             Ok(()) => Ok(()),
             Err(err) => {
@@ -207,7 +224,6 @@ impl KvStore for SqliteStore {
         }
     }
 
-    #[allow(clippy::await_holding_lock)]
     async fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>> {
         let ScanOptions {
             is_rev,
@@ -216,7 +232,6 @@ impl KvStore for SqliteStore {
         } = options;
         let pattern = like_pattern(prefix);
         let (extra_sql, extra_binds) = op_conditions(&op, key);
-        let mut conn = self.conn.lock().await;
         let order = if is_rev { "DESC" } else { "ASC" };
         let sql = format!(
             "SELECT key, value FROM {} WHERE key LIKE ? ESCAPE '\\'{} ORDER BY key {}",
@@ -229,7 +244,7 @@ impl KvStore for SqliteStore {
             query = query.bind(bind_val);
         }
         let rows = query
-            .fetch_all(&mut *conn)
+            .fetch_all(&self.pool)
             .await
             .map_err(|e| ActError::Store(e.to_string()))?;
         let mut result = Vec::with_capacity(rows.len());
