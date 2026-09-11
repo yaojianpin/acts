@@ -10,6 +10,7 @@ use crate::{ActError, Result};
 pub use action::Action;
 pub(crate) use emitter::ActWorkflowMessageHandle;
 pub use emitter::Emitter;
+pub(crate) use emitter::ProcessGate;
 pub use extra::TaskExtra;
 pub use message::{Message, MessageState};
 

@@ -91,6 +91,13 @@ impl EngineBuilder {
         self
     }
 
+    /// Set the number of serial task lanes. Independent pids can execute on
+    /// different lanes; tasks belonging to the same pid retain FIFO order.
+    pub fn scheduler_workers(mut self, workers: usize) -> Self {
+        self.config_mut().data.scheduler_workers = Some(workers);
+        self
+    }
+
     /// register plugin
     ///
     /// ## Example

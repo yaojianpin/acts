@@ -26,6 +26,10 @@ pub struct ConfigData {
     /// unbounded task creation caused by a node self-loop / cyclic `next`.
     /// 0 disables the check
     pub max_node_run_times: Option<i64>,
+    /// Maximum scheduler task lanes; defaults to available parallelism.
+    /// Each lane executes one task at a time.
+    /// Tasks for the same pid always hash to the same lane to preserve FIFO.
+    pub scheduler_workers: Option<usize>,
 
     // log config
     pub log: Option<ConfigLog>,
@@ -124,6 +128,16 @@ impl Config {
     }
     pub fn tick_interval_secs(&self) -> i64 {
         self.data.tick_interval_secs.unwrap_or(15)
+    }
+
+    /// Maximum concurrently executing scheduler jobs. This is also the explicit
+    /// in-flight admission limit for the fixed task-lane pool.
+    pub fn scheduler_workers(&self) -> usize {
+        let configured = self
+            .data
+            .scheduler_workers
+            .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()));
+        configured.clamp(1, 1024)
     }
 
     pub fn log(&self) -> ConfigLog {

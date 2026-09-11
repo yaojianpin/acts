@@ -6,7 +6,7 @@ use crate::{
     cache::Cache,
     data,
     env::Enviroment,
-    event::{Emitter, EventAction},
+    event::{Emitter, EventAction, ProcessGate},
     scheduler::queue::{Queue, QueueData},
     store::{KvStore, Store},
     utils::{self, consts},
@@ -22,7 +22,7 @@ use std::{
     task::{Context as TaskContext, Poll},
     time::Duration,
 };
-use tokio::{runtime::Handle, time};
+use tokio::{runtime::Handle, sync::mpsc, time};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument};
 
@@ -42,6 +42,68 @@ pub struct Runtime {
 /// Registry of snapshot-backed sealed-data targets (see [`crate::snapshot`]).
 pub(crate) struct SnapshotRegistry {
     stores: ShareLock<HashMap<String, Arc<SnapshotStore>>>,
+}
+
+/// A unit accepted by the scheduler lane pool. The original queue item's
+/// process lease is carried through dispatch so a finished/evicted process
+/// cannot invalidate work that was already admitted.
+#[derive(Debug)]
+enum SchedulerJob {
+    Exec { task: Arc<Task>, proc: Arc<Process> },
+    Next { task: Arc<Task>, proc: Arc<Process> },
+}
+
+/// Fixed set of serial workers. Jobs are assigned by pid hash, so all work for
+/// one process is queued on the same lane and preserves FIFO order while
+/// independent processes can run on different lanes.
+#[derive(Debug)]
+struct SchedulerLanes {
+    senders: Vec<mpsc::UnboundedSender<SchedulerJob>>,
+    gate: ProcessGate,
+}
+
+impl SchedulerLanes {
+    fn new(count: usize, emitter: Arc<Emitter>, shutdown: CancellationToken) -> Self {
+        let count = count.max(1);
+        let gate = emitter.process_gate();
+        let mut senders = Vec::with_capacity(count);
+        for _ in 0..count {
+            let (sender, mut receiver) = mpsc::unbounded_channel::<SchedulerJob>();
+            let shutdown = shutdown.clone();
+            let gate = emitter.process_gate();
+            tokio::spawn(async move {
+                loop {
+                    let job = tokio::select! {
+                        _ = shutdown.cancelled() => break,
+                        job = receiver.recv() => job,
+                    };
+                    let Some(job) = job else { break };
+                    let pid = match &job {
+                        SchedulerJob::Exec { task, .. } | SchedulerJob::Next { task, .. } => {
+                            task.pid.clone()
+                        }
+                    };
+                    let gate = gate.lock(&pid).await;
+                    Runtime::execute_job(job).await;
+                    drop(gate);
+                }
+            });
+            senders.push(sender);
+        }
+        Self { senders, gate }
+    }
+
+    fn dispatch(&self, job: SchedulerJob) -> crate::Result<()> {
+        let pid = match &job {
+            SchedulerJob::Exec { task, .. } | SchedulerJob::Next { task, .. } => &task.pid,
+        };
+        // The event gate uses the same stable FNV-1a mapping; this ensures a
+        // process's user event handlers cannot interleave with its lane job.
+        let lane = self.gate.lane_index(pid);
+        self.senders[lane]
+            .send(job)
+            .map_err(|err| ActError::Runtime(err.to_string()))
+    }
 }
 
 /// Catches panics raised while polling an operation, without moving that
@@ -588,7 +650,12 @@ impl Runtime {
 
     pub fn event_loop(self: &Arc<Self>) {
         let queue = self.queue.clone();
+        let emitter = self.emitter.clone();
         let shutdown = self.shutdown.clone();
+        // The dispatcher only dequeues/admits work. Fixed serial lanes provide
+        // the explicit in-flight cap while preserving per-pid ordering.
+        let lanes =
+            SchedulerLanes::new(self.config().scheduler_workers(), emitter, shutdown.clone());
         tokio::spawn(async move {
             // If this future is dropped or unwinds unexpectedly, make the
             // failure visible to producers (`queue.send`) instead of letting an
@@ -602,54 +669,14 @@ impl Runtime {
                 match next {
                     Ok(data) => match data {
                         QueueData::Task { task, proc } => {
-                            let Some(ctx) = Self::isolate_context(task.clone(), proc).await else {
-                                continue;
-                            };
-                            let result = CatchPanic::new({
-                                let task = task.clone();
-                                let ctx = ctx.clone();
-                                async move {
-                                    if let Err(err) = task.exec(&ctx).await {
-                                        error!(error = %err, "task.exec failed");
-                                        task.set_err(&err.clone().into());
-                                        ctx.set_task(&task);
-                                        ctx.emit_error().await.ok();
-                                    }
-                                }
-                            })
-                            .await;
-                            Self::report_task_panic("task.exec", task, ctx, result).await;
+                            if let Err(err) = lanes.dispatch(SchedulerJob::Exec { task, proc }) {
+                                error!(error = %err, "scheduler lane dispatch failed");
+                            }
                         }
                         QueueData::Next { task, proc } => {
-                            let Some(ctx) = Self::isolate_context(task.clone(), proc).await else {
-                                continue;
-                            };
-                            let result = CatchPanic::new({
-                                let task = task.clone();
-                                let ctx = ctx.clone();
-                                async move {
-                                    let result = task.next(&ctx).await;
-                                    if let Err(err) = result {
-                                        error!(error = %err, "task.next failed");
-                                        task.set_err(&err.clone().into());
-                                        ctx.set_task(&task);
-                                        ctx.emit_error().await.ok();
-                                        // the propagation ended in error (terminal):
-                                        // close the outbox record so recovery does not
-                                        // replay the failed `next`
-                                        if let Err(err) = task.runtime().complete_next(&task) {
-                                            error!(error = %err, "complete_next failed");
-                                        }
-                                    }
-                                    // On success the record is closed inside `next`
-                                    // once the task reaches a terminal state;
-                                    // outcomes with children still in flight or an
-                                    // interrupt leave it `Pending` for recovery to
-                                    // replay.
-                                }
-                            })
-                            .await;
-                            Self::report_task_panic("task.next", task, ctx, result).await;
+                            if let Err(err) = lanes.dispatch(SchedulerJob::Next { task, proc }) {
+                                error!(error = %err, "scheduler lane dispatch failed");
+                            }
                         }
                         QueueData::Abort => {
                             break;
@@ -665,6 +692,54 @@ impl Runtime {
     }
 
     /// Build an execution context while catching a panic at the poll boundary.
+    async fn execute_job(job: SchedulerJob) {
+        let (task, proc, operation) = match job {
+            SchedulerJob::Exec { task, proc } => (task, proc, "task.exec"),
+            SchedulerJob::Next { task, proc } => (task, proc, "task.next"),
+        };
+        let Some(ctx) = Self::isolate_context(task.clone(), proc).await else {
+            return;
+        };
+        let reporting_task = task.clone();
+        let reporting_ctx = ctx.clone();
+        let result = CatchPanic::new(async move {
+            match operation {
+                "task.exec" => Self::run_exec_job(task, ctx).await,
+                _ => Self::run_next_job(task, ctx).await,
+            }
+        })
+        .await;
+        Self::report_task_panic(operation, reporting_task, reporting_ctx, result).await;
+    }
+
+    async fn run_exec_job(task: Arc<Task>, ctx: Context) {
+        if let Err(err) = task.exec(&ctx).await {
+            error!(error = %err, "task.exec failed");
+            task.set_err(&err.clone().into());
+            ctx.set_task(&task);
+            ctx.emit_error().await.ok();
+        }
+    }
+
+    async fn run_next_job(task: Arc<Task>, ctx: Context) {
+        let result = task.next(&ctx).await;
+        if let Err(err) = result {
+            error!(error = %err, "task.next failed");
+            task.set_err(&err.clone().into());
+            ctx.set_task(&task);
+            ctx.emit_error().await.ok();
+            // the propagation ended in error (terminal):
+            // close the outbox record so recovery does not
+            // replay the failed `next`
+            if let Err(err) = task.runtime().complete_next(&task) {
+                error!(error = %err, "complete_next failed");
+            }
+        }
+        // On success the record is closed inside `next` once the task reaches
+        // a terminal state; outcomes with children still in flight or an
+        // interrupt leave it `Pending` for recovery to replay.
+    }
+
     async fn isolate_context(task: Arc<Task>, proc: Arc<Process>) -> Option<Context> {
         // Keep the queue item's process lease alive through context setup.
         let _proc = proc;
@@ -720,7 +795,8 @@ impl Runtime {
         // let scher = Scheduler::new();
         let env = Arc::new(Enviroment::new());
         let cache = Arc::new(Cache::new(config, store)?);
-        let emitter = Arc::new(Emitter::new());
+        let process_gate = ProcessGate::new(config.scheduler_workers());
+        let emitter = Arc::new(Emitter::with_process_gate(process_gate));
         let package = Arc::new(Package::new());
         let queue = Queue::new();
         let shutdown = CancellationToken::new();

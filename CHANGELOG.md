@@ -344,6 +344,7 @@
 
 
 # Unreleased
+- perf(scheduler): replace the single serialized event-loop executor with fixed pid-hashed task lanes — independent processes now overlap up to `scheduler_workers` jobs while work for one pid stays FIFO; scheduler jobs and same-pid workflow event handlers share a lane gate to preserve completion/action ordering, and the event loop only dequeues/admits work
 - perf(store): reduce query materialization and round trips — extract collection ids directly from data keys instead of parsing every row, paginate indexed `order_by` queries from the ordered index while reading only the page documents, batch page reads through `KvStore::mget` (Redis `MGET`, SQL `IN`, Sled blocking batch), and evaluate AND filters by candidate cardinality with empty-branch short-circuiting
 - fix: add index fields `["kind", "next_run", "mid"]` for `event` collection and add index fields `update_time` for `deliveries`
 - perf: cache registered package instances per engine registration instead of recreating them for every Func act or custom event trigger; package constructors now run once per successful first use and replaced registrations get a fresh cache slot

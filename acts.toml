@@ -23,6 +23,10 @@ max_message_retry_times = 20
 # through a cyclic `next`. 0 disables the check.
 max_node_run_times = 1000
 
+# Number of scheduler task lanes. Independent pids can execute concurrently;
+# tasks for the same pid are pinned to one lane and remain FIFO ordered.
+scheduler_workers = 4
+
 # [log] — file logging: hourly rolling acts.log files under dir, at level
 # (the ACTS_LOG env var overrides level at runtime).
 [log]

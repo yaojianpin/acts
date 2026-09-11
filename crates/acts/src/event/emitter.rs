@@ -8,7 +8,10 @@ use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::{
+    Mutex,
+    mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel},
+};
 use tracing::{debug, error, instrument};
 
 use super::TaskExtra;
@@ -53,15 +56,54 @@ const WORKER_IDLE: Duration = Duration::from_secs(30);
 
 type Workers = Arc<RwLock<HashMap<String, UnboundedSender<KeyEvent>>>>;
 
+/// Serializes user event handlers against scheduler-lane work for the same
+/// process. Per-pid emitter workers already order handlers among themselves;
+/// this gate also preserves the old single-loop barrier between a scheduler
+/// job and handlers reacting to its emissions.
+#[derive(Clone, Debug)]
+pub(crate) struct ProcessGate {
+    locks: Arc<Vec<Arc<Mutex<()>>>>,
+}
+
+impl ProcessGate {
+    pub(crate) fn new(count: usize) -> Self {
+        Self {
+            locks: Arc::new(
+                (0..count.max(1))
+                    .map(|_| Arc::new(Mutex::new(())))
+                    .collect(),
+            ),
+        }
+    }
+
+    /// This intentionally uses the same FNV-1a lane mapping as the scheduler,
+    /// so a process's event handlers serialize against that process's lane.
+    pub(crate) fn lane_index(&self, pid: &str) -> usize {
+        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+        for byte in pid.as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        (hash as usize) % self.locks.len()
+    }
+
+    pub(crate) async fn lock(&self, pid: &str) -> tokio::sync::OwnedMutexGuard<()> {
+        let lock = self.locks[self.lane_index(pid)].clone();
+        lock.lock_owned().await
+    }
+}
+
 /// One ordered consumer per process id. Panics of a handler future are
 /// isolated: every invocation is spawned and awaited, so a panicking handler
 /// neither kills the consumer nor reorders the next event of the process.
+#[allow(clippy::too_many_arguments)]
 async fn consume_pid_events(
     workers: Workers,
     starts: ShareLock<HashMap<String, ActWorkflowMessageHandle>>,
     completes: ShareLock<HashMap<String, ActWorkflowMessageHandle>>,
     messages: ShareLock<HashMap<String, ActWorkflowMessageHandle>>,
     errors: ShareLock<HashMap<String, ActWorkflowMessageHandle>>,
+    gate: ProcessGate,
     pid: String,
     mut rx: UnboundedReceiver<KeyEvent>,
 ) {
@@ -72,12 +114,30 @@ async fn consume_pid_events(
         };
         let terminal = is_terminal(&event);
         match event {
-            KeyEvent::Start(item) => dispatch_key_event(&starts, item).await,
-            KeyEvent::Complete(item) => dispatch_key_event(&completes, item).await,
-            KeyEvent::Message(item) => dispatch_key_event(&messages, item).await,
-            KeyEvent::Error(item) => dispatch_key_event(&errors, item).await,
+            KeyEvent::Start(item) => {
+                let gate = gate.lock(&item.pid).await;
+                dispatch_key_event(&starts, item).await;
+                drop(gate);
+            }
+            KeyEvent::Complete(item) => {
+                let gate = gate.lock(&item.pid).await;
+                dispatch_key_event(&completes, item).await;
+                drop(gate);
+            }
+            KeyEvent::Message(item) => {
+                let gate = gate.lock(&item.pid).await;
+                dispatch_key_event(&messages, item).await;
+                drop(gate);
+            }
+            KeyEvent::Error(item) => {
+                let gate = gate.lock(&item.pid).await;
+                dispatch_key_event(&errors, item).await;
+                drop(gate);
+            }
             KeyEvent::Delivery { chan_id, msg } => {
+                let gate = gate.lock(&msg.pid).await;
                 dispatch_delivery(&messages, &chan_id, msg).await;
+                drop(gate);
             }
         }
         if terminal {
@@ -156,6 +216,7 @@ pub struct Emitter {
     tasks: ShareLock<Vec<TaskHandle>>,
 
     workers: Workers,
+    process_gate: ProcessGate,
 }
 
 impl std::fmt::Debug for Emitter {
@@ -172,6 +233,10 @@ impl Default for Emitter {
 
 impl Emitter {
     pub fn new() -> Self {
+        Self::with_process_gate(ProcessGate::new(1))
+    }
+
+    pub(crate) fn with_process_gate(process_gate: ProcessGate) -> Self {
         Self {
             messages: Arc::new(RwLock::new(HashMap::new())),
             starts: Arc::new(RwLock::new(HashMap::new())),
@@ -179,6 +244,7 @@ impl Emitter {
             errors: Arc::new(RwLock::new(HashMap::new())),
             procs: Arc::new(RwLock::new(Vec::new())),
             tasks: Arc::new(RwLock::new(Vec::new())),
+            process_gate,
             workers: Arc::new(RwLock::new(HashMap::new())),
         }
     }
@@ -296,10 +362,15 @@ impl Emitter {
             self.completes.clone(),
             self.messages.clone(),
             self.errors.clone(),
+            self.process_gate(),
             pid,
             rx,
         ));
         let _ = tx.send(event);
+    }
+
+    pub(crate) fn process_gate(&self) -> ProcessGate {
+        self.process_gate.clone()
     }
 
     #[instrument(skip(self, proc), fields(pid = %proc.id()))]
