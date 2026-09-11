@@ -44,7 +44,7 @@ impl DbCollectionIden for Delivery {
         StoreIden::Deliveries
     }
     fn indexed_fields() -> &'static [&'static str] {
-        &["pid", "tid", "status", "msg_id", "chan_id"]
+        &["pid", "tid", "status", "msg_id", "chan_id", "update_time"]
     }
     fn version() -> i32 {
         1

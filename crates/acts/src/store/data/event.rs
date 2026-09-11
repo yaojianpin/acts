@@ -39,6 +39,9 @@ impl DbCollectionIden for Event {
     fn iden() -> StoreIden {
         StoreIden::Events
     }
+    fn indexed_fields() -> &'static [&'static str] {
+        &["kind", "next_run", "mid"]
+    }
     fn version() -> i32 {
         1
     }

@@ -344,6 +344,7 @@
 
 
 # Unreleased
+- fix: add index fields `["kind", "next_run", "mid"]` for `event` collection and add index fields `update_time` for `deliveries`
 - perf: cache registered package instances per engine registration instead of recreating them for every Func act or custom event trigger; package constructors now run once per successful first use and replaced registrations get a fresh cache slot
 - perf: `acts-package-state` uses a long-lived Redis multiplexed async connection and async `GET`/`SET` instead of opening and blocking a synchronous connection on every execution
 - perf: `acts-package-http` uses a package-level async `reqwest::Client`, reusing connections and TLS sessions instead of creating a blocking client for every HTTP act
