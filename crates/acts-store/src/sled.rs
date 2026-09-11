@@ -89,6 +89,26 @@ impl KvStore for SledStore {
         .map_err(|e| ActError::Store(e.to_string()))?
     }
 
+    async fn mget(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let db = self.db.clone();
+        let keys = keys.to_vec();
+        tokio::task::spawn_blocking(move || {
+            keys.into_iter()
+                .map(|key| {
+                    db.get(key.as_bytes())
+                        .map(|opt| opt.map(|ivec| ivec.to_vec()))
+                })
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .map_err(|e| ActError::Store(e.to_string()))
+        })
+        .await
+        .map_err(|e| ActError::Store(e.to_string()))?
+    }
+
     async fn batch(&self, ops: &[StoreBatchOp]) -> Result<()> {
         if ops.is_empty() {
             return Ok(());

@@ -28,6 +28,10 @@ impl<T> KvCollection<T> {
         format!("{}{}id{}{}", self.prefix, KEY_SEP, KEY_SEP, id)
     }
 
+    fn data_prefix(&self) -> String {
+        format!("{}{}id{}", self.prefix, KEY_SEP, KEY_SEP)
+    }
+
     fn index_keys(&self, json: &JsonValue, id: &str) -> Vec<String>
     where
         T: DbCollectionIden,
@@ -56,6 +60,22 @@ impl<T> KvCollection<T> {
             .await?
             .map(|data| serde_json::from_slice(&data).map_err(map_db_err))
             .transpose()
+    }
+
+    /// Read documents in the caller-supplied order with one backend batch
+    /// operation where one is available.
+    async fn read_json_many(&self, ids: &[String]) -> Result<Vec<JsonValue>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let keys: Vec<String> = ids.iter().map(|id| self.data_key(id)).collect();
+        let values = self.kv.mget(&keys).await?;
+        let mut docs = Vec::with_capacity(values.len());
+        for data in values.into_iter().flatten() {
+            docs.push(serde_json::from_slice(&data).map_err(map_db_err)?);
+        }
+        Ok(docs)
     }
 
     /// The mutations [`DbCollection::create`] would apply (data row + index
@@ -143,24 +163,7 @@ impl<T> KvCollection<T> {
         indexed: &[&str],
         order_by: &[OrderBy],
     ) -> Result<HashSet<String>> {
-        // Validate array-shaped operators up front: the error must not depend
-        // on whether the field is indexed or which scan path is selected.
-        match &expr.op {
-            ExprOp::Between => {
-                let arr = expr.value.as_array().map(Vec::as_slice).unwrap_or(&[]);
-                if arr.len() < 2 {
-                    return Err(ActError::Store(
-                        "Between operator requires an array of two values".to_string(),
-                    ));
-                }
-            }
-            ExprOp::In if !expr.value.as_array().is_some_and(|a| !a.is_empty()) => {
-                return Err(ActError::Store(
-                    "In operator requires a non-empty array".to_string(),
-                ));
-            }
-            _ => {}
-        }
+        Self::validate_expr(expr)?;
         // Match is substring matching (contains), which an index prefix scan
         // cannot serve, and range/inequality scans are exact only for the
         // fixed-width, order-preserving numeric encoding (see
@@ -302,18 +305,18 @@ impl<T> KvCollection<T> {
             Ok(ids)
         } else {
             // Fallback: scan all data entries and filter in-memory
-            let scan_key = format!("{}{}id{}", self.prefix, KEY_SEP, KEY_SEP);
+            let scan_key = self.data_prefix();
             let options = ScanOptions::new(ScanOperation::Eq, scan_key.clone(), false);
             let entries = self.kv.scan_prefix(&scan_key, options).await?;
             let ids: HashSet<String> = entries
                 .iter()
-                .filter_map(|(_, bytes)| {
+                .filter_map(|(key, bytes)| {
+                    let id = key.strip_prefix(&scan_key)?;
                     let v: JsonValue = serde_json::from_slice(bytes).ok()?;
-                    let id = v.get("id")?.as_str()?.to_string();
                     if let Some(field_val) = v.get(&expr.key)
                         && expr.op(field_val, &expr.value)
                     {
-                        return Some(id);
+                        return Some(id.to_string());
                     }
                     None
                 })
@@ -363,6 +366,76 @@ impl<T> KvCollection<T> {
         }
     }
 
+    /// Order matching IDs by an indexed field without reading document bodies.
+    ///
+    /// Index entries are stored as `{field}-{value}-{id}`. Consequently an
+    /// ascending index scan yields value order and, within equal values, ID
+    /// order -- the same stable tie-break used by [`cmp_order_docs`]. For a
+    /// descending query we reverse value groups while keeping IDs ascending
+    /// inside each group. Rows with a missing/null value are absent or in the
+    /// JSON `null` group; they sort first ascending and last descending.
+    async fn ordered_index_ids(
+        &self,
+        ids: &HashSet<String>,
+        field: &str,
+        desc: bool,
+    ) -> Result<Vec<String>> {
+        let field_prefix = format!("{}{}{}{}", self.prefix, KEY_SEP, field, KEY_SEP);
+        let options = ScanOptions::new(ScanOperation::Eq, field_prefix.clone(), false);
+        let entries = self.kv.scan_prefix(&field_prefix, options).await?;
+
+        // Keep value groups separate: a descending order reverses groups but
+        // deliberately does not reverse the ID tie-break within a group.
+        let mut groups: Vec<Vec<String>> = Vec::new();
+        let mut present = HashSet::new();
+        let mut current_value: Option<String> = None;
+        for (key, _) in entries {
+            let Some(rest) = key.strip_prefix(&field_prefix) else {
+                continue;
+            };
+            let Some(sep_pos) = rest.find(KEY_SEP) else {
+                continue;
+            };
+            let id = &rest[sep_pos + KEY_SEP.len()..];
+            if !ids.contains(id) {
+                continue;
+            }
+
+            // `cmp_order_docs` treats JSON null exactly like a missing value.
+            let value = &rest[..sep_pos];
+            if value == "null" {
+                continue;
+            }
+            if !present.insert(id.to_string()) {
+                continue;
+            }
+            if current_value.as_deref() != Some(value) {
+                groups.push(Vec::new());
+                current_value = Some(value.to_string());
+            }
+            if let Some(last) = groups.last_mut() {
+                last.push(id.to_string());
+            }
+        }
+
+        // This subtraction also includes documents whose order field is JSON
+        // null (the `null` index group was intentionally not marked present).
+        let mut missing: Vec<String> = ids.difference(&present).cloned().collect();
+        missing.sort();
+
+        let mut ordered_ids = if desc {
+            groups.into_iter().rev().flatten().collect::<Vec<_>>()
+        } else {
+            groups.into_iter().flatten().collect::<Vec<_>>()
+        };
+        if desc {
+            ordered_ids.extend(missing);
+        } else {
+            ordered_ids.splice(0..0, missing);
+        }
+        Ok(ordered_ids)
+    }
+
     /// Walk the filter tree and combine ID sets using AND/OR.
     async fn filter_ids(
         &self,
@@ -370,19 +443,95 @@ impl<T> KvCollection<T> {
         indexed: &[&str],
         order_by: &[OrderBy],
     ) -> Result<HashSet<String>> {
+        // Validate before short-circuiting so filter errors cannot depend on
+        // the data or on branch order.
+        Self::validate_filter(filter)?;
+
+        if filter.r#type == FilterType::And {
+            return self.and_filter_ids(filter, indexed, order_by).await;
+        }
+
+        // OR is order-insensitive semantically (it only affects scheduling of
+        // work), so retain caller order there.
         let mut result: Option<HashSet<String>> = None;
         for cond in &filter.exprs {
             // boxed: `filter_expr_ids` recurses back here (mutual async recursion)
             let ids = Box::pin(self.filter_expr_ids(cond, indexed, order_by)).await?;
             result = Some(match result {
                 None => ids,
-                Some(existing) => match filter.r#type {
-                    FilterType::And => existing.intersection(&ids).cloned().collect(),
-                    FilterType::Or => existing.union(&ids).cloned().collect(),
-                },
+                Some(existing) => existing.union(&ids).cloned().collect(),
             });
         }
         Ok(result.unwrap_or_default())
+    }
+
+    /// Evaluate AND branches by exact candidate cardinality and stop as soon
+    /// as any branch is empty.
+    ///
+    /// The scan that produces a branch also gives its selectivity: indexed
+    /// entries map one-to-one to candidate IDs, so the resulting set length is
+    /// the cheap cardinality estimate. Intersecting smallest first minimizes
+    /// the size of every later intermediate set.
+    async fn and_filter_ids(
+        &self,
+        filter: &Filter,
+        indexed: &[&str],
+        order_by: &[OrderBy],
+    ) -> Result<HashSet<String>> {
+        let mut branches: Vec<HashSet<String>> = Vec::with_capacity(filter.exprs.len());
+        for cond in &filter.exprs {
+            // boxed: `filter_expr_ids` recurses back here (mutual async recursion)
+            let ids = Box::pin(self.filter_expr_ids(cond, indexed, order_by)).await?;
+            if ids.is_empty() {
+                return Ok(ids);
+            }
+            branches.push(ids);
+        }
+
+        branches.sort_by_key(HashSet::len);
+        if branches.is_empty() {
+            return Ok(HashSet::new());
+        }
+        let mut result = branches.remove(0);
+        for ids in branches {
+            result.retain(|id| ids.contains(id));
+            if result.is_empty() {
+                break;
+            }
+        }
+        Ok(result)
+    }
+
+    fn validate_filter(filter: &Filter) -> Result<()> {
+        for cond in &filter.exprs {
+            match cond {
+                FilterExpr::Expr(expr) => Self::validate_expr(expr)?,
+                FilterExpr::Filter(filter) => Self::validate_filter(filter)?,
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate array-shaped operators independently of the selected scan
+    /// path, so short-circuiting cannot hide an invalid later branch.
+    fn validate_expr(expr: &Expr) -> Result<()> {
+        match &expr.op {
+            ExprOp::Between => {
+                let arr = expr.value.as_array().map(Vec::as_slice).unwrap_or(&[]);
+                if arr.len() < 2 {
+                    return Err(ActError::Store(
+                        "Between operator requires an array of two values".to_string(),
+                    ));
+                }
+            }
+            ExprOp::In if !expr.value.as_array().is_some_and(|a| !a.is_empty()) => {
+                return Err(ActError::Store(
+                    "In operator requires a non-empty array".to_string(),
+                ));
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     /// Rebuild every index entry of this collection from the stored data
@@ -581,46 +730,70 @@ where
         let id_set: HashSet<String> = if let Some(filter) = &q.filter {
             self.filter_ids(filter, indexed, q.get_order_by()).await?
         } else {
-            // No filter – scan all data entries to collect all IDs
-            let scan_key = format!("{}{}id{}", self.prefix, KEY_SEP, KEY_SEP);
+            // No filter — scan all data entries to collect all IDs
+            let scan_key = self.data_prefix();
             let options = ScanOptions::new(ScanOperation::Eq, scan_key.clone(), false);
             let entries = self.kv.scan_prefix(&scan_key, options).await?;
             entries
                 .iter()
-                .filter_map(|(_, bytes)| {
-                    let v: JsonValue = serde_json::from_slice(bytes).ok()?;
-                    v.get("id")?.as_str().map(|s| s.to_string())
-                })
+                .filter_map(|(key, _)| key.strip_prefix(&scan_key).map(str::to_string))
                 .collect()
         };
 
-        // ids always gather in ascending order: it is the page order when no
-        // `order_by` is given, and the tie-break (a stable sort keeps the read
-        // order) that makes offsets deterministic when sort keys repeat.
-        let mut ids: Vec<String> = id_set.into_iter().collect();
-        ids.sort();
-        let count = ids.len();
+        let count = id_set.len();
 
         // Step 3: Paginate. Sorting happens BEFORE pagination when `order_by`
         // is set: every page must be the global top-N slice, not a re-sorted
         // batch of an arbitrary page. Without `order_by` only the page ids
         // are read from the store.
         let order_by = q.get_order_by();
-        let rows: Vec<T> = if order_by.is_empty() {
-            let mut rows = Vec::new();
-            for id in ids.into_iter().skip(q.offset).take(q.limit) {
-                if let Some(json) = self.read_json(&id).await? {
-                    rows.push(T::upcast(json)?);
-                }
+        let index_ordered = match order_by.as_slice() {
+            [only]
+                if indexed.contains(&only.field.as_str())
+                    && T::ordered_index_fields().contains(&only.field.as_str()) =>
+            {
+                Some(only.order == Sort::Desc)
             }
-            rows
+            _ => None,
+        };
+
+        let rows: Vec<T> = if let Some(desc) = index_ordered {
+            // The order index itself supplies the global order, so only the
+            // page's document bodies need to be materialized. `ids` remains
+            // the authoritative count source (including rows missing/null in
+            // the order field, which `ordered_index_ids` places correctly).
+            let ordered_ids = self
+                .ordered_index_ids(&id_set, &order_by[0].field, desc)
+                .await?;
+            let page_ids = ordered_ids
+                .into_iter()
+                .skip(q.offset)
+                .take(q.limit)
+                .collect::<Vec<_>>();
+            self.read_json_many(&page_ids)
+                .await?
+                .into_iter()
+                .map(|row| T::upcast(row))
+                .collect::<Result<Vec<T>>>()?
+        } else if order_by.is_empty() {
+            // IDs are ascending: this is both the implicit page order and the
+            // stable tie-break that makes offsets deterministic.
+            let mut ids: Vec<String> = id_set.into_iter().collect();
+            ids.sort();
+            let page_ids = ids
+                .into_iter()
+                .skip(q.offset)
+                .take(q.limit)
+                .collect::<Vec<_>>();
+            self.read_json_many(&page_ids)
+                .await?
+                .into_iter()
+                .map(|row| T::upcast(row))
+                .collect::<Result<Vec<T>>>()?
         } else {
-            let mut docs: Vec<JsonValue> = Vec::with_capacity(count);
-            for id in &ids {
-                if let Some(json) = self.read_json(id).await? {
-                    docs.push(json);
-                }
-            }
+            let mut ids: Vec<String> = id_set.into_iter().collect();
+            ids.sort();
+            let mut docs = self.read_json_many(&ids).await?;
             docs.sort_by(|a, b| cmp_order_docs(a, b, order_by));
             docs.into_iter()
                 .skip(q.offset)
@@ -735,7 +908,7 @@ impl Expr {
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_key_str, json_value_to_key_str};
+    use super::{JsonValue, encode_key_str, json_value_to_key_str};
     use crate::store::Expr;
     use serde_json::json;
 
@@ -1343,6 +1516,70 @@ mod tests {
             .collect()
     }
 
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    struct OrderedDoc {
+        id: String,
+        state: String,
+        ord: JsonValue,
+    }
+
+    impl crate::store::DbCollectionIden for OrderedDoc {
+        fn iden() -> crate::store::StoreIden {
+            crate::store::StoreIden::Ops
+        }
+        fn indexed_fields() -> &'static [&'static str] {
+            &["state", "ord"]
+        }
+        fn ordered_index_fields() -> &'static [&'static str] {
+            &["ord"]
+        }
+    }
+
+    #[tokio::test]
+    async fn indexed_order_pages_without_inverting_ties() {
+        let kv: Arc<crate::store::MemoryStore> = Arc::new(crate::store::MemoryStore::new());
+        let col = KvCollection::<OrderedDoc>::new("ordered", kv.clone());
+        for (id, ord) in [
+            ("a", json!(2)),
+            ("b", json!(2)),
+            ("c", json!(1)),
+            ("d", json!(1)),
+            ("e", json!(null)),
+            ("f", json!(5)),
+        ] {
+            col.create(&OrderedDoc {
+                id: id.to_string(),
+                state: "idle".to_string(),
+                ord,
+            })
+            .await
+            .unwrap();
+        }
+
+        let asc = col
+            .query(&Query::new().order("ord", Sort::Asc).limit(100))
+            .await
+            .unwrap();
+        assert_eq!(
+            asc.rows.iter().map(|d| d.id.clone()).collect::<Vec<_>>(),
+            vec!["e", "c", "d", "a", "b", "f"]
+        );
+        // Desc reverses value groups, but equal values retain ascending IDs.
+        let desc_page = col
+            .query(&Query::new().order("ord", Sort::Desc).limit(3).offset(2))
+            .await
+            .unwrap();
+        assert_eq!(
+            desc_page
+                .rows
+                .iter()
+                .map(|d| d.id.clone())
+                .collect::<Vec<_>>(),
+            vec!["b", "c", "d"]
+        );
+        assert_eq!(desc_page.count, 6);
+    }
+
     #[tokio::test]
     async fn order_by_sorts_before_pagination() {
         let (_, col) = sort_col();
@@ -1433,8 +1670,10 @@ mod tests {
     struct CountingKv {
         inner: MemoryStore,
         batches: AtomicUsize,
+        mgets: AtomicUsize,
         puts: AtomicUsize,
         deletes: AtomicUsize,
+        scans: AtomicUsize,
     }
 
     #[async_trait::async_trait]
@@ -1458,11 +1697,17 @@ mod tests {
             self.inner.batch(ops).await
         }
 
+        async fn mget(&self, keys: &[String]) -> crate::Result<Vec<Option<Vec<u8>>>> {
+            self.mgets.fetch_add(1, Ordering::SeqCst);
+            self.inner.mget(keys).await
+        }
+
         async fn scan_prefix(
             &self,
             key: &str,
             options: ScanOptions,
         ) -> crate::Result<Vec<(String, Vec<u8>)>> {
+            self.scans.fetch_add(1, Ordering::SeqCst);
             self.inner.scan_prefix(key, options).await
         }
     }
@@ -1564,5 +1809,57 @@ mod tests {
             let page = query(&col, Filter::and().expr(Expr::eq(filter, "idle"))).await;
             assert_eq!(page.count, 0, "no index row may survive the delete");
         }
+    }
+
+    #[tokio::test]
+    async fn page_reads_use_batched_kv_reads() {
+        let (kv, col) = counting_col();
+        for i in 0..5 {
+            col.create(&doc(&format!("d{i}"), "idle", i)).await.unwrap();
+        }
+        kv.mgets.store(0, Ordering::SeqCst);
+
+        let page = col.query(&Query::new().limit(2).offset(1)).await.unwrap();
+        assert_eq!(ids(&page), vec!["d1", "d2"]);
+        assert_eq!(
+            kv.mgets.load(Ordering::SeqCst),
+            1,
+            "implicit-id pagination must use one logical mget"
+        );
+    }
+
+    #[tokio::test]
+    async fn and_filter_stops_on_empty_branch() {
+        let (kv, col) = counting_col();
+        col.create(&doc("d1", "idle", 5)).await.unwrap();
+        kv.scans.store(0, Ordering::SeqCst);
+
+        let page = query(
+            &col,
+            Filter::and()
+                .expr(Expr::eq("state", "idle"))
+                .expr(Expr::eq("state", "missing"))
+                .expr(Expr::eq("timestamp", 5)),
+        )
+        .await;
+        assert_eq!(page.count, 0);
+        assert_eq!(
+            kv.scans.load(Ordering::SeqCst),
+            2,
+            "an empty AND branch must prevent evaluation of later branches"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_and_filter_is_empty_result() {
+        let (_kv, col) = counting_col();
+        col.create(&doc("d1", "idle", 5)).await.unwrap();
+
+        let page = col
+            .query(&Query::new().filter(Filter::and()))
+            .await
+            .unwrap();
+        assert_eq!(page.count, 0);
+        assert!(page.rows.is_empty());
     }
 }

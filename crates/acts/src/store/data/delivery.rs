@@ -46,6 +46,9 @@ impl DbCollectionIden for Delivery {
     fn indexed_fields() -> &'static [&'static str] {
         &["pid", "tid", "status", "msg_id", "chan_id", "update_time"]
     }
+    fn ordered_index_fields() -> &'static [&'static str] {
+        &["update_time"]
+    }
     fn version() -> i32 {
         1
     }

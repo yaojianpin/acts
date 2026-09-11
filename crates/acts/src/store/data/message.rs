@@ -74,6 +74,9 @@ impl DbCollectionIden for Message {
     fn indexed_fields() -> &'static [&'static str] {
         &["pid", "tid", "nid", "timestamp"]
     }
+    fn ordered_index_fields() -> &'static [&'static str] {
+        &["timestamp"]
+    }
     fn version() -> i32 {
         2
     }

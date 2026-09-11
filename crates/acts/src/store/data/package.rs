@@ -36,6 +36,9 @@ impl DbCollectionIden for Package {
     fn indexed_fields() -> &'static [&'static str] {
         &["timestamp", "create_time", "update_time"]
     }
+    fn ordered_index_fields() -> &'static [&'static str] {
+        &["timestamp", "create_time", "update_time"]
+    }
 
     fn version() -> i32 {
         0

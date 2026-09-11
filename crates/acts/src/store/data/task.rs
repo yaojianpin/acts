@@ -36,6 +36,9 @@ impl DbCollectionIden for Task {
     fn indexed_fields() -> &'static [&'static str] {
         &["pid", "tid", "state", "timestamp", "start_time", "end_time"]
     }
+    fn ordered_index_fields() -> &'static [&'static str] {
+        &["timestamp", "start_time", "end_time"]
+    }
     fn version() -> i32 {
         0
     }

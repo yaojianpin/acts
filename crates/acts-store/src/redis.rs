@@ -65,6 +65,24 @@ impl KvStore for RedisStore {
             .map_err(|e| ActError::Store(e.to_string()))
     }
 
+    async fn mget(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut conn = self.conn.clone();
+        let mut values = Vec::with_capacity(keys.len());
+        for chunk in keys.chunks(256) {
+            let chunk_values: Vec<Option<Vec<u8>>> = redis::cmd("MGET")
+                .arg(chunk)
+                .query_async(&mut conn)
+                .await
+                .map_err(|e| ActError::Store(e.to_string()))?;
+            values.extend(chunk_values);
+        }
+        Ok(values)
+    }
+
     async fn batch(&self, ops: &[StoreBatchOp]) -> Result<()> {
         if ops.is_empty() {
             return Ok(());

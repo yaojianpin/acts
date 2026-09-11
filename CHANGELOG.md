@@ -344,6 +344,7 @@
 
 
 # Unreleased
+- perf(store): reduce query materialization and round trips — extract collection ids directly from data keys instead of parsing every row, paginate indexed `order_by` queries from the ordered index while reading only the page documents, batch page reads through `KvStore::mget` (Redis `MGET`, SQL `IN`, Sled blocking batch), and evaluate AND filters by candidate cardinality with empty-branch short-circuiting
 - fix: add index fields `["kind", "next_run", "mid"]` for `event` collection and add index fields `update_time` for `deliveries`
 - perf: cache registered package instances per engine registration instead of recreating them for every Func act or custom event trigger; package constructors now run once per successful first use and replaced registrations get a fresh cache slot
 - perf: `acts-package-state` uses a long-lived Redis multiplexed async connection and async `GET`/`SET` instead of opening and blocking a synchronous connection on every execution

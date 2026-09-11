@@ -27,6 +27,9 @@ impl DbCollectionIden for Model {
     fn indexed_fields() -> &'static [&'static str] {
         &["name", "timestamp", "create_time", "update_time", "ver"]
     }
+    fn ordered_index_fields() -> &'static [&'static str] {
+        &["timestamp", "create_time", "update_time"]
+    }
 
     fn version() -> i32 {
         0

@@ -163,6 +163,35 @@ impl KvStore for SqliteStore {
         Ok(())
     }
 
+    async fn mget(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+        if keys.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let mut values = Vec::with_capacity(keys.len());
+        for chunk in keys.chunks(500) {
+            let placeholders = vec!["?"; chunk.len()].join(",");
+            let sql = format!(
+                "SELECT key, value FROM {} WHERE key IN ({})",
+                consts::ACTS_STORE_NAME,
+                placeholders
+            );
+            let mut query = sqlx::query_as::<_, (String, Vec<u8>)>(&sql);
+            for key in chunk {
+                query = query.bind(key);
+            }
+            let rows = query
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| ActError::Store(e.to_string()))?;
+            let mut by_key = rows
+                .into_iter()
+                .collect::<std::collections::HashMap<_, _>>();
+            values.extend(chunk.iter().map(|key| by_key.remove(key)));
+        }
+        Ok(values)
+    }
+
     async fn batch(&self, ops: &[StoreBatchOp]) -> Result<()> {
         if ops.is_empty() {
             return Ok(());

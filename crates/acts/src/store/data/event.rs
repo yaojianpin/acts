@@ -42,6 +42,9 @@ impl DbCollectionIden for Event {
     fn indexed_fields() -> &'static [&'static str] {
         &["kind", "next_run", "mid"]
     }
+    fn ordered_index_fields() -> &'static [&'static str] {
+        &["next_run"]
+    }
     fn version() -> i32 {
         1
     }

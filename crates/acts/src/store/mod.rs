@@ -60,6 +60,14 @@ pub trait DbCollectionIden {
     fn indexed_fields() -> &'static [&'static str] {
         &[]
     }
+
+    /// Indexed fields whose index-key order is also the query `order_by`
+    /// order. A field must only be listed when every stored value has the
+    /// same JSON type and that type is encoded in order-preserving form
+    /// (currently the fixed-width unsigned/positive integer encoding).
+    fn ordered_index_fields() -> &'static [&'static str] {
+        &[]
+    }
     fn version() -> i32 {
         0
     }
@@ -169,6 +177,17 @@ pub trait KvStore: Send + Sync {
             }
         }
         Ok(())
+    }
+
+    /// Read several keys in one logical call. The default preserves
+    /// compatibility for stores without a native batch read; backends with a
+    /// network or SQL round trip should override it.
+    async fn mget(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+        let mut values = Vec::with_capacity(keys.len());
+        for key in keys {
+            values.push(self.get(key).await?);
+        }
+        Ok(values)
     }
 
     async fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>>;
