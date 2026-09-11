@@ -3,6 +3,7 @@
     "properties": {
         "shell": { "type": "string", "title": "Shell", "enum": ["sh", "nu", "bash", "powershell"] },
         "script": { "type": "string", "title": "Script" },
-        "content-type": { "type": ["string", "null"], "title": "Content Type", "enum": ["text", "json"]}
+        "content-type": { "type": ["string", "null"], "title": "Content Type", "enum": ["text", "json"] },
+        "max-output-bytes": { "type": "integer", "title": "Max Output Bytes", "minimum": 0, "description": "Optional maximum number of bytes for each captured output stream." }
     }
 }

@@ -5,6 +5,7 @@
         "headers",
         "content-type",
         "params",
-        "body"
+        "body",
+        "timeout-ms"
     ]
 }

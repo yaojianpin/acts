@@ -38,3 +38,8 @@ steps:
         let data = "${{ my_input }}"
         $data | split row ',' | each { |it| $it | str trim  } | to json
 ```
+
+The shell runs asynchronously and does not block the workflow executor.
+Output capture is unbounded unless `max-output-bytes` is set. That option
+limits the number of bytes captured from each of stdout and stderr and fails
+the act when the limit is exceeded.

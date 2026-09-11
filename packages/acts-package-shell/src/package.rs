@@ -4,8 +4,12 @@ use acts::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
-use std::process::Command;
+use std::process::Stdio;
 use strum::AsRefStr;
+use tokio::{
+    io::{AsyncRead, AsyncReadExt},
+    process::Command,
+};
 
 const DATA_KEY: &str = "data";
 
@@ -44,6 +48,10 @@ pub struct ShellPackageParams {
     script: String,
     #[serde(rename(deserialize = "content-type"))]
     content_type: Option<ContentType>,
+    /// Optional maximum number of bytes for each captured output stream. This
+    /// is opt-in to avoid changing the behavior of existing workflows.
+    #[serde(default, rename(deserialize = "max-output-bytes"))]
+    max_output_bytes: Option<usize>,
 }
 
 #[async_trait::async_trait]
@@ -58,7 +66,7 @@ impl ActPackage for ShellPackage {
             doc: "",
             schema: include_json!("./schema.json"),
             options: Some(json!({
-                "ui:order": ["shell", "script", "content-type"],
+                "ui:order": ["shell", "script", "content-type", "max-output-bytes"],
                 "script": {
                     "ui:widget": "textarea",
                 },
@@ -91,17 +99,36 @@ impl ActPackage for ShellPackage {
         })?;
 
         let shell = params.shell.as_ref().unwrap_or(&Shell::Sh);
-        let output = Command::new(shell.as_ref())
+        let mut child = Command::new(shell.as_ref())
             .arg("-c")
             .arg(&params.script)
-            .output()
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .map_err(|err| ActError::Package(format!("{err}")))?;
 
-        if !output.status.success() {
-            let err = String::from_utf8(output.stderr)?;
+        let mut stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| ActError::Package("failed to capture shell stdout".to_string()))?;
+        let mut stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| ActError::Package("failed to capture shell stderr".to_string()))?;
+        let (stdout_data, stderr_data, status) = tokio::join!(
+            read_captured(&mut stdout, params.max_output_bytes),
+            read_captured(&mut stderr, params.max_output_bytes),
+            child.wait(),
+        );
+        let stdout = stdout_data?;
+        let stderr = stderr_data?;
+        let status = status.map_err(|err| ActError::Package(format!("{err}")))?;
+
+        if !status.success() {
+            let err = String::from_utf8(stderr)?;
             return Err(ActError::Package(err));
         }
-        let data = String::from_utf8(output.stdout)?;
+        let data = String::from_utf8(stdout)?;
         let content_type = params.content_type.as_ref().unwrap_or(&ContentType::Text);
         match content_type {
             ContentType::Text => ret.set(DATA_KEY, data),
@@ -115,4 +142,32 @@ impl ActPackage for ShellPackage {
 
         Ok(Some(ret))
     }
+}
+
+async fn read_captured<R>(reader: &mut R, max_output_bytes: Option<usize>) -> Result<Vec<u8>>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut data = Vec::new();
+    let mut captured_size = 0_usize;
+    let mut buf = [0_u8; 8 * 1024];
+
+    loop {
+        let size = reader.read(&mut buf).await?;
+        if size == 0 {
+            break;
+        }
+
+        if let Some(max_output_bytes) = max_output_bytes {
+            captured_size += size;
+            if captured_size > max_output_bytes {
+                return Err(ActError::Package(format!(
+                    "shell output stream exceeded max-output-bytes limit ({max_output_bytes})"
+                )));
+            }
+        }
+        data.extend_from_slice(&buf[..size]);
+    }
+
+    Ok(data)
 }

@@ -346,6 +346,11 @@
 # Unreleased
 - perf: cache registered package instances per engine registration instead of recreating them for every Func act or custom event trigger; package constructors now run once per successful first use and replaced registrations get a fresh cache slot
 - perf: `acts-package-state` uses a long-lived Redis multiplexed async connection and async `GET`/`SET` instead of opening and blocking a synchronous connection on every execution
+- perf: `acts-package-http` uses a package-level async `reqwest::Client`, reusing connections and TLS sessions instead of creating a blocking client for every HTTP act
+- feat: `acts-package-http` supports an optional `timeout-ms` param for the total request duration; when omitted, requests keep the previous no-timeout behavior
+- fix: `acts-package-http` is registered as a `Func` act so the engine executes its package handler instead of leaving the task interrupted
+- perf: `acts-package-shell` runs child processes with `tokio::process` and captures stdout/stderr asynchronously without blocking a scheduler worker
+- feat: `acts-package-shell` supports an optional `max-output-bytes` param to cap each captured output stream and fail when the limit is exceeded
 - fix: `acts-package-nats` no longer creates a private Tokio runtime or calls `block_in_place`; it connects lazily on first async execution and reuses the NATS client, avoiding the current-thread runtime panic and blocking a scheduler worker
 - fix: break the `Process → TaskTree → Task → Process` reference cycle — a `Task` now holds its process `Weak`ly, so a finished process evicted from the cache is actually deallocated together with its whole task tree; previously the cycle kept every finished process and all of its tasks (with their scope data) alive forever as unreachable cyclic garbage — `evict` freed the resident-set slot but never the memory, so the `cache_cap` park/refill design still leaked unboundedly
 - BREAKING: `Task::proc()` returns `Option<Arc<Process>>` instead of `&Arc<Process>` — `None` only for a task clone that outlived its evicted process (engine-driven paths always see a live process); a late root-task write from the store writer whose process is already gone falls back to the task's own state to stamp the proc row complete, so the sweeper still removes it

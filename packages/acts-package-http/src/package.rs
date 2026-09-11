@@ -3,9 +3,11 @@ use acts::{
     include_json,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use reqwest::Client;
 use reqwest::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, InvalidHeaderValue};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
+use std::time::Duration;
 
 const DATA_KEY: &str = "data";
 
@@ -41,7 +43,9 @@ pub struct Pair {
 }
 
 #[derive(Debug, Clone)]
-pub struct HttpPackage;
+pub struct HttpPackage {
+    client: Client,
+}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct HttpPackageParams {
@@ -55,6 +59,10 @@ pub struct HttpPackageParams {
     #[serde(default)]
     pub params: Vec<Pair>,
     pub body: Option<JsonValue>,
+    /// Total request timeout in milliseconds. When unset, no timeout is
+    /// applied to preserve the existing behavior.
+    #[serde(default, rename(deserialize = "timeout-ms"))]
+    pub timeout_ms: Option<u64>,
 }
 
 #[async_trait::async_trait]
@@ -69,7 +77,7 @@ impl ActPackage for HttpPackage {
             doc: "",
             schema: include_json!("./in-schema.json"),
             options: Some(include_json!("./ui-schema.json")),
-            run_as: ActRunAs::Irq,
+            run_as: ActRunAs::Func,
             resources: vec![],
             catalog: ActPackageCatalog::Core,
         }
@@ -79,7 +87,9 @@ impl ActPackage for HttpPackage {
     where
         Self: Sized,
     {
-        Ok(Self)
+        Ok(Self {
+            client: Client::new(),
+        })
     }
 
     async fn execute(
@@ -117,8 +127,8 @@ impl ActPackage for HttpPackage {
             query.push((key.clone(), value.clone()));
         }
 
-        let c = reqwest::blocking::Client::new();
-        let mut request = c
+        let mut request = self
+            .client
             .request(
                 params.method.parse().map_err(|_| {
                     ActError::Runtime(format!("invalid method '{}'", params.method))
@@ -127,6 +137,14 @@ impl ActPackage for HttpPackage {
             )
             .headers(headers)
             .query(&query);
+        if let Some(timeout_ms) = params.timeout_ms {
+            if timeout_ms == 0 {
+                return Err(ActError::Package(
+                    "timeout-ms must be greater than zero".to_string(),
+                ));
+            }
+            request = request.timeout(Duration::from_millis(timeout_ms));
+        }
 
         match params.content_type {
             ContentType::Text | ContentType::Html => {
@@ -167,6 +185,7 @@ impl ActPackage for HttpPackage {
 
         let res = request
             .send()
+            .await
             .map_err(|err| ActError::Runtime(format!("Http error: {err}")))?;
 
         let default_type = HeaderValue::from_static("application/json");
@@ -182,17 +201,19 @@ impl ActPackage for HttpPackage {
             ContentType::Text | ContentType::Html => {
                 ret.insert(
                     DATA_KEY.to_string(),
-                    res.text().map_err(map_package_err)?.into(),
+                    res.text().await.map_err(map_package_err)?.into(),
                 );
             }
             ContentType::Json => {
                 ret.insert(
                     DATA_KEY.to_string(),
-                    res.json::<serde_json::Value>().map_err(map_package_err)?,
+                    res.json::<serde_json::Value>()
+                        .await
+                        .map_err(map_package_err)?,
                 );
             }
             ContentType::Binary | ContentType::Image | ContentType::Video | ContentType::Audio => {
-                let data = res.bytes().map_err(map_package_err)?.to_vec();
+                let data = res.bytes().await.map_err(map_package_err)?.to_vec();
                 let data = STANDARD.encode(&data);
                 ret.insert(DATA_KEY.to_string(), data.into());
             }

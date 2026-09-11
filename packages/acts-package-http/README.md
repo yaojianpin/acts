@@ -54,3 +54,8 @@ steps:
         data: '${{ $inputs().data }}'
 
 ```
+
+The request uses one package-level async client, so connections and TLS
+sessions are reused. Set `timeout-ms` for an optional total request timeout
+(including reading the response body). If it is omitted, the request has no
+timeout and can wait indefinitely for a remote server.

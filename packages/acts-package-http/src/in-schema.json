@@ -53,6 +53,12 @@
                 },
                 "required": ["key", "value"]
             }
+        },
+        "timeout-ms": {
+            "type": "integer",
+            "title": "Timeout (ms)",
+            "minimum": 1,
+            "description": "Total request timeout in milliseconds. Leave empty to disable the timeout."
         }
     },
     "dependencies": {
