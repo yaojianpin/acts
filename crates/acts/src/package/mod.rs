@@ -5,21 +5,45 @@ pub mod transform;
 mod tests;
 
 use crate::{
-    Config, Engine, Result, Vars, data,
+    ActError, Config, Engine, Result, Vars, data,
     scheduler::{Context, Runtime},
     store::DbCollectionIden,
 };
 use dashmap::DashMap;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
-use std::{fmt::Debug, sync::Arc};
+use std::{fmt, sync::Arc};
 use tracing::debug;
 
 #[cfg(test)]
 pub use core::RunningMode;
 
-#[derive(Debug, Clone)]
+struct PackageEntry {
+    register: ActPackageRegister,
+    instance: Mutex<Option<Arc<dyn ActPackage>>>,
+}
+
+type SharedPackageEntry = Arc<PackageEntry>;
+
+impl fmt::Debug for PackageEntry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PackageEntry")
+            .field("register", &self.register)
+            .finish()
+    }
+}
+
+#[derive(Clone)]
 pub struct Package {
-    packages: Arc<DashMap<String, ActPackageRegister>>,
+    packages: Arc<DashMap<String, SharedPackageEntry>>,
+}
+
+impl fmt::Debug for Package {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Package")
+            .field("packages", &self.packages)
+            .finish()
+    }
 }
 
 #[async_trait::async_trait]
@@ -199,11 +223,41 @@ impl Package {
     }
 
     pub fn register(&self, id: &str, register: &ActPackageRegister) {
-        self.packages.insert(id.to_string(), register.clone());
+        // Replacing the entry also replaces its instance slot, so an old
+        // registration can never initialize a cache entry for a new one.
+        self.packages.insert(
+            id.to_string(),
+            Arc::new(PackageEntry {
+                register: register.clone(),
+                instance: Mutex::new(None),
+            }),
+        );
     }
 
     pub fn get(&self, id: &str) -> Option<ActPackageRegister> {
-        self.packages.get(id).map(|v| v.clone())
+        self.packages.get(id).map(|entry| entry.register.clone())
+    }
+
+    /// Return the cached instance for a registration, creating it on first use.
+    ///
+    /// Package constructors are intended to initialize reusable resources (or
+    /// leave them to async execution), so this avoids rebuilding a package for
+    /// every act/event and lets async packages keep one connection alive.
+    pub(crate) fn create(&self, id: &str, config: &Config) -> Result<Arc<dyn ActPackage>> {
+        let entry = self
+            .packages
+            .get(id)
+            .ok_or_else(|| ActError::Runtime(format!("cannot find package '{id}'")))?
+            .clone();
+        let mut instance = entry.instance.lock();
+
+        if let Some(package) = &*instance {
+            return Ok(package.clone());
+        }
+
+        let package = (entry.register.create)(config)?;
+        *instance = Some(package.clone());
+        Ok(package)
     }
 }
 
@@ -245,4 +299,56 @@ pub async fn init(engine: &Engine) -> Result<()> {
         engine.runtime().package().register(meta.id, register);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod cached_instance_tests {
+    use super::*;
+    use serde_json::json;
+    #[derive(Clone, Debug)]
+    struct CachedPackage;
+
+    #[async_trait::async_trait]
+    impl ActPackage for CachedPackage {
+        fn new(_config: &Config) -> Result<Self> {
+            Ok(Self)
+        }
+
+        fn definition() -> ActPackageDefinition {
+            ActPackageDefinition {
+                id: "test.cached",
+                name: "Cached",
+                desc: "",
+                icon: "",
+                doc: "",
+                version: "0.1.0",
+                schema: json!({}),
+                options: None,
+                run_as: ActRunAs::Func,
+                resources: vec![],
+                catalog: ActPackageCatalog::Core,
+            }
+        }
+    }
+
+    #[test]
+    fn create_reuses_instance_until_registration_is_replaced() {
+        let package = Package::new();
+        package.register(
+            CachedPackage::definition().id,
+            &ActPackageRegister::new::<CachedPackage>(),
+        );
+        let config = Config::default();
+
+        let first = package.create("test.cached", &config).unwrap();
+        let second = package.create("test.cached", &config).unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+
+        package.register(
+            CachedPackage::definition().id,
+            &ActPackageRegister::new::<CachedPackage>(),
+        );
+        let third = package.create("test.cached", &config).unwrap();
+        assert!(!Arc::ptr_eq(&first, &third));
+    }
 }

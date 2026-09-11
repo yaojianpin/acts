@@ -1,5 +1,5 @@
 use crate::{
-    Act, ActError, ActRunAs, ActTask, Result, TaskState, Vars,
+    Act, ActRunAs, ActTask, Result, TaskState, Vars,
     scheduler::{Context, NextAction},
     utils::consts,
 };
@@ -40,15 +40,10 @@ impl ActTask for Act {
             }
             ActRunAs::Msg => {}
             ActRunAs::Func => {
-                let register = ctx
+                let package = ctx
                     .runtime
                     .package()
-                    .get(package.id())
-                    .ok_or(ActError::Runtime(format!(
-                        "cannot find Func package '{}'",
-                        package.id()
-                    )))?;
-                let package = (register.create)(ctx.runtime.config())?;
+                    .create(package.id(), ctx.runtime.config())?;
                 if let Some(vars) = package.execute(ctx, &ctx.task().params()).await? {
                     task.update_data(&vars);
                 };

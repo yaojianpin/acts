@@ -10,7 +10,7 @@ repository.workspace = true
 
 
 [dependencies]
-redis = { version = "0.31.0", default-features = false }
+redis = { version = "0.31.0", default-features = false, features = ["aio", "tokio-comp"] }
 acts = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

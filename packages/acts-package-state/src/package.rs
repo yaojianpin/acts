@@ -5,12 +5,15 @@ use acts::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::sync::Arc;
+use tokio::sync::OnceCell;
 
 const CONFIG_NAME: &str = "state";
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct StatePackage {
     client: redis::Client,
+    connection: Arc<OnceCell<redis::aio::MultiplexedConnection>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,13 +95,13 @@ impl ActPackage for StatePackage {
             .get::<StateConfig>(CONFIG_NAME)
             .map_err(|err| acts::ActError::Config(format!("get state config error: {err}")))?;
 
-        let mut client = redis::Client::open(config.database_uri.as_str())
+        let client = redis::Client::open(config.database_uri.as_str())
             .map_err(|err| acts::ActError::Config(format!("create redis client error: {err}")))?;
 
-        redis::cmd("PING")
-            .exec(&mut client)
-            .map_err(|err| acts::ActError::Config(format!("ping redis error: {err}")))?;
-        Ok(Self { client })
+        Ok(Self {
+            client,
+            connection: Arc::new(OnceCell::new()),
+        })
     }
 
     async fn execute(
@@ -106,10 +109,7 @@ impl ActPackage for StatePackage {
         ctx: &acts::Context,
         params: &serde_json::Value,
     ) -> Result<Option<Vars>> {
-        let mut conn = self
-            .client
-            .get_connection()
-            .map_err(|err| ActError::Package(format!("error happend to get connection: {err}")))?;
+        let mut conn = self.connection().await?;
 
         let pid = ctx.task().pid.to_string();
         let params = serde_json::from_value::<StatePackageParams>(params.clone()).map_err(|e| {
@@ -129,9 +129,10 @@ impl ActPackage for StatePackage {
 
                 let ret = redis::cmd("GET")
                     .arg(format!("{pid}:{key}"))
-                    .query::<String>(&mut conn)
+                    .query_async::<String>(&mut conn)
+                    .await
                     .map_err(|err| {
-                        ActError::Package(format!("error happend to set value: {err}"))
+                        ActError::Package(format!("error happend to get value: {err}"))
                     })?;
 
                 let mut vars = Vars::new();
@@ -163,7 +164,8 @@ impl ActPackage for StatePackage {
                 redis::cmd("SET")
                     .arg(format!("{pid}:{key}"))
                     .arg(v.as_str())
-                    .query::<String>(&mut conn)
+                    .query_async::<String>(&mut conn)
+                    .await
                     .map_err(|err| {
                         ActError::Package(format!("error happend to set value: {err}"))
                     })?;
@@ -175,4 +177,30 @@ impl ActPackage for StatePackage {
             ))),
         }
     }
+}
+
+impl StatePackage {
+    async fn connection(&self) -> Result<redis::aio::MultiplexedConnection> {
+        let client = self.client.clone();
+        let connection = self
+            .connection
+            .get_or_try_init(|| open_connection(client))
+            .await?;
+
+        Ok(connection.clone())
+    }
+}
+
+async fn open_connection(client: redis::Client) -> Result<redis::aio::MultiplexedConnection> {
+    let mut connection = client
+        .get_multiplexed_async_connection()
+        .await
+        .map_err(|err| ActError::Package(format!("error happend to connect redis: {err}")))?;
+
+    redis::cmd("PING")
+        .query_async::<String>(&mut connection)
+        .await
+        .map_err(|err| ActError::Package(format!("error happend to ping redis: {err}")))?;
+
+    Ok(connection)
 }

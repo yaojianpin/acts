@@ -6,23 +6,9 @@ use async_nats::Client;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
-use std::{future::Future, sync::LazyLock};
-use tokio::runtime::Runtime;
+use std::sync::Arc;
+use tokio::sync::OnceCell;
 const DATA_KEY: &str = "data";
-
-static RUNTIME: LazyLock<Runtime> =
-    LazyLock::new(|| Runtime::new().expect("failed to create tokio runtime"));
-
-fn runtime() -> &'static Runtime {
-    &RUNTIME
-}
-
-fn block_on<F: Future>(f: F) -> F::Output {
-    match tokio::runtime::Handle::try_current() {
-        Ok(_) => tokio::task::block_in_place(|| runtime().block_on(f)),
-        Err(_) => runtime().block_on(f),
-    }
-}
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -31,9 +17,10 @@ pub enum Mode {
     Sub,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct NatsPackage {
-    client: Client,
+    config: NatsConfig,
+    client: Arc<OnceCell<Client>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -44,7 +31,7 @@ pub struct NatsPackageParams {
     pub message: Option<JsonValue>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 struct NatsConfig {
     url: String,
     #[serde(default)]
@@ -96,9 +83,10 @@ impl ActPackage for NatsPackage {
         Self: Sized,
     {
         let nats_config = config.get::<NatsConfig>("nats")?;
-        let client = block_on(connect(&nats_config))
-            .map_err(|err| ActError::Config(format!("failed to connect to NATS: {err}")))?;
-        Ok(Self { client })
+        Ok(Self {
+            config: nats_config,
+            client: Arc::new(OnceCell::new()),
+        })
     }
 
     async fn execute(
@@ -106,6 +94,7 @@ impl ActPackage for NatsPackage {
         _ctx: &acts::Context,
         params: &serde_json::Value,
     ) -> Result<Option<Vars>> {
+        let client = self.client().await?;
         let params = serde_json::from_value::<NatsPackageParams>(params.clone()).map_err(|e| {
             ActError::Package(format!(
                 "invalid ActPackage({}) params: {}",
@@ -120,7 +109,7 @@ impl ActPackage for NatsPackage {
                     ActError::Package("message is required for pub mode".to_string())
                 })?;
 
-                self.client
+                client
                     .publish(params.subject, payload.to_string().into())
                     .await
                     .map_err(|err| {
@@ -129,8 +118,7 @@ impl ActPackage for NatsPackage {
                 Ok(None)
             }
             Mode::Sub => {
-                let mut sub = self
-                    .client
+                let mut sub = client
                     .subscribe(params.subject)
                     .await
                     .map_err(|err| ActError::Package(format!("failed to subscribe: {err}")))?;
@@ -147,5 +135,15 @@ impl ActPackage for NatsPackage {
                 Ok(Some(ret))
             }
         }
+    }
+}
+
+impl NatsPackage {
+    async fn client(&self) -> Result<Client> {
+        self.client
+            .get_or_try_init(|| connect(&self.config))
+            .await
+            .map_err(|err| ActError::Config(format!("failed to connect to NATS: {err}")))
+            .cloned()
     }
 }

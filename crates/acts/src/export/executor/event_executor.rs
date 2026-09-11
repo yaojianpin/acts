@@ -118,22 +118,16 @@ impl EventExecutor {
     /// custom kinds — a registered package that exposes the non-context
     /// `start` entry (as `ActPackageCatalog::Event` used to)
     async fn start_package(&self, event: &data::Event, params: &JsonValue) -> Result<Option<Vars>> {
-        let register = self
-            .runtime
-            .package()
-            .get(&event.kind)
-            .ok_or(ActError::Runtime(format!(
-                "cannot find the trigger kind '{}'",
-                event.kind
-            )))?;
-
         let options = Vars::new().with(consts::MODEL_ID, &event.mid);
         let mut params = params.clone();
         if params.is_null() {
             params = serde_json::from_str(&event.params)
                 .map_err(|err| ActError::Convert(format!("failed to deserialize params: {err}")))?;
         }
-        let package = (register.create)(self.runtime.config())?;
+        let package = self
+            .runtime
+            .package()
+            .create(&event.kind, self.runtime.config())?;
         let ret = package.start(&self.runtime, &params, &options).await?;
         Ok(ret)
     }
