@@ -616,7 +616,7 @@ async fn sealed_data_js_dollar_profile_access() {
 
     let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
     let context = task.create_context();
-    Context::scope(context, || {
+    Context::scope(&context, || {
         // test $profile.permissions (array access)
         let result = env.eval::<Vec<String>>("$profile.permissions").unwrap();
         assert_eq!(result, vec!["deploy".to_string(), "read_logs".to_string()]);
@@ -1179,7 +1179,7 @@ async fn snapshot_per_proc_js_access_inherits_on_child() {
     // the child itself must not carry sealed data — it inherits from root
     assert!(!task.has_sealed_local("profile"));
     let context = task.create_context();
-    Context::scope(context, || {
+    Context::scope(&context, || {
         let result = env.eval::<Vec<String>>("$profile.permissions").unwrap();
         assert_eq!(result, vec!["deploy".to_string(), "read_logs".to_string()]);
         let token = env.eval::<String>("$profile.secrets.TOKEN").unwrap();

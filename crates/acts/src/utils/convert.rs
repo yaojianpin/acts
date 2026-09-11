@@ -10,13 +10,12 @@ pub fn fill_params(params: &JsonValue, ctx: &Context) -> JsonValue {
             if !exprs.is_empty() {
                 let mut value = value.clone();
                 for (range, expr, content) in &exprs {
-                    let result = Context::scope(ctx.clone(), move || {
-                        ctx.runtime.env().eval::<JsonValue>(content)
-                    })
-                    .unwrap_or_else(|err| {
-                        eprintln!("fill_params: expr:{value}, err={err}");
-                        JsonValue::Null
-                    });
+                    let result =
+                        Context::scope(ctx, move || ctx.runtime.env().eval::<JsonValue>(content))
+                            .unwrap_or_else(|err| {
+                                eprintln!("fill_params: expr:{value}, err={err}");
+                                JsonValue::Null
+                            });
                     // just return json for only one express
                     if range.start == 0 && range.end == value.len() {
                         return result;
@@ -70,9 +69,8 @@ pub fn fill_inputs(inputs: &Vars, ctx: &Context) -> Vars {
     for (k, v) in inputs.iter() {
         if let JsonValue::String(value) = v {
             if let Some(expr) = get_expr(value) {
-                let result = Context::scope(ctx.clone(), move || {
-                    ctx.runtime.env().eval::<JsonValue>(&expr)
-                });
+                let result =
+                    Context::scope(ctx, move || ctx.runtime.env().eval::<JsonValue>(&expr));
 
                 let new_value = result.unwrap_or_else(|err| {
                     eprintln!("fill_inputs: expr:{value}, err={err}");
@@ -84,7 +82,7 @@ pub fn fill_inputs(inputs: &Vars, ctx: &Context) -> Vars {
                 continue;
             }
         } else if let JsonValue::Object(obj) = v {
-            ret.insert(k.clone(), fill_inputs(&obj.clone().into(), ctx).into());
+            ret.insert(k.clone(), fill_inputs(&Vars::from(obj.clone()), ctx).into());
             continue;
         }
         ret.insert(k.clone(), v.clone());
@@ -103,9 +101,7 @@ pub fn fill_outputs(outputs: &Vars, ctx: &Context) -> Vars {
         if let JsonValue::String(string) = v
             && let Some(expr) = get_expr(string)
         {
-            let result = Context::scope(ctx.clone(), move || {
-                ctx.runtime.env().eval::<JsonValue>(&expr)
-            });
+            let result = Context::scope(ctx, move || ctx.runtime.env().eval::<JsonValue>(&expr));
             let new_value = result.unwrap_or_else(|err| {
                 eprintln!("fill_outputs: expr:{string}, err={err}");
                 JsonValue::Null
@@ -138,7 +134,7 @@ pub fn fill_proc_vars(task: &Arc<Task>, values: &Vars, ctx: &Context) -> Vars {
         if let JsonValue::String(string) = v
             && let Some(expr) = get_expr(string)
         {
-            let result = Context::scope(ctx.clone(), || ctx.runtime.env().eval::<JsonValue>(&expr));
+            let result = Context::scope(ctx, || ctx.runtime.env().eval::<JsonValue>(&expr));
             let new_value = result.unwrap_or(JsonValue::Null);
 
             // satisfies the rule 1

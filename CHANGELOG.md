@@ -364,3 +364,8 @@
 - perf: cache `ActSchema` validators by serialized schema content, reusing compiled validators for repeated workflow input/output validation
 - feat: validate `Func` package params against the package JSON Schema before creating and executing the package instance
 - fix: invalidate a runtime's cached package definition when the package is published, removed, or re-registered through the engine extender
+- perf: pool QuickJS contexts in the expression environment and reuse initialized built-in modules instead of recreating a runtime, context, and all modules for every `${{...}}` expression
+- fix: refresh task vars, user vars and sealed data before every pooled expression, and restore isolated global state so one expression cannot leak globals into the next
+- perf: linearize `Task::vars` parent-chain merging and reduce redundant `Vars` cloning in JSON conversion and expression filling
+- perf: use borrowed scheduler-context access for expression evaluation instead of cloning the scoped context for each nested call
+- BREAKING: `Context::scope` now takes `&Context`; update callers from `Context::scope(context, ...)` to `Context::scope(&context, ...)`

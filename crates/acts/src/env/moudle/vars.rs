@@ -15,17 +15,18 @@ impl UserVars {
     }
 
     pub fn get_data(&self, key: &str) -> Option<Vars> {
-        if let Ok(ctx) = Context::current()
-            && let Some(v) = ctx.task().find::<Vars>(key)
-        {
-            return Some(v);
-        }
-        None
+        Context::try_with_current(|ctx| ctx.task().find::<Vars>(key))
+            .ok()
+            .flatten()
     }
 }
 
 impl ActModule for UserVars {
-    fn init(&self, ctx: &rquickjs::Ctx<'_>) -> Result<()> {
+    fn init(&self, _ctx: &rquickjs::Ctx<'_>) -> Result<()> {
+        Ok(())
+    }
+
+    fn refresh(&self, ctx: &rquickjs::Ctx<'_>) -> Result<()> {
         let envs = self.env.user_vars.read();
         for env in envs.iter() {
             let name = env.name();

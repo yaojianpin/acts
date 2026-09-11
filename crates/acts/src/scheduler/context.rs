@@ -75,12 +75,21 @@ impl Context {
         }
     }
 
-    pub fn scope<T, F: Fn() -> T>(ctx: Context, f: F) -> T {
-        if Context::current().is_ok() {
+    pub fn scope<T, F: Fn() -> T>(ctx: &Context, f: F) -> T {
+        // This is only an "is a scheduler context active?" probe; cloning the
+        // context here would copy all scoped vars on every nested evaluation.
+        if CONTEXT.try_with(|_| ()).is_ok() {
             f()
         } else {
-            CONTEXT.sync_scope(ctx, f)
+            CONTEXT.sync_scope(ctx.clone(), f)
         }
+    }
+
+    /// Access the active scheduler context without cloning it.
+    pub fn try_with_current<T, F: FnOnce(&Context) -> T>(f: F) -> Result<T> {
+        CONTEXT
+            .try_with(f)
+            .map_err(|e| ActError::Runtime(e.to_string()))
     }
 
     pub fn with<T, F: Fn(&Context) -> T>(f: F) -> T {
@@ -226,7 +235,7 @@ impl Context {
     }
 
     pub fn eval<T: DeserializeOwned + Serialize>(&self, expr: &str) -> Result<T> {
-        Context::scope(self.clone(), || self.runtime.env().eval::<T>(expr))
+        Context::scope(self, || self.runtime.env().eval::<T>(expr))
     }
 
     #[allow(unused)]

@@ -1184,12 +1184,22 @@ impl Task {
     }
 
     pub fn vars(&self) -> Vars {
-        let mut vars = self.data();
-        if let Some(parent) = self.parent() {
-            let data = parent.vars();
-            vars = vars.extend(data)
+        // Build a lineage chain once and merge each scope exactly once. The
+        // previous recursive merge cloned intermediate maps at every level,
+        // making deep task chains quadratic in the number of merged vars.
+        let mut chain = vec![self.data()];
+        let mut cursor = self.parent();
+        while let Some(task) = cursor {
+            cursor = task.parent();
+            chain.push(task.data());
         }
 
+        // Parent scopes win, matching the previous leaf.extend(parent.vars)
+        // merge direction.
+        let mut vars = chain.remove(0);
+        while let Some(data) = chain.pop() {
+            vars = vars.extend(data);
+        }
         vars
     }
 

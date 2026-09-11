@@ -10,13 +10,42 @@ impl SealedModule {
     }
 }
 
+const SEALED_SOURCE: &str = r#"
+(function() {
+    function deepFreeze(obj) {
+        if (typeof obj !== 'object' || obj === null) return obj;
+        Object.keys(obj).forEach(function(k) {
+            deepFreeze(obj[k]);
+        });
+        return Object.freeze(obj);
+    }
+    var keys = Object.keys(globalThis).filter(function(k) {
+        return k.startsWith('__sealed_');
+    });
+    for (var i = 0; i < keys.length; i++) {
+        var name = keys[i];
+        var publicName = '$' + name.slice(9);
+        globalThis[publicName] = deepFreeze(globalThis[name]);
+        delete globalThis[name];
+    }
+})();
+"#;
+
 impl ActModule for SealedModule {
     fn init(&self, ctx: &rquickjs::Ctx<'_>) -> Result<()> {
-        // Inject $name globals from the task's sealed chain — local sealed
-        // data overrides the parents'. Snapshot `PerProc` targets seal once
-        // per lineage and descendants inherit, so the executing task usually
-        // has no sealed data of its own.
-        if let Ok(cx) = Context::current() {
+        let _ = JsModule::evaluate(ctx.clone(), "@acts/sealed", SEALED_SOURCE)
+            .catch(ctx)
+            .map_err(|err| crate::ActError::Script(err.to_string()))?;
+
+        Ok(())
+    }
+
+    fn refresh(&self, ctx: &rquickjs::Ctx<'_>) -> Result<()> {
+        // Inject $name globals from the task's sealed chain. A local sealed
+        // value overrides the parent scopes. Evaluating outside a scheduler
+        // context is valid; sealed globals are simply absent.
+        let mut has_sealed = false;
+        let insert_globals = Context::try_with_current(|cx| -> crate::Result<()> {
             let task = cx.task();
             let mut names: Vec<String> = Vec::new();
             let mut cursor = Some(task.clone());
@@ -32,31 +61,18 @@ impl ActModule for SealedModule {
                 if let Some(data) = task.sealed(name) {
                     ctx.globals()
                         .set(format!("__sealed_{name}"), ActJsValue::new(data.into()))?;
+                    has_sealed = true;
                 }
             }
+            Ok(())
+        });
+        let _ = insert_globals;
+
+        if !has_sealed {
+            return Ok(());
         }
 
-        let source = r#"
-        (function() {
-            function deepFreeze(obj) {
-                if (typeof obj !== 'object' || obj === null) return obj;
-                Object.keys(obj).forEach(function(k) {
-                    deepFreeze(obj[k]);
-                });
-                return Object.freeze(obj);
-            }
-            var keys = Object.keys(globalThis).filter(function(k) {
-                return k.startsWith('__sealed_');
-            });
-            for (var i = 0; i < keys.length; i++) {
-                var name = keys[i];
-                var publicName = '$' + name.slice(9);
-                globalThis[publicName] = deepFreeze(globalThis[name]);
-                delete globalThis[name];
-            }
-        })();
-        "#;
-        let _ = JsModule::evaluate(ctx.clone(), "@acts/sealed", source)
+        let _ = JsModule::evaluate(ctx.clone(), "@acts/sealed", SEALED_SOURCE)
             .catch(ctx)
             .map_err(|err| crate::ActError::Script(err.to_string()))?;
 

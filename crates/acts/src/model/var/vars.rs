@@ -111,14 +111,14 @@ impl std::fmt::Display for Vars {
 
 impl From<JsonMap<String, JsonValue>> for Vars {
     fn from(value: JsonMap<String, JsonValue>) -> Self {
-        from_json(&value)
+        Self { inner: value }
     }
 }
 
 impl From<JsonValue> for Vars {
     fn from(value: JsonValue) -> Self {
-        if let JsonValue::Object(map) = &value {
-            return from_json(map);
+        if let JsonValue::Object(map) = value {
+            return Self { inner: map };
         }
         Vars::new()
     }
@@ -209,73 +209,5 @@ impl Vars {
 
     pub fn to_value(&self) -> JsonValue {
         JsonValue::Object(self.inner.clone())
-    }
-}
-
-#[allow(unused)]
-pub fn from_json(map: &JsonMap<String, JsonValue>) -> Vars {
-    let mut vars = Vars::new();
-
-    for (k, v) in map {
-        let value = match v {
-            JsonValue::Null => JsonValue::Null,
-            JsonValue::Bool(v) => JsonValue::Bool(*v),
-            JsonValue::Number(v) => from_json_number(v),
-            JsonValue::String(v) => JsonValue::String(v.clone()),
-            JsonValue::Array(v) => from_json_array(v),
-            JsonValue::Object(v) => from_json_object(v),
-        };
-
-        vars.insert(k.to_string(), value);
-    }
-
-    vars
-}
-
-#[allow(unused)]
-fn from_json_array(arr: &Vec<JsonValue>) -> JsonValue {
-    let mut ret = Vec::new();
-    for v in arr {
-        let value = match v {
-            JsonValue::Null => JsonValue::Null,
-            JsonValue::Bool(v) => JsonValue::Bool(*v),
-            JsonValue::Number(v) => from_json_number(v),
-            JsonValue::String(v) => JsonValue::String(v.clone()),
-            JsonValue::Array(v) => from_json_array(v),
-            JsonValue::Object(v) => from_json_object(v),
-        };
-        ret.push(value);
-    }
-
-    JsonValue::Array(ret)
-}
-
-#[allow(unused)]
-fn from_json_object(o: &serde_json::Map<String, JsonValue>) -> JsonValue {
-    let mut map = JsonMap::new();
-    for (k, v) in o {
-        let value = match v {
-            JsonValue::Null => JsonValue::Null,
-            JsonValue::Bool(v) => JsonValue::Bool(*v),
-            JsonValue::Number(v) => from_json_number(v),
-            JsonValue::String(v) => JsonValue::String(v.clone()),
-            JsonValue::Array(v) => from_json_array(v),
-            JsonValue::Object(v) => from_json_object(v),
-        };
-
-        map.insert(k.to_string(), value);
-    }
-
-    JsonValue::Object(map)
-}
-
-#[allow(unused)]
-fn from_json_number(n: &serde_json::Number) -> JsonValue {
-    if n.is_i64() {
-        JsonValue::Number(serde_json::Number::from(n.as_i64().unwrap()))
-    } else if n.is_u64() {
-        JsonValue::Number(serde_json::Number::from(n.as_u64().unwrap()))
-    } else {
-        JsonValue::Number(serde_json::Number::from_f64(n.as_f64().unwrap()).unwrap())
     }
 }

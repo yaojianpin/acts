@@ -167,7 +167,7 @@ async fn env_eval_sys_env() {
     "#;
 
     let context = task.create_context();
-    Context::scope(context, || {
+    Context::scope(&context, || {
         let result = env.eval::<String>(script);
         assert_eq!(result.unwrap(), "abc");
     });
@@ -198,7 +198,7 @@ async fn env_eval_null() {
     "#;
 
     let context = task.create_context();
-    Context::scope(context, || {
+    Context::scope(&context, || {
         let result = env.eval::<serde_json::Value>(script);
         assert_eq!(result.unwrap(), serde_json::Value::Null);
     });
@@ -234,6 +234,57 @@ fn env_collection_union() {
 
     let result = env.eval::<Vec<String>>(script).unwrap();
     assert_eq!(result, ["a", "b"]);
+}
+
+#[test]
+#[serial]
+fn env_eval_pooled_context_does_not_leak_globals() {
+    let env = Enviroment::new();
+
+    env.eval::<()>(
+        r#"
+        var leaked_var = 42;
+        globalThis.leaked_property = 42;
+        void 0;
+    "#,
+    )
+    .unwrap();
+
+    let leaked = env
+        .eval::<bool>(
+            r#"
+            typeof leaked_var === "undefined" && typeof leaked_property === "undefined"
+        "#,
+        )
+        .unwrap();
+    assert!(
+        leaked,
+        "global declarations must not leak across evaluations"
+    );
+}
+
+#[test]
+#[serial]
+fn env_eval_pooled_context_restores_module_globals() {
+    let env = Enviroment::new();
+
+    env.eval::<()>(
+        r#"
+        $get = 42;
+        os = 42;
+        void 0;
+    "#,
+    )
+    .unwrap();
+
+    let restored = env
+        .eval::<bool>(
+            r#"
+            typeof $get === "function" && typeof os === "string"
+        "#,
+        )
+        .unwrap();
+    assert!(restored, "static module globals must be restored");
 }
 
 #[test]
@@ -291,7 +342,7 @@ async fn env_task_get_value() {
     "#;
 
     let context = task.create_context();
-    Context::scope(context, || {
+    Context::scope(&context, || {
         let result = env.eval::<i64>(script);
         assert_eq!(result.unwrap(), 10);
     });
@@ -322,7 +373,7 @@ async fn env_task_get_var_not_exists() {
     "#;
 
     let context = task.create_context();
-    Context::scope(context, || {
+    Context::scope(&context, || {
         let result = env.eval::<serde_json::Value>(script);
         assert!(result.is_err());
     });
@@ -353,7 +404,7 @@ async fn env_task_get_fn_not_exists() {
     "#;
 
     let context = task.create_context();
-    Context::scope(context, || {
+    Context::scope(&context, || {
         let result = env.eval::<serde_json::Value>(script);
         assert_eq!(result.unwrap(), serde_json::Value::Null);
     });
@@ -385,7 +436,7 @@ async fn env_task_set() {
         $set("a", 100);
     "#;
     let context = task.create_context();
-    Context::scope(context, || {
+    Context::scope(&context, || {
         env.eval::<()>(script).unwrap();
         assert_eq!(proc.data().get::<i64>("a"), Some(100));
     });
@@ -413,7 +464,7 @@ async fn env_task_multi_line() {
     let task = proc.root().unwrap();
 
     let context = task.create_context();
-    Context::scope(context, || {
+    Context::scope(&context, || {
         env.eval::<()>(r#"$set("a", 100)"#).unwrap();
         env.eval::<()>(r#"$set("b", 200)"#).unwrap();
         let value = env.eval::<bool>(r#"a < b"#).unwrap();
@@ -448,7 +499,7 @@ async fn env_env_get_local() {
     $env.a
     "#;
     let context = task.create_context();
-    Context::scope(context, || {
+    Context::scope(&context, || {
         let result = env.eval::<i64>(script);
         assert_eq!(result.unwrap(), 10);
     });
@@ -483,7 +534,7 @@ async fn env_env_set_proc_env() {
     $env.a = 200;
     "#;
     let context = task.create_context();
-    Context::scope(context, || {
+    Context::scope(&context, || {
         env.eval::<serde_json::Value>(script).unwrap();
         assert_eq!(proc.env().get::<i64>("a"), Some(200));
     });
@@ -511,7 +562,7 @@ async fn env_env_multi_line() {
     let task = proc.root().unwrap();
 
     let context = task.create_context();
-    Context::scope(context, || {
+    Context::scope(&context, || {
         env.eval::<serde_json::Value>(r#"$env.a = 100"#).unwrap();
         env.eval::<serde_json::Value>(r#"$env.b = 200"#).unwrap();
         let value = env.eval::<bool>(r#"$env.a < $env.b"#).unwrap();
@@ -542,7 +593,7 @@ async fn env_vars_set_num() {
     let task = proc.root().unwrap();
 
     let context = task.create_context();
-    Context::scope(context, || {
+    Context::scope(&context, || {
         assert_eq!(proc.env().get::<i64>("a"), Some(10));
     });
 }
@@ -570,7 +621,7 @@ async fn env_vars_set_str() {
     let task = proc.root().unwrap();
 
     let context = task.create_context();
-    Context::scope(context, || {
+    Context::scope(&context, || {
         assert_eq!(proc.env().get::<String>("a"), Some("abc".to_string()));
     });
 }
@@ -598,7 +649,7 @@ async fn env_vars_set_json() {
     let task = proc.root().unwrap();
 
     let context = task.create_context();
-    Context::scope(context, || {
+    Context::scope(&context, || {
         assert_eq!(
             proc.env().get::<serde_json::Value>("a"),
             Some(json!({ "count": 1 }))
@@ -630,7 +681,7 @@ async fn env_vars_update() {
 
     let context = task.create_context();
     context.set_env("a", 100);
-    Context::scope(context, || {
+    Context::scope(&context, || {
         assert_eq!(proc.env().get::<i32>("a"), Some(100));
     });
 }
@@ -663,7 +714,7 @@ async fn env_step_get_data_by_id() {
 
     proc.print();
     let context = task.create_context();
-    Context::scope(context, || {
+    Context::scope(&context, || {
         let result = env.eval::<i32>(script);
         assert_eq!(result.unwrap(), 10);
     });
@@ -672,7 +723,7 @@ async fn env_step_get_data_by_id() {
         step2.b
     "#;
     let context = task.create_context();
-    Context::scope(context, || {
+    Context::scope(&context, || {
         let result = env.eval::<String>(script);
         assert_eq!(result.unwrap(), "abc");
     });
@@ -704,7 +755,7 @@ async fn env_step_get_data_null() {
 
     proc.print();
     let context = task.create_context();
-    Context::scope(context, || {
+    Context::scope(&context, || {
         let result = env.eval::<serde_json::Value>(script);
         assert_eq!(result.unwrap(), serde_json::Value::Null);
     });
@@ -735,7 +786,7 @@ async fn env_step_set_data_err_with_completed_state() {
     "#;
 
     let context = task.create_context();
-    Context::scope(context, || {
+    Context::scope(&context, || {
         let result = env.eval::<serde_json::Value>(script);
         proc.print();
         assert!(result.is_err());
@@ -775,7 +826,7 @@ async fn env_step_set_data_ok_with_running_state() {
     "#;
 
     let context = task.create_context();
-    Context::scope(context, || {
+    Context::scope(&context, || {
         env.eval::<serde_json::Value>(script).unwrap();
         proc.print();
         assert_eq!(
@@ -824,7 +875,7 @@ async fn env_step_get_data() {
     "#;
 
     let context = task.create_context();
-    Context::scope(context, || {
+    Context::scope(&context, || {
         let result = env.eval::<Vars>(script).unwrap();
         proc.print();
         assert_eq!(result.get::<String>("b").unwrap(), "abc");
@@ -864,7 +915,7 @@ async fn env_step_get_inputs() {
     "#;
 
     let context = task.create_context();
-    Context::scope(context, || {
+    Context::scope(&context, || {
         let result = env.eval::<Vars>(script).unwrap();
         proc.print();
         assert_eq!(result.get::<i32>("a").unwrap(), 10);
@@ -904,7 +955,7 @@ async fn env_act_get_inputs() {
     "#;
 
     let context = task.create_context();
-    Context::scope(context, || {
+    Context::scope(&context, || {
         let result = env.eval::<Vars>(script).unwrap();
         proc.print();
         assert_eq!(result.get::<i32>("a").unwrap(), 10);
@@ -944,7 +995,7 @@ async fn env_act_get_data() {
     "#;
 
     let context = task.create_context();
-    Context::scope(context, || {
+    Context::scope(&context, || {
         let result = env.eval::<Vars>(script).unwrap();
         proc.print();
         assert_eq!(result.get::<i32>("my_value").unwrap(), 20);
@@ -997,7 +1048,7 @@ async fn env_user_var_get_from_context() {
     "#;
 
     let context = task.create_context();
-    Context::scope(context, || {
+    Context::scope(&context, || {
         let result = env.eval::<i32>(script).unwrap();
         proc.print();
         assert_eq!(result, 10);
@@ -1051,7 +1102,7 @@ async fn env_user_var_get_default() {
     "#;
 
     let context = task.create_context();
-    Context::scope(context, || {
+    Context::scope(&context, || {
         let result = env.eval::<i32>(script).unwrap();
         proc.print();
         assert_eq!(result, 5);
@@ -1093,7 +1144,7 @@ async fn env_user_var_secrets_get() {
     "#;
 
     let context = task.create_context();
-    Context::scope(context, || {
+    Context::scope(&context, || {
         let result = env.eval::<String>(script).unwrap();
         proc.print();
         assert_eq!(result, "my_token");
@@ -1146,7 +1197,7 @@ async fn env_act_cost_get() {
     "#;
 
     let context = task.create_context();
-    Context::scope(context, || {
+    Context::scope(&context, || {
         let result = env.eval::<i32>(script).unwrap();
         proc.print();
         assert!(result > 0);
@@ -1188,7 +1239,7 @@ async fn env_act_cost_in_get() {
     "#;
 
     let context = task.create_context();
-    Context::scope(context, || {
+    Context::scope(&context, || {
         let result = env.eval::<bool>(script).unwrap();
         proc.print();
         assert!(result);
@@ -1240,7 +1291,7 @@ async fn env_act_ecode_get() {
     "#;
 
     let context = task.create_context();
-    Context::scope(context, || {
+    Context::scope(&context, || {
         let result = env.eval::<String>(script).unwrap();
         proc.print();
         assert_eq!(result, "err1");

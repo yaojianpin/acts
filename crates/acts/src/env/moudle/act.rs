@@ -9,10 +9,16 @@ impl ActJsModule {
     }
 
     pub fn vars(&self) -> Option<Vars> {
-        if let Ok(ctx) = Context::current() {
-            return Some(ctx.task().vars());
+        Context::try_with_current(|ctx| ctx.task().vars()).ok()
+    }
+
+    fn insert_vars(&self, ctx: &rquickjs::Ctx<'_>, vars: Option<Vars>) -> Result<()> {
+        if let Some(vars) = vars {
+            for (key, value) in vars.iter() {
+                ctx.globals().set(key, ActJsValue::new(value.clone()))?;
+            }
         }
-        None
+        Ok(())
     }
 }
 
@@ -119,13 +125,6 @@ mod act {
 impl ActModule for ActJsModule {
     fn init(&self, ctx: &rquickjs::Ctx<'_>) -> Result<()> {
         JsModule::declare_def::<js_act, _>(ctx.clone(), "@acts/act").unwrap();
-
-        if let Some(vars) = self.vars() {
-            for (key, value) in &vars {
-                ctx.globals().set(&key, ActJsValue::new(value))?;
-            }
-        }
-
         let source = r#"
         import { get_act_value, set_act_value, set_process_var, get_act_inputs, get_act_data, err_code, cost, cost_in } from '@acts/act';
 
@@ -145,5 +144,9 @@ impl ActModule for ActJsModule {
             .map_err(|err| ActError::Script(err.to_string()))?;
 
         Ok(())
+    }
+
+    fn refresh(&self, ctx: &rquickjs::Ctx<'_>) -> Result<()> {
+        self.insert_vars(ctx, self.vars())
     }
 }
