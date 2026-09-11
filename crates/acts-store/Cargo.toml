@@ -18,7 +18,7 @@ futures = { version = "0.3", optional = true }
 redis = { version = "0.27", optional = true, features = ["aio", "tokio-comp"] }
 sled = { version = "0.34", optional = true }
 sqlx = { version = "0.8", features = ["runtime-tokio"], optional = true }
-tokio = { version = "1.52", features = ["sync"] }
+tokio = { version = "1.52", features = ["rt", "sync"] }
 
 [dev-dependencies]
 acts = { workspace = true }

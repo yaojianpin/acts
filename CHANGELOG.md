@@ -378,4 +378,5 @@
 - fix: refresh task vars, user vars and sealed data before every pooled expression, and restore isolated global state so one expression cannot leak globals into the next
 - perf: linearize `Task::vars` parent-chain merging and reduce redundant `Vars` cloning in JSON conversion and expression filling
 - perf: use borrowed scheduler-context access for expression evaluation instead of cloning the scoped context for each nested call
+- perf(acts-store): move sled reads, writes, batches and scans onto tokio blocking threads so disk I/O no longer occupies async workers; batches keep one atomic apply-and-flush while single puts/deletes preserve their existing durability window
 - BREAKING: `Context::scope` now takes `&Context`; update callers from `Context::scope(context, ...)` to `Context::scope(&context, ...)`
