@@ -126,6 +126,10 @@ max_node_run_times = 1000
 # tasks for the same pid are pinned to one lane and remain FIFO ordered.
 scheduler_workers = 4
 
+# Maximum scheduler jobs buffered in memory. Overflowing task/next work is
+# retained in the durable outbox and replayed after the queue drains.
+scheduler_queue_cap = 4096
+
 # [log] — file logging: hourly rolling acts.log files under dir, at level
 # (the ACTS_LOG env var overrides level at runtime).
 [log]

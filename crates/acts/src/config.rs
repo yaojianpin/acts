@@ -30,7 +30,10 @@ pub struct ConfigData {
     /// Each lane executes one task at a time.
     /// Tasks for the same pid always hash to the same lane to preserve FIFO.
     pub scheduler_workers: Option<usize>,
-
+    /// Maximum number of scheduler jobs buffered in memory before producers
+    /// overflow to the durable outbox (or, for a fresh start, fail). Zero
+    /// selects the default.
+    pub scheduler_queue_cap: Option<usize>,
     // log config
     pub log: Option<ConfigLog>,
 }
@@ -138,6 +141,15 @@ impl Config {
             .scheduler_workers
             .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()));
         configured.clamp(1, 1024)
+    }
+
+    /// Maximum in-memory scheduler backlog. The durable outbox is the overflow
+    /// queue; this bound only limits resident `Arc<Task>`/`Arc<Process>` data.
+    pub fn scheduler_queue_cap(&self) -> usize {
+        self.data
+            .scheduler_queue_cap
+            .unwrap_or(4096)
+            .clamp(1, 1_048_576)
     }
 
     pub fn log(&self) -> ConfigLog {

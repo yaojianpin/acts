@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot};
@@ -24,6 +27,26 @@ pub(crate) enum WriteOp {
     EnqueueNext {
         pid: String,
         tid: String,
+    },
+    /// Durable outbox enqueue: record a task execution as pending when the
+    /// in-memory scheduler queue is full. The task state is queued before this
+    /// record, so replay always finds a durable task.
+    EnqueueExec {
+        pid: String,
+        tid: String,
+    },
+    /// Mark an outbox record as handed to the in-memory scheduler. A crash can
+    /// still replay it: boot recovery treats `Dispatched` like `Pending`.
+    MarkOpDispatched {
+        pid: String,
+        tid: String,
+        r#type: String,
+    },
+    /// Mark a `next` record as overflowed after bounded queue rejection.
+    MarkOpOverflow {
+        pid: String,
+        tid: String,
+        r#type: String,
     },
     /// Durable outbox enqueue: record a client action (event + options) as
     /// pending, before the action is applied in memory, so a crash before the
@@ -57,11 +80,16 @@ pub(crate) enum WriteOp {
 pub(crate) struct StoreWriter {
     tx: Arc<Mutex<Option<mpsc::UnboundedSender<WriteOp>>>>,
     task: Arc<Mutex<Option<JoinHandle<()>>>>,
+    depth: Arc<AtomicUsize>,
+    high_watermark: Arc<AtomicUsize>,
 }
 
 impl StoreWriter {
     pub(crate) fn spawn(store: Arc<Store>) -> Self {
         let (tx, mut rx) = mpsc::unbounded_channel::<WriteOp>();
+        let depth = Arc::new(AtomicUsize::new(0));
+        let high_watermark = Arc::new(AtomicUsize::new(0));
+        let writer_depth = depth.clone();
         // Runs on the ambient tokio runtime. Ordering is preserved: a single
         // consumer applies the ops in FIFO order, so the durability
         // guarantees (task state durable before outbox records, removal after
@@ -73,6 +101,7 @@ impl StoreWriter {
             // because a write that failed before the barrier is not durable.
             let mut failed: Option<ActError> = None;
             while let Some(op) = rx.recv().await {
+                Self::record_released(&writer_depth);
                 let res = match op {
                     WriteOp::Barrier(ack) => {
                         let _ = ack.send(failed.take().map_or(Ok(()), Err));
@@ -92,13 +121,57 @@ impl StoreWriter {
         Self {
             tx: Arc::new(Mutex::new(Some(tx))),
             task: Arc::new(Mutex::new(Some(task))),
+            depth,
+            high_watermark,
         }
     }
 
-    pub(crate) fn send(&self, op: WriteOp) -> Result<()> {
+    /// Async producer backpressure: wait until the bounded writer queue has a
+    /// slot. This is the database-style write-stall path for async callers.
+    pub(crate) async fn send(&self, op: WriteOp) -> Result<()> {
         let tx = self.sender()?;
+        self.record_accepted();
         tx.send(op)
-            .map_err(|_| ActError::Runtime("store writer channel closed".to_string()))
+            .map_err(|_| ActError::Runtime("store writer channel closed".to_string()))?;
+        Ok(())
+    }
+
+    /// Non-blocking admission for producers that cannot await. A full bounded
+    /// queue is an explicit overload error; it never silently grows memory.
+    pub(crate) fn try_send(&self, op: WriteOp) -> Result<()> {
+        let tx = self.sender()?;
+        self.record_accepted();
+        tx.send(op).map_err(|_| {
+            Self::record_released(&self.depth);
+            ActError::Runtime("store writer channel closed".to_string())
+        })?;
+        Ok(())
+    }
+
+    fn record_accepted(&self) {
+        let depth = self.depth.fetch_add(1, Ordering::AcqRel) + 1;
+        let watermark = self.high_watermark.fetch_max(depth, Ordering::AcqRel);
+        if depth == 1024 || (depth > 1024 && depth.is_power_of_two()) {
+            error!(
+                depth,
+                high_watermark = watermark.max(depth),
+                "store writer backlog is high"
+            );
+        }
+    }
+
+    pub(crate) fn depth(&self) -> usize {
+        self.depth.load(Ordering::Acquire)
+    }
+
+    fn record_released(depth: &AtomicUsize) {
+        let _ = depth.fetch_update(Ordering::AcqRel, Ordering::Acquire, |depth| {
+            Some(depth.saturating_sub(1))
+        });
+    }
+
+    pub(crate) fn high_watermark(&self) -> usize {
+        self.high_watermark.load(Ordering::Acquire)
     }
 
     /// Block until all previously enqueued writes have been applied.
@@ -110,6 +183,7 @@ impl StoreWriter {
     pub(crate) async fn flush(&self) -> Result<()> {
         let sender = self.sender()?;
         let (tx, rx) = oneshot::channel();
+        self.record_accepted();
         sender
             .send(WriteOp::Barrier(tx))
             .map_err(|_| ActError::Runtime("store writer channel closed".to_string()))?;
@@ -138,6 +212,18 @@ impl StoreWriter {
             }
             WriteOp::EnqueueNext { pid, tid } => {
                 store.enqueue_next_op(&pid, &tid).await?;
+                Ok(())
+            }
+            WriteOp::EnqueueExec { pid, tid } => {
+                store.enqueue_exec_op(&pid, &tid).await?;
+                Ok(())
+            }
+            WriteOp::MarkOpDispatched { pid, tid, r#type } => {
+                store.mark_op_dispatched(&pid, &tid, &r#type).await?;
+                Ok(())
+            }
+            WriteOp::MarkOpOverflow { pid, tid, r#type } => {
+                store.mark_op_overflow(&pid, &tid, &r#type).await?;
                 Ok(())
             }
             WriteOp::EnqueueAction {
@@ -314,12 +400,13 @@ mod tests {
         (store, kv, writer)
     }
 
-    fn enqueue(writer: &StoreWriter, pid: &str) {
+    async fn enqueue(writer: &StoreWriter, pid: &str) {
         writer
             .send(WriteOp::EnqueueNext {
                 pid: pid.to_string(),
                 tid: "t1".to_string(),
             })
+            .await
             .unwrap();
     }
 
@@ -339,15 +426,15 @@ mod tests {
         let (store, kv, writer) = test_writer();
 
         // healthy write lands
-        enqueue(&writer, "ok1");
+        enqueue(&writer, "ok1").await;
         writer.flush().await.unwrap();
         assert!(durable(&store, "ok1").await);
 
         // store outage: queued writes fail, and the next flush surfaces it
         // instead of silently acking `Ok`
         kv.set_fail(true);
-        enqueue(&writer, "lost1");
-        enqueue(&writer, "lost2");
+        enqueue(&writer, "lost1").await;
+        enqueue(&writer, "lost2").await;
         let err = writer.flush().await.unwrap_err();
         assert!(
             err.to_string().contains("injected"),
@@ -359,7 +446,7 @@ mod tests {
         // outage over: the failure was consumed by the flush, later flushes
         // are clean and later writes are durable
         kv.set_fail(false);
-        enqueue(&writer, "ok2");
+        enqueue(&writer, "ok2").await;
         writer.flush().await.unwrap();
         assert!(durable(&store, "ok2").await);
     }
@@ -380,7 +467,7 @@ mod tests {
 
         // hold the writer inside a write so it cannot drain while close runs
         kv.arm_gate();
-        enqueue(&writer, "p1");
+        enqueue(&writer, "p1").await;
         kv.wait_entered().await;
 
         let closer = {
@@ -413,7 +500,7 @@ mod tests {
     #[tokio::test]
     async fn send_and_flush_fail_after_close() {
         let (store, _, writer) = test_writer();
-        enqueue(&writer, "p1");
+        enqueue(&writer, "p1").await;
         writer.close().await;
         assert!(durable(&store, "p1").await);
 
@@ -424,6 +511,7 @@ mod tests {
                 pid: "p2".to_string(),
                 tid: "t1".to_string(),
             })
+            .await
             .unwrap_err();
         assert!(send_err.to_string().contains("closed"), "{send_err}");
         let flush_err = writer.flush().await.unwrap_err();
@@ -439,11 +527,12 @@ mod tests {
 
         // the enqueue is queued before the removal: it applies first, then
         // its rows are dropped by the removal
-        enqueue(&writer, "p1");
+        enqueue(&writer, "p1").await;
         writer
             .send(WriteOp::RemoveProc {
                 pid: "p1".to_string(),
             })
+            .await
             .unwrap();
         writer.flush().await.unwrap();
         assert!(
@@ -456,7 +545,30 @@ mod tests {
             .send(WriteOp::RemoveProc {
                 pid: "p1".to_string(),
             })
+            .await
             .unwrap();
         writer.flush().await.unwrap();
+    }
+
+    /// Writer depth is the number of accepted-but-not-consumed operations;
+    /// in-flight writes are not part of depth. The watermark stays observable.
+    #[tokio::test]
+    async fn writer_tracks_backlog_watermark() {
+        let kv = Arc::new(TestKv::new());
+        let store = Arc::new(Store::new(kv.clone()));
+        let writer = StoreWriter::spawn(store.clone());
+
+        kv.arm_gate();
+        enqueue(&writer, "p1").await;
+        kv.wait_entered().await;
+        assert_eq!(writer.depth(), 0); // the first op is in flight, not queued
+
+        enqueue(&writer, "p2").await;
+        assert_eq!(writer.depth(), 1);
+
+        kv.disarm_gate();
+        writer.flush().await.unwrap();
+        assert_eq!(writer.depth(), 0);
+        assert!(writer.high_watermark() >= 1);
     }
 }

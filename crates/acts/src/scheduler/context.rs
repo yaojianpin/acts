@@ -546,7 +546,7 @@ impl Context {
     /// Enqueue the task's `next` propagation through the durable outbox:
     /// the task state is flushed and a `Pending` outbox record is written
     /// before the in-memory queue dispatch.
-    pub fn push_next(&self) -> Result<()> {
-        self.runtime.enqueue_next(&self.task())
+    pub async fn push_next(&self) -> Result<()> {
+        self.runtime.enqueue_next(&self.task()).await
     }
 }

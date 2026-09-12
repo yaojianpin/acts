@@ -139,6 +139,15 @@ impl Cache {
         self.procs.read().len()
     }
 
+    /// Current number of write operations accepted but not yet consumed.
+    pub fn store_writer_depth(&self) -> usize {
+        self.writer.depth()
+    }
+
+    pub fn store_writer_high_watermark(&self) -> usize {
+        self.writer.high_watermark()
+    }
+
     /// Snapshot of the boot-resume overflow queue (test visibility).
     #[cfg(test)]
     pub(crate) fn pending_resume_ids(&self) -> Vec<String> {
@@ -234,9 +243,11 @@ impl Cache {
         // are applied first, then the rows are dropped. `flush` keeps the
         // callers' contract: when this returns, the removal is durable and
         // no pending write can resurrect the rows afterwards.
-        self.writer.send(WriteOp::RemoveProc {
-            pid: pid.to_string(),
-        })?;
+        self.writer
+            .send(WriteOp::RemoveProc {
+                pid: pid.to_string(),
+            })
+            .await?;
         self.writer.flush().await?;
         Ok(true)
     }
@@ -537,35 +548,75 @@ impl Cache {
     }
 
     #[instrument(skip(self, task), fields(pid = %task.pid, tid = %task.id))]
-    pub(crate) fn upsert_async(&self, task: &Arc<Task>) -> Result<()> {
+    pub(crate) async fn upsert_async(&self, task: &Arc<Task>) -> Result<()> {
         self.push_task_mem(task)?;
-        self.writer.send(WriteOp::Task(task.clone()))?;
+        self.writer.send(WriteOp::Task(task.clone())).await?;
         Ok(())
     }
 
-    pub(crate) fn upsert_message_status(
+    /// Non-blocking persistence for synchronous schedulers. Used only before a
+    /// durable `Exec` outbox handoff; if the writer is full the caller rejects
+    /// the work explicitly instead of buffering an unbounded process graph.
+    pub(crate) fn try_upsert_async(&self, task: &Arc<Task>) -> Result<()> {
+        self.push_task_mem(task)?;
+        self.writer.try_send(WriteOp::Task(task.clone()))
+    }
+
+    /// Try to persist a disk overflow marker for synchronous task admission.
+    pub(crate) fn try_enqueue_exec(&self, task: &Arc<Task>) -> Result<()> {
+        self.writer.try_send(WriteOp::EnqueueExec {
+            pid: task.pid.clone(),
+            tid: task.id.clone(),
+        })?;
+        Ok(())
+    }
+
+    /// Durable outbox enqueue for a `next` operation, with async writer
+    /// backpressure. FIFO order keeps it after the caller's task state write.
+    pub(crate) async fn enqueue_next(&self, task: &Arc<Task>) -> Result<()> {
+        self.writer
+            .send(WriteOp::EnqueueNext {
+                pid: task.pid.clone(),
+                tid: task.id.clone(),
+            })
+            .await
+    }
+
+    pub(crate) async fn mark_op_dispatched(&self, op: &crate::data::Op) -> Result<()> {
+        self.writer
+            .send(WriteOp::MarkOpDispatched {
+                pid: op.pid.clone(),
+                tid: op.tid.clone(),
+                r#type: op.r#type.clone(),
+            })
+            .await
+    }
+
+    /// Mark a normal `next` outbox record as overflowed after a bounded queue
+    /// rejection. The periodic recovery consumer only replays `Overflow`.
+    pub(crate) async fn mark_next_overflow(&self, task: &Arc<Task>) -> Result<()> {
+        self.writer
+            .send(WriteOp::MarkOpOverflow {
+                pid: task.pid.clone(),
+                tid: task.id.clone(),
+                r#type: crate::data::OpType::Next.as_ref().to_string(),
+            })
+            .await
+    }
+
+    pub(crate) async fn upsert_message_status(
         &self,
         pid: &str,
         tid: &str,
         status: DeliveryStatus,
     ) -> Result<()> {
-        self.writer.send(WriteOp::DeliveryStatus {
-            pid: pid.to_string(),
-            tid: tid.to_string(),
-            status,
-        })
-    }
-
-    /// Durable outbox enqueue for a `next` operation. The `Pending` record is
-    /// queued on the writer **after** the task state change the caller already
-    /// queued (`emit_task`), so FIFO order guarantees the task is durable
-    /// before the record — without blocking the caller. A crash leaves either
-    /// nothing (consistent, no replay) or the record, which recovery replays.
-    pub(crate) fn enqueue_next(&self, task: &Arc<Task>) -> Result<()> {
-        self.writer.send(WriteOp::EnqueueNext {
-            pid: task.pid.clone(),
-            tid: task.id.clone(),
-        })
+        self.writer
+            .send(WriteOp::DeliveryStatus {
+                pid: pid.to_string(),
+                tid: tid.to_string(),
+                status,
+            })
+            .await
     }
 
     /// Durable outbox enqueue for a client action: the `Pending` record (with
@@ -573,24 +624,28 @@ impl Cache {
     /// in memory, so a crash before the state write lands is replayed on
     /// recovery. Deduplicated per `(pid, tid)` against any other in-flight
     /// record.
-    pub(crate) fn enqueue_action(&self, action: &Action) -> Result<()> {
-        self.writer.send(WriteOp::EnqueueAction {
-            pid: action.pid.clone(),
-            tid: action.tid.clone(),
-            event: action.event.as_ref().to_string(),
-            options: action.options.to_string(),
-        })
+    pub(crate) async fn enqueue_action(&self, action: &Action) -> Result<()> {
+        self.writer
+            .send(WriteOp::EnqueueAction {
+                pid: action.pid.clone(),
+                tid: action.tid.clone(),
+                event: action.event.as_ref().to_string(),
+                options: action.options.to_string(),
+            })
+            .await
     }
 
     /// Durable outbox close for a client action: the state write (and the
     /// message status) were already queued by the caller, so FIFO order makes
     /// `Done` durable only after both.
-    pub(crate) fn complete_action(&self, task: &Arc<Task>) -> Result<()> {
-        self.writer.send(WriteOp::OpDone {
-            pid: task.pid.clone(),
-            tid: task.id.clone(),
-            r#type: crate::data::OpType::Action.as_ref().to_string(),
-        })
+    pub(crate) async fn complete_action(&self, task: &Arc<Task>) -> Result<()> {
+        self.writer
+            .send(WriteOp::OpDone {
+                pid: task.pid.clone(),
+                tid: task.id.clone(),
+                r#type: crate::data::OpType::Action.as_ref().to_string(),
+            })
+            .await
     }
 
     /// Durable outbox close: queue the task persist (capturing the
@@ -600,13 +655,15 @@ impl Cache {
     /// `Pending` and recovery re-dispatches it; the durable marker turns the
     /// re-run into a no-op. Safe to call repeatedly: already-closed records
     /// are left untouched.
-    pub(crate) fn complete_next(&self, task: &Arc<Task>) -> Result<()> {
-        self.upsert_async(task)?;
-        self.writer.send(WriteOp::OpDone {
-            pid: task.pid.clone(),
-            tid: task.id.clone(),
-            r#type: crate::data::OpType::Next.as_ref().to_string(),
-        })?;
+    pub(crate) async fn complete_next(&self, task: &Arc<Task>) -> Result<()> {
+        self.upsert_async(task).await?;
+        self.writer
+            .send(WriteOp::OpDone {
+                pid: task.pid.clone(),
+                tid: task.id.clone(),
+                r#type: crate::data::OpType::Next.as_ref().to_string(),
+            })
+            .await?;
         Ok(())
     }
 

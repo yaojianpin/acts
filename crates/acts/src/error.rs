@@ -25,6 +25,11 @@ pub enum ActError {
     #[error("{0}")]
     Runtime(String),
 
+    /// The bounded scheduler queue is at capacity. Fresh work must be retried;
+    /// durable `next` work remains in the outbox and is replayed later.
+    #[error("scheduler queue is full")]
+    QueueFull,
+
     #[error("{0}")]
     Store(String),
 

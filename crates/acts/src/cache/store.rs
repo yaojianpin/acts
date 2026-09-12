@@ -174,6 +174,13 @@ impl Store {
             .await
     }
 
+    /// Record a durable outbox entry for task execution. This is the disk
+    /// overflow queue used when the in-memory scheduler queue is full.
+    pub async fn enqueue_exec_op(&self, pid: &str, tid: &str) -> Result<()> {
+        self.enqueue_op(pid, tid, data::OpType::Exec, None, None)
+            .await
+    }
+
     /// Record a durable outbox entry for a client action (event + options).
     /// Deduplicated per `(pid, tid, type)`, so it is not shadowed by the
     /// task's in-flight `next` record (an interrupt act keeps its `next` op
@@ -245,12 +252,65 @@ impl Store {
     /// Load every outbox record that was not durably completed — the crash
     /// replay set. Order is stable across restarts (creation time).
     pub async fn load_pending_ops(&self) -> Result<Vec<data::Op>> {
-        let q = Query::new()
-            .filter(Filter::and().expr(Expr::eq("status", data::OpStatus::Pending.as_ref())));
+        let q = Query::new().filter(Filter::and().expr(Expr::r#in(
+            "status",
+            vec![
+                data::OpStatus::Pending.as_ref(),
+                data::OpStatus::Dispatched.as_ref(),
+                data::OpStatus::Overflow.as_ref(),
+            ],
+        )));
         Ok(self.ops().query(&q).await?.rows)
     }
 
-    /// Close the in-flight outbox records of a task (`Pending` → `Done`),
+    /// Mark a record as handed to the in-memory scheduler. Boot recovery still
+    /// treats this state as replayable; periodic overflow recovery does not.
+    pub async fn mark_op_dispatched(&self, pid: &str, tid: &str, r#type: &str) -> Result<()> {
+        let collection = self.ops();
+        let q = Query::new().filter(
+            Filter::and()
+                .expr(Expr::eq("pid", pid.to_string()))
+                .expr(Expr::eq("tid", tid.to_string())),
+        );
+        for mut op in collection.query(&q).await?.rows {
+            if op.r#type == r#type
+                && (op.status == data::OpStatus::Pending.as_ref()
+                    || op.status == data::OpStatus::Overflow.as_ref())
+            {
+                op.status = data::OpStatus::Dispatched.as_ref().to_string();
+                op.update_time = utils::time::time_millis();
+                collection.update(&op).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Load stale, not-yet-dispatched overflow records. `Dispatched` records
+    /// are deliberately excluded while the engine is running: replaying them
+    /// would duplicate work that is queued or executing in memory.
+    pub async fn load_overflow_ops(&self, older_than_millis: i64) -> Result<Vec<data::Op>> {
+        let q = Query::new()
+            .filter(Filter::and().expr(Expr::r#in(
+                "status",
+                vec![
+                    data::OpStatus::Pending.as_ref(),
+                    data::OpStatus::Overflow.as_ref(),
+                ],
+            )))
+            .order("create_time", Sort::Asc);
+        let now = utils::time::time_millis();
+        Ok(self
+            .ops()
+            .query(&q)
+            .await?
+            .rows
+            .into_iter()
+            .filter(|op| now - op.create_time >= older_than_millis)
+            .collect())
+    }
+
+    /// Close the in-flight outbox records of a task (`Pending`/`Dispatched`/
+    /// `Overflow` → `Done`),
     /// filtered by operation type: a `next` close must not sweep away a
     /// concurrent client-action record of the same task (and vice versa). Must
     /// only be called after the operation's effects (the task state write,
@@ -264,8 +324,31 @@ impl Store {
                 .expr(Expr::eq("tid", tid.to_string())),
         );
         for mut op in collection.query(&q).await?.rows {
-            if op.r#type == r#type && op.status == data::OpStatus::Pending.as_ref() {
+            if op.r#type == r#type
+                && (op.status == data::OpStatus::Pending.as_ref()
+                    || op.status == data::OpStatus::Dispatched.as_ref()
+                    || op.status == data::OpStatus::Overflow.as_ref())
+            {
                 op.status = data::OpStatus::Done.as_ref().to_string();
+                op.update_time = utils::time::time_millis();
+                collection.update(&op).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Mark a pending `next` record as overflowed to the durable scheduler disk
+    /// queue after the bounded in-memory queue rejected it.
+    pub async fn mark_op_overflow(&self, pid: &str, tid: &str, r#type: &str) -> Result<()> {
+        let collection = self.ops();
+        let q = Query::new().filter(
+            Filter::and()
+                .expr(Expr::eq("pid", pid.to_string()))
+                .expr(Expr::eq("tid", tid.to_string())),
+        );
+        for mut op in collection.query(&q).await?.rows {
+            if op.r#type == r#type && op.status == data::OpStatus::Pending.as_ref() {
+                op.status = data::OpStatus::Overflow.as_ref().to_string();
                 op.update_time = utils::time::time_millis();
                 collection.update(&op).await?;
             }

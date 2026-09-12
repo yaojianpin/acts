@@ -502,7 +502,7 @@ impl Task {
         }
         self.init(ctx).await?;
         self.run(ctx).await?;
-        ctx.push_next()?;
+        ctx.push_next().await?;
         Ok(())
     }
 
@@ -522,7 +522,7 @@ impl Task {
         // internal
         let action_outbox = !matches!(&action.event, EventAction::Next | EventAction::Push);
         if action_outbox {
-            ctx.runtime.enqueue_action(&action)?;
+            ctx.runtime.enqueue_action(&action).await?;
         }
 
         let result: Result<()> = (async {
@@ -554,13 +554,13 @@ impl Task {
                 EventAction::Remove => {
                     self.set_state(TaskState::Removed);
                     ctx.emit_task(self).await?;
-                    ctx.push_next()?;
+                    ctx.push_next().await?;
                 }
                 EventAction::Submit => {
                     self.update_data(&ctx.vars());
                     self.set_state(TaskState::Submitted);
                     ctx.emit_task(self).await?;
-                    ctx.push_next()?;
+                    ctx.push_next().await?;
                 }
                 EventAction::Next => {
                     if self.state().is_completed() {
@@ -572,7 +572,7 @@ impl Task {
                     self.update_data(&ctx.vars());
                     self.set_state(TaskState::Completed);
                     ctx.emit_task(self).await?;
-                    ctx.push_next()?;
+                    ctx.push_next().await?;
                 }
                 EventAction::Back => {
                     if self.state().is_completed() {
@@ -675,7 +675,7 @@ impl Task {
                     // set both current act and parent step to skip
                     self.set_state(TaskState::Skipped);
                     ctx.emit_task(self).await?;
-                    ctx.push_next()?;
+                    ctx.push_next().await?;
                 }
                 EventAction::Error => {
                     let ecode =
@@ -733,11 +733,10 @@ impl Task {
 
         if result.is_ok() && action.event != EventAction::Push {
             // update the message status after doing action (deferred to writer thread)
-            ctx.runtime.cache().upsert_message_status(
-                &action.pid,
-                &action.tid,
-                DeliveryStatus::Completed,
-            )?;
+            ctx.runtime
+                .cache()
+                .upsert_message_status(&action.pid, &action.tid, DeliveryStatus::Completed)
+                .await?;
         }
 
         if action_outbox {
@@ -745,7 +744,7 @@ impl Task {
             // the message status were already queued above, so FIFO order makes
             // `Done` durable only after both. An errored application is closed
             // too — nothing to replay.
-            if let Err(err) = ctx.runtime.complete_action(&action_task) {
+            if let Err(err) = ctx.runtime.complete_action(&action_task).await {
                 error!(error = %err, "complete_action failed");
             }
         }
@@ -1077,7 +1076,7 @@ impl ActTask for Arc<Task> {
         if self.is_sign(Sign::NEXT_COMPLETE) {
             // close the re-dispatched outbox record: the completion marker is
             // already durable, so the re-run is a no-op
-            if let Err(err) = self.runtime().complete_next(self) {
+            if let Err(err) = self.runtime().complete_next(self).await {
                 error!(error = %err, "complete_next failed");
             }
             return Ok(NextAction::Continue);
@@ -1112,7 +1111,7 @@ impl ActTask for Arc<Task> {
             // terminal + emitted → propagation complete, mark idempotent and
             // close the durable outbox record (persisting the marker first)
             self.set_sign(Sign::NEXT_COMPLETE);
-            if let Err(err) = self.runtime().complete_next(self) {
+            if let Err(err) = self.runtime().complete_next(self).await {
                 error!(error = %err, "complete_next failed");
             }
         }

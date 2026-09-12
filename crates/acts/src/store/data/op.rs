@@ -10,6 +10,8 @@ use crate::store::{DbCollectionIden, StoreIden};
 #[strum(serialize_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum OpType {
+    /// execute a task whose in-memory scheduler queue was full
+    Exec,
     /// propagate the task's `next` (schedule children / move to next node)
     Next,
     /// a client action (event + options) that must be replayed if the engine
@@ -24,6 +26,11 @@ pub enum OpType {
 pub enum OpStatus {
     /// the operation is enqueued but not yet durably completed
     Pending,
+    /// the operation has been handed to the in-memory scheduler; boot recovery
+    /// still replays it because the in-memory handoff is not itself durable
+    Dispatched,
+    /// a scheduler overflow descriptor awaiting replay from disk
+    Overflow,
     /// the operation completed and its effects are durable
     Done,
 }

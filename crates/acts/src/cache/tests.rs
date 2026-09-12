@@ -265,7 +265,7 @@ async fn cache_remove_after_writer_writes_drops_all_rows() {
     // remove() must drain the queue (the task write applies) before it drops
     // the rows
     proc.set_state(TaskState::Completed);
-    cache.upsert_async(&task).unwrap();
+    cache.upsert_async(&task).await.unwrap();
     cache.remove(&pid).await.unwrap();
 
     assert!(!store.procs().exists(&pid).await.unwrap());
@@ -297,7 +297,7 @@ async fn cache_writes_after_remove_are_skipped() {
     let task_row_id = utils::Id::new(&pid, &tid).id();
 
     proc.set_state(TaskState::Completed);
-    cache.upsert_async(&task).unwrap();
+    cache.upsert_async(&task).await.unwrap();
     cache.flush().await.unwrap();
     assert!(store.tasks().find(&task_row_id).await.is_ok());
 
@@ -305,7 +305,7 @@ async fn cache_writes_after_remove_are_skipped() {
     assert!(store.tasks().find(&task_row_id).await.is_err());
 
     // late write for the removed process: skipped silently
-    cache.upsert_async(&task).unwrap();
+    cache.upsert_async(&task).await.unwrap();
     cache.flush().await.unwrap();
     assert!(
         store.tasks().find(&task_row_id).await.is_err(),

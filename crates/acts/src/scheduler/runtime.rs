@@ -255,6 +255,28 @@ impl Runtime {
         self.cache.store().clone()
     }
 
+    /// Bounded scheduler-queue metrics: capacity, current depth, and high
+    /// watermark. The durable outbox backlog is visible through pending ops.
+    pub fn scheduler_queue_capacity(&self) -> usize {
+        self.queue.capacity()
+    }
+
+    pub fn scheduler_queue_depth(&self) -> usize {
+        self.queue.depth()
+    }
+
+    pub fn scheduler_queue_high_watermark(&self) -> usize {
+        self.queue.high_watermark()
+    }
+
+    pub fn store_writer_depth(&self) -> usize {
+        self.cache.store_writer_depth()
+    }
+
+    pub fn store_writer_high_watermark(&self) -> usize {
+        self.cache.store_writer_high_watermark()
+    }
+
     #[allow(unused)]
     pub fn config(&self) -> &Arc<Config> {
         &self.config
@@ -378,9 +400,17 @@ impl Runtime {
         debug!("task pushed");
         let cache = self.cache.clone();
         let task_clone = task.clone();
-        cache.upsert_async(&task_clone)?;
-        self.queue.send(&task_clone)?;
-        Ok(())
+        cache.try_upsert_async(&task_clone)?;
+        match self.queue.send(&task_clone) {
+            Ok(()) => Ok(()),
+            // The task row is queued first; the `Exec` outbox record becomes
+            // the disk queue. Keep it pending for the retry timer.
+            Err(ActError::QueueFull) => {
+                cache.try_enqueue_exec(&task_clone)?;
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// Dispatch a task to the in-memory queue WITHOUT queueing another store
@@ -390,8 +420,15 @@ impl Runtime {
     #[instrument(skip(self, task), fields(pid = %task.pid, tid = %task.id))]
     pub(crate) fn dispatch_root(&self, task: &Arc<Task>) -> Result<()> {
         debug!("root task dispatched");
-        self.queue.send(task)?;
-        Ok(())
+        match self.queue.send(task) {
+            Ok(()) => Ok(()),
+            // The root row is durable before dispatch; overflow is a descriptor.
+            Err(ActError::QueueFull) => {
+                self.cache.try_enqueue_exec(task)?;
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
     }
 
     #[instrument(skip(self, action), fields(pid = %action.pid, tid = %action.tid, event = ?action.event))]
@@ -409,15 +446,25 @@ impl Runtime {
 
     /// Durable outbox enqueue for a `next` operation: a `Pending` outbox record
     /// is queued on the store writer (after the task state change, so the task
-    /// is durable first) and the operation is dispatched to the in-memory
-    /// queue — neither blocks the caller. A crash before the record lands is
+    /// is durable first) and the operation is dispatched to the bounded
+    /// in-memory queue. This scheduler path applies backpressure; a crash
+    /// before the record lands is
     /// consistent (nothing to replay); a crash after it lands is recovered by
     /// [`Self::recover_actions`]; a crash after the operation ran is a no-op
     /// thanks to the durably persisted `NEXT_COMPLETE` marker.
-    pub(crate) fn enqueue_next(&self, task: &Arc<Task>) -> Result<()> {
-        self.cache.enqueue_next(task)?;
-        self.queue.send_next(task)?;
-        Ok(())
+    pub(crate) async fn enqueue_next(&self, task: &Arc<Task>) -> Result<()> {
+        self.cache.enqueue_next(task).await?;
+        match self.queue.send_next(task) {
+            Ok(()) => Ok(()),
+            // Convert the existing normal `Next` record into the disk queue's
+            // overflow state. The periodic recovery consumer owns it until it
+            // is successfully handed back to memory.
+            Err(ActError::QueueFull) => {
+                self.cache.mark_next_overflow(task).await?;
+                Ok(())
+            }
+            Err(err) => Err(err),
+        }
     }
 
     /// Durable outbox close for a task whose `next` propagation finished: queue
@@ -427,23 +474,23 @@ impl Runtime {
     /// idempotent replay guard), and from the event loop when `next` ends in
     /// error. Non-terminal outcomes (children in flight, interrupt) leave the
     /// record `Pending` so recovery replays it.
-    pub(crate) fn complete_next(&self, task: &Arc<Task>) -> Result<()> {
-        self.cache.complete_next(task)
+    pub(crate) async fn complete_next(&self, task: &Arc<Task>) -> Result<()> {
+        self.cache.complete_next(task).await
     }
 
     /// Durable outbox enqueue for a client action (non-`Next` events): the
     /// `Pending` record with the event + options payload is written **before**
     /// the action is applied, so a crash before the task state write lands is
     /// replayed by [`Self::recover_actions`].
-    pub(crate) fn enqueue_action(&self, action: &Action) -> Result<()> {
-        self.cache.enqueue_action(action)
+    pub(crate) async fn enqueue_action(&self, action: &Action) -> Result<()> {
+        self.cache.enqueue_action(action).await
     }
 
     /// Durable outbox close for a client action: the state write and message
     /// status were already queued by the caller, so FIFO order makes `Done`
     /// durable only after both.
-    pub(crate) fn complete_action(&self, task: &Arc<Task>) -> Result<()> {
-        self.cache.complete_action(task)
+    pub(crate) async fn complete_action(&self, task: &Arc<Task>) -> Result<()> {
+        self.cache.complete_action(task).await
     }
 
     /// Replay durable outbox records that were not durably completed (the
@@ -467,7 +514,7 @@ impl Runtime {
         let ops = self.cache.store().load_pending_ops().await?;
         for op in ops {
             let r#type = op.r#type.clone();
-            let (pid, tid) = (op.pid, op.tid);
+            let (pid, tid) = (op.pid.clone(), op.tid.clone());
             let Some(proc) = self.cache.proc(&pid, self).await? else {
                 // process is gone (removed while completing) — drop the orphan
                 self.cache.store().complete_ops(&pid, &tid, &r#type).await?;
@@ -518,6 +565,18 @@ impl Runtime {
                     error!(error = %err, pid = %pid, tid = %tid, "replayed action failed");
                     self.cache.store().complete_ops(&pid, &tid, &r#type).await?;
                 }
+            } else if r#type == data::OpType::Exec.as_ref() {
+                // Overflow task execution replay: do not confuse it with `next`.
+                if !task.state().is_completed() {
+                    if let Err(ActError::QueueFull) = self.queue.send(&task) {
+                        continue;
+                    }
+                    if let Err(err) = self.cache.mark_op_dispatched(&op).await {
+                        error!(error = %err, pid = %pid, tid = %tid, "failed to mark replayed exec dispatched");
+                    }
+                } else {
+                    self.cache.store().complete_ops(&pid, &tid, &r#type).await?;
+                }
             } else if task.is_sign(Sign::NEXT_COMPLETE) {
                 // propagation already completed durably; just close the record
                 // and mark the deliveries completed
@@ -528,7 +587,66 @@ impl Runtime {
                     .await?;
                 continue;
             } else {
-                self.queue.send_next(&task)?;
+                match self.queue.send_next(&task) {
+                    Ok(()) => {
+                        if let Err(err) = self.cache.mark_op_dispatched(&op).await {
+                            error!(error = %err, pid = %pid, tid = %tid, "failed to mark replayed next dispatched");
+                        }
+                    }
+                    // On restart into an already full queue, retain overflow.
+                    Err(ActError::QueueFull) => continue,
+                    Err(err) => return Err(err),
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Replay durable overflow records produced while the bounded scheduler
+    /// queue was full. This is the disk-queue consumer for overload: records
+    /// stay pending on disk and are handed back to memory only after they age
+    /// past one tick, giving the normal queue time to drain.
+    async fn recover_overflow(self: &Arc<Self>, older_than_millis: i64) -> Result<()> {
+        let store = self.cache.store();
+        for op in store.load_overflow_ops(older_than_millis).await? {
+            let r#type = op.r#type.clone();
+            let is_exec_overflow = r#type == data::OpType::Exec.as_ref()
+                && op.status == data::OpStatus::Pending.as_ref();
+            let is_next_overflow = r#type == data::OpType::Next.as_ref()
+                && op.status == data::OpStatus::Overflow.as_ref();
+            if !is_exec_overflow && !is_next_overflow {
+                continue;
+            }
+
+            let (pid, tid) = (op.pid.clone(), op.tid.clone());
+            let Some(proc) = self.cache.proc(&pid, self).await? else {
+                store.complete_ops(&pid, &tid, &r#type).await?;
+                continue;
+            };
+            let Some(task) = proc.task(&tid) else {
+                store.complete_ops(&pid, &tid, &r#type).await?;
+                continue;
+            };
+
+            if task.state().is_completed() {
+                store.complete_ops(&pid, &tid, &r#type).await?;
+                continue;
+            }
+
+            let queued = if is_next_overflow {
+                self.queue.send_next(&task)
+            } else {
+                self.queue.send(&task)
+            };
+            match queued {
+                Ok(()) => {
+                    if let Err(err) = self.cache.mark_op_dispatched(&op).await {
+                        error!(error = %err, pid = %pid, tid = %tid, "failed to mark overflow op dispatched");
+                    }
+                }
+                // Still full: leave the small durable descriptor pending.
+                Err(ActError::QueueFull) => {}
+                Err(err) => return Err(err),
             }
         }
         Ok(())
@@ -731,7 +849,7 @@ impl Runtime {
             // the propagation ended in error (terminal):
             // close the outbox record so recovery does not
             // replay the failed `next`
-            if let Err(err) = task.runtime().complete_next(&task) {
+            if let Err(err) = task.runtime().complete_next(&task).await {
                 error!(error = %err, "complete_next failed");
             }
         }
@@ -798,7 +916,7 @@ impl Runtime {
         let process_gate = ProcessGate::new(config.scheduler_workers());
         let emitter = Arc::new(Emitter::with_process_gate(process_gate));
         let package = Arc::new(Package::new());
-        let queue = Queue::new();
+        let queue = Queue::new(config.scheduler_queue_cap());
         let shutdown = CancellationToken::new();
         let schema_cache = Arc::new(SchemaCache::new());
         let snapshots = Arc::new(SnapshotRegistry::new());
@@ -861,7 +979,7 @@ impl Runtime {
                                     message.set_err("", &error);
                                     proc.set_err(&Error::new(&error, ""));
                                     let emitter = rt.emitter().clone();
-                                    emitter.emit_error(&message);
+                                emitter.emit_error(&message);
                                 }
                             }
 
@@ -920,6 +1038,7 @@ impl Runtime {
                     let e_clone = e.clone();
                     cache
                         .upsert_async(&e_clone)
+                        .await
                         .unwrap_or_else(|err| error!(error = %err, "task upsert failed"));
 
                     // check task is allowed to emit message to client
@@ -953,6 +1072,7 @@ impl Runtime {
 
         let evt = self.emitter().clone();
         let cache = self.cache.clone();
+        let rt = self.clone();
         let shutdown = self.shutdown.clone();
         Handle::current().spawn(async move {
             let mut intv = time::interval(Duration::from_millis(interval_ms));
@@ -997,6 +1117,12 @@ impl Runtime {
                 // for the deliveries that lag behind)
                 if let Err(err) = cache.sweep_removable().await {
                     error!(error = %err, "settled-process sweep failed");
+                }
+
+                // Replay durable scheduler overflow after the in-memory queue
+                // has had one full tick to drain.
+                if let Err(err) = rt.recover_overflow((interval_ms * 2) as i64).await {
+                    error!(error = %err, "scheduler overflow recovery failed");
                 }
             }
         });
