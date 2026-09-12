@@ -1048,6 +1048,16 @@ async fn cache_resume_overflow_drains_on_free_slot() {
         vec![pids[2].clone(), pids[3].clone()]
     );
 
+    // a second overflow scan (e.g. a driver re-running the boot pass) is
+    // idempotent: already-queued pids are not enqueued again, so the queue
+    // stays bounded by overflow rows, not by the number of scans.
+    rt.resume().await.unwrap();
+    assert_eq!(cache.count(), 2);
+    assert_eq!(
+        cache.pending_resume_ids(),
+        vec![pids[2].clone(), pids[3].clone()]
+    );
+
     // a terminal event frees pid0's slot: the oldest queued process is loaded
     cache.evict(&pids[0]);
     rt.restore().await.unwrap();

@@ -121,6 +121,45 @@ impl Drop for SlotReservation {
     }
 }
 
+/// Deduplicated FIFO of in-flight pids awaiting a free resident slot after a
+/// boot-resume overflow. `ids` mirrors `queue`: `push_back` is a no-op for a
+/// pid already queued, so repeated overflow scans cannot enqueue a duplicate
+/// (each resume attempt would otherwise pay a store lookup and the queue
+/// would grow with the number of scans, not the number of overflow rows).
+#[derive(Default)]
+struct PendingResume {
+    queue: VecDeque<String>,
+    ids: HashSet<String>,
+}
+
+impl PendingResume {
+    fn is_empty(&self) -> bool {
+        self.queue.is_empty()
+    }
+
+    /// Queue `pid` at the back unless it is already queued; returns whether
+    /// the pid was newly queued.
+    fn push_back(&mut self, pid: String) -> bool {
+        if !self.ids.insert(pid.clone()) {
+            return false;
+        }
+        self.queue.push_back(pid);
+        true
+    }
+
+    fn pop_front(&mut self) -> Option<String> {
+        let pid = self.queue.pop_front()?;
+        self.ids.remove(&pid);
+        Some(pid)
+    }
+
+    /// Return a just-popped `pid` to the front of the queue.
+    fn push_front(&mut self, pid: String) {
+        self.ids.insert(pid.clone());
+        self.queue.push_front(pid);
+    }
+}
+
 #[derive(Clone)]
 pub struct Cache {
     cap: usize,
@@ -146,8 +185,10 @@ pub struct Cache {
     /// `Pending`) rows that did not fit the resident cap at boot, oldest
     /// first. [`Self::resume_from_queue`] drains them into free slots (the
     /// terminal-event restore) — without it those rows would wait forever,
-    /// since [`Self::start_parked`] only refills parked `None` rows.
-    pending_resume: Arc<RwLock<VecDeque<String>>>,
+    /// since [`Self::start_parked`] only refills parked `None` rows. Enqueue
+    /// is deduplicated ([`PendingResume`]), so a repeated overflow scan never
+    /// queues a pid twice.
+    pending_resume: Arc<RwLock<PendingResume>>,
     store: Arc<Store>,
     writer: StoreWriter,
     /// Capacity bookkeeping: resident slots committed to loads that are still
@@ -178,7 +219,7 @@ impl Cache {
             procs: Arc::new(RwLock::new(HashMap::new())),
             loading: Arc::new(RwLock::new(HashMap::new())),
             claimed: Arc::new(RwLock::new(HashSet::new())),
-            pending_resume: Arc::new(RwLock::new(VecDeque::new())),
+            pending_resume: Arc::new(RwLock::new(PendingResume::default())),
             store: store.clone(),
             writer: StoreWriter::spawn(store),
             admission: Arc::new(Mutex::new(Admission::default())),
@@ -209,7 +250,7 @@ impl Cache {
     /// Snapshot of the boot-resume overflow queue (test visibility).
     #[cfg(test)]
     pub(crate) fn pending_resume_ids(&self) -> Vec<String> {
-        self.pending_resume.read().iter().cloned().collect()
+        self.pending_resume.read().queue.iter().cloned().collect()
     }
 
     pub async fn close(&self) {
@@ -540,8 +581,9 @@ impl Cache {
         {
             let mut q = self.pending_resume.write();
             for row in page.rows {
-                if !resident.contains(&row.id) {
-                    q.push_back(row.id.clone());
+                // `push_back` dedups: a pid an earlier scan already queued is
+                // left in place rather than pushed again.
+                if !resident.contains(&row.id) && q.push_back(row.id.clone()) {
                     queued += 1;
                 }
             }

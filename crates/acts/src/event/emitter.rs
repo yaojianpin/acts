@@ -93,6 +93,26 @@ impl ProcessGate {
     }
 }
 
+/// Spawn the ordered consumer for `pid` and return its sender. Callers insert
+/// the sender into `workers` before handing it any event (see [`Emitter::route`]);
+/// the worker also uses the same choke point to re-home its queue on exit.
+#[allow(clippy::too_many_arguments)]
+fn spawn_pid_worker(
+    workers: Workers,
+    starts: ShareLock<HashMap<String, ActWorkflowMessageHandle>>,
+    completes: ShareLock<HashMap<String, ActWorkflowMessageHandle>>,
+    messages: ShareLock<HashMap<String, ActWorkflowMessageHandle>>,
+    errors: ShareLock<HashMap<String, ActWorkflowMessageHandle>>,
+    gate: ProcessGate,
+    pid: String,
+) -> UnboundedSender<KeyEvent> {
+    let (tx, rx) = unbounded_channel();
+    tokio::spawn(consume_pid_events(
+        workers, starts, completes, messages, errors, gate, pid, rx,
+    ));
+    tx
+}
+
 /// One ordered consumer per process id. Panics of a handler future are
 /// isolated: every invocation is spawned and awaited, so a panicking handler
 /// neither kills the consumer nor reorders the next event of the process.
@@ -144,7 +164,37 @@ async fn consume_pid_events(
             break;
         }
     }
-    workers.write().remove(&pid);
+    // Exit (terminal event, or the idle timeout). Close the routing gate under
+    // the write lock first: `route` holds the read lock across its `send`, so
+    // once this removal wins no event can still be accepted by this worker.
+    // Events already accepted but not yet dequeued are then re-homed to a
+    // fresh worker instead of dropped with `rx` — covering the window where a
+    // delivery (e.g. a retry-timer re-send) or completion arrives right after
+    // the terminal event. Re-homing under the same lock keeps their order
+    // ahead of any event routed after the removal.
+    {
+        let mut map = workers.write();
+        map.remove(&pid);
+        let mut pending = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            pending.push(event);
+        }
+        if !pending.is_empty() {
+            let tx = spawn_pid_worker(
+                workers.clone(),
+                starts.clone(),
+                completes.clone(),
+                messages.clone(),
+                errors.clone(),
+                gate.clone(),
+                pid.clone(),
+            );
+            for event in pending {
+                let _ = tx.send(event);
+            }
+            map.insert(pid.clone(), tx);
+        }
+    }
 }
 
 /// Run one handler invocation. The spawn isolates a panicking handler from
@@ -353,19 +403,17 @@ impl Emitter {
             let _ = tx.send(event);
             return;
         }
-        let (tx, rx) = unbounded_channel();
-        workers.insert(pid.clone(), tx.clone());
-        drop(workers);
-        tokio::spawn(consume_pid_events(
+        let tx = spawn_pid_worker(
             self.workers.clone(),
             self.starts.clone(),
             self.completes.clone(),
             self.messages.clone(),
             self.errors.clone(),
             self.process_gate(),
-            pid,
-            rx,
-        ));
+            pid.clone(),
+        );
+        workers.insert(pid, tx.clone());
+        drop(workers);
         let _ = tx.send(event);
     }
 

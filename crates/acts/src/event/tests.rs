@@ -329,3 +329,50 @@ async fn event_message_fifo_order() {
     let ret = s2.recv().await;
     assert_eq!(ret, vec!["mid-0", "mid-1", "mid-2"]);
 }
+
+/// A worker that exits on its terminal event must not drop an event routed to
+/// it while the terminal handler was still running: the exit path re-homes the
+/// queued event to a fresh worker instead of dropping it with the receiver.
+#[tokio::test]
+async fn event_terminal_exit_rehomes_queued_event() {
+    let workflow = Workflow::new()
+        .with_id("m1")
+        .with_step(|step| step.with_id("step1"));
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
+    let evt = Emitter::new();
+
+    let entered = std::sync::Arc::new(tokio::sync::Notify::new());
+    let release = std::sync::Arc::new(tokio::sync::Notify::new());
+    {
+        let entered = entered.clone();
+        let release = release.clone();
+        evt.on_error("k1", move |_| {
+            let entered = entered.clone();
+            let release = release.clone();
+            async move {
+                entered.notify_one();
+                release.notified().await;
+            }
+        });
+    }
+    let (s1, s2) = engine.signal(false).double();
+    evt.on_message("k1", move |_| {
+        let s1 = s1.clone();
+        async move {
+            s1.send(true);
+        }
+    });
+
+    proc.start().await.unwrap();
+    let root = proc.root().unwrap();
+    evt.emit_error(&root.create_message());
+    // the terminal handler is now running; queue a follow-up for the same pid
+    entered.notified().await;
+    evt.emit_message(&root.create_message());
+    release.notify_one();
+
+    let received = tokio::time::timeout(std::time::Duration::from_secs(5), s2.recv())
+        .await
+        .expect("queued event was dropped when the terminal worker exited");
+    assert!(received);
+}
