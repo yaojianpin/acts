@@ -597,8 +597,17 @@ impl Task {
                         "cannot find history task by nid '{nid}'",
                     )))?;
 
-                    ctx.back_task(&ctx.task(), &path_tasks).await?;
+                    // Register the replacement task BEFORE the rewind marks the
+                    // history path terminal. `back_task` leaves every step of
+                    // the path `Completed`/`Backed`; should a concurrently
+                    // re-dispatched `next` pass (recovery replays them) observe
+                    // the process with all children terminal in between, it
+                    // would complete the whole workflow and the redo task would
+                    // be an orphan under a terminal process. `redo_task` is
+                    // synchronous, so the new child is visible to any such pass
+                    // the moment this returns.
                     ctx.redo_task(&task)?;
+                    ctx.back_task(&ctx.task(), &path_tasks).await?;
                 }
                 EventAction::Cancel => {
                     // find the parent step task
@@ -631,6 +640,15 @@ impl Task {
                         return Err(ActError::Action("cannot find cancelled tasks".to_string()));
                     }
 
+                    // Register the replacement task BEFORE the undo marks the
+                    // cancelled path terminal — same hazard as `Back`: between
+                    // the terminal states and the redo task, a concurrently
+                    // re-dispatched `next` pass would see every child of the
+                    // process terminal and complete the workflow. `redo_task` is
+                    // synchronous, so the new child exists before the first
+                    // `emit_task` await below.
+                    ctx.redo_task(&task)?;
+
                     // mark the path tasks as completed
                     for p in path_tasks {
                         if p.state().is_running() {
@@ -645,7 +663,6 @@ impl Task {
                     for next in &nexts {
                         ctx.undo_task(next).await?;
                     }
-                    ctx.redo_task(&task)?;
                 }
                 EventAction::Abort => {
                     if self.state().is_completed() {

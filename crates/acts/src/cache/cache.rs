@@ -6,7 +6,7 @@ use crate::{
     scheduler::{Process, Runtime, Task, TaskState},
     store::{KvStore, MemoryStore, Store, query::Sort},
 };
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     sync::Arc,
@@ -62,6 +62,65 @@ impl Drop for InflightGuard {
     }
 }
 
+/// Resident-slot commitments of in-flight store loads. [`Cache::admit`]
+/// decides capacity from the resident map alone, so this counter only makes a
+/// restore pass's free-slot claim visible to other passes: while a load is
+/// reading rows, `resident + reserved` is the capacity they must treat as
+/// taken, so they skip rows already being loaded instead of decoding them
+/// again.
+#[derive(Default)]
+struct Admission {
+    reserved: usize,
+}
+
+/// Slots on the resident set committed to one in-flight store load. A pass
+/// reserves every free slot before its store I/O (see `Cache::reserve_slots`)
+/// and releases them as loaded rows become resident; whatever is left is
+/// released on drop, covering short loads, errors and early returns. Two
+/// concurrent passes therefore never load — and race to start — the same
+/// parked row (each `start` is guarded per `Process` instance, not per pid, so
+/// a duplicate would run the workflow twice).
+struct SlotReservation {
+    cache: Cache,
+    remaining: usize,
+}
+
+impl SlotReservation {
+    /// Slots still available to this pass.
+    fn remaining(&self) -> usize {
+        self.remaining
+    }
+
+    /// Make `proc` resident, consuming one reserved slot. Returns `false` —
+    /// without consuming — when it is already resident or `cap` was reached
+    /// meanwhile: admission ignores reservations, so it may have taken the
+    /// slot while the row was being read. The caller must then NOT start the
+    /// process.
+    fn commit(&mut self, proc: &Arc<Process>) -> bool {
+        if self.remaining == 0 {
+            return false;
+        }
+        // `admission` before `procs`, the order every capacity path uses.
+        let mut admission = self.cache.admission.lock();
+        let mut procs = self.cache.procs.write();
+        if procs.len() >= self.cache.cap || procs.contains_key(proc.id()) {
+            return false;
+        }
+        procs.insert(proc.id().to_string(), proc.clone());
+        admission.reserved -= 1;
+        self.remaining -= 1;
+        true
+    }
+}
+
+impl Drop for SlotReservation {
+    fn drop(&mut self) {
+        if self.remaining > 0 {
+            self.cache.admission.lock().reserved -= self.remaining;
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Cache {
     cap: usize,
@@ -91,14 +150,13 @@ pub struct Cache {
     pending_resume: Arc<RwLock<VecDeque<String>>>,
     store: Arc<Store>,
     writer: StoreWriter,
-    /// Serializes every admission decision and whole restore passes. Terminal
-    /// proc events of different processes run concurrently, and admission
-    /// (`admit`) and restore both mutate the resident set across store I/O —
-    /// without the lock two passes could load — and auto-start — the same
-    /// persisted process twice (each `start` is guarded per `Process`
-    /// instance, not per pid, so the duplicate would run the workflow twice),
-    /// and concurrent starts could overshoot `cap`.
-    lock: Arc<tokio::sync::Mutex<()>>,
+    /// Capacity bookkeeping: resident slots committed to loads that are still
+    /// reading rows (see [`Admission`]). Terminal proc events of different
+    /// processes run concurrently, so admission (`admit`) and whole restore
+    /// passes share it — but only for the synchronous decision. Store I/O and
+    /// `Process::start` happen outside every lock, so a slow store no longer
+    /// serializes admission behind a restore pass (or vice versa).
+    admission: Arc<Mutex<Admission>>,
 }
 
 impl std::fmt::Debug for Cache {
@@ -123,7 +181,7 @@ impl Cache {
             pending_resume: Arc::new(RwLock::new(VecDeque::new())),
             store: store.clone(),
             writer: StoreWriter::spawn(store),
-            lock: Arc::new(tokio::sync::Mutex::new(())),
+            admission: Arc::new(Mutex::new(Admission::default())),
         })
     }
 
@@ -186,6 +244,16 @@ impl Cache {
                     let mut loading = self.loading.write();
                     if let Some(inflight) = loading.get(pid) {
                         (None, Some(inflight.rx.clone()))
+                    } else if let Some(proc) = self.get_proc(pid) {
+                        // A leader we missed finished inside our `flush` and
+                        // cached the process. Its insert precedes the removal
+                        // of this in-flight entry (both under `loading`, and
+                        // the insert comes first), so an absent entry means any
+                        // earlier load is already visible: reusing it here
+                        // avoids a second load returning a second instance for
+                        // the same pid. `loading` is always taken before
+                        // `procs`, never the other way around.
+                        return Ok(Some(proc));
                     } else {
                         let (tx, rx) = tokio::sync::watch::channel(None);
                         let inflight = Arc::new(InflightProc { rx: rx.clone() });
@@ -290,64 +358,91 @@ impl Cache {
     /// resident set delays them but never deadlocks.
     #[instrument(skip(self, proc), fields(pid = %proc.id()))]
     pub(crate) async fn admit(&self, proc: &Arc<Process>) -> Result<bool> {
-        // Serialized with restore passes under the same lock: the admission
-        // decision mutates the resident set across store I/O on the park
-        // path, and a concurrent restore pass must never observe a half-made
-        // decision (e.g. start a row whose parking write is still in flight).
-        let _guard = self.lock.lock().await;
-        // Claim the pid before any store I/O. Both resident and parked
-        // admissions leave this marker installed, so a second start for the
-        // same externally supplied pid fails deterministically even when both
-        // callers missed the durable row before either was admitted.
-        if !self.claimed.write().insert(proc.id().to_string()) {
-            return Err(ActError::Action(format!(
-                "proc_id({}) is duplicated in running process list",
-                proc.id()
-            )));
-        }
-
-        {
-            let procs = self.procs.read();
+        // Synchronous capacity decision: take a resident slot now, or park.
+        // Only the parking write below touches the store, and it happens after
+        // the decision is made, so a slow store cannot serialize this
+        // admission behind a restore pass (or vice versa). Parking happens
+        // only when the resident set is genuinely full, so a slot freed by a
+        // terminal event can never leave a parked process stranded.
+        let parked = {
+            let mut procs = self.procs.write();
+            // Claim the pid before any store I/O. Both resident and parked
+            // admissions leave this marker installed, so a second start for
+            // the same externally supplied pid fails deterministically even
+            // when both callers missed the durable row before either was
+            // admitted.
+            if !self.claimed.write().insert(proc.id().to_string()) {
+                return Err(ActError::Action(format!(
+                    "proc_id({}) is duplicated in running process list",
+                    proc.id()
+                )));
+            }
             if procs.contains_key(proc.id()) {
                 return Err(ActError::Action(format!(
                     "proc_id({}) is duplicated in running process list",
                     proc.id()
                 )));
             }
-        }
-
-        if self.count() >= self.cap {
-            debug!(pid = %proc.id(), "process parked, resident set full");
-            let result = self.store.upsert_proc(proc).await;
-            if result.is_err() {
-                self.claimed.write().remove(proc.id());
+            // In-flight reservations are deliberately ignored: they are a
+            // hint for restore passes, and were this decision to park on them,
+            // a pass that ends up committing fewer rows would strand this
+            // process despite a free slot.
+            if procs.len() >= self.cap {
+                true
+            } else {
+                procs.insert(proc.id().to_string(), proc.clone());
+                false
             }
-            return result.map(|_| false);
+        };
+        if !parked {
+            return Ok(true);
         }
 
-        self.procs
-            .write()
-            .insert(proc.id().to_string(), proc.clone());
-        Ok(true)
+        debug!(pid = %proc.id(), "process parked, resident set full");
+        let result = self.store.upsert_proc(proc).await;
+        if result.is_err() {
+            self.claimed.write().remove(proc.id());
+        }
+        result.map(|_| false)
+    }
+
+    /// Commit every free resident slot to the caller for the duration of a
+    /// store load. Returns `None` when the set is full — including slots
+    /// already committed to another in-flight pass — so a pass whose store I/O
+    /// would only find rows another pass is already loading skips the round
+    /// trip entirely.
+    fn reserve_slots(&self) -> Option<SlotReservation> {
+        // `admission` before `procs`, the order every capacity path uses.
+        let mut admission = self.admission.lock();
+        let resident = self.procs.read().len();
+        let free = self.cap.saturating_sub(resident + admission.reserved);
+        if free == 0 {
+            return None;
+        }
+        admission.reserved += free;
+        Some(SlotReservation {
+            cache: self.clone(),
+            remaining: free,
+        })
     }
 
     #[instrument(skip(self, rt))]
     pub async fn start_parked(&self, rt: &Arc<Runtime>) -> Result<()> {
-        // Terminal proc events of different processes trigger restores
-        // concurrently (each completion evicts its process and calls back in
-        // here); the pass is serialized with admission (`admit`) under the
-        // same lock so two passes can never load — and auto-start — the same
-        // persisted process twice (each `start` is guarded per `Process`
-        // instance, not per pid, so the duplicate would run the workflow
-        // twice), and no start can slip past a half-done pass.
-        let _guard = self.lock.lock().await;
         debug!("restore");
-        let cap = self.cap();
-        let count = self.count();
-        if count >= cap {
+        // Queued in-flight rows (boot-resume overflow) outrank parked ones,
+        // and the queue only ever holds rows that did not fit the cap — so
+        // while it is non-empty there is no free slot for a parked refill, and
+        // a concurrent pass must not take one from the queue.
+        if !self.pending_resume.read().is_empty() {
             return Ok(());
         }
-
+        // Reserve the free slots before touching the store: concurrent restore
+        // passes triggered by other completions then see the set as full and
+        // skip, instead of loading — and racing to start — the same parked
+        // rows. No lock is held across the store I/O or `Process::start`.
+        let Some(mut reservation) = self.reserve_slots() else {
+            return Ok(());
+        };
         // Refill free slots from parked rows (`None` state), oldest first —
         // overflow from a full resident set, or never-started seeds. Crashed
         // in-flight rows (`Ready`/`Running`/`Pending`) are the job of
@@ -356,10 +451,15 @@ impl Cache {
         // non-`None` rows belong to resident processes (reloading one would
         // create a second instance racing it).
         let cached: HashSet<String> = self.procs().iter().map(|p| p.id().to_string()).collect();
-        let free = cap - count;
-        for proc in self.store.load_parked(free, rt, &cached).await? {
-            if !self.procs.read().contains_key(proc.id()) {
-                self.push_proc_pri(&proc, false).await?;
+        let parked = self
+            .store
+            .load_parked(reservation.remaining(), rt, &cached)
+            .await?;
+        for proc in parked {
+            // Only the pass that actually makes a process resident starts it:
+            // `commit` refuses a row another path already cached, so a
+            // duplicate load can never run the workflow twice.
+            if reservation.commit(&proc) {
                 proc.start().await?;
             }
         }
@@ -382,34 +482,37 @@ impl Cache {
     /// process would wait forever.
     #[instrument(skip(self, rt))]
     pub(crate) async fn resume(&self, rt: &Arc<Runtime>) -> Result<Vec<Arc<Process>>> {
-        let _guard = self.lock.lock().await;
         debug!("resume");
-        let cap = self.cap();
-        let count = self.count();
-        let mut resident = Vec::new();
-        let cached: HashSet<String> = self.procs().iter().map(|p| p.id().to_string()).collect();
-        if count < cap {
-            let free = cap - count;
-            let procs = self.store.load_resumable(free, rt, &cached).await?;
-            resident.reserve(procs.len());
-            for proc in procs {
-                if !self.procs.read().contains_key(proc.id()) {
-                    self.procs
-                        .write()
-                        .insert(proc.id().to_string(), proc.clone());
-                    resident.push(proc);
-                }
-            }
-            // queue every remaining non-resident in-flight row (rows at or
-            // past the cap window, plus any that were skipped above because
-            // the resident set was already full) so the terminal-event refill
-            // can load them into later-free slots
-            if cached.len() + resident.len() < self.store.count_resumable().await? {
+        // Boot pass, but a terminal event can fire while it runs and drive a
+        // concurrent `restore`: reserve slots exactly like `start_parked` so
+        // the two never decode — and re-drive — the same durable row.
+        let Some(mut reservation) = self.reserve_slots() else {
+            // Resident set already at cap (a concurrent pass filled it) —
+            // anything else in flight waits in the overflow queue.
+            let cached: HashSet<String> = self.procs().iter().map(|p| p.id().to_string()).collect();
+            if self.store.count_resumable().await? > cached.len() {
                 self.enqueue_resume_overflow().await?;
             }
-        } else if self.store.count_resumable().await? > cached.len() {
-            // resident set already at cap (the outbox replay cached its own
-            // processes before this ran) — anything else in flight waits
+            return Ok(Vec::new());
+        };
+        let cached: HashSet<String> = self.procs().iter().map(|p| p.id().to_string()).collect();
+        let rows = self
+            .store
+            .load_resumable(reservation.remaining(), rt, &cached)
+            .await?;
+        let mut resident = Vec::with_capacity(rows.len());
+        for proc in rows {
+            // Checked and inserted under the write lock, so a row another path
+            // cached while we were reading is never loaded a second time.
+            if reservation.commit(&proc) {
+                resident.push(proc);
+            }
+        }
+        // queue every remaining non-resident in-flight row (rows at or past
+        // the cap window, plus any that were skipped above because the
+        // resident set was already full) so the terminal-event refill can load
+        // them into later-free slots
+        if cached.len() + resident.len() < self.store.count_resumable().await? {
             self.enqueue_resume_overflow().await?;
         }
         if !resident.is_empty() {
@@ -459,19 +562,22 @@ impl Cache {
     /// the newly resident processes for the caller to re-dispatch.
     #[instrument(skip(self, rt))]
     pub(crate) async fn resume_from_queue(&self, rt: &Arc<Runtime>) -> Result<Vec<Arc<Process>>> {
-        let _guard = self.lock.lock().await;
         let mut resident = Vec::new();
         loop {
             let pid = match self.pending_resume.write().pop_front() {
                 Some(pid) => pid,
                 None => break,
             };
-            if self.count() >= self.cap {
-                self.pending_resume.write().push_front(pid);
-                break;
-            }
             if self.procs.read().contains_key(&pid) {
                 continue;
+            }
+            // No free slot: put the oldest pid back and stop — the next
+            // terminal event retries. Checked against the resident set, not
+            // against another pass's in-flight reservations, so a queued
+            // in-flight row is never held up by a parked refill.
+            if self.procs.read().len() >= self.cap {
+                self.pending_resume.write().push_front(pid);
+                break;
             }
             let state = match self.store.procs().find(&pid).await {
                 Ok(row) => TaskState::from(row.state.as_str()),
@@ -484,9 +590,19 @@ impl Cache {
                 continue; // finished or parked while queued
             }
             if let Some(proc) = self.store.load_proc(&pid, rt).await? {
-                self.procs
-                    .write()
-                    .insert(proc.id().to_string(), proc.clone());
+                // Re-check under the write lock: an admission or another path
+                // may have filled the set while the row was being read.
+                let mut procs = self.procs.write();
+                if procs.contains_key(&pid) {
+                    continue;
+                }
+                if procs.len() >= self.cap {
+                    drop(procs);
+                    self.pending_resume.write().push_front(pid);
+                    break;
+                }
+                procs.insert(proc.id().to_string(), proc.clone());
+                drop(procs);
                 debug!(pid = %pid, "queued in-flight process resumed");
                 resident.push(proc);
             }

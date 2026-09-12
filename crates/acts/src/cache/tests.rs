@@ -1,13 +1,16 @@
 use crate::{
-    Act, Config, Engine, Vars, Workflow,
+    Act, Action, Config, Engine, Vars, Workflow,
     config::ConfigData,
     data,
-    scheduler::NodeContent,
-    scheduler::{NodeTree, Process, Runtime, TaskState},
-    store::{DbCollectionIden, MemoryStore},
+    event::EventAction,
+    scheduler::{NodeContent, NodeTree, Process, Runtime, TaskState},
+    store::{DbCollectionIden, KvStore, MemoryStore, ScanOptions, StoreBatchOp},
     utils,
 };
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, AtomicUsize, Ordering},
+};
 
 /// Evicting a finished process must free its whole in-memory graph: the task
 /// tree is owned by the process and every task references its process, so a
@@ -1062,6 +1065,307 @@ async fn cache_resume_overflow_drains_on_free_slot() {
     assert!(resident.contains(&pids[2]));
     assert!(resident.contains(&pids[3]));
     assert!(cache.pending_resume_ids().is_empty());
+
+    rt.close().await;
+}
+
+/// KV store that can be switched, from the test thread, to block inside its
+/// store I/O: `scan_prefix` (the call every store query runs through) and the
+/// writes (`put`/`batch`, the call every collection mutation runs through).
+/// The blocked counts let a test park a known number of callers before
+/// releasing them, so interleavings are exercised deterministically.
+struct GatedKv {
+    inner: MemoryStore,
+    find_gate: AtomicBool,
+    find_entered: AtomicUsize,
+    write_gate: AtomicBool,
+    write_entered: AtomicUsize,
+}
+
+impl GatedKv {
+    fn new() -> Self {
+        Self {
+            inner: MemoryStore::new(),
+            find_gate: AtomicBool::new(false),
+            find_entered: AtomicUsize::new(0),
+            write_gate: AtomicBool::new(false),
+            write_entered: AtomicUsize::new(0),
+        }
+    }
+
+    fn arm_find(&self) {
+        self.find_gate.store(true, Ordering::SeqCst);
+    }
+
+    fn disarm_find(&self) {
+        self.find_gate.store(false, Ordering::SeqCst);
+    }
+
+    fn arm_write(&self) {
+        self.write_gate.store(true, Ordering::SeqCst);
+    }
+
+    fn disarm_write(&self) {
+        self.write_gate.store(false, Ordering::SeqCst);
+    }
+
+    /// Yield until `entered` callers have parked on the read gate.
+    async fn wait_in_find(&self, entered: usize) {
+        while self.find_entered.load(Ordering::SeqCst) < entered {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    async fn wait_in_write(&self, entered: usize) {
+        while self.write_entered.load(Ordering::SeqCst) < entered {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Park while `armed`, counting this caller as parked.
+    async fn park(armed: &AtomicBool, entered: &AtomicUsize) {
+        entered.fetch_add(1, Ordering::SeqCst);
+        while armed.load(Ordering::SeqCst) {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl KvStore for GatedKv {
+    async fn get(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
+        self.inner.get(key).await
+    }
+
+    async fn put(&self, key: &str, value: Vec<u8>) -> crate::Result<()> {
+        if self.write_gate.load(Ordering::SeqCst) {
+            Self::park(&self.write_gate, &self.write_entered).await;
+        }
+        self.inner.put(key, value).await
+    }
+
+    async fn delete(&self, key: &str) -> crate::Result<()> {
+        if self.write_gate.load(Ordering::SeqCst) {
+            Self::park(&self.write_gate, &self.write_entered).await;
+        }
+        self.inner.delete(key).await
+    }
+
+    async fn batch(&self, ops: &[StoreBatchOp]) -> crate::Result<()> {
+        if self.write_gate.load(Ordering::SeqCst) {
+            Self::park(&self.write_gate, &self.write_entered).await;
+        }
+        self.inner.batch(ops).await
+    }
+
+    async fn scan_prefix(
+        &self,
+        key: &str,
+        options: ScanOptions,
+    ) -> crate::Result<Vec<(String, Vec<u8>)>> {
+        if self.find_gate.load(Ordering::SeqCst) {
+            Self::park(&self.find_gate, &self.find_entered).await;
+        }
+        self.inner.scan_prefix(key, options).await
+    }
+}
+
+/// Admission must not wait on a restore pass's store I/O. The old design held
+/// one global async mutex across `load_parked`, so a slow store blocked every
+/// new start (`launch` → `admit`) behind a restore; with the capacity decision
+/// made synchronously and the I/O outside the lock, `admit` completes while
+/// the restore is still parked inside `scan_prefix`.
+#[tokio::test(flavor = "multi_thread")]
+async fn cache_admit_not_blocked_by_restore_io() {
+    let config = Config {
+        data: ConfigData {
+            cache_cap: Some(4),
+            ..Default::default()
+        },
+        table: Default::default(),
+    };
+    let kv = Arc::new(GatedKv::new());
+    let kv_store: Arc<dyn KvStore> = kv.clone();
+    let rt = Runtime::new(&config, Some(kv_store)).unwrap();
+    let cache = rt.cache();
+    let model = Workflow::new()
+        .with_id("m1")
+        .with_step(|step| step.with_id("step1"));
+
+    // one resident proc (the restore's slot accounting) and one parked row
+    let resident = Process::new("restore-io-resident", &rt);
+    resident.load(&model).unwrap();
+    assert!(cache.admit(&resident).await.unwrap());
+    assert_eq!(cache.count(), 1);
+
+    let parked = Process::new_with_timestamp("restore-io-parked", 1, &rt);
+    parked.load(&model).unwrap();
+    parked.set_pure_state(TaskState::None);
+    cache.store().upsert_proc(&parked).await.unwrap();
+
+    // park a restore pass inside its store read
+    kv.arm_find();
+    let restore = {
+        let cache = cache.clone();
+        let rt = rt.clone();
+        tokio::spawn(async move { cache.start_parked(&rt).await })
+    };
+    kv.wait_in_find(1).await;
+
+    // ...and admit a fresh process while it is still there
+    let fresh = Process::new("restore-io-fresh", &rt);
+    fresh.load(&model).unwrap();
+    let admitted = tokio::time::timeout(std::time::Duration::from_secs(5), cache.admit(&fresh))
+        .await
+        .expect("admit must not block behind a restore's store I/O")
+        .unwrap();
+    assert!(admitted);
+
+    kv.disarm_find();
+    restore.await.unwrap().unwrap();
+    assert_eq!(cache.count(), 3, "resident + fresh + refilled parked");
+    let resident: Vec<String> = cache.procs().iter().map(|p| p.id().to_string()).collect();
+    assert!(resident.contains(&"restore-io-parked".to_string()));
+
+    rt.close().await;
+}
+
+/// Two concurrent restore passes must not both load the same parked rows. The
+/// first pass commits every free slot before its store I/O, so the second sees
+/// the set as full and returns immediately instead of blocking on — or
+/// duplicating — the first pass's read.
+#[tokio::test(flavor = "multi_thread")]
+async fn cache_concurrent_restore_passes_do_not_block_or_double_load() {
+    let config = Config {
+        data: ConfigData {
+            cache_cap: Some(2),
+            ..Default::default()
+        },
+        table: Default::default(),
+    };
+    let kv = Arc::new(GatedKv::new());
+    let kv_store: Arc<dyn KvStore> = kv.clone();
+    let rt = Runtime::new(&config, Some(kv_store)).unwrap();
+    let cache = rt.cache();
+    let model = Workflow::new()
+        .with_id("m1")
+        .with_step(|step| step.with_id("step1"));
+
+    for (tag, ts) in [("a", 1), ("b", 2)] {
+        let pid = format!("restore-concurrent-{tag}");
+        let proc = Process::new_with_timestamp(&pid, ts, &rt);
+        proc.load(&model).unwrap();
+        proc.set_pure_state(TaskState::None);
+        cache.store().upsert_proc(&proc).await.unwrap();
+    }
+
+    kv.arm_find();
+    let first = {
+        let cache = cache.clone();
+        let rt = rt.clone();
+        tokio::spawn(async move { cache.start_parked(&rt).await })
+    };
+    kv.wait_in_find(1).await;
+
+    // the second pass must return without touching the store
+    tokio::time::timeout(std::time::Duration::from_secs(5), cache.start_parked(&rt))
+        .await
+        .expect("a restore pass must not park on another pass's store I/O")
+        .unwrap();
+
+    kv.disarm_find();
+    first.await.unwrap().unwrap();
+    assert_eq!(cache.count(), 2, "each parked row started exactly once");
+    let resident: Vec<String> = cache.procs().iter().map(|p| p.id().to_string()).collect();
+    assert!(resident.contains(&"restore-concurrent-a".to_string()));
+    assert!(resident.contains(&"restore-concurrent-b".to_string()));
+
+    rt.close().await;
+}
+
+/// A miss whose `flush` overlaps another caller's load must reuse that load's
+/// instance. The single-flight leadership claim happens *after* `flush`, so
+/// without a post-flush re-check a caller that missed before the leader cached
+/// the process claimed leadership as soon as the leader's in-flight entry was
+/// removed — running a SECOND load that returned a second `Arc<Process>` for
+/// one pid, i.e. two instances driving the same durable process.
+#[tokio::test(flavor = "multi_thread")]
+async fn cache_proc_miss_overlapping_load_reuses_instance() {
+    let kv = Arc::new(GatedKv::new());
+    let kv_store: Arc<dyn KvStore> = kv.clone();
+    let rt = Runtime::new(&Config::default(), Some(kv_store)).unwrap();
+    let cache = rt.cache();
+    let model = Workflow::new()
+        .with_id("m1")
+        .with_step(|step| step.with_id("step1"));
+    cache.store().deploy(&model, None).await.unwrap();
+
+    let pid = utils::longid();
+    let row = data::Proc {
+        id: pid.clone(),
+        name: "test".to_string(),
+        mid: "m1".to_string(),
+        state: TaskState::Running.to_string(),
+        start_time: 0,
+        end_time: 0,
+        timestamp: 0,
+        model: model.to_json().unwrap(),
+        env: "{}".to_string(),
+        err: None,
+        removable: false,
+        v: data::Proc::version(),
+    };
+    cache.store().procs().create(&row).await.unwrap();
+
+    // hold the leader inside its store read, and the writer behind the read
+    // gate, so nothing below can make progress on its own
+    kv.arm_find();
+    kv.arm_write();
+
+    let leader = {
+        let cache = cache.clone();
+        let rt = rt.clone();
+        let pid = pid.clone();
+        tokio::spawn(async move { cache.proc(&pid, &rt).await.unwrap().unwrap() })
+    };
+    kv.wait_in_find(1).await;
+
+    // queue a writer op: it parks in the same read gate, which keeps the
+    // writer — and therefore every later `flush` — stuck
+    let action = Action::new(&pid, "op-tid", EventAction::Next, Vars::new());
+    cache.enqueue_action(&action).await.unwrap();
+    kv.wait_in_find(2).await;
+
+    // a second caller misses the (still empty) cache and parks in `flush`
+    let waiter = {
+        let cache = cache.clone();
+        let rt = rt.clone();
+        let pid = pid.clone();
+        tokio::spawn(async move { cache.proc(&pid, &rt).await.unwrap().unwrap() })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert_eq!(cache.count(), 0, "the leader is still parked in its load");
+
+    // release the leader's read: it finishes the load and caches the process,
+    // while the writer moves on to its write and parks on the write gate — so
+    // the waiter is still inside `flush` when the leader's entry is removed
+    kv.disarm_find();
+    tokio::time::timeout(std::time::Duration::from_secs(5), kv.wait_in_write(1))
+        .await
+        .expect("the queued write must park on the write gate");
+    let first = leader.await.unwrap();
+    assert_eq!(cache.count(), 1, "the leader caches the loaded process");
+
+    kv.disarm_write();
+    let second = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+        .await
+        .expect("the second caller must not hang in flush")
+        .unwrap();
+    assert!(
+        Arc::ptr_eq(&first, &second),
+        "a caller that missed before the load landed must reuse its instance"
+    );
+    assert_eq!(cache.count(), 1);
 
     rt.close().await;
 }
