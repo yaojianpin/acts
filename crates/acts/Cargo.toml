@@ -61,6 +61,11 @@ harness = false
 name = "model"
 path = "../../benches/model.rs"
 
+[[bench]]
+harness = false
+name = "latency"
+path = "../../benches/latency.rs"
+
 [[example]]
 name = "simple"
 path = "../../examples/simple/main.rs"
