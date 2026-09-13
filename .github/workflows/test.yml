@@ -47,10 +47,17 @@ jobs:
       # `-js` JetStream flag cannot be passed through the nats service; start
       # it directly (a JetStream server also serves the core-NATS tests of
       # acts-channel/acts-plugin-nats/acts-server)
+      # a skipped acts-store nats suite must not read as a green run, so the
+      # step fails when the server never accepts connections
       - name: Start NATS (JetStream)
         run: |
           docker run -d --name nats -p 4222:4222 nats:2 -js
-          for i in $(seq 1 30); do nc -z 127.0.0.1 4222 && break; sleep 1; done
+          ready=""
+          for i in $(seq 1 30); do
+            nc -z 127.0.0.1 4222 && { ready=1; break; }
+            sleep 1
+          done
+          test -n "$ready" || { echo "NATS did not become ready on 127.0.0.1:4222" >&2; exit 1; }
       - name: Build
         run: cargo build --verbose
       - name: Run tests

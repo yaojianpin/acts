@@ -25,7 +25,7 @@ acts = { workspace = true }
 nanoid = "0.4"
 serde_json = { workspace = true }
 serial_test = { version = "3", features = ["async"] }
-tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "sync"] }
+tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "sync", "time"] }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [features]

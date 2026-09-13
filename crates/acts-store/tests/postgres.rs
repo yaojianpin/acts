@@ -8,11 +8,11 @@ use std::sync::Arc;
 mod common;
 
 gen_store_tests!(async {
-    Arc::new(Store::new(Arc::new(
+    Some(Arc::new(Store::new(Arc::new(
         PostgresStore::open("postgres://postgres:yao@localhost:5433/tests")
             .await
             .unwrap(),
-    )))
+    ))))
 });
 
 #[tokio::test(flavor = "multi_thread")]

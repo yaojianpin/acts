@@ -8,9 +8,9 @@ use std::sync::Arc;
 mod common;
 
 gen_store_tests!(async {
-    Arc::new(Store::new(Arc::new(
+    Some(Arc::new(Store::new(Arc::new(
         SqliteStore::open_in_memory().await.unwrap(),
-    )))
+    ))))
 });
 
 #[tokio::test]

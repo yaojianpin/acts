@@ -55,14 +55,16 @@ macro_rules! gen_store_tests {
             CompId { pid, tid }
         }
 
-        async fn store() -> std::sync::Arc<acts::Store> {
-            // One backend instance per test, created inside the calling test's
-            // own tokio runtime. nats/redis/sqlx spawn their connection tasks
-            // on the runtime that is current at `open()`, so an instance shared
-            // across `#[tokio::test]`s (each with its own runtime) would have
-            // its connection torn down with the first test that created it —
-            // every test is hermetic (unique keys), so a fresh store is
-            // equivalent and keeps each backend's tasks on a live runtime.
+        /// One backend instance per test; `None` when the backend is
+        /// unreachable, so the calling test returns early (skips).
+        async fn store() -> Option<std::sync::Arc<acts::Store>> {
+            // Created inside the calling test's own tokio runtime. nats/redis/
+            // sqlx spawn their connection tasks on the runtime that is current
+            // at `open()`, so an instance shared across `#[tokio::test]`s (each
+            // with its own runtime) would have its connection torn down with the
+            // first test that created it — every test is hermetic (unique keys),
+            // so a fresh store is equivalent and keeps each backend's tasks on a
+            // live runtime.
             $init.await
         }
 
@@ -92,7 +94,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_load_by_limit() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
 
             let prefix = shortid();
             let name = shortid();
@@ -119,7 +121,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_load_by_state() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
 
             let prefix = shortid();
             let name = shortid();
@@ -168,7 +170,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_model_deploy_ok() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let workflow = create_workflow();
             let ok = store.deploy(&workflow, None).await.unwrap();
             assert!(ok);
@@ -177,7 +179,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_models() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
 
             let mut workflow = create_workflow();
             workflow.id = longid();
@@ -195,7 +197,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_model_get() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let mut workflow = create_workflow();
             workflow.id = longid();
             store.deploy(&workflow, None).await.unwrap();
@@ -207,7 +209,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_model_query_by_id() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let model = Model {
                 id: longid(),
                 name: "test".to_string(),
@@ -230,7 +232,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_model_query_by_offset_count() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let create_time = 100;
             let name = shortid();
             for _ in 0..10 {
@@ -278,7 +280,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_model_query_by_cond_and() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let create_time = 200;
             let name = shortid();
             for _ in 0..10 {
@@ -320,7 +322,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_model_query_by_cond_or() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let create_time = 300;
             let name = shortid();
             for _ in 0..10 {
@@ -373,7 +375,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_model_query_by_order() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let create_time = 400;
             let name = shortid();
             for _ in 0..10 {
@@ -421,7 +423,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_model_remove() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
 
             let id = longid();
             let mut workflow = create_workflow();
@@ -439,7 +441,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_model_deploy_id_error() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let mut workflow = create_workflow();
             workflow.id = "".to_string();
             let result = store.deploy(&workflow, None).await;
@@ -450,7 +452,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_proc_create() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let id = longid();
             let workflow = create_workflow();
             let proc = create_proc(&id, "none", &workflow);
@@ -465,7 +467,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_proc_find() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
 
             let id = longid();
             let workflow = create_workflow();
@@ -478,7 +480,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_proc_query_by_id() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
 
             let mid = longid();
             let proc = Proc {
@@ -505,7 +507,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_proc_query_by_offset_count() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let mid = longid();
             for i in 0..10 {
                 let proc = Proc {
@@ -545,7 +547,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_proc_query_by_cond_and() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let mid = longid();
             for i in 0..10 {
                 let proc = Proc {
@@ -585,7 +587,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_proc_query_by_cond_or() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let mid = longid();
             for i in 0..10 {
                 let proc = Proc {
@@ -638,7 +640,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_proc_query_by_order() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let mid = longid();
             for i in 0..10 {
                 let proc = Proc {
@@ -678,7 +680,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_proc_update() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
 
             let id = longid();
             let workflow = create_workflow();
@@ -697,7 +699,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_proc_remove() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
 
             let id = longid();
             let workflow = create_workflow();
@@ -716,7 +718,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_task_create() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
 
             let pid = longid();
             let tid = shortid();
@@ -749,7 +751,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_task_query_by_id() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
 
             let pid = longid();
             let tid = shortid();
@@ -782,7 +784,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_task_query_by_offset_count() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let pid = longid();
             for i in 0..10 {
                 let tid = shortid();
@@ -826,7 +828,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_task_query_by_cond_and() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let pid = longid();
             for i in 0..10 {
                 let tid = shortid();
@@ -870,7 +872,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_task_query_by_cond_or() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let pid = longid();
             for i in 0..10 {
                 let tid = shortid();
@@ -930,7 +932,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_task_query_by_order() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let pid = longid();
             for i in 0..10 {
                 let tid = shortid();
@@ -974,7 +976,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_task_update() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
 
             let pid = longid();
             let tid = shortid();
@@ -1011,7 +1013,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_task_remove() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
 
             let pid = longid();
             let tid = shortid();
@@ -1048,7 +1050,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_message_create() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
 
             let pid = longid();
             let tid = shortid();
@@ -1081,7 +1083,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_message_query_by_id() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
 
             let pid = longid();
             let tid = shortid();
@@ -1115,7 +1117,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_message_query_by_offset_count() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
 
             let pid = longid();
             let tid = shortid();
@@ -1162,7 +1164,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_message_query_by_cond_and() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
 
             let pid = longid();
             let tid = shortid();
@@ -1209,7 +1211,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_message_query_by_cond_or() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
 
             let pid = longid();
             let tid = shortid();
@@ -1272,7 +1274,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_message_query_by_order() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
 
             let pid = longid();
             let tid = shortid();
@@ -1319,7 +1321,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_message_update() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
 
             let pid = longid();
             let tid = shortid();
@@ -1358,7 +1360,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_message_remove() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
 
             let pid = longid();
             let tid = shortid();
@@ -1391,7 +1393,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_package_create() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
 
             let id = longid();
             let package = Package {
@@ -1421,7 +1423,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_package_query_by_id() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
 
             let id = longid();
             let package = Package {
@@ -1451,7 +1453,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_package_query_by_offset_count() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let name = shortid();
             for _i in 0..10 {
                 let package = Package {
@@ -1503,7 +1505,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_package_query_by_cond_and() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let name = shortid();
             for _ in 0..10 {
                 let package = Package {
@@ -1551,7 +1553,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_package_query_by_cond_or() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let name = shortid();
             for _ in 0..10 {
                 let package = Package {
@@ -1614,7 +1616,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_package_query_by_order() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let name = shortid();
             for i in 0..10 {
                 let package = Package {
@@ -1668,7 +1670,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_package_update() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
 
             let id = longid();
             let package = Package {
@@ -1703,7 +1705,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_package_remove() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
 
             let id = longid();
             let package = Package {
@@ -1736,7 +1738,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_upcast_model_version() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let model = Model {
                 id: shortid(),
                 name: "upcast-model".to_string(),
@@ -1769,7 +1771,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_task_vars_create_and_find() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let pid = longid();
             let vars = TaskVars {
                 id: comp_id(&pid, "t1").id(),
@@ -1793,7 +1795,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_task_vars_query_by_pid() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let pid = longid();
             for tid in ["t1", "t2", "t3"] {
                 let vars = TaskVars {
@@ -1837,7 +1839,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_task_vars_update() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let pid = longid();
             let vars = TaskVars {
                 id: comp_id(&pid, "t1").id(),
@@ -1869,7 +1871,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_task_vars_remove() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let pid = longid();
             let vars = TaskVars {
                 id: comp_id(&pid, "t1").id(),
@@ -1894,7 +1896,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_upcast_task_vars_version() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let pid = longid();
             let vars = TaskVars {
                 id: comp_id(&pid, "t1").id(),
@@ -1923,7 +1925,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_upcast_proc_version() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let proc = Proc {
                 id: shortid(),
                 name: "upcast-proc".to_string(),
@@ -1957,7 +1959,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_upcast_task_version() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let pid = longid();
             let tid = shortid();
             let task = Task {
@@ -1996,7 +1998,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_upcast_message_version() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let msg = Message {
                 id: shortid(),
                 name: "upcast-msg".to_string(),
@@ -2034,7 +2036,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_upcast_package_version() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let package = Package {
                 id: longid(),
                 name: "upcast-pkg".to_string(),
@@ -2080,7 +2082,7 @@ macro_rules! gen_store_tests {
         async fn store_query_order_by_matches_indexed_field_asc() {
             // When order_by field matches an indexed field, the scan direction
             // should be determined by that field's direction (not .first()).
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let pid = longid();
             let tid = shortid();
 
@@ -2132,7 +2134,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_query_order_by_matches_indexed_field_desc() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let pid = longid();
             let tid = shortid();
 
@@ -2186,7 +2188,7 @@ macro_rules! gen_store_tests {
             // When order_by has multiple entries and a non-first one matches
             // an indexed field, the scan direction is taken from the first
             // matching indexed field, not from the first order_by entry.
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let pid = longid();
             let tid = shortid();
 
@@ -2242,7 +2244,7 @@ macro_rules! gen_store_tests {
         async fn store_query_pagination_with_indexed_order_by() {
             // Verify that pagination metadata (count, page sizes) is correct
             // when order_by uses an indexed field.
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let pid = longid();
             let tid = shortid();
 
@@ -2368,7 +2370,7 @@ macro_rules! gen_store_tests {
             // Regression: order_by used to run AFTER pagination, so a page was
             // an arbitrary id-sorted batch re-ordered in isolation. Pages must
             // now be consecutive slices of the globally sorted result.
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let pid = longid();
             let tid = shortid();
             for &status in &[
@@ -2441,7 +2443,7 @@ macro_rules! gen_store_tests {
         async fn store_query_indexed_integer_filter() {
             // Verify that filtering by integer indexed fields works correctly
             // (tests zero-padded index key construction and scan_key matching).
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let pid = longid();
             let tid = shortid();
 
@@ -2560,7 +2562,7 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_between_on_indexed_integer_field() {
             // Between on timestamp (indexed integer field) — inclusive range scan
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let pid = longid();
             let tid = shortid();
 
@@ -2677,7 +2679,7 @@ macro_rules! gen_store_tests {
         async fn store_query_between_on_indexed_string_field() {
             // Between on state (indexed string field on Proc)
             // Use unique state values to avoid collisions with data from other tests
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let workflow = create_workflow();
             let prefix = shortid();
             let states: Vec<String> = vec![
@@ -2717,7 +2719,7 @@ macro_rules! gen_store_tests {
             // Eq on an indexed string must not reach stored values that extend
             // the query value with a hyphen ("-" is KEY_SEP and is escaped in
             // the value encoding)
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let workflow = create_workflow();
             let base = format!("st-{}", shortid());
 
@@ -2751,7 +2753,7 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_in_on_indexed_integer_field() {
             // In on status (indexed integer field on Message)
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let pid = longid();
             let tid = shortid();
 
@@ -2838,7 +2840,7 @@ macro_rules! gen_store_tests {
         async fn store_query_in_on_indexed_string_field() {
             // In on state (indexed string field on Proc)
             // Use unique state values to avoid collisions with data from other tests
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let workflow = create_workflow();
             let prefix = shortid();
             let states = vec![
@@ -2879,7 +2881,7 @@ macro_rules! gen_store_tests {
         async fn store_query_between_on_non_indexed_field() {
             // Between on name (NOT an indexed field) — tests the fallback path
             // that scans all data and filters in-memory via Expr::op()
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let workflow = Workflow::new()
                 .with_id(&shortid())
                 .with_step(|step| step.with_id("step1"));
@@ -2915,7 +2917,7 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_in_on_non_indexed_field() {
             // In on name (NOT an indexed field) — tests fallback path
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let workflow = Workflow::new()
                 .with_id(&shortid())
                 .with_step(|step| step.with_id("step1"));
@@ -2960,7 +2962,7 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_between_with_order_by_desc() {
             // Between on indexed field with descending order
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let pid = longid();
             let tid = shortid();
 
@@ -3008,7 +3010,7 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_in_with_pagination() {
             // In query with pagination — verify page_count, offset, uniqueness
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let pid = longid();
             let tid = shortid();
 
@@ -3095,7 +3097,7 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_between_and_other_cond() {
             // Combine Between with other conditions in AND/OR
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let pid = longid();
             let tid = shortid();
 
@@ -3165,7 +3167,7 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_between_and_in_combined() {
             // Combine Between and In in OR on non-indexed field (name)
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let workflow = create_workflow();
 
             // Create procs with sorted names a1..a5
@@ -3200,7 +3202,7 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_limit_zero_rejected() {
             // limit=0 must be rejected before any scan happens
-            let store = store().await;
+            let Some(store) = store().await else { return; };
 
             let q = Query::new().limit(0);
             let err = store.procs().query(&q).await.unwrap_err();
@@ -3215,7 +3217,7 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_in_empty_rejected() {
             // In with an empty array or a non-array value is rejected on indexed fields
-            let store = store().await;
+            let Some(store) = store().await else { return; };
 
             for value in [json!([]), json!("not-an-array")] {
                 let expr = Expr {
@@ -3238,7 +3240,7 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_between_invalid_rejected() {
             // Between requires an array of exactly two values on indexed fields
-            let store = store().await;
+            let Some(store) = store().await else { return; };
 
             for value in [json!([]), json!([1]), json!("not-an-array")] {
                 let expr = Expr {
@@ -3262,7 +3264,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_query_ne_on_indexed_integer_field() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let pid = longid();
             let tid = shortid();
 
@@ -3323,7 +3325,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_query_ne_on_indexed_string_field() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let workflow = Workflow::new()
                 .with_id(&shortid())
                 .with_step(|step| step.with_id("step1"));
@@ -3361,7 +3363,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_query_ne_on_non_indexed_field() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let workflow = Workflow::new()
                 .with_id(&shortid())
                 .with_step(|step| step.with_id("step1"));
@@ -3396,7 +3398,7 @@ macro_rules! gen_store_tests {
         async fn store_query_single_sided_exact_value_boundary() {
             // Stored values collide with the comparison bound — Gt/Ge/Lt/Le
             // must be exact at `value == bound` on the indexed scan path.
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let pid = longid();
             let tid = shortid();
 
@@ -3498,7 +3500,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_query_gt_on_indexed_integer_field() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let pid = longid();
             let tid = shortid();
 
@@ -3557,7 +3559,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_query_gt_on_non_indexed_field() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let pid = longid();
             let tid = shortid();
 
@@ -3616,7 +3618,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_query_ge_on_indexed_integer_field() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let pid = longid();
             let tid = shortid();
 
@@ -3675,7 +3677,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_query_ge_on_non_indexed_field() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let pid = longid();
             let tid = shortid();
 
@@ -3734,7 +3736,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_query_lt_on_indexed_integer_field() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let pid = longid();
             let tid = shortid();
 
@@ -3793,7 +3795,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_query_lt_on_non_indexed_field() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let pid = longid();
             let tid = shortid();
 
@@ -3852,7 +3854,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_query_le_on_indexed_integer_field() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let pid = longid();
             let tid = shortid();
 
@@ -3910,7 +3912,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_query_le_on_non_indexed_field() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let pid = longid();
             let tid = shortid();
 
@@ -3972,7 +3974,7 @@ macro_rules! gen_store_tests {
             // Match is substring (contains) semantics and is never served by
             // the index prefix scan — it runs the full-data fallback path even
             // when the field is indexed.
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let workflow = Workflow::new()
                 .with_id(&shortid())
                 .with_step(|step| step.with_id("step1"));
@@ -4011,7 +4013,7 @@ macro_rules! gen_store_tests {
         #[serial(store_tests)]
         async fn store_query_match_on_non_indexed_field() {
             // Match on name (non-indexed field) uses contains
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let workflow = Workflow::new()
                 .with_id(&shortid())
                 .with_step(|step| step.with_id("step1"));
@@ -4057,7 +4059,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_query_gt_with_order_by_desc() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let pid = longid();
             let tid = shortid();
 
@@ -4112,7 +4114,7 @@ macro_rules! gen_store_tests {
             // Test that special characters (%, |, \, _) are correctly handled as
             // literals in indexed field queries via the universal encode_key_str
             // mechanism. All four characters are tested on the indexed "state" field.
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let workflow = Workflow::new()
                 .with_id(&shortid())
                 .with_step(|step| step.with_id("step1"));
@@ -4261,7 +4263,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_query_special_chars_on_non_indexed_field() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let workflow = Workflow::new()
                 .with_id(&shortid())
                 .with_step(|step| step.with_id("step1"));
@@ -4369,7 +4371,7 @@ macro_rules! gen_store_tests {
         #[tokio::test(flavor = "multi_thread")]
         #[serial(store_tests)]
         async fn store_query_match_with_special_chars() {
-            let store = store().await;
+            let Some(store) = store().await else { return; };
             let workflow = Workflow::new()
                 .with_id(&shortid())
                 .with_step(|step| step.with_id("step1"));

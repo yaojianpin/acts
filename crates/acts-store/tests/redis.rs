@@ -8,9 +8,9 @@ use std::sync::Arc;
 mod common;
 
 gen_store_tests!(async {
-    Arc::new(Store::new(Arc::new(
+    Some(Arc::new(Store::new(Arc::new(
         RedisStore::open("redis://127.0.0.1:6379").await.unwrap(),
-    )))
+    ))))
 });
 
 #[tokio::test(flavor = "multi_thread")]

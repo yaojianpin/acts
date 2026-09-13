@@ -7,7 +7,11 @@ use std::sync::Arc;
 #[macro_use]
 mod common;
 
-gen_store_tests!(async { Arc::new(Store::new(Arc::new(SledStore::open_in_memory().unwrap()))) });
+gen_store_tests!(async {
+    Some(Arc::new(Store::new(Arc::new(
+        SledStore::open_in_memory().unwrap(),
+    ))))
+});
 
 #[tokio::test]
 async fn sled_scan_uses_eq_value_prefix() {
