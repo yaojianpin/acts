@@ -16,6 +16,6 @@ mod vars;
 
 pub mod model;
 pub use action_result::ActionResult;
-pub use channel::{ActsChannel, ActsOptions};
+pub use channel::{ActsChannel, ActsOptions, Subscription, SubscriptionError};
 pub use utils::create_seq;
 pub use vars::Vars;

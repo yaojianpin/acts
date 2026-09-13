@@ -18,9 +18,20 @@ use acts_channel::{ActsChannel, ActsOptions};
 
 let mut client = ActsChannel::connect("http://127.0.0.1:10080").await?;
 
-client
-    .subscribe("my-client", move |msg| println!("{msg:?}"), &ActsOptions::default())
-    .await;
+let sub = client
+    .subscribe(
+        "my-client",
+        move |msg| println!("{msg:?}"),
+        // faults that do not end the feed: decode failures, failed auto-acks
+        move |err| eprintln!("subscription fault: {err}"),
+        &ActsOptions::default(),
+    )
+    .await?;
+
+// the end of the feed: Ok(()) on a clean close, Err(status) on a failure
+if let Err(err) = sub.wait().await {
+    eprintln!("subscription closed: {err}");
+}
 ```
 
 ### Actions

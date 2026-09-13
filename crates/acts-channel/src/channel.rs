@@ -6,6 +6,7 @@ use crate::{
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::str::FromStr;
+use tokio::sync::oneshot;
 use tokio_stream::StreamExt;
 use tonic::{
     Request, Status,
@@ -39,19 +40,31 @@ impl ActsChannel {
         })
     }
 
-    /// subscribe the server message
-    pub async fn subscribe<F: FnMut(&model::Message) + Send + Sync + 'static>(
+    /// Subscribe to the server messages matching `options`; decoded messages
+    /// are handed to `on_message` in arrival order.
+    ///
+    /// Faults that do not end the subscription — a payload that fails to
+    /// decode, a failed auto-ack — are reported to `on_error`. A failure to
+    /// establish the subscription RPC is returned here, and the end of the
+    /// feed itself is reported by [`Subscription::wait`], so a dropped feed
+    /// never passes unnoticed.
+    pub async fn subscribe<F, E>(
         &mut self,
         client_id: &str,
         on_message: F,
+        on_error: E,
         options: &ActsOptions,
-    ) {
+    ) -> Result<Subscription, Status>
+    where
+        F: FnMut(&model::Message) + Send + Sync + 'static,
+        E: Fn(SubscriptionError) + Send + Sync + 'static,
+    {
         let mut client = self.client.clone();
         if let Some(auto_ack) = options.ack {
             self.auto_ack = auto_ack;
         }
-        self.on_message(&mut client, client_id, on_message, options)
-            .await;
+        self.on_message(&mut client, client_id, on_message, on_error, options)
+            .await
     }
 
     pub async fn deploy(
@@ -127,11 +140,12 @@ impl ActsChannel {
             }))
             .await?;
 
-        let data = resp
+        ret.data = resp
             .into_inner()
             .data
-            .map(|v| serde_json::from_slice(&v).unwrap());
-        ret.data = data;
+            .as_deref()
+            .map(|data| decode_payload::<String>("proc:start", data))
+            .transpose()?;
         ret.end()
     }
 
@@ -173,17 +187,24 @@ impl ActsChannel {
         ret.data = resp
             .into_inner()
             .data
-            .map(|v| serde_json::from_slice(&v).unwrap());
+            .as_deref()
+            .map(|data| decode_payload::<T>(name, data))
+            .transpose()?;
         ret.end()
     }
 
-    async fn on_message(
+    async fn on_message<F, E>(
         &self,
         client: &mut ActsServiceClient<Channel>,
         client_id: &str,
-        mut handle: impl FnMut(&model::Message) + Send + Sync + 'static,
+        mut handle: F,
+        on_error: E,
         options: &ActsOptions,
-    ) {
+    ) -> Result<Subscription, Status>
+    where
+        F: FnMut(&model::Message) + Send + Sync + 'static,
+        E: Fn(SubscriptionError) + Send + Sync + 'static,
+    {
         let request = tonic::Request::new(MessageOptions {
             client_id: client_id.to_string(),
             r#type: options.r#type.as_deref().unwrap_or("*").to_string(),
@@ -191,32 +212,50 @@ impl ActsChannel {
             options: options.options.clone(),
             uses: options.uses.as_deref().unwrap_or("*").to_string(),
         });
-        let mut stream = client.on_message(request).await.unwrap().into_inner();
+        // a failed handshake is the caller's error; the stream itself is read
+        // by a task that reports every fault and its end
+        let mut stream = client.on_message(request).await?.into_inner();
         let chan = self.clone();
         let auto_ack = self.auto_ack;
+        let (closed_tx, closed) = oneshot::channel();
         tokio::spawn(async move {
-            let mut chan = chan.clone();
+            let mut chan = chan;
+            let mut end = Ok(());
             while let Some(item) = stream.next().await {
-                if let Ok(m) = item {
-                    let message = serde_json::from_slice(m.data()).unwrap();
-                    let seq = &m.seq;
-
-                    if auto_ack {
-                        // auto ack the message
-                        match chan.ack(seq).await {
-                            Ok(_) => {
-                                handle(&message);
-                            }
-                            Err(err) => {
-                                println!("on_message err:{:?}", err);
-                            }
-                        }
-                    } else {
-                        handle(&message);
+                let raw = match item {
+                    Ok(m) => m,
+                    // a stream status ends the feed: reported by `wait`
+                    Err(status) => {
+                        end = Err(status);
+                        break;
                     }
+                };
+                let message = match decode_payload::<model::Message>("on_message", raw.data()) {
+                    Ok(message) => message,
+                    Err(err) => {
+                        // a corrupt payload must not end the feed; the message
+                        // stays unacked so the server may redeliver it
+                        on_error(SubscriptionError::Decode {
+                            seq: raw.seq.clone(),
+                            source: err.message().to_string(),
+                        });
+                        continue;
+                    }
+                };
+
+                if auto_ack && let Err(err) = chan.ack(&raw.seq).await {
+                    on_error(SubscriptionError::Ack {
+                        seq: raw.seq.clone(),
+                        source: err,
+                    });
+                    continue;
                 }
+                handle(&message);
             }
+            // the receiver is gone when the caller dropped its handle
+            closed_tx.send(end).ok();
         });
+        Ok(Subscription { closed })
     }
 
     pub async fn complete<T>(
@@ -362,4 +401,62 @@ impl ActsChannel {
         )
         .await
     }
+}
+
+/// A fault of a running subscription that does not end its feed.
+///
+/// Reported to the `on_error` callback of [`ActsChannel::subscribe`]; the end
+/// of the feed itself is reported by [`Subscription::wait`].
+#[derive(Debug, Clone)]
+pub enum SubscriptionError {
+    /// A message payload could not be decoded. The message is skipped and left
+    /// unacked, so the server may redeliver it.
+    Decode { seq: String, source: String },
+    /// Acking a message failed. The message was not handed to the message
+    /// callback.
+    Ack { seq: String, source: Status },
+}
+
+impl std::fmt::Display for SubscriptionError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Decode { seq, source } => {
+                write!(f, "message '{seq}' skipped: invalid payload: {source}")
+            }
+            Self::Ack { seq, source } => write!(f, "message '{seq}' dropped: ack failed: {source}"),
+        }
+    }
+}
+
+impl std::error::Error for SubscriptionError {}
+
+/// Handle of a subscription started by [`ActsChannel::subscribe`].
+///
+/// The feed runs on its own task; [`wait`](Self::wait) reports its end, so a
+/// dead subscription cannot pass unnoticed. Dropping the handle leaves the
+/// feed running until the server closes it (or the engine unsubscribes it).
+#[derive(Debug)]
+pub struct Subscription {
+    closed: oneshot::Receiver<Result<(), Status>>,
+}
+
+impl Subscription {
+    /// Wait until the subscription ends: `Ok(())` when the server closed the
+    /// stream, `Err(status)` when the stream or the connection failed.
+    pub async fn wait(self) -> Result<(), Status> {
+        match self.closed.await {
+            Ok(end) => end,
+            // the feed task was dropped before it could report its end
+            Err(_) => Err(Status::cancelled(
+                "subscription task ended without a status",
+            )),
+        }
+    }
+}
+
+/// Decode a message payload, mapping a malformed body to a `Status` instead of
+/// panicking the client.
+fn decode_payload<T: DeserializeOwned>(action: &str, data: &[u8]) -> Result<T, Status> {
+    serde_json::from_slice(data)
+        .map_err(|err| Status::internal(format!("{action}: invalid response payload: {err}")))
 }

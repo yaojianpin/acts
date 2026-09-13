@@ -7,28 +7,32 @@ Subscribe to workflow messages via the client channel.
 ```rust
 use acts_channel::{ActsChannel, ActsOptions};
 
-let mut client = ActsChannel::connect("http://localhost:8080");
-client.connect().await?;
+let mut client = ActsChannel::connect("http://127.0.0.1:10080").await?;
 
-client.subscribe("my_client", "act*", None, None).await?;
-
-// Subscribe to messages with a specific value
-// options supports glob patterns, e.g. "act*" matches all message starting with "act"
+// ActsOptions fields support glob patterns, e.g. "act*" matches every message
+// starting with "act"
 let options = ActsOptions {
-    tag: "your tag",
-    state: "{created,completed}"
-    r#type: "act*"
-    ..ChannelOptions::default()
+    state: Some("{created,completed}".to_string()),
+    r#type: Some("act*".to_string()),
+    ..ActsOptions::default()
 };
-client
+
+let sub = client
     .subscribe(
         "client-1",
         move |message| {
             println!("{message:?}");
         },
+        // faults that do not end the feed: decode failures, failed auto-acks
+        move |err| eprintln!("subscription fault: {err}"),
         &options,
     )
-    .await;
+    .await?;
+
+// the end of the feed: Ok(()) on a clean close, Err(status) on a failure
+if let Err(err) = sub.wait().await {
+    eprintln!("subscription closed: {err}");
+}
 ```
 
 

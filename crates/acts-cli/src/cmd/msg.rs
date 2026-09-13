@@ -257,20 +257,20 @@ async fn sub(
     ack: &bool,
     options: &[(String, String)],
 ) -> Result<String, String> {
-    let ret = String::new();
-
     let default_value = "*".to_string();
     // * means to sub all messages
     let r#type = r#type.as_ref().unwrap_or(&default_value);
     let state = state.as_ref().unwrap_or(&default_value);
     let uses = uses.as_ref().unwrap_or(&default_value);
-    parent
+    let sub = parent
         .client
         .subscribe(
             client_id,
-            |m| {
-                println!("[message]: {}", serde_json::to_string(&m).unwrap());
+            |m| match serde_json::to_string(&m) {
+                Ok(text) => println!("[message]: {text}"),
+                Err(err) => eprintln!("[subscription] message print failed: {err}"),
             },
+            |err| eprintln!("[subscription] {err}"),
             &ActsOptions {
                 r#type: Some(r#type.to_string()),
                 state: Some(state.to_string()),
@@ -279,9 +279,18 @@ async fn sub(
                 ack: Some(*ack),
             },
         )
-        .await;
+        .await
+        .map_err(|err| err.message().to_string())?;
 
-    Ok(ret)
+    // the feed runs in the background: its end must stay visible
+    tokio::spawn(async move {
+        match sub.wait().await {
+            Ok(()) => eprintln!("[subscription] closed by the server"),
+            Err(err) => eprintln!("[subscription] closed: {err}"),
+        }
+    });
+
+    Ok(format!("subscribed server messages as '{client_id}'"))
 }
 
 pub async fn unsub(parent: &mut Command<'_>, client_id: &str) -> Result<String, String> {

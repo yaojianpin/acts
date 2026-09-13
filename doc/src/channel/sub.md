@@ -7,29 +7,32 @@
 ```rust
 use acts_channel::{ActsChannel, ActsOptions};
 
-let mut client = ActsChannel::connect("http://localhost:8080");
-client.connect().await?;
+let mut client = ActsChannel::connect("http://127.0.0.1:10080").await?;
 
-// 订阅指定 key 的消息
-client.subscribe("my_client", "act*", None, None).await?;
-
-// ActsOptions里的属性支持 glob 模式，如 "act*" 匹配所有以 act 开头的
+// ActsOptions 的属性支持 glob 模式，如 "act*" 匹配所有以 act 开头的消息
 let options = ActsOptions {
-    tag: "your tag",
-    state: "{created,completed}"
-    r#type: "act*"
+    state: Some("{created,completed}".to_string()),
+    r#type: Some("act*".to_string()),
     // 其他配置
-    ..ChannelOptions::default()
+    ..ActsOptions::default()
 };
-client
+
+let sub = client
     .subscribe(
         "client-1",
         move |message| {
             println!("{message:?}");
         },
+        // 不结束订阅的故障：负载解码失败、自动 ack 失败
+        move |err| eprintln!("subscription fault: {err}"),
         &options,
     )
-    .await;
+    .await?;
+
+// 订阅结束：服务端正常关闭为 Ok(())，流或连接失败为 Err(status)
+if let Err(err) = sub.wait().await {
+    eprintln!("subscription closed: {err}");
+}
 ```
 
 
