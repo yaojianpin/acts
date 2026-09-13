@@ -76,6 +76,7 @@ async fn acts_server_handles_nats_snapshot_actions() {
             nats: true,
         },
     )
+    .unwrap()
     .start()
     .await
     .unwrap();

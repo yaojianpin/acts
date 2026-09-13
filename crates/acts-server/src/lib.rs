@@ -404,16 +404,18 @@ where
 /// reach a broker. `[[snapshot]]` targets declared in the config are
 /// pre-registered with [`acts::EngineBuilder::add_snapshot`] so the
 /// scheduler seals their values under the configured policy/scope.
+///
+/// A malformed `snapshot` section (for example a scalar where the
+/// `[[snapshot]]` array of tables is expected) is reported as an error so
+/// the server fails its startup instead of panicking.
 pub fn engine_builder(
     config: &Config,
     store: Arc<dyn KvStore>,
     plugins: &ServerPlugins,
-) -> EngineBuilder {
+) -> acts::Result<EngineBuilder> {
     let mut builder = Engine::builder().set_config(config).set_store(store);
     if config.has("snapshot") {
-        let targets = config
-            .get::<Vec<SnapshotConfig>>("snapshot")
-            .expect("config 'snapshot' must be a [[snapshot]] array of target tables");
+        let targets = config.get::<Vec<SnapshotConfig>>("snapshot")?;
         for target in &targets {
             builder = builder.add_snapshot(&target.name, target.clone().into());
         }
@@ -432,7 +434,7 @@ pub fn engine_builder(
     if plugins.nats && config.has("nats") {
         builder = builder.add_plugin(&acts_plugin_nats::NatsPlugin::new());
     }
-    builder
+    Ok(builder)
 }
 
 #[cfg(test)]
@@ -480,8 +482,7 @@ ttl = "5m"
         let config = Config::create(&path).unwrap();
 
         // engine_builder accepts a [[snapshot]] config and pre-registers the
-        // targets through EngineBuilder::add_snapshot (a parse or mapping
-        // error would panic here).
+        // targets through EngineBuilder::add_snapshot.
         engine_builder(
             &config,
             Arc::new(MemoryStore::new()),
@@ -490,7 +491,8 @@ ttl = "5m"
                 web: false,
                 nats: false,
             },
-        );
+        )
+        .unwrap();
 
         // parsed entries translate 1:1 into snapshot registration options
         let targets = config.get::<Vec<SnapshotConfig>>("snapshot").unwrap();
@@ -511,6 +513,38 @@ ttl = "5m"
 
         std::fs::remove_file(&path).ok();
         std::fs::remove_dir(&dir).ok();
+    }
+
+    #[test]
+    fn malformed_snapshot_config_fails_engine_build_without_panicking() {
+        // `snapshot` present but not a [[snapshot]] array of tables: the
+        // build must surface the config error instead of panicking, so a
+        // deployment typo becomes a diagnosable startup failure.
+        for body in [
+            "snapshot = \"bad\"\n",
+            "snapshot = 3\n",
+            "[snapshot]\nname = \"p\"\n",
+        ] {
+            let (dir, path) = write_config(body);
+            let config = Config::create(&path).unwrap();
+
+            let err = engine_builder(
+                &config,
+                Arc::new(MemoryStore::new()),
+                &ServerPlugins::default(),
+            )
+            .err()
+            .unwrap_or_else(|| panic!("config {body:?} must fail engine construction"));
+            let text = err.to_string();
+            assert!(
+                text.contains("snapshot"),
+                "error for {body:?} should name the offending key: {text}"
+            );
+            assert!(matches!(err, acts::ActError::Config(_)), "{err:?}");
+
+            std::fs::remove_file(&path).ok();
+            std::fs::remove_dir(&dir).ok();
+        }
     }
 
     #[test]
