@@ -205,7 +205,12 @@ impl Query {
     pub fn new() -> Self {
         Query {
             offset: 0,
-            limit: 100000, // default to a big number
+            // A page size, not a completeness bound: `query` answers at most
+            // this many rows, so a caller that must see every match
+            // (recovery, cleanup, reconciliation) reads through
+            // `KvCollection::query_all` instead of relying on this being
+            // large enough.
+            limit: 100000,
             order_by: Vec::new(),
             filter: None,
         }

@@ -223,14 +223,12 @@ impl Store {
         use crate::utils::consts;
 
         let events = KvCollection::<data::Event>::new(StoreIden::Events.as_ref(), self.kv.clone());
+        // Exhaustive: the reconciliation drops every stored trigger row the
+        // model no longer declares, so a row past a page limit would survive
+        // as a stale trigger of a removed declaration.
         let existing = events
-            .query(
-                &Query::new()
-                    .limit(1000)
-                    .filter(Filter::and().expr(Expr::eq(consts::MODEL_ID, mid))),
-            )
-            .await?
-            .rows;
+            .query_all(&Query::new().filter(Filter::and().expr(Expr::eq(consts::MODEL_ID, mid))))
+            .await?;
 
         // Every trigger row this reconciliation reads (the declared ones and
         // the stale ones it drops) is written by the caller's batch: lock them
@@ -302,7 +300,7 @@ impl Store {
     /// rows (or a half-cleared event set) behind. Removing an absent model is
     /// a no-op that still returns `true`.
     pub async fn rm_model(&self, id: &str) -> Result<bool> {
-        use super::query::{Expr, Filter, Query};
+        use super::query::{Expr, Filter};
         use crate::utils::consts;
 
         let models = KvCollection::<Model>::new(StoreIden::Models.as_ref(), self.kv.clone());
@@ -314,17 +312,18 @@ impl Store {
         // while that lock is held — a concurrent deploy of the same model
         // cannot add a row in between.
         let mut locks = lock_docs([models.data_key(id)]).await;
-        let rows = events
-            .query(&Query::new().filter(Filter::and().expr(Expr::eq(consts::MODEL_ID, id))))
-            .await?
-            .rows;
+        // Exhaustive ids: a trigger row past a page limit would outlive its
+        // model as an orphan.
+        let row_ids = events
+            .matching_ids(Some(&Filter::and().expr(Expr::eq(consts::MODEL_ID, id))))
+            .await?;
         locks
-            .lock_more(rows.iter().map(|row| events.data_key(&row.id)))
+            .lock_more(row_ids.iter().map(|row_id| events.data_key(row_id)))
             .await;
 
         let mut ops = Vec::new();
-        for row in rows {
-            ops.extend(events.delete_ops(&row.id).await?);
+        for row_id in &row_ids {
+            ops.extend(events.delete_ops(row_id).await?);
         }
         ops.extend(models.delete_ops(id).await?);
         self.kv.batch(&ops).await?;
@@ -340,7 +339,7 @@ impl Store {
     /// that would be retried forever after the process is gone. Removing an
     /// absent process is a no-op that still returns `true`.
     pub(crate) async fn remove_proc_rows(&self, pid: &str) -> Result<bool> {
-        use super::query::{Expr, Filter, Query};
+        use super::query::{Expr, Filter};
 
         let procs = KvCollection::<data::Proc>::new(StoreIden::Procs.as_ref(), self.kv.clone());
         let tasks = KvCollection::<data::Task>::new(StoreIden::Tasks.as_ref(), self.kv.clone());
@@ -357,42 +356,16 @@ impl Store {
         // applied. Rows appearing after the queries are not part of this
         // removal — the writer orders it after the process's own writes and
         // the cache has evicted the process by then.
-        let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", pid.to_string())));
-        let vars_ids: Vec<String> = vars
-            .query(&q)
-            .await?
-            .rows
-            .into_iter()
-            .map(|r| r.id)
-            .collect();
-        let task_ids: Vec<String> = tasks
-            .query(&q)
-            .await?
-            .rows
-            .into_iter()
-            .map(|r| r.id)
-            .collect();
-        let op_ids: Vec<String> = ops
-            .query(&q)
-            .await?
-            .rows
-            .into_iter()
-            .map(|r| r.id)
-            .collect();
-        let msg_ids: Vec<String> = messages
-            .query(&q)
-            .await?
-            .rows
-            .into_iter()
-            .map(|r| r.id)
-            .collect();
-        let dlv_ids: Vec<String> = deliveries
-            .query(&q)
-            .await?
-            .rows
-            .into_iter()
-            .map(|r| r.id)
-            .collect();
+        //
+        // The ids are exhaustive: a row past a page limit would survive the
+        // removal as an orphan that resurrects the process or keeps retrying
+        // its delivery.
+        let filter = Filter::and().expr(Expr::eq("pid", pid.to_string()));
+        let vars_ids = vars.matching_ids(Some(&filter)).await?;
+        let task_ids = tasks.matching_ids(Some(&filter)).await?;
+        let op_ids = ops.matching_ids(Some(&filter)).await?;
+        let msg_ids = messages.matching_ids(Some(&filter)).await?;
+        let dlv_ids = deliveries.matching_ids(Some(&filter)).await?;
         let _locks = lock_docs(
             vars_ids
                 .iter()
@@ -463,16 +436,19 @@ impl Store {
     /// is deletable.
     async fn has_unsettled_deliveries(&self, pid: &str) -> Result<bool> {
         use super::query::{Expr, Filter, Query};
+        // Exhaustive: a delivery past a page limit would be invisible to a
+        // page read, and an unsettled row that is invisible lets the sweeper
+        // delete a process whose delivery was still open. Read in small
+        // batches and stop at the first unsettled row, so the ack path does
+        // not read every delivery of the process.
         let q = Query::new()
-            .limit(500)
+            .limit(512)
             .filter(Filter::and().expr(Expr::eq("pid", pid.to_string())));
         Ok(self
             .deliveries()
-            .query(&q)
+            .find_matching(&q, &|d| d.status != DeliveryStatus::Completed)
             .await?
-            .rows
-            .iter()
-            .any(|d| d.status != DeliveryStatus::Completed))
+            .is_some())
     }
 
     /// The sweeper pass over finished processes. Deletion is decided ONLY by
@@ -1108,5 +1084,91 @@ mod tests {
         let rows = store.tasks().query(&q).await.unwrap().rows;
         assert_eq!(rows.len(), 1, "root task row must exist with the proc row");
         assert_eq!(rows[0].tid, "$", "the single row is the root task");
+    }
+
+    /// Recovery and cleanup must see every row of a match set larger than one
+    /// `Query::new()` page: a truncated crash-replay read silently drops
+    /// outbox records, and a truncated removal leaves task/vars/outbox rows
+    /// (with their index rows) behind as orphans. The set below crosses the
+    /// 100000 page limit, so a limit-capped read or delete fails the count
+    /// assertions.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn recovery_and_removal_are_exhaustive_past_one_query_page() {
+        use super::{KvCollection, StoreIden};
+        use crate::store::data::{Op, OpStatus};
+
+        let (kv, store) = counting_store();
+        let pid = "p-huge";
+        let total = 100_001usize;
+        let ops = KvCollection::<Op>::new(StoreIden::Ops.as_ref(), kv.clone());
+        let now = crate::utils::time::time_millis();
+        // Write the seed rows in batches (`create_ops` is exactly what a
+        // `create` of an absent id applies): 100001 per-row `create` calls
+        // would spend most of the test in store round trips.
+        let mut pending = Vec::new();
+        for i in 0..total {
+            pending.extend(
+                ops.create_ops(&Op {
+                    id: format!("{pid}op{i}"),
+                    pid: pid.to_string(),
+                    tid: "t1".to_string(),
+                    r#type: "next".to_string(),
+                    status: OpStatus::Pending.as_ref().to_string(),
+                    event: None,
+                    options: None,
+                    create_time: now,
+                    update_time: now,
+                    v: 0,
+                })
+                .unwrap(),
+            );
+            if pending.len() >= 4096 * 4 {
+                kv.batch(&pending).await.unwrap();
+                pending.clear();
+            }
+        }
+        if !pending.is_empty() {
+            kv.batch(&pending).await.unwrap();
+        }
+
+        let filter = Filter::and().expr(Expr::eq("pid", pid.to_string()));
+        // the premise: a page read stops at the limit, so an implementation
+        // that used `query` here would lose rows
+        let page = store
+            .ops()
+            .query(&Query::new().filter(filter.clone()))
+            .await
+            .unwrap();
+        assert_eq!(page.count, total);
+        assert_eq!(
+            page.rows.len(),
+            100_000,
+            "the page limit must bound `query`"
+        );
+
+        // the replay set is the whole set, not one page of it
+        assert_eq!(
+            store.load_pending_ops().await.unwrap().len(),
+            total,
+            "crash recovery must replay every pending outbox record"
+        );
+
+        // and the removal deletes all of them: no data row and no index row
+        // of the process may survive
+        assert!(store.remove_proc_rows(pid).await.unwrap());
+        assert!(
+            store.ops().matching_ids(None).await.unwrap().is_empty(),
+            "every outbox row must be removed"
+        );
+        assert_eq!(
+            store
+                .ops()
+                .query(&Query::new().filter(filter))
+                .await
+                .unwrap()
+                .count,
+            0,
+            "no index row of a removed outbox row may survive"
+        );
     }
 }

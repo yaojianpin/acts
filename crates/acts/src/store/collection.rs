@@ -200,6 +200,34 @@ impl<T> KvCollection<T> {
         Ok(docs)
     }
 
+    /// The ids matching `filter` — every id of the collection when `None` —
+    /// as a set.
+    ///
+    /// `order_by` only selects the scan direction of the index path (see
+    /// `expr_ids`); the resulting set is the same either way.
+    async fn filter_id_set(
+        &self,
+        filter: Option<&Filter>,
+        order_by: &[OrderBy],
+    ) -> Result<HashSet<String>>
+    where
+        T: DbCollectionIden,
+    {
+        match filter {
+            Some(filter) => self.filter_ids(filter, T::indexed_fields(), order_by).await,
+            None => {
+                // No filter — scan all data entries to collect all IDs
+                let scan_key = self.data_prefix();
+                let options = ScanOptions::new(ScanOperation::Eq, scan_key.clone(), false);
+                let entries = self.kv.scan_prefix(&scan_key, options).await?;
+                Ok(entries
+                    .iter()
+                    .filter_map(|(key, _)| key.strip_prefix(&scan_key).map(str::to_string))
+                    .collect())
+            }
+        }
+    }
+
     /// The mutations of an insert: the data row and the index rows of `data`,
     /// with no cleanup of a stored version. Only valid when the document is
     /// known to be absent — a row already stored under the same id would keep
@@ -891,18 +919,9 @@ where
         let indexed = T::indexed_fields();
 
         // Step 1 & 2: Compute matching ID set from filter and combine with AND/OR
-        let id_set: HashSet<String> = if let Some(filter) = &q.filter {
-            self.filter_ids(filter, indexed, q.get_order_by()).await?
-        } else {
-            // No filter — scan all data entries to collect all IDs
-            let scan_key = self.data_prefix();
-            let options = ScanOptions::new(ScanOperation::Eq, scan_key.clone(), false);
-            let entries = self.kv.scan_prefix(&scan_key, options).await?;
-            entries
-                .iter()
-                .filter_map(|(key, _)| key.strip_prefix(&scan_key).map(str::to_string))
-                .collect()
-        };
+        let id_set = self
+            .filter_id_set(q.filter.as_ref(), q.get_order_by())
+            .await?;
 
         let count = id_set.len();
 
@@ -1002,6 +1021,43 @@ where
         let ops = self.delete_ops(id).await?;
         self.kv.batch(&ops).await?;
         Ok(true)
+    }
+
+    async fn query_all(&self, q: &Query) -> crate::Result<Vec<Self::Item>> {
+        let ids = self.matching_ids(q.filter.as_ref()).await?;
+        // `q.limit` sizes one document read (`mget`) batch here, never the
+        // result: this is the exhaustive read.
+        let mut docs = Vec::with_capacity(ids.len());
+        for page in ids.chunks(q.limit.max(1)) {
+            docs.extend(self.read_json_many(page).await?);
+        }
+        if !q.order_by.is_empty() {
+            docs.sort_by(|a, b| cmp_order_docs(a, b, &q.order_by));
+        }
+        docs.into_iter().map(T::upcast).collect()
+    }
+
+    async fn matching_ids(&self, filter: Option<&Filter>) -> crate::Result<Vec<String>> {
+        let mut ids: Vec<String> = self.filter_id_set(filter, &[]).await?.into_iter().collect();
+        ids.sort();
+        Ok(ids)
+    }
+
+    async fn find_matching(
+        &self,
+        q: &Query,
+        pred: &(dyn for<'a> Fn(&'a Self::Item) -> bool + Sync),
+    ) -> crate::Result<Option<Self::Item>> {
+        let ids = self.matching_ids(q.filter.as_ref()).await?;
+        for page in ids.chunks(q.limit.max(1)) {
+            for json in self.read_json_many(page).await? {
+                let row = T::upcast(json)?;
+                if pred(&row) {
+                    return Ok(Some(row));
+                }
+            }
+        }
+        Ok(None)
     }
 }
 
@@ -2041,6 +2097,69 @@ mod tests {
             0
         );
         assert_eq!(col.find("d1").await.unwrap().timestamp, 9);
+    }
+
+    /// `query_all` is the exhaustive read: `query` bounds its rows by the page
+    /// size while `count` still reports the whole match set, so any recovery
+    /// or cleanup path that reads rows must go through `query_all`.
+    #[tokio::test]
+    async fn query_all_reads_past_the_page_limit_in_order() {
+        let (_kv, col) = counting_col();
+        for (id, ts) in [("d2", 2i64), ("d1", 1), ("d3", 3)] {
+            col.create(&doc(id, "idle", ts)).await.unwrap();
+        }
+
+        let page = col
+            .query(&Query::new().limit(1).order("timestamp", Sort::Asc))
+            .await
+            .unwrap();
+        assert_eq!(
+            (page.count, ids(&page).len()),
+            (3, 1),
+            "one page, three matches"
+        );
+
+        let all = col
+            .query_all(&Query::new().limit(1).order("timestamp", Sort::Asc))
+            .await
+            .unwrap();
+        assert_eq!(
+            all.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(),
+            vec!["d1", "d2", "d3"],
+            "query_all must return every match in order_by order"
+        );
+
+        let all = col.query_all(&Query::new().limit(2)).await.unwrap();
+        assert_eq!(
+            all.iter().map(|d| d.id.as_str()).collect::<Vec<_>>(),
+            vec!["d1", "d2", "d3"],
+            "without order_by, an exhaustive read is id-ascending"
+        );
+    }
+
+    /// `delete_all` must remove every matching row together with its index
+    /// rows — a limit-capped cleanup leaves orphan rows that keep answering
+    /// queries for documents that are gone.
+    #[tokio::test]
+    async fn delete_all_removes_every_match_and_its_index_rows() {
+        let (_kv, col) = counting_col();
+        let col = Arc::new(col);
+        for (id, state) in [("d1", "idle"), ("d2", "gone"), ("d3", "gone")] {
+            col.create(&doc(id, state, 1)).await.unwrap();
+        }
+
+        col.delete_all(Some(&Filter::and().expr(Expr::eq("state", "gone"))))
+            .await
+            .unwrap();
+
+        assert_eq!(
+            ids_of(&col, "state", json!("gone")).await,
+            Vec::<String>::new()
+        );
+        assert_eq!(ids_of(&col, "state", json!("idle")).await, vec!["d1"]);
+        assert_eq!(ids_of(&col, "timestamp", json!(1)).await, vec!["d1"]);
+        assert!(col.find("d2").await.is_err());
+        assert!(col.find("d3").await.is_err());
     }
 
     #[tokio::test]

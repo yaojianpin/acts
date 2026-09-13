@@ -576,11 +576,14 @@ impl Cache {
                     .expr(Expr::eq("state", TaskState::Pending.to_string())),
             )
             .order("timestamp", Sort::Asc);
-        let page = self.store.procs().query(&query).await?;
+        // Exhaustive: a row past a page limit would never be queued, and this
+        // queue is the only path that brings a non-resident in-flight process
+        // back — the row would sit in the store forever.
+        let rows = self.store.procs().query_all(&query).await?;
         let mut queued = 0usize;
         {
             let mut q = self.pending_resume.write();
-            for row in page.rows {
+            for row in rows {
                 // `push_back` dedups: a pid an earlier scan already queued is
                 // left in place rather than pushed again.
                 if !resident.contains(&row.id) && q.push_back(row.id.clone()) {

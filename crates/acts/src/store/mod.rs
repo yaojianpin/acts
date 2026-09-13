@@ -208,12 +208,53 @@ pub trait KvStore: Send + Sync {
 /// per document, so any combination of `create`/`update`/`delete` racing on
 /// one id leaves the index rows describing the document that ends up stored —
 /// never a query result the data row does not back.
+///
+/// [`DbCollection::query`] answers one page; recovery, cleanup and
+/// reconciliation read whole match sets through
+/// [`DbCollection::query_all`]/[`DbCollection::matching_ids`]/
+/// [`DbCollection::delete_all`], which no page size can silently truncate.
 #[async_trait::async_trait]
 pub trait DbCollection: Send + Sync {
     type Item;
     async fn exists(&self, id: &str) -> Result<bool>;
     async fn find(&self, id: &str) -> Result<Self::Item>;
+    /// One page of the matching documents — at most `query.limit` rows;
+    /// `count` reports how many rows match in total.
     async fn query(&self, query: &Query) -> Result<PageData<Self::Item>>;
+    /// Every row matching `query.filter`, in `query.order_by` order (id order
+    /// when it is unset) — the exhaustive counterpart of
+    /// [`DbCollection::query`], whose rows stop at `query.limit`.
+    ///
+    /// `query.limit` sizes one document read batch, never the result;
+    /// `query.offset` is not applied (an exhaustive read has no page to skip
+    /// to).
+    async fn query_all(&self, query: &Query) -> Result<Vec<Self::Item>>;
+    /// Every id matching `filter` (`None` = every id of the collection),
+    /// ascending — a delete of the whole match set reads its ids through
+    /// here, never through a limited [`DbCollection::query`].
+    async fn matching_ids(&self, filter: Option<&Filter>) -> Result<Vec<String>>;
+    /// Delete every row matching `filter` (`None` = every row of the
+    /// collection). Each row commits on its own — its index rows and its data
+    /// row as one batch — so a failure mid-way leaves the remaining rows to
+    /// the next pass rather than a row without its indexes.
+    async fn delete_all(&self, filter: Option<&Filter>) -> Result<()> {
+        for id in self.matching_ids(filter).await? {
+            self.delete(&id).await?;
+        }
+        Ok(())
+    }
+    /// The first row matching `query.filter` for which `pred` holds, reading
+    /// row bodies in `query.limit`-sized batches and stopping at the first
+    /// hit — an existence test over a match set that may exceed one page.
+    ///
+    /// [`DbCollection::query`] could miss the row beyond its page, and
+    /// [`DbCollection::query_all`] would materialize every row of the set;
+    /// `query.limit` bounds the rows read at once here, not the search.
+    async fn find_matching(
+        &self,
+        query: &Query,
+        pred: &(dyn for<'a> Fn(&'a Self::Item) -> bool + Sync),
+    ) -> Result<Option<Self::Item>>;
     /// Write `data` as the document of its id, replacing any stored document
     /// together with the index rows it no longer matches.
     async fn create(&self, data: &Self::Item) -> Result<bool>;

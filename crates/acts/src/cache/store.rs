@@ -223,9 +223,8 @@ impl Store {
                 .expr(Expr::eq("pid", pid.to_string()))
                 .expr(Expr::eq("tid", tid.to_string())),
         );
-        let existing = collection.query(&q).await?;
+        let existing = collection.query_all(&q).await?;
         if existing
-            .rows
             .iter()
             .any(|op| op.r#type == r#type.as_ref() && op.status == data::OpStatus::Pending.as_ref())
         {
@@ -250,7 +249,9 @@ impl Store {
     }
 
     /// Load every outbox record that was not durably completed — the crash
-    /// replay set. Order is stable across restarts (creation time).
+    /// replay set. Read exhaustively — the engine replays exactly what this
+    /// returns, so a page limit must never drop a record (id order, which is
+    /// stable across restarts).
     pub async fn load_pending_ops(&self) -> Result<Vec<data::Op>> {
         let q = Query::new().filter(Filter::and().expr(Expr::r#in(
             "status",
@@ -260,7 +261,7 @@ impl Store {
                 data::OpStatus::Overflow.as_ref(),
             ],
         )));
-        Ok(self.ops().query(&q).await?.rows)
+        self.ops().query_all(&q).await
     }
 
     /// Mark a record as handed to the in-memory scheduler. Boot recovery still
@@ -272,7 +273,7 @@ impl Store {
                 .expr(Expr::eq("pid", pid.to_string()))
                 .expr(Expr::eq("tid", tid.to_string())),
         );
-        for mut op in collection.query(&q).await?.rows {
+        for mut op in collection.query_all(&q).await? {
             if op.r#type == r#type
                 && (op.status == data::OpStatus::Pending.as_ref()
                     || op.status == data::OpStatus::Overflow.as_ref())
@@ -301,9 +302,8 @@ impl Store {
         let now = utils::time::time_millis();
         Ok(self
             .ops()
-            .query(&q)
+            .query_all(&q)
             .await?
-            .rows
             .into_iter()
             .filter(|op| now - op.create_time >= older_than_millis)
             .collect())
@@ -323,7 +323,7 @@ impl Store {
                 .expr(Expr::eq("pid", pid.to_string()))
                 .expr(Expr::eq("tid", tid.to_string())),
         );
-        for mut op in collection.query(&q).await?.rows {
+        for mut op in collection.query_all(&q).await? {
             if op.r#type == r#type
                 && (op.status == data::OpStatus::Pending.as_ref()
                     || op.status == data::OpStatus::Dispatched.as_ref()
@@ -346,7 +346,7 @@ impl Store {
                 .expr(Expr::eq("pid", pid.to_string()))
                 .expr(Expr::eq("tid", tid.to_string())),
         );
-        for mut op in collection.query(&q).await?.rows {
+        for mut op in collection.query_all(&q).await? {
             if op.r#type == r#type && op.status == data::OpStatus::Pending.as_ref() {
                 op.status = data::OpStatus::Overflow.as_ref().to_string();
                 op.update_time = utils::time::time_millis();
@@ -358,12 +358,11 @@ impl Store {
 
     /// Drop every outbox record of a process (used when the process is removed).
     pub async fn remove_ops(&self, pid: &str) -> Result<()> {
-        let collection = self.ops();
-        let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", pid.to_string())));
-        for op in collection.query(&q).await?.rows {
-            collection.delete(&op.id).await?;
-        }
-        Ok(())
+        // Exhaustive: the ids come from the complete match set, so no outbox
+        // row (or index row) of the process is left behind as an orphan.
+        self.ops()
+            .delete_all(Some(&Filter::and().expr(Expr::eq("pid", pid.to_string()))))
+            .await
     }
 
     /// Advance a stored delivery from `Created` to `Delivered` — the channel
@@ -423,8 +422,8 @@ impl Store {
                 .expr(Expr::eq("tid", tid.to_string())),
         );
         let collection = self.deliveries();
-        if let Ok(deliveries) = collection.query(&q).await {
-            for m in deliveries.rows.iter() {
+        if let Ok(deliveries) = collection.query_all(&q).await {
+            for m in deliveries.iter() {
                 let mut m = m.clone();
                 m.status = status;
                 m.update_time = utils::time::time_millis();
@@ -489,8 +488,8 @@ impl Store {
     pub async fn resend_error_deliveries(&self) -> Result<()> {
         let collection = self.deliveries();
         let q = Query::new().filter(Filter::and().expr(Expr::eq("status", DeliveryStatus::Error)));
-        if let Ok(deliveries) = collection.query(&q).await {
-            for m in deliveries.rows.iter() {
+        if let Ok(deliveries) = collection.query_all(&q).await {
+            for m in deliveries.iter() {
                 let mut delivery = m.clone();
                 delivery.status = DeliveryStatus::Created;
                 delivery.retry_times = 0;
@@ -504,18 +503,14 @@ impl Store {
 
     /// Delete error delivery rows: all of them or only those of one process.
     pub async fn clear_error_deliveries(&self, pid: Option<String>) -> Result<()> {
-        let collection = self.deliveries();
         let mut cond = Filter::and().expr(Expr::eq("status", DeliveryStatus::Error));
         if let Some(pid) = &pid {
             cond = cond.expr(Expr::eq("pid", pid));
         }
 
-        let q = Query::new().filter(cond);
-        if let Ok(deliveries) = collection.query(&q).await {
-            for m in deliveries.rows.iter() {
-                collection.delete(&m.id).await?;
-            }
-        }
+        // Exhaustive: an error row past a page limit must not survive as an
+        // orphan that nothing ever retries or clears.
+        self.deliveries().delete_all(Some(&cond)).await?;
 
         Ok(())
     }
@@ -660,7 +655,7 @@ impl Store {
         debug!("load_tasks pid={}", proc.id());
         let collection = self.tasks();
         let query = Query::new().filter(Filter::and().expr(Expr::eq("pid", proc.id())));
-        let tasks = collection.query(&query).await?;
+        let tasks = collection.query_all(&query).await?;
 
         // phase 1 + 2: load tasks and register dynamic nodes into the tree
         // map so node links (parent/prev/next) can be resolved afterwards,
@@ -669,7 +664,7 @@ impl Store {
         {
             let tree = &proc.tree();
             let mut dyn_nodes: Vec<(Arc<Node>, NodeData)> = Vec::new();
-            for t in tasks.rows {
+            for t in tasks {
                 let data: NodeData = serde_json::from_str(&t.node_data)
                     .map_err(|err| ActError::Store(err.to_string()))?;
                 let node = match tree.node(&data.id) {
@@ -719,7 +714,7 @@ impl Store {
         // collection, keyed by the same composite id as the lifecycle row
         let vars = self.vars();
         let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", proc.id())));
-        for row in vars.query(&q).await?.rows {
+        for row in vars.query_all(&q).await? {
             let Some(task) = proc.task(&row.tid) else {
                 continue;
             };
