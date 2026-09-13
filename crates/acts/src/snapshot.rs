@@ -33,7 +33,9 @@
 //! Caches stay bounded by configuration: feeds should `remove()` a scope
 //! when the source deletes it (tombstone), and [`SnapshotOptions::ttl_secs`]
 //! drops entries that were not refreshed in time — lazily on read and by a
-//! periodic sweep — so a forgotten scope cannot grow the cache forever.
+//! periodic sweep — so a forgotten scope cannot grow the cache forever. The
+//! read-path drop is revision-guarded: it only removes the exact expired entry
+//! the reader observed, never a refresh that landed while it was reading.
 
 use crate::{ActError, Vars, config::MissingParamAction, scheduler::Runtime};
 use parking_lot::RwLock;
@@ -125,16 +127,35 @@ impl SnapshotStore {
     }
 
     pub(crate) fn get(&self, scope: &str) -> Option<SnapshotEntry> {
-        let entry = self.entries.read().get(scope).cloned();
-        if let Some(ttl) = self.options.ttl_secs
-            && let Some(e) = &entry
-            && now_ms() - e.timestamp > ttl as i64 * 1000
-        {
-            // expired: drop on the read path (a concurrent refresh re-adds)
-            self.entries.write().remove(scope);
-            return None;
+        let observed = self.entries.read().get(scope).cloned()?;
+        if !self.is_expired(&observed) {
+            return Some(observed);
         }
-        entry
+        self.evict_expired(scope, &observed)
+    }
+
+    /// Whether `entry` is past its ttl (`ttl_secs` set and elapsed).
+    fn is_expired(&self, entry: &SnapshotEntry) -> bool {
+        self.options
+            .ttl_secs
+            .is_some_and(|ttl| now_ms() - entry.timestamp > ttl as i64 * 1000)
+    }
+
+    /// Drop the expired entry a reader observed, but only while it is still
+    /// that exact entry — same `rev` and `timestamp`. A concurrent refresh
+    /// (`upsert`) replaces it, and that value must survive the eviction: when
+    /// the cached entry differs from the observed one, it is returned to the
+    /// reader instead of being dropped. `None` means nothing to read — the
+    /// entry was evicted now, concurrently removed, or replaced by one that
+    /// is expired as well (left for the purge sweep).
+    fn evict_expired(&self, scope: &str, observed: &SnapshotEntry) -> Option<SnapshotEntry> {
+        let mut entries = self.entries.write();
+        let cur = entries.get(scope)?;
+        if cur.rev != observed.rev || cur.timestamp != observed.timestamp {
+            return (!self.is_expired(cur)).then(|| cur.clone());
+        }
+        entries.remove(scope);
+        None
     }
 
     /// Insert or replace the value of `scope`.
@@ -174,13 +195,12 @@ impl SnapshotStore {
     /// Drop every entry whose ttl elapsed; returns the number removed.
     /// No-op when the target has no ttl.
     pub(crate) fn purge_expired(&self) -> usize {
-        let Some(ttl) = self.options.ttl_secs else {
+        if self.options.ttl_secs.is_none() {
             return 0;
-        };
-        let now = now_ms();
+        }
         let mut guard = self.entries.write();
         let before = guard.len();
-        guard.retain(|_, e| now - e.timestamp <= ttl as i64 * 1000);
+        guard.retain(|_, entry| !self.is_expired(entry));
         before - guard.len()
     }
 
@@ -449,5 +469,72 @@ mod tests {
         assert!(multi.get("old").is_none());
         assert!(multi.get("new").is_some());
         assert_eq!(multi.purge_expired(), 0);
+    }
+
+    /// Age an entry so the next read sees it as expired, without sleeping.
+    fn age(store: &SnapshotStore, scope: &str) {
+        store.entries.write().get_mut(scope).unwrap().timestamp = 1;
+    }
+
+    #[test]
+    fn expired_read_does_not_drop_a_concurrent_refresh() {
+        let store = SnapshotStore::new(SnapshotOptions::default().with_ttl(1));
+        store.upsert("s1", 1, Vars::new().with("a", 1));
+        age(&store, "s1");
+
+        // the reader observes the expired entry...
+        let observed = store.entries.read().get("s1").cloned().unwrap();
+        // ...a feed refreshes the scope before the reader evicts...
+        store.upsert("s1", 2, Vars::new().with("a", 2));
+        // ...and the eviction must leave the refresh alone: the reader gets
+        // the new value instead of the entry being dropped
+        let got = store.evict_expired("s1", &observed).unwrap();
+        assert_eq!(got.rev, 2);
+        assert_eq!(got.data.get::<i32>("a").unwrap(), 2);
+        assert_eq!(store.entries.read().get("s1").unwrap().rev, 2);
+
+        // an unchanged entry is still evicted by the reader
+        age(&store, "s1");
+        let observed = store.entries.read().get("s1").cloned().unwrap();
+        assert!(store.evict_expired("s1", &observed).is_none());
+        assert!(store.entries.read().get("s1").is_none());
+    }
+
+    #[test]
+    fn expired_read_and_refresh_race_keeps_the_refresh() {
+        let store = Arc::new(SnapshotStore::new(SnapshotOptions::default().with_ttl(1)));
+        for i in 0..64 {
+            let scope = format!("s{i}");
+            store.upsert(&scope, 1, Vars::new().with("a", 1));
+            age(&store, &scope);
+
+            let barrier = Arc::new(Barrier::new(2));
+            let reader = {
+                let store = store.clone();
+                let scope = scope.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store.get(&scope);
+                })
+            };
+            let writer = {
+                let store = store.clone();
+                let scope = scope.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    store.upsert(&scope, 2, Vars::new().with("a", 2));
+                })
+            };
+            reader.join().unwrap();
+            writer.join().unwrap();
+
+            // whichever order the two steps interleaved in, the refresh is
+            // never lost to the expired read
+            let entry = store.get(&scope).expect("refresh must survive the read");
+            assert_eq!(entry.rev, 2);
+            assert_eq!(entry.data.get::<i32>("a").unwrap(), 2);
+        }
     }
 }
