@@ -311,7 +311,11 @@ impl Runtime {
     /// Deployments that run multiple runtime instances against one store must
     /// enforce external pid uniqueness at their boundary.
     #[instrument(skip(self, model, options), fields(mid = %model.id, name = %model.name))]
-    pub async fn start(self: &Arc<Self>, model: &Workflow, options: Vars) -> Result<Arc<Process>> {
+    pub async fn start(
+        self: &Arc<Self>,
+        model: &Workflow,
+        mut options: Vars,
+    ) -> Result<Arc<Process>> {
         debug!("process starting");
 
         let mut proc_id = utils::longid();
@@ -354,7 +358,14 @@ impl Runtime {
         }
 
         let proc = Process::new(&proc_id, self);
+        // The caller's snapshot scope authority travels inside the start
+        // options (set by `actions::apply_as`), never as a model input: it is
+        // popped here so it cannot leak into the workflow's user vars.
+        let owner = options.pop::<crate::ScopePolicy>(consts::PROC_OWNER);
         proc.load_with_vars(model, &options)?;
+        if let Some(owner) = owner {
+            proc.set_owner_scope(&owner);
+        }
 
         self.launch(&proc).await?;
 

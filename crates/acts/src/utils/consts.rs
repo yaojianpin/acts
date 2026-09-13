@@ -34,6 +34,11 @@ pub const ACT_RUN_AS_IRQ: &str = "acts.core.irq";
 pub const ACT_RUN_AS_MSG: &str = "acts.core.msg";
 pub const ACT_RUN_AS: &str = "__run_as";
 
+/// Process env key holding the owner's [`crate::acl::ScopePolicy`] as json.
+/// Private (see [`is_private_key`]): the JS `$env` proxy refuses it, so a
+/// workflow can neither read nor forge its own scope authority.
+pub const PROC_OWNER: &str = "__owner";
+
 /// Key delimiter for constructing store keys and composite IDs.
 /// Must be valid across all backends (NATS KV, SQL LIKE, Redis).
 /// NATS KV allows: [-/_=\.a-zA-Z0-9]

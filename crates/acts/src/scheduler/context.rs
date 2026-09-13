@@ -124,6 +124,13 @@ impl Context {
         // `engine.snapshot().upsert`) write out-of-band, so this never does
         // network I/O. Missing params / absent data follow the target's
         // `on_missing` action.
+        //
+        // The process's owner credential decides which scopes it may read: a
+        // process started by one caller cannot seal another subject's value,
+        // however its vars were set. Enforced here rather than at the start
+        // operation because the scope key is only resolvable on the task
+        // chain, at prepare time.
+        let owner = self.proc.owner_scope();
         let snapshots: Vec<(String, Arc<SnapshotStore>)> = self.runtime.snapshot_registry().list();
         for (name, store) in snapshots {
             let task = self.task();
@@ -150,6 +157,12 @@ impl Context {
                 },
             };
             let scope = join_scope(&values);
+            if !owner.allows(&name, &scope) {
+                return Err(ActError::Denied(format!(
+                    "snapshot '{name}' scope '{scope}' is not owned by subject '{}'",
+                    owner.subject
+                )));
+            }
             match store.get(&scope) {
                 Some(entry) => task.set_sealed(&name, entry.data.clone()),
                 None => match options.on_missing {

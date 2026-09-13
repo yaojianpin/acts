@@ -77,20 +77,24 @@ async fn request_action(client: &Client, subject: String, payload: JsonValue) ->
     panic!("no reply from actions subject '{subject}'");
 }
 
+/// Each live test owns a distinct subject prefix: they share one broker and
+/// run in parallel, so two engines subscribing to the same `<prefix>.cmd`
+/// would answer each other's requests and fail on whichever engine answered.
 #[tokio::test(flavor = "multi_thread")]
 async fn snapshot_actions_over_nats() {
     let Some(client) = connect_or_skip().await else {
         return;
     };
 
-    let (path, config) =
-        temp_config("[nats]\nurl = \"nats://127.0.0.1:4222\"\nsubject = \"acts\"\n");
+    let (path, config) = temp_config(
+        "[nats]\nurl = \"nats://127.0.0.1:4222\"\nsubject = \"acts-snapshot-test\"\n",
+    );
     let engine = engine_with_nats(&config).await;
 
     // upsert
     let reply = request_action(
         &client,
-        "acts.cmd".to_string(),
+        "acts-snapshot-test.cmd".to_string(),
         json!({
             "name": "snap:upsert",
             "seq": "req-1",
@@ -112,7 +116,7 @@ async fn snapshot_actions_over_nats() {
     // unknown action → err reply
     let reply = request_action(
         &client,
-        "acts.cmd".to_string(),
+        "acts-snapshot-test.cmd".to_string(),
         json!({"name": "no:such", "seq": "x"}),
     )
     .await;
@@ -127,7 +131,7 @@ async fn snapshot_actions_over_nats() {
     // remove
     let reply = request_action(
         &client,
-        "acts.cmd".to_string(),
+        "acts-snapshot-test.cmd".to_string(),
         json!({
             "name": "snap:remove",
             "seq": "req-2",
@@ -149,10 +153,10 @@ async fn engine_events_forwarded_to_nats() {
     };
 
     let (path, config) = temp_config(
-        "[nats]\nurl = \"nats://127.0.0.1:4222\"\nsubject = \"acts\"\n\n\
+        "[nats]\nurl = \"nats://127.0.0.1:4222\"\nsubject = \"acts-events-test\"\n\n\
          [[nats.channels]]\n\
          id = \"t2\"\n\
-         subject = \"acts.evt.t2\"\n\
+         subject = \"acts-events-test.evt.t2\"\n\
          type = \"*\"\n\
          state = \"*\"\n\
          uses = \"*\"\n",
@@ -160,7 +164,7 @@ async fn engine_events_forwarded_to_nats() {
     let engine = engine_with_nats(&config).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    let mut sub = client.subscribe("acts.evt.t2").await.unwrap();
+    let mut sub = client.subscribe("acts-events-test.evt.t2").await.unwrap();
     let executor = engine.executor();
     let workflow = Workflow::new()
         .with_id("nats_event_demo")
@@ -201,14 +205,15 @@ async fn malformed_action_data_rejected() {
         return;
     };
 
-    let (path, config) =
-        temp_config("[nats]\nurl = \"nats://127.0.0.1:4222\"\nsubject = \"acts\"\n");
+    let (path, config) = temp_config(
+        "[nats]\nurl = \"nats://127.0.0.1:4222\"\nsubject = \"acts-malformed-test\"\n",
+    );
     let engine = engine_with_nats(&config).await;
 
     for data in [json!([]), json!("msg:clear"), json!(7)] {
         let reply = request_action(
             &client,
-            "acts.cmd".to_string(),
+            "acts-malformed-test.cmd".to_string(),
             json!({ "name": "msg:clear", "seq": "req-bad", "data": data }),
         )
         .await;
@@ -226,13 +231,85 @@ async fn malformed_action_data_rejected() {
     // an object payload is still accepted
     let reply = request_action(
         &client,
-        "acts.cmd".to_string(),
+        "acts-malformed-test.cmd".to_string(),
         json!({ "name": "msg:clear", "seq": "req-ok", "data": {} }),
     )
     .await;
     assert!(
         reply["err"].is_null(),
         "object data must be accepted: {reply}"
+    );
+
+    engine.close().await;
+    std::fs::remove_file(&path).ok();
+}
+
+/// The action payload's `token` is the credential over NATS (the broker
+/// authenticates a connection, not a request): a payload without one is
+/// refused, and a role only gets the actions it was granted.
+///
+/// The test uses its own subject prefix: several live tests run in parallel
+/// against one broker, and two engines subscribing to the same `<subject>.cmd`
+/// would answer each other's requests.
+#[tokio::test(flavor = "multi_thread")]
+async fn acl_enforced_over_nats() {
+    let Some(client) = connect_or_skip().await else {
+        return;
+    };
+
+    let (path, config) = temp_config(
+        r#"
+        [nats]
+        url = "nats://127.0.0.1:4222"
+        subject = "acts-acl-test"
+
+        [acl]
+
+        [[acl.role]]
+        name = "operator"
+        tokens = ["op-token"]
+        allow = ["msg:clear"]
+        "#,
+    );
+    let engine = engine_with_nats(&config).await;
+
+    let reply = request_action(
+        &client,
+        "acts-acl-test.cmd".to_string(),
+        json!({ "name": "msg:clear", "seq": "req-anon", "data": {} }),
+    )
+    .await;
+    assert!(
+        reply["err"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("unauthenticated"),
+        "a tokenless action must be refused: {reply}"
+    );
+
+    let reply = request_action(
+        &client,
+        "acts-acl-test.cmd".to_string(),
+        json!({ "name": "model:rm", "seq": "req-denied", "data": { "id": "x" }, "token": "op-token" }),
+    )
+    .await;
+    assert!(
+        reply["err"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("permission denied"),
+        "an action outside the role must be denied: {reply}"
+    );
+
+    let reply = request_action(
+        &client,
+        "acts-acl-test.cmd".to_string(),
+        json!({ "name": "msg:clear", "seq": "req-ok", "data": {}, "token": "op-token" }),
+    )
+    .await;
+    assert!(
+        reply["err"].is_null(),
+        "an allowed action must run: {reply}"
     );
 
     engine.close().await;

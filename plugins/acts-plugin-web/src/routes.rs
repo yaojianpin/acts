@@ -1,7 +1,7 @@
 use crate::objects::{AppError, RespData};
-use acts::{Engine, Workflow, query::Query as ActsQuery};
+use acts::{Engine, Principal, Vars, Workflow, query::Query as ActsQuery};
 use axum::{
-    Json,
+    Extension, Json,
     extract::{Path, State},
     response::{IntoResponse, Result},
 };
@@ -13,6 +13,7 @@ use validator::Validate;
 pub struct PacakgePublish {
     pub fmt: String,
     pub model: serde_json::Value,
+    #[serde(default)]
     pub view: serde_json::Value,
 }
 
@@ -36,8 +37,33 @@ pub struct PacakgeStart {
     pub options: Option<acts::Vars>,
 }
 
+/// Run one action as the authenticated caller.
+///
+/// Every route goes through here rather than touching the executor: the
+/// action name is what the ACL matches on, so one table describes the whole
+/// surface whatever the transport. A refusal is reported with the status its
+/// kind deserves (401 vs 403).
+async fn call(
+    engine: &Arc<Engine>,
+    principal: &Principal,
+    name: &str,
+    payload: Vars,
+) -> Result<RespData<serde_json::Value>, AppError> {
+    let value = acts::actions::apply_as(engine, principal, name, payload)
+        .await
+        .map_err(AppError::from)?;
+    Ok(RespData::ok(value))
+}
+
+/// Deploy a workflow model.
+///
+/// The body carries yaml/json rather than a `model` string (unlike the
+/// channel transports), so it is parsed here and re-serialized as yaml for
+/// the shared `model:deploy` action — the ACL then sees one action name for
+/// every transport.
 pub async fn deploy(
     State(state): State<Arc<Engine>>,
+    Extension(principal): Extension<Principal>,
     Json(req): Json<PacakgePublish>,
 ) -> Result<impl IntoResponse, AppError> {
     let workflow = match req.fmt.as_str() {
@@ -45,60 +71,73 @@ pub async fn deploy(
         "ymal" | "yml" => Workflow::from_yml(&req.model.to_string())?,
         _ => return Err("fmt is not correct, it should be one of 'json' or 'ymal'".into()),
     };
-    let ret = state
-        .executor()
-        .model()
-        .deploy(&workflow, Some(&req.view))
-        .await?;
-    Ok(RespData::ok(ret))
+    let payload = Vars::new()
+        .with("model", workflow.to_yml()?)
+        .with("mid", workflow.id.clone())
+        .with("view", req.view);
+    call(&state, &principal, "model:deploy", payload).await
 }
 
 pub async fn get(
     State(state): State<Arc<Engine>>,
+    Extension(principal): Extension<Principal>,
     Json(req): Json<PacakgeGet>,
 ) -> Result<impl IntoResponse, AppError> {
-    let ret = state.executor().model().get(&req.id, &req.fmt).await?;
-    Ok(RespData::ok(ret))
+    let payload = Vars::new().with("id", req.id).with("fmt", req.fmt);
+    call(&state, &principal, "model:get", payload).await
 }
 
 pub async fn rm(
     State(state): State<Arc<Engine>>,
+    Extension(principal): Extension<Principal>,
     Json(req): Json<PacakgeId>,
 ) -> Result<impl IntoResponse, AppError> {
-    let ret = state.executor().model().rm(&req.id).await?;
-    Ok(RespData::ok(ret))
+    call(
+        &state,
+        &principal,
+        "model:rm",
+        Vars::new().with("id", req.id),
+    )
+    .await
 }
 
 pub async fn list(
     State(state): State<Arc<Engine>>,
+    Extension(principal): Extension<Principal>,
     Json(req): Json<ActsQuery>,
 ) -> Result<impl IntoResponse, AppError> {
-    let ret = state.executor().model().list(&req).await?;
-    Ok(RespData::ok(ret))
+    call(
+        &state,
+        &principal,
+        "model:ls",
+        Vars::new().with("query", req),
+    )
+    .await
 }
 
 pub async fn proc_start(
     State(state): State<Arc<Engine>>,
+    Extension(principal): Extension<Principal>,
     Json(data): Json<PacakgeStart>,
 ) -> Result<impl IntoResponse, AppError> {
     let options = data.options.unwrap_or_default();
-    let fmt = data.fmt.ok_or("fmt is required")?;
-    let ret = match data.mode.as_str() {
+    match data.mode.as_str() {
         "model" => {
             let model = data.model.ok_or("model is required")?;
-            state
-                .executor()
-                .proc()
-                .start_from_model(&model.to_string(), &fmt, options)
-                .await?
+            let fmt = data.fmt.ok_or("fmt is required")?;
+            let payload = Vars::new()
+                .with("model", model.to_string())
+                .with("fmt", fmt)
+                .extend(options);
+            call(&state, &principal, "proc:start_from_model", payload).await
         }
         "id" => {
             let id = data.id.ok_or("id is required")?;
-            state.executor().proc().start(&id, options).await?
+            let payload = Vars::new().with("id", id).extend(options);
+            call(&state, &principal, "proc:start", payload).await
         }
-        _ => return Err("mode is not correct, it should be one of 'model' or 'id'".into()),
-    };
-    Ok(RespData::ok(ret))
+        _ => Err("mode is not correct, it should be one of 'model' or 'id'".into()),
+    }
 }
 
 #[derive(Debug, Validate, Deserialize)]
@@ -140,6 +179,7 @@ pub struct SnapRef {
 
 pub async fn pack_list(
     State(state): State<Arc<Engine>>,
+    Extension(principal): Extension<Principal>,
     Json(params): Json<PackageParams>,
 ) -> Result<impl IntoResponse, AppError> {
     params.validate()?;
@@ -151,12 +191,10 @@ pub async fn pack_list(
     if let Some(catalog) = &params.catalog {
         filter = filter.expr(acts::query::Expr::eq("catalog", catalog));
     }
-    if let Some(order) = &params.order {
-        match order.as_str() {
-            "desc" => query = query.order("version", acts::query::Sort::Desc),
-            "asc" => query = query.order("version", acts::query::Sort::Asc),
-            _ => (),
-        }
+    match params.order.as_deref() {
+        Some("desc") => query = query.order("version", acts::query::Sort::Desc),
+        Some("asc") => query = query.order("version", acts::query::Sort::Asc),
+        _ => (),
     }
     if let Some(size) = params.size {
         query = query.limit(size);
@@ -167,8 +205,13 @@ pub async fn pack_list(
         }
     }
     query = query.filter(filter);
-    let ret = state.executor().pack().list(&query).await?;
-    Ok(RespData::ok(ret))
+    call(
+        &state,
+        &principal,
+        "pack:ls",
+        Vars::new().with("query", query),
+    )
+    .await
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -217,16 +260,25 @@ pub async fn pack_catalogs() -> Result<impl IntoResponse, AppError> {
 
 pub async fn pack_get(
     State(state): State<Arc<Engine>>,
+    Extension(principal): Extension<Principal>,
     Json(package): Json<PackageIdRequest>,
 ) -> Result<impl IntoResponse, AppError> {
-    let ret = state.executor().pack().get(&package.id).await?;
-    Ok(RespData::ok(ret))
+    call(
+        &state,
+        &principal,
+        "pack:get",
+        Vars::new().with("id", package.id),
+    )
+    .await
 }
+
 /// Update or insert one snapshot value (feed write). Delegates to the shared
-/// dispatch table (`acts::actions`), the same code the gRPC and NATS
-/// transports run, so all transports share one snapshot implementation.
+/// dispatch table (`acts::actions`) — the same code the gRPC and NATS
+/// transports run — so the caller's scope ownership rule applies here exactly
+/// as it does over the other transports.
 pub async fn snap_upsert(
     State(state): State<Arc<Engine>>,
+    Extension(principal): Extension<Principal>,
     Json(req): Json<SnapUpsert>,
 ) -> Result<impl IntoResponse, AppError> {
     let scope = req.scope.clone().unwrap_or_default();
@@ -235,57 +287,44 @@ pub async fn snap_upsert(
         .with("scope", scope)
         .with("rev", req.rev)
         .with("data", req.data);
-    let ret = acts::actions::apply(&state, "snap:upsert", payload)
-        .await
-        .map_err(app_err)?;
-    Ok(RespData::ok(ret))
+    call(&state, &principal, "snap:upsert", payload).await
 }
 
 /// Remove one snapshot value (tombstone).
 pub async fn snap_remove(
     State(state): State<Arc<Engine>>,
+    Extension(principal): Extension<Principal>,
     Json(req): Json<SnapRef>,
 ) -> Result<impl IntoResponse, AppError> {
     let scope = req.scope.clone().unwrap_or_default();
     let payload = acts::Vars::new()
         .with("name", req.name.clone())
         .with("scope", scope);
-    let ret = acts::actions::apply(&state, "snap:remove", payload)
-        .await
-        .map_err(app_err)?;
-    Ok(RespData::ok(ret))
+    call(&state, &principal, "snap:remove", payload).await
 }
 
 /// Query one snapshot value by name and scope. A scope without a value
 /// answers `data: null` (the same wire shape the other transports return).
 pub async fn snap_get(
     State(state): State<Arc<Engine>>,
+    Extension(principal): Extension<Principal>,
     Json(req): Json<SnapRef>,
 ) -> Result<impl IntoResponse, AppError> {
     let scope = req.scope.clone().unwrap_or_default();
     let payload = acts::Vars::new()
         .with("name", req.name.clone())
         .with("scope", scope);
-    let ret = acts::actions::apply(&state, "snap:get", payload)
-        .await
-        .map_err(app_err)?;
-    Ok(RespData::ok(ret))
+    call(&state, &principal, "snap:get", payload).await
 }
 
-/// Query every scope of one snapshot target.
+/// Query every scope of one snapshot target the caller's subject owns.
 pub async fn snap_ls(
     State(state): State<Arc<Engine>>,
+    Extension(principal): Extension<Principal>,
     Json(req): Json<SnapRef>,
 ) -> Result<impl IntoResponse, AppError> {
     let payload = acts::Vars::new().with("name", req.name.clone());
-    let ret = acts::actions::apply(&state, "snap:ls", payload)
-        .await
-        .map_err(app_err)?;
-    Ok(RespData::ok(ret))
-}
-
-fn app_err(err: acts::actions::Error) -> AppError {
-    AppError::from(err.to_string().as_str())
+    call(&state, &principal, "snap:ls", payload).await
 }
 
 /// Fire a deployed trigger from an HTTP POST whose JSON body becomes the
@@ -296,10 +335,13 @@ fn app_err(err: acts::actions::Error) -> AppError {
 /// result as `executor.evt().start()`.
 pub async fn hook(
     State(state): State<Arc<Engine>>,
+    Extension(principal): Extension<Principal>,
     Path(event_id): Path<String>,
     body: Option<Json<serde_json::Value>>,
 ) -> Result<impl IntoResponse, AppError> {
-    let payload = body.map(|Json(v)| v).unwrap_or(serde_json::Value::Null);
-    let ret = state.executor().evt().start(&event_id, &payload).await?;
-    Ok(RespData::ok(ret))
+    let params = body
+        .map(|Json(value)| value)
+        .unwrap_or(serde_json::Value::Null);
+    let payload = Vars::new().with("id", event_id).with("params", params);
+    call(&state, &principal, "evt:start", payload).await
 }

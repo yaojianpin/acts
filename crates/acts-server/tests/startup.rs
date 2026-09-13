@@ -62,3 +62,71 @@ fn unusable_log_dir_fails_without_panicking() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// An `[acl]` section that cannot be enforced (enabled, but no role declares
+/// any token) must fail startup with a diagnostic instead of silently
+/// refusing — or silently allowing — every request.
+#[tokio::test(flavor = "multi_thread")]
+async fn unusable_acl_fails_startup() {
+    let table: toml::Table = toml::from_str("[acl]\n").unwrap();
+    let config = acts::Config {
+        data: Default::default(),
+        table,
+    };
+    let result = acts_server::engine_builder(
+        &config,
+        std::sync::Arc::new(acts::MemoryStore::new()),
+        &acts_server::ServerPlugins::default(),
+    )
+    .unwrap()
+    .start()
+    .await;
+    let err = match result {
+        Ok(_) => panic!("an unenforceable acl must fail startup"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("neither a token nor a role"),
+        "unexpected startup error: {err}"
+    );
+}
+
+/// A usable `[acl]` compiles and the engine starts; the anonymous caller is
+/// then refused.
+#[tokio::test(flavor = "multi_thread")]
+async fn acl_with_a_role_starts_and_refuses_anonymous() {
+    let table: toml::Table = toml::from_str(
+        r#"
+        [acl]
+        [[acl.role]]
+        name = "operator"
+        tokens = ["op-token"]
+        allow = ["model:ls"]
+        "#,
+    )
+    .unwrap();
+    let config = acts::Config {
+        data: Default::default(),
+        table,
+    };
+    let engine = acts_server::engine_builder(
+        &config,
+        std::sync::Arc::new(acts::MemoryStore::new()),
+        &acts_server::ServerPlugins::default(),
+    )
+    .unwrap()
+    .start()
+    .await
+    .unwrap();
+
+    assert!(engine.acl().enabled());
+    let err = acts::actions::apply(&engine, "model:ls", acts::Vars::new())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, acts::actions::Error::Unauthenticated(_)),
+        "got: {err}"
+    );
+
+    engine.close().await;
+}

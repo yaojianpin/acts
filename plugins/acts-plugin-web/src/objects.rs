@@ -70,16 +70,19 @@ pub struct AppError {
     message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     details: Option<String>,
+    /// HTTP status the error is answered with. Action errors carry their own
+    /// kind (401/403), everything else is a 500.
+    #[serde(skip)]
+    status: StatusCode,
 }
 
 impl IntoResponse for AppError {
     fn into_response(self) -> axum::response::Response {
-        match self.details {
-            Some(details) => {
-                RespData::<()>::err_with_details(&self.message, &details).into_response()
-            }
-            None => RespData::<()>::err(&self.message).into_response(),
-        }
+        let body = match self.details {
+            Some(details) => RespData::<()>::err_with_details(&self.message, &details),
+            None => RespData::<()>::err(&self.message),
+        };
+        (self.status, Json(body)).into_response()
     }
 }
 
@@ -88,6 +91,7 @@ impl From<&str> for AppError {
         Self {
             message: value.to_string(),
             details: None,
+            status: StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }
@@ -97,6 +101,22 @@ impl From<acts::ActError> for AppError {
         Self {
             message: value.to_string(),
             details: None,
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+        }
+    }
+}
+
+impl From<acts::actions::Error> for AppError {
+    fn from(value: acts::actions::Error) -> Self {
+        let status = match value {
+            acts::actions::Error::Unauthenticated(_) => StatusCode::UNAUTHORIZED,
+            acts::actions::Error::Denied(_) => StatusCode::FORBIDDEN,
+            _ => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        Self {
+            message: value.to_string(),
+            details: None,
+            status,
         }
     }
 }
@@ -106,6 +126,7 @@ impl From<validator::ValidationErrors> for AppError {
         Self {
             message: value.to_string(),
             details: None,
+            status: StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
 }

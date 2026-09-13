@@ -24,16 +24,61 @@ pub struct ActsOptions {
     pub ack: Option<bool>,
 }
 
+/// The authenticated transport the client speaks over: the token interceptor
+/// is part of the type, so no request can be built without it.
+pub type AuthChannel = tonic::service::interceptor::InterceptedService<Channel, Auth>;
+
 #[derive(Debug, Clone)]
 pub struct ActsChannel {
-    client: ActsServiceClient<Channel>,
+    client: ActsServiceClient<AuthChannel>,
     auto_ack: bool,
 }
 
+/// Attaches the caller's ACL token to every request as an
+/// `authorization: Bearer …` metadata entry.
+///
+/// A client interceptor covers the unary actions and the `on_message` stream
+/// alike, so no call path can silently omit the credential.
+#[derive(Debug, Clone, Default)]
+pub struct Auth {
+    token: Option<String>,
+}
+
+impl Auth {
+    /// An interceptor that presents `token` (or nothing when it is `None`).
+    pub fn new(token: Option<String>) -> Self {
+        Self { token }
+    }
+}
+
+impl tonic::service::Interceptor for Auth {
+    fn call(&mut self, mut request: Request<()>) -> Result<Request<()>, Status> {
+        if let Some(token) = self.token.as_deref() {
+            let value = format!("Bearer {token}")
+                .parse()
+                .map_err(|_| Status::invalid_argument("invalid acl token"))?;
+            request.metadata_mut().insert("authorization", value);
+        }
+        Ok(request)
+    }
+}
+
 impl ActsChannel {
+    /// Connect without a credential — valid only when the server runs
+    /// without an `[acl]` section.
     pub async fn connect(url: &str) -> Result<Self, Box<dyn std::error::Error>> {
+        Self::connect_with_token(url, None).await
+    }
+
+    /// Connect and present `token` on every request. A server with an enabled
+    /// ACL refuses a request that carries no acceptable token.
+    pub async fn connect_with_token(
+        url: &str,
+        token: Option<String>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let addr = Endpoint::from_str(url)?;
-        let client = ActsServiceClient::connect(addr).await?;
+        let channel = addr.connect().await?;
+        let client = ActsServiceClient::with_interceptor(channel, Auth::new(token));
         Ok(Self {
             client,
             auto_ack: true,
@@ -198,7 +243,7 @@ impl ActsChannel {
 
     async fn on_message<F, E>(
         &self,
-        client: &mut ActsServiceClient<Channel>,
+        client: &mut ActsServiceClient<AuthChannel>,
         client_id: &str,
         mut handle: F,
         on_error: E,

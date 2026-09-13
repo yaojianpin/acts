@@ -252,7 +252,7 @@ impl EngineBuilder {
         let config = Arc::new(config);
 
         let runtime = Runtime::new(&config, store)?;
-        let engine = Engine::with_runtime(config, runtime.clone());
+        let engine = Engine::with_runtime(config, runtime.clone())?;
 
         match engine.initialize(snapshots, plugins, packages).await {
             Ok(()) => {

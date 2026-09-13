@@ -2,6 +2,7 @@
 
 #![doc = include_str!("../../../README.md")]
 
+mod acl;
 mod builder;
 
 mod cache;
@@ -26,6 +27,7 @@ mod tests;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
+pub use acl::{Acl, AclConfig, AclError, Principal, RoleConfig, ScopePolicy};
 pub use builder::EngineBuilder;
 pub use config::{Config, MissingParamAction};
 pub use engine::Engine;

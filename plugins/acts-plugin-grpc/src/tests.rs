@@ -126,7 +126,7 @@ async fn test_do_action_rejects_malformed_data() {
             data: Some(data.to_vec()),
         };
         let status = server
-            .do_action(message)
+            .do_action(message, None)
             .await
             .expect_err("malformed data must be rejected");
         assert_eq!(
@@ -155,7 +155,7 @@ async fn test_do_action_rejects_malformed_data() {
             data,
         };
         let response = server
-            .do_action(message)
+            .do_action(message, None)
             .await
             .expect("absent or object data must be accepted")
             .into_inner();
@@ -275,4 +275,87 @@ async fn test_on_message_stream_drop_deregisters_channel() {
     );
 
     engine.close().await;
+}
+
+/// An engine whose `[acl]` section is `acl_text`.
+async fn engine_with_acl(acl_text: &str) -> Engine {
+    let config: toml::Table = toml::from_str(acl_text).unwrap();
+    let cfg = acts::Config {
+        data: Default::default(),
+        table: config,
+    };
+    Engine::builder().set_config(&cfg).start().await.unwrap()
+}
+
+const GRPC_ACL: &str = r#"
+[acl]
+
+[[acl.role]]
+name = "operator"
+tokens = ["op-token"]
+allow = ["msg:clear"]
+"#;
+
+fn send_request(name: &str, token: Option<&str>) -> tonic::Request<acts_channel::Message> {
+    let mut request = tonic::Request::new(acts_channel::Message {
+        name: name.to_string(),
+        seq: "seq-1".to_string(),
+        ack: None,
+        data: Some(b"{}".to_vec()),
+    });
+    if let Some(token) = token {
+        request
+            .metadata_mut()
+            .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    }
+    request
+}
+
+/// The `authorization: Bearer <token>` metadata is the credential: a request
+/// without one is UNAUTHENTICATED, and a role only gets the actions it was
+/// granted.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_send_enforces_acl() {
+    let engine = engine_with_acl(GRPC_ACL).await;
+    let server = GrpcServer::new(&engine);
+
+    let status = server
+        .send(send_request("msg:clear", None))
+        .await
+        .expect_err("no token must be refused");
+    assert_eq!(status.code(), tonic::Code::Unauthenticated, "{status}");
+
+    let status = server
+        .send(send_request("msg:clear", Some("bogus")))
+        .await
+        .expect_err("an unknown token must be refused");
+    assert_eq!(status.code(), tonic::Code::Unauthenticated, "{status}");
+
+    let status = server
+        .send(send_request("model:rm", Some("op-token")))
+        .await
+        .expect_err("an action outside the role must be refused");
+    assert_eq!(status.code(), tonic::Code::PermissionDenied, "{status}");
+
+    server
+        .send(send_request("msg:clear", Some("op-token")))
+        .await
+        .expect("an allowed action must run");
+
+    // the subscribe stream is closed to an anonymous caller too
+    let anonymous = server
+        .on_message(tonic::Request::new(MessageOptions::default()))
+        .await
+        .err()
+        .expect("an anonymous subscription must be refused");
+    assert_eq!(anonymous.code(), tonic::Code::Unauthenticated);
+
+    let mut request = tonic::Request::new(MessageOptions::default());
+    request
+        .metadata_mut()
+        .insert("authorization", "Bearer op-token".parse().unwrap());
+    server
+        .on_message(request)
+        .await
+        .expect("an authenticated subscription must open");
 }

@@ -1,6 +1,7 @@
 # Summary
 
 - [Installation](./install.md)
+- [Access Control](./access.md)
 - [Channel Client](./channel.md)
     - [Connect](./channel/connect.md)
     - [Subscribe](./channel/sub.md)

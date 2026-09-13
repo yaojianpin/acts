@@ -11,6 +11,17 @@ cargo run -p acts-cli -- --host 127.0.0.1 --port 10080
 
 - `--host` server hostname (default `127.0.0.1`)
 - `--port` server gRPC port (default `10080`)
+- `--token` ACL token presented on every request (or the `ACTS_TOKEN`
+  environment variable, which keeps it out of the process list)
+
+On startup the CLI asks the server who it is and prints the resolved identity,
+so a missing or stale token fails immediately instead of on the first command:
+
+```text
+$ ACTS_TOKEN="$TOKEN" cargo run -p acts-cli -- --host 127.0.0.1
+authenticated as roles: operator
+tap 'help' to list available subcommands and some concept guides
+```
 
 Type `help` inside the session to list the available subcommands.
 

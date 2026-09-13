@@ -1,5 +1,5 @@
 use crate::{
-    ActPlugin, ChannelOptions, Config, Signal,
+    Acl, AclConfig, ActPlugin, ChannelOptions, Config, Principal, Signal,
     builder::EngineBuilder,
     export::{Channel, Executor, Extender},
     package::{self, ActPackageRegister},
@@ -9,6 +9,7 @@ use crate::{
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
+use serde::Deserialize;
 /// A started workflow engine.
 ///
 /// An `Engine` is created only by [`EngineBuilder::start`]. Its runtime is
@@ -17,6 +18,7 @@ use tokio_util::sync::CancellationToken;
 pub struct Engine {
     config: Arc<Config>,
     runtime: Arc<Runtime>,
+    acl: Arc<Acl>,
 }
 
 impl Engine {
@@ -26,6 +28,18 @@ impl Engine {
 
     pub fn config(&self) -> Arc<Config> {
         self.config.clone()
+    }
+
+    /// The compiled access control policy. Without an `[acl]` section this is
+    /// a disabled ACL and every check passes.
+    pub fn acl(&self) -> Arc<Acl> {
+        self.acl.clone()
+    }
+
+    /// The principal `acl:whoami` and the in-process action entry resolve to
+    /// when no token is presented.
+    pub fn anonymous(&self) -> Principal {
+        self.acl.anonymous()
     }
 
     /// Register (or replace) a snapshot-backed sealed-data target at runtime.
@@ -85,8 +99,22 @@ impl Engine {
         Signal::new(init)
     }
 
-    pub(crate) fn with_runtime(config: Arc<Config>, runtime: Arc<Runtime>) -> Self {
-        Self { config, runtime }
+    pub(crate) fn with_runtime(config: Arc<Config>, runtime: Arc<Runtime>) -> crate::Result<Self> {
+        let acl = match config.table.get("acl") {
+            Some(value) => {
+                let acl_config = AclConfig::deserialize(value.clone()).map_err(|err| {
+                    crate::ActError::Config(format!("failed to parse the 'acl' config: {err}"))
+                })?;
+                Acl::from_config(&acl_config)?
+            }
+            None => Acl::disabled(),
+        };
+
+        Ok(Self {
+            config,
+            runtime,
+            acl: Arc::new(acl),
+        })
     }
 
     pub(crate) async fn initialize(

@@ -3,16 +3,19 @@
 //! Every inbound channel message is a `name` plus a `Vars` payload. This
 //! module maps the name to the matching engine operation (process/model/act/
 //! msg/evt/snapshot) and returns the JSON-serialized result. Transport plugins
-//! (`acts-plugin-grpc`, `acts-plugin-nats`, `acts-plugin-web`) call [`apply`]
-//! and marshal the value or the [`Error`] into their own protocol, so every
-//! transport speaks one action set and the table is maintained in a single
-//! place.
+//! (`acts-plugin-grpc`, `acts-plugin-nats`, `acts-plugin-web`) authenticate the
+//! request into a [`crate::Principal`] and call [`apply_as`]; [`apply`] is the
+//! anonymous in-process entry. Every transport speaks one action set and the
+//! table is maintained in a single place.
 //!
 //! Error kinds map to transport semantics:
 //! - [`Error::NotFound`] — unknown action name (`not found`)
 //! - [`Error::Invalid`] — malformed/missing payload fields (`invalid argument`)
+//! - [`Error::Unauthenticated`] — no credential, or one selecting no role
+//! - [`Error::Denied`] — a credential without the right for this action/scope
 //! - [`Error::Internal`] — engine/store failure (`internal error`)
 
+use crate::utils::consts;
 use crate::{Engine, Vars, Workflow};
 use serde_json::{Value as JsonValue, json};
 use std::fmt;
@@ -26,6 +29,11 @@ pub enum Error {
     Invalid(String),
     /// Engine/store failure.
     Internal(String),
+    /// No token, or a token that selects no role, under an enabled ACL.
+    Unauthenticated(String),
+    /// Authenticated caller without the right to run the action (or to name
+    /// the snapshot scope it targets).
+    Denied(String),
 }
 
 impl fmt::Display for Error {
@@ -34,6 +42,8 @@ impl fmt::Display for Error {
             Error::NotFound(msg) => write!(f, "not found action '{msg}'"),
             Error::Invalid(msg) => f.write_str(msg),
             Error::Internal(msg) => f.write_str(msg),
+            Error::Unauthenticated(msg) => write!(f, "unauthenticated: {msg}"),
+            Error::Denied(msg) => write!(f, "permission denied: {msg}"),
         }
     }
 }
@@ -60,14 +70,48 @@ fn pop(options: &mut Vars, key: &str) -> std::result::Result<String, Error> {
         .ok_or_else(|| Error::Invalid(format!("{key} is required")))
 }
 
-/// Apply a channel message action.
+/// Map an ACL refusal onto the action protocol's error kinds, so every
+fn deny(err: crate::AclError) -> Error {
+    match err {
+        crate::AclError::Unauthenticated(msg) => Error::Unauthenticated(msg),
+        crate::AclError::Denied(msg) => Error::Denied(msg),
+    }
+}
+
+/// Apply a channel message action as an anonymous in-process caller.
+///
+/// Without an `[acl]` section this is the only entry point and nothing is
+/// enforced. With one, the caller resolves to the configured `default_role`
+/// (or is refused outright when none is configured), so an embedder that
+/// never carries a token cannot sidestep the transport checks.
+pub async fn apply(engine: &Engine, name: &str, options: Vars) -> Ret {
+    let principal = engine.acl().anonymous();
+    apply_as(engine, &principal, name, options).await
+}
+
+/// Apply a channel message action on behalf of an authenticated principal.
 ///
 /// `name` selects the operation; `options` is the payload. On success the
 /// returned value serializes exactly like the old gRPC `Message.data`.
-pub async fn apply(engine: &Engine, name: &str, mut options: Vars) -> Ret {
+///
+/// Two checks precede the dispatch: the action itself must be allowed, and
+/// every snapshot scope the action names (or would return) must belong to the
+/// principal's subject — see [`crate::acl`].
+pub async fn apply_as(
+    engine: &Engine,
+    principal: &crate::Principal,
+    name: &str,
+    mut options: Vars,
+) -> Ret {
+    // `acl:whoami` is implicitly allowed — but only once a token resolved, so
+    // it doubles as a startup check without being reachable anonymously.
+    if name == crate::acl::ACTION_WHOAMI {
+        return Ok(principal.to_value());
+    }
+    principal.check(name).map_err(deny)?;
+
     let executor = engine.executor();
     match name {
-        // act
         "act:push" => {
             let pid = pop(&mut options, "pid")?;
             let tid = pop(&mut options, "tid")?;
@@ -138,7 +182,8 @@ pub async fn apply(engine: &Engine, name: &str, mut options: Vars) -> Ret {
             if let Some(mid) = options.get::<String>("mid") {
                 model.set_id(&mid);
             }
-            value(executor.model().deploy(&model, None).await)
+            let view = options.get::<JsonValue>("view");
+            value(executor.model().deploy(&model, view.as_ref()).await)
         }
         // package
         "pack:ls" => {
@@ -197,11 +242,16 @@ pub async fn apply(engine: &Engine, name: &str, mut options: Vars) -> Ret {
         // proc
         "proc:start" => {
             let id = pop(&mut options, "id")?;
+            // A run may only read its own subject's snapshot scopes: the
+            // caller's authority is sealed into the process (see
+            // `crate::acl`) and re-checked at every seal.
+            options.set(consts::PROC_OWNER, principal.scope_policy());
             value(executor.proc().start(&id, options).await)
         }
         "proc:start_from_model" => {
             let fmt = pop(&mut options, "fmt")?;
             let model = pop(&mut options, "model")?;
+            options.set(consts::PROC_OWNER, principal.scope_policy());
             value(
                 executor
                     .proc()
@@ -283,12 +333,16 @@ pub async fn apply(engine: &Engine, name: &str, mut options: Vars) -> Ret {
         "evt:start" => {
             let id = pop(&mut options, "id")?;
             let params = options.get::<JsonValue>("params").unwrap_or_default();
+            // Triggers reach a model's own start inputs, so they carry no
+            // caller authority: a snapshot-backed model started by a trigger
+            // keeps the reading authority of whoever deployed it.
             value(executor.evt().start(&id, &params).await)
         }
-        // snapshot
+        // snapshot — the requested scope must belong to the subject
         "snap:upsert" => {
             let target = pop(&mut options, "name")?;
             let scope = options.get::<String>("scope").unwrap_or_default();
+            principal.check_scope(&target, &scope).map_err(deny)?;
             let rev = options
                 .get::<u64>("rev")
                 .ok_or_else(|| Error::Invalid("rev is required".to_string()))?;
@@ -300,11 +354,13 @@ pub async fn apply(engine: &Engine, name: &str, mut options: Vars) -> Ret {
         "snap:remove" => {
             let target = pop(&mut options, "name")?;
             let scope = options.get::<String>("scope").unwrap_or_default();
+            principal.check_scope(&target, &scope).map_err(deny)?;
             unit_ok(engine.snapshot().remove(&target, &scope))
         }
         "snap:get" => {
             let target = pop(&mut options, "name")?;
             let scope = options.get::<String>("scope").unwrap_or_default();
+            principal.check_scope(&target, &scope).map_err(deny)?;
             match engine.snapshot().read(&target, &scope) {
                 Some(entry) => {
                     let data = serde_json::to_value(entry.data)
@@ -321,10 +377,14 @@ pub async fn apply(engine: &Engine, name: &str, mut options: Vars) -> Ret {
         }
         "snap:ls" => {
             let target = pop(&mut options, "name")?;
+            // A listing answers only the scopes this subject owns — the
+            // others are filtered out rather than failing the whole call, so
+            // one tenant cannot enumerate the rest.
             let rows: Vec<JsonValue> = engine
                 .snapshot()
                 .list(&target)
                 .into_iter()
+                .filter(|(scope, _)| principal.check_scope(&target, scope).is_ok())
                 .map(|(scope, entry)| {
                     let data = serde_json::to_value(entry.data)
                         .map_err(|e| Error::Internal(e.to_string()))?;
@@ -459,5 +519,243 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, Error::Internal(_)), "got: {err}");
         assert!(err.to_string().contains("none"), "got: {err}");
+    }
+
+    // ---- access control ----
+
+    const MULTI_TENANT: &str = r#"
+        [acl]
+
+        [[acl.role]]
+        name = "u1"
+        tokens = ["token-u1"]
+        allow = ["model:deploy", "proc:start", "snap:get", "snap:ls", "snap:upsert"]
+        snapshot = { secrets = ["u1"], profile = ["u1"] }
+
+        [[acl.role]]
+        name = "u2"
+        tokens = ["token-u2"]
+        allow = ["model:deploy", "proc:start", "snap:get", "snap:ls", "snap:upsert"]
+        snapshot = { secrets = ["u2"], profile = ["u2"] }
+    "#;
+
+    /// An engine whose `[acl]` section is the given toml text.
+    async fn acl_engine(text: &str) -> crate::Engine {
+        let config = crate::Config {
+            data: Default::default(),
+            table: toml::from_str::<toml::Table>(text).unwrap(),
+        };
+        crate::Engine::builder()
+            .set_config(&config)
+            .start()
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_enabled_acl_refuses_the_anonymous_caller() {
+        let engine = acl_engine(MULTI_TENANT).await;
+
+        // `apply` is the anonymous in-process entry: no token, no access.
+        let err = apply(&engine, "model:ls", Vars::new()).await.unwrap_err();
+        assert!(matches!(err, Error::Unauthenticated(_)), "got: {err}");
+
+        // A token that selects no role is refused the same way.
+        let err = engine.acl().authenticate(Some("bogus")).unwrap_err();
+        assert!(matches!(err, crate::AclError::Unauthenticated(_)));
+    }
+
+    #[tokio::test]
+    async fn a_role_runs_only_the_actions_it_allows() {
+        let engine = acl_engine(MULTI_TENANT).await;
+        let principal = engine.acl().authenticate(Some("token-u1")).unwrap();
+
+        apply_as(&engine, &principal, "model:ls", Vars::new())
+            .await
+            .unwrap_err();
+
+        // whoami is implicitly allowed, even though `model:ls` is not.
+        let who = apply_as(&engine, &principal, crate::acl::ACTION_WHOAMI, Vars::new())
+            .await
+            .unwrap();
+        assert_eq!(who["subject"], "u1");
+        assert_eq!(who["unrestricted"], false);
+    }
+
+    #[tokio::test]
+    async fn a_snapshot_scope_belongs_to_one_subject_only() {
+        let engine = acl_engine(MULTI_TENANT).await;
+        let u1 = engine.acl().authenticate(Some("token-u1")).unwrap();
+        let u2 = engine.acl().authenticate(Some("token-u2")).unwrap();
+
+        // Each subject may seed and read its own scope.
+        for (principal, scope, val) in [(&u1, "u1", 1), (&u2, "u2", 2)] {
+            let payload = Vars::new()
+                .with("name", "profile")
+                .with("scope", scope)
+                .with("rev", 1u64)
+                .with("data", Vars::new().with("val", val));
+            assert_eq!(
+                apply_as(&engine, principal, "snap:upsert", payload)
+                    .await
+                    .unwrap(),
+                json!(true)
+            );
+        }
+
+        // ...and neither may touch the other's, in either direction.
+        let payload = Vars::new()
+            .with("name", "profile")
+            .with("scope", "u2")
+            .with("rev", 9u64)
+            .with("data", Vars::new().with("val", 9));
+        let err = apply_as(&engine, &u1, "snap:upsert", payload)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, Error::Denied(_)), "got: {err}");
+
+        let err = apply_as(
+            &engine,
+            &u1,
+            "snap:get",
+            Vars::new().with("name", "profile").with("scope", "u2"),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::Denied(_)), "got: {err}");
+
+        // A listing answers own scopes only — no enumeration of the others.
+        let rows = apply_as(&engine, &u1, "snap:ls", Vars::new().with("name", "profile"))
+            .await
+            .unwrap();
+        assert_eq!(rows.as_array().unwrap().len(), 1);
+        assert_eq!(rows[0]["scope"], "u1");
+        assert_eq!(rows[0]["data"]["val"], 1);
+    }
+
+    /// The decisive case: a workflow may not read another subject's sealed
+    /// data just because it was started with that subject's `uid`. The
+    /// authority is the caller's, sealed into the process at start.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn a_run_cannot_seal_another_subjects_scope() {
+        let engine = acl_engine(MULTI_TENANT).await;
+        engine
+            .add_snapshot(
+                "secrets",
+                crate::SnapshotOptions {
+                    scope: vec!["uid".to_string()],
+                    ..crate::SnapshotOptions::per_proc()
+                },
+            )
+            .unwrap();
+
+        let u1 = engine.acl().authenticate(Some("token-u1")).unwrap();
+        let u2 = engine.acl().authenticate(Some("token-u2")).unwrap();
+
+        // u2's secret exists, and only u2 may read or write it.
+        apply_as(
+            &engine,
+            &u2,
+            "snap:upsert",
+            Vars::new()
+                .with("name", "secrets")
+                .with("scope", "u2")
+                .with("rev", 1u64)
+                .with("data", Vars::new().with("TOKEN", "u2-secret")),
+        )
+        .await
+        .unwrap();
+
+        let workflow = crate::Workflow::from_yml(
+            r#"
+            id: acl_seal
+            ver: 0.1.0
+            exposes:
+              - name: leaked
+            steps:
+              - name: read the secret
+                uses: acts.transform.code
+                params: |
+                  return { leaked: secrets.TOKEN };
+            "#,
+        )
+        .unwrap();
+        apply_as(
+            &engine,
+            &u1,
+            "model:deploy",
+            Vars::new().with("model", workflow.to_yml().unwrap()),
+        )
+        .await
+        .unwrap();
+
+        // u1 starting a run under u2's uid must not reach u2's value: the
+        // process carries u1's authority, so the seal is refused.
+        let sig = engine.signal(String::new());
+        let s = sig.clone();
+        engine.channel().on_error(move |e| {
+            let s = s.clone();
+            async move {
+                let err = e
+                    .inputs
+                    .get::<String>(crate::utils::consts::ACT_ERR_MESSAGE)
+                    .unwrap_or_default();
+                s.update(|data| data.clone_from(&err));
+                s.close();
+            }
+        });
+        apply_as(
+            &engine,
+            &u1,
+            "proc:start",
+            Vars::new().with("id", "acl_seal").with("uid", "u2"),
+        )
+        .await
+        .unwrap();
+        let err = sig.recv().await;
+        assert!(err.contains("not owned by subject 'u1'"), "got: {err}");
+
+        // The same run under its own uid seals its own value.
+        engine
+            .snapshot()
+            .upsert("secrets", "u1", 1, Vars::new().with("TOKEN", "u1-secret"))
+            .unwrap();
+        let sig = engine.signal(String::new());
+        let s = sig.clone();
+        engine.channel().on_complete(move |e| {
+            let s = s.clone();
+            async move {
+                s.update(|data| data.clone_from(&e.pid));
+                s.close();
+            }
+        });
+        let pid = apply_as(
+            &engine,
+            &u1,
+            "proc:start",
+            Vars::new()
+                .with("id", "acl_seal")
+                .with("pid", "acl_seal_owned")
+                .with("uid", "u1"),
+        )
+        .await
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+        assert_eq!(sig.recv().await, pid);
+
+        // The run sealed its own subject's value, and nothing else.
+        let proc = engine.runtime().proc(&pid).await.unwrap().unwrap();
+        assert_eq!(
+            proc.root()
+                .unwrap()
+                .sealed("secrets")
+                .unwrap()
+                .get::<String>("TOKEN")
+                .unwrap(),
+            "u1-secret"
+        );
     }
 }

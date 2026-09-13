@@ -93,32 +93,66 @@ impl GrpcServer {
         }
     }
 
-    async fn do_action(&self, message: Message) -> Result<Response<Message>, Status> {
-        let options = match message.data {
+    /// The request's bearer token: the `authorization: Bearer <token>`
+    /// metadata entry. Absent metadata is "no credential" — the ACL decides
+    /// whether that is acceptable.
+    fn bearer_token(request: &tonic::Request<impl Sized>) -> Option<String> {
+        request
+            .metadata()
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| {
+                value
+                    .strip_prefix("Bearer ")
+                    .or_else(|| value.strip_prefix("bearer "))
+            })
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+            .map(str::to_string)
+    }
+
+    async fn do_action(
+        &self,
+        message: Message,
+        token: Option<String>,
+    ) -> Result<Response<Message>, Status> {
+        let options = match &message.data {
             // `data` is the action payload and MUST be a JSON object. A
             // malformed payload is a caller error, never an empty option set:
             // silently defaulting to empty options would run the action's
             // global branch (e.g. `msg:clear` clearing every error delivery)
             // instead of rejecting the request.
-            Some(ref data) => serde_json::from_slice::<Vars>(data)
+            Some(data) => serde_json::from_slice::<Vars>(data)
                 .map_err(|err| Status::invalid_argument(format!("invalid message data: {err}")))?,
             None => Vars::new(),
         };
         tracing::info!(
-            "do-action seq={} name={} ack={:?} options={options}",
+            "do-action seq={} name={} ack={:?} authenticated={}",
             message.seq,
             message.name,
-            message.ack
+            message.ack,
+            token.is_some()
         );
 
+        let principal = match self.engine.acl().authenticate(token.as_deref()) {
+            Ok(principal) => principal,
+            Err(err) => return Err(Status::unauthenticated(err.to_string())),
+        };
+
         let name = message.name.clone();
-        let value = match acts::actions::apply(&self.engine, &name, options).await {
+        let value = match acts::actions::apply_as(&self.engine, &principal, &name, options).await {
             Ok(value) => value,
             Err(acts::actions::Error::NotFound(msg)) => {
                 return Err(Status::not_found(msg));
             }
             Err(acts::actions::Error::Invalid(msg)) => {
                 return Err(Status::invalid_argument(msg));
+            }
+            Err(acts::actions::Error::Unauthenticated(msg)) => {
+                return Err(Status::unauthenticated(msg));
+            }
+            Err(acts::actions::Error::Denied(msg)) => {
+                return Err(Status::permission_denied(msg));
             }
             Err(acts::actions::Error::Internal(msg)) => {
                 tracing::error!("do-action err={msg}");
@@ -142,11 +176,18 @@ impl GrpcServer {
 #[tonic::async_trait]
 impl ActsService for GrpcServer {
     type OnMessageStream = MessageStream;
-
     async fn on_message(
         &self,
         req: tonic::Request<MessageOptions>,
     ) -> Result<tonic::Response<Self::OnMessageStream>, tonic::Status> {
+        // A subscription is a read of every message matching the caller's own
+        // filter, so it authenticates like any other request: an anonymous
+        // stream would be a way around the action checks.
+        let token = Self::bearer_token(&req);
+        if let Err(err) = self.engine.acl().authenticate(token.as_deref()) {
+            return Err(Status::unauthenticated(err.to_string()));
+        }
+
         let (tx, rx) = mpsc::channel::<Result<Message, Status>>(128);
         let addr = req
             .remote_addr()
@@ -210,7 +251,8 @@ impl ActsService for GrpcServer {
         &self,
         request: tonic::Request<Message>,
     ) -> Result<tonic::Response<Message>, tonic::Status> {
-        self.do_action(request.into_inner()).await
+        let token = Self::bearer_token(&request);
+        self.do_action(request.into_inner(), token).await
     }
 }
 

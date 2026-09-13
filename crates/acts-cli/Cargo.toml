@@ -13,7 +13,7 @@ version.workspace = true
 acts-channel = { workspace = true }
 anyhow = { workspace = true }
 chrono = "0.4.24"
-clap = { version = "4.5.21", features = ["derive", "color"] }
+clap = { version = "4.5.21", features = ["derive", "color", "env"] }
 clap-cargo = "0.14.1"
 comfy-table = "7.2.2"
 futures = "0.3.27"

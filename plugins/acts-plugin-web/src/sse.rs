@@ -1,7 +1,7 @@
 use crate::objects::{AppError, RespData};
-use acts::{Channel, ChannelOptions, Engine, Message, Vars};
+use acts::{Channel, ChannelOptions, Engine, Message, Principal, Vars};
 use axum::{
-    Json,
+    Extension, Json,
     extract::{Query, State},
     response::{
         IntoResponse, Sse,
@@ -45,8 +45,14 @@ impl Drop for CloseChannelOnDrop {
     }
 }
 
+/// Subscribe to workflow events over SSE.
+///
+/// The caller's principal must be authenticated (the route middleware
+/// enforces it); the channel filter itself is still self-declared, exactly
+/// like a gRPC `on_message` subscription.
 pub async fn sse(
     State(state): State<Arc<Engine>>,
+    Extension(_principal): Extension<Principal>,
     Query(query): Query<MessageQuery>,
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let (tx, mut rx) = mpsc::channel::<Message>(100);
@@ -87,10 +93,17 @@ pub async fn sse(
 
 pub async fn ack(
     State(state): State<Arc<Engine>>,
+    Extension(principal): Extension<Principal>,
     Json(ack): Json<MessageAck>,
 ) -> Result<impl IntoResponse, AppError> {
-    state.executor().msg().ack(&ack.id).await?;
-    Ok(RespData::ok(()))
+    let value = acts::actions::apply_as(
+        &state,
+        &principal,
+        "msg:ack",
+        Vars::new().with("id", ack.id),
+    )
+    .await?;
+    Ok(RespData::ok(value))
 }
 
 #[cfg(test)]
@@ -174,7 +187,12 @@ mod tests {
             key: None,
             options: Vars::new(),
         };
-        let response = sse(State(Arc::new(engine.clone())), Query(query)).await;
+        let response = sse(
+            State(Arc::new(engine.clone())),
+            Extension(engine.anonymous()),
+            Query(query),
+        )
+        .await;
 
         // positive control: while the stream is alive, its ack channel
         // stores one message row per workflow message

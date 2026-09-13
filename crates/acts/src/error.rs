@@ -41,6 +41,15 @@ pub enum ActError {
 
     #[error("{0}")]
     Package(String),
+
+    /// The request carried no token, or a token that matches no role, while
+    /// an ACL is configured. Transports map this to "unauthenticated".
+    #[error("{0}")]
+    Unauthenticated(String),
+
+    /// The caller is authenticated but not allowed to run the operation.
+    #[error("{0}")]
+    Denied(String),
 }
 
 #[derive(Default, Debug, Clone, Deserialize, Serialize)]

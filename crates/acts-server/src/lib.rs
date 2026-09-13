@@ -182,6 +182,47 @@ port = 10080
 # port the web server listens on
 port = 10082
 
+# access control — optional. The section's presence turns enforcement ON;
+# without it every request is allowed (the pre-ACL behaviour).
+#
+# A request's token selects a role; the role's allow/deny action-name globs
+# decide what it may do, and `deny` always wins. Because the section is the
+# opt-in, a request with no token (or an unknown one) is refused unless
+# `default_role` names a role. Tokens are matched by sha256 hex digest: store
+# `sha256:<64 hex digits>` to keep the clear text out of this file, or write
+# the token itself and let the server hash it.
+#
+# `snapshot` narrows which scopes of a target a subject owns; `$subject` is
+# the role name, so `["$subject"]` means "my own scope only". A process
+# started through an action carries its caller's rules, and the scheduler
+# re-checks them at every seal — a workflow cannot read another subject's
+# sealed data even when started with someone else's `uid`.
+#
+# Transport credentials:
+#   gRPC  — `authorization: Bearer <token>` metadata
+#   HTTP  — `authorization: Bearer <token>` header
+#   NATS  — the `token` field of the action JSON body
+#
+# [acl]
+# role applied to an absent/unknown token; omit to refuse such requests
+# default_role = "guest"
+#
+# shorthand: one token with unrestricted access (the `requirepass` equivalent)
+# token = "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+#
+# [[acl.role]]
+# name = "operator"
+# tokens = ["sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"]
+# allow = ["model:ls", "model:get", "proc:ls", "proc:get", "task:*", "msg:ls",
+#          "msg:ack", "snap:get", "snap:ls", "acl:whoami"]
+# deny = ["model:rm", "pack:publish"]
+# snapshot = { secrets = ["$subject"], profile = ["$subject/*"] }
+#
+# [[acl.role]]
+# name = "guest"
+# tokens = ["sha256:..."]
+# allow = ["model:ls", "acl:whoami"]
+
 # http package — acts-package-http rules for every `acts.core.http` act.
 # Outbound requests are blocked by default when the target is a
 # loopback/private/link-local address or a cloud metadata endpoint.

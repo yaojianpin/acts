@@ -153,6 +153,29 @@ plus snapshot operations (`snap:upsert`, `snap:remove`, `snap:get`,
 `snap:ls`). Over HTTP the snapshot endpoints are `/api/snap/upsert`,
 `/api/snap/get`, `/api/snap/ls` and `/api/snap/remove`.
 
+### Access control
+
+An optional `[acl]` section turns on access control for all three transports.
+The section's presence is the switch — without it every request is allowed,
+which is the previous behaviour.
+
+| Transport | Credential |
+|-----------|------------|
+| gRPC | `authorization: Bearer <token>` metadata, on actions and the `on_message` subscription |
+| HTTP | `authorization: Bearer <token>` header; `/health` stays open |
+| NATS | the `token` field of the action JSON body |
+
+The token selects a role; the role's `allow`/`deny` action-name globs decide,
+with `deny` winning. Tokens are compared as SHA-256 digests
+(`sha256:<hex>` keeps the clear text out of the config). A `snapshot` table
+per role narrows which scopes of which targets the subject owns (`$subject`
+is the role name), and that ownership is re-checked when a task seals a
+snapshot value — a workflow cannot read another subject's sealed data even
+when started with their `uid`.
+
+See the commented template in the generated default config
+(`~/.acts/acts.toml`) or the access-control chapter of the book.
+
 ## Tests
 
 `cargo test -p acts-server --test nats` boots the same engine the binary

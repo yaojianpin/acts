@@ -33,6 +33,7 @@ acts-channel = { workspace = true }
 acts-store = { workspace = true, features = ["sled", "sqlite", "postgres", "redis", "nats"] }
 [dev-dependencies]
 async-nats = "0.50"
+toml = "0.8.22"
 
 [features]
 default = []

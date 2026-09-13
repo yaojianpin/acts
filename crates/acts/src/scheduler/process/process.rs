@@ -155,6 +155,27 @@ impl Process {
         f(&mut env)
     }
 
+    /// Seal a caller's snapshot scope authority into the process env.
+    ///
+    /// Written once, under a private (`__`) key: the workflow's `$env` proxy
+    /// refuses private keys, so a model can neither read the credential nor
+    /// overwrite it. The env row is persisted with the proc, so the authority
+    /// survives a restart and a resumed process keeps the scope it started
+    /// with. A process started without a credential (in-process embedder,
+    /// engine-internal start) carries none and stays unrestricted — see
+    /// [`Process::owner_scope`].
+    pub(crate) fn set_owner_scope(&self, policy: &crate::ScopePolicy) {
+        self.with_env_mut(|env| env.set(consts::PROC_OWNER, policy.clone()));
+    }
+
+    /// The owner's snapshot scope authority. A process without one is
+    /// unrestricted: it was started in-process (an embedder that already has
+    /// the whole API in hand), or its row predates this field.
+    pub(crate) fn owner_scope(&self) -> crate::ScopePolicy {
+        self.with_env(|env| env.get::<crate::ScopePolicy>(consts::PROC_OWNER))
+            .unwrap_or_default()
+    }
+
     pub fn outputs(&self) -> Vars {
         if let Some(root) = self.root() {
             return root.outputs();

@@ -27,6 +27,7 @@ serde_json = { workspace = true }
 serde_repr = "0.1"
 serde_yaml = "0.9"
 strum = { features = ["derive"], workspace = true }
+sha2 = "0.10"
 thiserror = "2"
 tracing = "0.1"
 toml = "0.8.22"

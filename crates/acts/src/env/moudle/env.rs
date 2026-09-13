@@ -13,14 +13,22 @@ impl ProcEnv {
 #[rquickjs::module(rename_vars = "camelCase")]
 mod env {
     use crate::{Context, Result, env::value::ActJsValue};
-
     #[rquickjs::function]
     pub fn get_env(name: String) -> Option<ActJsValue> {
+        // Private keys (the process owner credential) are engine-internal:
+        // exposing one would let a model read — and, through `set_env`, forge
+        // — its own snapshot scope authority.
+        if crate::utils::consts::is_private_key(&name) {
+            return None;
+        }
         Context::with(|ctx| ctx.get_env(&name).map(ActJsValue::new))
     }
 
     #[rquickjs::function]
     pub fn set_env(name: String, value: ActJsValue) -> Result<()> {
+        if crate::utils::consts::is_private_key(&name) {
+            return Ok(());
+        }
         Context::with(|ctx| {
             ctx.set_env(&name, value.inner());
         });

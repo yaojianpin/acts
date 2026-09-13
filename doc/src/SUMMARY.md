@@ -1,6 +1,7 @@
 # Summary
 
 - [安装](./install.md)
+- [访问控制](./access.md)
 - [客户端Channel](./channel.md)
     - [连接](./channel/connect.md)
     - [订阅](./channel/sub.md)

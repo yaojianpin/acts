@@ -44,7 +44,12 @@ pub use config::{NatsChannelConfig, NatsConfig};
 mod config;
 
 /// Wire format of an inbound action request — mirrors the gRPC `Message`
-/// fields (`name`/`seq`/`ack`/`data`).
+/// fields (`name`/`seq`/`ack`/`data`) plus the caller's `token`.
+///
+/// The token travels in the body rather than in a NATS header: the NATS
+/// server authenticates a *connection*, and the engine has no access to the
+/// broker's authenticated user, so the only place a per-request identity can
+/// come from is the payload itself.
 #[derive(Debug, Clone, Deserialize)]
 struct WireMessage {
     name: String,
@@ -54,6 +59,8 @@ struct WireMessage {
     ack: Option<String>,
     #[serde(default)]
     data: Option<JsonValue>,
+    #[serde(default)]
+    token: Option<String>,
 }
 
 /// Wire format of an action reply (or event envelope).
@@ -207,7 +214,23 @@ async fn serve_actions(
                     return;
                 }
             };
-            let result = acts::actions::apply(&engine, &cmd.name, options).await;
+            let principal = match engine.acl().authenticate(cmd.token.as_deref()) {
+                Ok(principal) => principal,
+                Err(err) => {
+                    tracing::warn!(name = %cmd.name, error = %err, "nats action unauthenticated");
+                    if let Some(subject) = msg.reply {
+                        let out = WireReply {
+                            name: cmd.name,
+                            ack: cmd.seq,
+                            data: JsonValue::Null,
+                            err: Some(err.to_string()),
+                        };
+                        let _ = client.publish(subject, reply_bytes(&out).into()).await;
+                    }
+                    return;
+                }
+            };
+            let result = acts::actions::apply_as(&engine, &principal, &cmd.name, options).await;
             let reply = match result {
                 Ok(data) => WireReply {
                     name: cmd.name,

@@ -9,4 +9,10 @@ pub struct Cli {
 
     #[arg(short, long)]
     pub port: Option<u16>,
+
+    /// ACL token presented on every request. Takes precedence over the
+    /// ACTS_TOKEN environment variable, which is the safer place for it: an
+    /// argument is visible to every process on the machine.
+    #[arg(long, env = "ACTS_TOKEN", hide_env_values = true)]
+    pub token: Option<String>,
 }
