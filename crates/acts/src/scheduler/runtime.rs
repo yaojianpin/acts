@@ -550,12 +550,9 @@ impl Runtime {
                 let always_reapply = matches!(event, EventAction::Cancel | EventAction::Remove);
                 if !always_reapply && task.state().is_completed() {
                     // already applied durably (the state write landed but the
-                    // close was lost) — close and mark the messages completed
+                    // close was lost) — close and settle the engine-owned
                     self.cache.store().complete_ops(&pid, &tid, &r#type).await?;
-                    self.cache
-                        .store()
-                        .set_deliveries_with(&pid, &tid, data::DeliveryStatus::Completed)
-                        .await?;
+                    self.cache.store().close_deliveries(&pid, &tid).await?;
                     continue;
                 }
                 // the action was never durably applied — re-apply it; the
@@ -579,12 +576,9 @@ impl Runtime {
                 }
             } else if task.is_sign(Sign::NEXT_COMPLETE) {
                 // propagation already completed durably; just close the record
-                // and mark the deliveries completed
+                // and settle the engine-owned deliveries (an `Error` row stays)
                 self.cache.store().complete_ops(&pid, &tid, &r#type).await?;
-                self.cache
-                    .store()
-                    .set_deliveries_with(&pid, &tid, data::DeliveryStatus::Completed)
-                    .await?;
+                self.cache.store().close_deliveries(&pid, &tid).await?;
                 continue;
             } else {
                 match self.queue.send_next(&task) {

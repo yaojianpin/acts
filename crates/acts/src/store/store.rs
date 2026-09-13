@@ -451,6 +451,160 @@ impl Store {
             .is_some())
     }
 
+    /// Read-modify-write of delivery rows under their document locks.
+    ///
+    /// Every id is locked before the first read and held until the batch
+    /// commits; `f` receives each stored row — the exact state the batch
+    /// replaces — and returns the replacement (`None` leaves the row alone);
+    /// every replacement is stamped with a new `update_time` and the whole set
+    /// commits as one batch.
+    ///
+    /// This is what keeps the delivery transitions safe against each other:
+    /// the engine's close, the retry pass and the client's delivery/ack writes
+    /// reach the same rows from different tasks, and a decision taken on a
+    /// stale read ("still `Delivered`, re-arm it") must never overwrite a
+    /// state another transition already committed (`Completed` closed the
+    /// message, `Error` exhausted its retries).
+    async fn rewrite_deliveries<F>(&self, ids: &[String], mut f: F) -> Result<Vec<data::Delivery>>
+    where
+        F: FnMut(data::Delivery) -> Option<data::Delivery>,
+    {
+        let deliveries =
+            KvCollection::<data::Delivery>::new(data::Delivery::iden().as_ref(), self.kv.clone());
+        // Locked before the read: a concurrent transition of one of these rows
+        // waits here, so the row `f` decides on is the row the batch below
+        // commits over.
+        let _locks = lock_docs(ids.iter().map(|id| deliveries.data_key(id))).await;
+
+        let mut written = Vec::new();
+        let mut ops = Vec::new();
+        for id in ids {
+            let Some(stored) = deliveries.find_opt(id).await? else {
+                continue;
+            };
+            let Some(mut next) = f(stored) else {
+                continue;
+            };
+            next.update_time = utils::time::time_millis();
+            ops.extend(deliveries.update_ops(&next).await?);
+            written.push(next);
+        }
+        if !ops.is_empty() {
+            self.kv.batch(&ops).await?;
+        }
+        Ok(written)
+    }
+
+    /// [`Store::rewrite_deliveries`] for one row: the written replacement, or
+    /// `None` when the row is absent or `f` declined it.
+    pub(crate) async fn update_delivery<F>(&self, id: &str, f: F) -> Result<Option<data::Delivery>>
+    where
+        F: FnMut(data::Delivery) -> Option<data::Delivery>,
+    {
+        let ids = [id.to_string()];
+        Ok(self.rewrite_deliveries(&ids, f).await?.pop())
+    }
+
+    /// The delivery ids of one task — exhaustive, so a row past a page limit
+    /// cannot survive a transition of the task as a row nothing ever settles.
+    async fn task_delivery_ids(&self, pid: &str, tid: &str) -> Result<Vec<String>> {
+        use super::query::{Expr, Filter, Query};
+        let q = Query::new().filter(
+            Filter::and()
+                .expr(Expr::eq("pid", pid.to_string()))
+                .expr(Expr::eq("tid", tid.to_string())),
+        );
+        self.deliveries().matching_ids(q.filter.as_ref()).await
+    }
+
+    /// Close the engine-owned delivery rows of a task: `Created`, `Delivered`
+    /// and `Acked` become `Completed` — the client is not asked to act on a
+    /// finished task. An `Error` row is left alone: its retries were exhausted
+    /// before the task closed, only a manual resend/clear resolves it
+    /// (`resend_error_deliveries`/`clear_error_deliveries`), and erasing it
+    /// would drop the failed delivery from view and let the process be swept
+    /// while the client never received the message.
+    ///
+    /// A concurrent transition of a row — the retry pass marking it `Error`,
+    /// the client acking it — either lands before this read (the row is
+    /// skipped or closed from its actual state) or after this batch (it sees
+    /// `Completed`), never between the check and the write.
+    pub(crate) async fn close_deliveries(&self, pid: &str, tid: &str) -> Result<()> {
+        let ids = self.task_delivery_ids(pid, tid).await?;
+        self.rewrite_deliveries(&ids, |mut delivery| {
+            matches!(
+                delivery.status,
+                DeliveryStatus::Created | DeliveryStatus::Delivered | DeliveryStatus::Acked
+            )
+            .then(|| {
+                delivery.status = DeliveryStatus::Completed;
+                delivery
+            })
+        })
+        .await?;
+        Ok(())
+    }
+
+    /// Collect deliveries with no response: re-arm the ones that were handed
+    /// over but never acked (`Delivered` — as well as `Created` rows that were
+    /// never successfully dispatched) and mark the ones that exceeded
+    /// `max_delivery_retry_times` as errors. Returns every re-armed delivery
+    /// (the caller re-sends them to their own channels).
+    ///
+    /// The candidate page is a hint, not the decision: every row is re-read
+    /// under its document lock and acted on from that stored state, so a row
+    /// the engine closed, the client acked or a manual resend re-armed while
+    /// this pass runs is left alone instead of being overwritten by a stale
+    /// read and re-sent after the message already settled.
+    pub async fn with_no_response_deliveries(
+        &self,
+        timeout_millis: i64,
+        max_delivery_retry_times: i32,
+    ) -> Result<Vec<data::Delivery>> {
+        use super::query::{Expr, Filter, Query};
+
+        // One page per pass: the caller re-sends this batch, the next tick
+        // takes the following one.
+        let stale_before = utils::time::time_millis() - timeout_millis;
+        let q = Query::new()
+            .limit(300)
+            .filter(Filter::and().expr(Expr::lt("update_time", stale_before)));
+        let mut ids = self.deliveries().matching_ids(q.filter.as_ref()).await?;
+        ids.truncate(q.limit);
+
+        let mut rearmed = Vec::new();
+        self.rewrite_deliveries(&ids, |mut delivery| {
+            // only rows that still need a response: never successfully
+            // dispatched (`Created`) or handed over but not acked/closed
+            // (`Delivered`); settled ones are skipped
+            if !matches!(
+                delivery.status,
+                DeliveryStatus::Created | DeliveryStatus::Delivered
+            ) {
+                return None;
+            }
+            // the row was written again since the candidate scan (a manual
+            // resend reset it, a dispatch just delivered it): it is not
+            // overdue anymore — leave it to the next timeout window instead of
+            // re-sending a message the client was just handed
+            if delivery.update_time >= stale_before {
+                return None;
+            }
+            if delivery.retry_times < max_delivery_retry_times {
+                delivery.retry_times += 1;
+                rearmed.push(delivery.clone());
+            } else {
+                // the delivery will re-send by manual through the manager
+                // command — an errored delivery keeps its process alive
+                // until a manual resend/clear resolves it
+                delivery.status = DeliveryStatus::Error;
+            }
+            Some(delivery)
+        })
+        .await?;
+        Ok(rearmed)
+    }
+
     /// The sweeper pass over finished processes. Deletion is decided ONLY by
     /// the `removable` mark on the proc row — nothing else is consulted here:
     /// a process is marked removable when it is finished and every delivery
@@ -533,11 +687,13 @@ impl Store {
 mod tests {
     use super::Store;
     use crate::Workflow;
+    use crate::store::data::DeliveryStatus;
     use crate::store::query::{Expr, Filter, Query};
     use crate::store::{KvStore, MemoryStore, ScanOptions, StoreBatchOp};
     use crate::utils::consts::MODEL_ID;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::time::Duration;
 
     /// Kv wrapper that counts how the store writes: a whole `deploy` (model
     /// row + trigger rows) must go through exactly one `batch` call and never
@@ -569,6 +725,74 @@ mod tests {
         async fn batch(&self, ops: &[StoreBatchOp]) -> crate::Result<()> {
             self.batches.fetch_add(1, Ordering::SeqCst);
             self.inner.batch(ops).await
+        }
+
+        async fn scan_prefix(
+            &self,
+            key: &str,
+            options: ScanOptions,
+        ) -> crate::Result<Vec<(String, Vec<u8>)>> {
+            self.inner.scan_prefix(key, options).await
+        }
+    }
+
+    /// Kv wrapper whose armed operation parks until released: `put` (a
+    /// delivery write in flight) or `get` (a row read in flight). Lets a test
+    /// hold one delivery transition inside the store at a chosen point and run
+    /// a second one against the row it holds.
+    #[derive(Default)]
+    struct GateKv {
+        inner: MemoryStore,
+        gate_put: AtomicBool,
+        gate_get: AtomicBool,
+        in_gate: AtomicBool,
+    }
+
+    impl GateKv {
+        async fn park(&self, armed: &AtomicBool) {
+            if armed.load(Ordering::SeqCst) {
+                self.in_gate.store(true, Ordering::SeqCst);
+                while armed.load(Ordering::SeqCst) {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+            }
+        }
+
+        fn arm_put(&self) {
+            self.gate_put.store(true, Ordering::SeqCst);
+        }
+
+        fn arm_get(&self) {
+            self.gate_get.store(true, Ordering::SeqCst);
+        }
+
+        fn release(&self) {
+            self.gate_put.store(false, Ordering::SeqCst);
+            self.gate_get.store(false, Ordering::SeqCst);
+        }
+
+        /// Yield until the armed operation is parked inside the gate.
+        async fn wait_entered(&self) {
+            while !self.in_gate.load(Ordering::SeqCst) {
+                tokio::task::yield_now().await;
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl KvStore for GateKv {
+        async fn get(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
+            self.park(&self.gate_get).await;
+            self.inner.get(key).await
+        }
+
+        async fn put(&self, key: &str, value: Vec<u8>) -> crate::Result<()> {
+            self.park(&self.gate_put).await;
+            self.inner.put(key, value).await
+        }
+
+        async fn delete(&self, key: &str) -> crate::Result<()> {
+            self.inner.delete(key).await
         }
 
         async fn scan_prefix(
@@ -897,6 +1121,354 @@ mod tests {
         assert!(store.procs().find("p-completed").await.is_err());
         assert!(store.messages().query(&q).await.unwrap().rows.is_empty());
         assert!(store.deliveries().query(&q).await.unwrap().rows.is_empty());
+    }
+
+    /// The terminal delivery close settles the engine-owned rows of the task
+    /// and leaves an `Error` one untouched: retries exhausted before the task
+    /// finished keep the failed delivery — and its process — for manual
+    /// handling, until the operator resends or clears it.
+    #[tokio::test]
+    async fn close_deliveries_preserves_error_rows() {
+        let (_, store) = counting_store();
+        seed_terminal_proc_with_delivery(
+            &store,
+            "p-close",
+            crate::store::data::DeliveryStatus::Error,
+        )
+        .await;
+        // a second delivery of the same task, still awaiting the client, plus
+        // rows of another task and of another process that must not be touched
+        for (id, pid, tid, status) in [
+            (
+                "p-closed2",
+                "p-close",
+                "t1",
+                crate::store::data::DeliveryStatus::Delivered,
+            ),
+            (
+                "p-closed3",
+                "p-close",
+                "t2",
+                crate::store::data::DeliveryStatus::Created,
+            ),
+            (
+                "p-closed4",
+                "p-other",
+                "t1",
+                crate::store::data::DeliveryStatus::Created,
+            ),
+        ] {
+            store
+                .deliveries()
+                .create(&crate::store::data::Delivery {
+                    id: id.to_string(),
+                    msg_id: "p-closem1".to_string(),
+                    pid: pid.to_string(),
+                    tid: tid.to_string(),
+                    status,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+        }
+
+        store.close_deliveries("p-close", "t1").await.unwrap();
+
+        // the errored row survives; the open one is closed (`Error` is not a
+        // closable state, `Delivered` is); neither the other task's row nor
+        // the other process's row is touched
+        assert_eq!(
+            store.deliveries().find("p-closed1").await.unwrap().status,
+            crate::store::data::DeliveryStatus::Error
+        );
+        assert_eq!(
+            store.deliveries().find("p-closed2").await.unwrap().status,
+            crate::store::data::DeliveryStatus::Completed
+        );
+        assert_eq!(
+            store.deliveries().find("p-closed3").await.unwrap().status,
+            crate::store::data::DeliveryStatus::Created
+        );
+        assert_eq!(
+            store.deliveries().find("p-closed4").await.unwrap().status,
+            crate::store::data::DeliveryStatus::Created
+        );
+        // the errored delivery keeps the process alive — no removable mark, no
+        // sweep; clearing the error manually and closing the process's
+        // remaining open row lets it settle
+        assert!(!store.try_mark_removable("p-close").await.unwrap());
+        assert!(
+            !store
+                .sweep_settled_procs(10)
+                .await
+                .unwrap()
+                .contains(&"p-close".to_string())
+        );
+        assert!(store.procs().find("p-close").await.is_ok());
+        assert!(store.clear_error_delivery("p-closed1").await.unwrap());
+        store.close_deliveries("p-close", "t2").await.unwrap();
+        assert!(store.try_mark_removable("p-close").await.unwrap());
+    }
+
+    /// Seed one delivery row whose last write is `age_millis` in the past.
+    async fn seed_delivery(
+        store: &Store,
+        id: &str,
+        pid: &str,
+        tid: &str,
+        status: DeliveryStatus,
+        retry_times: i32,
+        age_millis: i64,
+    ) {
+        let now = crate::utils::time::time_millis();
+        store
+            .deliveries()
+            .create(&crate::store::data::Delivery {
+                id: id.to_string(),
+                msg_id: format!("{id}m"),
+                pid: pid.to_string(),
+                tid: tid.to_string(),
+                status,
+                retry_times,
+                create_time: now,
+                update_time: now - age_millis,
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+    }
+
+    /// The retry pass acts on the stored row, not on the candidate page it
+    /// scanned: only an overdue still-open row is re-armed and returned, a row
+    /// whose retries are exhausted becomes `Error` (kept for manual resend, not
+    /// re-sent), and a settled (`Completed`/`Acked`) or freshly written row is
+    /// left alone.
+    #[tokio::test]
+    async fn retry_scan_rearms_open_rows_and_errors_the_exhausted() {
+        let (_, store) = counting_store();
+        seed_delivery(
+            &store,
+            "d-open",
+            "p1",
+            "t1",
+            DeliveryStatus::Delivered,
+            0,
+            10_000,
+        )
+        .await;
+        seed_delivery(
+            &store,
+            "d-max",
+            "p1",
+            "t1",
+            DeliveryStatus::Delivered,
+            3,
+            10_000,
+        )
+        .await;
+        seed_delivery(
+            &store,
+            "d-acked",
+            "p1",
+            "t1",
+            DeliveryStatus::Acked,
+            0,
+            10_000,
+        )
+        .await;
+        seed_delivery(
+            &store,
+            "d-done",
+            "p1",
+            "t1",
+            DeliveryStatus::Completed,
+            0,
+            10_000,
+        )
+        .await;
+        // written a moment ago: not overdue, even though it was in the
+        // candidate id set by the time the row is read
+        seed_delivery(
+            &store,
+            "d-fresh",
+            "p1",
+            "t1",
+            DeliveryStatus::Delivered,
+            0,
+            0,
+        )
+        .await;
+
+        let rearmed = store.with_no_response_deliveries(1_000, 3).await.unwrap();
+        let ids: Vec<&str> = rearmed.iter().map(|d| d.id.as_str()).collect();
+        assert_eq!(ids, ["d-open"], "only the overdue open row is re-sent");
+        assert_eq!(rearmed[0].retry_times, 1);
+
+        let d_max = store.deliveries().find("d-max").await.unwrap();
+        assert_eq!(d_max.status, DeliveryStatus::Error);
+        assert_eq!(d_max.retry_times, 3, "an errored row keeps its retry count");
+        assert_eq!(
+            store.deliveries().find("d-acked").await.unwrap().status,
+            DeliveryStatus::Acked
+        );
+        assert_eq!(
+            store.deliveries().find("d-done").await.unwrap().status,
+            DeliveryStatus::Completed
+        );
+        // written a moment ago: neither re-armed nor re-sent
+        let fresh = store.deliveries().find("d-fresh").await.unwrap();
+        assert_eq!(fresh.status, DeliveryStatus::Delivered);
+        assert_eq!(fresh.retry_times, 0);
+    }
+
+    /// The retry pass holds each row's document lock across its read and its
+    /// write, so a close of the same task cannot slip in between: the close
+    /// waits, sees the re-armed `Delivered` row and closes it `Completed`
+    /// instead of leaving the pass's stale write on top of a finished task.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn retry_scan_does_not_overwrite_a_concurrent_close() {
+        let kv = Arc::new(GateKv::default());
+        let store = Arc::new(Store::new(kv.clone()));
+        seed_delivery(
+            &store,
+            "d1",
+            "p1",
+            "t1",
+            DeliveryStatus::Delivered,
+            0,
+            10_000,
+        )
+        .await;
+
+        // hold the pass inside its write of d1, with the row's lock held
+        kv.arm_put();
+        let scan = tokio::spawn({
+            let store = store.clone();
+            async move { store.with_no_response_deliveries(1_000, 3).await }
+        });
+        kv.wait_entered().await;
+
+        let close = tokio::spawn({
+            let store = store.clone();
+            async move { store.close_deliveries("p1", "t1").await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !close.is_finished(),
+            "the close must wait for the delivery lock the retry pass holds"
+        );
+
+        kv.release();
+        let rearmed = scan.await.unwrap().unwrap();
+        close.await.unwrap().unwrap();
+
+        assert_eq!(rearmed.len(), 1, "the pass re-armed the row it found open");
+        assert_eq!(
+            store.deliveries().find("d1").await.unwrap().status,
+            DeliveryStatus::Completed,
+            "the close decided on the stored row, so the finished task's delivery settles"
+        );
+    }
+
+    /// A row rewritten between the pass's candidate scan and its row read wins:
+    /// the pass reads the stored row, whose fresh `update_time` says the
+    /// message was just handed over (or re-armed by an operator), so it is left
+    /// to the next timeout window instead of being re-sent on the stale
+    /// candidate view — no duplicate delivery, no inflated retry count.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn retry_scan_skips_a_row_rewritten_after_its_candidate_scan() {
+        use super::{KvCollection, StoreIden};
+
+        let kv = Arc::new(GateKv::default());
+        let store = Arc::new(Store::new(kv.clone()));
+        seed_delivery(&store, "d1", "p1", "t1", DeliveryStatus::Created, 0, 10_000).await;
+
+        // park the pass at its row read: the candidate ids are already
+        // resolved from the index
+        kv.arm_get();
+        let scan = tokio::spawn({
+            let store = store.clone();
+            async move { store.with_no_response_deliveries(1_000, 3).await }
+        });
+        kv.wait_entered().await;
+
+        // the row is written again in that window (a dispatch just succeeded,
+        // a timer re-armed it): same open status, fresh `update_time`
+        let now = crate::utils::time::time_millis();
+        let row = crate::store::data::Delivery {
+            id: "d1".to_string(),
+            msg_id: "d1m".to_string(),
+            pid: "p1".to_string(),
+            tid: "t1".to_string(),
+            status: DeliveryStatus::Created,
+            retry_times: 1,
+            create_time: now,
+            update_time: now,
+            ..Default::default()
+        };
+        let key = KvCollection::<crate::store::data::Delivery>::new(
+            StoreIden::Deliveries.as_ref(),
+            kv.clone(),
+        )
+        .data_key("d1");
+        kv.put(&key, serde_json::to_vec(&row).unwrap())
+            .await
+            .unwrap();
+        kv.release();
+
+        let rearmed = scan.await.unwrap().unwrap();
+        assert!(
+            rearmed.is_empty(),
+            "a row rewritten after the candidate scan is not re-armed from the stale view"
+        );
+        let row = store.deliveries().find("d1").await.unwrap();
+        assert_eq!(row.status, DeliveryStatus::Created);
+        assert_eq!(row.retry_times, 1, "the pass left the rewritten row alone");
+    }
+
+    /// A client ack waits for a delivery write in flight and then reads the
+    /// stored state: it can no longer leave an `Acked` row behind on a
+    /// delivery the engine already closed (which nothing would ever settle
+    /// again — the process would stay unsettled and never be swept).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn ack_waits_for_a_close_in_flight_and_keeps_it_closed() {
+        let kv = Arc::new(GateKv::default());
+        let store = Arc::new(Store::new(kv.clone()));
+        seed_delivery(
+            &store,
+            "d1",
+            "p1",
+            "t1",
+            DeliveryStatus::Delivered,
+            0,
+            10_000,
+        )
+        .await;
+
+        kv.arm_put();
+        let ack = tokio::spawn({
+            let store = store.clone();
+            async move { store.set_delivery("d1", DeliveryStatus::Acked).await }
+        });
+        kv.wait_entered().await;
+
+        let close = tokio::spawn({
+            let store = store.clone();
+            async move { store.close_deliveries("p1", "t1").await }
+        });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !close.is_finished(),
+            "the close must wait for the delivery lock the ack holds"
+        );
+
+        kv.release();
+        ack.await.unwrap().unwrap();
+        close.await.unwrap().unwrap();
+        assert_eq!(
+            store.deliveries().find("d1").await.unwrap().status,
+            DeliveryStatus::Completed
+        );
     }
 
     async fn delivery_count(store: &Store, q: &Query) -> usize {

@@ -9,8 +9,7 @@ use crate::store::DbCollectionIden;
 use crate::utils::consts::TASK_ROOT_TID;
 use crate::{
     Act, ActError, ActTask, Error, Message, MessageState, NodeKind, Result, ShareLock, Variant,
-    Vars,
-    data::{self, DeliveryStatus},
+    Vars, data,
     event::EventAction,
     scheduler::{
         Context, Process, Runtime, TaskState,
@@ -803,10 +802,11 @@ impl Task {
         .await;
 
         if result.is_ok() && action.event != EventAction::Push {
-            // update the message status after doing action (deferred to writer thread)
+            // close the task's deliveries after doing the action (deferred to
+            // the writer thread); an `Error` delivery stays for manual handling
             ctx.runtime
                 .cache()
-                .upsert_message_status(&action.pid, &action.tid, DeliveryStatus::Completed)
+                .close_deliveries(&action.pid, &action.tid)
                 .await?;
         }
 

@@ -17,8 +17,12 @@ use crate::{
 /// Created ──► Delivered ──► Acked ──► Completed   (final: engine closes)
 ///    │            │            │            ▲
 ///    └────────────┴────────────┴────────────┘   (task/message close marks
+///                                                 every engine-owned state)
 ///    (any) ───────► Error      (retries exhausted — manual resend/clear)
 /// ```
+///
+/// The task/message close never marks an `Error` row `Completed`: a failed
+/// delivery stays open for manual resend/clear.
 ///
 /// `Acked` is only an intermediate state (the client confirmed receipt); the
 /// final state is `Completed` — the engine closed the delivery because the

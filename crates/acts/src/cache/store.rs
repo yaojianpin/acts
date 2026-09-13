@@ -365,114 +365,48 @@ impl Store {
     /// Advance a stored delivery from `Created` to `Delivered` — the channel
     /// handler ran to completion, so the delivery succeeded. Only rows still
     /// `Created` move: a handler that acked (or was closed) while running
-    /// must never be downgraded.
+    /// must never be downgraded. The stored row is read under its document
+    /// lock (`Store::update_delivery`), so a close or retry-pass write landing
+    /// while the handler ran is seen — never overwritten by a stale `Created`.
     pub async fn mark_delivered(&self, id: &str) -> Result<()> {
-        let Some(mut delivery) = self.deliveries().find_opt(id).await? else {
-            return Ok(());
-        };
-        if delivery.status == DeliveryStatus::Created {
-            delivery.status = DeliveryStatus::Delivered;
-            delivery.update_time = utils::time::time_millis();
-            self.deliveries().update(&delivery).await?;
-        }
+        self.update_delivery(id, |mut delivery| {
+            (delivery.status == DeliveryStatus::Created).then(|| {
+                delivery.status = DeliveryStatus::Delivered;
+                delivery
+            })
+        })
+        .await?;
         Ok(())
     }
 
     /// Ack one delivery row (by its delivery id): set its status.
     pub async fn set_delivery(&self, id: &str, status: DeliveryStatus) -> Result<()> {
-        let Some(mut delivery) = self.deliveries().find_opt(id).await? else {
-            // it's ok there is no delivery
+        let delivery = self
+            .update_delivery(id, |mut delivery| {
+                // `Completed` is the final state (the engine closed the
+                // delivery) — a late ack must never downgrade it back to the
+                // intermediate `Acked`. The stored status is read under the
+                // row's lock, so an engine close that won the race is seen
+                // here instead of being overwritten by a stale read.
+                (delivery.status != DeliveryStatus::Completed).then(|| {
+                    delivery.status = status;
+                    delivery
+                })
+            })
+            .await?;
+        // it's ok there is no delivery, or it was already closed by the engine
+        let Some(delivery) = delivery else {
             return Ok(());
         };
-        // `Completed` is the final state (the engine closed the
-        // delivery) — a late ack must never downgrade it back to the
-        // intermediate `Acked`
-        if delivery.status == DeliveryStatus::Completed {
-            return Ok(());
-        }
-        let pid = delivery.pid.clone();
-        delivery.status = status;
-        delivery.update_time = utils::time::time_millis();
-        self.deliveries().update(&delivery).await?;
         // a delivery closed `Completed` by the engine may be the
         // process's last unsettled one — if the process is finished and
         // nothing is left unsettled, mark it removable for the sweeper.
         // `Acked` is only an intermediate state and never triggers the
         // mark. `Error` keeps the process alive for manual handling.
         if status == DeliveryStatus::Completed {
-            let _ = self.try_mark_removable(&pid).await;
+            let _ = self.try_mark_removable(&delivery.pid).await;
         }
         Ok(())
-    }
-
-    /// Mark every delivery row of a task (pid, tid) with a status — used to
-    /// close the deliveries when the task completes.
-    pub async fn set_deliveries_with(
-        &self,
-        pid: &str,
-        tid: &str,
-        status: DeliveryStatus,
-    ) -> Result<bool> {
-        debug!("set_deliveries_with pid={pid} tid={tid} status={status:?}");
-        let q = Query::new().filter(
-            Filter::and()
-                .expr(Expr::eq("pid", pid.to_string()))
-                .expr(Expr::eq("tid", tid.to_string())),
-        );
-        let collection = self.deliveries();
-        // it's ok there is no delivery: whether one exists depends on the
-        // emitter — the client may create an emitter without an emit_id
-        for mut m in collection.query_all(&q).await? {
-            m.status = status;
-            m.update_time = utils::time::time_millis();
-            collection.update(&m).await?;
-        }
-
-        Ok(true)
-    }
-
-    /// Collect deliveries with no response: re-arm the ones that were handed
-    /// over but never acked (`Delivered` — as well as `Created` rows that were
-    /// never successfully dispatched) and mark the ones that exceeded
-    /// `max_delivery_retry_times` as errors. Returns every re-armed delivery
-    /// (the caller re-sends them to their own channels).
-    pub async fn with_no_response_deliveries(
-        &self,
-        timeout_millis: i64,
-        max_delivery_retry_times: i32,
-    ) -> Result<Vec<data::Delivery>> {
-        let q = Query::new().limit(300).filter(Filter::and().expr(Expr::lt(
-            "update_time",
-            utils::time::time_millis() - timeout_millis,
-        )));
-        let collection = self.deliveries();
-        let mut rearmed = Vec::new();
-        for m in collection.query(&q).await?.rows.iter() {
-            // only rows that still need a response: never successfully
-            // dispatched (`Created`) or handed over but not acked/closed
-            // (`Delivered`); settled ones are skipped
-            if !matches!(
-                m.status,
-                DeliveryStatus::Created | DeliveryStatus::Delivered
-            ) {
-                continue;
-            }
-            let mut delivery = m.clone();
-            delivery.update_time = utils::time::time_millis();
-            if delivery.retry_times < max_delivery_retry_times {
-                delivery.retry_times += 1;
-                if collection.update(&delivery).await? {
-                    rearmed.push(delivery);
-                }
-            } else {
-                // the delivery will re-send by manual through the manager
-                // command — an errored delivery keeps its process alive
-                // until a manual resend/clear resolves it
-                delivery.status = DeliveryStatus::Error;
-                collection.update(&delivery).await?;
-            }
-        }
-        Ok(rearmed)
     }
 
     /// Re-send every error delivery row (reset to `Created`; the retry timer

@@ -8,18 +8,18 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tracing::error;
 
-use crate::{ActError, Result, data::DeliveryStatus, scheduler::Task, store::Store, utils::consts};
+use crate::{ActError, Result, scheduler::Task, store::Store, utils::consts};
 
 pub(crate) enum WriteOp {
     /// Persist a task, its root task, and mark the process complete when needed.
     /// Serialization happens on the writer thread, off the caller's hot path.
     Task(Arc<Task>),
-    /// Deferred delivery-status update: closes every delivery row of a
-    /// finished task's message (the client is not asked to act again).
-    DeliveryStatus {
+    /// Deferred delivery close: settles every engine-owned delivery row of a
+    /// finished task (`Created`/`Delivered`/`Acked` → `Completed`; an `Error`
+    /// row stays for manual handling).
+    CloseDeliveries {
         pid: String,
         tid: String,
-        status: DeliveryStatus,
     },
     /// Durable outbox enqueue: record the task's `next` as pending. Ordered
     /// after the task write queued by the same caller, so when this record
@@ -202,8 +202,8 @@ impl StoreWriter {
     async fn apply(store: &Store, op: WriteOp) -> Result<()> {
         match op {
             WriteOp::Task(task) => Self::apply_task(store, &task).await,
-            WriteOp::DeliveryStatus { pid, tid, status } => {
-                store.set_deliveries_with(&pid, &tid, status).await?;
+            WriteOp::CloseDeliveries { pid, tid } => {
+                store.close_deliveries(&pid, &tid).await?;
                 // the task close may have settled the process's last open
                 // delivery — mark it removable when the process is finished
                 // and nothing is left open
@@ -285,13 +285,12 @@ impl StoreWriter {
         // the authoritative point for both:
         //  1. close the task's own delivery rows `Completed` — the client is
         //     not asked to act on a finished task (this covers tasks
-        //     completed by the engine itself, with no client action ever);
+        //     completed by the engine itself, with no client action ever) —
+        //     except `Error` rows, which stay open for manual handling;
         //  2. re-check the removable mark — a process with no delivery rows
         //     (or all settled) is marked here, so the sweeper deletes it.
         if task.state().is_completed() {
-            store
-                .set_deliveries_with(&task.pid, &task.id, DeliveryStatus::Completed)
-                .await?;
+            store.close_deliveries(&task.pid, &task.id).await?;
             let _ = store.try_mark_removable(&task.pid).await;
         }
         Ok(())
@@ -570,5 +569,53 @@ mod tests {
         writer.flush().await.unwrap();
         assert_eq!(writer.depth(), 0);
         assert!(writer.high_watermark() >= 1);
+    }
+
+    /// The deferred delivery close queued for a finished task settles the
+    /// engine-owned rows and leaves an `Error` row for manual handling.
+    #[tokio::test]
+    async fn delivery_close_preserves_error_rows() {
+        use crate::store::data::{Delivery, DeliveryStatus};
+
+        let (store, _, writer) = test_writer();
+        for (id, status) in [
+            ("d-error", DeliveryStatus::Error),
+            ("d-delivered", DeliveryStatus::Delivered),
+            ("d-acked", DeliveryStatus::Acked),
+        ] {
+            store
+                .deliveries()
+                .create(&Delivery {
+                    id: id.to_string(),
+                    pid: "p1".to_string(),
+                    tid: "t1".to_string(),
+                    status,
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+        }
+
+        writer
+            .send(WriteOp::CloseDeliveries {
+                pid: "p1".to_string(),
+                tid: "t1".to_string(),
+            })
+            .await
+            .unwrap();
+        writer.flush().await.unwrap();
+
+        assert_eq!(
+            store.deliveries().find("d-error").await.unwrap().status,
+            DeliveryStatus::Error
+        );
+        assert_eq!(
+            store.deliveries().find("d-delivered").await.unwrap().status,
+            DeliveryStatus::Completed
+        );
+        assert_eq!(
+            store.deliveries().find("d-acked").await.unwrap().status,
+            DeliveryStatus::Completed
+        );
     }
 }

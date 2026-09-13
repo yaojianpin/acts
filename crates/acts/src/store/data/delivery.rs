@@ -12,6 +12,11 @@ use super::message::DeliveryStatus;
 /// Ack/Retry/Clear/Redo and the retry timer operate on. Rows are keyed by
 /// their own delivery id and reference the message id; the message payload is
 /// stored once in the `messages` collection.
+///
+/// Every status transition is a conditional read-modify-write serialized per
+/// row (`Store::rewrite_deliveries`): the engine's close, the retry pass and
+/// the client's delivery/ack writes decide on the stored row, so none of them
+/// can overwrite a state another transition already committed.
 #[derive(Default, Deserialize, Serialize, Debug, Clone)]
 pub struct Delivery {
     /// delivery id — unique storage key of this (message × channel) delivery

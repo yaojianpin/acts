@@ -1,7 +1,6 @@
 use super::writer::{StoreWriter, WriteOp};
 use crate::{
     ActError, Action, Config, Result,
-    data::DeliveryStatus,
     query::{Expr, Filter, Query},
     scheduler::{Process, Runtime, Task, TaskState},
     store::{KvStore, MemoryStore, Store, query::Sort},
@@ -765,17 +764,13 @@ impl Cache {
             .await
     }
 
-    pub(crate) async fn upsert_message_status(
-        &self,
-        pid: &str,
-        tid: &str,
-        status: DeliveryStatus,
-    ) -> Result<()> {
+    /// Close the deliveries of a finished task (deferred to the writer
+    /// thread). The store keeps an `Error` row for manual handling.
+    pub(crate) async fn close_deliveries(&self, pid: &str, tid: &str) -> Result<()> {
         self.writer
-            .send(WriteOp::DeliveryStatus {
+            .send(WriteOp::CloseDeliveries {
                 pid: pid.to_string(),
                 tid: tid.to_string(),
-                status,
             })
             .await
     }
