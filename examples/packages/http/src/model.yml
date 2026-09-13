@@ -1,13 +1,17 @@
 name: http example
 id: http-example
+ver: 0.1.0
 vars:
-  key1: "1"
-  key2: "2"
+  - name: key1
+    value: "1"
+  - name: key2
+    value: "2"
 steps:
   - name: http step
     uses: acts.core.http
     params:
       url: http://127.0.0.1:1234/hello
+      content-type: text
       method: GET
       # params from workflow.inputs
       params: 

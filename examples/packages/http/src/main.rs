@@ -30,7 +30,13 @@ async fn main() -> Result<()> {
         .with_body(json!({ "my_value": "world"}).to_string())
         .create();
 
+    // The mock server listens on loopback, which the http package blocks by
+    // default; opt in explicitly for this example.
+    let mut config = acts::Config::default();
+    config.table =
+        toml::from_str("[http]\nallow-private-addresses = true\n").expect("parse http config");
     let engine = Engine::builder()
+        .set_config(&config)
         .add_package::<HttpPackage>()
         .start()
         .await?;
