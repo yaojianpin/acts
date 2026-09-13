@@ -87,7 +87,8 @@ impl ActsChannel {
     /// Update or insert one snapshot value on the server (feed write). The
     /// snapshot target must be registered on the server (`snap:upsert`
     /// auto-registers it with default options); scope key and revision are
-    /// supplied by the caller.
+    /// supplied by the caller, and a revision not newer than the server's
+    /// cached one for that scope is ignored.
     pub async fn upsert_snapshot(
         &mut self,
         name: &str,

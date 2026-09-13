@@ -7,6 +7,11 @@
 //! seals it — `resolve` never performs network I/O, so remote latency and
 //! outages stay out of the scheduling hot path.
 //!
+//! Feeds stamp a monotonic `rev` per scope. `upsert` applies a value only
+//! when its revision is newer than the cached one, so a delayed retry, an
+//! out-of-order bus delivery, or a race between two feeds can never roll a
+//! scope back to an older value.
+//!
 //! Two policies control *when* the cache value is frozen into a task's
 //! sealed data:
 //!
@@ -132,13 +137,31 @@ impl SnapshotStore {
         entry
     }
 
+    /// Insert or replace the value of `scope`.
+    ///
+    /// Only a strictly newer `rev` overwrites the cached entry; a stale
+    /// revision (older than the cached one) is dropped, and an equal revision
+    /// is treated as an idempotent replay — the cached value is kept and only
+    /// the ttl basis is refreshed.
     pub(crate) fn upsert(&self, scope: &str, rev: u64, data: Vars) {
-        self.entries.write().insert(
+        let now = now_ms();
+        let mut entries = self.entries.write();
+        if let Some(entry) = entries.get_mut(scope) {
+            if rev > entry.rev {
+                entry.rev = rev;
+                entry.data = data;
+                entry.timestamp = now;
+            } else if rev == entry.rev {
+                entry.timestamp = now;
+            }
+            return;
+        }
+        entries.insert(
             scope.to_string(),
             SnapshotEntry {
                 rev,
                 data,
-                timestamp: now_ms(),
+                timestamp: now,
             },
         );
     }
@@ -205,7 +228,9 @@ impl SnapshotManager {
     }
 
     /// Feed a new value for `name`/`scope`. Auto-registers the target with
-    /// [`SnapshotOptions::default`] when missing.
+    /// [`SnapshotOptions::default`] when missing. Revisions are monotonic per
+    /// scope: a value whose `rev` is not newer than the cached one is ignored
+    /// (a stale revision cannot roll the scope back).
     pub fn upsert(&self, name: &str, scope: &str, rev: u64, data: Vars) {
         let store = self.runtime.snapshot_store(name).unwrap_or_else(|| {
             self.runtime
@@ -285,6 +310,7 @@ pub(crate) fn resolve_scope_params(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Barrier;
 
     #[test]
     fn join_scope_strings_and_numbers() {
@@ -317,6 +343,71 @@ mod tests {
         // tombstone removes
         store.remove("s1");
         assert!(store.get("s1").is_none());
+    }
+
+    #[test]
+    fn store_upsert_ignores_stale_and_duplicate_rev() {
+        let store = SnapshotStore::new(SnapshotOptions::default());
+        store.upsert("s1", 2, Vars::new().with("a", 2));
+
+        // a late delivery of an older revision must not roll the entry back
+        store.upsert("s1", 1, Vars::new().with("a", 1));
+        let entry = store.get("s1").unwrap();
+        assert_eq!(entry.rev, 2);
+        assert_eq!(entry.data.get::<i32>("a").unwrap(), 2);
+
+        // an equal revision is an idempotent replay: the cached value stays
+        store.upsert("s1", 2, Vars::new().with("a", 99));
+        let entry = store.get("s1").unwrap();
+        assert_eq!(entry.rev, 2);
+        assert_eq!(entry.data.get::<i32>("a").unwrap(), 2);
+
+        // a newer revision still wins
+        store.upsert("s1", 3, Vars::new().with("a", 3));
+        let entry = store.get("s1").unwrap();
+        assert_eq!(entry.rev, 3);
+        assert_eq!(entry.data.get::<i32>("a").unwrap(), 3);
+    }
+
+    #[test]
+    fn store_upsert_replay_refreshes_ttl_basis() {
+        let store = SnapshotStore::new(SnapshotOptions::default().with_ttl(1));
+        store.upsert("s1", 1, Vars::new().with("a", 1));
+        // age the entry, then replay the same revision
+        {
+            let mut entries = store.entries.write();
+            entries.get_mut("s1").unwrap().timestamp = 1;
+        }
+        store.upsert("s1", 1, Vars::new().with("a", 2));
+
+        let entry = store.get("s1").unwrap();
+        assert_eq!(entry.rev, 1);
+        assert_eq!(entry.data.get::<i32>("a").unwrap(), 1);
+        assert!(entry.timestamp > 1, "replay must refresh the ttl basis");
+    }
+
+    #[test]
+    fn store_upsert_concurrent_revs_keep_max() {
+        let store = Arc::new(SnapshotStore::new(SnapshotOptions::default()));
+        let barrier = Arc::new(Barrier::new(8));
+        let mut handles = Vec::new();
+        // every revision is attempted at the same instant: the write lock
+        // decides the arrival order, the cache must still end at the max
+        for rev in 1..=8u64 {
+            let store = store.clone();
+            let barrier = barrier.clone();
+            handles.push(std::thread::spawn(move || {
+                barrier.wait();
+                store.upsert("s1", rev, Vars::new().with("rev", rev as i64));
+            }));
+        }
+        for handle in handles {
+            handle.join().unwrap();
+        }
+
+        let entry = store.get("s1").unwrap();
+        assert_eq!(entry.rev, 8);
+        assert_eq!(entry.data.get::<i64>("rev").unwrap(), 8);
     }
 
     #[test]
