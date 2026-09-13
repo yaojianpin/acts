@@ -7,7 +7,13 @@ use crate::utils::consts::{KEY_SEP, KEY_SEP_SUCC};
 use crate::{ActError, Result};
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value as JsonValue;
-use std::{cmp::Ordering, collections::HashSet, fmt::Debug, marker::PhantomData, sync::Arc};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeMap, HashSet},
+    fmt::Debug,
+    marker::PhantomData,
+    sync::Arc,
+};
 
 pub struct KvCollection<T> {
     prefix: String,
@@ -368,12 +374,19 @@ impl<T> KvCollection<T> {
 
     /// Order matching IDs by an indexed field without reading document bodies.
     ///
-    /// Index entries are stored as `{field}-{value}-{id}`. Consequently an
-    /// ascending index scan yields value order and, within equal values, ID
-    /// order -- the same stable tie-break used by [`cmp_order_docs`]. For a
-    /// descending query we reverse value groups while keeping IDs ascending
-    /// inside each group. Rows with a missing/null value are absent or in the
-    /// JSON `null` group; they sort first ascending and last descending.
+    /// Index entries are stored as `{field}-{value}-{id}`. The intended order
+    /// is encoded value order and, within one value, id order -- the same
+    /// stable tie-break used by [`cmp_order_docs`]. That order is rebuilt here
+    /// rather than taken from the scan: [`KvStore::scan_prefix`] promises
+    /// nothing about entry order (Redis `SCAN` returns keys in arbitrary
+    /// order), so entries arrive neither value-sorted nor grouped. Sorting the
+    /// encoded value strings restores query order only because
+    /// `ordered_index_fields` lists just the fields whose values all use the
+    /// fixed-width, order-preserving integer encoding.
+    ///
+    /// A descending query reverses the value groups while keeping IDs
+    /// ascending inside each group. Rows with a missing/null value sort first
+    /// ascending and last descending.
     async fn ordered_index_ids(
         &self,
         ids: &HashSet<String>,
@@ -384,54 +397,51 @@ impl<T> KvCollection<T> {
         let options = ScanOptions::new(ScanOperation::Eq, field_prefix.clone(), false);
         let entries = self.kv.scan_prefix(&field_prefix, options).await?;
 
-        // Keep value groups separate: a descending order reverses groups but
-        // deliberately does not reverse the ID tie-break within a group.
-        let mut groups: Vec<Vec<String>> = Vec::new();
+        // Group by encoded value: ordering the map restores value order, and
+        // the per-group id sort restores the tie-break.
+        let mut groups: BTreeMap<String, Vec<String>> = BTreeMap::new();
         let mut present = HashSet::new();
-        let mut current_value: Option<String> = None;
         for (key, _) in entries {
             let Some(rest) = key.strip_prefix(&field_prefix) else {
                 continue;
             };
+            // A value never contains `KEY_SEP` (the key encoding escapes it
+            // away) while an id may, so the first separator ends the value.
             let Some(sep_pos) = rest.find(KEY_SEP) else {
                 continue;
             };
-            let id = &rest[sep_pos + KEY_SEP.len()..];
-            if !ids.contains(id) {
-                continue;
-            }
-
-            // `cmp_order_docs` treats JSON null exactly like a missing value.
             let value = &rest[..sep_pos];
-            if value == "null" {
+            let id = &rest[sep_pos + KEY_SEP.len()..];
+            // `cmp_order_docs` treats JSON null exactly like a missing value.
+            if value == "null" || !ids.contains(id) {
                 continue;
             }
             if !present.insert(id.to_string()) {
                 continue;
             }
-            if current_value.as_deref() != Some(value) {
-                groups.push(Vec::new());
-                current_value = Some(value.to_string());
-            }
-            if let Some(last) = groups.last_mut() {
-                last.push(id.to_string());
-            }
+            groups
+                .entry(value.to_string())
+                .or_default()
+                .push(id.to_string());
         }
 
-        // This subtraction also includes documents whose order field is JSON
-        // null (the `null` index group was intentionally not marked present).
+        // Documents whose order value is null or missing carry no group.
         let mut missing: Vec<String> = ids.difference(&present).cloned().collect();
         missing.sort();
 
-        let mut ordered_ids = if desc {
-            groups.into_iter().rev().flatten().collect::<Vec<_>>()
-        } else {
-            groups.into_iter().flatten().collect::<Vec<_>>()
-        };
+        let mut ordered_ids = Vec::with_capacity(ids.len());
         if desc {
+            for group in groups.values_mut().rev() {
+                group.sort();
+                ordered_ids.append(group);
+            }
             ordered_ids.extend(missing);
         } else {
-            ordered_ids.splice(0..0, missing);
+            ordered_ids.append(&mut missing);
+            for group in groups.values_mut() {
+                group.sort();
+                ordered_ids.append(group);
+            }
         }
         Ok(ordered_ids)
     }
@@ -1578,6 +1588,80 @@ mod tests {
             vec!["b", "c", "d"]
         );
         assert_eq!(desc_page.count, 6);
+    }
+
+    /// Kv wrapper whose `scan_prefix` returns entries in reverse key order,
+    /// standing in for a backend that makes no ordering promise (Redis
+    /// `SCAN`). The ordered-index pagination must not depend on it.
+    struct UnorderedScanKv {
+        inner: MemoryStore,
+    }
+
+    #[async_trait::async_trait]
+    impl KvStore for UnorderedScanKv {
+        async fn get(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
+            self.inner.get(key).await
+        }
+
+        async fn put(&self, key: &str, value: Vec<u8>) -> crate::Result<()> {
+            self.inner.put(key, value).await
+        }
+
+        async fn delete(&self, key: &str) -> crate::Result<()> {
+            self.inner.delete(key).await
+        }
+
+        async fn scan_prefix(
+            &self,
+            key: &str,
+            options: ScanOptions,
+        ) -> crate::Result<Vec<(String, Vec<u8>)>> {
+            let mut entries = self.inner.scan_prefix(key, options).await?;
+            entries.reverse();
+            Ok(entries)
+        }
+    }
+
+    #[tokio::test]
+    async fn indexed_order_does_not_trust_scan_order() {
+        let kv: Arc<dyn KvStore> = Arc::new(UnorderedScanKv {
+            inner: MemoryStore::new(),
+        });
+        let col = KvCollection::<OrderedDoc>::new("unordered", kv);
+        for (id, ord) in [
+            ("a", json!(2)),
+            ("b", json!(2)),
+            ("c", json!(1)),
+            ("d", json!(1)),
+            ("e", json!(null)),
+            ("f", json!(5)),
+        ] {
+            col.create(&OrderedDoc {
+                id: id.to_string(),
+                state: "idle".to_string(),
+                ord,
+            })
+            .await
+            .unwrap();
+        }
+
+        let asc = col
+            .query(&Query::new().order("ord", Sort::Asc).limit(100))
+            .await
+            .unwrap();
+        assert_eq!(
+            asc.rows.iter().map(|d| d.id.clone()).collect::<Vec<_>>(),
+            vec!["e", "c", "d", "a", "b", "f"]
+        );
+
+        let desc = col
+            .query(&Query::new().order("ord", Sort::Desc).limit(100))
+            .await
+            .unwrap();
+        assert_eq!(
+            desc.rows.iter().map(|d| d.id.clone()).collect::<Vec<_>>(),
+            vec!["f", "a", "b", "c", "d", "e"]
+        );
     }
 
     #[tokio::test]

@@ -190,6 +190,12 @@ pub trait KvStore: Send + Sync {
         Ok(values)
     }
 
+    /// Return every entry whose key starts with `key` and matches `options`.
+    ///
+    /// Entry order is unspecified: a backend may iterate an ordered key space
+    /// (SQLite/Postgres `ORDER BY key`, an in-memory `BTreeMap`) or return
+    /// keys in arbitrary order (`RedisStore` uses `SCAN`). Callers that need
+    /// an order MUST impose it themselves.
     async fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>>;
 }
 
