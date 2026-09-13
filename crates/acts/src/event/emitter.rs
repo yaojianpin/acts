@@ -307,6 +307,17 @@ impl Emitter {
         self.errors.write().clear();
     }
 
+    /// Test hook: replace the worker entry of `pid` with a sender whose
+    /// receiver is already dropped — the state a worker leaves behind when its
+    /// task ends without running the re-home exit (e.g. the runtime aborted
+    /// it). `route` must replace that stale entry, not write into it.
+    #[cfg(test)]
+    pub(crate) fn abandon_worker(&self, pid: &str) {
+        let (tx, rx) = unbounded_channel();
+        drop(rx);
+        self.workers.write().insert(pid.to_string(), tx);
+    }
+
     pub fn on_message<F, Fut>(&self, key: &str, f: F)
     where
         F: Fn(Event<Message>) -> Fut + Send + Sync + 'static,
@@ -379,6 +390,12 @@ impl Emitter {
 
     /// Route one workflow event to the ordered consumer of its process,
     /// starting the consumer on first use.
+    ///
+    /// A send that fails means that sender's receiver is gone — its worker
+    /// task ended without the exit path that replaces the entry (the task was
+    /// dropped, e.g. the runtime was aborted) — so the entry is never written
+    /// into and left: it is replaced by a fresh worker that the event is then
+    /// handed to.
     fn route(&self, mut event: KeyEvent) {
         let pid = match &event {
             KeyEvent::Start(m)
@@ -400,8 +417,13 @@ impl Emitter {
         }
         let mut workers = self.workers.write();
         if let Some(tx) = workers.get(&pid) {
-            let _ = tx.send(event);
-            return;
+            match tx.send(event) {
+                Ok(()) => return,
+                // a stale entry: this sender's worker is gone without having
+                // re-homed its queue, so the entry must be replaced instead of
+                // accepting an event nobody will ever read
+                Err(err) => event = err.0,
+            }
         }
         let tx = spawn_pid_worker(
             self.workers.clone(),
@@ -414,6 +436,9 @@ impl Emitter {
         );
         workers.insert(pid, tx.clone());
         drop(workers);
+        // the receiver was created one line above: it is gone only if the
+        // just-spawned task never got to run (no runtime left), and then there
+        // is no queue left to re-home the event to either
         let _ = tx.send(event);
     }
 
