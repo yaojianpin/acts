@@ -181,11 +181,11 @@ impl Vars {
     }
 
     pub fn value_str(&self, key: &str) -> Option<&str> {
-        self.inner.get(key).map(|v| v.as_str().unwrap())
+        self.inner.get(key).and_then(|v| v.as_str())
     }
 
     pub fn value_number(&self, key: &str) -> Option<f64> {
-        self.inner.get(key).map(|v| v.as_f64().unwrap())
+        self.inner.get(key).and_then(|v| v.as_f64())
     }
 }
 

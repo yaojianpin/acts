@@ -11,6 +11,7 @@ use crate::acts_service_server::{ActsService, ActsServiceServer};
 mod act;
 mod server;
 mod subscribe;
+mod vars;
 mod workflow;
 
 #[cfg(feature = "docker_test")]
