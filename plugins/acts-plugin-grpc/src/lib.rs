@@ -95,7 +95,13 @@ impl GrpcServer {
 
     async fn do_action(&self, message: Message) -> Result<Response<Message>, Status> {
         let options = match message.data {
-            Some(ref data) => serde_json::from_slice::<Vars>(data).unwrap_or_default(),
+            // `data` is the action payload and MUST be a JSON object. A
+            // malformed payload is a caller error, never an empty option set:
+            // silently defaulting to empty options would run the action's
+            // global branch (e.g. `msg:clear` clearing every error delivery)
+            // instead of rejecting the request.
+            Some(ref data) => serde_json::from_slice::<Vars>(data)
+                .map_err(|err| Status::invalid_argument(format!("invalid message data: {err}")))?,
             None => Vars::new(),
         };
         tracing::info!(

@@ -191,7 +191,22 @@ async fn serve_actions(
                 cmd.seq,
                 cmd.ack
             );
-            let options = cmd.data.clone().map(Vars::from).unwrap_or_default();
+            let options = match action_options(cmd.data) {
+                Ok(options) => options,
+                Err(err) => {
+                    tracing::error!(name = %cmd.name, error = %err, "nats action payload rejected");
+                    if let Some(subject) = msg.reply {
+                        let out = WireReply {
+                            name: cmd.name,
+                            ack: cmd.seq,
+                            data: JsonValue::Null,
+                            err: Some(err),
+                        };
+                        let _ = client.publish(subject, reply_bytes(&out).into()).await;
+                    }
+                    return;
+                }
+            };
             let result = acts::actions::apply(&engine, &cmd.name, options).await;
             let reply = match result {
                 Ok(data) => WireReply {
@@ -218,6 +233,20 @@ async fn serve_actions(
 
 fn reply_bytes(reply: &WireReply) -> String {
     serde_json::to_string(reply).unwrap_or_else(|_| "{}".to_string())
+}
+
+/// Action options from an inbound request's `data` field.
+///
+/// When present, `data` MUST be a JSON object: a malformed payload is a
+/// caller error, never an empty option set. Defaulting to empty options would
+/// run the action's global branch (e.g. `msg:clear` clearing every error
+/// delivery) instead of rejecting the request.
+fn action_options(data: Option<JsonValue>) -> std::result::Result<Vars, String> {
+    match data {
+        None => Ok(Vars::new()),
+        Some(JsonValue::Object(map)) => Ok(Vars::from(map)),
+        Some(_) => Err("invalid payload: `data` must be a JSON object".to_string()),
+    }
 }
 
 #[async_trait::async_trait]
@@ -281,5 +310,34 @@ mod tests {
         assert!(text.contains("\"name\":\"proc:start\""));
         assert!(text.contains("\"ack\":\"seq-1\""));
         assert!(!text.contains("err"));
+    }
+
+    #[test]
+    fn action_options_accepts_absent_or_object_data() {
+        assert!(action_options(None).unwrap().is_empty());
+        assert!(action_options(Some(json!({}))).unwrap().is_empty());
+
+        let payload = action_options(Some(json!({ "id": "d-1" }))).unwrap();
+        assert_eq!(payload.get::<String>("id").unwrap(), "d-1");
+    }
+
+    /// A non-object `data` must be rejected, never converted to empty options:
+    /// empty options on `msg:clear` mean "clear every error delivery".
+    #[test]
+    fn action_options_rejects_non_object_data() {
+        for data in [
+            json!([]),
+            json!("msg:clear"),
+            json!(1),
+            json!(null),
+            json!(true),
+        ] {
+            let err = action_options(Some(data.clone()))
+                .expect_err(&format!("data={data} must be rejected"));
+            assert!(
+                err.contains("must be a JSON object"),
+                "unexpected error for data={data}: {err}"
+            );
+        }
     }
 }

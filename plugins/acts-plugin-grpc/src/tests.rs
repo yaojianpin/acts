@@ -109,6 +109,62 @@ async fn test_grpc_server_new() {
     engine.close().await;
 }
 
+/// `data` is the action payload and must be a JSON object. A malformed
+/// payload is rejected as INVALID_ARGUMENT instead of silently becoming empty
+/// options — empty options on `msg:clear` mean "clear every error delivery".
+#[tokio::test(flavor = "multi_thread")]
+async fn test_do_action_rejects_malformed_data() {
+    let engine = Engine::builder().start().await.unwrap();
+    let server = GrpcServer::new(&engine);
+
+    let malformed: [&[u8]; 4] = [b"[]", b"{", b"null", b"\"msg:clear\""];
+    for data in malformed {
+        let message = acts_channel::Message {
+            name: "msg:clear".to_string(),
+            seq: "seq-1".to_string(),
+            ack: None,
+            data: Some(data.to_vec()),
+        };
+        let status = server
+            .do_action(message)
+            .await
+            .expect_err("malformed data must be rejected");
+        assert_eq!(
+            status.code(),
+            tonic::Code::InvalidArgument,
+            "data={data:?} must be INVALID_ARGUMENT"
+        );
+    }
+
+    // nothing was applied: the rejected `msg:clear` must not have cleared
+    let stored = engine
+        .executor()
+        .msg()
+        .list(&StoreQuery::new().offset(0).limit(10))
+        .await
+        .unwrap()
+        .count;
+    assert_eq!(stored, 0);
+
+    // absent or object-valued data stays valid
+    for data in [None, Some(b"{}".to_vec())] {
+        let message = acts_channel::Message {
+            name: "msg:clear".to_string(),
+            seq: "seq-1".to_string(),
+            ack: None,
+            data,
+        };
+        let response = server
+            .do_action(message)
+            .await
+            .expect("absent or object data must be accepted")
+            .into_inner();
+        assert_eq!(response.ack.as_deref(), Some("seq-1"));
+    }
+
+    engine.close().await;
+}
+
 async fn run_irq_workflow(engine: &Engine, key: &str) {
     let model = Workflow::new()
         .with_id(&format!("grpc-leak-{key}"))

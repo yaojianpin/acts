@@ -192,3 +192,49 @@ async fn engine_events_forwarded_to_nats() {
     engine.close().await;
     std::fs::remove_file(&path).ok();
 }
+
+/// A non-object `data` must be rejected over the wire, never reinterpreted as
+/// empty options: empty options on `msg:clear` clear every error delivery.
+#[tokio::test(flavor = "multi_thread")]
+async fn malformed_action_data_rejected() {
+    let Some(client) = connect_or_skip().await else {
+        return;
+    };
+
+    let (path, config) =
+        temp_config("[nats]\nurl = \"nats://127.0.0.1:4222\"\nsubject = \"acts\"\n");
+    let engine = engine_with_nats(&config).await;
+
+    for data in [json!([]), json!("msg:clear"), json!(7)] {
+        let reply = request_action(
+            &client,
+            "acts.cmd".to_string(),
+            json!({ "name": "msg:clear", "seq": "req-bad", "data": data }),
+        )
+        .await;
+        assert_eq!(reply["ack"], "req-bad");
+        assert_eq!(reply["data"], JsonValue::Null);
+        assert!(
+            reply["err"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("must be a JSON object"),
+            "data={data} must be rejected: {reply}"
+        );
+    }
+
+    // an object payload is still accepted
+    let reply = request_action(
+        &client,
+        "acts.cmd".to_string(),
+        json!({ "name": "msg:clear", "seq": "req-ok", "data": {} }),
+    )
+    .await;
+    assert!(
+        reply["err"].is_null(),
+        "object data must be accepted: {reply}"
+    );
+
+    engine.close().await;
+    std::fs::remove_file(&path).ok();
+}
