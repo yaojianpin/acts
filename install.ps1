@@ -7,9 +7,9 @@
 # The binaries land in ~\.acts\bin (override with ACTS_INSTALL_DIR).
 
 param(
-    [string]$Repo = "yaojianpin/acts",
-    [string]$Version = "latest",
-    [string]$InstallDir = ""
+    [string]$Repo = $(if ($env:ACTS_REPO) { $env:ACTS_REPO } else { "yaojianpin/acts" }),
+    [string]$Version = $(if ($env:ACTS_VERSION) { $env:ACTS_VERSION } else { "latest" }),
+    [string]$InstallDir = $(if ($env:ACTS_INSTALL_DIR) { $env:ACTS_INSTALL_DIR } else { "" })
 )
 
 $ErrorActionPreference = "Stop"
@@ -47,9 +47,38 @@ try {
     Copy-Item (Join-Path $tmp "acts-cli.exe") $InstallDir -Force
 
     Write-Host "installed acts-server $version and acts-cli $version to $InstallDir" -ForegroundColor Green
-    $current = [Environment]::GetEnvironmentVariable("Path", "User")
-    if ($current -notlike "*$InstallDir*") {
-        Write-Host "add $InstallDir to your PATH, e.g.: setx PATH \"$InstallDir;%PATH%\""
+
+    $installPath = [System.IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
+    $registry = [Microsoft.Win32.Registry]::CurrentUser.OpenSubKey("Environment", $true)
+    try {
+        $current = [string]$registry.GetValue(
+            "Path",
+            "",
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+        )
+        $entries = @($current -split ";" | Where-Object { $_ })
+        $exists = foreach ($entry in $entries) {
+            try {
+                $candidate = [Environment]::ExpandEnvironmentVariables($entry)
+                [System.IO.Path]::GetFullPath($candidate).TrimEnd('\') -ieq $installPath
+            }
+            catch {
+                $entry -ieq $installPath
+            }
+        }
+
+        if (-not $exists) {
+            $updated = if ($entries.Count) { ($entries + $installPath) -join ";" } else { $installPath }
+            $registry.SetValue("Path", $updated, [Microsoft.Win32.RegistryValueKind]::ExpandString)
+            Write-Host "added $installPath to the user PATH" -ForegroundColor Green
+        }
+    }
+    finally {
+        $registry.Dispose()
+    }
+
+    if (-not (($env:Path -split ";") -icontains $installPath)) {
+        $env:Path = "$installPath;$env:Path"
     }
 }
 finally {
