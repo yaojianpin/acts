@@ -218,6 +218,11 @@ pub trait DbCollection: Send + Sync {
     type Item;
     async fn exists(&self, id: &str) -> Result<bool>;
     async fn find(&self, id: &str) -> Result<Self::Item>;
+    /// Like [`DbCollection::find`], but a missing row is `Ok(None)` instead of
+    /// an error. Only the explicit not-found case is normalized — a backend
+    /// failure is still an error, so callers can tell "no record" from "the
+    /// store is unavailable".
+    async fn find_opt(&self, id: &str) -> Result<Option<Self::Item>>;
     /// One page of the matching documents — at most `query.limit` rows;
     /// `count` reports how many rows match in total.
     async fn query(&self, query: &Query) -> Result<PageData<Self::Item>>;

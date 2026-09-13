@@ -109,8 +109,8 @@ impl Store {
         }
 
         let packages = self.packages();
-        match packages.find(&pack.id).await {
-            Ok(m) => {
+        match packages.find_opt(&pack.id).await? {
+            Some(m) => {
                 let data = Package {
                     create_time: m.create_time,
                     update_time: utils::time::time_millis(),
@@ -118,7 +118,7 @@ impl Store {
                 };
                 packages.update(&data).await
             }
-            Err(_) => {
+            None => {
                 let data = Package {
                     create_time: utils::time::time_millis(),
                     ..pack.clone()
@@ -167,8 +167,8 @@ impl Store {
     ) -> Result<Vec<StoreBatchOp>> {
         let models = KvCollection::<Model>::new(StoreIden::Models.as_ref(), self.kv.clone());
         let text = serde_yaml::to_string(model).unwrap();
-        match self.models().find(&model.id).await {
-            Ok(m) => {
+        match self.models().find_opt(&model.id).await? {
+            Some(m) => {
                 models
                     .update_ops(&Model {
                         id: model.id.clone(),
@@ -185,7 +185,7 @@ impl Store {
                     })
                     .await
             }
-            Err(_) => models.create_ops(&Model {
+            None => models.create_ops(&Model {
                 id: model.id.clone(),
                 name: model.name.clone(),
                 desc: model.desc.clone(),
@@ -260,8 +260,8 @@ impl Store {
         }
 
         for mut event in declared {
-            match events.find(&event.id).await {
-                Ok(evt) => {
+            match events.find_opt(&event.id).await? {
+                Some(evt) => {
                     let changed = evt.name != event.name
                         || evt.kind != event.kind
                         || evt.params != event.params
@@ -283,7 +283,7 @@ impl Store {
                     };
                     ops.extend(events.update_ops(&event).await?);
                 }
-                Err(_) => {
+                None => {
                     // new trigger: arm `schedule` rows to their next cron fire
                     if let Some(schedule) = event.schedule.as_deref() {
                         event.next_run = crate::scheduler::cron::Cron::next_fire_millis(schedule);

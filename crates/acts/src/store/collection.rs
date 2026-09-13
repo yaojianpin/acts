@@ -900,13 +900,18 @@ where
     }
 
     async fn find(&self, id: &str) -> crate::Result<Self::Item> {
+        self.find_opt(id)
+            .await?
+            .ok_or_else(|| ActError::Store(format!("cannot find {} by '{}'", self.prefix, id)))
+    }
+
+    async fn find_opt(&self, id: &str) -> crate::Result<Option<Self::Item>> {
         let key = self.data_key(id);
-        let data = self.kv.get(&key).await?.ok_or(ActError::Store(format!(
-            "cannot find {} by '{}'",
-            self.prefix, id
-        )))?;
+        let Some(data) = self.kv.get(&key).await? else {
+            return Ok(None);
+        };
         let json: JsonValue = serde_json::from_slice(&data).map_err(map_db_err)?;
-        T::upcast(json)
+        Ok(Some(T::upcast(json)?))
     }
 
     async fn query(&self, q: &Query) -> crate::Result<PageData<Self::Item>> {

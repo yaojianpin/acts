@@ -624,9 +624,9 @@ impl Cache {
                 self.pending_resume.write().push_front(pid);
                 break;
             }
-            let state = match self.store.procs().find(&pid).await {
-                Ok(row) => TaskState::from(row.state.as_str()),
-                Err(_) => continue, // removed while queued
+            let state = match self.store.procs().find_opt(&pid).await? {
+                Some(row) => TaskState::from(row.state.as_str()),
+                None => continue, // removed while queued
             };
             if !matches!(
                 state,

@@ -131,28 +131,25 @@ impl Store {
         rt: &Arc<Runtime>,
     ) -> Result<Option<Arc<scheduler::Process>>> {
         debug!("load process pid={}", pid);
-        match self.procs().find(pid).await {
-            Ok(p) => {
-                // println!("process model={}", p.model);
-                let model = Workflow::from_json(&p.model)?;
-                let proc = scheduler::Process::new(pid, rt);
-                let env_local: serde_json::Value =
-                    serde_json::from_str(&p.env).map_err(|err| ActError::Store(err.to_string()))?;
+        let Some(p) = self.procs().find_opt(pid).await? else {
+            return Ok(None);
+        };
+        let model = Workflow::from_json(&p.model)?;
+        let proc = scheduler::Process::new(pid, rt);
+        let env_local: serde_json::Value =
+            serde_json::from_str(&p.env).map_err(|err| ActError::Store(err.to_string()))?;
 
-                proc.load_owned(model)?;
-                proc.set_pure_state(p.state.into());
-                proc.set_start_time(p.start_time);
-                proc.set_env(&env_local.into());
-                self.load_tasks(&proc, rt).await?;
-                if let Some(err) = p.err {
-                    let err: Error = serde_json::from_str(&err)
-                        .map_err(|err| ActError::Store(err.to_string()))?;
-                    proc.set_pure_err(&err)
-                }
-                Ok(Some(proc))
-            }
-            Err(_) => Ok(None),
+        proc.load_owned(model)?;
+        proc.set_pure_state(p.state.into());
+        proc.set_start_time(p.start_time);
+        proc.set_env(&env_local.into());
+        self.load_tasks(&proc, rt).await?;
+        if let Some(err) = p.err {
+            let err: Error =
+                serde_json::from_str(&err).map_err(|err| ActError::Store(err.to_string()))?;
+            proc.set_pure_err(&err)
         }
+        Ok(Some(proc))
     }
 
     pub async fn remove_proc(&self, pid: &str) -> Result<bool> {
@@ -370,9 +367,10 @@ impl Store {
     /// `Created` move: a handler that acked (or was closed) while running
     /// must never be downgraded.
     pub async fn mark_delivered(&self, id: &str) -> Result<()> {
-        if let Ok(mut delivery) = self.deliveries().find(id).await
-            && delivery.status == DeliveryStatus::Created
-        {
+        let Some(mut delivery) = self.deliveries().find_opt(id).await? else {
+            return Ok(());
+        };
+        if delivery.status == DeliveryStatus::Created {
             delivery.status = DeliveryStatus::Delivered;
             delivery.update_time = utils::time::time_millis();
             self.deliveries().update(&delivery).await?;
@@ -382,28 +380,28 @@ impl Store {
 
     /// Ack one delivery row (by its delivery id): set its status.
     pub async fn set_delivery(&self, id: &str, status: DeliveryStatus) -> Result<()> {
-        if let Ok(mut delivery) = self.deliveries().find(id).await {
-            // `Completed` is the final state (the engine closed the
-            // delivery) — a late ack must never downgrade it back to the
-            // intermediate `Acked`
-            if delivery.status == DeliveryStatus::Completed {
-                return Ok(());
-            }
-            let pid = delivery.pid.clone();
-            delivery.status = status;
-            delivery.update_time = utils::time::time_millis();
-            self.deliveries().update(&delivery).await?;
-            // a delivery closed `Completed` by the engine may be the
-            // process's last unsettled one — if the process is finished and
-            // nothing is left unsettled, mark it removable for the sweeper.
-            // `Acked` is only an intermediate state and never triggers the
-            // mark. `Error` keeps the process alive for manual handling.
-            if status == DeliveryStatus::Completed {
-                let _ = self.try_mark_removable(&pid).await;
-            }
+        let Some(mut delivery) = self.deliveries().find_opt(id).await? else {
+            // it's ok there is no delivery
+            return Ok(());
+        };
+        // `Completed` is the final state (the engine closed the
+        // delivery) — a late ack must never downgrade it back to the
+        // intermediate `Acked`
+        if delivery.status == DeliveryStatus::Completed {
+            return Ok(());
         }
-
-        // it's ok there is no delivery
+        let pid = delivery.pid.clone();
+        delivery.status = status;
+        delivery.update_time = utils::time::time_millis();
+        self.deliveries().update(&delivery).await?;
+        // a delivery closed `Completed` by the engine may be the
+        // process's last unsettled one — if the process is finished and
+        // nothing is left unsettled, mark it removable for the sweeper.
+        // `Acked` is only an intermediate state and never triggers the
+        // mark. `Error` keeps the process alive for manual handling.
+        if status == DeliveryStatus::Completed {
+            let _ = self.try_mark_removable(&pid).await;
+        }
         Ok(())
     }
 
@@ -422,18 +420,14 @@ impl Store {
                 .expr(Expr::eq("tid", tid.to_string())),
         );
         let collection = self.deliveries();
-        if let Ok(deliveries) = collection.query_all(&q).await {
-            for m in deliveries.iter() {
-                let mut m = m.clone();
-                m.status = status;
-                m.update_time = utils::time::time_millis();
-                collection.update(&m).await?;
-            }
+        // it's ok there is no delivery: whether one exists depends on the
+        // emitter — the client may create an emitter without an emit_id
+        for mut m in collection.query_all(&q).await? {
+            m.status = status;
+            m.update_time = utils::time::time_millis();
+            collection.update(&m).await?;
         }
 
-        // it's ok there is no delivery
-        // whether a delivery exists depends on the emitter
-        // it is allowed the client creates emitter without emit_id
         Ok(true)
     }
 
@@ -453,31 +447,29 @@ impl Store {
         )));
         let collection = self.deliveries();
         let mut rearmed = Vec::new();
-        if let Ok(deliveries) = collection.query(&q).await {
-            for m in deliveries.rows.iter() {
-                // only rows that still need a response: never successfully
-                // dispatched (`Created`) or handed over but not acked/closed
-                // (`Delivered`); settled ones are skipped
-                if !matches!(
-                    m.status,
-                    DeliveryStatus::Created | DeliveryStatus::Delivered
-                ) {
-                    continue;
+        for m in collection.query(&q).await?.rows.iter() {
+            // only rows that still need a response: never successfully
+            // dispatched (`Created`) or handed over but not acked/closed
+            // (`Delivered`); settled ones are skipped
+            if !matches!(
+                m.status,
+                DeliveryStatus::Created | DeliveryStatus::Delivered
+            ) {
+                continue;
+            }
+            let mut delivery = m.clone();
+            delivery.update_time = utils::time::time_millis();
+            if delivery.retry_times < max_delivery_retry_times {
+                delivery.retry_times += 1;
+                if collection.update(&delivery).await? {
+                    rearmed.push(delivery);
                 }
-                let mut delivery = m.clone();
-                delivery.update_time = utils::time::time_millis();
-                if delivery.retry_times < max_delivery_retry_times {
-                    delivery.retry_times += 1;
-                    if collection.update(&delivery).await? {
-                        rearmed.push(delivery);
-                    }
-                } else {
-                    // the delivery will re-send by manual through the manager
-                    // command — an errored delivery keeps its process alive
-                    // until a manual resend/clear resolves it
-                    delivery.status = DeliveryStatus::Error;
-                    collection.update(&delivery).await?;
-                }
+            } else {
+                // the delivery will re-send by manual through the manager
+                // command — an errored delivery keeps its process alive
+                // until a manual resend/clear resolves it
+                delivery.status = DeliveryStatus::Error;
+                collection.update(&delivery).await?;
             }
         }
         Ok(rearmed)
@@ -488,14 +480,11 @@ impl Store {
     pub async fn resend_error_deliveries(&self) -> Result<()> {
         let collection = self.deliveries();
         let q = Query::new().filter(Filter::and().expr(Expr::eq("status", DeliveryStatus::Error)));
-        if let Ok(deliveries) = collection.query_all(&q).await {
-            for m in deliveries.iter() {
-                let mut delivery = m.clone();
-                delivery.status = DeliveryStatus::Created;
-                delivery.retry_times = 0;
-                delivery.update_time = utils::time::time_millis();
-                collection.update(&delivery).await?;
-            }
+        for mut delivery in collection.query_all(&q).await? {
+            delivery.status = DeliveryStatus::Created;
+            delivery.retry_times = 0;
+            delivery.update_time = utils::time::time_millis();
+            collection.update(&delivery).await?;
         }
 
         Ok(())
@@ -520,9 +509,8 @@ impl Store {
     /// otherwise.
     pub async fn resend_error_delivery(&self, delivery_id: &str) -> Result<Option<data::Delivery>> {
         let collection = self.deliveries();
-        let mut delivery = match collection.find(delivery_id).await {
-            Ok(delivery) => delivery,
-            Err(_) => return Ok(None),
+        let Some(mut delivery) = collection.find_opt(delivery_id).await? else {
+            return Ok(None);
         };
         if delivery.status != DeliveryStatus::Error {
             return Ok(None);
@@ -542,11 +530,13 @@ impl Store {
     /// was in error state and was deleted.
     pub async fn clear_error_delivery(&self, delivery_id: &str) -> Result<bool> {
         let collection = self.deliveries();
-        match collection.find(delivery_id).await {
-            Ok(delivery) if delivery.status == DeliveryStatus::Error => {
-                collection.delete(delivery_id).await
-            }
-            _ => Ok(false),
+        let Some(delivery) = collection.find_opt(delivery_id).await? else {
+            return Ok(false);
+        };
+        if delivery.status == DeliveryStatus::Error {
+            collection.delete(delivery_id).await
+        } else {
+            Ok(false)
         }
     }
 
@@ -557,13 +547,10 @@ impl Store {
     }
     pub async fn upsert_task_data(&self, data: &data::Task) -> Result<()> {
         let collection = self.tasks();
-        match collection.find(&data.id).await {
-            Ok(_) => {
-                collection.update(data).await?;
-            }
-            Err(_) => {
-                collection.create(data).await?;
-            }
+        if collection.find_opt(&data.id).await?.is_some() {
+            collection.update(data).await?;
+        } else {
+            collection.create(data).await?;
         }
 
         Ok(())
@@ -575,13 +562,10 @@ impl Store {
         debug!(pid = %task.pid, tid = %task.id, "upsert task vars");
         let data: data::TaskVars = task.into_data_vars()?;
         let collection = self.vars();
-        match collection.find(&data.id).await {
-            Ok(_) => {
-                collection.update(&data).await?;
-            }
-            Err(_) => {
-                collection.create(&data).await?;
-            }
+        if collection.find_opt(&data.id).await?.is_some() {
+            collection.update(&data).await?;
+        } else {
+            collection.create(&data).await?;
         }
 
         Ok(())
@@ -639,13 +623,10 @@ impl Store {
         debug!("upsert process: {}", proc.id());
         let collection = self.procs();
         let data: data::Proc = proc.into_data()?;
-        match collection.find(proc.id()).await {
-            Ok(_) => {
-                collection.update(&data).await?;
-            }
-            Err(_) => {
-                collection.create(&data).await?;
-            }
+        if collection.find_opt(proc.id()).await?.is_some() {
+            collection.update(&data).await?;
+        } else {
+            collection.create(&data).await?;
         }
 
         Ok(())

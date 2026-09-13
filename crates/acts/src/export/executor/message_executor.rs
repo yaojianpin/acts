@@ -124,25 +124,28 @@ impl MessageExecutor {
             .resend_error_delivery(delivery_id)
             .await?
         {
-            if let Ok(message) = self
+            match self
                 .runtime
                 .cache()
                 .store()
                 .messages()
-                .find(&delivery.msg_id)
-                .await
+                .find_opt(&delivery.msg_id)
+                .await?
             {
-                let mut msg: crate::Message = message.into();
-                msg.delivery_id = Some(delivery.id.clone());
-                self.runtime
-                    .emitter()
-                    .emit_delivery(&delivery.chan_id, &msg);
-            } else {
-                debug!(
-                    delivery_id = %delivery.id,
-                    msg_id = %delivery.msg_id,
-                    "cannot re-send delivery: canonical message missing"
-                );
+                Some(message) => {
+                    let mut msg: crate::Message = message.into();
+                    msg.delivery_id = Some(delivery.id.clone());
+                    self.runtime
+                        .emitter()
+                        .emit_delivery(&delivery.chan_id, &msg);
+                }
+                None => {
+                    debug!(
+                        delivery_id = %delivery.id,
+                        msg_id = %delivery.msg_id,
+                        "cannot re-send delivery: canonical message missing"
+                    );
+                }
             }
         }
         Ok(())

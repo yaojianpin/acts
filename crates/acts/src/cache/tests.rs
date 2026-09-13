@@ -4,7 +4,7 @@ use crate::{
     data,
     event::EventAction,
     scheduler::{NodeContent, NodeTree, Process, Runtime, TaskState},
-    store::{DbCollectionIden, KvStore, MemoryStore, ScanOptions, StoreBatchOp},
+    store::{DbCollectionIden, KvStore, MemoryStore, ScanOptions, Store, StoreBatchOp},
     utils,
 };
 use std::sync::{
@@ -1376,6 +1376,74 @@ async fn cache_proc_miss_overlapping_load_reuses_instance() {
         "a caller that missed before the load landed must reuse its instance"
     );
     assert_eq!(cache.count(), 1);
+
+    rt.close().await;
+}
+
+/// KV backend that fails every call, as an unreachable/down backend does.
+struct FailKv;
+
+#[async_trait::async_trait]
+impl KvStore for FailKv {
+    async fn get(&self, _key: &str) -> crate::Result<Option<Vec<u8>>> {
+        Err(crate::ActError::Store("backend unavailable".to_string()))
+    }
+
+    async fn put(&self, _key: &str, _value: Vec<u8>) -> crate::Result<()> {
+        Err(crate::ActError::Store("backend unavailable".to_string()))
+    }
+
+    async fn delete(&self, _key: &str) -> crate::Result<()> {
+        Err(crate::ActError::Store("backend unavailable".to_string()))
+    }
+
+    async fn scan_prefix(
+        &self,
+        _key: &str,
+        _options: ScanOptions,
+    ) -> crate::Result<Vec<(String, Vec<u8>)>> {
+        Err(crate::ActError::Store("backend unavailable".to_string()))
+    }
+}
+
+/// Only the explicit not-found case is normalized to `Ok(None)`; the
+/// must-exist read keeps its not-found error contract.
+#[tokio::test]
+async fn find_opt_normalizes_only_missing_rows() {
+    let store = Store::new(Arc::new(MemoryStore::new()));
+    assert!(store.procs().find_opt("absent").await.unwrap().is_none());
+    assert!(store.procs().find("absent").await.is_err());
+}
+
+/// A backend failure must never be normalized into "no record" or an empty
+/// success: process load, delivery updates and the delivery retry scan all
+/// surface it, so a down store stays visible (and the retry timer keeps its
+/// next tick) instead of masquerading as settled business state.
+#[tokio::test]
+async fn cache_store_error_is_not_an_empty_success() {
+    let kv_store: Arc<dyn KvStore> = Arc::new(FailKv);
+    let rt = Runtime::new(&Config::default(), Some(kv_store)).unwrap();
+    let store = rt.cache().store();
+
+    // process load: a store error is not `Ok(None)` (a missing pid)
+    let err = store.load_proc("any-pid", &rt).await.unwrap_err();
+    assert!(matches!(err, crate::ActError::Store(_)), "{err:?}");
+
+    // delivery update: a store error is not a silent success
+    let err = store
+        .set_delivery("any-delivery", data::DeliveryStatus::Acked)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, crate::ActError::Store(_)), "{err:?}");
+    let err = store.mark_delivered("any-delivery").await.unwrap_err();
+    assert!(matches!(err, crate::ActError::Store(_)), "{err:?}");
+
+    // retry scan: a store error is not an empty re-arm set
+    let err = store
+        .with_no_response_deliveries(1_000, 3)
+        .await
+        .unwrap_err();
+    assert!(matches!(err, crate::ActError::Store(_)), "{err:?}");
 
     rt.close().await;
 }
