@@ -18,6 +18,11 @@ pub const ACT_VALUE: &str = "$value";
 pub const TASK_SIGN: &str = "__sign";
 pub const TASK_COST: &str = "__cost";
 
+/// Node ids of the timeout branches that already fired for one task
+/// (one-shot guard persisted with the task's vars row — see
+/// [`Task::claim_timeout`](crate::scheduler::Task::claim_timeout)).
+pub const TASK_TIMEOUTS: &str = "__timeouts";
+
 pub const ACT_TO: &str = "to";
 
 pub const TASK_ROOT_TID: &str = "$";

@@ -483,6 +483,60 @@ impl Task {
         }
     }
 
+    /// Whether the timeout branch `node_id` already fired for this task (see
+    /// [`Self::claim_timeout`]).
+    pub fn is_timeout_claimed(&self, node_id: &str) -> bool {
+        self.with_data(|data| {
+            data.get::<Vec<String>>(consts::TASK_TIMEOUTS)
+                .is_some_and(|fired| fired.iter().any(|id| id == node_id))
+        })
+    }
+
+    /// Claim the one-shot timeout slot of `node_id` on this task. Returns
+    /// `true` when this call set the marker — the caller then dispatches the
+    /// branch — and `false` when that branch already fired.
+    ///
+    /// The marker is part of the task's own scope data, so it is persisted
+    /// with the task's vars row (see [`Self::release_timeout`] for the
+    /// not-made-durable case) and a restored process does not re-fire a
+    /// branch that already fired. The check and the set happen under the
+    /// scope lock, so two ticks cannot both claim one slot; distinct branches
+    /// hold distinct slots.
+    pub fn claim_timeout(&self, node_id: &str) -> bool {
+        let mut data = self.data.write();
+        let mut fired: Vec<String> = data.get(consts::TASK_TIMEOUTS).unwrap_or_default();
+        if fired.iter().any(|id| id == node_id) {
+            return false;
+        }
+        fired.push(node_id.to_string());
+        data.set(consts::TASK_TIMEOUTS, fired);
+        // the generation is bumped before the dirty flag, so a persist running
+        // concurrently cannot clear this mutation away
+        self.mark_vars_dirty();
+        true
+    }
+
+    /// Release a claim taken by [`Self::claim_timeout`] — used when the claim
+    /// could not be made durable, so the branch stays eligible on the next
+    /// tick instead of being silently consumed.
+    pub fn release_timeout(&self, node_id: &str) {
+        let mut data = self.data.write();
+        let Some(mut fired) = data.get::<Vec<String>>(consts::TASK_TIMEOUTS) else {
+            return;
+        };
+        let before = fired.len();
+        fired.retain(|id| id != node_id);
+        if fired.len() == before {
+            return;
+        }
+        if fired.is_empty() {
+            data.pop::<Vec<String>>(consts::TASK_TIMEOUTS);
+        } else {
+            data.set(consts::TASK_TIMEOUTS, fired);
+        }
+        self.mark_vars_dirty();
+    }
+
     pub fn is_catches(&self) -> bool {
         match &self.node.content {
             NodeContent::Step(step) => !step.catches.is_empty(),
