@@ -7,6 +7,7 @@ use crate::{
     snapshot::{SnapshotManager, SnapshotOptions},
 };
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 
 /// A started workflow engine.
 ///
@@ -67,6 +68,15 @@ impl Engine {
     /// Close the engine and stop its runtime.
     pub async fn close(&self) {
         self.runtime.close().await;
+    }
+
+    /// Cancellation token fired when the engine shuts down through
+    /// [`Engine::close`]. Plugins and embedders that spawn their own
+    /// long-running tasks (transport servers, loops) select on it so a
+    /// graceful close stops them instead of leaving them to be force-killed
+    /// with the process.
+    pub fn shutdown_token(&self) -> CancellationToken {
+        self.runtime.shutdown_token()
     }
 
     pub fn signal<T: Clone>(&self, init: T) -> Signal<T> {

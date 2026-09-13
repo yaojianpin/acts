@@ -89,7 +89,16 @@ async fn test_snapshot_upsert_remove_over_grpc() {
     assert_eq!(ok.data, Some(true));
     assert!(engine.snapshot().read("profile", "u1").is_none());
 
+    // graceful shutdown stops the transport: the port must be released
     engine.close().await;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while std::net::TcpListener::bind(("127.0.0.1", port)).is_err() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "engine.close() must stop the gRPC server and release its port"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]

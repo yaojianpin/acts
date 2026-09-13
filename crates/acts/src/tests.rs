@@ -109,6 +109,51 @@ async fn engine_start() {
     assert!(engine.is_ok());
 }
 
+/// Plugin that spawns a task from `on_init` and stops it on the engine
+/// shutdown token — the pattern the transport plugins (gRPC, web, NATS) use.
+#[derive(Clone)]
+struct ShutdownTaskPlugin {
+    stopped: crate::Signal<bool>,
+}
+
+#[async_trait::async_trait]
+impl crate::ActPlugin for ShutdownTaskPlugin {
+    fn on_init(&self, engine: &Engine) -> crate::Result<()> {
+        let shutdown = engine.shutdown_token();
+        let stopped = self.stopped.clone();
+        tokio::spawn(async move {
+            shutdown.cancelled().await;
+            stopped.close();
+        });
+        Ok(())
+    }
+}
+
+/// `Engine::close` must fire the shutdown token: a plugin task that outlives
+/// the engine would otherwise keep the process alive (or be force-killed with
+/// unflushed work) when the server shuts down.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn engine_close_fires_shutdown_token() {
+    let stopped = crate::Signal::new(false);
+    let rx = stopped.clone();
+    let engine = Engine::builder()
+        .add_plugin(&ShutdownTaskPlugin { stopped })
+        .start()
+        .await
+        .unwrap();
+
+    assert!(
+        !rx.data(),
+        "the plugin task must not stop before the engine closes"
+    );
+
+    engine.close().await;
+    timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("engine close must fire the shutdown token");
+}
+
 /// Plugin whose `on_init` can fail on demand — used to exercise the
 /// engine-start failure path.
 #[derive(Clone)]

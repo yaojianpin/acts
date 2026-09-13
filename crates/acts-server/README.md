@@ -47,7 +47,10 @@ acts-server
 On the first run acts-server creates its config directory `~/.acts`
 (`$HOME/.acts`, `%USERPROFILE%\.acts` on Windows) and writes a default
 `acts.toml` there with a working sled database under `~/.acts/data` and logs
-under `~/.acts/log`. The server then blocks until interrupted.
+under `~/.acts/log`. The server then blocks until it is asked to stop:
+Ctrl-C (SIGINT), or SIGTERM on macOS/Linux. It logs the signal, closes the
+engine — flushing the store writer and stopping the transport plugins and
+their background tasks — and exits.
 
 To point the config directory elsewhere, set `ACTS_CONFIG_DIR`.
 

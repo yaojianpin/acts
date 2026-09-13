@@ -231,6 +231,7 @@ impl ActPlugin for GrpcPlugin {
         let grpc_config = config.get::<GrpcConfig>("grpc").unwrap_or_default();
         let port = grpc_config.port.unwrap_or(10080);
         let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port as u16));
+        let shutdown = engine.shutdown_token();
 
         tokio::spawn(async move {
             let server = GrpcServer::new(&engine);
@@ -239,8 +240,13 @@ impl ActPlugin for GrpcPlugin {
                 "The gRPC server is now ready to accept connections on port {}",
                 port
             );
-            if let Err(err) = Server::builder().add_service(grpc).serve(addr).await {
+            let serve = Server::builder()
+                .add_service(grpc)
+                .serve_with_shutdown(addr, shutdown.cancelled_owned());
+            if let Err(err) = serve.await {
                 tracing::error!(addr = %addr, error = %err, "gRPC server stopped");
+            } else {
+                tracing::info!(addr = %addr, "gRPC server stopped");
             }
         });
 

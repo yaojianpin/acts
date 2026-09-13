@@ -21,3 +21,4 @@ async-stream = { workspace = true }
 tracing = "0.1.37"
 
 [dev-dependencies]
+toml = "0.8.22"

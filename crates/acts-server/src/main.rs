@@ -1,5 +1,6 @@
 use acts::Config;
 use std::{path::Path, sync::Arc};
+use tracing::info;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -31,9 +32,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     print_logo();
 
-    let signal = engine.signal(());
-    signal.recv().await;
+    shutdown_signal().await;
+    info!("shutdown signal received, closing the engine");
+    engine.close().await;
+    info!("engine closed, exiting");
+
     Ok(())
+}
+
+/// Resolve when the process is asked to stop: Ctrl-C (SIGINT) everywhere,
+/// plus SIGTERM on unix so a deployment's rolling update drains the engine
+/// instead of force-killing it.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        tokio::signal::ctrl_c()
+            .await
+            .expect("failed to install the Ctrl-C handler");
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("failed to install the SIGTERM handler")
+            .recv()
+            .await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
 }
 
 fn init_log(#[allow(unused_variables)] config: &Config) {

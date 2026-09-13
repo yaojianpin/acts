@@ -33,7 +33,7 @@
 //! Then register the plugin while building the engine:
 //! `Engine::builder().add_plugin(&acts_plugin_nats::NatsPlugin::new())`.
 
-use acts::{ActPlugin, ChannelOptions, Engine, Vars};
+use acts::{ActPlugin, CancellationToken, ChannelOptions, Engine, Vars};
 use async_nats::Client;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -143,7 +143,12 @@ fn register_channel(engine: &Engine, client: Client, channel: &NatsChannelConfig
 
 /// Handle the inbound action subject: apply each command and reply to its
 /// request subject (when present).
-async fn serve_actions(client: Client, subject: String, engine: Engine) {
+async fn serve_actions(
+    client: Client,
+    subject: String,
+    engine: Engine,
+    shutdown: CancellationToken,
+) {
     let mut sub = match client.subscribe(subject.clone()).await {
         Ok(sub) => sub,
         Err(err) => {
@@ -153,7 +158,14 @@ async fn serve_actions(client: Client, subject: String, engine: Engine) {
     };
     tracing::info!(subject = %subject, "nats actions subscription ready");
 
-    while let Some(msg) = sub.next().await {
+    loop {
+        let msg = tokio::select! {
+            _ = shutdown.cancelled() => break,
+            msg = sub.next() => match msg {
+                Some(msg) => msg,
+                None => break,
+            },
+        };
         let client = client.clone();
         let engine = engine.clone();
         tokio::spawn(async move {
@@ -213,6 +225,7 @@ impl ActPlugin for NatsPlugin {
     fn on_init(&self, engine: &Engine) -> acts::Result<()> {
         let engine = engine.clone();
         let config: NatsConfig = engine.config().get("nats").unwrap_or_default();
+        let shutdown = engine.shutdown_token();
 
         tokio::spawn(async move {
             let client = match connect(&config).await {
@@ -227,14 +240,24 @@ impl ActPlugin for NatsPlugin {
             let cmd_subject = format!("{base}.cmd");
             let actions_client = client.clone();
             let actions_engine = engine.clone();
+            let actions_shutdown = shutdown.clone();
             tokio::spawn(async move {
-                serve_actions(actions_client, cmd_subject, actions_engine).await;
+                serve_actions(
+                    actions_client,
+                    cmd_subject,
+                    actions_engine,
+                    actions_shutdown,
+                )
+                .await;
             });
 
             let channels = config.channels.clone();
             for channel in &channels {
                 register_channel(&engine, client.clone(), channel, &base);
             }
+
+            shutdown.cancelled().await;
+            tracing::info!("nats plugin stopped");
         });
 
         Ok(())

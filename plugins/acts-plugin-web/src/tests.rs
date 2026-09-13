@@ -100,3 +100,59 @@ fn test_web_plugin_default() {
     let plugin = WebPlugin;
     let _ = plugin;
 }
+
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
+/// Wait until the port is (un)reachable, or give up after 10s.
+async fn wait_for_port(port: u16, want_reachable: bool) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let reachable = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .is_ok();
+        if reachable == want_reachable {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// `Engine::close` must stop the web server: the transport task selects on the
+/// engine shutdown token, so a graceful shutdown releases the listening socket
+/// (and stops accepting requests) instead of leaving the process to be killed.
+#[tokio::test(flavor = "multi_thread")]
+async fn web_server_stops_on_engine_close() {
+    let port = free_port();
+    let table: toml::Table = toml::from_str(&format!("[web]\nport = {port}\n")).unwrap();
+    let cfg = acts::Config {
+        data: Default::default(),
+        table,
+    };
+    let engine = acts::Engine::builder()
+        .set_config(&cfg)
+        .add_plugin(&WebPlugin::new())
+        .start()
+        .await
+        .unwrap();
+
+    assert!(
+        wait_for_port(port, true).await,
+        "the web server must accept connections while the engine runs"
+    );
+
+    engine.close().await;
+
+    assert!(
+        wait_for_port(port, false).await,
+        "engine.close() must stop the web server and release its port"
+    );
+}

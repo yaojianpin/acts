@@ -41,6 +41,7 @@ pub use scheduler::Context;
 pub use signal::Signal;
 pub use snapshot::{SnapshotEntry, SnapshotManager, SnapshotOptions, SnapshotPolicy};
 pub use store::*;
+pub use tokio_util::sync::CancellationToken;
 pub type Result<T> = std::result::Result<T, ActError>;
 
 pub(crate) use scheduler::NodeKind;
