@@ -3,7 +3,7 @@ use std::{path::Path, sync::Arc};
 use tracing::info;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), anyhow::Error> {
     // Config home: ~/.acts (or $ACTS_CONFIG_DIR). The default acts.toml is
     // auto-created there on first start (embedded at build time), so a binary
     // installed with `cargo install acts-server` works with zero setup.
@@ -15,7 +15,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut config = Config::create(&config_file)?;
     config.overlay_file(Path::new("acts.toml"))?;
 
-    init_log(&config);
+    init_log(&config)?;
     println!("config file: {}", config_file.display());
 
     let db = if config.has("db") {
@@ -67,7 +67,8 @@ async fn shutdown_signal() {
     }
 }
 
-fn init_log(#[allow(unused_variables)] config: &Config) {
+fn init_log(#[allow(unused_variables)] config: &Config) -> Result<(), anyhow::Error> {
+    use anyhow::Context;
     use std::path::Path;
     use time::macros::format_description;
     use tracing_subscriber::EnvFilter;
@@ -78,7 +79,7 @@ fn init_log(#[allow(unused_variables)] config: &Config) {
 
     let log_dir = config.log().dir;
     std::fs::create_dir_all(&log_dir)
-        .unwrap_or_else(|err| panic!("failed to create log dir {log_dir}: {err}"));
+        .with_context(|| format!("failed to create log dir {log_dir}"))?;
     let log_dir = Path::new(&log_dir);
     let file_appender = tracing_appender::rolling::hourly(log_dir, "acts.log");
     let timer = LocalTime::new(format_description!(
@@ -94,6 +95,8 @@ fn init_log(#[allow(unused_variables)] config: &Config) {
         .with_writer(std::io::stdout.and(file_appender))
         .with_ansi(false)
         .init();
+
+    Ok(())
 }
 
 fn print_logo() {
