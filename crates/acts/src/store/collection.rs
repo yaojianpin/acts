@@ -43,9 +43,12 @@ static DOC_LOCKS: LazyLock<DocLockRegistry> = LazyLock::new(DocLockRegistry::def
 
 #[derive(Default)]
 struct DocLockRegistry {
-    /// Keyed by the full document key. An entry is dropped once the last
-    /// holder released it, so a long-running engine does not accumulate one
-    /// lock per document id it has ever touched.
+    /// Keyed by the full document key. Two collections over the same key (or
+    /// two stores with equal keys) share one lock — conservative where the
+    /// stores are unrelated, and required when two handles address the same
+    /// database. An entry is dropped once the last holder released it, so a
+    /// long-running engine does not accumulate one lock per document id it has
+    /// ever touched: the map holds only the documents being mutated right now.
     entries: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
 }
 
@@ -2391,5 +2394,71 @@ mod tests {
                 "index and data row disagree after concurrent creates: {field}={value}"
             );
         }
+    }
+
+    /// The lock registry holds one entry per document being mutated right now,
+    /// not one per document the process has ever touched: an entry is dropped
+    /// by the last holder to release it, so a long-running engine that writes
+    /// unboundedly many ids does not grow a lock map with them.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn doc_lock_registry_holds_only_in_flight_documents() {
+        let kv = Arc::new(GatedKv::default());
+        // A prefix no sibling test uses: the registry is process-wide and keyed
+        // by the store key, so every collection over the same key shares one
+        // lock (conservative for two stores with equal keys, and required when
+        // two handles address one database).
+        let col = Arc::new(KvCollection::<Doc>::new("doclockregdocs", kv.clone()));
+        let ids: Vec<String> = (0..256).map(|i| format!("d{i}")).collect();
+        let key = |id: &str| col.data_key(id);
+        let held = |key: &str| super::DOC_LOCKS.entries.lock().contains_key(key);
+
+        for id in &ids {
+            col.create(&doc(id, "idle", 1)).await.unwrap();
+        }
+        assert!(
+            ids.iter().all(|id| !held(&key(id))),
+            "a released document lock must not stay registered"
+        );
+
+        // positive control: while a mutation is in flight its key IS registered
+        kv.arm();
+        let parked = {
+            let col = col.clone();
+            let id = ids[0].clone();
+            tokio::spawn(async move { col.update(&doc(&id, "running", 2)).await })
+        };
+        kv.wait_entered(1).await;
+        assert!(
+            held(&key(&ids[0])),
+            "the document being mutated must be registered"
+        );
+        kv.disarm();
+        parked.await.unwrap().unwrap();
+
+        assert!(
+            ids.iter().all(|id| !held(&key(id))),
+            "the registry must be back to empty once every mutation released its lock"
+        );
+
+        // Waiters hold the entry they queued on, so cleanup has to happen in
+        // the LAST releaser of each key — including when many mutations of one
+        // document overlap, and when the keys are all distinct.
+        let mut tasks = Vec::new();
+        for i in 0..32 {
+            let col = col.clone();
+            let ids = ids.clone();
+            tasks.push(tokio::spawn(async move {
+                for id in ids {
+                    col.update(&doc(&id, "running", 3 + i)).await.unwrap();
+                }
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        assert!(
+            ids.iter().all(|id| !held(&key(id))),
+            "overlapping mutations must leave no entry behind"
+        );
     }
 }
