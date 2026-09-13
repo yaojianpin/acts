@@ -306,12 +306,128 @@ fn store_mixed_qps(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark: Eq scans — indexed pushdown vs the full-scan fallback, and the
+/// id-only (`matching_ids`) read the recovery/cleanup paths use.
+///
+/// `mid` is indexed, so a selective `Eq` reads only the matching index rows;
+/// `name` is not indexed, so the same predicate reads every row and evaluates
+/// the `Expr` against each document.
+fn store_eq_scan_qps(c: &mut Criterion) {
+    let mut group = c.benchmark_group("store_eq_scan");
+    group.throughput(Throughput::Elements(1));
+    group.sample_size(10);
+
+    for &batch_size in &[100, 1000] {
+        // one distinct `mid` per row: the Eq scan selects a single index entry
+        group.bench_function(
+            BenchmarkId::new("index_eq_mid", batch_size.to_string()),
+            |b| {
+                b.to_async(FuturesExecutor)
+                    .iter_custom(move |iters| async move {
+                        let store = memory_store();
+                        let procs = store.procs();
+                        let mut ids = Vec::with_capacity(batch_size);
+
+                        for i in 0..batch_size {
+                            let id = format!("eqi_{}_{}", batch_size, i);
+                            ids.push(id.clone());
+                            let mid = format!("m_eq_{}_{}", batch_size, i);
+                            procs.create(&make_proc(&id, &mid, i as u64)).await.unwrap();
+                        }
+
+                        let q = Query::new().filter(
+                            Filter::and().expr(Expr::eq("mid", format!("m_eq_{}_0", batch_size))),
+                        );
+                        let start = std::time::Instant::now();
+                        for _ in 0..iters {
+                            let _ = procs.query(&q).await.unwrap();
+                        }
+                        let elapsed = start.elapsed();
+                        // Cleanup
+                        for id in &ids {
+                            procs.delete(id).await.unwrap();
+                        }
+                        elapsed
+                    })
+            },
+        );
+
+        // `name` is not indexed: every row is scanned and its expr evaluated
+        group.bench_function(
+            BenchmarkId::new("scan_eq_name", batch_size.to_string()),
+            |b| {
+                b.to_async(FuturesExecutor)
+                    .iter_custom(move |iters| async move {
+                        let store = memory_store();
+                        let procs = store.procs();
+                        let mid = format!("m_eqs_{}", batch_size);
+                        let mut ids = Vec::with_capacity(batch_size);
+
+                        for i in 0..batch_size {
+                            let id = format!("eqs_{}_{}", batch_size, i);
+                            ids.push(id.clone());
+                            procs.create(&make_proc(&id, &mid, i as u64)).await.unwrap();
+                        }
+
+                        let q =
+                            Query::new().filter(Filter::and().expr(Expr::eq("name", "bench-0")));
+                        let start = std::time::Instant::now();
+                        for _ in 0..iters {
+                            let _ = procs.query(&q).await.unwrap();
+                        }
+                        let elapsed = start.elapsed();
+                        // Cleanup
+                        for id in &ids {
+                            procs.delete(id).await.unwrap();
+                        }
+                        elapsed
+                    })
+            },
+        );
+
+        // id-only read of the same index Eq (recovery/cleanup enumerate ids)
+        group.bench_function(
+            BenchmarkId::new("index_eq_ids", batch_size.to_string()),
+            |b| {
+                b.to_async(FuturesExecutor)
+                    .iter_custom(move |iters| async move {
+                        let store = memory_store();
+                        let procs = store.procs();
+                        let mut ids = Vec::with_capacity(batch_size);
+
+                        for i in 0..batch_size {
+                            let id = format!("eqd_{}_{}", batch_size, i);
+                            ids.push(id.clone());
+                            let mid = format!("m_eqd_{}_{}", batch_size, i);
+                            procs.create(&make_proc(&id, &mid, i as u64)).await.unwrap();
+                        }
+
+                        let filter =
+                            Filter::and().expr(Expr::eq("mid", format!("m_eqd_{}_0", batch_size)));
+                        let start = std::time::Instant::now();
+                        for _ in 0..iters {
+                            let _ = procs.matching_ids(Some(&filter)).await.unwrap();
+                        }
+                        let elapsed = start.elapsed();
+                        // Cleanup
+                        for id in &ids {
+                            procs.delete(id).await.unwrap();
+                        }
+                        elapsed
+                    })
+            },
+        );
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     store_create_qps,
     store_find_qps,
     store_query_index_qps,
     store_query_scan_qps,
+    store_eq_scan_qps,
     store_update_qps,
     store_delete_qps,
     store_mixed_qps,

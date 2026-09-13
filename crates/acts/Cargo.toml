@@ -51,6 +51,16 @@ harness = false
 name = "store"
 path = "../../benches/store.rs"
 
+[[bench]]
+harness = false
+name = "engine"
+path = "../../benches/engine.rs"
+
+[[bench]]
+harness = false
+name = "model"
+path = "../../benches/model.rs"
+
 [[example]]
 name = "simple"
 path = "../../examples/simple/main.rs"
