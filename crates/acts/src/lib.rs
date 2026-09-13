@@ -39,7 +39,7 @@ pub use package::{ActPackage, ActPackageCatalog, ActPackageDefinition, ActResour
 pub use plugin::ActPlugin;
 pub use scheduler::Context;
 pub use signal::Signal;
-pub use snapshot::{SnapshotEntry, SnapshotManager, SnapshotOptions, SnapshotPolicy};
+pub use snapshot::{MAX_TTL_SECS, SnapshotEntry, SnapshotManager, SnapshotOptions, SnapshotPolicy};
 pub use store::*;
 pub use tokio_util::sync::CancellationToken;
 pub type Result<T> = std::result::Result<T, ActError>;

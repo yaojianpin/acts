@@ -57,6 +57,13 @@ pub enum SnapshotPolicy {
     PerTask,
 }
 
+/// Largest ttl representable as an expiry deadline: the entry timestamp plus
+/// `ttl * 1000` must stay within the `i64` epoch-millisecond range of
+/// [`SnapshotEntry::timestamp`]. Larger values are rejected by
+/// [`SnapshotOptions::validate`]; a store built directly from such options
+/// saturates instead so it can never overflow or panic.
+pub const MAX_TTL_SECS: u64 = i64::MAX as u64 / 1000;
+
 /// Registration options of a snapshot-backed sealed-data target.
 #[derive(Debug, Clone)]
 pub struct SnapshotOptions {
@@ -70,6 +77,10 @@ pub struct SnapshotOptions {
     /// expires. Expired entries are dropped on read and by the periodic
     /// sweep — with `remove()` tombstones the backstop against unbounded
     /// growth of dead scopes.
+    ///
+    /// `Some(0)` is a zero-length window: the entry is expired the moment it
+    /// is read. Values above [`MAX_TTL_SECS`] cannot be represented as a
+    /// deadline and are rejected by [`SnapshotOptions::validate`].
     pub ttl_secs: Option<u64>,
 }
 
@@ -95,9 +106,23 @@ impl SnapshotOptions {
         }
     }
 
+    /// Set the ttl in seconds; see [`SnapshotOptions::ttl_secs`] for the
+    /// accepted range and the zero semantics.
     pub fn with_ttl(mut self, ttl_secs: u64) -> Self {
         self.ttl_secs = Some(ttl_secs);
         self
+    }
+
+    /// Reject a ttl that cannot be represented as an expiry deadline:
+    /// [`MAX_TTL_SECS`] is the largest valid value. A zero ttl is valid and
+    /// means entries are never readable.
+    pub fn validate(&self) -> crate::Result<()> {
+        match self.ttl_secs {
+            Some(ttl) if ttl > MAX_TTL_SECS => Err(ActError::Config(format!(
+                "snapshot ttl {ttl}s exceeds the maximum of {MAX_TTL_SECS}s"
+            ))),
+            _ => Ok(()),
+        }
     }
 }
 
@@ -115,13 +140,20 @@ pub struct SnapshotEntry {
 /// The in-memory snapshot cache of one sealed-data target.
 pub(crate) struct SnapshotStore {
     pub(crate) options: SnapshotOptions,
+    /// ttl in milliseconds, precomputed once at construction. Saturating so a
+    /// store built from an out-of-range [`SnapshotOptions::ttl_secs`] — the
+    /// field is public, so direct construction bypasses
+    /// [`SnapshotOptions::validate`] — can never overflow.
+    ttl_ms: Option<u64>,
     entries: RwLock<HashMap<String, SnapshotEntry>>,
 }
 
 impl SnapshotStore {
     pub(crate) fn new(options: SnapshotOptions) -> Self {
+        let ttl_ms = options.ttl_secs.map(|ttl| ttl.saturating_mul(1000));
         Self {
             options,
+            ttl_ms,
             entries: RwLock::new(HashMap::new()),
         }
     }
@@ -134,11 +166,11 @@ impl SnapshotStore {
         self.evict_expired(scope, &observed)
     }
 
-    /// Whether `entry` is past its ttl (`ttl_secs` set and elapsed).
+    /// Whether `entry` reached its ttl. See [`is_expired_at`] for the
+    /// boundary semantics.
     fn is_expired(&self, entry: &SnapshotEntry) -> bool {
-        self.options
-            .ttl_secs
-            .is_some_and(|ttl| now_ms() - entry.timestamp > ttl as i64 * 1000)
+        self.ttl_ms
+            .is_some_and(|ttl_ms| is_expired_at(ttl_ms, entry.timestamp, now_ms()))
     }
 
     /// Drop the expired entry a reader observed, but only while it is still
@@ -221,6 +253,15 @@ fn now_ms() -> i64 {
         .unwrap_or(0)
 }
 
+/// Whether an entry received at `timestamp` is expired at `now` for a ttl of
+/// `ttl_ms` milliseconds. The comparison is inclusive — expired once the
+/// elapsed time *reaches* the ttl — so `ttl_ms == 0` is expired immediately
+/// rather than for the rest of the current millisecond. Elapsed time is
+/// clamped at zero, so a future timestamp (clock skew) never expires early.
+fn is_expired_at(ttl_ms: u64, timestamp: i64, now: i64) -> bool {
+    now.saturating_sub(timestamp).max(0) as u64 >= ttl_ms
+}
+
 /// Write/read handle of the snapshot caches, obtained via [`Engine::snapshot`](crate::Engine::snapshot).
 ///
 /// Feed adapters (message channels) call [`upsert`](Self::upsert) /
@@ -228,7 +269,9 @@ fn now_ms() -> i64 {
 /// store at each task prepare. `upsert` auto-registers the target with
 /// default options when it does not exist yet, so a feed never drops data on
 /// an unregistered name — register explicitly first when a non-default
-/// policy or scope keys are needed.
+/// policy or scope keys are needed. `remove` acts on an existing target
+/// only: a tombstone for a name the engine never registered is a wiring
+/// error, not a silent no-op.
 #[derive(Clone)]
 pub struct SnapshotManager {
     runtime: Arc<Runtime>,
@@ -242,28 +285,40 @@ impl SnapshotManager {
     }
 
     /// Register a snapshot target with its options (replaces any existing
-    /// registration of the same name — its cache is reset).
-    pub fn register(&self, name: &str, options: SnapshotOptions) {
-        self.runtime.register_snapshot(name, options);
+    /// registration of the same name — its cache is reset). Returns an error
+    /// when the options are invalid (see [`SnapshotOptions::validate`]).
+    pub fn register(&self, name: &str, options: SnapshotOptions) -> crate::Result<()> {
+        self.runtime.register_snapshot(name, options)?;
+        Ok(())
     }
 
     /// Feed a new value for `name`/`scope`. Auto-registers the target with
-    /// [`SnapshotOptions::default`] when missing. Revisions are monotonic per
-    /// scope: a value whose `rev` is not newer than the cached one is ignored
-    /// (a stale revision cannot roll the scope back).
-    pub fn upsert(&self, name: &str, scope: &str, rev: u64, data: Vars) {
-        let store = self.runtime.snapshot_store(name).unwrap_or_else(|| {
-            self.runtime
-                .register_snapshot(name, SnapshotOptions::default())
-        });
+    /// [`SnapshotOptions::default`] when missing, so the write only fails
+    /// when those options are rejected (see [`SnapshotOptions::validate`]).
+    /// Revisions are monotonic per scope: a value whose `rev` is not newer
+    /// than the cached one is ignored (a stale revision cannot roll the
+    /// scope back).
+    pub fn upsert(&self, name: &str, scope: &str, rev: u64, data: Vars) -> crate::Result<()> {
+        let store = match self.runtime.snapshot_store(name) {
+            Some(store) => store,
+            None => self
+                .runtime
+                .register_snapshot(name, SnapshotOptions::default())?,
+        };
         store.upsert(scope, rev, data);
+        Ok(())
     }
 
-    /// Remove the value of `name`/`scope` (tombstone).
-    pub fn remove(&self, name: &str, scope: &str) {
-        if let Some(store) = self.runtime.snapshot_store(name) {
-            store.remove(scope);
-        }
+    /// Remove the value of `name`/`scope` (tombstone). Fails when the target
+    /// is not registered — there is nothing to tombstone, and a caller that
+    /// believes it deleted a target should hear about the mismatch.
+    pub fn remove(&self, name: &str, scope: &str) -> crate::Result<()> {
+        let store = self
+            .runtime
+            .snapshot_store(name)
+            .ok_or_else(|| ActError::Runtime(format!("snapshot '{name}' is not registered")))?;
+        store.remove(scope);
+        Ok(())
     }
 
     /// Current value of `name`/`scope`, if any.
@@ -535,6 +590,67 @@ mod tests {
             let entry = store.get(&scope).expect("refresh must survive the read");
             assert_eq!(entry.rev, 2);
             assert_eq!(entry.data.get::<i32>("a").unwrap(), 2);
+        }
+    }
+
+    #[test]
+    fn ttl_validation_bounds() {
+        assert!(SnapshotOptions::default().with_ttl(0).validate().is_ok());
+        assert!(
+            SnapshotOptions::default()
+                .with_ttl(MAX_TTL_SECS)
+                .validate()
+                .is_ok()
+        );
+        assert!(
+            SnapshotOptions::default()
+                .with_ttl(MAX_TTL_SECS + 1)
+                .validate()
+                .is_err()
+        );
+        assert!(
+            SnapshotOptions::default()
+                .with_ttl(u64::MAX)
+                .validate()
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn ttl_expiry_boundary_is_inclusive() {
+        // expired once the elapsed time reaches the ttl
+        assert!(is_expired_at(1000, 1_000, 2_000));
+        assert!(!is_expired_at(1000, 1_000, 1_999));
+        // zero ttl: no valid window, expired at the instant of the read
+        assert!(is_expired_at(0, 1_000, 1_000));
+        // a future timestamp (clock skew) never expires early
+        assert!(!is_expired_at(1000, 2_000, 1_000));
+    }
+
+    #[test]
+    fn ttl_zero_expires_on_read_and_purge() {
+        let store = SnapshotStore::new(SnapshotOptions::default().with_ttl(0));
+        store.upsert("s1", 1, Vars::new().with("a", 1));
+        assert!(store.get("s1").is_none(), "ttl 0 is never a valid window");
+        assert_eq!(store.purge_expired(), 0, "the read already evicted it");
+
+        store.upsert("s1", 2, Vars::new().with("a", 2));
+        assert_eq!(store.purge_expired(), 1);
+    }
+
+    #[test]
+    fn out_of_range_ttl_never_panics_or_expires() {
+        // direct construction bypasses `validate`: the store must stay total
+        // for any u64 and never invent a build-profile-dependent expiry
+        for ttl in [u64::MAX, MAX_TTL_SECS + 1] {
+            let store = SnapshotStore::new(SnapshotOptions::default().with_ttl(ttl));
+            store.upsert("s1", 1, Vars::new().with("a", 1));
+            age(&store, "s1");
+            assert!(
+                store.get("s1").is_some(),
+                "ttl {ttl} must not expire a live entry"
+            );
+            assert_eq!(store.purge_expired(), 0, "ttl {ttl}");
         }
     }
 }

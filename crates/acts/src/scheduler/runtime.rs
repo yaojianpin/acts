@@ -285,8 +285,9 @@ impl Runtime {
         &self,
         name: &str,
         options: SnapshotOptions,
-    ) -> Arc<SnapshotStore> {
-        self.snapshots.register(name, options)
+    ) -> Result<Arc<SnapshotStore>> {
+        options.validate()?;
+        Ok(self.snapshots.register(name, options))
     }
 
     pub(crate) fn snapshot_store(&self, name: &str) -> Option<Arc<SnapshotStore>> {

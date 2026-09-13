@@ -97,11 +97,12 @@ impl ActsChannel {
 
         self.send("pack:publish", options).await
     }
-    /// Update or insert one snapshot value on the server (feed write). The
-    /// snapshot target must be registered on the server (`snap:upsert`
-    /// auto-registers it with default options); scope key and revision are
-    /// supplied by the caller, and a revision not newer than the server's
-    /// cached one for that scope is ignored.
+    /// Update or insert one snapshot value on the server (feed write). An
+    /// unknown snapshot target is auto-registered on the server with default
+    /// options (`snap:upsert`), so feeding a name that is missing from the
+    /// server config still lands; scope key and revision are supplied by the
+    /// caller, and a revision not newer than the server's cached one for that
+    /// scope is ignored.
     pub async fn upsert_snapshot(
         &mut self,
         name: &str,
@@ -117,7 +118,9 @@ impl ActsChannel {
         self.send("snap:upsert", options).await
     }
 
-    /// Remove one snapshot value on the server (tombstone).
+    /// Remove one snapshot value on the server (tombstone). Fails when the
+    /// snapshot target is not registered on the server — unlike
+    /// [`upsert_snapshot`](Self::upsert_snapshot), a remove never registers.
     pub async fn remove_snapshot(
         &mut self,
         name: &str,

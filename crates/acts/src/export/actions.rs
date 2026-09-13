@@ -48,6 +48,12 @@ fn value<T: serde::Serialize>(r: crate::Result<T>) -> Ret {
         .map_err(|e| Error::Internal(e.to_string()))
 }
 
+/// Map a unit engine result to the action protocol's `true` value.
+fn unit_ok(r: crate::Result<()>) -> Ret {
+    r.map(|_| json!(true))
+        .map_err(|e| Error::Internal(e.to_string()))
+}
+
 fn pop(options: &mut Vars, key: &str) -> std::result::Result<String, Error> {
     options
         .pop::<String>(key)
@@ -289,14 +295,12 @@ pub async fn apply(engine: &Engine, name: &str, mut options: Vars) -> Ret {
             let data = options
                 .pop::<Vars>("data")
                 .ok_or_else(|| Error::Invalid("data is required".to_string()))?;
-            engine.snapshot().upsert(&target, &scope, rev, data);
-            Ok(json!(true))
+            unit_ok(engine.snapshot().upsert(&target, &scope, rev, data))
         }
         "snap:remove" => {
             let target = pop(&mut options, "name")?;
             let scope = options.get::<String>("scope").unwrap_or_default();
-            engine.snapshot().remove(&target, &scope);
-            Ok(json!(true))
+            unit_ok(engine.snapshot().remove(&target, &scope))
         }
         "snap:get" => {
             let target = pop(&mut options, "name")?;
@@ -441,5 +445,19 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ret, JsonValue::Array(vec![]));
+    }
+
+    #[tokio::test]
+    async fn snapshot_remove_unknown_target_is_internal() {
+        let engine = crate::Engine::builder().start().await.unwrap();
+        let err = apply(
+            &engine,
+            "snap:remove",
+            Vars::new().with("name", "none").with("scope", "u1"),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::Internal(_)), "got: {err}");
+        assert!(err.to_string().contains("none"), "got: {err}");
     }
 }

@@ -29,10 +29,12 @@ impl Engine {
     }
 
     /// Register (or replace) a snapshot-backed sealed-data target at runtime.
-    /// Prefer [`EngineBuilder::add_snapshot`] when the options are known
-    /// before starting.
-    pub fn add_snapshot(&self, name: &str, options: SnapshotOptions) {
-        self.runtime.register_snapshot(name, options);
+    /// Returns an error when the options are invalid (see
+    /// [`SnapshotOptions::validate`]). Prefer [`EngineBuilder::add_snapshot`]
+    /// when the options are known before starting.
+    pub fn add_snapshot(&self, name: &str, options: SnapshotOptions) -> crate::Result<()> {
+        self.runtime.register_snapshot(name, options)?;
+        Ok(())
     }
 
     /// Engine executor.
@@ -125,7 +127,7 @@ impl Engine {
     ) -> crate::Result<()> {
         // Register snapshot targets (data feeds come from plugins/adapters).
         for (name, options) in snapshots {
-            self.runtime.register_snapshot(&name, options);
+            self.runtime.register_snapshot(&name, options)?;
         }
 
         for plugin in plugins {

@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
                 "features",
                 Vars::new().with("beta", true).with("rate_limit", 100),
             ),
-    );
+    )?;
 
     let workflow = Workflow::new()
         .with_id("snapshot_demo")
@@ -107,7 +107,7 @@ async fn main() -> Result<()> {
                 "features",
                 Vars::new().with("beta", true).with("rate_limit", 200),
             ),
-    );
+    )?;
     let current = engine.snapshot().read("profile", "").unwrap();
     println!(
         "snapshot current: rev={}, rate_limit={}",

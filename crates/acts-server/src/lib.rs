@@ -341,8 +341,10 @@ pub struct SnapshotConfig {
     pub on_missing: MissingParamAction,
     /// how long an entry stays valid after its last refresh — a suffixed
     /// duration like `"2s"`, `"5m"`, `"3h"`, `"1d"`, or a bare number of
-    /// seconds; unset never expires. Expired entries are dropped on read
-    /// and by a periodic sweep.
+    /// seconds; unset never expires, `0` is a zero-length window (never
+    /// valid). Expired entries are dropped on read and by a periodic sweep.
+    /// A value above `acts::MAX_TTL_SECS` cannot be represented as a
+    /// deadline and fails the engine startup.
     #[serde(default, deserialize_with = "de_ttl_secs")]
     pub ttl: Option<u64>,
 }
@@ -375,7 +377,8 @@ fn parse_ttl_secs(text: &str) -> Result<u64, String> {
     let n: u64 = digits.parse().map_err(|_| {
         format!("invalid ttl '{text}': the value before the unit must be a whole number")
     })?;
-    Ok(n * factor)
+    n.checked_mul(factor)
+        .ok_or_else(|| format!("invalid ttl '{text}': the duration overflows the seconds range"))
 }
 
 /// Deserialize a snapshot `ttl` config value: suffixed duration string
@@ -433,7 +436,9 @@ pub fn engine_builder(
     if config.has("snapshot") {
         let targets = config.get::<Vec<SnapshotConfig>>("snapshot")?;
         for target in &targets {
-            builder = builder.add_snapshot(&target.name, target.clone().into());
+            let options: SnapshotOptions = target.clone().into();
+            options.validate()?;
+            builder = builder.add_snapshot(&target.name, options);
         }
     }
     if plugins.grpc {
@@ -605,7 +610,7 @@ ttl = "5m"
         std::fs::remove_dir(&dir).ok();
 
         // malformed values fail loudly instead of silently disabling ttl
-        for bad in ["5x", "", "1.5h", "abc", "-2s"] {
+        for bad in ["5x", "", "1.5h", "abc", "-2s", "18446744073709551615d"] {
             assert!(parse_ttl_secs(bad).is_err(), "ttl {bad} should be rejected");
         }
     }

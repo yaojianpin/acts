@@ -575,16 +575,21 @@ async fn engine_get_custom_config() {
 #[tokio::test(flavor = "multi_thread")]
 async fn snapshot_injects_sealed_data() {
     let engine = Engine::builder().start().await.unwrap();
-    engine.add_snapshot("profile", crate::SnapshotOptions::per_proc());
-    engine.snapshot().upsert(
-        "profile",
-        "",
-        1,
-        Vars::new()
-            .with("secrets", Vars::new().with("TOKEN", "abc123"))
-            .with("vars", Vars::new().with("DB_HOST", "10.0.0.1"))
-            .with("permissions", vec!["deploy", "read_logs"]),
-    );
+    engine
+        .add_snapshot("profile", crate::SnapshotOptions::per_proc())
+        .unwrap();
+    engine
+        .snapshot()
+        .upsert(
+            "profile",
+            "",
+            1,
+            Vars::new()
+                .with("secrets", Vars::new().with("TOKEN", "abc123"))
+                .with("vars", Vars::new().with("DB_HOST", "10.0.0.1"))
+                .with("permissions", vec!["deploy", "read_logs"]),
+        )
+        .unwrap();
 
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -624,15 +629,20 @@ async fn snapshot_injects_sealed_data() {
 #[tokio::test(flavor = "multi_thread")]
 async fn sealed_data_js_dollar_profile_access() {
     let engine = Engine::builder().start().await.unwrap();
-    engine.add_snapshot("profile", crate::SnapshotOptions::per_task());
-    engine.snapshot().upsert(
-        "profile",
-        "",
-        1,
-        Vars::new()
-            .with("permissions", vec!["deploy", "read_logs"])
-            .with("secrets", Vars::new().with("TOKEN", "sk-123")),
-    );
+    engine
+        .add_snapshot("profile", crate::SnapshotOptions::per_task())
+        .unwrap();
+    engine
+        .snapshot()
+        .upsert(
+            "profile",
+            "",
+            1,
+            Vars::new()
+                .with("permissions", vec!["deploy", "read_logs"])
+                .with("secrets", Vars::new().with("TOKEN", "sk-123")),
+        )
+        .unwrap();
 
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| {
@@ -680,19 +690,24 @@ async fn sealed_data_js_dollar_profile_access() {
 #[tokio::test(flavor = "multi_thread")]
 async fn snapshot_skips_when_scope_params_missing() {
     let engine = Engine::builder().start().await.unwrap();
-    engine.add_snapshot(
-        "profile",
-        crate::SnapshotOptions {
-            scope: vec!["unit".into(), "project".into()],
-            ..Default::default()
-        },
-    );
-    engine.snapshot().upsert(
-        "profile",
-        "u1/p1",
-        1,
-        Vars::new().with("result", "not reachable without params"),
-    );
+    engine
+        .add_snapshot(
+            "profile",
+            crate::SnapshotOptions {
+                scope: vec!["unit".into(), "project".into()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    engine
+        .snapshot()
+        .upsert(
+            "profile",
+            "u1/p1",
+            1,
+            Vars::new().with("result", "not reachable without params"),
+        )
+        .unwrap();
 
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -728,10 +743,13 @@ async fn snapshot_skips_when_scope_params_missing() {
 #[tokio::test(flavor = "multi_thread")]
 async fn snapshot_sealed_data_inherits_from_parent() {
     let engine = Engine::builder().start().await.unwrap();
-    engine.add_snapshot("profile", crate::SnapshotOptions::per_proc());
+    engine
+        .add_snapshot("profile", crate::SnapshotOptions::per_proc())
+        .unwrap();
     engine
         .snapshot()
-        .upsert("profile", "", 1, Vars::new().with("scope", "workflow"));
+        .upsert("profile", "", 1, Vars::new().with("scope", "workflow"))
+        .unwrap();
 
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
@@ -926,12 +944,15 @@ fn engine_builder_set_store_duplicate() {
 #[tokio::test(flavor = "multi_thread")]
 async fn snapshot_per_proc_pins_value_until_process_ends() {
     let engine = Engine::builder().start().await.unwrap();
-    engine.add_snapshot("profile", crate::SnapshotOptions::per_proc());
+    engine
+        .add_snapshot("profile", crate::SnapshotOptions::per_proc())
+        .unwrap();
 
     // external system feeds v1 before the process starts
     engine
         .snapshot()
-        .upsert("profile", "", 1, Vars::new().with("val", 1));
+        .upsert("profile", "", 1, Vars::new().with("val", 1))
+        .unwrap();
 
     let workflow = Workflow::new()
         .with_id("snap_proc_pin")
@@ -960,7 +981,8 @@ async fn snapshot_per_proc_pins_value_until_process_ends() {
             if key == "stop1" {
                 // external system refreshes the snapshot mid-run
                 eng.snapshot()
-                    .upsert("profile", "", 2, Vars::new().with("val", 2));
+                    .upsert("profile", "", 2, Vars::new().with("val", 2))
+                    .unwrap();
                 executor
                     .act()
                     .complete(&e.pid, &e.tid, Vars::new())
@@ -1011,11 +1033,14 @@ async fn snapshot_per_proc_pins_value_until_process_ends() {
 #[tokio::test(flavor = "multi_thread")]
 async fn snapshot_per_task_reads_latest_value() {
     let engine = Engine::builder().start().await.unwrap();
-    engine.add_snapshot("profile", crate::SnapshotOptions::per_task());
+    engine
+        .add_snapshot("profile", crate::SnapshotOptions::per_task())
+        .unwrap();
 
     engine
         .snapshot()
-        .upsert("profile", "", 1, Vars::new().with("val", 1));
+        .upsert("profile", "", 1, Vars::new().with("val", 1))
+        .unwrap();
 
     let workflow = Workflow::new()
         .with_id("snap_task_latest")
@@ -1044,7 +1069,8 @@ async fn snapshot_per_task_reads_latest_value() {
             if key == "stop1" {
                 // external system refreshes the snapshot mid-run
                 eng.snapshot()
-                    .upsert("profile", "", 2, Vars::new().with("val", 2));
+                    .upsert("profile", "", 2, Vars::new().with("val", 2))
+                    .unwrap();
                 executor
                     .act()
                     .complete(&e.pid, &e.tid, Vars::new())
@@ -1091,20 +1117,24 @@ async fn snapshot_per_task_reads_latest_value() {
 #[tokio::test(flavor = "multi_thread")]
 async fn snapshot_scope_keyed_by_task_params() {
     let engine = Engine::builder().start().await.unwrap();
-    engine.add_snapshot(
-        "profile",
-        crate::SnapshotOptions {
-            scope: vec!["unit".to_string()],
-            ..Default::default()
-        },
-    );
+    engine
+        .add_snapshot(
+            "profile",
+            crate::SnapshotOptions {
+                scope: vec!["unit".to_string()],
+                ..Default::default()
+            },
+        )
+        .unwrap();
 
     engine
         .snapshot()
-        .upsert("profile", "u1", 1, Vars::new().with("val", "A"));
+        .upsert("profile", "u1", 1, Vars::new().with("val", "A"))
+        .unwrap();
     engine
         .snapshot()
-        .upsert("profile", "u2", 1, Vars::new().with("val", "B"));
+        .upsert("profile", "u2", 1, Vars::new().with("val", "B"))
+        .unwrap();
 
     let workflow = Workflow::new()
         .with_id("snap_scope")
@@ -1185,15 +1215,20 @@ async fn snapshot_per_proc_js_access_inherits_on_child() {
     // per-proc seals once on the root lineage; a child task has no local
     // sealed data, yet its JS environment must still expose $profile
     let engine = Engine::builder().start().await.unwrap();
-    engine.add_snapshot("profile", crate::SnapshotOptions::per_proc());
-    engine.snapshot().upsert(
-        "profile",
-        "",
-        1,
-        Vars::new()
-            .with("permissions", vec!["deploy", "read_logs"])
-            .with("secrets", Vars::new().with("TOKEN", "sk-123")),
-    );
+    engine
+        .add_snapshot("profile", crate::SnapshotOptions::per_proc())
+        .unwrap();
+    engine
+        .snapshot()
+        .upsert(
+            "profile",
+            "",
+            1,
+            Vars::new()
+                .with("permissions", vec!["deploy", "read_logs"])
+                .with("secrets", Vars::new().with("TOKEN", "sk-123")),
+        )
+        .unwrap();
 
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| {
@@ -1230,4 +1265,60 @@ async fn snapshot_per_proc_js_access_inherits_on_child() {
         let token = env.eval::<String>("$profile.secrets.TOKEN").unwrap();
         assert_eq!(token, "sk-123");
     });
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn snapshot_rejects_unrepresentable_ttl() {
+    // builder path: start() validates and fails loudly
+    let err = Engine::builder()
+        .add_snapshot(
+            "profile",
+            crate::SnapshotOptions::default().with_ttl(u64::MAX),
+        )
+        .start()
+        .await
+        .map(|_| ())
+        .unwrap_err();
+    assert!(matches!(err, crate::ActError::Config(_)), "got: {err}");
+
+    // runtime path, plus the exact boundary accepted
+    let engine = Engine::builder().start().await.unwrap();
+    for ttl in [u64::MAX, crate::MAX_TTL_SECS + 1] {
+        let err = engine
+            .add_snapshot("profile", crate::SnapshotOptions::default().with_ttl(ttl))
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::ActError::Config(_)),
+            "ttl {ttl}: {err}"
+        );
+    }
+    engine
+        .add_snapshot(
+            "profile",
+            crate::SnapshotOptions::default().with_ttl(crate::MAX_TTL_SECS),
+        )
+        .unwrap();
+    engine.close().await;
+}
+
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn snapshot_manager_remove_requires_registration() {
+    let engine = Engine::builder().start().await.unwrap();
+
+    // upsert auto-registers the target, so the tombstone applies
+    engine
+        .snapshot()
+        .upsert("auto", "", 1, Vars::new().with("a", 1))
+        .unwrap();
+    engine.snapshot().remove("auto", "").unwrap();
+    assert!(engine.snapshot().read("auto", "").is_none());
+
+    // a target the engine never registered is a wiring error, not a no-op
+    let err = engine.snapshot().remove("missing", "").unwrap_err();
+    assert!(matches!(err, crate::ActError::Runtime(_)), "got: {err}");
+    assert!(err.to_string().contains("missing"), "got: {err}");
+
+    engine.close().await;
 }
