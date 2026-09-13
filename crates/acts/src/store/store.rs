@@ -15,7 +15,9 @@ use crate::{
 };
 
 use super::{
-    DbCollection, DbCollectionIden, StoreBatchOp, StoreIden, collection::KvCollection, data,
+    DbCollection, DbCollectionIden, StoreBatchOp, StoreIden,
+    collection::{DocLocks, KvCollection, lock_docs},
+    data,
     data::DeliveryStatus,
 };
 
@@ -139,8 +141,19 @@ impl Store {
         // trigger rows are committed as ONE atomic batch: a mid-deploy
         // failure can no longer leave a model row with half-reconciled (or
         // missing) triggers, or stale triggers of a removed declaration.
+        //
+        // The batch is a read-modify-write of the model row and of every
+        // trigger row it reconciles: the model is locked first, then the
+        // trigger rows it owns (`DocLocks::lock_more`), so a concurrent
+        // deploy/remove of the model or a concurrent arm of one of its
+        // triggers cannot interleave.
+        let models = KvCollection::<Model>::new(StoreIden::Models.as_ref(), self.kv.clone());
+        let mut locks = lock_docs([models.data_key(&model.id)]).await;
         let mut ops = self.model_deploy_ops(model, view).await?;
-        ops.extend(self.trigger_ops(&model.on, &model.id, &model.ver).await?);
+        ops.extend(
+            self.trigger_ops(&model.on, &model.id, &model.ver, &mut locks)
+                .await?,
+        );
         self.kv.batch(&ops).await?;
         Ok(true)
     }
@@ -204,6 +217,7 @@ impl Store {
         triggers: &[Trigger],
         mid: &str,
         ver: &str,
+        locks: &mut DocLocks,
     ) -> Result<Vec<StoreBatchOp>> {
         use super::query::{Expr, Filter, Query};
         use crate::utils::consts;
@@ -217,6 +231,19 @@ impl Store {
             )
             .await?
             .rows;
+
+        // Every trigger row this reconciliation reads (the declared ones and
+        // the stale ones it drops) is written by the caller's batch: lock them
+        // under the already held model lock.
+        locks
+            .lock_more(
+                existing.iter().map(|row| events.data_key(&row.id)).chain(
+                    triggers
+                        .iter()
+                        .map(|trigger| events.data_key(&format!("{}:{}", mid, trigger.id))),
+                ),
+            )
+            .await;
 
         let mut ops = Vec::new();
         let mut keep = Vec::new();
@@ -281,11 +308,21 @@ impl Store {
         let models = KvCollection::<Model>::new(StoreIden::Models.as_ref(), self.kv.clone());
         let events = KvCollection::<data::Event>::new(StoreIden::Events.as_ref(), self.kv.clone());
 
-        let mut ops = Vec::new();
+        // The model row and every trigger row of it are read-modify-writes
+        // committed as one batch: the model is locked first (nobody takes a
+        // trigger lock before a model lock), then the trigger rows discovered
+        // while that lock is held — a concurrent deploy of the same model
+        // cannot add a row in between.
+        let mut locks = lock_docs([models.data_key(id)]).await;
         let rows = events
             .query(&Query::new().filter(Filter::and().expr(Expr::eq(consts::MODEL_ID, id))))
             .await?
             .rows;
+        locks
+            .lock_more(rows.iter().map(|row| events.data_key(&row.id)))
+            .await;
+
+        let mut ops = Vec::new();
         for row in rows {
             ops.extend(events.delete_ops(&row.id).await?);
         }
@@ -314,22 +351,75 @@ impl Store {
             KvCollection::<data::Delivery>::new(StoreIden::Deliveries.as_ref(), self.kv.clone());
         let vars = KvCollection::<data::TaskVars>::new(StoreIden::Vars.as_ref(), self.kv.clone());
 
+        // Every row is deleted by reading the document to compute its index
+        // rows: collect the ids first, then lock all of them (in key order)
+        // before any of the reads, and keep the locks until the batch is
+        // applied. Rows appearing after the queries are not part of this
+        // removal — the writer orders it after the process's own writes and
+        // the cache has evicted the process by then.
         let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", pid.to_string())));
+        let vars_ids: Vec<String> = vars
+            .query(&q)
+            .await?
+            .rows
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        let task_ids: Vec<String> = tasks
+            .query(&q)
+            .await?
+            .rows
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        let op_ids: Vec<String> = ops
+            .query(&q)
+            .await?
+            .rows
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        let msg_ids: Vec<String> = messages
+            .query(&q)
+            .await?
+            .rows
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        let dlv_ids: Vec<String> = deliveries
+            .query(&q)
+            .await?
+            .rows
+            .into_iter()
+            .map(|r| r.id)
+            .collect();
+        let _locks = lock_docs(
+            vars_ids
+                .iter()
+                .map(|id| vars.data_key(id))
+                .chain(task_ids.iter().map(|id| tasks.data_key(id)))
+                .chain(op_ids.iter().map(|id| ops.data_key(id)))
+                .chain(msg_ids.iter().map(|id| messages.data_key(id)))
+                .chain(dlv_ids.iter().map(|id| deliveries.data_key(id)))
+                .chain([procs.data_key(pid)]),
+        )
+        .await;
+
         let mut batch = Vec::new();
-        for row in vars.query(&q).await?.rows {
-            batch.extend(vars.delete_ops(&row.id).await?);
+        for id in &vars_ids {
+            batch.extend(vars.delete_ops(id).await?);
         }
-        for row in tasks.query(&q).await?.rows {
-            batch.extend(tasks.delete_ops(&row.id).await?);
+        for id in &task_ids {
+            batch.extend(tasks.delete_ops(id).await?);
         }
-        for row in ops.query(&q).await?.rows {
-            batch.extend(ops.delete_ops(&row.id).await?);
+        for id in &op_ids {
+            batch.extend(ops.delete_ops(id).await?);
         }
-        for row in messages.query(&q).await?.rows {
-            batch.extend(messages.delete_ops(&row.id).await?);
+        for id in &msg_ids {
+            batch.extend(messages.delete_ops(id).await?);
         }
-        for row in deliveries.query(&q).await?.rows {
-            batch.extend(deliveries.delete_ops(&row.id).await?);
+        for id in &dlv_ids {
+            batch.extend(deliveries.delete_ops(id).await?);
         }
         batch.extend(procs.delete_ops(pid).await?);
         self.kv.batch(&batch).await?;
@@ -443,9 +533,20 @@ impl Store {
         let procs = KvCollection::<data::Proc>::new(StoreIden::Procs.as_ref(), self.kv.clone());
         let tasks = KvCollection::<data::Task>::new(StoreIden::Tasks.as_ref(), self.kv.clone());
 
-        let mut ops = procs.update_ops(&proc.into_data()?).await?;
-        if let Some(root) = root {
-            ops.extend(tasks.update_ops(&root.into_data()?).await?);
+        // Both rows are read-modify-writes committed as one batch: lock them
+        // (in key order) before reading either, and hold the locks until the
+        // batch is applied.
+        let proc_data = proc.into_data()?;
+        let task_data = root.map(|root| root.into_data()).transpose()?;
+        let _locks = lock_docs(
+            std::iter::once(procs.data_key(&proc_data.id))
+                .chain(task_data.iter().map(|task| tasks.data_key(&task.id))),
+        )
+        .await;
+
+        let mut ops = procs.update_ops(&proc_data).await?;
+        if let Some(task_data) = &task_data {
+            ops.extend(tasks.update_ops(task_data).await?);
         }
         self.kv.batch(&ops).await?;
         Ok(())

@@ -199,13 +199,26 @@ pub trait KvStore: Send + Sync {
     async fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>>;
 }
 
+/// One collection of documents, each with an id and the index rows derived
+/// from its indexed fields.
+///
+/// The three mutations are read-modify-writes of a document (they read the
+/// stored row to compute which index rows to drop) and each applies its data
+/// row and index rows as one atomic [`KvStore::batch`]. They are serialized
+/// per document, so any combination of `create`/`update`/`delete` racing on
+/// one id leaves the index rows describing the document that ends up stored —
+/// never a query result the data row does not back.
 #[async_trait::async_trait]
 pub trait DbCollection: Send + Sync {
     type Item;
     async fn exists(&self, id: &str) -> Result<bool>;
     async fn find(&self, id: &str) -> Result<Self::Item>;
     async fn query(&self, query: &Query) -> Result<PageData<Self::Item>>;
+    /// Write `data` as the document of its id, replacing any stored document
+    /// together with the index rows it no longer matches.
     async fn create(&self, data: &Self::Item) -> Result<bool>;
+    /// Same write as [`DbCollection::create`].
     async fn update(&self, data: &Self::Item) -> Result<bool>;
+    /// Remove the document and every index row of it.
     async fn delete(&self, id: &str) -> Result<bool>;
 }

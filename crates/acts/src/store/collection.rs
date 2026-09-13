@@ -5,20 +5,133 @@ use crate::store::{
 };
 use crate::utils::consts::{KEY_SEP, KEY_SEP_SUCC};
 use crate::{ActError, Result};
+use parking_lot::Mutex;
 use serde::{Serialize, de::DeserializeOwned};
 use serde_json::Value as JsonValue;
+use std::sync::LazyLock;
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     fmt::Debug,
     marker::PhantomData,
     sync::Arc,
 };
+use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
 
 pub struct KvCollection<T> {
     prefix: String,
     kv: Arc<dyn KvStore>,
     _t: PhantomData<T>,
+}
+
+/// Process-wide registry of the per-document mutation locks.
+///
+/// A document's data row and its index rows stay consistent only if no other
+/// mutation reads the stored row in between: `update`/`delete` read the
+/// document to compute which index rows to drop, then commit the data row and
+/// the new index rows as one [`KvStore::batch`]. Two mutations of the same id
+/// that both read the same old document each compute their drops from that
+/// version, so whichever batch lands second leaves index rows of a value the
+/// data row no longer holds (a query returns a phantom id) or drops index rows
+/// of the value it does hold (a query misses it).
+///
+/// [`lock_docs`] serializes every read-modify-write of a document from its
+/// read until its batch has been applied. The locks are process-local: the
+/// store contract is one writer per database, so a second process writing the
+/// same database needs a backend-level conditional write.
+static DOC_LOCKS: LazyLock<DocLockRegistry> = LazyLock::new(DocLockRegistry::default);
+
+#[derive(Default)]
+struct DocLockRegistry {
+    /// Keyed by the full document key. An entry is dropped once the last
+    /// holder released it, so a long-running engine does not accumulate one
+    /// lock per document id it has ever touched.
+    entries: Mutex<HashMap<String, Arc<AsyncMutex<()>>>>,
+}
+
+/// The document locks held by one read-modify-write, released on drop.
+///
+/// The locks MUST be held until the batch computed from the locked documents
+/// has been applied.
+pub(crate) struct DocLocks {
+    locks: Vec<DocLock>,
+}
+
+struct DocLock {
+    registry: &'static DocLockRegistry,
+    key: String,
+    /// `None` only inside `Drop`, which drops the reference before deciding
+    /// whether the registry entry is unreferenced.
+    entry: Option<Arc<AsyncMutex<()>>>,
+    guard: Option<OwnedMutexGuard<()>>,
+}
+
+/// Lock every document in `keys` (full document keys) for a read-modify-write.
+///
+/// The keys are acquired in ascending order and deduplicated, so two mutations
+/// touching the same documents in a different discovery order cannot deadlock
+/// against each other.
+pub(crate) async fn lock_docs(keys: impl IntoIterator<Item = String>) -> DocLocks {
+    let mut keys: Vec<String> = keys.into_iter().collect();
+    keys.sort_unstable();
+    keys.dedup();
+
+    let registry: &'static DocLockRegistry = &DOC_LOCKS;
+    let mut locks = Vec::with_capacity(keys.len());
+    for key in keys {
+        locks.push(DocLock::acquire(registry, key).await);
+    }
+    DocLocks { locks }
+}
+
+impl DocLocks {
+    /// Lock the documents a mutation extends to while it already holds the
+    /// lock of the document that owns them.
+    ///
+    /// Only a model row and its own trigger rows use this: the model is locked
+    /// first, the trigger rows it declares (and the stale ones it drops)
+    /// after, and no code path takes a trigger lock before a model lock, so
+    /// this nesting cannot form a wait cycle. Independent documents must go to
+    /// one [`lock_docs`] call instead.
+    pub(crate) async fn lock_more(&mut self, keys: impl IntoIterator<Item = String>) {
+        self.locks.extend(lock_docs(keys).await.locks);
+    }
+}
+
+impl DocLock {
+    async fn acquire(registry: &'static DocLockRegistry, key: String) -> Self {
+        let entry = {
+            let mut entries = registry.entries.lock();
+            entries.entry(key.clone()).or_default().clone()
+        };
+        let guard = entry.clone().lock_owned().await;
+        Self {
+            registry,
+            key,
+            entry: Some(entry),
+            guard: Some(guard),
+        }
+    }
+}
+
+impl Drop for DocLock {
+    fn drop(&mut self) {
+        // Release the mutex before the registry entry can go away: a mutation
+        // looking the entry up between these steps must still observe it
+        // locked.
+        drop(self.guard.take());
+        drop(self.entry.take());
+        let mut entries = self.registry.entries.lock();
+        // The registry's own reference is the last one exactly when no task
+        // holds or awaits this lock any more; a waiter that cloned the entry
+        // before this point keeps it alive and drops it after its own release.
+        if entries
+            .get(&self.key)
+            .is_some_and(|e| Arc::strong_count(e) == 1)
+        {
+            entries.remove(&self.key);
+        }
+    }
 }
 
 impl<T> KvCollection<T> {
@@ -30,7 +143,7 @@ impl<T> KvCollection<T> {
         }
     }
 
-    fn data_key(&self, id: &str) -> String {
+    pub(crate) fn data_key(&self, id: &str) -> String {
         format!("{}{}id{}{}", self.prefix, KEY_SEP, KEY_SEP, id)
     }
 
@@ -84,24 +197,38 @@ impl<T> KvCollection<T> {
         Ok(docs)
     }
 
-    /// The mutations [`DbCollection::create`] would apply (data row + index
-    /// rows), without applying them. Lets a caller fold several document
-    /// writes — e.g. a model and its trigger rows on `deploy` — into one
-    /// atomic [`KvStore::batch`].
+    /// The mutations of an insert: the data row and the index rows of `data`,
+    /// with no cleanup of a stored version. Only valid when the document is
+    /// known to be absent — a row already stored under the same id would keep
+    /// its index rows, so `create`/`update` (which drop them) are the writes
+    /// for any id that may exist.
+    ///
+    /// Lets a caller fold several document writes — e.g. a model and its
+    /// trigger rows on `deploy` — into one atomic [`KvStore::batch`]. The
+    /// caller MUST hold the lock of every document it writes (see
+    /// [`lock_docs`]) until that batch is applied, so the absence it relies on
+    /// cannot change underneath it.
     pub(crate) fn create_ops(&self, data: &T) -> Result<Vec<StoreBatchOp>>
     where
         T: DbCollectionIden + Serialize,
     {
         let json = serde_json::to_value(data).map_err(map_db_err)?;
-        let id = extract_id(&json)?;
-        let bytes = serde_json::to_vec(&json).map_err(map_db_err)?;
+        self.create_ops_json(&json)
+    }
+
+    fn create_ops_json(&self, json: &JsonValue) -> Result<Vec<StoreBatchOp>>
+    where
+        T: DbCollectionIden,
+    {
+        let id = extract_id(json)?;
+        let bytes = serde_json::to_vec(json).map_err(map_db_err)?;
 
         let mut ops = Vec::with_capacity(1 + T::indexed_fields().len());
         ops.push(StoreBatchOp::Put {
             key: self.data_key(&id),
             value: bytes,
         });
-        for idx_key in self.index_keys(&json, &id) {
+        for idx_key in self.index_keys(json, &id) {
             ops.push(StoreBatchOp::Put {
                 key: idx_key,
                 value: vec![],
@@ -114,14 +241,25 @@ impl<T> KvCollection<T> {
     /// keys the new document no longer carries (keys re-created with the same
     /// value are left alone — a delete+put of one key is a no-op), then write
     /// the data row and the new index rows.
+    ///
+    /// The caller MUST hold the lock of every document it writes (see
+    /// [`lock_docs`]) until that batch is applied: the dropped keys are the
+    /// ones the stored document holds at this moment.
     pub(crate) async fn update_ops(&self, data: &T) -> Result<Vec<StoreBatchOp>>
     where
         T: DbCollectionIden + Serialize,
     {
         let new_json = serde_json::to_value(data).map_err(map_db_err)?;
-        let id = extract_id(&new_json)?;
-        let new_bytes = serde_json::to_vec(&new_json).map_err(map_db_err)?;
-        let new_index = self.index_keys(&new_json, &id);
+        self.update_ops_json(&new_json).await
+    }
+
+    async fn update_ops_json(&self, new_json: &JsonValue) -> Result<Vec<StoreBatchOp>>
+    where
+        T: DbCollectionIden,
+    {
+        let id = extract_id(new_json)?;
+        let new_bytes = serde_json::to_vec(new_json).map_err(map_db_err)?;
+        let new_index = self.index_keys(new_json, &id);
         let mut ops = Vec::with_capacity(new_index.len() + 1);
         if let Some(old_json) = self.read_json(&id).await? {
             let new_keys: HashSet<&str> = new_index.iter().map(String::as_str).collect();
@@ -146,6 +284,10 @@ impl<T> KvCollection<T> {
 
     /// The mutations [`DbCollection::delete`] would apply: every index row of
     /// the current document, then the data row itself.
+    ///
+    /// The caller MUST hold the lock of the document (see [`lock_docs`]) until
+    /// that batch is applied: the index rows are the ones the stored document
+    /// holds at this moment.
     pub(crate) async fn delete_ops(&self, id: &str) -> Result<Vec<StoreBatchOp>>
     where
         T: DbCollectionIden,
@@ -570,6 +712,15 @@ impl<T> KvCollection<T> {
         for (_, bytes) in &docs {
             let json: JsonValue = serde_json::from_slice(bytes).map_err(map_db_err)?;
             let id = extract_id(&json)?;
+            // Re-read the document under its mutation lock: the index region
+            // was just wiped, so the keys must come from a version no
+            // concurrent update can replace between this read and the puts.
+            // A document deleted meanwhile is skipped instead of being
+            // re-indexed.
+            let _lock = lock_docs([self.data_key(&id)]).await;
+            let Some(json) = self.read_json(&id).await? else {
+                continue;
+            };
             for idx_key in self.index_keys(&json, &id) {
                 self.kv.put(&idx_key, vec![]).await?;
             }
@@ -825,24 +976,45 @@ where
     }
 
     async fn create(&self, data: &Self::Item) -> crate::Result<bool> {
-        // Data row and index rows are committed as one atomic batch, so a
-        // mid-write failure can never leave a document without its indexes.
-        let ops = self.create_ops(data)?;
-        self.kv.batch(&ops).await?;
-        Ok(true)
+        // `create` and `update` are the same write. Both may land on an id
+        // that already holds a document — the engine's find-then-create
+        // upserts (`publish`, `upsert_proc`, the task/vars rows) and two
+        // racing callers of either — and the invariant they maintain is one:
+        // after the write, the index rows of this id are exactly the keys
+        // derived from the stored document. A create that merely overwrote the
+        // data row would leave the previous document's index rows behind,
+        // answering queries for a value the row no longer holds.
+        self.write_document(data).await
     }
 
     async fn update(&self, data: &Self::Item) -> crate::Result<bool> {
-        // Stale index drops, the data row and the new index rows commit as
-        // one atomic batch.
-        let ops = self.update_ops(data).await?;
-        self.kv.batch(&ops).await?;
-        Ok(true)
+        self.write_document(data).await
     }
 
     async fn delete(&self, id: &str) -> crate::Result<bool> {
-        // Index rows and the data row are removed as one atomic batch.
+        // Index rows and the data row are removed as one atomic batch: the
+        // index rows are the ones the stored document holds, read under the
+        // document's lock (`lock_docs`).
+        let _lock = lock_docs([self.data_key(id)]).await;
         let ops = self.delete_ops(id).await?;
+        self.kv.batch(&ops).await?;
+        Ok(true)
+    }
+}
+
+impl<T> KvCollection<T>
+where
+    T: DbCollectionIden + Serialize,
+{
+    /// Write `data` as the document of its id: the stale index rows of the
+    /// stored version, the data row and the new index rows commit as one
+    /// atomic batch, computed while holding the document's lock, so no
+    /// concurrent mutation of the same id can interleave its own index
+    /// computation with this one.
+    async fn write_document(&self, data: &T) -> crate::Result<bool> {
+        let json = serde_json::to_value(data).map_err(map_db_err)?;
+        let _lock = lock_docs([self.data_key(&extract_id(&json)?)]).await;
+        let ops = self.update_ops_json(&json).await?;
         self.kv.batch(&ops).await?;
         Ok(true)
     }
@@ -1945,5 +2117,279 @@ mod tests {
             .unwrap();
         assert_eq!(page.count, 0);
         assert!(page.rows.is_empty());
+    }
+
+    // ========== concurrent mutation of one document ==========
+
+    /// KV store that can be switched, from the test thread, to block inside the
+    /// two store calls a collection mutation makes around its index
+    /// computation: the document read (`get`) and the data+index write
+    /// (`batch`). `entered` counts every caller that reached either gate, so a
+    /// test can prove that a second mutation did NOT reach the store.
+    #[derive(Default)]
+    struct GatedKv {
+        inner: crate::store::MemoryStore,
+        gate: std::sync::atomic::AtomicBool,
+        entered: std::sync::atomic::AtomicUsize,
+    }
+
+    impl GatedKv {
+        fn ordered(&self) -> bool {
+            self.gate.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        fn arm(&self) {
+            self.gate.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn disarm(&self) {
+            self.gate.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+
+        fn entered(&self) -> usize {
+            self.entered.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        async fn wait_entered(&self, entered: usize) {
+            while self.entered() < entered {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        async fn park(&self) {
+            self.entered
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            while self.ordered() {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl KvStore for GatedKv {
+        async fn get(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
+            if self.ordered() {
+                self.park().await;
+            }
+            self.inner.get(key).await
+        }
+
+        async fn put(&self, key: &str, value: Vec<u8>) -> crate::Result<()> {
+            if self.ordered() {
+                self.park().await;
+            }
+            self.inner.put(key, value).await
+        }
+
+        async fn delete(&self, key: &str) -> crate::Result<()> {
+            if self.ordered() {
+                self.park().await;
+            }
+            self.inner.delete(key).await
+        }
+
+        async fn batch(&self, ops: &[crate::store::StoreBatchOp]) -> crate::Result<()> {
+            if self.ordered() {
+                self.park().await;
+            }
+            self.inner.batch(ops).await
+        }
+
+        async fn scan_prefix(
+            &self,
+            key: &str,
+            options: crate::store::ScanOptions,
+        ) -> crate::Result<Vec<(String, Vec<u8>)>> {
+            self.inner.scan_prefix(key, options).await
+        }
+    }
+
+    async fn ids_of(col: &Arc<KvCollection<Doc>>, field: &str, value: JsonValue) -> Vec<String> {
+        let page = col
+            .query(&Query::new().filter(Filter::and().expr(Expr::eq(field, value))))
+            .await
+            .unwrap();
+        ids(&page)
+    }
+
+    /// Two concurrent updates of one document must not compute their index
+    /// drops from the same stored version: the second waits for the first
+    /// batch (`lock_docs`), so the data row and its index rows always describe
+    /// one version — the value the row holds is indexed and the value it
+    /// dropped is not.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_updates_do_not_tear_data_and_index_rows() {
+        let kv = Arc::new(GatedKv::default());
+        let col = Arc::new(KvCollection::<Doc>::new("docs", kv.clone()));
+        col.create(&doc("d1", "a", 1)).await.unwrap();
+
+        kv.arm();
+        let first = {
+            let col = col.clone();
+            tokio::spawn(async move { col.update(&doc("d1", "b", 1)).await })
+        };
+        kv.wait_entered(1).await;
+
+        let second = {
+            let col = col.clone();
+            tokio::spawn(async move { col.update(&doc("d1", "a", 2)).await })
+        };
+        // Give the second update every chance to run: it must wait for the
+        // document lock instead of reading the version the first one mutates.
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(
+            kv.entered(),
+            1,
+            "a concurrent update read the document version the first one is mutating"
+        );
+
+        kv.disarm();
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+
+        let row = col.find("d1").await.unwrap();
+        assert_eq!(
+            ids_of(&col, "state", json!(row.state)).await,
+            vec!["d1"],
+            "the value the stored row holds must stay indexed"
+        );
+        let dropped = if row.state == "a" { "b" } else { "a" };
+        assert!(
+            ids_of(&col, "state", json!(dropped)).await.is_empty(),
+            "a value the stored row dropped must not stay indexed"
+        );
+        assert_eq!(
+            ids_of(&col, "timestamp", json!(row.timestamp)).await,
+            vec!["d1"],
+            "every indexed field must agree with the stored row"
+        );
+    }
+
+    /// A delete and an update racing on one document must end in one of the two
+    /// clean states — the updated document with its indexes, or nothing at all.
+    /// Never a data row whose index entries describe a value it no longer
+    /// holds, nor index rows whose document is gone (a query would return a
+    /// phantom id).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_delete_and_update_leave_no_orphan_index_rows() {
+        let kv = Arc::new(GatedKv::default());
+        let col = Arc::new(KvCollection::<Doc>::new("docs", kv.clone()));
+        col.create(&doc("d1", "a", 1)).await.unwrap();
+
+        kv.arm();
+        let deleter = {
+            let col = col.clone();
+            tokio::spawn(async move { col.delete("d1").await })
+        };
+        kv.wait_entered(1).await;
+
+        let updater = {
+            let col = col.clone();
+            tokio::spawn(async move { col.update(&doc("d1", "b", 2)).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(
+            kv.entered(),
+            1,
+            "the update read the document while the delete was mutating it"
+        );
+
+        kv.disarm();
+        deleter.await.unwrap().unwrap();
+        updater.await.unwrap().unwrap();
+
+        match col.find("d1").await {
+            Ok(row) => {
+                assert_eq!(
+                    ids_of(&col, "state", json!(row.state)).await,
+                    vec!["d1"],
+                    "the surviving row must be indexed under its own value"
+                );
+                assert_eq!(
+                    ids_of(&col, "timestamp", json!(row.timestamp)).await,
+                    vec!["d1"]
+                );
+                for (field, value) in [
+                    ("state", json!("a")),
+                    ("state", json!("b")),
+                    ("timestamp", json!(1)),
+                    ("timestamp", json!(2)),
+                ] {
+                    if field == "state" && value == json!(row.state) {
+                        continue;
+                    }
+                    if field == "timestamp" && value == json!(row.timestamp) {
+                        continue;
+                    }
+                    assert!(
+                        ids_of(&col, field, value.clone()).await.is_empty(),
+                        "index rows of a dropped value survived the delete/update race: {field}={value}"
+                    );
+                }
+            }
+            Err(_) => {
+                for (field, value) in [
+                    ("state", json!("a")),
+                    ("state", json!("b")),
+                    ("timestamp", json!(1)),
+                    ("timestamp", json!(2)),
+                ] {
+                    assert!(
+                        ids_of(&col, field, value.clone()).await.is_empty(),
+                        "a deleted document left index rows behind: {field}={value}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// `create` landing on an id that already holds a document — the engine's
+    /// find-then-create upserts, or two racing creators — must drop the index
+    /// rows of the version it replaces, exactly like `update`. Leaving them
+    /// behind would answer queries for a value the stored row no longer holds.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_creates_do_not_leave_stale_index_rows() {
+        let kv = Arc::new(GatedKv::default());
+        let col = Arc::new(KvCollection::<Doc>::new("docs", kv.clone()));
+        col.create(&doc("d1", "a", 1)).await.unwrap();
+
+        kv.arm();
+        let first = {
+            let col = col.clone();
+            tokio::spawn(async move { col.create(&doc("d1", "b", 2)).await })
+        };
+        kv.wait_entered(1).await;
+
+        let second = {
+            let col = col.clone();
+            tokio::spawn(async move { col.create(&doc("d1", "a", 3)).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        assert_eq!(
+            kv.entered(),
+            1,
+            "a concurrent create read the document version the first one is replacing"
+        );
+
+        kv.disarm();
+        first.await.unwrap().unwrap();
+        second.await.unwrap().unwrap();
+
+        let row = col.find("d1").await.unwrap();
+        for (field, value) in [
+            ("state", json!("a")),
+            ("state", json!("b")),
+            ("timestamp", json!(1)),
+            ("timestamp", json!(2)),
+            ("timestamp", json!(3)),
+        ] {
+            let expected = (field == "state" && value == json!(row.state))
+                || (field == "timestamp" && value == json!(row.timestamp));
+            assert_eq!(
+                ids_of(&col, field, value.clone()).await,
+                if expected { vec!["d1"] } else { Vec::new() },
+                "index and data row disagree after concurrent creates: {field}={value}"
+            );
+        }
     }
 }
