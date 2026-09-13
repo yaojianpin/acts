@@ -341,6 +341,7 @@
 # 0.24.1
 - fix: `schedule` triggers arm to their actual next cron fire instead of firing on the first engine tick — a freshly deployed or cron-changed schedule row now stores `next_run = cron.next()` (not `now`), so it fires at its first cron boundary, and re-deploying an unchanged schedule deterministically keeps `last_run`/`next_run` (previously the armed-now row fired immediately and rolled the run state between the deploy and the re-deploy, racing the reconcile)
 - ci: the release workflow builds `macos-x86_64` by cross-compiling `x86_64-apple-darwin` on `macos-latest` instead of the retired `macos-13` runners (jobs queued forever waiting for a runner that no longer exists); every target now declares its rust `target` triple and builds with `--target`
+- fix: `install.ps1` path error when installing
 
 
 # Unreleased
@@ -349,11 +350,6 @@
 - fix: add index fields `["kind", "next_run", "mid"]` for `event` collection and add index fields `update_time` for `deliveries`
 - perf: cache registered package instances per engine registration instead of recreating them for every Func act or custom event trigger; package constructors now run once per successful first use and replaced registrations get a fresh cache slot
 - perf: `acts-package-state` uses a long-lived Redis multiplexed async connection and async `GET`/`SET` instead of opening and blocking a synchronous connection on every execution
-- perf: `acts-package-http` uses a package-level async `reqwest::Client`, reusing connections and TLS sessions instead of creating a blocking client for every HTTP act
-- feat: `acts-package-http` supports an optional `timeout-ms` param for the total request duration; when omitted, requests keep the previous no-timeout behavior
-- fix: `acts-package-http` is registered as a `Func` act so the engine executes its package handler instead of leaving the task interrupted
-- perf: `acts-package-shell` runs child processes with `tokio::process` and captures stdout/stderr asynchronously without blocking a scheduler worker
-- feat: `acts-package-shell` supports an optional `max-output-bytes` param to cap each captured output stream and fail when the limit is exceeded
 - fix: `acts-package-nats` no longer creates a private Tokio runtime or calls `block_in_place`; it connects lazily on first async execution and reuses the NATS client, avoiding the current-thread runtime panic and blocking a scheduler worker
 - fix: break the `Process → TaskTree → Task → Process` reference cycle — a `Task` now holds its process `Weak`ly, so a finished process evicted from the cache is actually deallocated together with its whole task tree; previously the cycle kept every finished process and all of its tasks (with their scope data) alive forever as unreachable cyclic garbage — `evict` freed the resident-set slot but never the memory, so the `cache_cap` park/refill design still leaked unboundedly
 - BREAKING: `Task::proc()` returns `Option<Arc<Process>>` instead of `&Arc<Process>` — `None` only for a task clone that outlived its evicted process (engine-driven paths always see a live process); a late root-task write from the store writer whose process is already gone falls back to the task's own state to stamp the proc row complete, so the sweeper still removes it
@@ -381,7 +377,6 @@
 - fix: refresh task vars, user vars and sealed data before every pooled expression, and restore isolated global state so one expression cannot leak globals into the next
 - perf: linearize `Task::vars` parent-chain merging and reduce redundant `Vars` cloning in JSON conversion and expression filling
 - perf: use borrowed scheduler-context access for expression evaluation instead of cloning the scoped context for each nested call
-- perf(acts-store): move sled reads, writes, batches and scans onto tokio blocking threads so disk I/O no longer occupies async workers; batches keep one atomic apply-and-flush while single puts/deletes preserve their existing durability window
 - BREAKING: `Context::scope` now takes `&Context`; update callers from `Context::scope(context, ...)` to `Context::scope(&context, ...)`
 - perf(acts-store): pool SQLite file connections in WAL mode so reads can run concurrently and writes no longer queue behind large scans; batches keep their atomic `BEGIN IMMEDIATE` semantics while in-memory stores retain one shared pooled connection
 - fix(plugins): SSE and gRPC transports deregister their channel handler when the client disconnects — the SSE response body and the gRPC `on_message` response stream each carry a drop guard that calls `Channel::close()`, so finished connections no longer leak handlers into the emitter map (previously every dead client kept matching all future messages: unbounded map growth, per-message O(all historical channels) glob matching, a doomed `tokio::spawn` send per dead SSE channel, and three store writes plus one `messages().exists` read per message per dead ack channel); the SSE stream also ends cleanly instead of spinning on its closed queue once the handler is deregistered; regression tests on both transports use ack-delivery message rows as the leak detector (a live channel stores one row per message, a dropped one stores none)
