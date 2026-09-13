@@ -43,3 +43,19 @@ The shell runs asynchronously and does not block the workflow executor.
 Output capture is unbounded unless `max-output-bytes` is set. That option
 limits the number of bytes captured from each of stdout and stderr and fails
 the act when the limit is exceeded.
+
+## Directory control
+
+When the engine's ACL config gives the process a workdir (see the
+access-control chapter of the book), the script runs inside
+`<workdir>/<pid>`: that directory is its working directory, `HOME`,
+`TMPDIR`/`TEMP`/`TMP` and `PWD` point inside it, and `ACTS_WORKDIR` names it.
+A script that names an absolute path or a `..` segment is refused before it
+runs.
+
+That check is policy, not a sandbox — the containment is the child's working
+directory, and a shell can spell an outside path in ways no textual check
+follows. Treat a hostile workflow as needing an OS boundary around the server.
+
+Without a workdir, no directory control applies: the script inherits the
+server's own working directory and environment.

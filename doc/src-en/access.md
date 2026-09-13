@@ -33,6 +33,7 @@ allow = ["model:ls", "model:get", "proc:ls", "proc:get", "task:*", "msg:ls",
          "msg:ack", "snap:get", "snap:ls", "acl:whoami"]
 deny = ["model:rm", "pack:publish"]
 snapshot = { secrets = ["$subject"], profile = ["$subject/*"] }
+workdir = "/srv/acts"
 
 [[acl.role]]
 name = "guest"
@@ -82,6 +83,37 @@ The rule is enforced twice:
 
 A process started in-process (an embedder calling the executor directly) or by
 a trigger carries no caller authority and stays unrestricted.
+
+## Directory control
+
+`workdir` (on `[acl]`, or per role to override it) gives every process the
+policy starts its own directory: the run's filesystem access is confined to
+`<workdir>/<pid>`. Each directory is created at start, and the process id
+becomes a path segment — so a pid that is not one safe component (empty, `.`,
+`..`, or containing a path separator or colon) is refused rather than placing
+the run outside the root it was given.
+
+The path travels the same private route as the scope authority: sealed into
+the process env under a key the workflow's `$env` proxy refuses to read or
+write, persisted with the process, and never part of the start options the
+workflow sees. An act reads it through `Context::workdir()`.
+
+`acts.app.shell` uses it: the script runs with that directory as its working
+directory, `HOME`, `TMPDIR`/`TEMP`/`TMP` and `PWD` point inside it, and
+`ACTS_WORKDIR` names it for the script. A script that names an absolute path
+(`/etc/passwd`, `C:\Windows`) or a `..` segment is refused before it runs.
+
+That textual check is **policy, not a sandbox**: it is what makes the direct
+escape a loud failure instead of a silent success, but a shell can spell a
+path in ways no textual check follows (`a=/etc; cat $a/passwd`, a symlink
+inside the workdir) — the containment that actually holds is the child's
+working directory. Treat a hostile workflow as needing an OS boundary (a
+container or namespace around the server); per-process directories keep such
+runs from colliding meanwhile.
+
+Without `workdir`, no directory control applies and a process may touch
+whatever the server's own account can — the behaviour before this option
+existed.
 
 ## Transport credentials
 

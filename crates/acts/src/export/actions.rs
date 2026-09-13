@@ -242,16 +242,24 @@ pub async fn apply_as(
         // proc
         "proc:start" => {
             let id = pop(&mut options, "id")?;
-            // A run may only read its own subject's snapshot scopes: the
-            // caller's authority is sealed into the process (see
-            // `crate::acl`) and re-checked at every seal.
+            // The caller's authority is sealed into the process (see
+            // `crate::acl`) and re-checked at every seal: which snapshot
+            // scopes the run may read, and where its filesystem access is
+            // confined. The workdir is the root here; the process id turns it
+            // into the run's own directory at start.
             options.set(consts::PROC_OWNER, principal.scope_policy());
+            if let Some(root) = principal.workdir() {
+                options.set(consts::PROC_WORKDIR_ROOT, root);
+            }
             value(executor.proc().start(&id, options).await)
         }
         "proc:start_from_model" => {
             let fmt = pop(&mut options, "fmt")?;
             let model = pop(&mut options, "model")?;
             options.set(consts::PROC_OWNER, principal.scope_policy());
+            if let Some(root) = principal.workdir() {
+                options.set(consts::PROC_WORKDIR_ROOT, root);
+            }
             value(
                 executor
                     .proc()
@@ -757,5 +765,122 @@ mod tests {
                 .unwrap(),
             "u1-secret"
         );
+    }
+
+    /// A run's directory is its own: `<root>/<pid>`, sealed into the process
+    /// and reachable by a package through `Context::workdir`.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn a_run_is_confined_to_its_own_workdir() {
+        let root = std::env::temp_dir().join(format!("acts_workdir_{}", crate::utils::longid()));
+        let engine = acl_engine(&format!(
+            r#"
+            [acl]
+            workdir = '{}'
+
+            [[acl.role]]
+            name = "u1"
+            tokens = ["token-u1"]
+            allow = ["model:deploy", "proc:start"]
+            "#,
+            root.display()
+        ))
+        .await;
+
+        // The root itself is not created up front: a policy may name one that
+        // does not exist yet, and the first run materializes its own directory.
+        assert!(!root.exists());
+
+        let workflow = crate::Workflow::from_yml(
+            r#"
+            id: workdir_run
+            ver: 0.1.0
+            steps:
+              - name: finish
+                uses: acts.transform.code
+                params: |
+                  return { ok: true };
+            "#,
+        )
+        .unwrap();
+        let u1 = engine.acl().authenticate(Some("token-u1")).unwrap();
+        assert_eq!(u1.workdir(), Some(root.as_path()));
+
+        apply_as(
+            &engine,
+            &u1,
+            "model:deploy",
+            Vars::new().with("model", workflow.to_yml().unwrap()),
+        )
+        .await
+        .unwrap();
+
+        let pid = apply_as(
+            &engine,
+            &u1,
+            "proc:start",
+            Vars::new().with("id", "workdir_run").with("pid", "run1"),
+        )
+        .await
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string();
+        assert_eq!(pid, "run1");
+
+        // The run got `<root>/<pid>`, and the workflow never saw the key.
+        let dir = root.join("run1");
+        assert!(dir.is_dir(), "workdir {} was not created", dir.display());
+        let proc = engine.runtime().proc(&pid).await.unwrap().unwrap();
+        assert_eq!(proc.workdir(), Some(dir.clone()));
+        assert!(proc.inputs().get::<String>(consts::PROC_WORKDIR).is_none());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A pid is not a free-form string once it names a directory: a value that
+    /// would place the run outside its root (or leave the filesystem's own
+    /// segment vocabulary) is refused instead of confined.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn a_workdir_refuses_a_pid_that_is_not_one_directory() {
+        let root = std::env::temp_dir().join(format!("acts_workdir_{}", crate::utils::longid()));
+        let engine = acl_engine(&format!(
+            r#"
+            [acl]
+            workdir = '{}'
+
+            [[acl.role]]
+            name = "u1"
+            tokens = ["token-u1"]
+            allow = ["proc:start_from_model"]
+            "#,
+            root.display()
+        ))
+        .await;
+        let u1 = engine.acl().authenticate(Some("token-u1")).unwrap();
+        let model = Vars::new()
+            .with("model", "id: w\nver: 0.1.0\nsteps:\n  - name: s\n")
+            .with("fmt", "yml");
+
+        for pid in ["..", ".", "a/b", "a\\b", "a:b"] {
+            let err = apply_as(
+                &engine,
+                &u1,
+                "proc:start_from_model",
+                model.clone().with("pid", pid),
+            )
+            .await
+            .expect_err(pid);
+            assert!(
+                err.to_string().contains("cannot be used as a workdir name"),
+                "pid {pid:?} must be refused, got: {err}"
+            );
+        }
+
+        // Nothing escaped: the root has no entries, not even `..`
+        // materialized somewhere else.
+        assert!(!root.exists() || std::fs::read_dir(&root).unwrap().next().is_none());
+        std::fs::remove_dir_all(&root).ok();
     }
 }

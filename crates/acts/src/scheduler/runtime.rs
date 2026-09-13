@@ -358,13 +358,18 @@ impl Runtime {
         }
 
         let proc = Process::new(&proc_id, self);
-        // The caller's snapshot scope authority travels inside the start
-        // options (set by `actions::apply_as`), never as a model input: it is
-        // popped here so it cannot leak into the workflow's user vars.
+        // The caller's authority travels inside the start options (set by
+        // `actions::apply_as`), never as a model input: it is popped here so
+        // it cannot leak into the workflow's user vars.
         let owner = options.pop::<crate::ScopePolicy>(consts::PROC_OWNER);
+        let workdir_root = options.pop::<std::path::PathBuf>(consts::PROC_WORKDIR_ROOT);
         proc.load_with_vars(model, &options)?;
         if let Some(owner) = owner {
             proc.set_owner_scope(&owner);
+        }
+        if let Some(root) = workdir_root {
+            let dir = prepare_workdir(&root, &proc_id)?;
+            proc.set_workdir(&dir);
         }
 
         self.launch(&proc).await?;
@@ -1277,4 +1282,41 @@ impl Runtime {
         self.cache.store().events().update(&event).await?;
         started.map(|_| ())
     }
+}
+
+/// Materialize `<root>/<pid>` — the directory a process's filesystem access is
+/// confined to — and return it.
+///
+/// The process id becomes a path segment here, so it must be one safe
+/// component. An externally supplied pid is otherwise free-form (only the key
+/// separator is rejected elsewhere, because it was previously only ever a
+/// store-key part), and a pid like `../..` would place the process outside the
+/// root it was given.
+fn prepare_workdir(root: &std::path::Path, pid: &str) -> Result<std::path::PathBuf> {
+    if !is_workdir_segment(pid) {
+        return Err(ActError::Action(format!(
+            "proc id '{pid}' cannot be used as a workdir name: it must be a single path component without '.' or '..'"
+        )));
+    }
+
+    let dir = root.join(pid);
+    std::fs::create_dir_all(&dir).map_err(|err| {
+        ActError::Action(format!(
+            "failed to create the process workdir {}: {err}",
+            dir.display()
+        ))
+    })?;
+    Ok(dir)
+}
+
+/// Whether `pid` is usable as a single directory name: non-empty, not `.` or
+/// `..`, and containing no path separator, drive/stream colon, NUL or control
+/// character. Engine-generated ids ([`crate::utils::longid`]) are alphanumeric
+/// and pass unchanged.
+fn is_workdir_segment(pid: &str) -> bool {
+    !pid.is_empty()
+        && pid != "."
+        && pid != ".."
+        && !pid.contains(['/', '\\', ':', '\0'])
+        && !pid.chars().any(char::is_control)
 }

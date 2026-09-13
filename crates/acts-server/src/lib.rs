@@ -197,6 +197,14 @@ port = 10082
 # started through an action carries its caller's rules, and the scheduler
 # re-checks them at every seal — a workflow cannot read another subject's
 # sealed data even when started with someone else's `uid`.
+# `workdir` gives each process its own directory (`<workdir>/<pid>`) and the
+# process id becomes a path segment, so a pid that is not one safe component is
+# refused. It applies to every role unless the role sets its own. Acts that
+# touch the filesystem read it through `Context::workdir()`; `acts.app.shell`
+# runs the script inside it (cwd, HOME, TMPDIR, ACTS_WORKDIR) and refuses a
+# script naming an absolute path or a `..` segment. This is a per-run boundary
+# and a policy check, not a sandbox: hostile workflows still need an OS one.
+# Omitted means no directory control.
 #
 # Transport credentials:
 #   gRPC  — `authorization: Bearer <token>` metadata
@@ -216,7 +224,7 @@ port = 10082
 # allow = ["model:ls", "model:get", "proc:ls", "proc:get", "task:*", "msg:ls",
 #          "msg:ack", "snap:get", "snap:ls", "acl:whoami"]
 # deny = ["model:rm", "pack:publish"]
-# snapshot = { secrets = ["$subject"], profile = ["$subject/*"] }
+# workdir = "/srv/acts"
 #
 # [[acl.role]]
 # name = "guest"

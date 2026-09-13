@@ -29,6 +29,7 @@ allow = ["model:ls", "model:get", "proc:ls", "proc:get", "task:*", "msg:ls",
          "msg:ack", "snap:get", "snap:ls", "acl:whoami"]
 deny = ["model:rm", "pack:publish"]
 snapshot = { secrets = ["$subject"], profile = ["$subject/*"] }
+workdir = "/srv/acts"
 
 [[acl.role]]
 name = "guest"
@@ -71,6 +72,29 @@ Snapshot target 由 `target` × `scope` 寻址（见[快照密封数据](./model
 
 进程内直接调用 executor 启动的流程，或由触发器启动的流程不带调用者身份，
 因此不受限制。
+
+## 目录控制
+
+`workdir` 可写在 `[acl]` 上，也可写在单个角色上覆盖：策略启动的每个流程都会得到
+自己的目录，其文件系统访问被限定在 `<workdir>/<pid>`。目录在启动时创建，进程 id
+成为路径的一段——因此不能作为单个安全目录名的 pid（空、`.`、`..`，或含路径分隔符、
+冒号）会被拒绝，而不是被放到根目录之外。
+
+该路径与 scope 权威走同一条私有通道：以工作流 `$env` 代理拒绝读写的私有键封入
+进程 env，随进程持久化，且不出现在工作流可见的启动参数里。act 通过
+`Context::workdir()` 读取。
+
+`acts.app.shell` 使用它：脚本以该目录为工作目录运行，`HOME`、`TMPDIR`/`TEMP`/`TMP`、
+`PWD` 都指向其中，`ACTS_WORKDIR` 让脚本能直接引用自己的目录。脚本中出现绝对路径
+（`/etc/passwd`、`C:\Windows`）或 `..` 段时，会在运行前被拒绝。
+
+这项文本检查是**策略，不是沙箱**：它的价值在于让直接越界变成显式失败而不是静默成功，
+但 shell 能以文本检查无法跟进的方式拼出路径（`a=/etc; cat $a/passwd`、工作目录内的
+符号链接）——真正生效的包含是子进程的工作目录。面对恶意工作流应依赖操作系统边界
+（容器/命名空间），按进程分目录在此期间用于避免互相踩踏。
+
+不配置 `workdir` 时不做任何目录控制，进程可以访问服务端账号能访问的一切，
+即该选项出现之前的行为。
 
 ## 各传输的凭证
 

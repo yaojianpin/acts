@@ -4,6 +4,7 @@ use acts::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
+use std::path::Path;
 use std::process::Stdio;
 use strum::AsRefStr;
 use tokio::{
@@ -85,7 +86,7 @@ impl ActPackage for ShellPackage {
 
     async fn execute(
         &self,
-        _ctx: &acts::Context,
+        ctx: &acts::Context,
         params: &serde_json::Value,
     ) -> Result<Option<Vars>> {
         let mut ret = Vars::new();
@@ -98,12 +99,36 @@ impl ActPackage for ShellPackage {
             ))
         })?;
 
+        // Directory control: when the engine's ACL config gives this process a
+        // workdir, the script runs inside it and may not name a path outside.
+        // See `confine_script` for what that check can and cannot catch.
+        let workdir = ctx.workdir();
+        if let Some(dir) = &workdir {
+            confine_script(&params.script, dir)?;
+        }
+
         let shell = params.shell.as_ref().unwrap_or(&Shell::Sh);
-        let mut child = Command::new(shell.as_ref())
+        let mut command = Command::new(shell.as_ref());
+        command
             .arg("-c")
             .arg(&params.script)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::piped());
+        if let Some(dir) = &workdir {
+            // The working directory confines relative paths; the home and temp
+            // variables keep the tools that default to them inside too, and
+            // `ACTS_WORKDIR` gives a script an explicit handle on its own
+            // directory.
+            command
+                .current_dir(dir)
+                .env("HOME", dir)
+                .env("PWD", dir)
+                .env("TMPDIR", dir)
+                .env("TEMP", dir)
+                .env("TMP", dir)
+                .env(WORKDIR_ENV, dir);
+        }
+        let mut child = command
             .spawn()
             .map_err(|err| ActError::Package(format!("{err}")))?;
 
@@ -170,4 +195,133 @@ where
     }
 
     Ok(data)
+}
+
+/// Environment variable naming the process workdir, so a script can address
+/// its own directory without hardcoding a path (and without leaving it).
+const WORKDIR_ENV: &str = "ACTS_WORKDIR";
+
+/// Refuse a script that names a path outside `workdir`.
+///
+/// The **containment** is the child's working directory (plus `HOME`/`TMPDIR`
+/// pointing inside it): relative paths resolve inside the workdir, and that is
+/// what the process actually gets. This check is the additional *policy*
+/// layer — it turns the direct escape into a loud refusal instead of a silent
+/// success, and it is what makes "may not touch the rest of the filesystem"
+/// visible in a workflow's own error rather than in an audit.
+///
+/// It rejects, token by token over the script text: an absolute path
+/// (`/etc/passwd`, `C:\Windows`, `\\server\share`) and a `..` path segment
+/// (`../secrets`, `/tmp/../../etc`). It is deliberately NOT a security
+/// boundary on its own — a shell can spell a path in ways no textual check
+/// can follow (`a=/etc; cat $a/passwd`, `file:///etc/passwd`, a symlink
+/// inside the workdir, `$PWD/../..`) — so it is documented as best-effort:
+/// quotes, splitting and metacharacters are not interpreted, and a script
+/// that names an outside path in a way this misses is caught by nothing else
+/// here. A real boundary is an OS one (a container or a namespace sandbox
+/// around the server), which is where the workdir being per-process helps.
+fn confine_script(script: &str, workdir: &Path) -> Result<()> {
+    for token in script.split(|c: char| {
+        c.is_whitespace() || matches!(c, ';' | '|' | '&' | '(' | ')' | '<' | '>' | '"' | '\'')
+    }) {
+        let escapes = is_absolute_path(token) || has_parent_segment(token);
+        if escapes {
+            return Err(ActError::Package(format!(
+                "script names '{token}', outside this run's directory {} (ACTS_WORKDIR); \
+                 the process workdir confines every relative path, so refer to files it \
+                 contains",
+                workdir.display()
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// A token that is an absolute path on either platform. A URL's `//` is not
+/// one (`http://host` does not start with a separator), which is intended:
+/// network access is not the filesystem's business here — an API with a path
+/// (`http://host/a`) is likewise left to the act that performs the request.
+fn is_absolute_path(token: &str) -> bool {
+    if token.starts_with('/') || token.starts_with('\\') {
+        return true;
+    }
+    // Windows drive or UNC form: `C:\dir`, `C:/dir`, `\\host\share`.
+    matches!(
+        token.as_bytes(),
+        [drive, b':', ..] if drive.is_ascii_alphabetic()
+    )
+}
+
+/// A token with a `..` path segment — a traversal whichever platform's
+/// separators it uses. `..` inside a longer name (`a..b`) is not one.
+fn has_parent_segment(token: &str) -> bool {
+    token
+        .split(['/', '\\'])
+        .any(|segment| segment.trim() == "..")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn check(script: &str) -> Result<()> {
+        confine_script(script, Path::new("/work/pid1"))
+    }
+
+    #[test]
+    fn confined_script_allows_relative_work_inside_the_workdir() {
+        for script in [
+            "echo hello",
+            "./run.sh --flag",
+            "cat sub/dir/file.txt",
+            "cp a.txt b.txt",
+            "sed -e 's/a/b/' data.txt",
+            "grep -rn todo src",
+            "ls",
+            "printf '%s' \"$ACTS_WORKDIR\"",
+            "tar -czf out.tgz .",
+            "a..b/c..d",
+        ] {
+            assert!(check(script).is_ok(), "should be allowed: {script}");
+        }
+    }
+
+    #[test]
+    fn confined_script_rejects_absolute_paths() {
+        for script in [
+            "cat /etc/passwd",
+            "ls /tmp",
+            "sh /opt/x.sh",
+            "cat C:\\Windows\\win.ini",
+            "cat c:/Users/me/.ssh/id_rsa",
+            "type \\\\server\\share\\f",
+            "cat '/etc/shadow'",
+            "> /etc/hosts",
+        ] {
+            let err = check(script).expect_err(script).to_string();
+            assert!(
+                err.contains("outside this run's directory"),
+                "unexpected error for {script}: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn confined_script_rejects_parent_traversal() {
+        for script in [
+            "cat ../secrets",
+            "cat sub/../../etc/passwd",
+            "cd .. && ls",
+            "cat ..\\secrets",
+            "cp x ../../out",
+        ] {
+            assert!(check(script).is_err(), "should be refused: {script}");
+        }
+    }
+
+    #[test]
+    fn a_url_is_not_read_as_a_path() {
+        // The guard is about the filesystem, not the network.
+        assert!(check("curl http://example.com/a/b").is_ok());
+    }
 }

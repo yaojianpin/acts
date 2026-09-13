@@ -540,6 +540,48 @@ async fn env_env_set_proc_env() {
     });
 }
 
+/// The engine's private env keys — the process owner credential and its
+/// workdir — are not workflow state: `$env` must neither read nor write them,
+/// or a model could widen its own scope authority and escape its directory.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn env_private_keys_are_engine_only() {
+    let engine = Engine::builder().start().await.unwrap();
+    let env = engine.runtime().env().clone();
+    let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
+    let task = proc.root().unwrap();
+    let context = task.create_context();
+    context.set_env(crate::utils::consts::PROC_OWNER, "forged");
+    context.set_env(crate::utils::consts::PROC_WORKDIR, "/etc");
+
+    Context::scope(&context, || {
+        // reading answers null/absent, writing is a no-op
+        let read = env
+            .eval::<serde_json::Value>(&format!("$env.{}", crate::utils::consts::PROC_OWNER))
+            .unwrap();
+        assert!(read.is_null(), "private key must not be readable: {read}");
+        env.eval::<serde_json::Value>(&format!(
+            "$env.{} = 'escaped';",
+            crate::utils::consts::PROC_WORKDIR
+        ))
+        .unwrap();
+    });
+
+    // the direct write landed (it is an engine-side API), the script's did not
+    assert_eq!(
+        proc.env()
+            .get::<String>(crate::utils::consts::PROC_WORKDIR)
+            .as_deref(),
+        Some("/etc")
+    );
+    engine.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_env_multi_line() {

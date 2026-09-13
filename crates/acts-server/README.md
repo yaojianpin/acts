@@ -173,6 +173,12 @@ is the role name), and that ownership is re-checked when a task seals a
 snapshot value — a workflow cannot read another subject's sealed data even
 when started with their `uid`.
 
+`workdir` (on `[acl]`, or per role) confines each run's filesystem access to
+`<workdir>/<pid>`: the directory is created at start, the process id becomes a
+path segment (so one that is not a single safe component is refused), and acts
+that touch the filesystem read it through `Context::workdir()`. Without it, no
+directory control applies.
+
 See the commented template in the generated default config
 (`~/.acts/acts.toml`) or the access-control chapter of the book.
 

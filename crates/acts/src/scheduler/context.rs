@@ -112,6 +112,13 @@ impl Context {
         self.task.read().clone()
     }
 
+    /// The directory this process's filesystem access is confined to
+    /// (`<acl workdir root>/<pid>`), or `None` when the engine's ACL config
+    /// declares no workdir root. Packages that touch the filesystem (shell,
+    /// and any custom one) read it here and refuse to leave it.
+    pub fn workdir(&self) -> Option<std::path::PathBuf> {
+        self.proc.workdir()
+    }
     pub async fn prepare(&self) -> Result<()> {
         self.init_vars(&self.task());
         self.resolve_sealed().await?;

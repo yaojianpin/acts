@@ -48,6 +48,7 @@ use serde_json::{Value as JsonValue, json};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fmt;
+use std::path::{Path, PathBuf};
 
 /// Action name that reports the caller's own identity and effective policy.
 /// It is implicitly allowed — but only for an already authenticated caller,
@@ -67,6 +68,10 @@ pub struct AclConfig {
     /// Role applied to a request whose token is absent or unknown. Must name
     /// a configured role.
     pub default_role: Option<String>,
+    /// Filesystem root for the processes this policy starts: each one runs in
+    /// `<workdir>/<pid>`. Omitted means no directory control, and a process
+    /// may touch whatever the server's own account can.
+    pub workdir: Option<String>,
     /// `[[acl.role]]` entries.
     pub role: Vec<RoleConfig>,
 }
@@ -89,6 +94,10 @@ pub struct RoleConfig {
     /// not readable. Only consulted when the role is not unrestricted.
     #[serde(default)]
     pub snapshot: HashMap<String, Vec<String>>,
+    /// Filesystem root for this role's processes, overriding the `[acl]`
+    /// `workdir`. See [`AclConfig::workdir`].
+    #[serde(default)]
+    pub workdir: Option<String>,
 }
 
 /// Why an operation was refused.
@@ -195,6 +204,9 @@ pub struct Principal {
     allow_pat: Vec<String>,
     deny_pat: Vec<String>,
     scopes: HashMap<String, Vec<String>>,
+    /// Filesystem root this principal's processes run under; `None` when the
+    /// policy declares none (no directory control).
+    workdir: Option<PathBuf>,
 }
 
 impl Principal {
@@ -211,6 +223,7 @@ impl Principal {
             allow_pat: vec!["*".to_string()],
             deny_pat: Vec::new(),
             scopes: HashMap::new(),
+            workdir: None,
         }
     }
 
@@ -227,6 +240,7 @@ impl Principal {
             allow_pat: Vec::new(),
             deny_pat: Vec::new(),
             scopes: HashMap::new(),
+            workdir: None,
         }
     }
 
@@ -284,6 +298,11 @@ impl Principal {
             self.subject
         )))
     }
+    /// The filesystem root this principal's processes run under, or `None`
+    /// when the policy declares none.
+    pub fn workdir(&self) -> Option<&Path> {
+        self.workdir.as_deref()
+    }
 
     /// The scope authority to seal into a process started by this principal.
     pub fn scope_policy(&self) -> ScopePolicy {
@@ -303,6 +322,7 @@ impl Principal {
             "allow": self.allow_pat,
             "deny": self.deny_pat,
             "scopes": self.scopes,
+            "workdir": self.workdir.as_ref().map(|dir| dir.display().to_string()),
         })
     }
 
@@ -325,6 +345,7 @@ struct CompiledRole {
     allow_pat: Vec<String>,
     deny_pat: Vec<String>,
     scopes: HashMap<String, Vec<String>>,
+    workdir: Option<PathBuf>,
 }
 
 /// The compiled ACL: a token index plus the roles it resolves to.
@@ -336,6 +357,8 @@ pub struct Acl {
     index: HashMap<String, usize>,
     /// Role applied to an absent/unknown token (`default_role`).
     default_role: Option<usize>,
+    /// `[acl] workdir` — the root every role without its own runs under.
+    workdir: Option<PathBuf>,
 }
 
 impl Default for Acl {
@@ -347,6 +370,7 @@ impl Default for Acl {
             roles: Vec::new(),
             index: HashMap::new(),
             default_role: None,
+            workdir: None,
         }
     }
 }
@@ -384,6 +408,7 @@ impl Acl {
                 allow_pat: vec!["*".to_string()],
                 deny_pat: Vec::new(),
                 scopes: HashMap::new(),
+                workdir: None,
             });
             let hash = hash_token(token)?;
             index.insert(hash, 0);
@@ -437,6 +462,7 @@ impl Acl {
             roles,
             index,
             default_role,
+            workdir: compile_workdir(config.workdir.as_deref(), "acl")?,
         })
     }
 
@@ -492,6 +518,7 @@ impl Acl {
             allow_pat: role.allow_pat.clone(),
             deny_pat: role.deny_pat.clone(),
             scopes: role.scopes.clone(),
+            workdir: role.workdir.clone().or_else(|| self.workdir.clone()),
         }
     }
 }
@@ -525,7 +552,21 @@ fn compile_role(role: &RoleConfig) -> Result<CompiledRole> {
         allow_pat: role.allow.clone(),
         deny_pat: role.deny.clone(),
         scopes: role.snapshot.clone(),
+        workdir: compile_workdir(role.workdir.as_deref(), &role.name)?,
     })
+}
+
+/// Normalize a configured workdir root. An empty value is a config error
+/// rather than "no directory control": the two cannot be told apart in the
+/// result, and a typo must not silently drop the confinement.
+fn compile_workdir(workdir: Option<&str>, owner: &str) -> Result<Option<PathBuf>> {
+    match workdir {
+        None => Ok(None),
+        Some(value) if value.trim().is_empty() => Err(ActError::Config(format!(
+            "acl {owner} workdir cannot be empty; remove the key to run without directory control"
+        ))),
+        Some(value) => Ok(Some(PathBuf::from(value.trim()))),
+    }
 }
 
 fn compile_patterns(patterns: &[String], role: &str, field: &str) -> Result<Vec<GlobMatcher>> {
@@ -801,6 +842,101 @@ mod tests {
         ))
         .unwrap_err();
         assert!(err.to_string().contains("name cannot be empty"), "{err}");
+    }
+
+    #[test]
+    fn workdir_defaults_to_none_and_role_overrides_the_section() {
+        // No workdir anywhere: no directory control.
+        let acl = operator_acl();
+        assert!(
+            acl.authenticate(Some("op-secret"))
+                .unwrap()
+                .workdir()
+                .is_none()
+        );
+
+        // Section-level root applies to every role...
+        let acl = Acl::from_config(&config(
+            r#"
+            workdir = "/srv/acts"
+            [[role]]
+            name = "r"
+            tokens = ["t"]
+            allow = ["*"]
+            "#,
+        ))
+        .unwrap();
+        assert_eq!(
+            acl.authenticate(Some("t")).unwrap().workdir().unwrap(),
+            Path::new("/srv/acts")
+        );
+
+        // ...and a role may point somewhere else.
+        let acl = Acl::from_config(&config(
+            r#"
+            workdir = "/srv/acts"
+            [[role]]
+            name = "a"
+            tokens = ["ta"]
+            allow = ["*"]
+            [[role]]
+            name = "b"
+            tokens = ["tb"]
+            allow = ["*"]
+            workdir = "/srv/tenant-b"
+            "#,
+        ))
+        .unwrap();
+        assert_eq!(
+            acl.authenticate(Some("ta")).unwrap().workdir().unwrap(),
+            Path::new("/srv/acts")
+        );
+        assert_eq!(
+            acl.authenticate(Some("tb")).unwrap().workdir().unwrap(),
+            Path::new("/srv/tenant-b")
+        );
+    }
+
+    #[test]
+    fn an_empty_workdir_is_a_config_error() {
+        // An empty value cannot be told from "no control", so a typo must not
+        // silently drop the confinement.
+        for text in [
+            r#"
+            workdir = "  "
+            [[role]]
+            name = "r"
+            tokens = ["t"]
+            allow = ["*"]
+            "#,
+            r#"
+            [[role]]
+            name = "r"
+            tokens = ["t"]
+            allow = ["*"]
+            workdir = ""
+            "#,
+        ] {
+            let err = Acl::from_config(&config(text)).unwrap_err();
+            assert!(err.to_string().contains("workdir cannot be empty"), "{err}");
+        }
+    }
+
+    #[test]
+    fn whoami_reports_the_workdir_without_leaking_tokens() {
+        let acl = Acl::from_config(&config(
+            r#"
+            workdir = "/srv/acts"
+            [[role]]
+            name = "r"
+            tokens = ["top-secret"]
+            allow = ["*"]
+            "#,
+        ))
+        .unwrap();
+        let value = acl.authenticate(Some("top-secret")).unwrap().to_value();
+        assert_eq!(value["workdir"], "/srv/acts");
+        assert!(!value.to_string().contains("top-secret"));
     }
 
     #[test]
