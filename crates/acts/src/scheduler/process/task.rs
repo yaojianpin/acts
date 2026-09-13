@@ -942,7 +942,17 @@ impl Task {
                     self.runtime.emitter().emit_task_event(task).await?;
                     task.exec(ctx).await?;
                 }
-                if task.state().is_completed() {
+                // A child only counts once its own `next` has run
+                // (`NEXT_COMPLETE`), because that is what propagates the
+                // child's outputs into this task. A terminal state alone is
+                // written by whatever job applied the child's action — e.g.
+                // `acts.core.action` setting `Submitted` inside the `exec`
+                // above — and the child's queued `next` may still be behind
+                // this job, so counting the state would complete this step
+                // (and the whole workflow) with the child's outputs missing.
+                // The child's `next` re-enters this step's `next`, which then
+                // observes the marker and proceeds.
+                if task.state().is_completed() && task.is_sign(Sign::NEXT_COMPLETE) {
                     count += 1;
                 }
             }
