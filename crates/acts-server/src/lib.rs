@@ -143,6 +143,11 @@ level = "INFO"
 #   type = "postgres" database_url = "postgres://user:pass@host:5432/acts"
 #   type = "redis"    database_url = "redis://127.0.0.1:6379"
 #   type = "nats"     database_url = "nats://127.0.0.1:4222"
+#
+# One writer per database: the document locks that keep a row and its index
+# entries consistent are process-local, so two servers on the same database
+# have no mutual exclusion between them. Give each server its own database, or
+# coordinate outside the engine (see the storage section of the README).
 [db]
 type = "sled"
 database_url = '@ACTS_DIR@/data'

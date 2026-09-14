@@ -54,6 +54,18 @@ async fn main() -> acts::Result<()> {
 implement; a custom backend implementing `acts::KvStore` is injected the same
 way via `set_store`.
 
+Each database has **one writer**. The engine's document locks are process-local
+— every engine in one process shares one lock table (two databases that happen
+to use the same keys are serialized together, which costs contention and
+nothing else) — and they do **not** cross processes, so two processes writing
+one database have no mutual exclusion: their concurrent updates of a row can
+leave the index entries disagreeing with the data row, a query matching a value
+the row no longer holds or missing the one it does. A single-instance
+deployment is unaffected; a deployment with several gives each its own
+database, or coordinates outside the engine (a backend conditional write, or a
+lock spanning the read) — `batch` makes one write atomic, not a read plus
+another process's write.
+
 ## Create Engine
 
 ```rust

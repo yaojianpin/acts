@@ -36,9 +36,28 @@ pub struct KvCollection<T> {
 /// of the value it does hold (a query misses it).
 ///
 /// [`lock_docs`] serializes every read-modify-write of a document from its
-/// read until its batch has been applied. The locks are process-local: the
-/// store contract is one writer per database, so a second process writing the
-/// same database needs a backend-level conditional write.
+/// read until its batch has been applied. The guarantee ends at the process
+/// boundary — the store's contract is one writer per database — and both edges
+/// of it are worth stating, because neither is enforced anywhere:
+///
+/// - The registry is a process-wide `static`, so every engine and every store
+///   handle in this process share one table. Keys are full document keys, so
+///   two collections with the same prefix and id (a second engine, a second
+///   handle over the same keys) serialize on them even when the databases
+///   behind them are unrelated. That costs contention and never correctness —
+///   a shared table can wrongly exclude, not wrongly admit — and it is what
+///   makes two engines over one database in a single process safe without any
+///   further coordination.
+/// - There is no cross-process mutex. Two processes writing one database (a
+///   multi-instance deployment over a remote postgres/redis/nats backend, or a
+///   second server on the same sqlite/sled file) each hold a private registry,
+///   so the read in `update_ops`/`delete_ops` and the batch computed from it
+///   can interleave and both inconsistent outcomes above are reachable. Such a
+///   deployment needs coordination the engine does not provide: one writer per
+///   database (the supported deployment), a backend conditional write (a
+///   compare-and-swap on the row), or a backend lock held across the read —
+///   [`KvStore::batch`] makes one write atomic, not a read against another
+///   process's write.
 static DOC_LOCKS: LazyLock<DocLockRegistry> = LazyLock::new(DocLockRegistry::default);
 
 #[derive(Default)]

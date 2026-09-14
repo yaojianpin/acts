@@ -99,6 +99,16 @@ type = "sqlite"
 database_url = "./data/acts.db"   # or set ACTS_DATABASE_URL
 ```
 
+Every database has **one writer**, and the document locks that keep a row and
+its index entries consistent are process-local: two servers on one database
+have no mutual exclusion, so their concurrent writes to the same row can leave
+a query matching a row that no longer holds the value, or missing one that
+does. Run one `acts-server` per database; a deployment that needs several gives
+each its own, or supplies coordination the store does not — a backend
+conditional write, or a lock held across the read. A single `batch` is not
+that: it is atomic on its own, while a read followed by another process's batch
+is not.
+
 ### Transports
 
 ```toml

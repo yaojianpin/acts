@@ -209,6 +209,12 @@ pub trait KvStore: Send + Sync {
 /// one id leaves the index rows describing the document that ends up stored —
 /// never a query result the data row does not back.
 ///
+/// That serialization is per document *and per process*: `batch` makes a
+/// single write all-or-nothing, it does not make a read-then-batch pair atomic
+/// against another writer. A database written by more than one process needs
+/// coordination the backend provides — see the document-lock registry notes in
+/// the store's `collection` module.
+///
 /// [`DbCollection::query`] answers one page; recovery, cleanup and
 /// reconciliation read whole match sets through
 /// [`DbCollection::query_all`]/[`DbCollection::matching_ids`]/
