@@ -318,7 +318,7 @@ fn env_collection_union() {
 
 #[test]
 #[serial]
-fn env_eval_pooled_context_does_not_leak_globals() {
+fn env_eval_contexts_do_not_leak_globals() {
     let env = Environment::new();
 
     env.eval::<()>(
@@ -345,7 +345,7 @@ fn env_eval_pooled_context_does_not_leak_globals() {
 
 #[test]
 #[serial]
-fn env_eval_pooled_context_restores_module_globals() {
+fn env_eval_contexts_restore_module_globals() {
     let env = Environment::new();
 
     env.eval::<()>(
@@ -365,6 +365,65 @@ fn env_eval_pooled_context_restores_module_globals() {
         )
         .unwrap();
     assert!(restored, "static module globals must be restored");
+}
+
+/// Every evaluation runs in its own QuickJS realm, so state an expression
+/// writes to shared-looking objects — built-in prototypes and namespaces, a
+/// module global or its proxy target, a non-configurable global — is invisible
+/// to the next one. A pooled context leaked all of these across tasks (and, in
+/// the multi-tenant server, across tenants), because the reset script only
+/// restored `globalThis`'s own properties.
+#[test]
+#[serial]
+fn env_eval_isolates_realm_state() {
+    let env = Environment::new();
+
+    env.eval::<()>(
+        r#"
+        Array.prototype.__acts_secret = "A";
+        Object.prototype.__acts_secret = "A";
+        Math.__acts_secret = "A";
+        $get.__acts_secret = "A";
+        console.__acts_secret = "A";
+        Object.defineProperty($env, "__acts_secret", { value: "A", configurable: true });
+        globalThis.__acts_secret = "A";
+        Object.defineProperty(globalThis, "__acts_hidden", { value: "A", configurable: false });
+        void 0;
+    "#,
+    )
+    .unwrap();
+
+    let leaked = env
+        .eval::<serde_json::Value>(
+            r#"
+            ({
+                array: Array.prototype.__acts_secret === "A",
+                object: Object.prototype.__acts_secret === "A",
+                namespace: Math.__acts_secret === "A",
+                module_fn: $get.__acts_secret === "A",
+                console: console.__acts_secret === "A",
+                env_target: (Object.getOwnPropertyDescriptor($env, "__acts_secret") || {}).value === "A",
+                global: globalThis.__acts_secret === "A",
+                hidden: globalThis.__acts_hidden === "A",
+            })
+        "#,
+        )
+        .unwrap();
+
+    assert_eq!(
+        leaked,
+        json!({
+            "array": false,
+            "object": false,
+            "namespace": false,
+            "module_fn": false,
+            "console": false,
+            "env_target": false,
+            "global": false,
+            "hidden": false,
+        }),
+        "realm state must not survive an evaluation"
+    );
 }
 
 #[test]

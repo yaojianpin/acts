@@ -68,7 +68,7 @@ async fn arm_batch(
 
 /// A workflow whose `acts.core.irq` params carry `exprs` `${{ ... }}`
 /// expressions. Starting a process evaluates every one of them while filling
-/// the act params (`Task::params` → `fill_params` → `Enviroment::eval`).
+/// the act params (`Task::params` → `fill_params` → `Environment::eval`).
 fn expr_workflow(exprs: usize) -> Workflow {
     let mut params = String::from("      key: act1\n");
     for i in 0..exprs {
@@ -89,7 +89,7 @@ fn expr_workflow(exprs: usize) -> Workflow {
 /// The expression environment is crate-private, so a process is started with
 /// `exprs` expressions in its irq params and the start→armed span is timed:
 /// the scheduler and emitter costs are constant across the variants, so the
-/// slope is the per-expression cost (QuickJS context reuse, module refresh,
+/// slope is the per-expression cost (a fresh QuickJS realm, module init and
 /// JS→JSON conversion).
 fn expr_eval(c: &mut Criterion) {
     let mut group = c.benchmark_group("expr_eval");
