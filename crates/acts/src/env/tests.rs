@@ -93,13 +93,93 @@ fn env_eval_bigint_within_i64() {
 }
 
 #[test]
-fn env_eval_bigint_outside_i64_is_error() {
+fn env_eval_bigint_outside_u64_is_error() {
     let env = Environment::new();
     let result = env.eval::<serde_json::Value>(r#"BigInt("1000000000000000000000000000000")"#);
     let err = result.unwrap_err();
     assert!(
-        err.to_string().contains("outside the i64 range"),
+        err.to_string().contains("outside the i64/u64 range"),
         "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn env_eval_bigint_beyond_i64_keeps_u64() {
+    let env = Environment::new();
+    let result = env
+        .eval::<serde_json::Value>(r#"BigInt("18446744073709551615")"#)
+        .unwrap();
+    assert_eq!(result, json!(u64::MAX));
+}
+
+#[test]
+fn env_eval_non_finite_number_is_error() {
+    let env = Environment::new();
+    for script in ["0/0", "1e400"] {
+        let err = env.eval::<serde_json::Value>(script).unwrap_err();
+        assert!(
+            err.to_string().contains("non-finite"),
+            "unexpected error for {script}: {err}"
+        );
+    }
+}
+
+#[test]
+fn env_eval_large_numbers_round_trip_exactly() {
+    #[derive(Clone)]
+    struct BigNumberVar;
+
+    impl ActUserVar for BigNumberVar {
+        fn name(&self) -> String {
+            "bignumbers".to_string()
+        }
+
+        fn default_data(&self) -> Option<Vars> {
+            Some(
+                Vars::new()
+                    .with("over_i32", 3_000_000_000i64)
+                    .with("millis", 1_757_318_400_000i64)
+                    .with("snowflake", 1_234_567_890_123_456_789i64)
+                    .with("min", i64::MIN)
+                    .with("over_i64", u64::MAX),
+            )
+        }
+    }
+
+    let env = Environment::new();
+    env.register_var(&BigNumberVar);
+
+    // Above i32, inside the double's exact integer range: still a plain number.
+    assert_eq!(
+        env.eval::<i64>("bignumbers.over_i32").unwrap(),
+        3_000_000_000
+    );
+    assert_eq!(
+        env.eval::<i64>("bignumbers.millis").unwrap(),
+        1_757_318_400_000
+    );
+    assert!(
+        env.eval::<bool>("typeof bignumbers.millis === 'number'")
+            .unwrap()
+    );
+
+    // Past 2^53-1 a JS number cannot hold the value: it arrives as a BigInt
+    // instead of being truncated to i32 (3e9 used to become -1294967296).
+    assert_eq!(
+        env.eval::<i64>("bignumbers.snowflake").unwrap(),
+        1_234_567_890_123_456_789
+    );
+    assert_eq!(env.eval::<i64>("bignumbers.min").unwrap(), i64::MIN);
+    assert_eq!(env.eval::<u64>("bignumbers.over_i64").unwrap(), u64::MAX);
+
+    // The value stays exact for the expression itself, not only on the way out.
+    assert!(
+        env.eval::<bool>("bignumbers.snowflake === 1234567890123456789n")
+            .unwrap()
+    );
+    assert_eq!(
+        env.eval::<i64>("bignumbers.snowflake - 1n").unwrap(),
+        1_234_567_890_123_456_788
     );
 }
 
