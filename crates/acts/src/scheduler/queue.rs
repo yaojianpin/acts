@@ -82,33 +82,48 @@ impl Queue {
         Ok(data)
     }
 
+    /// Queue a task for execution. Fails when the queue consumer is gone or the
+    /// task's process was deallocated: a refused dispatch must be visible to
+    /// the caller, which may hold a durable outbox record for the task.
     pub(crate) fn send(&self, task: &Arc<Task>) -> Result<()> {
         if !self.alive.load(Ordering::Acquire) {
             return Err(ActError::Runtime(
                 "scheduler queue consumer is not running".to_string(),
             ));
         }
-        let Some(proc) = task.proc() else {
-            return Ok(());
-        };
+        let proc = Self::item_proc(task)?;
         self.send_data(QueueData::Task {
             task: task.clone(),
             proc,
         })
     }
 
+    /// Queue a task's `next` propagation. Same failure contract as
+    /// [`Self::send`].
     pub(crate) fn send_next(&self, task: &Arc<Task>) -> Result<()> {
         if !self.alive.load(Ordering::Acquire) {
             return Err(ActError::Runtime(
                 "scheduler queue consumer is not running".to_string(),
             ));
         }
-        let Some(proc) = task.proc() else {
-            return Ok(());
-        };
+        let proc = Self::item_proc(task)?;
         self.send_data(QueueData::Next {
             task: task.clone(),
             proc,
+        })
+    }
+
+    /// The process lease a queued item carries. A task holds its process only
+    /// `Weak`ly (see [`Task::proc`]), so a task clone that outlived an evicted
+    /// process has nothing left to run it: refusing the item keeps the caller
+    /// from reading `Ok` as "queued" — a recovery pass marks a durable outbox
+    /// record `Dispatched` on `Ok`, which would stall work that never ran.
+    fn item_proc(task: &Arc<Task>) -> Result<Arc<Process>> {
+        task.proc().ok_or_else(|| {
+            ActError::Runtime(format!(
+                "cannot dispatch task '{}:{}': its process was deallocated",
+                task.pid, task.id
+            ))
         })
     }
 

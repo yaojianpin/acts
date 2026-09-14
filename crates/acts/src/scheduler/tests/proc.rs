@@ -1,6 +1,6 @@
 use crate::{Config, config::ConfigData};
 use crate::{
-    Workflow,
+    ActError, Workflow,
     scheduler::{NodeTree, TaskState},
     utils::{
         self,
@@ -300,4 +300,34 @@ async fn sch_step_if_false_self_next_falls_through() {
             .is_completed()
     );
     drop(engine);
+}
+
+/// A dispatch is reported as `Ok` only when the item is really on the queue. A
+/// task holds its process `Weak`ly, so a clone that outlived an evicted process
+/// has nothing left to run it — `send`/`send_next` must refuse it rather than
+/// answer success, because a recovery pass marks a durable outbox record
+/// `Dispatched` on `Ok` and the work would then be stalled until a restart.
+#[tokio::test]
+async fn queue_refuses_a_task_whose_process_is_gone() {
+    let workflow = Workflow::new()
+        .with_id("w1")
+        .with_step(|step| step.with_id("s1"));
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
+    let rt = engine.runtime();
+    let task = proc
+        .create_task(&proc.tree().node("s1").unwrap(), None)
+        .unwrap();
+
+    // the only strong reference: dropping it deallocates the process, leaving
+    // the task with a dangling `Weak`
+    drop(proc);
+    assert!(task.proc().is_none(), "the task must not hold its process");
+
+    let err = rt.queue().send(&task).unwrap_err();
+    assert!(matches!(err, ActError::Runtime(_)), "{err:?}");
+    let err = rt.queue().send_next(&task).unwrap_err();
+    assert!(matches!(err, ActError::Runtime(_)), "{err:?}");
+    // nothing was left behind — and neither refusal is a full queue, which
+    // callers read as "retry later"
+    assert_eq!(rt.queue().depth(), 0);
 }

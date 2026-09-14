@@ -594,15 +594,20 @@ impl Runtime {
                 }
             } else if r#type == data::OpType::Exec.as_ref() {
                 // Overflow task execution replay: do not confuse it with `next`.
-                if !task.state().is_completed() {
-                    if let Err(ActError::QueueFull) = self.queue.send(&task) {
-                        continue;
-                    }
-                    if let Err(err) = self.cache.mark_op_dispatched(&op).await {
-                        error!(error = %err, pid = %pid, tid = %tid, "failed to mark replayed exec dispatched");
-                    }
-                } else {
+                if task.state().is_completed() {
                     self.cache.store().complete_ops(&pid, &tid, &r#type).await?;
+                } else {
+                    match self.queue.send(&task) {
+                        Ok(()) => {
+                            if let Err(err) = self.cache.mark_op_dispatched(&op).await {
+                                error!(error = %err, pid = %pid, tid = %tid, "failed to mark replayed exec dispatched");
+                            }
+                        }
+                        // Still full: retain the descriptor for the periodic
+                        // overflow consumer.
+                        Err(ActError::QueueFull) => continue,
+                        Err(err) => return Err(err),
+                    }
                 }
             } else if task.is_sign(Sign::NEXT_COMPLETE) {
                 // propagation already completed durably; just close the record
