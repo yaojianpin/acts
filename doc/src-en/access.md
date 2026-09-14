@@ -86,17 +86,25 @@ a trigger carries no caller authority and stays unrestricted.
 
 ## Directory control
 
-`workdir` (on `[acl]`, or per role to override it) gives every process the
-policy starts its own directory: the run's filesystem access is confined to
-`<workdir>/<pid>`. Each directory is created at start, and the process id
-becomes a path segment — so a pid that is not one safe component (empty, `.`,
-`..`, or containing a path separator or colon) is refused rather than placing
-the run outside the root it was given.
+The configured `workdir` — on `[acl]`, or per role to override it — is a **root**:
+every process the policy starts gets its own directory `<workdir>/<pid>`, and the
+run's filesystem access is confined to that one. It is created at start, and the
+process id becomes a path segment — so a pid that is not one safe component
+(empty, `.`, `..`, or containing a path separator or colon) is refused rather
+than placing the run outside the root it was given.
 
-The path travels the same private route as the scope authority: sealed into
-the process env under a key the workflow's `$env` proxy refuses to read or
-write, persisted with the process, and never part of the start options the
-workflow sees. An act reads it through `Context::workdir()`.
+The root travels the same private route as the scope authority — it is part of
+it: sealed into the process env under a key the workflow's `$env` proxy
+refuses, persisted with the process, and never a start option, so a caller
+cannot name the directory a run is confined to. The **run's own directory**
+(`<root>/<pid>`) is what an act reads through `Context::workdir()` and what a
+script reads as `$env.WORK_DIR` — the same directory under two names, neither of
+them the configured root. `$env.WORK_DIR` is engine-owned, so a write to that
+name is dropped and a run cannot redefine where it runs. The directory lives
+exactly as long as the process's durable rows: the sweeper removes it with them
+(a finished run whose delivery errored and awaits a manual retry keeps its row,
+and its directory with it), and a start that never became durable removes its
+own directory immediately — so nothing left in there outlives the run.
 
 `acts.app.shell` uses it: the script runs with that directory as its working
 directory, `HOME`, `TMPDIR`/`TEMP`/`TMP` and `PWD` point inside it, and

@@ -69,8 +69,13 @@ pub struct AclConfig {
     /// a configured role.
     pub default_role: Option<String>,
     /// Filesystem root for the processes this policy starts: each one runs in
-    /// `<workdir>/<pid>`. Omitted means no directory control, and a process
-    /// may touch whatever the server's own account can.
+    /// its own directory `<workdir>/<pid>`, which is what
+    /// `Process::workdir`/`Context::workdir` answer and what `$env.WORK_DIR`
+    /// names. The directory lives exactly as long as the process's durable
+    /// rows (the engine removes it once the process finished and its
+    /// deliveries settled; a failed start removes it immediately). Omitted
+    /// means no directory control, and a process may touch whatever the
+    /// server's own account can.
     pub workdir: Option<String>,
     /// `[[acl.role]]` entries.
     pub role: Vec<RoleConfig>,
@@ -129,11 +134,14 @@ impl From<AclError> for ActError {
     }
 }
 
-/// The scope authority carried by a process: which snapshot targets the
-/// process *owner* may read, and under which scope. It is sealed into the
-/// process env at start (under [`crate::utils::consts::PROC_OWNER`]) and
-/// re-checked by the scheduler at every seal, so a model deployed by anyone
-/// cannot widen its own reading scope.
+/// The authority carried by a process: which snapshot targets the process
+/// *owner* may read and under which scope, plus the directory root its
+/// filesystem access is confined to. It is sealed into the process env at
+/// start (under [`crate::utils::consts::PROC_OWNER`]) and re-checked by the
+/// scheduler at every seal, so a model deployed by anyone cannot widen its
+/// own reading scope — and, because the root travels here rather than as a
+/// start option, a caller cannot place a run outside the directory its policy
+/// names either.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScopePolicy {
     /// Subject the policy belongs to; substituted into `$subject` patterns.
@@ -145,6 +153,14 @@ pub struct ScopePolicy {
     /// target -> raw scope patterns (`$subject` allowed).
     #[serde(default)]
     pub scopes: HashMap<String, Vec<String>>,
+    /// Filesystem root this process runs under: its own directory is
+    /// `<workdir_root>/<pid>`, created at start (that directory — not this
+    /// root — is what `Process::workdir` and `Context::workdir` answer, and
+    /// what `$env.WORK_DIR` names). Compiled from the policy that started the
+    /// process (see [`AclConfig::workdir`] and [`RoleConfig::workdir`]);
+    /// `None` means no directory control.
+    #[serde(default)]
+    pub workdir_root: Option<PathBuf>,
 }
 
 impl Default for ScopePolicy {
@@ -162,6 +178,7 @@ impl ScopePolicy {
             subject: String::new(),
             all: true,
             scopes: HashMap::new(),
+            workdir_root: None,
         }
     }
 
@@ -172,6 +189,7 @@ impl ScopePolicy {
             subject: String::new(),
             all: false,
             scopes: HashMap::new(),
+            workdir_root: None,
         }
     }
 
@@ -205,8 +223,9 @@ pub struct Principal {
     deny_pat: Vec<String>,
     scopes: HashMap<String, Vec<String>>,
     /// Filesystem root this principal's processes run under; `None` when the
-    /// policy declares none (no directory control).
-    workdir: Option<PathBuf>,
+    /// policy declares none (no directory control). A process's own directory
+    /// is `<workdir_root>/<pid>`.
+    workdir_root: Option<PathBuf>,
 }
 
 impl Principal {
@@ -223,10 +242,9 @@ impl Principal {
             allow_pat: vec!["*".to_string()],
             deny_pat: Vec::new(),
             scopes: HashMap::new(),
-            workdir: None,
+            workdir_root: None,
         }
     }
-
     /// The anonymous caller under an enabled ACL: no token matched, and no
     /// `default_role` was configured — every operation is refused.
     pub fn anonymous() -> Self {
@@ -240,10 +258,9 @@ impl Principal {
             allow_pat: Vec::new(),
             deny_pat: Vec::new(),
             scopes: HashMap::new(),
-            workdir: None,
+            workdir_root: None,
         }
     }
-
     pub fn subject(&self) -> &str {
         &self.subject
     }
@@ -299,9 +316,10 @@ impl Principal {
         )))
     }
     /// The filesystem root this principal's processes run under, or `None`
-    /// when the policy declares none.
-    pub fn workdir(&self) -> Option<&Path> {
-        self.workdir.as_deref()
+    /// when the policy declares none. A process's own directory is
+    /// `<root>/<pid>` (see `Process::workdir`).
+    pub fn workdir_root(&self) -> Option<&Path> {
+        self.workdir_root.as_deref()
     }
 
     /// The scope authority to seal into a process started by this principal.
@@ -310,6 +328,7 @@ impl Principal {
             subject: self.subject.clone(),
             all: self.all,
             scopes: self.scopes.clone(),
+            workdir_root: self.workdir_root.clone(),
         }
     }
 
@@ -322,7 +341,7 @@ impl Principal {
             "allow": self.allow_pat,
             "deny": self.deny_pat,
             "scopes": self.scopes,
-            "workdir": self.workdir.as_ref().map(|dir| dir.display().to_string()),
+            "workdir_root": self.workdir_root.as_ref().map(|dir| dir.display().to_string()),
         })
     }
 
@@ -345,7 +364,7 @@ struct CompiledRole {
     allow_pat: Vec<String>,
     deny_pat: Vec<String>,
     scopes: HashMap<String, Vec<String>>,
-    workdir: Option<PathBuf>,
+    workdir_root: Option<PathBuf>,
 }
 
 /// The compiled ACL: a token index plus the roles it resolves to.
@@ -357,8 +376,9 @@ pub struct Acl {
     index: HashMap<String, usize>,
     /// Role applied to an absent/unknown token (`default_role`).
     default_role: Option<usize>,
-    /// `[acl] workdir` — the root every role without its own runs under.
-    workdir: Option<PathBuf>,
+    /// `[acl] workdir` — the root every role without its own runs under. A
+    /// process's own directory is `<root>/<pid>`.
+    workdir_root: Option<PathBuf>,
 }
 
 impl Default for Acl {
@@ -370,7 +390,7 @@ impl Default for Acl {
             roles: Vec::new(),
             index: HashMap::new(),
             default_role: None,
-            workdir: None,
+            workdir_root: None,
         }
     }
 }
@@ -408,7 +428,7 @@ impl Acl {
                 allow_pat: vec!["*".to_string()],
                 deny_pat: Vec::new(),
                 scopes: HashMap::new(),
-                workdir: None,
+                workdir_root: None,
             });
             let hash = hash_token(token)?;
             index.insert(hash, 0);
@@ -462,7 +482,7 @@ impl Acl {
             roles,
             index,
             default_role,
-            workdir: compile_workdir(config.workdir.as_deref(), "acl")?,
+            workdir_root: compile_workdir(config.workdir.as_deref(), "acl")?,
         })
     }
 
@@ -518,7 +538,10 @@ impl Acl {
             allow_pat: role.allow_pat.clone(),
             deny_pat: role.deny_pat.clone(),
             scopes: role.scopes.clone(),
-            workdir: role.workdir.clone().or_else(|| self.workdir.clone()),
+            workdir_root: role
+                .workdir_root
+                .clone()
+                .or_else(|| self.workdir_root.clone()),
         }
     }
 }
@@ -552,7 +575,7 @@ fn compile_role(role: &RoleConfig) -> Result<CompiledRole> {
         allow_pat: role.allow.clone(),
         deny_pat: role.deny.clone(),
         scopes: role.snapshot.clone(),
-        workdir: compile_workdir(role.workdir.as_deref(), &role.name)?,
+        workdir_root: compile_workdir(role.workdir.as_deref(), &role.name)?,
     })
 }
 
@@ -773,6 +796,7 @@ mod tests {
             subject: "u1".to_string(),
             all: false,
             scopes: HashMap::from([("secrets".to_string(), vec!["$subject".to_string()])]),
+            workdir_root: None,
         };
         assert!(policy.allows("secrets", "u1"));
         assert!(!policy.allows("secrets", "u2"));
@@ -851,7 +875,7 @@ mod tests {
         assert!(
             acl.authenticate(Some("op-secret"))
                 .unwrap()
-                .workdir()
+                .workdir_root()
                 .is_none()
         );
 
@@ -867,7 +891,7 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(
-            acl.authenticate(Some("t")).unwrap().workdir().unwrap(),
+            acl.authenticate(Some("t")).unwrap().workdir_root().unwrap(),
             Path::new("/srv/acts")
         );
 
@@ -888,11 +912,17 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(
-            acl.authenticate(Some("ta")).unwrap().workdir().unwrap(),
+            acl.authenticate(Some("ta"))
+                .unwrap()
+                .workdir_root()
+                .unwrap(),
             Path::new("/srv/acts")
         );
         assert_eq!(
-            acl.authenticate(Some("tb")).unwrap().workdir().unwrap(),
+            acl.authenticate(Some("tb"))
+                .unwrap()
+                .workdir_root()
+                .unwrap(),
             Path::new("/srv/tenant-b")
         );
     }
@@ -923,7 +953,7 @@ mod tests {
     }
 
     #[test]
-    fn whoami_reports_the_workdir_without_leaking_tokens() {
+    fn whoami_reports_the_workdir_root_without_leaking_tokens() {
         let acl = Acl::from_config(&config(
             r#"
             workdir = "/srv/acts"
@@ -935,7 +965,7 @@ mod tests {
         ))
         .unwrap();
         let value = acl.authenticate(Some("top-secret")).unwrap().to_value();
-        assert_eq!(value["workdir"], "/srv/acts");
+        assert_eq!(value["workdir_root"], "/srv/acts");
         assert!(!value.to_string().contains("top-secret"));
     }
 

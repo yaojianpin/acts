@@ -721,6 +721,64 @@ async fn env_private_keys_are_engine_only() {
     engine.close().await;
 }
 
+/// The directory a process runs in has a readable name of its own —
+/// `$env.WORK_DIR` — answered from the process rather than stored, so a script
+/// can find it while the private key it lives under stays out of reach, and
+/// no write can point the run at another directory.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn env_work_dir_names_the_process_directory() {
+    let engine = Engine::builder().start().await.unwrap();
+    let env = engine.runtime().env().clone();
+    let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
+    let task = proc.root().unwrap();
+    let context = task.create_context();
+
+    // A process the policy gave no directory has none to name: the key is
+    // absent instead of falling back to an OS variable of the same name.
+    Context::scope(&context, || {
+        let read = env.eval::<serde_json::Value>("$env.WORK_DIR").unwrap();
+        assert!(read.is_null(), "no workdir means no value: {read}");
+    });
+
+    let dir = std::env::temp_dir().join(format!("acts_workdir_{}", crate::utils::longid()));
+    proc.set_workdir(&dir);
+    Context::scope(&context, || {
+        assert_eq!(
+            env.eval::<String>("$env.WORK_DIR").unwrap(),
+            dir.display().to_string()
+        );
+        // the engine-side accessor answers the same value
+        assert_eq!(
+            context.get_env::<std::path::PathBuf>(consts::ENV_WORK_DIR),
+            Some(dir.clone())
+        );
+
+        // read-only: neither the script's write nor the engine-side one
+        // redefines the directory
+        env.eval::<serde_json::Value>("$env.WORK_DIR = '/etc'")
+            .unwrap();
+        context.set_env(consts::ENV_WORK_DIR, "/etc");
+        assert_eq!(
+            env.eval::<String>("$env.WORK_DIR").unwrap(),
+            dir.display().to_string(),
+            "a run must not be able to rename its own workdir"
+        );
+    });
+    assert!(
+        proc.env().get::<String>(consts::ENV_WORK_DIR).is_none(),
+        "the reserved name must never be stored in the process env"
+    );
+    assert_eq!(proc.workdir(), Some(dir));
+
+    engine.close().await;
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_env_multi_line() {

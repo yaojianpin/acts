@@ -39,15 +39,18 @@ pub const ACT_RUN_AS: &str = "__run_as";
 /// workflow can neither read nor forge its own scope authority.
 pub const PROC_OWNER: &str = "__owner";
 
-/// Start-option key carrying the caller's workdir root from the ACL into
-/// `Runtime::start`, which pairs it with the process id to make the
-/// process's directory. Popped at start, so it never reaches the workflow.
-pub const PROC_WORKDIR_ROOT: &str = "__workdir_root";
-
-/// Process env key holding the directory a process's filesystem access is
-/// confined to (`<root>/<pid>`). Private like [`PROC_OWNER`]: the JS `$env`
+/// Process env key holding the process's own directory
+/// (`<acl workdir root>/<pid>`). Private like [`PROC_OWNER`]: the JS `$env`
 /// proxy refuses it, and packages read it through `Context::workdir`.
 pub const PROC_WORKDIR: &str = "__workdir";
+
+/// The name a workflow reads its process directory under: `$env.WORK_DIR` is
+/// the same `<root>/<pid>` that `Context::workdir()` answers, not the root the
+/// ACL config declares. Engine-owned and read-only — `Context::get_env`
+/// answers it from the process itself (never a stored value or an OS variable
+/// of the same name) and `Context::set_env` drops a write to it, so a script
+/// can find the directory it runs in but cannot redefine it.
+pub const ENV_WORK_DIR: &str = "WORK_DIR";
 
 /// Key delimiter for constructing store keys and composite IDs.
 /// Must be valid across all backends (NATS KV, SQL LIKE, Redis).

@@ -197,14 +197,19 @@ port = 10082
 # started through an action carries its caller's rules, and the scheduler
 # re-checks them at every seal — a workflow cannot read another subject's
 # sealed data even when started with someone else's `uid`.
-# `workdir` gives each process its own directory (`<workdir>/<pid>`) and the
-# process id becomes a path segment, so a pid that is not one safe component is
-# refused. It applies to every role unless the role sets its own. Acts that
-# touch the filesystem read it through `Context::workdir()`; `acts.app.shell`
-# runs the script inside it (cwd, HOME, TMPDIR, ACTS_WORKDIR) and refuses a
-# script naming an absolute path or a `..` segment. This is a per-run boundary
-# and a policy check, not a sandbox: hostile workflows still need an OS one.
-# Omitted means no directory control.
+# `workdir` is a root: it gives each process its own directory (`<workdir>/<pid>`)
+# and confines the process there, and the process id becomes a path segment, so a
+# pid that is not one safe component is refused. It applies to every role unless
+# the role sets its own. Acts read that directory through `Context::workdir()`,
+# and a script reads the same one as `$env.WORK_DIR` (engine-owned: a write to
+# that name is dropped); `acts.app.shell` runs the script inside it (cwd, HOME,
+# TMPDIR, ACTS_WORKDIR) and refuses a script naming an absolute path or a `..`
+# segment. This is a per-run boundary and a policy check, not a sandbox: hostile
+# workflows still need an OS one. The directory is removed with the process's
+# rows, once the process finished and every delivery of its messages settled — so
+# nothing left in it outlives the run (a run that must keep a file has to export
+# it), and a finished run whose row is kept (an errored delivery awaiting a manual
+# retry) keeps its directory as well. Omitted means no directory control.
 #
 # Transport credentials:
 #   gRPC  — `authorization: Bearer <token>` metadata

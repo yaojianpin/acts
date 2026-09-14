@@ -8,6 +8,7 @@ use crate::{
 use parking_lot::{Mutex, RwLock};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    path::PathBuf,
     sync::Arc,
 };
 use tracing::{debug, instrument, warn};
@@ -344,8 +345,17 @@ impl Cache {
     #[instrument(skip(self), fields(pid = %pid))]
     pub async fn remove(&self, pid: &str) -> Result<bool> {
         debug!("remove pid={pid}");
+        // Read before the writer drops the row: the directory lives in the
+        // process's env, and a swept process's instance is already evicted.
+        let workdir = self.store.proc_workdir(pid).await;
         self.procs.write().remove(pid);
         self.claimed.write().remove(pid);
+        // The directory is created by the start and holds nothing the rows
+        // depend on, so it goes with them — and goes FIRST: a crash between
+        // the two leaves the row still marked, which the next sweep converges
+        // on, while the reverse order would strand the directory with no row
+        // left to find it.
+        remove_workdir(pid, workdir);
         // Removal is serialized through the writer (FIFO) so it can never
         // race writes still queued for the process — its completion markers
         // are applied first, then the rows are dropped. `flush` keeps the
@@ -391,24 +401,33 @@ impl Cache {
     /// retained claim would reject every later start of that externally
     /// supplied pid with a misleading "duplicated in running process list".
     ///
+    /// The directory the failed start created (`<acl workdir root>/<pid>`)
+    /// goes the same way for the same reason: with no row, no sweep will ever
+    /// find it.
+    ///
     /// The claim is released only when the store confirms the pid has no row:
     /// a durable row occupies its pid for the row's whole lifetime and
     /// [`Self::remove`] (the sweeper) is what releases the claim then. A store
     /// that cannot answer keeps the claim too — a row that cannot be ruled out
     /// must never be handed to a second admission.
-    pub(crate) async fn abandon(&self, pid: &str) {
+    pub(crate) async fn abandon(&self, proc: &Arc<Process>) {
         // the in-memory instance goes first: whatever failed inside
         // `Process::start`, this workflow is not running, so it must not hold
         // a resident slot nor answer `proc()` for a pid that is dead
-        self.procs.write().remove(pid);
-        match self.store.procs().exists(pid).await {
+        self.procs.write().remove(proc.id());
+        match self.store.procs().exists(proc.id()).await {
             Ok(true) => {}
             Ok(false) => {
-                self.claimed.write().remove(pid);
+                // No row, so nothing will ever sweep the directory the start
+                // created: it goes with the claim — and before the claim is
+                // released, or a start that takes the freed pid could see the
+                // directory it just created removed.
+                remove_workdir(proc.id(), proc.workdir());
+                self.claimed.write().remove(proc.id());
             }
             Err(err) => {
                 warn!(
-                    pid = %pid, error = %err,
+                    pid = %proc.id(), error = %err,
                     "cannot check for a durable row while rolling back a failed start: \
                      the pid keeps its claim"
                 );
@@ -482,6 +501,12 @@ impl Cache {
         debug!(pid = %proc.id(), "process parked, resident set full");
         let result = self.store.upsert_proc(proc).await;
         if result.is_err() {
+            // Like a failed `Process::start`, the parked row never landed, so
+            // the directory the start created has no row left to sweep it: it
+            // goes with the claim, and before the claim is released, or a
+            // start that takes the freed pid could lose the directory it just
+            // created.
+            remove_workdir(proc.id(), proc.workdir());
             self.claimed.write().remove(proc.id());
         }
         result.map(|_| false)
@@ -896,5 +921,40 @@ impl Cache {
         }
 
         Ok(())
+    }
+}
+
+/// Delete the directory a process's filesystem access was confined to —
+/// `<acl workdir root>/<pid>`, as carried in the process's env — when the
+/// process named `pid` has one.
+///
+/// The shape is checked: only a directory whose last component is the pid
+/// itself is removed, the only shape a start ever creates, so a row that names
+/// something else cannot delete it. Removal is best-effort — a directory holds
+/// no engine state, so a failure is reported and never blocks the removal it
+/// belongs to (pinning a dead process's rows, and its pid, on a filesystem
+/// error would be the worse outcome).
+fn remove_workdir(pid: &str, dir: Option<PathBuf>) {
+    let Some(dir) = dir else {
+        return;
+    };
+    if dir.file_name().and_then(|name| name.to_str()) != Some(pid) {
+        warn!(
+            pid = %pid, dir = %dir.display(),
+            "not removing a workdir that is not named after its process"
+        );
+        return;
+    }
+    match std::fs::remove_dir_all(&dir) {
+        Ok(()) => debug!(pid = %pid, "removed the process workdir"),
+        // Already gone (an interrupted removal that was retried, or an
+        // operator cleaning up): nothing to do.
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            warn!(
+                pid = %pid, dir = %dir.display(), error = %err,
+                "failed to remove the process workdir"
+            );
+        }
     }
 }

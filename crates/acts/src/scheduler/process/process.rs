@@ -176,16 +176,19 @@ impl Process {
             .unwrap_or_default()
     }
 
-    /// Seal the directory this process's filesystem access is confined to
-    /// (`<acl workdir root>/<pid>`), under a private env key so the workflow's
-    /// `$env` proxy can neither read nor overwrite it. Persisted with the
-    /// process env, so a resumed process keeps the same directory.
+    /// Seal the directory this process's filesystem access is confined to —
+    /// `<workdir_root>/<pid>`, the process's own directory, not the root the
+    /// ACL config declares — under a private env key so the workflow's `$env`
+    /// proxy can neither read nor overwrite it. Persisted with the process
+    /// env, so a resumed process keeps the same directory.
     pub(crate) fn set_workdir(&self, dir: &std::path::Path) {
         self.with_env_mut(|env| env.set(consts::PROC_WORKDIR, dir));
     }
 
-    /// The process's workdir, or `None` when the ACL config declares no
-    /// workdir root (and for process rows written before this field existed).
+    /// The process's own directory (`<acl workdir root>/<pid>`), or `None`
+    /// when the ACL config declares no workdir root (and for process rows
+    /// written before this field existed). `Context::workdir` and
+    /// `$env.WORK_DIR` both answer this.
     pub fn workdir(&self) -> Option<std::path::PathBuf> {
         self.with_env(|env| env.get::<std::path::PathBuf>(consts::PROC_WORKDIR))
     }

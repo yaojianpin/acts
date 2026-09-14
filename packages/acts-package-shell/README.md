@@ -47,15 +47,20 @@ the act when the limit is exceeded.
 ## Directory control
 
 When the engine's ACL config gives the process a workdir (see the
-access-control chapter of the book), the script runs inside
-`<workdir>/<pid>`: that directory is its working directory, `HOME`,
-`TMPDIR`/`TEMP`/`TMP` and `PWD` point inside it, and `ACTS_WORKDIR` names it.
-A script that names an absolute path or a `..` segment is refused before it
-runs.
+access-control chapter of the book), the script runs inside the directory the
+run owns — the configured root plus the process id, `<workdir>/<pid>`: that
+directory is its working directory, `HOME`, `TMPDIR`/`TEMP`/`TMP` and `PWD`
+point inside it, and `ACTS_WORKDIR` names it. A script that names an absolute
+path or a `..` segment is refused before it runs.
 
 That check is policy, not a sandbox — the containment is the child's working
 directory, and a shell can spell an outside path in ways no textual check
 follows. Treat a hostile workflow as needing an OS boundary around the server.
+
+That directory lives as long as the run's durable rows: the engine removes it
+with them once the run finished and its deliveries settled, and a run that
+never became durable removes it immediately. A file the run must keep has to be
+exported, not left in the workdir.
 
 Without a workdir, no directory control applies: the script inherits the
 server's own working directory and environment.

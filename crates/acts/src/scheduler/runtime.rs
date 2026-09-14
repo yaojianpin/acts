@@ -362,14 +362,20 @@ impl Runtime {
         // `actions::apply_as`), never as a model input: it is popped here so
         // it cannot leak into the workflow's user vars.
         let owner = options.pop::<crate::ScopePolicy>(consts::PROC_OWNER);
-        let workdir_root = options.pop::<std::path::PathBuf>(consts::PROC_WORKDIR_ROOT);
         proc.load_with_vars(model, &options)?;
         if let Some(owner) = owner {
+            // The workdir root travels with the owner authority, never as a
+            // start option: it is compiled from the config's ACL, so a caller
+            // can neither name the directory nor place a run outside the one
+            // its policy confines it to. The directory lives exactly as long
+            // as the process's durable rows — the sweeper removes it with
+            // them, and a start that never became durable removes it itself
+            // (see `Cache::abandon`).
+            if let Some(root) = owner.workdir_root.as_deref() {
+                let dir = prepare_workdir(root, &proc_id)?;
+                proc.set_workdir(&dir);
+            }
             proc.set_owner_scope(&owner);
-        }
-        if let Some(root) = workdir_root {
-            let dir = prepare_workdir(&root, &proc_id)?;
-            proc.set_workdir(&dir);
         }
 
         self.launch(&proc).await?;
@@ -403,8 +409,10 @@ impl Runtime {
             // the claim guards an admission that is becoming durable, so a pid
             // whose start never reached the store can be started again — while
             // a retained claim would fail every later start of the same
-            // external pid as a duplicate although nothing is running.
-            self.cache.abandon(proc.id()).await;
+            // external pid as a duplicate although nothing is running. The
+            // workdir the start just created goes with the pid: with no row,
+            // no sweep would ever find it.
+            self.cache.abandon(&proc).await;
             return Err(err);
         }
         Ok(())

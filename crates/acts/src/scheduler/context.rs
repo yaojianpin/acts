@@ -115,7 +115,9 @@ impl Context {
     /// The directory this process's filesystem access is confined to
     /// (`<acl workdir root>/<pid>`), or `None` when the engine's ACL config
     /// declares no workdir root. Packages that touch the filesystem (shell,
-    /// and any custom one) read it here and refuse to leave it.
+    /// and any custom one) read it here and refuse to leave it; a workflow
+    /// script reads the same directory as `$env.WORK_DIR` (see
+    /// [`crate::utils::consts::ENV_WORK_DIR`]).
     pub fn workdir(&self) -> Option<std::path::PathBuf> {
         self.proc.workdir()
     }
@@ -206,6 +208,12 @@ impl Context {
     where
         T: Serialize + Clone,
     {
+        // The workdir is engine-owned (it is what `$env.WORK_DIR` reads):
+        // answering it from a stored value would let a script redefine where
+        // its run is. A write is dropped, like the private keys in `$env`.
+        if name == consts::ENV_WORK_DIR {
+            return;
+        }
         // in context, the global env is not writable
         // just set the value to local env of the process
         self.proc.with_env_mut(|data| {
@@ -217,6 +225,14 @@ impl Context {
     where
         T: for<'de> Deserialize<'de> + Clone,
     {
+        // The directory the process runs in has a readable name of its own
+        // (`$env.WORK_DIR`), answered from the process itself — never from a
+        // stored var or the OS environment of the same name, either of which
+        // would name a directory the run is not in.
+        if name == consts::ENV_WORK_DIR {
+            let dir = self.workdir()?;
+            return T::deserialize(serde_json::json!(dir.display().to_string())).ok();
+        }
         // find the env from proc
         if let Some(v) = self.proc.with_env(|vars| vars.get(name)) {
             return Some(v);

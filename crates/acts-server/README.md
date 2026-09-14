@@ -173,11 +173,17 @@ is the role name), and that ownership is re-checked when a task seals a
 snapshot value — a workflow cannot read another subject's sealed data even
 when started with their `uid`.
 
-`workdir` (on `[acl]`, or per role) confines each run's filesystem access to
-`<workdir>/<pid>`: the directory is created at start, the process id becomes a
-path segment (so one that is not a single safe component is refused), and acts
-that touch the filesystem read it through `Context::workdir()`. Without it, no
-directory control applies.
+`workdir` (on `[acl]`, or per role) is a **root**: each run gets its own
+directory `<workdir>/<pid>` and its filesystem access is confined to that one.
+The process id becomes a path segment (so one that is not a single safe
+component is refused), acts read the directory through `Context::workdir()`,
+and a script reads the same directory as `$env.WORK_DIR` (engine-owned: a write
+to that name is dropped). The directory is removed together with the run's rows
+— once the run finished and every delivery of its messages settled — so it does
+not accumulate one directory per historical process; a run whose row is kept
+(an errored delivery awaiting a manual retry) keeps its directory too, and
+anything a run needs to outlive itself must be exported, not left in the
+workdir.
 
 See the commented template in the generated default config
 (`~/.acts/acts.toml`) or the access-control chapter of the book.

@@ -245,21 +245,16 @@ pub async fn apply_as(
             // The caller's authority is sealed into the process (see
             // `crate::acl`) and re-checked at every seal: which snapshot
             // scopes the run may read, and where its filesystem access is
-            // confined. The workdir is the root here; the process id turns it
-            // into the run's own directory at start.
+            // confined. It carries the workdir root too, so the process id
+            // turns it into the run's own directory at start — nothing about
+            // the directory comes from the request.
             options.set(consts::PROC_OWNER, principal.scope_policy());
-            if let Some(root) = principal.workdir() {
-                options.set(consts::PROC_WORKDIR_ROOT, root);
-            }
             value(executor.proc().start(&id, options).await)
         }
         "proc:start_from_model" => {
             let fmt = pop(&mut options, "fmt")?;
             let model = pop(&mut options, "model")?;
             options.set(consts::PROC_OWNER, principal.scope_policy());
-            if let Some(root) = principal.workdir() {
-                options.set(consts::PROC_WORKDIR_ROOT, root);
-            }
             value(
                 executor
                     .proc()
@@ -799,12 +794,20 @@ mod tests {
               - name: finish
                 uses: acts.transform.code
                 params: |
-                  return { ok: true };
+                  return { dir: $env.WORK_DIR };
             "#,
         )
         .unwrap();
         let u1 = engine.acl().authenticate(Some("token-u1")).unwrap();
-        assert_eq!(u1.workdir(), Some(root.as_path()));
+        assert_eq!(u1.workdir_root(), Some(root.as_path()));
+
+        // the run's completion, so its script's reading below is in hand
+        let sig = engine.signal(());
+        let done = sig.clone();
+        engine.channel().on_complete(move |_| {
+            let done = done.clone();
+            async move { done.close() }
+        });
 
         apply_as(
             &engine,
@@ -834,6 +837,35 @@ mod tests {
         let proc = engine.runtime().proc(&pid).await.unwrap().unwrap();
         assert_eq!(proc.workdir(), Some(dir.clone()));
         assert!(proc.inputs().get::<String>(consts::PROC_WORKDIR).is_none());
+
+        // ...and the run's own script finds the directory by name, the public
+        // alias of the private key the workflow never saw
+        sig.recv().await;
+        assert_eq!(
+            proc.task_by_uses(crate::utils::test::USES_CODE)
+                .first()
+                .unwrap()
+                .outputs()
+                .get::<String>("dir")
+                .unwrap(),
+            dir.display().to_string()
+        );
+        // The directory lives as long as the run's durable rows: once the run
+        // finished and its deliveries settled, the sweeper that removes the
+        // rows takes the workdir with them — a long-lived engine does not
+        // accumulate one directory per historical process.
+        for _ in 0..150 {
+            if !dir.exists() {
+                break;
+            }
+            let _ = engine.runtime().cache().sweep_removable().await;
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        assert!(
+            !dir.exists(),
+            "the workdir {} must be removed with the process's rows",
+            dir.display()
+        );
 
         std::fs::remove_dir_all(&root).ok();
     }

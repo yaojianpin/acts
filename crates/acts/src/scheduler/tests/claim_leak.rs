@@ -90,7 +90,15 @@ async fn failed_launch_releases_pid_claim() {
         .with_id("m1")
         .with_step(|step| step.with_id("step1"));
     let pid = "claimleak";
-    let vars = Vars::new().with(consts::PROCESS_ID, pid);
+    let root = std::env::temp_dir().join(format!("acts_workdir_{}", crate::utils::longid()));
+    let dir = root.join(pid);
+    let vars = Vars::new().with(consts::PROCESS_ID, pid).with(
+        consts::PROC_OWNER,
+        crate::ScopePolicy {
+            workdir_root: Some(root.clone()),
+            ..Default::default()
+        },
+    );
 
     // the transient fault: the proc row write fails, so the start errors
     let err = rt.start(&workflow, vars.clone()).await.unwrap_err();
@@ -106,6 +114,13 @@ async fn failed_launch_releases_pid_claim() {
         "the failed start must not have written a row"
     );
 
+    // ...and the directory the start created is gone with it: no row exists
+    // that a sweep could ever find it through
+    assert!(
+        !dir.exists(),
+        "a start that never became durable must leave no workdir behind"
+    );
+
     // the pid is reusable: the retry is admitted instead of being rejected as
     // a duplicate of the start that failed
     let proc = rt
@@ -113,8 +128,13 @@ async fn failed_launch_releases_pid_claim() {
         .await
         .expect("a failed start must release its pid claim");
     assert_eq!(proc.state(), TaskState::Running);
+    assert!(
+        dir.is_dir(),
+        "the retry materializes the same workdir again"
+    );
 
     rt.close().await;
+    std::fs::remove_dir_all(&root).ok();
 }
 
 /// The complement of the case above: a *durable* row left behind by the failed
@@ -129,16 +149,24 @@ async fn abandon_keeps_the_claim_of_a_durable_row() {
         .with_id("m1")
         .with_step(|step| step.with_id("step1"));
     let pid = "abandondurable";
+    let root = std::env::temp_dir().join(format!("acts_workdir_{}", crate::utils::longid()));
+    let dir = root.join(pid);
+    std::fs::create_dir_all(&dir).unwrap();
     let vars = Vars::new().with(consts::PROCESS_ID, pid);
 
     let proc = Process::new(pid, &rt);
     proc.load(&workflow).unwrap();
+    proc.set_workdir(&dir);
     assert!(cache.admit(&proc).await.unwrap(), "the pid starts admitted");
     // the row the failed start would have left behind
     cache.store().upsert_proc(&proc).await.unwrap();
 
-    cache.abandon(pid).await;
+    cache.abandon(&proc).await;
     assert_eq!(cache.count(), 0, "the instance is evicted either way");
+    assert!(
+        dir.is_dir(),
+        "a durable row keeps its workdir: the sweep that removes the row removes it"
+    );
 
     // the claim survives with the row: a second start of the pid is refused
     let retry = rt.start(&workflow, vars.clone()).await.unwrap_err();
@@ -157,9 +185,14 @@ async fn abandon_keeps_the_claim_of_a_durable_row() {
     // ...and removing the row is what gives the pid back
     cache.remove(pid).await.unwrap();
     assert!(
+        !dir.exists(),
+        "removing the row removes the workdir with it"
+    );
+    assert!(
         cache.admit(&other).await.unwrap(),
         "removing the row releases the pid claim"
     );
 
     rt.close().await;
+    std::fs::remove_dir_all(&root).ok();
 }
