@@ -86,9 +86,8 @@ async fn snapshot_actions_over_nats() {
         return;
     };
 
-    let (path, config) = temp_config(
-        "[nats]\nurl = \"nats://127.0.0.1:4222\"\nsubject = \"acts-snapshot-test\"\n",
-    );
+    let (path, config) =
+        temp_config("[nats]\nurl = \"nats://127.0.0.1:4222\"\nsubject = \"acts-snapshot-test\"\n");
     let engine = engine_with_nats(&config).await;
 
     // upsert
@@ -205,9 +204,8 @@ async fn malformed_action_data_rejected() {
         return;
     };
 
-    let (path, config) = temp_config(
-        "[nats]\nurl = \"nats://127.0.0.1:4222\"\nsubject = \"acts-malformed-test\"\n",
-    );
+    let (path, config) =
+        temp_config("[nats]\nurl = \"nats://127.0.0.1:4222\"\nsubject = \"acts-malformed-test\"\n");
     let engine = engine_with_nats(&config).await;
 
     for data in [json!([]), json!("msg:clear"), json!(7)] {

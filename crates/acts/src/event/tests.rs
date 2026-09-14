@@ -482,7 +482,7 @@ async fn event_route_replaces_an_abandoned_worker() {
     evt.emit_start_event(&root.create_message());
     // the worker task is gone without the exit path that would have replaced
     // its entry — the sender now outlives its receiver
-    evt.abandon_worker(&proc.id());
+    evt.abandon_worker(proc.id());
 
     let msg = crate::Message {
         mid: "mid-1".to_string(),

@@ -197,11 +197,10 @@ fn scheduler_multi_pid(c: &mut Criterion) {
                         let counter = counter.clone();
                         let fire = fire.clone();
                         async move {
-                            if e.is_type("workflow") && e.is_state(MessageState::Completed) {
-                                if counter.fetch_add(1, Ordering::AcqRel) + 1 >= total {
+                            if e.is_type("workflow") && e.is_state(MessageState::Completed)
+                                && counter.fetch_add(1, Ordering::AcqRel) + 1 >= total {
                                     fire.close();
                                 }
-                            }
                         }
                     });
 

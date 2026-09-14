@@ -32,9 +32,11 @@ async fn main() -> Result<()> {
 
     // The mock server listens on loopback, which the http package blocks by
     // default; opt in explicitly for this example.
-    let mut config = acts::Config::default();
-    config.table =
-        toml::from_str("[http]\nallow-private-addresses = true\n").expect("parse http config");
+    let config = acts::Config {
+        table: toml::from_str("[http]\nallow-private-addresses = true\n")
+            .expect("parse http config"),
+        ..Default::default()
+    };
     let engine = Engine::builder()
         .set_config(&config)
         .add_package::<HttpPackage>()
