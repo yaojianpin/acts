@@ -384,6 +384,38 @@ impl Cache {
         self.procs.write().remove(pid);
     }
 
+    /// Roll back an admission whose [`Process::start`] failed: drop the
+    /// in-memory instance and give the pid back. A start that errored never
+    /// became a running process, and for a pid with no rows nothing else ever
+    /// releases its claim — the sweeper only removes rows that exist — so a
+    /// retained claim would reject every later start of that externally
+    /// supplied pid with a misleading "duplicated in running process list".
+    ///
+    /// The claim is released only when the store confirms the pid has no row:
+    /// a durable row occupies its pid for the row's whole lifetime and
+    /// [`Self::remove`] (the sweeper) is what releases the claim then. A store
+    /// that cannot answer keeps the claim too — a row that cannot be ruled out
+    /// must never be handed to a second admission.
+    pub(crate) async fn abandon(&self, pid: &str) {
+        // the in-memory instance goes first: whatever failed inside
+        // `Process::start`, this workflow is not running, so it must not hold
+        // a resident slot nor answer `proc()` for a pid that is dead
+        self.procs.write().remove(pid);
+        match self.store.procs().exists(pid).await {
+            Ok(true) => {}
+            Ok(false) => {
+                self.claimed.write().remove(pid);
+            }
+            Err(err) => {
+                warn!(
+                    pid = %pid, error = %err,
+                    "cannot check for a durable row while rolling back a failed start: \
+                     the pid keeps its claim"
+                );
+            }
+        }
+    }
+
     /// Capacity admission for a fresh start. Returns `true` when the process
     /// was admitted to the resident set and the caller should run it now;
     /// returns `false` when the set is full — the process is *parked*: its
@@ -412,12 +444,21 @@ impl Cache {
             // when both callers missed the durable row before either was
             // admitted.
             if !self.claimed.write().insert(proc.id().to_string()) {
+                // The claim belongs to the admission that installed it: that
+                // start releases it itself, either through `Self::abandon`
+                // (a start that never became durable) or through `Self::remove`
+                // once the row's lifetime ends. Never here.
                 return Err(ActError::Action(format!(
                     "proc_id({}) is duplicated in running process list",
                     proc.id()
                 )));
             }
             if procs.contains_key(proc.id()) {
+                // The pid is resident but its claim was not ours to install: a
+                // process loaded from the store is cached without claiming
+                // (see `Self::proc`). The claim inserted above stays — it is
+                // the resident instance's, and the `remove()` that ends its
+                // row lifetime is what releases it.
                 return Err(ActError::Action(format!(
                     "proc_id({}) is duplicated in running process list",
                     proc.id()

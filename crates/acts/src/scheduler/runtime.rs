@@ -399,7 +399,12 @@ impl Runtime {
             return Ok(());
         }
         if let Err(err) = proc.start().await {
-            self.cache.evict(proc.id());
+            // A start that failed must give its pid back (`Cache::abandon`):
+            // the claim guards an admission that is becoming durable, so a pid
+            // whose start never reached the store can be started again — while
+            // a retained claim would fail every later start of the same
+            // external pid as a duplicate although nothing is running.
+            self.cache.abandon(proc.id()).await;
             return Err(err);
         }
         Ok(())
