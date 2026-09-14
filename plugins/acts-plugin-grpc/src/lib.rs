@@ -18,6 +18,21 @@ mod config;
 type MessageStream =
     std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<Message, Status>> + Send>>;
 
+/// Map an action-dispatch failure onto its gRPC status, so the unary and the
+/// subscription paths answer a refusal the same way.
+fn action_status(err: acts::actions::Error) -> Status {
+    match err {
+        acts::actions::Error::NotFound(msg) => Status::not_found(msg),
+        acts::actions::Error::Invalid(msg) => Status::invalid_argument(msg),
+        acts::actions::Error::Unauthenticated(msg) => Status::unauthenticated(msg),
+        acts::actions::Error::Denied(msg) => Status::permission_denied(msg),
+        acts::actions::Error::Internal(msg) => {
+            tracing::error!("do-action err={msg}");
+            Status::new(Code::Internal, msg)
+        }
+    }
+}
+
 /// Deregisters the channel handler when the gRPC response stream is dropped
 /// (client disconnected or the RPC ended). Without this, every finished
 /// `on_message` RPC would leak a handler into the engine emitter: the map
@@ -140,25 +155,9 @@ impl GrpcServer {
         };
 
         let name = message.name.clone();
-        let value = match acts::actions::apply_as(&self.engine, &principal, &name, options).await {
-            Ok(value) => value,
-            Err(acts::actions::Error::NotFound(msg)) => {
-                return Err(Status::not_found(msg));
-            }
-            Err(acts::actions::Error::Invalid(msg)) => {
-                return Err(Status::invalid_argument(msg));
-            }
-            Err(acts::actions::Error::Unauthenticated(msg)) => {
-                return Err(Status::unauthenticated(msg));
-            }
-            Err(acts::actions::Error::Denied(msg)) => {
-                return Err(Status::permission_denied(msg));
-            }
-            Err(acts::actions::Error::Internal(msg)) => {
-                tracing::error!("do-action err={msg}");
-                return Err(Status::new(Code::Internal, msg));
-            }
-        };
+        let value = acts::actions::apply_as(&self.engine, &principal, &name, options)
+            .await
+            .map_err(action_status)?;
 
         let mut response = Message {
             name,
@@ -180,22 +179,37 @@ impl ActsService for GrpcServer {
         &self,
         req: tonic::Request<MessageOptions>,
     ) -> Result<tonic::Response<Self::OnMessageStream>, tonic::Status> {
-        // A subscription is a read of every message matching the caller's own
-        // filter, so it authenticates like any other request: an anonymous
-        // stream would be a way around the action checks.
+        // A subscription is a read of the message stream, so it goes through
+        // the action table like every other request: `msg:sub` must be in the
+        // caller's `allow` list, and the key the action answers with is the
+        // key this stream registers under — the transport never composes it
+        // on its own, so a checked subscription and the key it occupies
+        // cannot drift apart.
         let token = Self::bearer_token(&req);
-        if let Err(err) = self.engine.acl().authenticate(token.as_deref()) {
-            return Err(Status::unauthenticated(err.to_string()));
-        }
-
-        let (tx, rx) = mpsc::channel::<Result<Message, Status>>(128);
+        let principal = self
+            .engine
+            .acl()
+            .authenticate(token.as_deref())
+            .map_err(|err| Status::unauthenticated(err.to_string()))?;
         let addr = req
             .remote_addr()
             .map(|addr| addr.to_string())
             .unwrap_or_else(|| "unknown".to_string());
         let options = req.into_inner();
+        let chan_id = acts::actions::apply_as(
+            &self.engine,
+            &principal,
+            acts::ACTION_SUBSCRIBE,
+            Vars::new().with("client_id", options.client_id.clone()),
+        )
+        .await
+        .map_err(action_status)?
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
 
-        tracing::info!("on_message: options={options:?}");
+        tracing::info!("on_message: options={options:?} chan={chan_id}");
+        let (tx, rx) = mpsc::channel::<Result<Message, Status>>(128);
         let client = MessageClient {
             addr: addr.to_string(),
             sender: tx,
@@ -203,7 +217,7 @@ impl ActsService for GrpcServer {
                 r#type: options.r#type.clone(),
                 state: options.state.clone(),
                 uses: options.uses.clone(),
-                id: options.client_id.clone(),
+                id: chan_id.clone(),
                 ack: true,
                 options: {
                     let mut vars = Vars::new();

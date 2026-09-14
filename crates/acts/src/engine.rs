@@ -107,7 +107,14 @@ impl Engine {
                 })?;
                 Acl::from_config(&acl_config)?
             }
-            None => Acl::disabled(),
+            // No section is a deployment that has not said who may do what:
+            // it answers to anyone, with the anonymous read-only policy.
+            None => {
+                tracing::warn!(
+                    "no [acl] section in the config: callers are anonymous and read-only. Add [acl] with a token to grant more, or set enabled = false to lift the limits."
+                );
+                Acl::anonymous_access()
+            }
         };
 
         Ok(Self {

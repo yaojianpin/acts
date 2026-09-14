@@ -35,6 +35,12 @@ if let Err(err) = sub.wait().await {
 }
 ```
 
+The id is a namespace component of the caller's subject on the server
+(`{subject}/{client_id}`): two subscribers of different subjects can both
+subscribe as `client-1` without colliding, and under `[acl]` a subscription
+carries the messages of the processes that subject started, not every
+tenant's. See [access control](../access.md).
+
 
 ## Message Types
 

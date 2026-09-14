@@ -217,6 +217,13 @@ port = 10082
 #   NATS  — the `token` field of the action JSON body
 #
 # [acl]
+# Without this section the engine is anonymous and read-only: callers may list
+# and get models, processes, tasks, messages, events and packages, and nothing
+# else (no writes, no control, no admin actions, no snapshot scope, no
+# subscription). Add the section to name your callers — the smallest useful one
+# is the `token` shorthand below — or write `enabled = false` to lift the
+# limits on purpose.
+#
 # role applied to an absent/unknown token; omit to refuse such requests
 # default_role = "guest"
 #
@@ -227,7 +234,7 @@ port = 10082
 # name = "operator"
 # tokens = ["sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"]
 # allow = ["model:ls", "model:get", "proc:ls", "proc:get", "task:*", "msg:ls",
-#          "msg:ack", "snap:get", "snap:ls", "acl:whoami"]
+#          "msg:ack", "msg:sub", "snap:get", "snap:ls", "acl:whoami"]
 # deny = ["model:rm", "pack:publish"]
 # workdir = "/srv/acts"
 #

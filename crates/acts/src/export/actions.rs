@@ -16,7 +16,7 @@
 //! - [`Error::Internal`] — engine/store failure (`internal error`)
 
 use crate::utils::consts;
-use crate::{Engine, Vars, Workflow};
+use crate::{ChannelOptions, Engine, Vars, Workflow};
 use serde_json::{Value as JsonValue, json};
 use std::fmt;
 
@@ -295,6 +295,17 @@ pub async fn apply_as(
             let id = pop(&mut options, "id")?;
             value(executor.msg().get(&id).await)
         }
+        // Opening a subscription is an action like any other: the transport
+        // hands the client id it received to this arm and uses the key it
+        // answers with, so the checked path and the channel key cannot drift
+        // apart — and `msg:unsub` composes the same key from the same id.
+        crate::acl::ACTION_SUBSCRIBE => {
+            let client_id = options.get::<String>("client_id").unwrap_or_default();
+            Ok(JsonValue::String(ChannelOptions::subscription_id(
+                principal.subject(),
+                &client_id,
+            )))
+        }
         "msg:ack" => {
             let id = pop(&mut options, "id")?;
             value(executor.msg().ack(&id).await)
@@ -320,7 +331,10 @@ pub async fn apply_as(
         }
         "msg:unsub" => {
             let client_id = pop(&mut options, "client_id")?;
-            value(executor.msg().unsub(&client_id).await)
+            // The channel key carries the subscriber's subject, so a caller
+            // only names a channel in its own namespace.
+            let chan_id = ChannelOptions::subscription_id(principal.subject(), &client_id);
+            value(executor.msg().unsub(&chan_id).await)
         }
         // event
         "evt:ls" => {
@@ -409,9 +423,25 @@ pub async fn apply_as(
 mod tests {
     use super::*;
 
+    /// An engine with access control explicitly off. These cases exercise the
+    /// dispatch table itself, so their caller must be unrestricted: the
+    /// anonymous read-only policy an unconfigured engine resolves to is
+    /// covered by `acl::tests::a_missing_section_is_anonymous_read_only`.
+    async fn open_engine() -> crate::Engine {
+        let config = crate::Config {
+            data: Default::default(),
+            table: toml::from_str::<toml::Table>("[acl]\nenabled = false\n").unwrap(),
+        };
+        crate::Engine::builder()
+            .set_config(&config)
+            .start()
+            .await
+            .unwrap()
+    }
+
     #[tokio::test]
     async fn snapshot_upsert_remove_roundtrip() {
-        let engine = crate::Engine::builder().start().await.unwrap();
+        let engine = open_engine().await;
         let payload = Vars::new()
             .with("name", "profile")
             .with("scope", "u1")
@@ -437,7 +467,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_action_is_not_found() {
-        let engine = crate::Engine::builder().start().await.unwrap();
+        let engine = open_engine().await;
         let err = apply(&engine, "no:such", Vars::new()).await.unwrap_err();
         assert!(matches!(err, Error::NotFound(_)));
         assert_eq!(err.to_string(), "not found action 'no:such'");
@@ -445,7 +475,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_payload_is_invalid() {
-        let engine = crate::Engine::builder().start().await.unwrap();
+        let engine = open_engine().await;
         let err = apply(&engine, "snap:upsert", Vars::new())
             .await
             .unwrap_err();
@@ -455,7 +485,7 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_query_roundtrip() {
-        let engine = crate::Engine::builder().start().await.unwrap();
+        let engine = open_engine().await;
         for (scope, val) in [("u1", 1), ("u2", 2)] {
             let payload = Vars::new()
                 .with("name", "profile")
@@ -503,7 +533,7 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_query_unknown_target() {
-        let engine = crate::Engine::builder().start().await.unwrap();
+        let engine = open_engine().await;
         let ret = apply(&engine, "snap:ls", Vars::new().with("name", "none"))
             .await
             .unwrap();
@@ -512,7 +542,7 @@ mod tests {
 
     #[tokio::test]
     async fn snapshot_remove_unknown_target_is_internal() {
-        let engine = crate::Engine::builder().start().await.unwrap();
+        let engine = open_engine().await;
         let err = apply(
             &engine,
             "snap:remove",
@@ -634,6 +664,291 @@ mod tests {
         assert_eq!(rows.as_array().unwrap().len(), 1);
         assert_eq!(rows[0]["scope"], "u1");
         assert_eq!(rows[0]["data"]["val"], 1);
+    }
+
+    /// Two subjects that share the message actions: the delivery's owner and
+    /// the channel's namespace decide.
+    const MSG_TENANT: &str = r#"
+        [acl]
+
+        [[acl.role]]
+        name = "u1"
+        tokens = ["token-u1"]
+        allow = ["model:deploy", "proc:start", "msg:ack", "msg:unsub"]
+
+        [[acl.role]]
+        name = "u2"
+        tokens = ["token-u2"]
+        allow = ["model:deploy", "proc:start", "msg:ack", "msg:unsub"]
+    "#;
+
+    /// Acking is grant-based, like every other action: a role with `msg:ack`
+    /// may ack, one without it may not — the delivery's process owner plays no
+    /// part.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn an_ack_follows_the_grant_not_the_process_owner() {
+        let engine = acl_engine(MSG_TENANT).await;
+        let u1 = engine.acl().authenticate(Some("token-u1")).unwrap();
+        let u2 = engine.acl().authenticate(Some("token-u2")).unwrap();
+
+        let workflow = crate::Workflow::from_yml(
+            r#"
+            id: ack_owner
+            ver: 0.1.0
+            steps:
+                - id: step1
+                  uses: acts.core.irq
+            "#,
+        )
+        .unwrap();
+        apply_as(
+            &engine,
+            &u1,
+            "model:deploy",
+            Vars::new().with("model", workflow.to_yml().unwrap()),
+        )
+        .await
+        .unwrap();
+
+        // u1's own channel receives the run's messages and stores their
+        // deliveries — the row an ack names.
+        let delivery = engine.signal(String::new());
+        let d = delivery.clone();
+        let chan = engine.channel_with_options(&ChannelOptions {
+            id: ChannelOptions::subscription_id("u1", "client-1"),
+            ack: true,
+            ..Default::default()
+        });
+        chan.on_message(move |e| {
+            let d = d.clone();
+            async move {
+                if let Some(id) = &e.delivery_id {
+                    d.update(|data| data.clone_from(id));
+                    d.close();
+                }
+            }
+        });
+
+        apply_as(
+            &engine,
+            &u1,
+            "proc:start",
+            Vars::new().with("id", "ack_owner"),
+        )
+        .await
+        .unwrap();
+        let delivery_id = delivery.recv().await;
+        assert!(!delivery_id.is_empty());
+
+        // u2 holds `msg:ack` too, so u1's delivery is u2's to ack as well:
+        // the check is the action grant, not who started the run.
+        apply_as(
+            &engine,
+            &u2,
+            "msg:ack",
+            Vars::new().with("id", delivery_id.clone()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            engine
+                .runtime()
+                .cache()
+                .store()
+                .deliveries()
+                .find(&delivery_id)
+                .await
+                .unwrap()
+                .status,
+            crate::data::DeliveryStatus::Acked
+        );
+    }
+
+    /// ...and a role without the grant cannot ack, however the delivery
+    /// belongs.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn an_ack_without_the_grant_is_refused() {
+        let engine = acl_engine(
+            r#"
+            [acl]
+
+            [[acl.role]]
+            name = "starter"
+            tokens = ["token-starter"]
+            allow = ["model:deploy", "proc:start", "msg:ls"]
+        "#,
+        )
+        .await;
+        let starter = engine.acl().authenticate(Some("token-starter")).unwrap();
+
+        // An ack channel is what stores a delivery row, and the row's id is
+        // what the action names. The channel is engine-side, so it needs no
+        // grant of its own.
+        let delivery = engine.signal(String::new());
+        let d = delivery.clone();
+        let chan = engine.channel_with_options(&ChannelOptions {
+            id: "ack-grant-client".to_string(),
+            ack: true,
+            ..Default::default()
+        });
+        chan.on_message(move |e| {
+            let d = d.clone();
+            async move {
+                if let Some(id) = &e.delivery_id {
+                    d.update(|data| data.clone_from(id));
+                    d.close();
+                }
+            }
+        });
+
+        let workflow = crate::Workflow::from_yml(
+            r#"
+            id: ack_grant
+            ver: 0.1.0
+            steps:
+                - id: step1
+                  uses: acts.core.irq
+            "#,
+        )
+        .unwrap();
+        apply_as(
+            &engine,
+            &starter,
+            "model:deploy",
+            Vars::new().with("model", workflow.to_yml().unwrap()),
+        )
+        .await
+        .unwrap();
+        apply_as(
+            &engine,
+            &starter,
+            "proc:start",
+            Vars::new().with("id", "ack_grant"),
+        )
+        .await
+        .unwrap();
+        let delivery_id = delivery.recv().await;
+        assert!(!delivery_id.is_empty());
+
+        let err = apply_as(
+            &engine,
+            &starter,
+            "msg:ack",
+            Vars::new().with("id", delivery_id),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, Error::Denied(_)), "got: {err}");
+    }
+
+    /// `msg:unsub` names a client id, not a channel: the subject is prefixed
+    /// server-side, so the subscription a caller opened is the one its own
+    /// unsub reaches — and no other subject's, whatever id it names.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn an_unsub_reaches_only_the_callers_own_namespace() {
+        let engine = acl_engine(MSG_TENANT).await;
+        let u1 = engine.acl().authenticate(Some("token-u1")).unwrap();
+        let u2 = engine.acl().authenticate(Some("token-u2")).unwrap();
+
+        let workflow = crate::Workflow::from_yml(
+            r#"
+            id: unsub_scope
+            ver: 0.1.0
+            steps:
+                - id: step1
+                  uses: acts.core.irq
+            "#,
+        )
+        .unwrap();
+        apply_as(
+            &engine,
+            &u1,
+            "model:deploy",
+            Vars::new().with("model", workflow.to_yml().unwrap()),
+        )
+        .await
+        .unwrap();
+
+        // u1 subscribes under a client id u2 also names below.
+        let received = std::sync::Arc::new(parking_lot::Mutex::new(0usize));
+        let count = received.clone();
+        let chan = engine.channel_with_options(&ChannelOptions {
+            id: ChannelOptions::subscription_id("u1", "shared-client"),
+            ack: true,
+            ..Default::default()
+        });
+        chan.on_message(move |_| {
+            let count = count.clone();
+            async move {
+                *count.lock() += 1;
+            }
+        });
+
+        apply_as(
+            &engine,
+            &u2,
+            "msg:unsub",
+            Vars::new().with("client_id", "shared-client"),
+        )
+        .await
+        .unwrap();
+
+        // u2 names the same client id u1 subscribed under: u1's channel is
+        // untouched and its stream still receives u1's run.
+        apply_as(
+            &engine,
+            &u2,
+            "msg:unsub",
+            Vars::new().with("client_id", "shared-client"),
+        )
+        .await
+        .unwrap();
+        apply_as(
+            &engine,
+            &u1,
+            "proc:start",
+            Vars::new().with("id", "unsub_scope"),
+        )
+        .await
+        .unwrap();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while *received.lock() == 0 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let after_foreign_unsub = *received.lock();
+        assert!(
+            after_foreign_unsub > 0,
+            "another subject's unsub silenced u1's channel"
+        );
+
+        // The subscriber's own unsub names the same client id and DOES reach
+        // its channel: the composition is symmetric, so the id a client
+        // unsubscribes with is the id it subscribed with.
+        apply_as(
+            &engine,
+            &u1,
+            "msg:unsub",
+            Vars::new().with("client_id", "shared-client"),
+        )
+        .await
+        .unwrap();
+        apply_as(
+            &engine,
+            &u1,
+            "proc:start",
+            Vars::new().with("id", "unsub_scope"),
+        )
+        .await
+        .unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        assert_eq!(
+            *received.lock(),
+            after_foreign_unsub,
+            "the subscriber's own unsub did not reach its channel"
+        );
     }
 
     /// The decisive case: a workflow may not read another subject's sealed

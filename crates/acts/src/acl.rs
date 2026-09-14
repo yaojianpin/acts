@@ -55,6 +55,54 @@ use std::path::{Path, PathBuf};
 /// so it can be used as a startup check without opening a hole.
 pub const ACTION_WHOAMI: &str = "acl:whoami";
 
+/// Action name a subscription is checked against. A stream of workflow
+/// messages is a read of the message face, so opening one is an operation like
+/// any other: a role may subscribe only if `msg:sub` is in its `allow` list.
+/// It is a plain pattern (unlike [`ACTION_WHOAMI`], which is implicitly
+/// allowed) — a role that may not read messages must not be able to open a
+/// stream.
+pub const ACTION_SUBSCRIBE: &str = "msg:sub";
+
+/// The role an engine without an `[acl]` section runs under, and the subject
+/// its callers are attributed to.
+pub const ANONYMOUS_ROLE: &str = "anonymous";
+
+/// What [`ANONYMOUS_ROLE`] may do: **reads only**.
+///
+/// An engine configured without `[acl]` is not locked down but it is not
+/// open either — it answers to anyone, so it must answer to the least anyone
+/// could be trusted with. Inspecting the engine (list/get over models,
+/// processes, tasks, messages, events and packages) is what an unconfigured
+/// deployment is for, and none of it changes state. Everything else is out:
+///
+/// - writes (`model:deploy`, `pack:publish`, `snap:upsert`/`snap:remove`) and
+///   control (`proc:start*`, `act:*`, `evt:start`, `msg:ack`) mutate the
+///   engine,
+/// - admin actions (`*:rm`, `msg:clear`, `msg:redo`, `msg:unsub`) destroy
+///   state,
+/// - `snap:get`/`snap:ls` read scope-owned data, and a scope has an owner
+///   only when a policy names one — without `$subject` there is nobody the
+///   anonymous caller could be,
+/// - `msg:sub` streams live payloads *and* stores a delivery row per message
+///   for a channel it holds, which is a write and a resource, not a read.
+///
+/// Write the smallest `[acl]` section (a `token` shorthand) to get an
+/// administrator, or `enabled = false` to lift the limits on purpose.
+const ANONYMOUS_ALLOW: &[&str] = &[
+    "model:ls",
+    "model:get",
+    "proc:ls",
+    "proc:get",
+    "task:ls",
+    "task:get",
+    "msg:ls",
+    "msg:get",
+    "evt:ls",
+    "evt:get",
+    "pack:ls",
+    "pack:get",
+];
+
 /// The `[acl]` config section. Only read when the section exists — see
 /// [`Acl::from_config`], which turns its presence into "enabled by default".
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -315,6 +363,7 @@ impl Principal {
             self.subject
         )))
     }
+
     /// The filesystem root this principal's processes run under, or `None`
     /// when the policy declares none. A process's own directory is
     /// `<root>/<pid>` (see `Process::workdir`).
@@ -382,9 +431,60 @@ pub struct Acl {
 }
 
 impl Default for Acl {
-    /// A disabled ACL: every operation passes with
-    /// [`Principal::unrestricted`].
+    /// The policy of an engine without an `[acl]` section: anonymous,
+    /// read-only — see [`Acl::anonymous_access`].
     fn default() -> Self {
+        Self::anonymous_access()
+    }
+}
+
+impl Acl {
+    /// The policy of an engine whose config carries **no `[acl]` section**:
+    /// every caller is the [`ANONYMOUS_ROLE`] subject and gets exactly
+    /// [`ANONYMOUS_ALLOW`] — reads, nothing that changes or owns state.
+    ///
+    /// A missing section is neither "no enforcement" (which would hand an
+    /// unauthenticated caller every action) nor "no access" (which would lock
+    /// an operator out of the engine they just started): it is a deployment
+    /// that has not said who may do what, so it answers to anyone with the
+    /// minimum that can be trusted to anyone. The `[acl]` section is how a
+    /// deployment raises that: a `token` shorthand is the smallest one, and
+    /// `enabled = false` (see [`Acl::disabled`]) is the explicit opt-out.
+    pub fn anonymous_access() -> Self {
+        let role = CompiledRole {
+            name: ANONYMOUS_ROLE.to_string(),
+            all: false,
+            allow: compile_patterns(
+                &ANONYMOUS_ALLOW
+                    .iter()
+                    .map(|a| a.to_string())
+                    .collect::<Vec<_>>(),
+                ANONYMOUS_ROLE,
+                "allow",
+            )
+            .expect("the built-in anonymous allow list is valid"),
+            deny: Vec::new(),
+            allow_pat: ANONYMOUS_ALLOW.iter().map(|a| a.to_string()).collect(),
+            deny_pat: Vec::new(),
+            scopes: HashMap::new(),
+            workdir_root: None,
+        };
+        Self {
+            enabled: true,
+            roles: vec![role],
+            // No token is configured, so every token — including none — is an
+            // unknown one, and all of them resolve to the anonymous subject.
+            index: HashMap::new(),
+            default_role: Some(0),
+            workdir_root: None,
+        }
+    }
+
+    /// An explicitly disabled ACL — no enforcement, every operation passes
+    /// with [`Principal::unrestricted`]. Only reachable through an `enabled =
+    /// false` in an `[acl]` section: the absence of the section is
+    /// [`Acl::anonymous_access`], never this.
+    pub fn disabled() -> Self {
         Self {
             enabled: false,
             roles: Vec::new(),
@@ -392,13 +492,6 @@ impl Default for Acl {
             default_role: None,
             workdir_root: None,
         }
-    }
-}
-
-impl Acl {
-    /// A disabled ACL — no enforcement.
-    pub fn disabled() -> Self {
-        Self::default()
     }
 
     pub fn enabled(&self) -> bool {
@@ -551,6 +644,15 @@ fn compile_role(role: &RoleConfig) -> Result<CompiledRole> {
         return Err(ActError::Config(
             "acl role name cannot be empty".to_string(),
         ));
+    }
+    // The role name is the subject, and it prefixes the channel key of every
+    // subscription the role opens (`{subject}/{client_id}`), so a name
+    // carrying the separator could spell another subject's prefix.
+    if role.name.contains('/') {
+        return Err(ActError::Config(format!(
+            "acl role name '{}' cannot contain '/'",
+            role.name
+        )));
     }
     let all = role.allow.iter().any(|p| p == "*");
     let allow = compile_patterns(&role.allow, &role.name, "allow")?;
@@ -982,6 +1084,110 @@ mod tests {
         ))
         .unwrap_err();
         assert!(err.to_string().contains("without a target name"), "{err}");
+    }
+
+    #[test]
+    fn a_role_name_cannot_carry_the_channel_separator() {
+        let err = Acl::from_config(&config(
+            r#"
+            [[role]]
+            name = "u1/u2"
+            tokens = ["t"]
+            allow = ["*"]
+            "#,
+        ))
+        .unwrap_err();
+        assert!(err.to_string().contains("cannot contain '/'"), "{err}");
+    }
+
+    /// An engine without an `[acl]` section answers to anyone, with the
+    /// anonymous read-only policy: reads pass, everything that changes or
+    /// owns state does not.
+    #[test]
+    fn a_missing_section_is_anonymous_read_only() {
+        let acl = Acl::anonymous_access();
+        assert!(acl.enabled());
+
+        let anonymous = acl.authenticate(None).unwrap();
+        assert_eq!(anonymous.subject(), ANONYMOUS_ROLE);
+        // No token is configured, so a presented one is just as unknown and
+        // lands on the same subject.
+        assert_eq!(
+            acl.authenticate(Some("anything")).unwrap().subject(),
+            ANONYMOUS_ROLE
+        );
+        // The in-process entry resolves there too.
+        assert_eq!(acl.anonymous().subject(), ANONYMOUS_ROLE);
+
+        for action in ANONYMOUS_ALLOW {
+            assert!(anonymous.check(action).is_ok(), "{action} should pass");
+        }
+        // Writes, control and admin actions are all out.
+        for action in [
+            "model:deploy",
+            "pack:publish",
+            "snap:upsert",
+            "snap:remove",
+            "proc:start",
+            "proc:start_from_model",
+            "act:complete",
+            "evt:start",
+            "msg:ack",
+            "msg:sub",
+            "msg:rm",
+            "msg:clear",
+            "msg:redo",
+            "msg:unsub",
+            "model:rm",
+            "snap:get",
+            "snap:ls",
+        ] {
+            assert!(
+                matches!(anonymous.check(action), Err(AclError::Denied(_))),
+                "{action} must be refused, got {:?}",
+                anonymous.check(action)
+            );
+        }
+        // Snapshot scopes have an owner only when a policy names one.
+        assert!(anonymous.check_scope("profile", "u1").is_err());
+    }
+
+    /// `enabled = false` is the explicit opt-out, and the only way to reach
+    /// the pre-ACL behaviour.
+    #[test]
+    fn enabled_false_is_the_explicit_opt_out() {
+        let acl = Acl::from_config(&config("enabled = false")).unwrap();
+        assert!(!acl.enabled());
+        assert!(acl.authenticate(None).unwrap().is_unrestricted());
+        assert!(acl.anonymous().is_unrestricted());
+    }
+
+    /// Subscribing is an action: a role without `msg:sub` cannot open a
+    /// stream, and one with it is granted the key it registered.
+    #[test]
+    fn subscribing_needs_the_grant() {
+        let acl = Acl::from_config(&config(
+            r#"
+            [[role]]
+            name = "reader"
+            tokens = ["t1"]
+            allow = ["msg:ls"]
+            [[role]]
+            name = "listener"
+            tokens = ["t2"]
+            allow = ["msg:sub"]
+            "#,
+        ))
+        .unwrap();
+
+        let reader = acl.authenticate(Some("t1")).unwrap();
+        assert!(matches!(
+            reader.check(ACTION_SUBSCRIBE),
+            Err(AclError::Denied(_))
+        ));
+
+        let listener = acl.authenticate(Some("t2")).unwrap();
+        assert!(listener.check(ACTION_SUBSCRIBE).is_ok());
     }
 
     #[test]

@@ -90,10 +90,23 @@ port = 10082
 # allow-private-addresses = false
 # maximum response body bytes; larger bodies fail the act
 # max-response-bytes = 67108864
+
 # connect timeout in ms; 0 disables it
 # connect-timeout-ms = 10000
 # whole-request timeout in ms; omitted or 0 disables it
 # timeout-ms = 30000
+
+# access control — acts-server and every transport plugin.
+#
+# Without this section the engine is anonymous and read-only: callers may list
+# and get models, processes, tasks, messages, events and packages, and nothing
+# else (no writes, no control actions, no admin actions, no snapshot scope, no
+# subscriptions). Add the section to name your callers, or write
+# `enabled = false` inside it to lift the limits on purpose.
+# [acl]
+# enabled = false
+# shorthand: one token with unrestricted access (the requirepass equivalent)
+# token = "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
 
 # nats service — acts-plugin-nats. Only connected when this [nats] section
 # exists. Server actions are request/reply on "<subject>.cmd"; engine events

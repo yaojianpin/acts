@@ -155,9 +155,13 @@ plus snapshot operations (`snap:upsert`, `snap:remove`, `snap:get`,
 
 ### Access control
 
-An optional `[acl]` section turns on access control for all three transports.
-The section's presence is the switch — without it every request is allowed,
-which is the previous behaviour.
+Without an `[acl]` section the engine is **anonymous and read-only**: every
+request is attributed to the built-in `anonymous` subject, which may list and
+get models, processes, tasks, messages, events and packages — no writes, no
+control actions (`proc:start`, `act:*`, `evt:start`, `msg:ack`), no admin
+actions, no snapshot scope, no subscriptions. Add `[acl]` to name your callers
+(a single `token` is the smallest useful section), or write `enabled = false`
+inside it to lift the limits on purpose.
 
 | Transport | Credential |
 |-----------|------------|
@@ -167,11 +171,13 @@ which is the previous behaviour.
 
 The token selects a role; the role's `allow`/`deny` action-name globs decide,
 with `deny` winning. Tokens are compared as SHA-256 digests
-(`sha256:<hex>` keeps the clear text out of the config). A `snapshot` table
-per role narrows which scopes of which targets the subject owns (`$subject`
-is the role name), and that ownership is re-checked when a task seals a
-snapshot value — a workflow cannot read another subject's sealed data even
-when started with their `uid`.
+(`sha256:<hex>` keeps the clear text out of the config). Opening a message
+stream is itself an action (`msg:sub`), and a subscription's channel is
+namespaced by the caller's subject, so one caller cannot take over another's
+channel. A `snapshot` table per role narrows which scopes of which targets the
+subject owns (`$subject` is the role name), and that ownership is re-checked
+when a task seals a snapshot value — a workflow cannot read another subject's
+sealed data even when started with their `uid`.
 
 `workdir` (on `[acl]`, or per role) is a **root**: each run gets its own
 directory `<workdir>/<pid>` and its filesystem access is confined to that one.

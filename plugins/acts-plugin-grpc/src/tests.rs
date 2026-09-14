@@ -5,6 +5,7 @@ use acts_channel::{MessageOptions, acts_service_server::ActsService};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio_stream::StreamExt as _;
 
 #[test]
 fn test_grpc_config_default() {
@@ -46,8 +47,12 @@ fn free_port() -> u16 {
         .port()
 }
 
+/// A transport engine with access control explicitly off: these cases exercise
+/// the gRPC surface, so their caller must be unrestricted. The ACL cases below
+/// build their own policies.
 async fn engine_with_grpc(port: u16) -> Engine {
-    let table: toml::Table = toml::from_str(&format!("[grpc]\nport = {port}\n")).unwrap();
+    let table: toml::Table =
+        toml::from_str(&format!("[acl]\nenabled = false\n[grpc]\nport = {port}\n")).unwrap();
     let cfg = acts::Config {
         data: Default::default(),
         table,
@@ -114,7 +119,7 @@ async fn test_grpc_server_new() {
 /// options — empty options on `msg:clear` mean "clear every error delivery".
 #[tokio::test(flavor = "multi_thread")]
 async fn test_do_action_rejects_malformed_data() {
-    let engine = Engine::builder().start().await.unwrap();
+    let engine = engine_with_grpc(free_port()).await;
     let server = GrpcServer::new(&engine);
 
     let malformed: [&[u8]; 4] = [b"[]", b"{", b"null", b"\"msg:clear\""];
@@ -213,7 +218,7 @@ async fn wait_until(mut cond: impl FnMut() -> bool, label: &str) {
 /// a leaked handler would store one message row per workflow message forever.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_on_message_stream_drop_deregisters_channel() {
-    let engine = Engine::builder().start().await.unwrap();
+    let engine = engine_with_grpc(free_port()).await;
     let server = GrpcServer::new(&engine);
 
     // spy channel: counts every dispatched workflow message without
@@ -293,7 +298,7 @@ const GRPC_ACL: &str = r#"
 [[acl.role]]
 name = "operator"
 tokens = ["op-token"]
-allow = ["msg:clear"]
+allow = ["msg:clear", "msg:sub"]
 "#;
 
 fn send_request(name: &str, token: Option<&str>) -> tonic::Request<acts_channel::Message> {
@@ -358,4 +363,161 @@ async fn test_send_enforces_acl() {
         .on_message(request)
         .await
         .expect("an authenticated subscription must open");
+}
+
+/// Two tenants, both allowed to start runs, subscribe and ack.
+const SUB_ACL: &str = r#"
+[acl]
+
+[[acl.role]]
+name = "u1"
+tokens = ["token-u1"]
+allow = ["model:deploy", "proc:start", "msg:ack", "msg:sub"]
+
+[[acl.role]]
+name = "u2"
+tokens = ["token-u2"]
+allow = ["model:deploy", "proc:start", "msg:ack", "msg:sub"]
+"#;
+
+fn subscribe(client_id: &str, token: &str) -> tonic::Request<MessageOptions> {
+    let mut request = tonic::Request::new(MessageOptions {
+        client_id: client_id.to_string(),
+        r#type: "*".to_string(),
+        state: "*".to_string(),
+        uses: "*".to_string(),
+        options: Default::default(),
+    });
+    request
+        .metadata_mut()
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
+    request
+}
+
+/// Start the deployed `mid` as the principal's own run and answer its pid.
+async fn start_owned(engine: &Engine, principal: &acts::Principal, mid: &str) -> String {
+    acts::actions::apply_as(engine, principal, "proc:start", Vars::new().with("id", mid))
+        .await
+        .unwrap()
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// Collect what a subscription stream carries until it goes quiet for
+/// `idle_ms`, decoding each wire payload back into an `acts::Message`.
+async fn drain<T>(stream: &mut T, idle_ms: u64) -> Vec<acts::Message>
+where
+    T: tokio_stream::Stream<Item = Result<acts_channel::Message, tonic::Status>> + Unpin,
+{
+    let mut out = Vec::new();
+    loop {
+        match tokio::time::timeout(Duration::from_millis(idle_ms), stream.next()).await {
+            Ok(Some(Ok(message))) => {
+                let data = message.data.expect("a delivered message carries data");
+                out.push(serde_json::from_slice::<acts::Message>(&data).unwrap());
+            }
+            Ok(Some(Err(status))) => panic!("subscription failed: {status}"),
+            Ok(None) => break,
+            Err(_) => break,
+        }
+    }
+    out
+}
+
+/// The `client_id` is not the channel key on its own: the subject namespaces
+/// it, so two subscribers naming the same id coexist instead of one replacing
+/// the other's handler. Both see every process — delivery follows the grants
+/// and the channel filters, not the run's starter.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_subscriptions_are_namespaced_by_subject() {
+    let engine = engine_with_acl(SUB_ACL).await;
+    let server = GrpcServer::new(&engine);
+    let u1 = engine.acl().authenticate(Some("token-u1")).unwrap();
+    let u2 = engine.acl().authenticate(Some("token-u2")).unwrap();
+
+    let model = Workflow::new().with_id("grpc-scope").with_step(|step| {
+        step.with_id("step1")
+            .with_uses("acts.core.irq", Vars::new().with("key", "scope-test"))
+    });
+    for principal in [&u1, &u2] {
+        acts::actions::apply_as(
+            &engine,
+            principal,
+            "model:deploy",
+            Vars::new().with("model", model.to_yml().unwrap()),
+        )
+        .await
+        .unwrap();
+    }
+
+    // the same client id on both sides, a different token each
+    let mut u1_stream = server
+        .on_message(subscribe("shared-client", "token-u1"))
+        .await
+        .unwrap()
+        .into_inner();
+    let mut u2_stream = server
+        .on_message(subscribe("shared-client", "token-u2"))
+        .await
+        .unwrap()
+        .into_inner();
+
+    let u1_pid = start_owned(&engine, &u1, "grpc-scope").await;
+    let u2_pid = start_owned(&engine, &u2, "grpc-scope").await;
+
+    let seen_u1 = drain(&mut u1_stream, 1_000).await;
+    let seen_u2 = drain(&mut u2_stream, 1_000).await;
+
+    // Both registrations are live — neither handler replaced the other — and
+    // each stream carried both runs.
+    assert!(!seen_u1.is_empty(), "u1's subscription received nothing");
+    assert!(!seen_u2.is_empty(), "u2's subscription received nothing");
+    for (subject, seen) in [("u1", &seen_u1), ("u2", &seen_u2)] {
+        assert!(
+            seen.iter().any(|m| m.pid == u1_pid),
+            "{subject}'s stream never saw u1's run"
+        );
+        assert!(
+            seen.iter().any(|m| m.pid == u2_pid),
+            "{subject}'s stream never saw u2's run"
+        );
+    }
+
+    engine.close().await;
+}
+
+/// A subscription is an action: a role without `msg:sub` is refused the
+/// stream with PERMISSION_DENIED, and one with it is granted a channel.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_subscription_needs_the_grant() {
+    let engine = engine_with_acl(SUB_ACL).await;
+    let server = GrpcServer::new(&engine);
+
+    // `msg:ls` is a read of stored messages; it is not a subscription grant.
+    let engine2 = engine_with_acl(
+        r#"
+        [acl]
+        [[acl.role]]
+        name = "reader"
+        tokens = ["reader-token"]
+        allow = ["msg:ls"]
+        "#,
+    )
+    .await;
+    let reader = GrpcServer::new(&engine2);
+    let status = reader
+        .on_message(subscribe("reader-client", "reader-token"))
+        .await
+        .err()
+        .expect("a role without msg:sub must not open a stream");
+    assert_eq!(status.code(), tonic::Code::PermissionDenied, "{status}");
+    engine2.close().await;
+
+    let stream = server
+        .on_message(subscribe("granted-client", "token-u1"))
+        .await
+        .expect("msg:sub opens the stream");
+    drop(stream);
+    engine.close().await;
 }

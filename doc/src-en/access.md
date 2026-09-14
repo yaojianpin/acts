@@ -1,18 +1,29 @@
 # Access Control
 
-An optional `[acl]` section in the engine config turns on access control for
-the transport plugins. Without the section nothing is enforced — every request
-is allowed, which is the pre-ACL behaviour.
+An `[acl]` section in the engine config is what makes an engine answerable to a
+known caller. **Without it, the engine is anonymous and read-only**: every
+request is attributed to the built-in `anonymous` subject, which may list and
+get models, processes, tasks, messages, events and packages, and nothing else —
+no writes, no control actions, no admin actions, no snapshot scope, no
+subscription. An unconfigured deployment is for looking at the engine, not for
+changing it or for reading data someone owns.
 
-The section's presence is the switch. It can be turned off explicitly with
-`enabled = false`, but there is no reason to write the section for that.
+Two ways out of that default:
+
+- add `[acl]` — the smallest useful section is one `token`, which grants that
+  token everything (the `requirepass` equivalent) and switches every caller
+  from anonymous to authenticated;
+- write `enabled = false` inside `[acl]`, the explicit opt-out: nothing is
+  enforced and every caller is unrestricted. That is the pre-ACL behaviour, and
+  it is now a deliberate choice rather than the absence of a section.
 
 ## Tokens and roles
 
 A request carries a token; the token selects a **role**; the role's `allow` /
-`deny` **action patterns** decide. `deny` always wins, and because the section
-is the opt-in, a request with no token — or with a token matching no role — is
-refused unless `default_role` names a role to fall back to.
+`deny` **action patterns** decide. `deny` always wins. A request with no token
+— or with a token matching no role — is refused unless `default_role` names a
+role to fall back to (`[[acl.role]] name = "anonymous"` is how a deployment
+keeps the read-only default while configuring everything else around it).
 
 Tokens are compared by **SHA-256 digest**. Write `sha256:<64 hex digits>` to
 keep the clear text out of the config file, or write the token itself and let
@@ -57,12 +68,21 @@ the CLI and the channel client use.
 | read | `model:ls` `model:get` `proc:ls` `proc:get` `task:ls` `task:get` `msg:ls` `msg:get` `evt:ls` `evt:get` `pack:ls` `pack:get` `snap:get` `snap:ls` |
 | write | `model:deploy` `pack:publish` `snap:upsert` `snap:remove` |
 | control | `proc:start` `proc:start_from_model` `act:push` `act:remove` `act:submit` `act:complete` `act:abort` `act:cancel` `act:back` `act:skip` `act:error` `evt:start` `msg:ack` |
+| subscribe | `msg:sub` |
 | admin | `model:rm` `pack:rm` `msg:rm` `msg:clear` `msg:redo` `msg:unsub` |
 
 `allow = ["*"]` is unrestricted: every action passes, and every snapshot scope
 too. `acl:whoami` reports the caller's own identity and effective patterns; it
 is implicitly allowed for an authenticated caller, so it works as a startup
 check without widening anything.
+
+The `anonymous` subject an engine without `[acl]` resolves to gets exactly the
+`read` group of the table above minus the snapshot actions — every `*:ls` and
+`*:get` over models, processes, tasks, messages, events and packages. That is
+the least a caller the engine cannot name may be trusted with: `msg:sub` is out
+because a stream both carries live payloads and stores a delivery row per
+message for a channel it holds, and `snap:get`/`snap:ls` are out because a
+snapshot scope has an owner only when a policy names one.
 
 ## Snapshot scope ownership
 
@@ -83,6 +103,55 @@ The rule is enforced twice:
 
 A process started in-process (an embedder calling the executor directly) or by
 a trigger carries no caller authority and stays unrestricted.
+
+## Message face
+
+Messages and their deliveries are authorized by **action grants**, like every
+other operation — a process's owner has no say over who may read or ack the
+messages it emitted.
+
+- **Subscribing is an action.** Opening a stream (gRPC `on_message`, SSE
+  `/msg/sse`) requires `msg:sub` in the role's `allow` list; without it the
+  transport answers `PERMISSION_DENIED` / `403` instead of a stream. The
+  transport hands the client id it received to that action and registers the
+  channel under the key the action answers with, so the checked path and the
+  occupied key cannot drift apart.
+- **The key is namespaced by subject**: `{subject}/{transport id}` — the
+  subject as the prefix, the transport's own client id (SSE keeps its
+  `acts-flow-client-` segment) behind it. A second caller naming a client id
+  another subject already uses therefore subscribes to a *different* channel
+  instead of replacing that subject's handler. `msg:unsub` composes the same
+  key from the same id, so a caller only names channels in its own namespace —
+  and a role name carrying `/` is refused at config load, which is what keeps
+  the prefix unambiguous.
+- **Delivery follows the filters and the grants.** A channel receives every
+  message that matches its self-declared `type`/`state`/`uses`/`options`
+  globs, whoever started the emitting process; what a caller may do with the
+  messages it receives is decided by the actions it holds. A role that must not
+  read message payloads simply has no `msg:sub` (and no `msg:ls`/`msg:get`).
+- `msg:ack` and `msg:unsub` are ordinary actions too: any role granted them may
+  ack any delivery id and unsubscribe any channel in its own namespace. The
+  delivery id is not addressed per client, so grant `msg:ack` the way you would
+  grant a write — its holder can silence another caller's unacked messages.
+
+## What is enforced where
+
+Three kinds of rule, and each is checked at the layer that can express it:
+
+| Rule | Enforced on | By |
+| --- | --- | --- |
+| action permission | every operation, in one table | role `allow`/`deny` patterns |
+| snapshot scope ownership | `snap:*` actions, and again at seal time | role `snapshot` table (`$subject`) |
+| channel namespace | channel key and `msg:unsub` | the authenticated subject |
+
+Two entry points do **not** go through the action table, and are not subject to
+it: a process started in-process (an embedder calling `Engine::executor()`
+directly) or by a trigger carries no caller authority and stays unrestricted,
+and the engine's own internal operations are not requests. An unconfigured
+engine's anonymous caller is the exception that proves the rule — it *is* a
+caller, so it goes through the table like any other and gets the read-only
+subset described above.
+
 
 ## Directory control
 
@@ -148,4 +217,6 @@ use acts_channel::ActsChannel;
 let mut client = ActsChannel::connect_with_token("http://127.0.0.1:10080", Some(token)).await?;
 ```
 
-`connect` is the tokenless form, valid only against a server without `[acl]`.
+`connect` is the tokenless form: it is the anonymous caller, so against a server
+without `[acl]` it can read and nothing else, and against a configured one it is
+refused unless a `default_role` admits it.

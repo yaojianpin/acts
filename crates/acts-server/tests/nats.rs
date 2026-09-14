@@ -58,9 +58,12 @@ async fn acts_server_handles_nats_snapshot_actions() {
             .unwrap()
             .as_nanos()
     ));
+    // This case exercises the server's NATS action path, so the caller must be
+    // unrestricted: an engine without `[acl]` is anonymous and read-only.
     std::fs::write(
         &path,
         "[log]\ndir = \"acts-server-test-log\"\nlevel = \"INFO\"\n\n\
+         [acl]\nenabled = false\n\n\
          [nats]\nurl = \"nats://127.0.0.1:4222\"\nsubject = \"acts\"\n",
     )
     .unwrap();

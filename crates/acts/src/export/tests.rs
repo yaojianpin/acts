@@ -2372,6 +2372,91 @@ async fn export_emitter_type_not_match() {
     assert_eq!(ret.len(), 0);
 }
 
+/// Start `model` as an owned process: the authority the action layer seals
+/// into the start options, without an HTTP/gRPC transport in the way.
+async fn start_owned(engine: &Engine, model: &Workflow, subject: &str) -> String {
+    engine
+        .runtime()
+        .start(
+            model,
+            Vars::new().with(
+                consts::PROC_OWNER,
+                crate::ScopePolicy {
+                    subject: subject.to_string(),
+                    ..crate::ScopePolicy::deny_all()
+                },
+            ),
+        )
+        .await
+        .unwrap()
+        .id()
+        .to_string()
+}
+
+/// Two subscribers name the same client id: the subject namespaces the channel
+/// key, so the second registration must not replace the first subscriber's
+/// handler — both keep receiving, and each sees every process (delivery is
+/// decided by the action grants and the channel filters, not by who started
+/// the run).
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn export_channel_namespace_keeps_subscribers_apart() {
+    let engine = Engine::builder().start().await.unwrap();
+    let model = Workflow::new().with_id(&utils::longid()).with_step(|step| {
+        step.with_id("step1")
+            .with_uses(USES_IRQ, Vars::new().with("key", "scope-test"))
+    });
+
+    /// One test subscriber: its subject, what it collected, and its signal.
+    type Subscriber = (&'static str, Arc<Mutex<Vec<Message>>>, Signal<bool>);
+    let mut seen: Vec<Subscriber> = Vec::new();
+    for subject in ["u1", "u2"] {
+        let collected = Arc::new(Mutex::new(Vec::<Message>::new()));
+        let notified = engine.signal(false);
+        let chan = engine.channel_with_options(&ChannelOptions {
+            id: ChannelOptions::subscription_id(subject, "client-1"),
+            ack: true,
+            ..Default::default()
+        });
+        let (c, n) = (collected.clone(), notified.clone());
+        chan.on_message(move |e| {
+            let (c, n) = (c.clone(), n.clone());
+            async move {
+                c.lock().push(e.inner().clone());
+                n.send(true);
+            }
+        });
+        seen.push((subject, collected, notified));
+    }
+
+    let u1_pid = start_owned(&engine, &model, "u1").await;
+    let u2_pid = start_owned(&engine, &model, "u2").await;
+
+    // Both subscribers are alive — the later registration did not take over
+    // the earlier one's channel.
+    for (subject, _, notified) in &seen {
+        assert!(
+            notified.timeout(5_000).await,
+            "subscriber {subject} received nothing"
+        );
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    // Both runs reach both channels: neither subject's messages are withheld
+    // from a subscriber whose filters match them.
+    for (subject, collected, _) in &seen {
+        let messages = collected.lock().clone();
+        assert!(
+            messages.iter().any(|m| m.pid == u1_pid),
+            "subscriber {subject} never saw u1's run"
+        );
+        assert!(
+            messages.iter().any(|m| m.pid == u2_pid),
+            "subscriber {subject} never saw u2's run"
+        );
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn export_emitter_state_match() {
