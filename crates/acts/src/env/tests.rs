@@ -1,7 +1,7 @@
 use std::time::{Duration, Instant};
 
 use crate::{
-    ActError, ActUserVar, Context, Engine, MessageState, Vars, Workflow, env::Enviroment,
+    ActError, ActUserVar, Context, Engine, MessageState, Vars, Workflow, env::Environment,
     event::EventAction, utils::consts, utils::test::USES_IRQ,
 };
 use serde::{Deserialize, Serialize};
@@ -10,14 +10,14 @@ use serde_json::json;
 use serial_test::serial;
 #[test]
 fn env_eval_empty() {
-    let env = Enviroment::new();
+    let env = Environment::new();
     let result = env.eval::<()>("");
     assert!(result.is_ok());
 }
 
 #[test]
 fn env_eval_void() {
-    let env = Enviroment::new();
+    let env = Environment::new();
 
     let script = r#"
         let v = 5;
@@ -30,7 +30,7 @@ fn env_eval_void() {
 
 #[test]
 fn env_eval_number() {
-    let env = Enviroment::new();
+    let env = Environment::new();
     let script = r#"
         let v = 5;
         v
@@ -42,7 +42,7 @@ fn env_eval_number() {
 
 #[test]
 fn env_eval_throw_error() {
-    let env = Enviroment::new();
+    let env = Environment::new();
     let script = r#"
         throw new Error("err1");
     "#;
@@ -58,7 +58,7 @@ fn env_eval_throw_error() {
 }
 #[test]
 fn env_eval_infinite_loop_timeout() {
-    let env = Enviroment::new();
+    let env = Environment::new();
     let script = r#"
         while (true) {}
     "#;
@@ -75,7 +75,7 @@ fn env_eval_infinite_loop_timeout() {
 
 #[test]
 fn env_eval_expr() {
-    let env = Enviroment::new();
+    let env = Environment::new();
 
     let script = r#"
         let ret =  10;
@@ -87,14 +87,14 @@ fn env_eval_expr() {
 
 #[test]
 fn env_eval_bigint_within_i64() {
-    let env = Enviroment::new();
+    let env = Environment::new();
     let result = env.eval::<i64>("BigInt(42)");
     assert_eq!(result.unwrap(), 42);
 }
 
 #[test]
 fn env_eval_bigint_outside_i64_is_error() {
-    let env = Enviroment::new();
+    let env = Environment::new();
     let result = env.eval::<serde_json::Value>(r#"BigInt("1000000000000000000000000000000")"#);
     let err = result.unwrap_err();
     assert!(
@@ -105,7 +105,7 @@ fn env_eval_bigint_outside_i64_is_error() {
 
 #[test]
 fn env_eval_array() {
-    let env = Enviroment::new();
+    let env = Environment::new();
 
     let script = r#"
         ["u1", "u2"]
@@ -117,7 +117,7 @@ fn env_eval_array() {
 
 #[test]
 fn env_eval_object() {
-    let env = Enviroment::new();
+    let env = Environment::new();
 
     let script = r#"
         let ret =  { "a": 1, "b": "abc" };
@@ -207,7 +207,7 @@ async fn env_eval_null() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_console_module() {
-    let env = Enviroment::new();
+    let env = Environment::new();
     let script = r#"
         let v = 5;
         console.log(`v=${v}`);
@@ -225,7 +225,7 @@ async fn env_console_module() {
 #[test]
 #[serial]
 fn env_collection_union() {
-    let env = Enviroment::new();
+    let env = Environment::new();
     let script = r#"
         let a = ["a"];
         let b = ["b"];
@@ -239,7 +239,7 @@ fn env_collection_union() {
 #[test]
 #[serial]
 fn env_eval_pooled_context_does_not_leak_globals() {
-    let env = Enviroment::new();
+    let env = Environment::new();
 
     env.eval::<()>(
         r#"
@@ -266,7 +266,7 @@ fn env_eval_pooled_context_does_not_leak_globals() {
 #[test]
 #[serial]
 fn env_eval_pooled_context_restores_module_globals() {
-    let env = Enviroment::new();
+    let env = Environment::new();
 
     env.eval::<()>(
         r#"
@@ -290,7 +290,7 @@ fn env_eval_pooled_context_restores_module_globals() {
 #[test]
 #[serial]
 fn env_collection_intersect() {
-    let env = Enviroment::new();
+    let env = Environment::new();
     let script = r#"
         let a = ["a", "b"];
         let b = ["b", "c"];
@@ -304,7 +304,7 @@ fn env_collection_intersect() {
 #[test]
 #[serial]
 fn env_collection_difference() {
-    let env = Enviroment::new();
+    let env = Environment::new();
     let script = r#"
         let a = ["a", "b"];
         let b = ["b"];
@@ -1196,7 +1196,7 @@ async fn env_user_var_secrets_get() {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_user_var_os_get() {
-    let env = Enviroment::new();
+    let env = Environment::new();
 
     let script = r#"
         os

@@ -3,14 +3,14 @@ pub mod secrets;
 use super::super::ActModule;
 use crate::{
     Context, Result, Vars,
-    env::{Enviroment, value::ActJsValue},
+    env::{Environment, value::ActJsValue},
 };
 
 pub struct UserVars {
-    env: Enviroment,
+    env: Environment,
 }
 impl UserVars {
-    pub fn new(env: &Enviroment) -> Self {
+    pub fn new(env: &Environment) -> Self {
         Self { env: env.clone() }
     }
 

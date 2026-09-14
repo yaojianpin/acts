@@ -1,4 +1,4 @@
-mod moudle;
+mod module;
 #[cfg(test)]
 mod tests;
 mod value;
@@ -61,7 +61,7 @@ pub trait ActUserVar: Send + Sync {
 }
 
 #[derive(Clone)]
-pub struct Enviroment {
+pub struct Environment {
     modules: ShareLock<Vec<Box<dyn ActModule>>>,
     pub(crate) user_vars: ShareLock<Vec<Box<dyn ActUserVar>>>,
     /// Third-party modules may install arbitrary state in `init`; preserve the
@@ -71,21 +71,21 @@ pub struct Enviroment {
     contexts: Arc<Mutex<Vec<(JsContext, bool)>>>,
 }
 
-impl fmt::Debug for Enviroment {
+impl fmt::Debug for Environment {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Enviroment").finish()
     }
 }
 
-impl Default for Enviroment {
+impl Default for Environment {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Enviroment {
+impl Environment {
     pub fn new() -> Self {
-        let mut env = Enviroment {
+        let mut env = Environment {
             modules: Arc::new(RwLock::new(Vec::new())),
             user_vars: Arc::new(RwLock::new(Vec::new())),
             has_custom_modules: Arc::new(AtomicBool::new(false)),
@@ -166,7 +166,7 @@ const GLOBAL_SNAPSHOT_RESET: &str = r#"
 })()
 "#;
 
-impl Enviroment {
+impl Environment {
     fn eval_with_new_context<T>(&self, expr: &str) -> Result<T>
     where
         T: DeserializeOwned,

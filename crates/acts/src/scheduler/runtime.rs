@@ -5,7 +5,7 @@ use crate::{
     ActError, Action, Config, Error, Package, Result, ShareLock, Vars, Workflow,
     cache::Cache,
     data,
-    env::Enviroment,
+    env::Environment,
     event::{Emitter, EventAction, ProcessGate},
     scheduler::queue::{Queue, QueueData},
     store::{KvStore, Store},
@@ -30,7 +30,7 @@ use tracing::{debug, error, info, instrument};
 pub struct Runtime {
     config: Arc<Config>,
     queue: Arc<Queue>,
-    env: Arc<Enviroment>,
+    env: Arc<Environment>,
     cache: Arc<Cache>,
     emitter: Arc<Emitter>,
     package: Arc<Package>,
@@ -227,7 +227,7 @@ impl Runtime {
     }
 
     #[allow(unused)]
-    pub fn env(&self) -> &Arc<Enviroment> {
+    pub fn env(&self) -> &Arc<Environment> {
         &self.env
     }
 
@@ -922,7 +922,7 @@ impl Runtime {
 
     fn create(config: &Config, store: Option<Arc<dyn KvStore>>) -> crate::Result<Arc<Runtime>> {
         // let scher = Scheduler::new();
-        let env = Arc::new(Enviroment::new());
+        let env = Arc::new(Environment::new());
         let cache = Arc::new(Cache::new(config, store)?);
         let process_gate = ProcessGate::new(config.scheduler_workers());
         let emitter = Arc::new(Emitter::with_process_gate(process_gate));

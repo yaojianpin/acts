@@ -1,4 +1,4 @@
-use super::Enviroment;
+use super::Environment;
 
 mod act;
 mod array;
@@ -9,7 +9,7 @@ mod sealed;
 mod step;
 mod vars;
 
-impl Enviroment {
+impl Environment {
     pub fn init(&mut self) {
         let mut modules = self.modules.write();
 
