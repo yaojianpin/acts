@@ -19,7 +19,7 @@ use serial_test::serial;
 #[serial]
 async fn export_manager_publish_ok() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let pack = data::Package {
         id: "pack1".to_string(),
         desc: "desc".to_string(),
@@ -43,7 +43,7 @@ async fn export_manager_publish_ok() {
 #[serial]
 async fn export_manager_deploy_ok() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let model = Workflow::new()
         .with_id(&utils::longid())
         .with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "test")));
@@ -58,7 +58,7 @@ async fn export_manager_deploy_ok() {
 #[serial]
 async fn export_manager_deploy_many_times() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let model = Workflow::new()
         .with_id(&utils::longid())
         .with_step(|step| step.with_id("step1"));
@@ -75,7 +75,7 @@ async fn export_manager_deploy_many_times() {
 #[serial]
 async fn export_manager_deploy_no_model_id_error() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let model = Workflow::new().with_step(|step| step.with_id("step1"));
 
     let result = manager.model().deploy(&model, None).await;
@@ -86,7 +86,7 @@ async fn export_manager_deploy_no_model_id_error() {
 #[serial]
 async fn export_manager_deploy_dup_id_error() {
     let engine = Engine::builder().start().await.unwrap();
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
     let model = Workflow::new()
         .with_id(&utils::longid())
         .with_step(|step| step.with_id("step1"))
@@ -100,14 +100,14 @@ async fn export_manager_deploy_dup_id_error() {
 #[serial]
 async fn engine_executor_start_no_pid() {
     let engine = Engine::builder().start().await.unwrap();
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
 
     let mid = utils::longid();
     let workflow = Workflow::new()
         .with_id(&mid)
         .with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "test")));
     engine
-        .executor()
+        .executor(&crate::Principal::unrestricted())
         .model()
         .deploy(&workflow, None)
         .await
@@ -121,14 +121,14 @@ async fn engine_executor_start_no_pid() {
 #[serial]
 async fn engine_executor_start_with_pid() {
     let engine = Engine::builder().start().await.unwrap();
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
 
     let mid = utils::longid();
     let workflow = Workflow::new()
         .with_id(&mid)
         .with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "test")));
     engine
-        .executor()
+        .executor(&crate::Principal::unrestricted())
         .model()
         .deploy(&workflow, None)
         .await
@@ -145,7 +145,7 @@ async fn engine_executor_start_with_pid() {
 #[serial]
 async fn export_executor_start_empty_pid() {
     let engine = Engine::builder().start().await.unwrap();
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
 
     let mid = utils::longid();
     let workflow = Workflow::new()
@@ -153,7 +153,7 @@ async fn export_executor_start_empty_pid() {
         .with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "test")));
 
     engine
-        .executor()
+        .executor(&crate::Principal::unrestricted())
         .model()
         .deploy(&workflow, None)
         .await
@@ -171,7 +171,7 @@ async fn export_executor_start_empty_pid() {
 #[serial]
 async fn export_executor_start_dup_pid_error() {
     let engine = Engine::builder().start().await.unwrap();
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
 
     let pid = utils::longid();
     let mid = utils::longid();
@@ -196,7 +196,7 @@ async fn export_executor_start_dup_pid_error() {
     };
     store.procs().create(&proc).await.expect("create process");
     engine
-        .executor()
+        .executor(&crate::Principal::unrestricted())
         .model()
         .deploy(&model, None)
         .await
@@ -211,7 +211,7 @@ async fn export_executor_start_dup_pid_error() {
 #[serial]
 async fn export_executor_start_from_yaml() {
     let engine = Engine::builder().start().await.unwrap();
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
     let mid = utils::longid();
     let model = Workflow::new()
         .with_id(&mid)
@@ -230,7 +230,7 @@ async fn export_executor_start_from_yaml() {
 #[serial]
 async fn export_executor_start_from_json() {
     let engine = Engine::builder().start().await.unwrap();
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
     let mid = utils::longid();
     let model = Workflow::new()
         .with_id(&mid)
@@ -249,7 +249,7 @@ async fn export_executor_start_from_json() {
 #[serial]
 async fn export_executor_start_with_inputs_schema_ok() {
     let engine = Engine::builder().start().await.unwrap();
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
     let mid = utils::longid();
     let workflow = Workflow::new()
         .with_id(&mid)
@@ -259,7 +259,7 @@ async fn export_executor_start_with_inputs_schema_ok() {
         )]))
         .with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "test")));
     engine
-        .executor()
+        .executor(&crate::Principal::unrestricted())
         .model()
         .deploy(&workflow, None)
         .await
@@ -275,7 +275,7 @@ async fn export_executor_start_with_inputs_schema_ok() {
 #[serial]
 async fn export_executor_start_with_inputs_schema_err() {
     let engine = Engine::builder().start().await.unwrap();
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
     let mid = utils::longid();
     let workflow = Workflow::new()
         .with_id(&mid)
@@ -285,7 +285,7 @@ async fn export_executor_start_with_inputs_schema_err() {
         )]))
         .with_step(|step| step.with_uses(USES_IRQ, Vars::new().with("key", "test")));
     engine
-        .executor()
+        .executor(&crate::Principal::unrestricted())
         .model()
         .deploy(&workflow, None)
         .await
@@ -301,14 +301,14 @@ async fn export_executor_start_with_inputs_schema_err() {
 #[serial]
 async fn export_executor_start_with_outputs_schema_ok() {
     let engine = Engine::builder().start().await.unwrap();
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
     let mid = utils::longid();
     let workflow = Workflow::new()
         .with_id(&mid)
         .with_expose(Variant::new().name("a").r#type(VariantTypes::Number));
 
     engine
-        .executor()
+        .executor(&crate::Principal::unrestricted())
         .model()
         .deploy(&workflow, None)
         .await
@@ -335,13 +335,13 @@ async fn export_executor_start_with_outputs_schema_ok() {
 #[serial]
 async fn export_executor_start_with_outputs_schema_err() {
     let engine = Engine::builder().start().await.unwrap();
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
     let mid = utils::longid();
     let workflow = Workflow::new()
         .with_id(&mid)
         .with_expose(Variant::new().name("a").r#type(VariantTypes::Number));
     engine
-        .executor()
+        .executor(&crate::Principal::unrestricted())
         .model()
         .deploy(&workflow, None)
         .await
@@ -368,7 +368,7 @@ async fn export_executor_start_with_outputs_schema_err() {
 #[serial]
 async fn export_executor_start_from_empty_fmt() {
     let engine = Engine::builder().start().await.unwrap();
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
     let mid = utils::longid();
     let model = Workflow::new()
         .with_id(&mid)
@@ -387,7 +387,7 @@ async fn export_executor_start_from_empty_fmt() {
 #[serial]
 async fn export_executor_start_from_error_fmt() {
     let engine = Engine::builder().start().await.unwrap();
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
     let mid = utils::longid();
     let model = Workflow::new()
         .with_id(&mid)
@@ -406,7 +406,7 @@ async fn export_executor_start_from_error_fmt() {
 #[serial]
 async fn export_manager_models_get_count() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let mut model = Workflow::new().with_step(|step| step.with_id("step1"));
 
     for _ in 0..5 {
@@ -426,7 +426,7 @@ async fn export_manager_models_get_count() {
 #[serial]
 async fn export_manager_models_order() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let mut model = Workflow::new().with_step(|step| step.with_id("step1"));
 
     for i in 0..5 {
@@ -447,7 +447,7 @@ async fn export_manager_models_order() {
 #[serial]
 async fn export_manager_models_get_rows() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let mut model = Workflow::new().with_step(|step| step.with_id("step1"));
 
     for _ in 0..5 {
@@ -467,7 +467,7 @@ async fn export_manager_models_get_rows() {
 #[serial]
 async fn export_manager_models_query() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let mut model = Workflow::new().with_step(|step| step.with_id("step1"));
 
     for i in 0..5 {
@@ -489,7 +489,7 @@ async fn export_manager_models_query() {
 #[serial]
 async fn export_manager_model_get_text() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let mut model = Workflow::new().with_step(|step| step.with_id("step1"));
 
     model.set_id(&utils::longid());
@@ -504,7 +504,7 @@ async fn export_manager_model_get_text() {
 #[serial]
 async fn export_manager_model_get_tree() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let mut model = Workflow::new().with_step(|step| step.with_id("step1"));
 
     model.set_id(&utils::longid());
@@ -519,7 +519,7 @@ async fn export_manager_model_get_tree() {
 #[serial]
 async fn export_manager_model_remove() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let mut model = Workflow::new().with_step(|step| step.with_id("step1"));
 
     model.set_id(&utils::longid());
@@ -541,7 +541,7 @@ async fn export_manager_model_remove() {
 #[serial]
 async fn export_manager_model_remove_with_events() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let mut model = Workflow::new()
         .with_trigger(|t| t.with_id("event1").with_kind("manual"))
         .with_trigger(|t| t.with_id("event2").with_kind("manual"))
@@ -585,7 +585,7 @@ async fn export_manager_model_remove_with_events() {
 #[serial]
 async fn export_manager_procs_one() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
@@ -619,7 +619,7 @@ async fn export_manager_procs_one() {
 #[serial]
 async fn export_manager_procs_count() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
@@ -662,7 +662,7 @@ async fn export_manager_procs_count() {
 #[serial]
 async fn export_manager_procs_offset_in_range() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
@@ -706,7 +706,7 @@ async fn export_manager_procs_offset_in_range() {
 #[serial]
 async fn export_manager_procs_offset_out_range() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
@@ -750,7 +750,7 @@ async fn export_manager_procs_offset_out_range() {
 #[serial]
 async fn export_manager_procs_query() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
@@ -794,7 +794,7 @@ async fn export_manager_procs_query() {
 #[serial]
 async fn export_manager_procs_order() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
@@ -837,7 +837,7 @@ async fn export_manager_procs_order() {
 #[serial]
 async fn export_manager_proc_get() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
@@ -866,7 +866,7 @@ async fn export_manager_proc_get() {
 #[serial]
 async fn export_manager_tasks_count() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
@@ -909,7 +909,7 @@ async fn export_manager_tasks_count() {
 #[serial]
 async fn export_manager_tasks_offset_in_range() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
@@ -952,7 +952,7 @@ async fn export_manager_tasks_offset_in_range() {
 #[serial]
 async fn export_manager_tasks_offset_out_range() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
@@ -995,7 +995,7 @@ async fn export_manager_tasks_offset_out_range() {
 #[serial]
 async fn export_manager_tasks_query() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
@@ -1039,7 +1039,7 @@ async fn export_manager_tasks_query() {
 #[serial]
 async fn export_manager_tasks_order() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
@@ -1080,7 +1080,7 @@ async fn export_manager_tasks_order() {
 #[serial]
 async fn export_manager_task_get() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
@@ -1125,7 +1125,7 @@ async fn export_manager_task_get() {
 #[serial]
 async fn export_manager_messages_all() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
@@ -1159,7 +1159,7 @@ async fn export_manager_messages_all() {
 #[serial]
 async fn export_manager_messages_query() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
@@ -1200,7 +1200,7 @@ async fn export_manager_messages_query() {
 #[serial]
 async fn export_manager_messages_order() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
@@ -1241,7 +1241,7 @@ async fn export_manager_messages_order() {
 #[serial]
 async fn export_manager_messages_count() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
@@ -1292,7 +1292,7 @@ async fn export_manager_messages_count() {
 #[serial]
 async fn export_manager_messages_offset_in_range() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
@@ -1332,7 +1332,7 @@ async fn export_manager_messages_offset_in_range() {
 #[serial]
 async fn export_manager_messages_offset_out_range() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
@@ -1383,7 +1383,7 @@ async fn export_manager_messages_offset_out_range() {
 #[serial]
 async fn export_manager_message_get() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
@@ -1435,7 +1435,7 @@ async fn export_manager_message_get() {
 #[serial]
 async fn export_manager_message_rm() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let model = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
@@ -1486,7 +1486,7 @@ async fn export_manager_message_rm() {
 #[serial]
 async fn export_manager_packages_count() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
 
     let count = 5;
     for i in 0..count {
@@ -1530,7 +1530,7 @@ async fn export_manager_packages_count() {
 #[serial]
 async fn export_manager_packages_order() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
 
     let count = 5;
     for i in 0..count {
@@ -1572,7 +1572,7 @@ async fn export_manager_packages_order() {
 #[serial]
 async fn export_manager_packages_query() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
 
     let count = 5;
     for i in 0..count {
@@ -1610,7 +1610,7 @@ async fn export_manager_packages_query() {
 #[serial]
 async fn export_manager_packages_offset_in_range() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
 
     let count = 5;
     for i in 0..count {
@@ -1655,7 +1655,7 @@ async fn export_manager_packages_offset_in_range() {
 #[serial]
 async fn export_manager_packages_offset_out_range() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
 
     let count = 5;
     for i in 0..count {
@@ -1695,7 +1695,7 @@ async fn export_manager_packages_offset_out_range() {
 #[serial]
 async fn export_manager_package_rm() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
 
     let package = Package {
         id: utils::longid(),
@@ -1737,7 +1737,7 @@ async fn export_executor_start() {
     });
 
     engine
-        .executor()
+        .executor(&crate::Principal::unrestricted())
         .model()
         .deploy(&model, None)
         .await
@@ -1748,7 +1748,7 @@ async fn export_executor_start() {
     vars.insert("uid".to_string(), json!("u1"));
     vars.insert("pid".to_string(), json!(pid));
 
-    let result = engine.executor().proc().start(&model.id, vars).await;
+    let result = engine.executor(&crate::Principal::unrestricted()).proc().start(&model.id, vars).await;
     sig.recv().await;
     assert!(result.is_ok());
 }
@@ -1771,7 +1771,7 @@ async fn export_executor_start_not_found_model() {
     vars.insert("uid".to_string(), json!("u1"));
     vars.insert("pid".to_string(), json!(pid));
 
-    let result = engine.executor().proc().start("not_exists", vars).await;
+    let result = engine.executor(&crate::Principal::unrestricted()).proc().start("not_exists", vars).await;
     assert!(result.is_err());
 }
 
@@ -1787,7 +1787,7 @@ async fn export_executor_complete_normal() {
     let rt = engine.runtime();
     let sig = engine.signal(false);
     let s1 = sig.clone();
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
     engine.channel().on_message(move |e| {
         let executor = executor.clone();
         let s1 = s1.clone();
@@ -1819,7 +1819,7 @@ async fn export_executor_complete_no_uid() {
     let rt = engine.runtime();
     let sig = engine.signal(false);
     let s1 = sig.clone();
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
 
     engine.channel().on_message(move |e| {
         let executor = executor.clone();
@@ -1851,7 +1851,7 @@ async fn export_executor_submit() {
     let rt = engine.runtime();
     let sig = engine.signal(false);
     let s1 = sig.clone();
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
 
     engine.channel().on_message(move |e| {
         let executor = executor.clone();
@@ -1884,7 +1884,7 @@ async fn export_executor_skip() {
     let rt = engine.runtime();
     let sig = engine.signal(false);
     let s1 = sig.clone();
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
     engine.channel().on_message(move |e| {
         let executor = executor.clone();
         let s1 = s1.clone();
@@ -1918,7 +1918,7 @@ async fn export_executor_error() {
     let rt = engine.runtime();
     let sig = engine.signal(false);
     let s1 = sig.clone();
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
     engine.channel().on_message(move |e| {
         let executor = executor.clone();
         let s1 = s1.clone();
@@ -1953,7 +1953,7 @@ async fn export_executor_abort() {
     let rt = engine.runtime();
     let sig = engine.signal(false);
     let s1 = sig.clone();
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
     engine.channel().on_message(move |e| {
         let executor = executor.clone();
         let s1 = s1.clone();
@@ -1991,7 +1991,7 @@ async fn export_executor_back() {
     let rt = engine.runtime();
     let sig = engine.signal(false);
     let s1 = sig.clone();
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
 
     let count = Arc::new(Mutex::new(0));
     engine.channel().on_message(move |e| {
@@ -2047,7 +2047,7 @@ async fn export_executor_cancel() {
     let rt = engine.runtime();
     let sig = engine.signal(false);
     let s1 = sig.clone();
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
     let count = Arc::new(Mutex::new(0));
     let tid = Arc::new(Mutex::new("".to_string()));
     engine.channel().on_message(move |e| {
@@ -2100,7 +2100,7 @@ async fn export_executor_push() {
     let rt = engine.runtime();
     let sig = engine.signal(false);
     let s1 = sig.clone();
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
     engine.channel().on_message(move |e| {
         let executor = executor.clone();
         let s1 = s1.clone();
@@ -2137,7 +2137,7 @@ async fn export_executor_push_no_key_error() {
     let rt = engine.runtime();
     let sig = engine.signal(false);
     let s1 = sig.clone();
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
     engine.channel().on_message(move |e| {
         let executor = executor.clone();
         let s1 = s1.clone();
@@ -2173,7 +2173,7 @@ async fn export_executor_push_not_step_id_error() {
     let rt = engine.runtime();
     let sig = engine.signal(false);
     let s1 = sig.clone();
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
     engine.channel().on_message(move |e| {
         let executor = executor.clone();
         let s1 = s1.clone();
@@ -2207,7 +2207,7 @@ async fn export_executor_remove() {
     let rt = engine.runtime();
     let sig = engine.signal(false);
     let s1 = sig.clone();
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
     engine.channel().on_message(move |e| {
         let executor = executor.clone();
         let s1 = s1.clone();
@@ -2245,7 +2245,7 @@ async fn export_extender_set_process_var() {
     let rt = engine.runtime();
     let sig = engine.signal(false);
     let s1 = sig.clone();
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
     engine.channel().on_message(move |e| {
         let executor = executor.clone();
         let s1 = s1.clone();
@@ -2275,11 +2275,11 @@ async fn export_extender_set_process_var() {
 #[serial]
 async fn export_extender_register_module() {
     let engine = Engine::builder().start().await.unwrap();
-    let extender = engine.extender();
+    let extender = engine.executor(&crate::Principal::unrestricted());
 
     let before_count = engine.runtime().env().user_env_count();
     let module = test_module::TestModule;
-    extender.register_var(&module);
+    extender.ext().register_var(&module).unwrap();
     let count = engine.runtime().env().user_env_count();
     assert_eq!(count, before_count + 1);
 }
@@ -2372,25 +2372,41 @@ async fn export_emitter_type_not_match() {
     assert_eq!(ret.len(), 0);
 }
 
-/// Start `model` as an owned process: the authority the action layer seals
-/// into the start options, without an HTTP/gRPC transport in the way.
-async fn start_owned(engine: &Engine, model: &Workflow, subject: &str) -> String {
-    engine
-        .runtime()
-        .start(
-            model,
-            Vars::new().with(
-                consts::PROC_OWNER,
-                crate::ScopePolicy {
-                    subject: subject.to_string(),
-                    ..crate::ScopePolicy::deny_all()
-                },
-            ),
+/// An engine with two callers, `u1` and `u2`, each granted exactly the
+/// operations this test performs: the models are deployed as the engine
+/// itself, and each run is started by the caller that owns it.
+async fn two_caller_engine() -> Engine {
+    let config = crate::Config {
+        data: Default::default(),
+        table: toml::from_str(
+            r#"
+            [acl]
+            [[acl.role]]
+            name = "u1"
+            tokens = ["t1"]
+            allow = ["proc:start", "msg:ls"]
+            [[acl.role]]
+            name = "u2"
+            tokens = ["t2"]
+            allow = ["proc:start", "msg:ls"]
+            "#,
         )
+        .unwrap(),
+    };
+    Engine::builder().set_config(&config).start().await.unwrap()
+}
+
+/// Start a deployed model as the caller `token` authenticates to. The run
+/// carries that caller's authority because the executor sealed it — the
+/// subject is the token's role, not something the start options said.
+async fn start_owned(engine: &Engine, mid: &str, token: &str) -> String {
+    let principal = engine.acl().authenticate(Some(token)).unwrap();
+    engine
+        .executor(&principal)
+        .proc()
+        .start(mid, Vars::new())
         .await
         .unwrap()
-        .id()
-        .to_string()
 }
 
 /// Two subscribers name the same client id: the subject namespaces the channel
@@ -2401,11 +2417,18 @@ async fn start_owned(engine: &Engine, model: &Workflow, subject: &str) -> String
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn export_channel_namespace_keeps_subscribers_apart() {
-    let engine = Engine::builder().start().await.unwrap();
+    let engine = two_caller_engine().await;
     let model = Workflow::new().with_id(&utils::longid()).with_step(|step| {
         step.with_id("step1")
             .with_uses(USES_IRQ, Vars::new().with("key", "scope-test"))
     });
+    // Deployment is the engine's own act here, not a caller's.
+    engine
+        .executor(&crate::Principal::unrestricted())
+        .model()
+        .deploy(&model, None)
+        .await
+        .unwrap();
 
     /// One test subscriber: its subject, what it collected, and its signal.
     type Subscriber = (&'static str, Arc<Mutex<Vec<Message>>>, Signal<bool>);
@@ -2429,8 +2452,8 @@ async fn export_channel_namespace_keeps_subscribers_apart() {
         seen.push((subject, collected, notified));
     }
 
-    let u1_pid = start_owned(&engine, &model, "u1").await;
-    let u2_pid = start_owned(&engine, &model, "u2").await;
+    let u1_pid = start_owned(&engine, &model.id, "t1").await;
+    let u2_pid = start_owned(&engine, &model.id, "t2").await;
 
     // Both subscribers are alive — the later registration did not take over
     // the earlier one's channel.
@@ -2793,7 +2816,7 @@ async fn export_message_multi_channels_share_message_single_delivery_each() {
     let delivery_a = received_a.delivery_id.clone().unwrap();
     let delivery_b = received_b.delivery_id.clone().unwrap();
     assert_ne!(delivery_a, delivery_b);
-    engine.executor().msg().ack(&delivery_a).await.unwrap();
+    engine.executor(&crate::Principal::unrestricted()).msg().ack(&delivery_a).await.unwrap();
 
     let row_a = store.deliveries().find(&delivery_a).await.unwrap();
     assert_eq!(row_a.status, data::DeliveryStatus::Acked);
@@ -2902,7 +2925,7 @@ async fn export_message_clear_error_messages_by_none() {
         .await
         .unwrap();
     assert_eq!(ret.status, data::DeliveryStatus::Error);
-    engine.executor().msg().clear(None).await.unwrap();
+    engine.executor(&crate::Principal::unrestricted()).msg().clear(None).await.unwrap();
     assert!(
         !engine
             .runtime()
@@ -2950,7 +2973,7 @@ async fn export_message_clear_error_messages_by_pid() {
         .await
         .unwrap();
     engine
-        .executor()
+        .executor(&crate::Principal::unrestricted())
         .msg()
         .clear(Some(pid.clone()))
         .await
@@ -3000,7 +3023,7 @@ async fn export_message_resend_error_messages() {
         .await
         .unwrap();
     assert_eq!(ret.status, data::DeliveryStatus::Error);
-    engine.executor().msg().redo().await.unwrap();
+    engine.executor(&crate::Principal::unrestricted()).msg().redo().await.unwrap();
 
     let ret = engine
         .runtime()
@@ -3140,7 +3163,7 @@ async fn export_emitter_options_missing_key() {
 #[serial]
 async fn export_trigger_deploy_all_kinds() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let model = Workflow::new()
         .with_id("trigger-model")
         .with_trigger(|t| t.with_id("e-manual").with_kind("manual"))
@@ -3173,7 +3196,7 @@ async fn export_trigger_deploy_all_kinds() {
 #[serial]
 async fn export_trigger_redeploy_removes_stale_rows() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let mut model = Workflow::new()
         .with_id("trigger-reconcile")
         .with_trigger(|t| t.with_id("e1").with_kind("manual"))
@@ -3206,7 +3229,7 @@ async fn export_trigger_redeploy_removes_stale_rows() {
 #[serial]
 async fn export_trigger_redeploy_keeps_schedule_state() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let mut model = Workflow::new()
         .with_id("trigger-reconcile-state")
         .with_trigger(|t| {
@@ -3278,7 +3301,7 @@ async fn export_trigger_redeploy_keeps_schedule_state() {
 #[serial]
 async fn export_trigger_manual_start() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let model = Workflow::new()
         .with_id("trigger-manual")
         .with_trigger(|t| {
@@ -3301,7 +3324,7 @@ async fn export_trigger_manual_start() {
 #[serial]
 async fn export_trigger_chat_start() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let model = Workflow::new()
         .with_id("trigger-chat")
         .with_trigger(|t| t.with_id("event1").with_kind("chat"))
@@ -3320,7 +3343,7 @@ async fn export_trigger_chat_start() {
 #[serial]
 async fn export_trigger_hook_start() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let model = Workflow::new()
         .with_var("ret", 0)
         .with_expose(Variant::create("ret", json!(null)))
@@ -3348,7 +3371,7 @@ async fn export_trigger_hook_start() {
 #[serial]
 async fn export_trigger_schedule_cannot_start_manually() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let model = Workflow::new()
         .with_id("trigger-schedule-blocked")
         .with_trigger(|t| {
@@ -3372,7 +3395,7 @@ async fn export_trigger_schedule_cannot_start_manually() {
 #[serial]
 async fn export_trigger_schedule_auto_fire() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let model = Workflow::new()
         .with_id("trigger-schedule")
         .with_trigger(|t| {
@@ -3411,7 +3434,7 @@ async fn export_trigger_schedule_auto_fire() {
 #[serial]
 async fn export_trigger_deploy_invalid() {
     let engine = Engine::builder().start().await.unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
 
     // dup trigger id
     let workflow = r#"
@@ -3517,7 +3540,7 @@ async fn export_trigger_custom_kind_package() {
         .start()
         .await
         .unwrap();
-    let manager = engine.executor();
+    let manager = engine.executor(&crate::Principal::unrestricted());
     let model = Workflow::new()
         .with_id("trigger-custom")
         .with_trigger(|t| t.with_id("event1").with_kind("test.trigger.pkg"))

@@ -35,7 +35,7 @@ async fn pack_subflow_start() {
     let channel = engine.channel();
 
     // deploy w2 workflow
-    Executor::new(&rt).model().deploy(&w2, None).await.unwrap();
+    Executor::new(&rt, &crate::Principal::unrestricted()).model().deploy(&w2, None).await.unwrap();
     channel.on_start(move |e| {
         let rx = rx.clone();
         async move {
@@ -94,7 +94,7 @@ async fn pack_subflow_act_running() {
     let (tx, rx) = engine.signal(false).double();
     auto_complete(&engine, &rx);
 
-    Executor::new(&rt).model().deploy(&w2, None).await.unwrap();
+    Executor::new(&rt, &crate::Principal::unrestricted()).model().deploy(&w2, None).await.unwrap();
     let channel = engine.channel();
     channel.on_message(move |e| async move { println!("message: {:?}", e.inner()) });
 
@@ -148,7 +148,7 @@ async fn pack_subflow_act_complete() {
             }
         }
     });
-    Executor::new(&rt).model().deploy(&w2, None).await.unwrap();
+    Executor::new(&rt, &crate::Principal::unrestricted()).model().deploy(&w2, None).await.unwrap();
     channel.on_message(move |e| {
         let rt = rt.clone();
         async move {
@@ -200,7 +200,7 @@ async fn pack_subflow_act_skip() {
             }
         }
     });
-    Executor::new(&rt).model().deploy(&w2, None).await.unwrap();
+    Executor::new(&rt, &crate::Principal::unrestricted()).model().deploy(&w2, None).await.unwrap();
     channel.on_message(move |e| {
         let rt = rt.clone();
         async move {
@@ -248,7 +248,7 @@ async fn pack_subflow_act_abort() {
     // auto_complete(&engine, &rx);
     let channel = engine.channel();
 
-    Executor::new(&rt).model().deploy(&w2, None).await.unwrap();
+    Executor::new(&rt, &crate::Principal::unrestricted()).model().deploy(&w2, None).await.unwrap();
     channel.on_message(move |e| {
         let rt = rt.clone();
         async move {
@@ -301,7 +301,7 @@ async fn pack_subflow_act_error() {
     let (tx, rx) = engine.signal(false).double();
     let channel = engine.channel();
 
-    Executor::new(&rt).model().deploy(&w2, None).await.unwrap();
+    Executor::new(&rt, &crate::Principal::unrestricted()).model().deploy(&w2, None).await.unwrap();
     channel.on_error(move |e| {
         let rx = rx.clone();
         async move {

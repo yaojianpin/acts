@@ -35,7 +35,7 @@ pub use env::ActUserVar;
 pub use error::{ActError, Error};
 pub use event::{Action, Event, Message, MessageState};
 pub use export::actions;
-pub use export::{Channel, ChannelOptions, Executor, Extender};
+pub use export::{Channel, ChannelOptions, Executor};
 pub use model::*;
 pub use package::{ActPackage, ActPackageCatalog, ActPackageDefinition, ActResource, ActRunAs};
 pub use plugin::ActPlugin;

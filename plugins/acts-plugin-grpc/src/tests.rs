@@ -143,7 +143,7 @@ async fn test_do_action_rejects_malformed_data() {
 
     // nothing was applied: the rejected `msg:clear` must not have cleared
     let stored = engine
-        .executor()
+        .executor(&acts::Principal::unrestricted())
         .msg()
         .list(&StoreQuery::new().offset(0).limit(10))
         .await
@@ -178,13 +178,13 @@ async fn run_irq_workflow(engine: &Engine, key: &str) {
                 .with_uses("acts.core.irq", Vars::new().with("key", "leak-test"))
         });
     engine
-        .executor()
+        .executor(&acts::Principal::unrestricted())
         .model()
         .deploy(&model, None)
         .await
         .unwrap();
     engine
-        .executor()
+        .executor(&acts::Principal::unrestricted())
         .proc()
         .start(&model.id, Vars::new())
         .await
@@ -193,7 +193,7 @@ async fn run_irq_workflow(engine: &Engine, key: &str) {
 
 async fn stored_message_count(engine: &Engine) -> usize {
     engine
-        .executor()
+        .executor(&acts::Principal::unrestricted())
         .msg()
         .list(&StoreQuery::new().offset(0).limit(1000))
         .await

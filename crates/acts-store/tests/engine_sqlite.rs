@@ -22,13 +22,13 @@ async fn engine_set_store_sqlite() {
     // deploy + read back through the engine must go through the sqlite store
     let model = Workflow::new().with_id("sqlite_model");
     engine
-        .executor()
+        .executor(&acts::Principal::unrestricted())
         .model()
         .deploy(&model, None)
         .await
         .unwrap();
     let m = engine
-        .executor()
+        .executor(&acts::Principal::unrestricted())
         .model()
         .get("sqlite_model", "")
         .await
@@ -63,7 +63,7 @@ async fn engine_sqlite_runs_on_current_thread_runtime() {
 
     let (done, sig) = engine.signal(bool::default()).double();
     engine
-        .executor()
+        .executor(&acts::Principal::unrestricted())
         .model()
         .deploy(&model, None)
         .await
@@ -77,7 +77,7 @@ async fn engine_sqlite_runs_on_current_thread_runtime() {
         }
     });
     engine
-        .executor()
+        .executor(&acts::Principal::unrestricted())
         .proc()
         .start("current_thread_model", Vars::new())
         .await

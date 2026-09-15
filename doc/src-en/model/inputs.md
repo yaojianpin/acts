@@ -24,10 +24,10 @@ inputs:
 ## Passing Inputs When Starting
 
 ```rust
-use acts::{Engine, Vars, Workflow};
+use acts::{Engine, Principal, Vars, Workflow};
 
 let engine = Engine::builder().start().await.unwrap();
-let executor = engine.executor();
+let executor = engine.executor(&Principal::unrestricted());
 
 let mut vars = Vars::new();
 vars.set("a", 100);

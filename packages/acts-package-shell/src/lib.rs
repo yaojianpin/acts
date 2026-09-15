@@ -1,3 +1,3 @@
 mod package;
 
-pub use package::ShellPackage;
+pub use package::{ScriptPolicy, ShellConfig, ShellPackage};

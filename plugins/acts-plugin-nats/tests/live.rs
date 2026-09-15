@@ -168,7 +168,7 @@ async fn engine_events_forwarded_to_nats() {
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     let mut sub = client.subscribe("acts-events-test.evt.t2").await.unwrap();
-    let executor = engine.executor();
+    let executor = engine.executor(&acts::Principal::unrestricted());
     let workflow = Workflow::new()
         .with_id("nats_event_demo")
         .with_step(|step| {

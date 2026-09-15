@@ -74,12 +74,21 @@ impl ActPackage for SubflowPackage {
             })?;
         let task = ctx.task();
         task.set_auto_complete(false);
-        let executor = Executor::new(&ctx.runtime);
+        // A subflow is not a caller: it is a live run spawning work of its
+        // own, so there is no action to check and no principal to check it
+        // against. What the child must have is the *parent's* authority —
+        // the same snapshot scopes, the same workdir root — because
+        // inheriting is what keeps a subflow inside the limits of the run
+        // that opened it instead of handing it the data plane.
+        let executor = Executor::engine(&ctx.runtime);
 
         let mut inputs = utils::fill_inputs(&params.options, ctx);
         inputs.set(consts::ACT_USE_PARENT_PROC_ID, &ctx.proc.id());
         inputs.set(consts::ACT_USE_PARENT_TASK_ID, &task.id);
-        executor.proc().start(&params.to, inputs).await?;
+        executor
+            .proc()
+            .start_as_owner(&params.to, inputs, &ctx.proc.owner_scope())
+            .await?;
 
         Ok(None)
     }

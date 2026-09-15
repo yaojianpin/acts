@@ -161,16 +161,18 @@ impl Process {
     /// refuses private keys, so a model can neither read the credential nor
     /// overwrite it. The env row is persisted with the proc, so the authority
     /// survives a restart and a resumed process keeps the scope it started
-    /// with. A process started without a credential (in-process embedder,
-    /// engine-internal start) carries none and stays unrestricted — see
+    /// with. A process started without a credential (a `schedule` trigger, an
+    /// embedder calling `Runtime::start` itself) carries none — see
     /// [`Process::owner_scope`].
     pub(crate) fn set_owner_scope(&self, policy: &crate::ScopePolicy) {
         self.with_env_mut(|env| env.set(consts::PROC_OWNER, policy.clone()));
     }
 
-    /// The owner's snapshot scope authority. A process without one is
-    /// unrestricted: it was started in-process (an embedder that already has
-    /// the whole API in hand), or its row predates this field.
+    /// The owner's snapshot scope authority. A process without one reads
+    /// nothing ([`crate::ScopePolicy::default`] is `deny_all`): it was started
+    /// with no caller authority to seal — a `schedule` trigger, or an
+    /// embedder that called `Runtime::start` instead of going through
+    /// [`crate::Engine::executor`] — or its row predates this field.
     pub(crate) fn owner_scope(&self) -> crate::ScopePolicy {
         self.with_env(|env| env.get::<crate::ScopePolicy>(consts::PROC_OWNER))
             .unwrap_or_default()

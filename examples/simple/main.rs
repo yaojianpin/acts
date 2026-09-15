@@ -4,11 +4,11 @@ use acts::{Engine, Result, Vars, Workflow};
 async fn main() -> Result<()> {
     let engine = Engine::builder().start().await?;
     let (s1, s2, sig) = engine.signal(()).triple();
-    let executor = engine.executor();
+    let executor = engine.executor(&acts::Principal::unrestricted());
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text)?;
     workflow.print();
-    engine.executor().model().deploy(&workflow, None).await?;
+    engine.executor(&acts::Principal::unrestricted()).model().deploy(&workflow, None).await?;
 
     let mut vars = Vars::new();
     vars.insert("input".into(), 10.into());

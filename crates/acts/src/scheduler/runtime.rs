@@ -309,6 +309,12 @@ impl Runtime {
             )));
         }
 
+        // The caller's authority travels inside the start options (sealed by
+        // `Executor`), never as a model input: it is popped before anything
+        // else reads the options, so it can neither fail an input schema nor
+        // leak into the workflow's user vars.
+        let owner = options.pop::<crate::ScopePolicy>(consts::PROC_OWNER);
+
         // validate the options
         if !model.inputs.is_empty() {
             model
@@ -323,10 +329,6 @@ impl Runtime {
         }
 
         let proc = Process::new(&proc_id, self);
-        // The caller's authority travels inside the start options (set by
-        // `actions::apply_as`), never as a model input: it is popped here so
-        // it cannot leak into the workflow's user vars.
-        let owner = options.pop::<crate::ScopePolicy>(consts::PROC_OWNER);
         proc.load_with_vars(model, &options)?;
         if let Some(owner) = owner {
             // The workdir root travels with the owner authority, never as a

@@ -125,7 +125,7 @@ impl Channel {
     ///
     /// Example
     /// ```rust,no_run
-    /// use acts::{Engine, Act, Workflow, Vars, Message};
+    /// use acts::{Engine, Act, Principal, Workflow, Vars, Message};
     ///
     /// #[tokio::main]
     /// async fn main() {
@@ -139,7 +139,7 @@ impl Channel {
     ///             println!("act message: state={} inputs={:?} outputs={:?}", e.state, e.inputs, e.outputs);
     ///         }
     ///     });
-    ///     let exec = engine.executor();
+    ///     let exec = engine.executor(&Principal::unrestricted());
     ///     exec.model().deploy(&workflow, None).await.expect("fail to deploy workflow");
     ///     let mut vars = Vars::new();
     ///     vars.set("pid", "w1");

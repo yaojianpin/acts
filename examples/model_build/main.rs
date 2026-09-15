@@ -33,8 +33,8 @@ async fn main() -> Result<()> {
         .with_step(|step| step.with_name("step2"));
 
     workflow.print();
-    let executor = engine.executor();
-    engine.executor().model().deploy(&workflow, None).await?;
+    let executor = engine.executor(&acts::Principal::unrestricted());
+    engine.executor(&acts::Principal::unrestricted()).model().deploy(&workflow, None).await?;
 
     let mut vars = Vars::new();
     vars.insert("pid".to_string(), nanoid!().into());

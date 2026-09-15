@@ -46,9 +46,9 @@ async fn main() -> Result<()> {
     let workflow = Workflow::from_yml(text).unwrap();
     workflow.print();
     let (s, s2, sig) = engine.signal(()).triple();
-    let executor = engine.executor().clone();
+    let executor = engine.executor(&acts::Principal::unrestricted()).clone();
     engine
-        .executor()
+        .executor(&acts::Principal::unrestricted())
         .model()
         .deploy(&workflow, None)
         .await

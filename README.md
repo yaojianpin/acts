@@ -60,12 +60,12 @@ cargo add acts
 
 1. Create and start the workflow engine by `engine.new()`.
 2. Load a yaml model to create a `workflow`.
-3. Deploy the model in step 2 by `engine.executor().model()`.
+3. Deploy the model in step 2 by `engine.executor(&principal).model()`.
 4. Config events by `engine.channel()`.
-5. Start the workflow by `engine.executor().proc()`.
+5. Start the workflow by `engine.executor(&principal).proc()`.
 
 ```rust,no_run
-use acts::{Engine, Vars, Workflow};
+use acts::{Engine, Principal, Vars, Workflow};
 
 #[tokio::main]
 async fn main() {
@@ -87,7 +87,10 @@ async fn main() {
     "#;
     let workflow = Workflow::from_yml(model).unwrap();
 
-    let executor = engine.executor();
+    // The executor acts for a caller: this one is the engine's own, which is
+    // what an embedder that drives the engine itself passes. `Principal` is
+    // also what the ACL in an `[acl]` config section decides.
+    let executor = engine.executor(&Principal::unrestricted());
     executor
         .model()
         .deploy(&workflow, None)
@@ -208,12 +211,12 @@ steps:
 The vars can also be set by starting the workflow.
 
 ```rust,no_run
-use acts::{Engine, Vars, Workflow};
+use acts::{Engine, Principal, Vars, Workflow};
 
 #[tokio::main]
 async fn main() {
   let engine = Engine::builder().start().await.unwrap();
-  let executor = engine.executor();
+  let executor = engine.executor(&Principal::unrestricted());
 
   let mut vars = Vars::new();
   vars.set("input", 3);

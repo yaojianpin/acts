@@ -69,16 +69,18 @@ another process's write.
 ## Create Engine
 
 ```rust
-use acts::Engine;
+use acts::{Engine, Principal};
 
 let engine = Engine::builder().start().await.unwrap();
-let executor = engine.executor();
+// The executor acts for a caller; an embedder driving the engine itself is
+// the engine's own principal (see the access-control chapter).
+let executor = engine.executor(&Principal::unrestricted());
 ```
 
 ## Deploy and Start Workflow
 
 ```rust
-use acts::{Engine, Vars, Workflow};
+use acts::{Engine, Principal, Vars, Workflow};
 
 let engine = Engine::builder().start().await.unwrap();
 
@@ -99,7 +101,7 @@ steps:
 let workflow = Workflow::from_yml(model).unwrap();
 
 // Deploy model
-let executor = engine.executor();
+let executor = engine.executor(&Principal::unrestricted());
 executor.model().deploy(&workflow).expect("fail to deploy workflow");
 
 // Start workflow

@@ -14,8 +14,8 @@ async fn main() -> Result<()> {
     let workflow = Workflow::from_yml(text).unwrap();
     workflow.print();
 
-    let executor = engine.executor().clone();
-    engine.executor().model().deploy(&workflow, None).await?;
+    let executor = engine.executor(&acts::Principal::unrestricted()).clone();
+    engine.executor(&acts::Principal::unrestricted()).model().deploy(&workflow, None).await?;
     executor
         .proc()
         .start(&workflow.id, Vars::new())

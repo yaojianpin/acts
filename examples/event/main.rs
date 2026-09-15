@@ -4,11 +4,11 @@ use acts::{Engine, Result, Vars, Workflow};
 async fn main() -> Result<()> {
     let engine = Engine::builder().start().await?;
 
-    let executor = engine.executor();
+    let executor = engine.executor(&acts::Principal::unrestricted());
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text).unwrap();
     workflow.print();
-    engine.executor().model().deploy(&workflow, None).await?;
+    engine.executor(&acts::Principal::unrestricted()).model().deploy(&workflow, None).await?;
     executor.proc().start(&workflow.id, Vars::new()).await?;
 
     let ret = executor

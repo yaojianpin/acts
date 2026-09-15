@@ -1,5 +1,5 @@
 use crate::{
-    ActError, EventInfo, Result, TriggerKind, Vars, Workflow, data,
+    ActError, EventInfo, Principal, Result, TriggerKind, Vars, Workflow, data,
     query::Query,
     scheduler::Runtime,
     store::PageData,
@@ -9,20 +9,30 @@ use serde_json::Value as JsonValue;
 use std::sync::Arc;
 use tracing::instrument;
 
+/// `evt:ls` — list deployed triggers.
+pub(crate) const LS: &str = "evt:ls";
+/// `evt:get` — read one deployed trigger.
+pub(crate) const GET: &str = "evt:get";
+/// `evt:start` — fire a trigger, starting its model.
+pub(crate) const START: &str = "evt:start";
+
 #[derive(Clone)]
 pub struct EventExecutor {
     runtime: Arc<Runtime>,
+    principal: Arc<Principal>,
 }
 
 impl EventExecutor {
-    pub fn new(rt: &Arc<Runtime>) -> Self {
+    pub(crate) fn new(rt: &Arc<Runtime>, principal: &Arc<Principal>) -> Self {
         Self {
             runtime: rt.clone(),
+            principal: principal.clone(),
         }
     }
 
     #[instrument(skip(self))]
     pub async fn list(&self, q: &Query) -> Result<PageData<EventInfo>> {
+        self.principal.check(LS)?;
         match self.runtime.cache().store().events().query(q).await {
             Ok(events) => Ok(PageData {
                 count: events.count,
@@ -37,6 +47,7 @@ impl EventExecutor {
 
     #[instrument(skip(self))]
     pub async fn get(&self, id: &str) -> Result<EventInfo> {
+        self.principal.check(GET)?;
         let event = &self.runtime.cache().store().events().find(id).await?;
         Ok(event.into())
     }
@@ -50,7 +61,15 @@ impl EventExecutor {
     /// - `chat`: start the workflow with the string payload as `params`
     /// - `hook`: start the workflow and block until it completes, returning
     ///   its outputs
+    ///
+    /// A trigger reaches a model's own start inputs, so the run it starts
+    /// carries the *firing caller's* authority: a snapshot-backed model is
+    /// read under the scopes of whoever fired the trigger. A `schedule`
+    /// trigger has no caller at all and is fired by the runtime itself, which
+    /// seals nothing — see [`crate::ScopePolicy::default`].
+    #[instrument(skip(self, params), fields(event_id = %event_id))]
     pub async fn start(&self, event_id: &str, params: &JsonValue) -> Result<Option<Vars>> {
+        self.principal.check(START)?;
         let store = self.runtime.cache().store();
         let event = store.events().find(event_id).await?;
 
@@ -65,7 +84,7 @@ impl EventExecutor {
                 };
                 let proc = self
                     .runtime
-                    .start(&workflow, payload_to_vars(payload)?)
+                    .start(&workflow, self.start_options(payload_to_vars(payload)?))
                     .await?;
                 Ok(Some(Vars::new().with(consts::PROCESS_ID, proc.id())))
             }
@@ -80,7 +99,10 @@ impl EventExecutor {
                 if let Some(v) = payload.as_str() {
                     start_params.set(consts::ACT_PARAMS_KEY, v);
                 }
-                let proc = self.runtime.start(&workflow, start_params).await?;
+                let proc = self
+                    .runtime
+                    .start(&workflow, self.start_options(start_params))
+                    .await?;
                 Ok(Some(Vars::new().with(consts::PROCESS_ID, proc.id())))
             }
             Some(TriggerKind::Hook) => {
@@ -90,7 +112,7 @@ impl EventExecutor {
                 } else {
                     params.clone()
                 };
-                let inputs = payload_to_vars(payload)?;
+                let inputs = self.start_options(payload_to_vars(payload)?);
                 self.start_hook(&workflow, inputs).await
             }
             Some(TriggerKind::Schedule) => Err(ActError::Runtime(format!(
@@ -101,6 +123,14 @@ impl EventExecutor {
                 self.start_package(&event, params).await
             }
         }
+    }
+
+    /// The firing caller's authority, sealed into the run the trigger starts.
+    /// A start option would be readable (and forgeable) from the workflow; the
+    /// private env key is not — see [`crate::utils::consts::PROC_OWNER`].
+    fn start_options(&self, mut options: Vars) -> Vars {
+        options.set(consts::PROC_OWNER, self.principal.scope_policy());
+        options
     }
 
     async fn workflow(&self, event: &data::Event) -> Result<Workflow> {

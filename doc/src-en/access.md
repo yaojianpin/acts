@@ -1,12 +1,13 @@
 # Access Control
 
-An `[acl]` section in the engine config is what makes an engine answerable to a
-known caller. **Without it, the engine is anonymous and read-only**: every
-request is attributed to the built-in `anonymous` subject, which may list and
-get models, processes, tasks, messages, events and packages, and nothing else —
-no writes, no control actions, no admin actions, no snapshot scope, no
-subscription. An unconfigured deployment is for looking at the engine, not for
-changing it or for reading data someone owns.
+Every operation of the engine is checked against the identity of the caller
+performing it. An `[acl]` section in the engine config is what names those
+callers. **Without it, the engine answers to anyone and hands out only the
+catalogue**: every request is attributed to the built-in `anonymous` subject,
+which may list and get **models and packages** and nothing else — no other
+read, no write, no control action, no admin action, no snapshot scope, no
+subscription. An unconfigured deployment is for looking at what is deployed,
+not for changing it or for reading what a run, a message or a trigger holds.
 
 Two ways out of that default:
 
@@ -15,7 +16,13 @@ Two ways out of that default:
   from anonymous to authenticated;
 - write `enabled = false` inside `[acl]`, the explicit opt-out: nothing is
   enforced and every caller is unrestricted. That is the pre-ACL behaviour, and
-  it is now a deliberate choice rather than the absence of a section.
+  it is a deliberate choice rather than the absence of a section. An embedder
+  says the same thing with `Engine::builder().disable_acl()`, which is the
+  setting a test or a local demo uses.
+
+There is no *implicit* unrestricted policy anywhere: not a missing section, not
+a process nobody claimed, not a snapshot scope nobody named. Each of those is
+the read-nothing case described where it appears below.
 
 ## Tokens and roles
 
@@ -70,19 +77,58 @@ the CLI and the channel client use.
 | control | `proc:start` `proc:start_from_model` `act:push` `act:remove` `act:submit` `act:complete` `act:abort` `act:cancel` `act:back` `act:skip` `act:error` `evt:start` `msg:ack` |
 | subscribe | `msg:sub` |
 | admin | `model:rm` `pack:rm` `msg:rm` `msg:clear` `msg:redo` `msg:unsub` |
+| embedded | `ext:register_var` (and `pack:publish` for `ext().register_package`) |
+
+The last row is the embedder's own surface — installing a user var module into
+the expression environment, publishing a package definition. No wire action
+maps to it, so a transport caller cannot reach it; an embedder that extends the
+engine it hosts passes its own principal (see
+[The executor](#the-executor)).
 
 `allow = ["*"]` is unrestricted: every action passes, and every snapshot scope
 too. `acl:whoami` reports the caller's own identity and effective patterns; it
 is implicitly allowed for an authenticated caller, so it works as a startup
 check without widening anything.
 
-The `anonymous` subject an engine without `[acl]` resolves to gets exactly the
-`read` group of the table above minus the snapshot actions — every `*:ls` and
-`*:get` over models, processes, tasks, messages, events and packages. That is
-the least a caller the engine cannot name may be trusted with: `msg:sub` is out
-because a stream both carries live payloads and stores a delivery row per
-message for a channel it holds, and `snap:get`/`snap:ls` are out because a
-snapshot scope has an owner only when a policy names one.
+The `anonymous` subject an engine without `[acl]` resolves to gets exactly
+`model:ls` `model:get` `pack:ls` `pack:get` — the catalogue. That is the least a
+caller the engine cannot name may be trusted with, and the list is pinned by a
+test rather than left to interpretation. Everything else is out, including
+reads a named caller would take for granted: a process row names who ran what,
+a delivery names who was meant to receive it, a trigger names the model it will
+start — a caller the engine cannot identify is not the one those rows are about.
+`msg:sub` is out for the same reason and one more (a stream both carries live
+payloads and stores a delivery row per message for a channel it holds), and
+`snap:get`/`snap:ls` are out because a snapshot scope has an owner only when a
+policy names one.
+
+## The executor
+
+The engine's operations are grouped on one object, the executor, and **every
+one of its methods is checked before it runs** — `model().deploy()`,
+`proc().start()` and the rest. It is bound to a caller when it is created:
+
+```rust
+// a transport's request, after its token resolved
+let executor = engine.executor(&principal);
+executor.proc().start("my_model", vars).await?;
+
+// a request that carried no token
+let executor = engine.executor(&engine.anonymous());
+
+// the engine's own work, and what a test or a local demo passes
+let executor = engine.executor(&Principal::unrestricted());
+```
+
+The executor also decides what a run it starts *carries*: `proc().start()` and
+`evt().start()` seal the principal's snapshot scopes and workdir root into the
+process, so a caller cannot widen its own reading by putting an authority in the
+request. Two callers of the same model therefore read what each of them owns.
+
+An embedder is not outside this: it reaches the engine through an executor like
+everyone else, so its operations are checked against the principal it passed.
+Passing `Principal::unrestricted()` is a statement ("this is the engine's own
+work", or "this deployment opted out") and it is written at the call site.
 
 ## Snapshot scope ownership
 
@@ -96,13 +142,18 @@ The rule is enforced twice:
 - On the `snap:*` actions — a read or write of a scope outside the caller's
   set is refused, and `snap:ls` returns only the scopes the subject owns, so
   one tenant cannot enumerate another's.
-- At **seal time** — a process started through an action carries its caller's
-  rules, and the scheduler re-checks them before freezing a snapshot value into
-  a task. A workflow therefore cannot read another subject's data by being
-  started with someone else's `uid`.
+- At **seal time** — a process carries its starter's rules, and the scheduler
+  re-checks them before freezing a snapshot value into a task. A workflow
+  therefore cannot read another subject's data by being started with someone
+  else's `uid`.
 
-A process started in-process (an embedder calling the executor directly) or by
-a trigger carries no caller authority and stays unrestricted.
+A run's authority comes from one place: the principal whose executor started
+it. A subflow inherits its parent's authority, so it can never read more than
+the run that opened it. A run the engine started with no caller at all — a
+`schedule` trigger, an embedder calling `Runtime::start` directly — carries
+*no* authority and reads no snapshot scope: an absent authority is not an
+unlimited one, and a task that needs owned data fails at its seal with the
+subject it lacks instead of being handed the data plane.
 
 ## Message face
 
@@ -136,21 +187,29 @@ messages it emitted.
 
 ## What is enforced where
 
-Three kinds of rule, and each is checked at the layer that can express it:
+Four kinds of rule, and each is checked at the layer that can express it:
 
 | Rule | Enforced on | By |
 | --- | --- | --- |
 | action permission | every operation, in one table | role `allow`/`deny` patterns |
 | snapshot scope ownership | `snap:*` actions, and again at seal time | role `snapshot` table (`$subject`) |
 | channel namespace | channel key and `msg:unsub` | the authenticated subject |
+| directory confinement | the process workdir | `[acl]`/role `workdir` |
 
-Two entry points do **not** go through the action table, and are not subject to
-it: a process started in-process (an embedder calling `Engine::executor()`
-directly) or by a trigger carries no caller authority and stays unrestricted,
-and the engine's own internal operations are not requests. An unconfigured
-engine's anonymous caller is the exception that proves the rule — it *is* a
-caller, so it goes through the table like any other and gets the read-only
-subset described above.
+Every operation goes through the action table, which is what makes the check
+universal: a transport resolves a token into a principal, and so does an
+embedder — the executor an operation runs on carries that principal, and the
+dispatch table and the executor match the same action names, defined once per
+operation. The two callers that do not *have* an identity are the two the table
+has an answer for anyway:
+
+- a request with no token resolves to `default_role`, or to the read-only
+  `anonymous` subject when the engine has no `[acl]` section — it is still a
+  caller, and it is checked like any other;
+- a run nothing claims (a `schedule` trigger) and a subflow (which inherits its
+  parent's authority) are the engine's own starts, with no caller to check:
+  what they may read is the authority they ended up carrying, and neither can
+  gain one from the outside.
 
 
 ## Directory control
@@ -187,6 +246,24 @@ inside the workdir) — the containment that actually holds is the child's
 working directory. Treat a hostile workflow as needing an OS boundary (a
 container or namespace around the server); per-process directories keep such
 runs from colliding meanwhile.
+
+The shell package has a second, script-level policy of its own — two glob lists
+over the **whole script text**:
+
+```toml
+[shell]
+# when non-empty, only a script matching one of these may run
+allow = ["ls", "ls *", "cat *.txt"]
+# always refused, allow or not
+deny = ["*rm -rf*", "*sudo *"]
+```
+
+`*` matches any run of characters, `/` and newlines included, and `deny` wins.
+Both lists empty means no restriction; a pattern that does not compile fails
+startup. Like the workdir check it is policy rather than a sandbox — a glob
+over script text cannot see what the script will do (`a=rm; $a -rf /` names no
+forbidden word), so it is for stating intent and refusing the obvious, and a
+hostile workflow still needs an OS boundary.
 
 Without `workdir`, no directory control applies and a process may touch
 whatever the server's own account can — the behaviour before this option

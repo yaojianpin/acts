@@ -67,14 +67,17 @@ pub const ACTION_SUBSCRIBE: &str = "msg:sub";
 /// its callers are attributed to.
 pub const ANONYMOUS_ROLE: &str = "anonymous";
 
-/// What [`ANONYMOUS_ROLE`] may do: **reads only**.
+/// What [`ANONYMOUS_ROLE`] may do: the catalogue reads, and nothing else.
 ///
 /// An engine configured without `[acl]` is not locked down but it is not
 /// open either — it answers to anyone, so it must answer to the least anyone
-/// could be trusted with. Inspecting the engine (list/get over models,
-/// processes, tasks, messages, events and packages) is what an unconfigured
-/// deployment is for, and none of it changes state. Everything else is out:
+/// could be trusted with. That least is the *catalogue*: which models are
+/// deployed and which packages exist. Everything else is out:
 ///
+/// - every operation over a run (`proc:*`, `task:*`, `act:*`), a message
+///   (`msg:*`) or a trigger (`evt:*`) — reads included: those rows are the
+///   work of a caller the engine cannot name, so it cannot tell that caller
+///   from the next one,
 /// - writes (`model:deploy`, `pack:publish`, `snap:upsert`/`snap:remove`) and
 ///   control (`proc:start*`, `act:*`, `evt:start`, `msg:ack`) mutate the
 ///   engine,
@@ -88,20 +91,7 @@ pub const ANONYMOUS_ROLE: &str = "anonymous";
 ///
 /// Write the smallest `[acl]` section (a `token` shorthand) to get an
 /// administrator, or `enabled = false` to lift the limits on purpose.
-const ANONYMOUS_ALLOW: &[&str] = &[
-    "model:ls",
-    "model:get",
-    "proc:ls",
-    "proc:get",
-    "task:ls",
-    "task:get",
-    "msg:ls",
-    "msg:get",
-    "evt:ls",
-    "evt:get",
-    "pack:ls",
-    "pack:get",
-];
+const ANONYMOUS_ALLOW: &[&str] = &["model:ls", "model:get", "pack:get", "pack:ls"];
 
 /// The `[acl]` config section. Only read when the section exists — see
 /// [`Acl::from_config`], which turns its presence into "enabled by default".
@@ -190,6 +180,10 @@ impl From<AclError> for ActError {
 /// own reading scope — and, because the root travels here rather than as a
 /// start option, a caller cannot place a run outside the directory its policy
 /// names either.
+///
+/// A policy comes from one place: the principal that started the run, through
+/// [`Principal::scope_policy`]. Nothing widens a run's reading by omission —
+/// see [`ScopePolicy::default`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScopePolicy {
     /// Subject the policy belongs to; substituted into `$subject` patterns.
@@ -212,15 +206,31 @@ pub struct ScopePolicy {
 }
 
 impl Default for ScopePolicy {
-    /// Unrestricted — the policy of a process that was not started through an
-    /// authenticated operation (in-process embedders, engine-internal starts,
-    /// and process rows written before this field existed).
+    /// Nothing readable, no workdir — what a run carries when no caller
+    /// authority was sealed into it: an engine-internal start (a schedule
+    /// trigger, or an in-process embedder calling `Runtime::start`), and
+    /// process rows written before this field existed.
+    ///
+    /// An absent authority is not an unlimited one. The three alternative
+    /// readings are all wrong: *unrestricted* hands every run the whole data
+    /// plane, *inherit the model's deployer* is not something a start can
+    /// know, and *fail the start* would refuse runs that read no snapshot at
+    /// all. So the run starts and reads nothing — it may still execute every
+    /// task that needs no owned data, and a task that does need it fails at
+    /// its seal with the subject it lacks, which is a readable error rather
+    /// than a silent grant. Only a policy that came from a caller is ever
+    /// unrestricted: `[acl] enabled = false` resolves every caller to
+    /// [`Principal::unrestricted`], and that principal's
+    /// [`Principal::scope_policy`] is where one comes from.
     fn default() -> Self {
-        Self::unrestricted()
+        Self::deny_all()
     }
 }
 
 impl ScopePolicy {
+    /// Every target and scope passes. Only a policy compiled from a principal
+    /// is ever this — the anonymous role is not, and neither is
+    /// [`ScopePolicy::default`].
     pub fn unrestricted() -> Self {
         Self {
             subject: String::new(),
@@ -230,8 +240,8 @@ impl ScopePolicy {
         }
     }
 
-    /// Nothing readable — the policy of the anonymous principal under an
-    /// enabled ACL.
+    /// Nothing readable, and no workdir. The policy of the anonymous principal
+    /// under an enabled ACL, and the default of a policy nobody sealed.
     pub fn deny_all() -> Self {
         Self {
             subject: String::new(),
@@ -277,8 +287,14 @@ pub struct Principal {
 }
 
 impl Principal {
-    /// A principal that passes every check — the identity used when no ACL is
-    /// configured at all.
+    /// A principal that passes every check, under the `system` subject.
+    ///
+    /// Three things reach it, and all of them say so out loud: an
+    /// `enabled = false` `[acl]` section (the explicit opt-out, and the policy
+    /// a test or a demo runs under), an `allow = ["*"]` role or the `token`
+    /// shorthand (an administrator), and the engine's own operations — the
+    /// package registrations `Engine` performs while starting up, which are
+    /// not requests from anyone.
     pub fn unrestricted() -> Self {
         Self {
             subject: "system".to_string(),
@@ -1101,10 +1117,10 @@ mod tests {
     }
 
     /// An engine without an `[acl]` section answers to anyone, with the
-    /// anonymous read-only policy: reads pass, everything that changes or
-    /// owns state does not.
+    /// anonymous catalogue-only policy: the four reads that name no owner
+    /// pass, everything else — every read of a run included — does not.
     #[test]
-    fn a_missing_section_is_anonymous_read_only() {
+    fn a_missing_section_is_anonymous_catalogue_only() {
         let acl = Acl::anonymous_access();
         assert!(acl.enabled());
 
@@ -1119,10 +1135,17 @@ mod tests {
         // The in-process entry resolves there too.
         assert_eq!(acl.anonymous().subject(), ANONYMOUS_ROLE);
 
+        assert_eq!(
+            ANONYMOUS_ALLOW,
+            ["model:ls", "model:get", "pack:get", "pack:ls"],
+            "the anonymous grant is the catalogue, pinned exactly"
+        );
         for action in ANONYMOUS_ALLOW {
             assert!(anonymous.check(action).is_ok(), "{action} should pass");
         }
-        // Writes, control and admin actions are all out.
+        // Writes, control and admin are out — and so is every read that
+        // names a caller (a run, a delivery, a trigger) the engine cannot
+        // identify without an `[acl]` section.
         for action in [
             "model:deploy",
             "pack:publish",
@@ -1141,6 +1164,15 @@ mod tests {
             "model:rm",
             "snap:get",
             "snap:ls",
+            "proc:ls",
+            "proc:get",
+            "task:ls",
+            "task:get",
+            "msg:ls",
+            "msg:get",
+            "evt:ls",
+            "evt:get",
+            "ext:register_var",
         ] {
             assert!(
                 matches!(anonymous.check(action), Err(AclError::Denied(_))),
@@ -1152,14 +1184,29 @@ mod tests {
         assert!(anonymous.check_scope("profile", "u1").is_err());
     }
 
-    /// `enabled = false` is the explicit opt-out, and the only way to reach
-    /// the pre-ACL behaviour.
+    /// `enabled = false` is the explicit opt-out, and the only way a caller
+    /// resolves to an unrestricted principal.
     #[test]
     fn enabled_false_is_the_explicit_opt_out() {
         let acl = Acl::from_config(&config("enabled = false")).unwrap();
         assert!(!acl.enabled());
         assert!(acl.authenticate(None).unwrap().is_unrestricted());
         assert!(acl.anonymous().is_unrestricted());
+    }
+
+    /// A policy nobody sealed reads nothing — an absent authority is not an
+    /// unlimited one, and a run that has to read owned data says so at its
+    /// seal instead of being handed the whole data plane.
+    #[test]
+    fn an_unsealed_policy_reads_nothing() {
+        let default = ScopePolicy::default();
+        assert_eq!(default, ScopePolicy::deny_all());
+        assert!(!default.allows("secrets", "u1"));
+        assert!(default.workdir_root.is_none());
+
+        // Only a principal's own policy is unrestricted, and it says so.
+        assert!(Principal::unrestricted().scope_policy().all);
+        assert!(!Principal::anonymous().scope_policy().all);
     }
 
     /// Subscribing is an action: a role without `msg:sub` cannot open a

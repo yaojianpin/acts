@@ -110,15 +110,22 @@ port = 10082
 
 # access control — acts-server and every transport plugin.
 #
-# Without this section the engine is anonymous and read-only: callers may list
-# and get models, processes, tasks, messages, events and packages, and nothing
-# else (no writes, no control actions, no admin actions, no snapshot scope, no
-# subscriptions). Add the section to name your callers, or write
-# `enabled = false` inside it to lift the limits on purpose.
+# Without this section the engine is anonymous and catalogue-only: callers may
+# list and get models and packages, and nothing else (no other read, no write,
+# no control actions, no admin actions, no snapshot scope, no subscriptions).
+# Add the section to name your callers, or write `enabled = false` inside it to
+# lift the limits on purpose.
 # [acl]
 # enabled = false
 # shorthand: one token with unrestricted access (the requirepass equivalent)
 # token = "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+
+# shell package — acts-package-shell script policy: glob lists over the whole
+# script text, `deny` over `allow`, empty pair = no restriction. A refused
+# script fails the act before any shell is spawned.
+# [shell]
+# allow = ["ls", "ls *", "cat *.txt", "nu *"]
+# deny = ["*rm -rf*", "*sudo *"]
 
 # nats service — acts-plugin-nats. Only connected when this [nats] section
 # exists. Server actions are request/reply on "<subject>.cmd"; engine events

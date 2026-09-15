@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
     let workflow = Workflow::from_yml(model).unwrap();
 
     let (s1, s2) = engine.signal::<()>(()).double();
-    let executor = engine.executor();
+    let executor = engine.executor(&acts::Principal::unrestricted());
     executor
         .model()
         .deploy(&workflow, None)

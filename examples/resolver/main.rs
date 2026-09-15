@@ -62,7 +62,7 @@ async fn main() -> Result<()> {
 
     workflow.print();
 
-    let executor = engine.executor();
+    let executor = engine.executor(&acts::Principal::unrestricted());
     executor.model().deploy(&workflow, None).await?;
 
     // --- run 1: seals v1 ---------------------------------------------

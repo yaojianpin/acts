@@ -9,11 +9,11 @@ async fn main() -> Result<()> {
 
     let engine = Engine::builder().start().await?;
     let (s1, s2, sig) = engine.signal(()).triple();
-    let exec = engine.executor();
+    let exec = engine.executor(&acts::Principal::unrestricted());
     deploy_model(&exec, include_str!("./model/main.yml")).await?;
     deploy_model(&exec, include_str!("./model/sub.yml")).await?;
 
-    let executor = engine.executor().clone();
+    let executor = engine.executor(&acts::Principal::unrestricted()).clone();
     engine.channel().on_message(move |e| {
         let client = client.clone();
         let executor = executor.clone();
@@ -58,7 +58,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    engine.executor().proc().start("main", Vars::new()).await?;
+    engine.executor(&acts::Principal::unrestricted()).proc().start("main", Vars::new()).await?;
 
     sig.recv().await;
 

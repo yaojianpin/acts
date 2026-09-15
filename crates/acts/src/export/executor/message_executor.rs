@@ -1,16 +1,33 @@
-use crate::{MessageInfo, Result, query::Query, scheduler::Runtime, store::PageData};
+use crate::{MessageInfo, Principal, Result, query::Query, scheduler::Runtime, store::PageData};
 use std::sync::Arc;
 use tracing::{debug, instrument};
+
+/// `msg:ls` — list delivery rows.
+pub(crate) const LS: &str = "msg:ls";
+/// `msg:get` — read one delivery row joined with its message.
+pub(crate) const GET: &str = "msg:get";
+/// `msg:ack` — acknowledge a delivery.
+pub(crate) const ACK: &str = "msg:ack";
+/// `msg:rm` — delete a delivery row.
+pub(crate) const RM: &str = "msg:rm";
+/// `msg:clear` — clear error deliveries, of one process or of all.
+pub(crate) const CLEAR: &str = "msg:clear";
+/// `msg:redo` — re-send error deliveries.
+pub(crate) const REDO: &str = "msg:redo";
+/// `msg:unsub` — unsubscribe a channel.
+pub(crate) const UNSUB: &str = "msg:unsub";
 
 #[derive(Clone)]
 pub struct MessageExecutor {
     runtime: Arc<Runtime>,
+    principal: Arc<Principal>,
 }
 
 impl MessageExecutor {
-    pub fn new(rt: &Arc<Runtime>) -> Self {
+    pub(crate) fn new(rt: &Arc<Runtime>, principal: &Arc<Principal>) -> Self {
         Self {
             runtime: rt.clone(),
+            principal: principal.clone(),
         }
     }
 
@@ -20,6 +37,7 @@ impl MessageExecutor {
     /// `messages` collection.
     #[instrument(skip(self))]
     pub async fn list(&self, q: &Query) -> Result<PageData<MessageInfo>> {
+        self.principal.check(LS)?;
         match self.runtime.cache().store().deliveries().query(q).await {
             Ok(deliveries) => {
                 let mut rows = Vec::with_capacity(deliveries.rows.len());
@@ -43,6 +61,7 @@ impl MessageExecutor {
     /// Get one delivery row (joined with its message) by its delivery id.
     #[instrument(skip(self))]
     pub async fn get(&self, id: &str) -> Result<MessageInfo> {
+        self.principal.check(GET)?;
         let delivery = &self.runtime.cache().store().deliveries().find(id).await?;
         match self.delivery_info(delivery).await? {
             Some(info) => Ok(info),
@@ -73,18 +92,22 @@ impl MessageExecutor {
 
     /// Ack one delivery row by its delivery id.
     pub async fn ack(&self, id: &str) -> Result<()> {
+        self.principal.check(ACK)?;
         self.runtime.ack(id).await
     }
 
     /// Delete one delivery row by its delivery id.
     #[instrument(skip(self))]
     pub async fn rm(&self, id: &str) -> Result<bool> {
+        self.principal.check(RM)?;
         self.runtime.cache().store().deliveries().delete(id).await
     }
 
     /// Clear error delivery rows: all of them (`None`) or only those of one
     /// process (`Some(pid)`).
+    #[instrument(skip(self))]
     pub async fn clear(&self, pid: Option<String>) -> Result<()> {
+        self.principal.check(CLEAR)?;
         self.runtime
             .cache()
             .store()
@@ -96,6 +119,7 @@ impl MessageExecutor {
     /// Re-send every error delivery row (reset to `Created`; the retry timer
     /// sends them to their own channels).
     pub async fn redo(&self) -> Result<()> {
+        self.principal.check(REDO)?;
         self.runtime
             .cache()
             .store()
@@ -106,6 +130,7 @@ impl MessageExecutor {
 
     /// Delete one error delivery row by its delivery id.
     pub async fn clear_delivery(&self, delivery_id: &str) -> Result<()> {
+        self.principal.check(CLEAR)?;
         self.runtime
             .cache()
             .store()
@@ -117,6 +142,7 @@ impl MessageExecutor {
     /// Reset one error delivery row and immediately re-send it to the channel
     /// it belongs to.
     pub async fn redeliver(&self, delivery_id: &str) -> Result<()> {
+        self.principal.check(REDO)?;
         if let Some(delivery) = self
             .runtime
             .cache()
@@ -153,6 +179,7 @@ impl MessageExecutor {
 
     /// Unsubscribe a channel: no message is delivered to it any more.
     pub async fn unsub(&self, chan_id: &str) -> Result<()> {
+        self.principal.check(UNSUB)?;
         self.runtime.emitter().remove(chan_id);
         Ok(())
     }

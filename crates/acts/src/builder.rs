@@ -61,6 +61,31 @@ impl EngineBuilder {
         Ok(self)
     }
 
+    /// Turn access control off: every caller resolves to
+    /// [`Principal::unrestricted`](crate::Principal::unrestricted) and nothing
+    /// is checked.
+    ///
+    /// This is the explicit opt-out, and the setting a test or a local demo
+    /// uses — it is spelled out at the call site, never inferred. There is no
+    /// implicit version of it: an engine whose config has no `[acl]` section
+    /// runs under the read-only `anonymous` policy instead
+    /// ([`Acl::anonymous_access`](crate::Acl::anonymous_access)), and an
+    /// engine that has one runs under exactly the roles that section names.
+    ///
+    /// ```toml
+    /// # the same thing from a config file
+    /// [acl]
+    /// enabled = false
+    /// ```
+    pub fn disable_acl(mut self) -> Self {
+        self.config_mut()
+            .table
+            .insert("acl".to_string(), toml::Value::Table(toml::Table::from_iter(
+                [("enabled".to_string(), toml::Value::Boolean(false))],
+            )));
+        self
+    }
+
     pub fn log(mut self, dir: &str, level: &str) -> Self {
         self.config_mut().data.log = Some(ConfigLog {
             dir: dir.to_string(),

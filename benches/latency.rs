@@ -134,7 +134,7 @@ async fn engine_with_cache(cache_cap: i64) -> Engine {
 
 async fn deploy(engine: &Engine, workflow: &Workflow) {
     engine
-        .executor()
+        .executor(&acts::Principal::unrestricted())
         .model()
         .deploy(workflow, None)
         .await
@@ -173,7 +173,7 @@ async fn arm_batch(
     let start = Instant::now();
     for _ in 0..count {
         engine
-            .executor()
+            .executor(&acts::Principal::unrestricted())
             .proc()
             .start(&workflow.id, Vars::new())
             .await
@@ -341,7 +341,7 @@ async fn expr_eval(exprs: usize, n: usize) -> Report {
         // complete it (untimed) so the process is evicted between samples
         if let Some((pid, tid)) = tasks.pop() {
             engine
-                .executor()
+                .executor(&acts::Principal::unrestricted())
                 .act()
                 .complete(&pid, &tid, Vars::new())
                 .await
@@ -411,7 +411,7 @@ async fn proc_start(workers: usize, batch: usize, bursts: usize) -> Report {
             let mid = workflow.id.clone();
             calls.push(tokio::spawn(async move {
                 engine
-                    .executor()
+                    .executor(&acts::Principal::unrestricted())
                     .proc()
                     .start(&mid, Vars::new())
                     .await
@@ -473,7 +473,7 @@ async fn act_complete(handlers: usize, n: usize) -> Report {
     for (i, (pid, tid)) in tasks.iter().enumerate() {
         let start = Instant::now();
         engine
-            .executor()
+            .executor(&acts::Principal::unrestricted())
             .act()
             .complete(pid, tid, Vars::new())
             .await

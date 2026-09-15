@@ -1,4 +1,4 @@
-use crate::{Config, Engine, Signal, Workflow, scheduler::Process};
+use crate::{Config, Engine, Signal, Vars, Workflow, scheduler::Process};
 use std::sync::Arc;
 
 // Package uses constants
@@ -40,6 +40,26 @@ pub(crate) async fn create_proc_with_config(
         .on_message(|e| async move { println!("message: {e:?}") });
 
     (engine, proc)
+}
+
+/// Start a run the engine itself owns, sealing the authority explicitly.
+///
+/// A run with no authority at all reads no snapshot scope (see
+/// [`crate::ScopePolicy::default`]), which is what an embedder that never
+/// authenticated gets; a test that means "this engine has the whole API in
+/// hand" says so here, the way production says it with
+/// [`crate::Engine::executor`] and an unrestricted principal.
+pub(crate) async fn start_engine_owned(
+    runtime: &Arc<crate::scheduler::Runtime>,
+    workflow: &Workflow,
+    vars: Vars,
+) -> crate::Result<Arc<Process>> {
+    runtime
+        .start(
+            workflow,
+            vars.with(crate::utils::consts::PROC_OWNER, crate::ScopePolicy::unrestricted()),
+        )
+        .await
 }
 
 pub(crate) fn auto_complete<S>(engine: &Engine, sig: &Signal<S>)

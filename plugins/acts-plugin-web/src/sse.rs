@@ -230,13 +230,13 @@ allow = ["model:deploy", "proc:start", "msg:ack", "msg:sub"]
                     .with_uses("acts.core.irq", Vars::new().with("key", "leak-test"))
             });
         engine
-            .executor()
+            .executor(&acts::Principal::unrestricted())
             .model()
             .deploy(&model, None)
             .await
             .unwrap();
         engine
-            .executor()
+            .executor(&acts::Principal::unrestricted())
             .proc()
             .start(&model.id, Vars::new())
             .await
@@ -245,7 +245,7 @@ allow = ["model:deploy", "proc:start", "msg:ack", "msg:sub"]
 
     async fn stored_message_count(engine: &Engine) -> usize {
         engine
-            .executor()
+            .executor(&acts::Principal::unrestricted())
             .msg()
             .list(&StoreQuery::new().offset(0).limit(1000))
             .await

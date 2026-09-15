@@ -117,7 +117,7 @@ impl GrpcServer {
             &serde_json::from_slice::<acts::Vars>(&message.data.unwrap_or_default()).unwrap();
         let name = message.name.as_str();
         let ack = message.seq.as_str();
-        let executor = self.engine.executor();
+        let executor = self.engine.executor(&acts::Principal::unrestricted());
         match name {
             // do act
             "act:push" => {

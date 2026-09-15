@@ -1,7 +1,7 @@
 use crate::{
     Acl, AclConfig, ActPlugin, ChannelOptions, Config, Principal, Signal,
     builder::EngineBuilder,
-    export::{Channel, Executor, Extender},
+    export::{Channel, Executor},
     package::{self, ActPackageRegister},
     scheduler::Runtime,
     snapshot::{SnapshotManager, SnapshotOptions},
@@ -36,8 +36,12 @@ impl Engine {
         self.acl.clone()
     }
 
-    /// The principal `acl:whoami` and the in-process action entry resolve to
-    /// when no token is presented.
+    /// The principal a caller that presents no token resolves to — the
+    /// identity to hand [`Engine::executor`] on behalf of such a request.
+    ///
+    /// Without an `[acl]` section this is the read-only `anonymous` subject;
+    /// with one it is the configured `default_role`, or a principal that is
+    /// refused everything when no default role exists.
     pub fn anonymous(&self) -> Principal {
         self.acl.anonymous()
     }
@@ -51,9 +55,22 @@ impl Engine {
         Ok(())
     }
 
-    /// Engine executor.
-    pub fn executor(&self) -> Arc<Executor> {
-        Arc::new(Executor::new(&self.runtime))
+    /// The engine's operations, bound to `principal`.
+    ///
+    /// Every operation of the returned [`Executor`] is checked against that
+    /// principal's `allow`/`deny` patterns before it runs — `model().deploy()`
+    /// and `proc().start()` included — so an embedder reaches the engine
+    /// through exactly the policy a transport caller does. What the principal
+    /// may start is what its runs may read: `proc().start()` seals the
+    /// principal's [`crate::ScopePolicy`] (snapshot scopes and workdir root)
+    /// into the process it starts.
+    ///
+    /// Use [`Engine::anonymous`] for a request that carries no token, or
+    /// [`Principal::unrestricted`] for work that is the engine's own — the
+    /// package registrations [`EngineBuilder::start`] performs, a test that
+    /// drives the engine directly.
+    pub fn executor(&self, principal: &Principal) -> Arc<Executor> {
+        Arc::new(Executor::new(&self.runtime, principal))
     }
 
     /// Event channel (defaults to no redelivery support).
@@ -65,11 +82,6 @@ impl Engine {
     /// set, unacked messages can be re-sent.
     pub fn channel_with_options(&self, matcher: &ChannelOptions) -> Arc<Channel> {
         Arc::new(Channel::channel(&self.runtime, matcher))
-    }
-
-    /// Engine extender.
-    pub fn extender(&self) -> Arc<Extender> {
-        Arc::new(Extender::new(&self.runtime))
     }
 
     /// Snapshot manager for feeding snapshot-backed sealed data.
@@ -171,9 +183,13 @@ impl Engine {
 
         package::init(self).await?;
 
+        // Publishing a built-in package is the engine's own operation, not a
+        // request: it runs as the unrestricted `system` principal, whatever
+        // policy the deployment configured for its callers.
+        let executor = self.executor(&Principal::unrestricted());
         for package_register in packages {
             let meta = (package_register.meta)();
-            self.extender().register_package(&meta).await?;
+            executor.ext().register_package(&meta).await?;
             if meta.run_as == crate::ActRunAs::Func {
                 self.runtime.package().register(meta.id, &package_register);
             }

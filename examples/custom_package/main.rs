@@ -12,7 +12,7 @@ async fn main() -> acts::Result<()> {
         .await?;
 
     let (s1, s2, sig) = engine.signal(()).triple();
-    let executor = engine.executor();
+    let executor = engine.executor(&acts::Principal::unrestricted());
 
     let mut vars = Vars::new();
     vars.set("input", 10);
@@ -22,7 +22,7 @@ async fn main() -> acts::Result<()> {
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text)?;
     workflow.print();
-    engine.executor().model().deploy(&workflow, None).await?;
+    engine.executor(&acts::Principal::unrestricted()).model().deploy(&workflow, None).await?;
 
     executor.proc().start(&workflow.id, vars).await?;
     let chan = engine.channel();

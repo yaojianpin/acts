@@ -26,7 +26,8 @@ async fn plugin_package_register() {
         .unwrap();
 
     engine
-        .extender()
+        .executor(&crate::Principal::unrestricted())
+        .ext()
         .register_package(&ActPackageDefinition {
             id: "test_package",
             name: "test_package",
@@ -52,7 +53,8 @@ async fn plugin_package_register() {
         .await
         .unwrap();
     engine
-        .extender()
+        .executor(&crate::Principal::unrestricted())
+        .ext()
         .register_package(&ActPackageDefinition {
             id: "test_package2",
             name: "test_package2",
@@ -78,10 +80,10 @@ async fn plugin_package_register() {
         .await
         .unwrap();
 
-    let pack1 = engine.executor().pack().get("test_package").await.unwrap();
+    let pack1 = engine.executor(&crate::Principal::unrestricted()).pack().get("test_package").await.unwrap();
     assert_eq!(pack1.run_as, ActRunAs::Irq);
 
-    let pack2 = engine.executor().pack().get("test_package2").await.unwrap();
+    let pack2 = engine.executor(&crate::Principal::unrestricted()).pack().get("test_package2").await.unwrap();
     assert_eq!(pack2.run_as, ActRunAs::Msg);
 }
 

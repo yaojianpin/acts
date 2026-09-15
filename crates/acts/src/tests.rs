@@ -3,7 +3,7 @@ use crate::event::EventAction;
 use crate::{
     ActPackage, ActPackageCatalog, ActPackageDefinition, ActRunAs, Context, Engine, KvStore,
     MemoryStore, MessageState, ScanOperation, ScanOptions, Vars, Workflow, utils,
-    utils::test::USES_IRQ,
+    utils::test::{USES_IRQ, start_engine_owned},
 };
 use parking_lot::Mutex;
 use serde::Deserialize;
@@ -222,9 +222,9 @@ async fn engine_event_on_message() {
         }
     });
 
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
     engine
-        .executor()
+        .executor(&crate::Principal::unrestricted())
         .model()
         .deploy(&workflow, None)
         .await
@@ -256,9 +256,9 @@ async fn engine_event_on_start() {
         }
     });
 
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
     engine
-        .executor()
+        .executor(&crate::Principal::unrestricted())
         .model()
         .deploy(&workflow, None)
         .await
@@ -290,9 +290,9 @@ async fn engine_event_on_complete() {
         }
     });
 
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
     engine
-        .executor()
+        .executor(&crate::Principal::unrestricted())
         .model()
         .deploy(&workflow, None)
         .await
@@ -343,7 +343,7 @@ async fn engine_event_on_error() {
         }
     });
 
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
     executor.model().deploy(&workflow, None).await.unwrap();
 
     let mut options = Vars::new();
@@ -608,9 +608,7 @@ async fn snapshot_injects_sealed_data() {
         }
     });
 
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new().with("unit", "u1"))
+    let proc = start_engine_owned(&engine.runtime(), &workflow, Vars::new().with("unit", "u1"))
         .await
         .unwrap();
 
@@ -661,9 +659,7 @@ async fn sealed_data_js_dollar_profile_access() {
         }
     });
 
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new().with("unit", "u1"))
+    let proc = start_engine_owned(&engine.runtime(), &workflow, Vars::new().with("unit", "u1"))
         .await
         .unwrap();
 
@@ -727,9 +723,7 @@ async fn snapshot_skips_when_scope_params_missing() {
 
     // start WITHOUT required params: the scope key cannot be derived, so
     // nothing is sealed (Skip)
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
+    let proc = start_engine_owned(&engine.runtime(), &workflow, Vars::new())
         .await
         .unwrap();
 
@@ -767,9 +761,7 @@ async fn snapshot_sealed_data_inherits_from_parent() {
         }
     });
 
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new().with("unit", "u1"))
+    let proc = start_engine_owned(&engine.runtime(), &workflow, Vars::new().with("unit", "u1"))
         .await
         .unwrap();
 
@@ -907,7 +899,7 @@ async fn engine_set_store_custom() {
     // writes through the engine must land in the custom store
     let model = Workflow::new().with_id("custom_store_model");
     engine
-        .executor()
+        .executor(&crate::Principal::unrestricted())
         .model()
         .deploy(&model, None)
         .await
@@ -968,7 +960,7 @@ async fn snapshot_per_proc_pins_value_until_process_ends() {
     let sig = engine.signal(String::new());
     let s = sig.clone();
     let eng = engine.clone();
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
     engine.channel().on_message(move |e| {
         let s = s.clone();
         let eng = eng.clone();
@@ -1001,9 +993,7 @@ async fn snapshot_per_proc_pins_value_until_process_ends() {
     });
 
     let pid = utils::longid();
-    engine
-        .runtime()
-        .start(&workflow, Vars::new().with("pid", pid.clone()))
+    start_engine_owned(&engine.runtime(), &workflow, Vars::new().with("pid", pid.clone()))
         .await
         .unwrap();
 
@@ -1056,7 +1046,7 @@ async fn snapshot_per_task_reads_latest_value() {
     let sig = engine.signal(String::new());
     let s = sig.clone();
     let eng = engine.clone();
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
     engine.channel().on_message(move |e| {
         let s = s.clone();
         let eng = eng.clone();
@@ -1089,9 +1079,7 @@ async fn snapshot_per_task_reads_latest_value() {
     });
 
     let pid = utils::longid();
-    engine
-        .runtime()
-        .start(&workflow, Vars::new().with("pid", pid.clone()))
+    start_engine_owned(&engine.runtime(), &workflow, Vars::new().with("pid", pid.clone()))
         .await
         .unwrap();
 
@@ -1151,7 +1139,7 @@ async fn snapshot_scope_keyed_by_task_params() {
 
     let sig = engine.signal(String::new());
     let s = sig.clone();
-    let executor = engine.executor();
+    let executor = engine.executor(&crate::Principal::unrestricted());
     engine.channel().on_message(move |e| {
         let s = s.clone();
         let executor = executor.clone();
@@ -1179,9 +1167,7 @@ async fn snapshot_scope_keyed_by_task_params() {
     });
 
     let pid = utils::longid();
-    engine
-        .runtime()
-        .start(&workflow, Vars::new().with("pid", pid.clone()))
+    start_engine_owned(&engine.runtime(), &workflow, Vars::new().with("pid", pid.clone()))
         .await
         .unwrap();
 
@@ -1247,9 +1233,7 @@ async fn snapshot_per_proc_js_access_inherits_on_child() {
         }
     });
 
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new().with("unit", "u1"))
+    let proc = start_engine_owned(&engine.runtime(), &workflow, Vars::new().with("unit", "u1"))
         .await
         .unwrap();
 
@@ -1265,6 +1249,57 @@ async fn snapshot_per_proc_js_access_inherits_on_child() {
         let token = env.eval::<String>("$profile.secrets.TOKEN").unwrap();
         assert_eq!(token, "sk-123");
     });
+}
+
+/// A run nothing claims — the engine started it with no caller authority —
+/// reads no snapshot scope. An absent authority is not an unlimited one, so
+/// the task fails at its seal naming the subject it lacks instead of being
+/// handed another subject's data.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unclaimed_run_reads_no_snapshot_scope() {
+    let engine = Engine::builder().start().await.unwrap();
+    engine
+        .add_snapshot("profile", crate::SnapshotOptions::per_proc())
+        .unwrap();
+    engine
+        .snapshot()
+        .upsert("profile", "", 1, Vars::new().with("val", 1))
+        .unwrap();
+
+    let workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_uses(USES_IRQ, Vars::new().with("key", "test"))
+    });
+
+    let (send, failed) = engine.signal::<String>(String::new()).double();
+    engine.channel().on_error(move |e| {
+        let send = send.clone();
+        async move {
+            send.send(
+                e.inputs
+                    .get::<String>(crate::utils::consts::ACT_ERR_MESSAGE)
+                    .unwrap_or_default(),
+            );
+        }
+    });
+
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new().with("unit", "u1"))
+        .await
+        .unwrap();
+    let err = failed.recv().await;
+    assert!(
+        err.contains("is not owned by subject"),
+        "unexpected error: {err}"
+    );
+
+    // the cache still holds the value; it was the run's authority that did not
+    assert_eq!(engine.snapshot().read("profile", "").unwrap().rev, 1);
+    let root = proc.root().unwrap();
+    assert!(root.sealed("profile").is_none());
+    assert_eq!(proc.owner_scope(), crate::ScopePolicy::deny_all());
 }
 
 #[serial]

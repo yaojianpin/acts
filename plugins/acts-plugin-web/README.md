@@ -37,13 +37,15 @@ port = 10082
 
 ## Authentication
 
-Every endpoint except `/health` requires an `authorization: Bearer <token>`
-header once the engine config has an `[acl]` section. Without one the engine is
-anonymous and read-only, so the header still works but buys only reads
-(`/api/msg/sse` needs the `msg:sub` grant). Each route runs its operation
-through the shared action table (`acts::actions::apply_as`) as the request's
-principal, so the same role rules cover HTTP, gRPC and NATS. A refusal answers
-`401` (no/unknown token) or `403` (authenticated but not allowed).
+Every endpoint except `/health` runs its operation through the shared action
+table (`acts::actions::apply_as`) as the request's principal, so the same role
+rules cover HTTP, gRPC and NATS. The principal is the bearer token's role; with
+no token — or no `[acl]` section at all — it is the `anonymous` subject, which
+may read only the catalogue (`model:ls`/`model:get`/`pack:ls`/`pack:get`).
+A refusal answers `401` (no/unknown token) or `403` (authenticated but not
+allowed); an endpoint outside the catalogue therefore answers `401` until an
+`[acl]` section names its caller (`/api/msg/sse` additionally needs the
+`msg:sub` grant).
 
 See the access-control chapter of the book for the config format.
 

@@ -67,7 +67,7 @@ impl Context {
     pub fn new(proc: &Arc<Process>, task: &Arc<Task>) -> Self {
         Context {
             runtime: task.runtime().clone(),
-            executor: Arc::new(Executor::new(task.runtime())),
+            executor: Arc::new(Executor::engine(task.runtime())),
             proc: proc.clone(),
             action: RwLock::new(None),
             task: RwLock::new(task.clone()),

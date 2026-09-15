@@ -53,7 +53,7 @@ fn deploy(c: &mut Criterion) {
                 let start = std::time::Instant::now();
                 for _ in 0..iters {
                     engine
-                        .executor()
+                        .executor(&acts::Principal::unrestricted())
                         .model()
                         .deploy(&workflow, None)
                         .await
@@ -90,7 +90,7 @@ fn start(c: &mut Criterion) {
                     .await
                     .expect("failed to start engine");
                 engine
-                    .executor()
+                    .executor(&acts::Principal::unrestricted())
                     .model()
                     .deploy(&workflow, None)
                     .await
@@ -99,7 +99,7 @@ fn start(c: &mut Criterion) {
                 let start = std::time::Instant::now();
                 for _ in 0..iters {
                     engine
-                        .executor()
+                        .executor(&acts::Principal::unrestricted())
                         .proc()
                         .start(&workflow_id, Vars::new())
                         .await
@@ -155,7 +155,7 @@ async fn arm_batch(engine: &Engine, workflow: &Workflow, count: u64) -> Vec<(Str
 
     for _ in 0..count {
         engine
-            .executor()
+            .executor(&acts::Principal::unrestricted())
             .proc()
             .start(&workflow.id, Vars::new())
             .await
@@ -197,7 +197,7 @@ fn act(c: &mut Criterion) {
                     .await
                     .expect("failed to start engine");
                 engine
-                    .executor()
+                    .executor(&acts::Principal::unrestricted())
                     .model()
                     .deploy(&workflow, None)
                     .await
@@ -209,7 +209,7 @@ fn act(c: &mut Criterion) {
                 let start = std::time::Instant::now();
                 for (pid, tid) in &tasks {
                     engine
-                        .executor()
+                        .executor(&acts::Principal::unrestricted())
                         .act()
                         .complete(pid, tid, Vars::new())
                         .await

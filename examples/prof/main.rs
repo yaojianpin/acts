@@ -25,7 +25,7 @@ steps:
         .await
         .expect("failed to start engine");
     engine
-        .executor()
+        .executor(&acts::Principal::unrestricted())
         .model()
         .deploy(&workflow, None)
         .await
@@ -51,7 +51,7 @@ steps:
 
     for _ in 0..iters {
         engine
-            .executor()
+            .executor(&acts::Principal::unrestricted())
             .proc()
             .start(&workflow.id, Vars::new())
             .await
@@ -67,7 +67,7 @@ steps:
     // warmup
     let (pid, tid) = &tasks[0];
     let _ = engine
-        .executor()
+        .executor(&acts::Principal::unrestricted())
         .act()
         .complete(pid, tid, Vars::new())
         .await;
@@ -75,7 +75,7 @@ steps:
     let start = Instant::now();
     for (pid, tid) in tasks.iter().skip(1) {
         engine
-            .executor()
+            .executor(&acts::Principal::unrestricted())
             .act()
             .complete(pid, tid, Vars::new())
             .await

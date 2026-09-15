@@ -1503,7 +1503,7 @@ async fn sch_message_ack_not_exist_message_in_store() {
         let rx = rx.clone();
         async move {
             if msg.r#type == "workflow" && msg.state() == MessageState::Created {
-                let ret = engine.executor().msg().ack(&msg.id).await;
+                let ret = engine.executor(&crate::Principal::unrestricted()).msg().ack(&msg.id).await;
                 rx.send(ret.is_ok());
             }
         }
@@ -1557,7 +1557,7 @@ async fn sch_message_ack_exist_message_in_store() {
                 if msg.r#type == "workflow" && msg.state() == MessageState::Created {
                     // the channel delivery carries its own delivery id
                     let delivery_id = msg.delivery_id.clone().unwrap();
-                    engine.executor().msg().ack(&delivery_id).await.unwrap();
+                    engine.executor(&crate::Principal::unrestricted()).msg().ack(&delivery_id).await.unwrap();
                     rx.send(msg.inner().clone());
                 }
             }
@@ -1636,7 +1636,7 @@ async fn sch_message_complete_message_in_store() {
             async move {
                 if msg.is_params_key("act1") && msg.state() == MessageState::Created {
                     engine
-                        .executor()
+                        .executor(&crate::Principal::unrestricted())
                         .act()
                         .complete(&msg.pid, &msg.tid, Vars::new())
                         .await
@@ -1885,7 +1885,7 @@ async fn sch_message_error_if_not_ack_and_exceed_max_reties() {
                 rx.update(|data| data.push(e.inner().clone()));
             } else if let Some(delivery_id) = &e.delivery_id {
                 // ack the other deliveries of this channel
-                engine.executor().msg().ack(delivery_id).await.unwrap();
+                engine.executor(&crate::Principal::unrestricted()).msg().ack(delivery_id).await.unwrap();
             }
         }
     });
@@ -1967,7 +1967,7 @@ async fn sch_message_redelivery_goes_to_owning_channel_only() {
             let a_send = a_send.clone();
             async move {
                 if let Some(delivery_id) = &e.delivery_id {
-                    engine_a.executor().msg().ack(delivery_id).await.unwrap();
+                    engine_a.executor(&crate::Principal::unrestricted()).msg().ack(delivery_id).await.unwrap();
                 }
                 if e.r#type == "workflow" && e.state() == MessageState::Created {
                     a_send.update(|data| data.push(e.inner().clone()));

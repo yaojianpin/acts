@@ -2,6 +2,7 @@ use acts::{
     ActError, ActPackage, ActPackageCatalog, ActPackageDefinition, ActRunAs, Result, Vars,
     include_json,
 };
+use globset::{GlobBuilder, GlobMatcher};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 use std::path::Path;
@@ -40,9 +41,6 @@ pub enum ContentType {
     Json,
 }
 
-#[derive(Debug, Clone)]
-pub struct ShellPackage;
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ShellPackageParams {
     shell: Option<Shell>,
@@ -53,6 +51,97 @@ pub struct ShellPackageParams {
     /// is opt-in to avoid changing the behavior of existing workflows.
     #[serde(default, rename(deserialize = "max-output-bytes"))]
     max_output_bytes: Option<usize>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ShellPackage {
+    policy: ScriptPolicy,
+}
+
+/// Package-level `[shell]` configuration: what a workflow's script may be.
+///
+/// ```toml
+/// [shell]
+/// # when non-empty, only a script matching one of these may run
+/// allow = ["ls", "ls *", "cat *.txt", "nu *"]
+/// # always refused, allow or not
+/// deny = ["*rm -rf*", "*sudo *", "*> /etc/*"]
+/// ```
+///
+/// Patterns are globs over the **whole script text** — `*` matches any run of
+/// characters, newlines and `/` included, `?` matches one, `[abc]` one of a
+/// set — so `rm *` matches a script that *starts* with `rm` and `*rm *`
+/// matches one that contains it anywhere. Matching the script rather than a
+/// parsed command is deliberate: the package does not parse a shell (that is
+/// the shell's job, and no two shells agree), so the rule is the one thing it
+/// can state exactly — "this text, or not".
+///
+/// `deny` wins over `allow`. Both lists empty means no restriction, which is
+/// the behaviour of a deployment that says nothing; the moment either is
+/// written, the policy is the judgement. A pattern that does not compile is a
+/// startup error, never a silent allow: a policy that cannot be enforced must
+/// not run.
+///
+/// **This is a policy, not a sandbox.** A glob over script text cannot see
+/// what the script will do — `a=rm; $a -rf /` names no forbidden word, and a
+/// script can do anything the server's own account may do that
+/// `confine_script` does not name either. The lists are for making intent
+/// explicit and for refusing the obvious, in the spirit of the workdir check
+/// below them; a hostile workflow still needs an OS boundary (a container or a
+/// namespace around the server).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ShellConfig {
+    /// Script globs that may run. Empty means "anything not denied".
+    pub allow: Vec<String>,
+    /// Script globs that never run; wins over [`ShellConfig::allow`].
+    pub deny: Vec<String>,
+}
+
+/// The compiled [`ShellConfig`]: allow/deny globs, deny first.
+#[derive(Debug, Clone, Default)]
+pub struct ScriptPolicy {
+    allow: Vec<GlobMatcher>,
+    deny: Vec<GlobMatcher>,
+}
+
+impl ScriptPolicy {
+    /// Compile the configured globs. A malformed pattern is an error here,
+    /// where it fails startup, rather than at the first script it would have
+    /// governed.
+    pub fn new(config: &ShellConfig) -> Result<Self> {
+        Ok(Self {
+            allow: compile(&config.allow, "allow")?,
+            deny: compile(&config.deny, "deny")?,
+        })
+    }
+
+    /// Whether `script` may run: not denied, and — when an allow list exists —
+    /// matched by it.
+    pub fn allows(&self, script: &str) -> bool {
+        if self.deny.iter().any(|glob| glob.is_match(script)) {
+            return false;
+        }
+        self.allow.is_empty() || self.allow.iter().any(|glob| glob.is_match(script))
+    }
+}
+
+/// Compile one pattern list. `literal_separator(false)` is what makes `*`
+/// mean "any characters" rather than "any characters but `/`": a script is one
+/// string, not a path, and `cat *` has to match `cat sub/dir/file.txt`.
+fn compile(patterns: &[String], field: &str) -> Result<Vec<GlobMatcher>> {
+    patterns
+        .iter()
+        .map(|pattern| {
+            GlobBuilder::new(pattern)
+                .literal_separator(false)
+                .build()
+                .map(|glob| glob.compile_matcher())
+                .map_err(|err| {
+                    ActError::Config(format!("invalid shell {field} pattern '{pattern}': {err}"))
+                })
+        })
+        .collect()
 }
 
 #[async_trait::async_trait]
@@ -77,11 +166,16 @@ impl ActPackage for ShellPackage {
             catalog: ActPackageCatalog::App,
         }
     }
-    fn new(_: &acts::Config) -> Result<Self>
+    fn new(config: &acts::Config) -> Result<Self>
     where
         Self: Sized,
     {
-        Ok(Self)
+        let config = if config.has("shell") {
+            config.get::<ShellConfig>("shell")?
+        } else {
+            ShellConfig::default()
+        };
+        Self::from_config(&config)
     }
 
     async fn execute(
@@ -98,6 +192,16 @@ impl ActPackage for ShellPackage {
                 e
             ))
         })?;
+
+        // The `[shell]` allow/deny lists, checked before anything is spawned:
+        // a script the deployment did not admit never reaches the shell.
+        if !self.policy.allows(&params.script) {
+            return Err(ActError::Package(format!(
+                "the script is refused by the [shell] policy: it is not admitted by `allow` \
+                 or it matches `deny` ({} characters)",
+                params.script.len()
+            )));
+        }
 
         // Directory control: when the engine's ACL config gives this process a
         // workdir, the script runs inside it and may not name a path outside.
@@ -166,6 +270,16 @@ impl ActPackage for ShellPackage {
         }
 
         Ok(Some(ret))
+    }
+}
+
+impl ShellPackage {
+    /// Build the package from an explicit `[shell]` config, bypassing the
+    /// engine config lookup.
+    pub fn from_config(config: &ShellConfig) -> Result<Self> {
+        Ok(Self {
+            policy: ScriptPolicy::new(config)?,
+        })
     }
 }
 
@@ -323,5 +437,106 @@ mod tests {
     fn a_url_is_not_read_as_a_path() {
         // The guard is about the filesystem, not the network.
         assert!(check("curl http://example.com/a/b").is_ok());
+    }
+    fn compile_policy(allow: &[&str], deny: &[&str]) -> ScriptPolicy {
+        ScriptPolicy::new(&ShellConfig {
+            allow: allow.iter().map(|s| s.to_string()).collect(),
+            deny: deny.iter().map(|s| s.to_string()).collect(),
+        })
+        .expect("compile policy")
+    }
+
+    /// An empty policy does not restrict: a deployment that lists nothing has
+    /// said nothing, and the check is the deployment's to make.
+    #[test]
+    fn an_empty_policy_admits_every_script() {
+        let policy = compile_policy(&[], &[]);
+        for script in ["ls", "rm -rf /", "curl http://example.com", "a\nb\nc"] {
+            assert!(policy.allows(script), "should be allowed: {script}");
+        }
+    }
+
+    /// A non-empty allow list is the whole of what may run — anything else is
+    /// refused, not merely unmatched.
+    #[test]
+    fn a_non_empty_allow_list_is_exhaustive() {
+        let policy = compile_policy(&["ls", "ls *", "cat *.txt"], &[]);
+        for script in ["ls", "ls -la /tmp", "cat notes.txt"] {
+            assert!(policy.allows(script), "should be allowed: {script}");
+        }
+        for script in ["rm -rf /", "cat notes.md", "ls; rm -rf /", "  ls"] {
+            assert!(!policy.allows(script), "should be refused: {script}");
+        }
+    }
+
+    /// `*` spans `/` and newlines: a script is one string, not a path, so
+    /// `cat *` has to reach `cat sub/dir/file.txt`.
+    #[test]
+    fn a_star_matches_across_separators_and_lines() {
+        let policy = compile_policy(&["cat *"], &[]);
+        assert!(policy.allows("cat sub/dir/file.txt"));
+        assert!(policy.allows("cat a\ncat b"));
+
+        let policy = compile_policy(&["nu *"], &[]);
+        assert!(policy.allows("nu -c 'echo hi'"));
+    }
+
+    /// Deny wins over allow, contains anywhere in the script, and is checked
+    /// first — a script both listed and forbidden is refused.
+    #[test]
+    fn deny_wins_over_allow() {
+        let policy = compile_policy(&["ls *"], &["*rm -rf*", "*sudo *"]);
+        assert!(policy.allows("ls -la"));
+        assert!(!policy.allows("rm -rf /"));
+        assert!(!policy.allows("ls\nrm -rf /"));
+        assert!(!policy.allows("ls; sudo reboot"));
+
+        let policy = compile_policy(&["*rm -rf*"], &["*rm -rf*"]);
+        assert!(!policy.allows("rm -rf /"));
+
+        // deny is effective with no allow list at all
+        let policy = compile_policy(&[], &["*rm -rf*"]);
+        assert!(policy.allows("ls"));
+        assert!(!policy.allows("cd /tmp && rm -rf *"));
+    }
+
+    /// A pattern that does not compile fails at load, where it is a startup
+    /// error, instead of silently governing nothing.
+    #[test]
+    fn an_invalid_pattern_is_a_config_error() {
+        let err = ScriptPolicy::new(&ShellConfig {
+            allow: vec!["ls [unclosed".to_string()],
+            deny: vec![],
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("invalid shell allow pattern"), "{err}");
+
+        let err = ScriptPolicy::new(&ShellConfig {
+            allow: vec![],
+            deny: vec!["a{b".to_string()],
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("invalid shell deny pattern"), "{err}");
+    }
+
+    /// The config lookup is the `[shell]` section, and a section with no lists
+    /// is no restriction.
+    #[test]
+    fn the_section_is_read_from_the_engine_config() {
+        let config = acts::Config {
+            data: Default::default(),
+            table: toml::from_str::<toml::Table>(
+                "[shell]\nallow = [\"ls *\"]\ndeny = [\"*rm *\"]\n",
+            )
+            .unwrap(),
+        };
+        let package = ShellPackage::new(&config).unwrap();
+        assert!(package.policy.allows("ls -la"));
+        assert!(!package.policy.allows("rm file"));
+        assert!(!package.policy.allows("echo hi"));
+
+        // No section: nothing is restricted.
+        let package = ShellPackage::new(&acts::Config::default()).unwrap();
+        assert!(package.policy.allows("anything at all"));
     }
 }

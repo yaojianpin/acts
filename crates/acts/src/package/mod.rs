@@ -289,13 +289,17 @@ impl ActPackageDefinition {
 inventory::collect!(ActPackageRegister);
 
 pub async fn init(engine: &Engine) -> Result<()> {
+    // The built-in packages are the engine's own registrations, not requests,
+    // so they are published as the unrestricted `system` principal — the
+    // deployment's policy governs its callers, not the engine's startup.
+    let executor = engine.executor(&crate::Principal::unrestricted());
     for register in inventory::iter::<ActPackageRegister> {
         let meta = (register.meta)();
         debug!("package: {}", meta.name);
 
         let mut pack = meta.into_data()?;
         pack.built_in = true;
-        engine.executor().pack().publish(&pack).await?;
+        executor.pack().publish(&pack).await?;
         engine.runtime().package().register(meta.id, register);
     }
     Ok(())

@@ -52,7 +52,7 @@ async fn pack_irq_multi_threads() {
     workflow.print();
     let engine = Engine::builder().cache_size(10).start().await.unwrap();
     engine
-        .executor()
+        .executor(&crate::Principal::unrestricted())
         .model()
         .deploy(&workflow, None)
         .await
@@ -68,7 +68,7 @@ async fn pack_irq_multi_threads() {
         async move {
             if e.is_params_key("act1") && e.is_state(MessageState::Created) {
                 let ret = engine
-                    .executor()
+                    .executor(&crate::Principal::unrestricted())
                     .act()
                     .complete(&e.pid, &e.tid, Vars::new())
                     .await;
@@ -88,7 +88,7 @@ async fn pack_irq_multi_threads() {
     });
 
     for _ in 0..len {
-        e2.executor().proc().start("m1", Vars::new()).await.unwrap();
+        e2.executor(&crate::Principal::unrestricted()).proc().start("m1", Vars::new()).await.unwrap();
     }
 
     let ret = s2.recv().await;

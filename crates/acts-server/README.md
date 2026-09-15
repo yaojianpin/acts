@@ -165,13 +165,17 @@ plus snapshot operations (`snap:upsert`, `snap:remove`, `snap:get`,
 
 ### Access control
 
-Without an `[acl]` section the engine is **anonymous and read-only**: every
+Without an `[acl]` section the engine is **anonymous and catalogue-only**: every
 request is attributed to the built-in `anonymous` subject, which may list and
-get models, processes, tasks, messages, events and packages — no writes, no
-control actions (`proc:start`, `act:*`, `evt:start`, `msg:ack`), no admin
-actions, no snapshot scope, no subscriptions. Add `[acl]` to name your callers
-(a single `token` is the smallest useful section), or write `enabled = false`
-inside it to lift the limits on purpose.
+get **models and packages** — no other read (a run, a delivery or a trigger is
+someone's work), no write, no control actions (`proc:start`, `act:*`,
+`evt:start`, `msg:ack`), no admin actions, no snapshot scope, no subscriptions.
+Add `[acl]` to name your callers (a single `token` is the smallest useful
+section), or write `enabled = false` inside it to lift the limits on purpose.
+
+Every operation is checked — including the ones an embedder performs through
+`Engine::executor(&principal)` — and the executor seals the principal's
+snapshot scopes and workdir root into every run it starts.
 
 | Transport | Credential |
 |-----------|------------|
@@ -200,6 +204,10 @@ not accumulate one directory per historical process; a run whose row is kept
 (an errored delivery awaiting a manual retry) keeps its directory too, and
 anything a run needs to outlive itself must be exported, not left in the
 workdir.
+
+`acts.app.shell` adds a script policy of its own: `[shell] allow`/`deny` are
+globs over the whole script text (`*` spans `/` and newlines, `deny` wins), and
+a script the policy refuses fails the act before any shell is spawned.
 
 See the commented template in the generated default config
 (`~/.acts/acts.toml`) or the access-control chapter of the book.

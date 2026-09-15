@@ -42,4 +42,6 @@ steps:
 
 ## 自定义包
 
-可以通过实现 `ActPackage` trait 来扩展自定义包，使用 `engine.extender().register_package(&meta)` 注册。
+可以通过实现 `ActPackage` trait 来扩展自定义包，用
+`engine.executor(&principal).ext().register_package(&meta)` 注册（`principal` 是调用者
+身份，见[访问控制](../access.md)；引擎自身在启动时注册内置包也走同一条路）。

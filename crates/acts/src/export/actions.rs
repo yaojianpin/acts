@@ -15,7 +15,6 @@
 //! - [`Error::Denied`] — a credential without the right for this action/scope
 //! - [`Error::Internal`] — engine/store failure (`internal error`)
 
-use crate::utils::consts;
 use crate::{ChannelOptions, Engine, Vars, Workflow};
 use serde_json::{Value as JsonValue, json};
 use std::fmt;
@@ -53,15 +52,22 @@ impl std::error::Error for Error {}
 pub type Ret = std::result::Result<JsonValue, Error>;
 
 /// Serialize an already-resolved engine result into its wire value.
+///
+/// An ACL refusal keeps its kind: a caller with no credential and a caller
+/// without the right are different answers, and a transport must be able to
+/// say which one it is.
 fn value<T: serde::Serialize>(r: crate::Result<T>) -> Ret {
-    serde_json::to_value(r.map_err(|e| Error::Internal(e.to_string()))?)
-        .map_err(|e| Error::Internal(e.to_string()))
+    match r {
+        Ok(value) => serde_json::to_value(value).map_err(|e| Error::Internal(e.to_string())),
+        Err(crate::ActError::Unauthenticated(msg)) => Err(Error::Unauthenticated(msg)),
+        Err(crate::ActError::Denied(msg)) => Err(Error::Denied(msg)),
+        Err(e) => Err(Error::Internal(e.to_string())),
+    }
 }
 
 /// Map a unit engine result to the action protocol's `true` value.
 fn unit_ok(r: crate::Result<()>) -> Ret {
-    r.map(|_| json!(true))
-        .map_err(|e| Error::Internal(e.to_string()))
+    value(r.map(|_| json!(true)))
 }
 
 fn pop(options: &mut Vars, key: &str) -> std::result::Result<String, Error> {
@@ -71,6 +77,7 @@ fn pop(options: &mut Vars, key: &str) -> std::result::Result<String, Error> {
 }
 
 /// Map an ACL refusal onto the action protocol's error kinds, so every
+/// transport answers "no credential" and "wrong credential" distinctly.
 fn deny(err: crate::AclError) -> Error {
     match err {
         crate::AclError::Unauthenticated(msg) => Error::Unauthenticated(msg),
@@ -80,12 +87,13 @@ fn deny(err: crate::AclError) -> Error {
 
 /// Apply a channel message action as an anonymous in-process caller.
 ///
-/// Without an `[acl]` section this is the only entry point and nothing is
-/// enforced. With one, the caller resolves to the configured `default_role`
-/// (or is refused outright when none is configured), so an embedder that
-/// never carries a token cannot sidestep the transport checks.
+/// Without an `[acl]` section the caller resolves to the `anonymous` subject,
+/// which may read the model and package catalogues and nothing else. With a
+/// section it resolves to the configured `default_role`, or is refused
+/// outright when no default role is configured — so an embedder that never
+/// carries a token cannot sidestep the transport checks.
 pub async fn apply(engine: &Engine, name: &str, options: Vars) -> Ret {
-    let principal = engine.acl().anonymous();
+    let principal = engine.anonymous();
     apply_as(engine, &principal, name, options).await
 }
 
@@ -94,9 +102,11 @@ pub async fn apply(engine: &Engine, name: &str, options: Vars) -> Ret {
 /// `name` selects the operation; `options` is the payload. On success the
 /// returned value serializes exactly like the old gRPC `Message.data`.
 ///
-/// Two checks precede the dispatch: the action itself must be allowed, and
-/// every snapshot scope the action names (or would return) must belong to the
-/// principal's subject — see [`crate::acl`].
+/// The action itself and every snapshot scope it names (or would return) are
+/// checked against the principal before anything runs; the operations that
+/// reach the executor are checked once more there, so an embedder calling
+/// [`Engine::executor`] directly is held to the same policy this table
+/// applies — see [`crate::acl`].
 pub async fn apply_as(
     engine: &Engine,
     principal: &crate::Principal,
@@ -108,9 +118,16 @@ pub async fn apply_as(
     if name == crate::acl::ACTION_WHOAMI {
         return Ok(principal.to_value());
     }
+    // The action check for the operations the executor does not own: the
+    // snapshot data plane (checked here and by `check_scope` below) and
+    // `msg:sub` (which answers a channel key rather than touching the
+    // engine). Every operation that does go through the executor is checked
+    // again there, against the same principal — one policy, enforced at each
+    // entry point, so a caller that reaches the executor directly is held to
+    // exactly what this table would grant it.
     principal.check(name).map_err(deny)?;
 
-    let executor = engine.executor();
+    let executor = engine.executor(principal);
     match name {
         "act:push" => {
             let pid = pop(&mut options, "pid")?;
@@ -242,25 +259,17 @@ pub async fn apply_as(
         // proc
         "proc:start" => {
             let id = pop(&mut options, "id")?;
-            // The caller's authority is sealed into the process (see
-            // `crate::acl`) and re-checked at every seal: which snapshot
-            // scopes the run may read, and where its filesystem access is
-            // confined. It carries the workdir root too, so the process id
-            // turns it into the run's own directory at start — nothing about
-            // the directory comes from the request.
-            options.set(consts::PROC_OWNER, principal.scope_policy());
+            // The executor seals this caller's authority into the run it
+            // starts — the snapshot scopes it may read and the workdir root
+            // its directory is made under — and the scheduler re-checks that
+            // authority at every seal. Nothing about either comes from the
+            // request body.
             value(executor.proc().start(&id, options).await)
         }
         "proc:start_from_model" => {
             let fmt = pop(&mut options, "fmt")?;
             let model = pop(&mut options, "model")?;
-            options.set(consts::PROC_OWNER, principal.scope_policy());
-            value(
-                executor
-                    .proc()
-                    .start_from_model(&model, &fmt, options)
-                    .await,
-            )
+            value(executor.proc().start_from_model(&model, &fmt, options).await)
         }
         "proc:ls" => {
             let query = options
@@ -350,9 +359,10 @@ pub async fn apply_as(
         "evt:start" => {
             let id = pop(&mut options, "id")?;
             let params = options.get::<JsonValue>("params").unwrap_or_default();
-            // Triggers reach a model's own start inputs, so they carry no
-            // caller authority: a snapshot-backed model started by a trigger
-            // keeps the reading authority of whoever deployed it.
+            // Firing a trigger is an action like any other, and the run it
+            // starts carries this caller's authority: whoever may fire the
+            // trigger decides which scopes the run reads, exactly as a
+            // `proc:start` does.
             value(executor.evt().start(&id, &params).await)
         }
         // snapshot — the requested scope must belong to the subject
@@ -422,6 +432,7 @@ pub async fn apply_as(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::consts;
 
     /// An engine with access control explicitly off. These cases exercise the
     /// dispatch table itself, so their caller must be unrestricted: the

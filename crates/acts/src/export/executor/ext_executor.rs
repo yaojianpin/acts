@@ -1,32 +1,44 @@
-use crate::{ActPackageDefinition, Result, env::ActUserVar, scheduler::Runtime};
-use core::fmt;
+use crate::{ActPackageDefinition, Principal, Result, env::ActUserVar, scheduler::Runtime};
 use std::sync::Arc;
 
+/// `ext:register_var` — install a user var module into the engine's
+/// expression environment. Unlike the model/package names it has no wire
+/// equivalent: only an embedder registers one.
+pub(crate) const REGISTER_VAR: &str = "ext:register_var";
+
+/// `pack:publish` — a package definition is written to the store, which is
+/// what `pack().publish()` does too, so the two share one grant.
+pub(crate) const REGISTER_PACKAGE: &str = "pack:publish";
+
+/// The engine's own extension surface: registering user var modules and
+/// publishing package definitions.
+///
+/// Both operations change what every run of the engine can express, so they
+/// are checked like any other operation — against the principal this executor
+/// was built with. An embedder that extends the engine it hosts passes its
+/// own identity ([`Principal::unrestricted`]); a transport caller never
+/// reaches here at all, because no action of the wire table maps to it.
 #[derive(Clone)]
-pub struct Extender {
+pub struct ExtExecutor {
     runtime: Arc<Runtime>,
+    principal: Arc<Principal>,
 }
 
-impl fmt::Debug for Extender {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Extender").finish()
-    }
-}
-
-impl Extender {
-    pub(crate) fn new(runtime: &Arc<Runtime>) -> Self {
+impl ExtExecutor {
+    pub(crate) fn new(rt: &Arc<Runtime>, principal: &Arc<Principal>) -> Self {
         Self {
-            runtime: runtime.clone(),
+            runtime: rt.clone(),
+            principal: principal.clone(),
         }
     }
 
-    /// register module
+    /// register a user var module, so `$env`/expressions can read it
     ///
     /// ## Example
     /// ```no_run
-    /// use acts::Engine;
+    /// use acts::{Engine, Principal};
     /// mod test_module {
-    ///   use acts::{ActUserVar, Vars, Result};
+    ///   use acts::{ActUserVar, Vars};
     ///   #[derive(Clone)]
     ///   pub struct TestModule;
     ///   impl ActUserVar for TestModule {
@@ -43,17 +55,25 @@ impl Extender {
     /// async fn main() {
     ///     let engine = Engine::builder().start().await.unwrap();
     ///     let module = test_module::TestModule;
-    ///     engine.extender().register_var(&module);
+    ///     // The engine this embedder owns acts as itself: `Engine::anonymous`
+    ///     // would be the tokenless caller, which may not change the engine.
+    ///     engine
+    ///         .executor(&Principal::unrestricted())
+    ///         .ext()
+    ///         .register_var(&module)
+    ///         .unwrap();
     /// }
     /// ```
-    pub fn register_var<T: ActUserVar + Clone + 'static>(&self, module: &T) {
-        self.runtime.env().register_var(module)
+    pub fn register_var<T: ActUserVar + Clone + 'static>(&self, module: &T) -> Result<()> {
+        self.principal.check(REGISTER_VAR)?;
+        self.runtime.env().register_var(module);
+        Ok(())
     }
 
-    /// register package with meta definition
+    /// publish a package definition into the package catalogue
     /// ## Example
     /// ```no_run
-    /// use acts::{ActPackage, ActPackageDefinition, Vars};
+    /// use acts::{ActPackage, ActPackageDefinition, Engine, Principal, Vars};
     /// use serde::{Deserialize, Serialize};
     /// use serde_json::json;
     ///
@@ -94,13 +114,16 @@ impl Extender {
     /// #[tokio::main]
     /// async fn main() {
     ///     let engine = acts::Engine::builder().start().await.unwrap();
-    ///     engine.extender()
+    ///     engine
+    ///         .executor(&Principal::unrestricted())
+    ///         .ext()
     ///         .register_package(&MyPackage::definition())
     ///         .await
     ///         .unwrap();
     /// }
     /// ```
     pub async fn register_package(&self, def: &ActPackageDefinition) -> Result<()> {
+        self.principal.check(REGISTER_PACKAGE)?;
         let package = def.into_data()?;
         let ret = self.runtime.cache().store().publish(&package).await?;
         if ret {

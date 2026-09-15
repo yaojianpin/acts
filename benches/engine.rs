@@ -49,7 +49,7 @@ async fn arm_batch(
     let start = Instant::now();
     for _ in 0..count {
         engine
-            .executor()
+            .executor(&acts::Principal::unrestricted())
             .proc()
             .start(&workflow.id, Vars::new())
             .await
@@ -110,7 +110,7 @@ fn expr_eval(c: &mut Criterion) {
                         .await
                         .expect("failed to start engine");
                     engine
-                        .executor()
+                        .executor(&acts::Principal::unrestricted())
                         .model()
                         .deploy(&workflow, None)
                         .await
@@ -124,7 +124,7 @@ fn expr_eval(c: &mut Criterion) {
                         // iterations instead of accumulating
                         if let Some((pid, tid)) = tasks.pop() {
                             engine
-                                .executor()
+                                .executor(&acts::Principal::unrestricted())
                                 .act()
                                 .complete(&pid, &tid, Vars::new())
                                 .await
@@ -181,7 +181,7 @@ fn scheduler_multi_pid(c: &mut Criterion) {
                         .await
                         .expect("failed to start engine");
                     engine
-                        .executor()
+                        .executor(&acts::Principal::unrestricted())
                         .model()
                         .deploy(&workflow, None)
                         .await
@@ -209,7 +209,7 @@ fn scheduler_multi_pid(c: &mut Criterion) {
                     let start = Instant::now();
                     for _ in 0..total {
                         engine
-                            .executor()
+                            .executor(&acts::Principal::unrestricted())
                             .proc()
                             .start(&workflow.id, Vars::new())
                             .await
@@ -264,7 +264,7 @@ fn emitter_fanout(c: &mut Criterion) {
                         .await
                         .expect("failed to start engine");
                     engine
-                        .executor()
+                        .executor(&acts::Principal::unrestricted())
                         .model()
                         .deploy(&workflow, None)
                         .await
@@ -295,7 +295,7 @@ fn emitter_fanout(c: &mut Criterion) {
                     for (pid, tid) in &tasks {
                         let start = Instant::now();
                         engine
-                            .executor()
+                            .executor(&acts::Principal::unrestricted())
                             .act()
                             .complete(pid, tid, Vars::new())
                             .await

@@ -44,6 +44,29 @@ Output capture is unbounded unless `max-output-bytes` is set. That option
 limits the number of bytes captured from each of stdout and stderr and fails
 the act when the limit is exceeded.
 
+## Script policy
+
+`[shell]` in the engine config is an allow/deny pair of globs over the **whole
+script text**:
+
+```toml
+[shell]
+# when non-empty, only a script matching one of these may run
+allow = ["ls", "ls *", "cat *.txt", "nu *"]
+# always refused, allow or not
+deny = ["*rm -rf*", "*sudo *", "*> /etc/*"]
+```
+
+`*` matches any run of characters — `/` and newlines included, since a script
+is one string and not a path — and `?` matches one. `deny` wins over `allow`;
+both lists empty means no restriction. A script the policy refuses fails the act
+before anything is spawned, and a pattern that does not compile fails startup
+rather than silently governing nothing.
+
+Like the workdir check below, this is **policy, not a sandbox**: a glob over
+script text cannot see what the script will do, so it states intent and refuses
+the obvious. A hostile workflow needs an OS boundary around the server.
+
 ## Directory control
 
 When the engine's ACL config gives the process a workdir (see the

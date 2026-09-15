@@ -62,16 +62,18 @@ async fn main() -> acts::Result<()> {
 ## 创建引擎
 
 ```rust
-use acts::Engine;
+use acts::{Engine, Principal};
 
 let engine = Engine::builder().start().await.unwrap();
-let executor = engine.executor();
+// executor 代表一个调用者；直接驱动引擎的嵌入式调用者用的是引擎自身的身份
+// （见"访问控制"一章）
+let executor = engine.executor(&Principal::unrestricted());
 ```
 
 ## 部署和启动工作流
 
 ```rust
-use acts::{Engine, Vars, Workflow};
+use acts::{Engine, Principal, Vars, Workflow};
 
 let engine = Engine::builder().start().await.unwrap();
 
@@ -92,7 +94,7 @@ steps:
 let workflow = Workflow::from_yml(model).unwrap();
 
 // 部署模型
-let executor = engine.executor();
+let executor = engine.executor(&Principal::unrestricted());
 executor.model().deploy(&workflow).expect("fail to deploy workflow");
 
 // 启动工作流

@@ -1,16 +1,25 @@
-use crate::{Result, TaskInfo, query::Query, scheduler::Runtime, store::PageData, utils::Id};
+use crate::{
+    Principal, Result, TaskInfo, query::Query, scheduler::Runtime, store::PageData, utils::Id,
+};
 use std::sync::Arc;
 use tracing::instrument;
+
+/// `task:ls` — list task rows.
+pub(crate) const LS: &str = "task:ls";
+/// `task:get` — read one task row, with its scope vars.
+pub(crate) const GET: &str = "task:get";
 
 #[derive(Clone)]
 pub struct TaskExecutor {
     runtime: Arc<Runtime>,
+    principal: Arc<Principal>,
 }
 
 impl TaskExecutor {
-    pub fn new(rt: &Arc<Runtime>) -> Self {
+    pub(crate) fn new(rt: &Arc<Runtime>, principal: &Arc<Principal>) -> Self {
         Self {
             runtime: rt.clone(),
+            principal: principal.clone(),
         }
     }
 
@@ -34,6 +43,7 @@ impl TaskExecutor {
 
     #[instrument(skip(self))]
     pub async fn list(&self, q: &Query) -> Result<PageData<TaskInfo>> {
+        self.principal.check(LS)?;
         match self.runtime.cache().store().tasks().query(q).await {
             Ok(tasks) => {
                 let mut rows: Vec<TaskInfo> = tasks.rows.iter().map(|m| m.into()).collect();
@@ -54,6 +64,7 @@ impl TaskExecutor {
 
     #[instrument(skip(self))]
     pub async fn get(&self, pid: &str, tid: &str) -> Result<TaskInfo> {
+        self.principal.check(GET)?;
         let id = Id::new(pid, tid);
         match self.runtime.cache().store().tasks().find(&id.id()).await {
             Ok(t) => {

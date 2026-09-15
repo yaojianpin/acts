@@ -1257,7 +1257,7 @@ async fn env_user_var_get_from_context() {
     let sig = engine.signal(());
     let s1 = sig.clone();
 
-    engine.extender().register_var(&MyVarPlugin);
+    engine.executor(&crate::Principal::unrestricted()).ext().register_var(&MyVarPlugin).unwrap();
 
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| {
@@ -1314,7 +1314,7 @@ async fn env_user_var_get_default() {
     let sig = engine.signal(());
     let s1 = sig.clone();
 
-    engine.extender().register_var(&MyVarPlugin);
+    engine.executor(&crate::Principal::unrestricted()).ext().register_var(&MyVarPlugin).unwrap();
 
     let env = engine.runtime().env().clone();
     let workflow = Workflow::new().with_step(|step| {

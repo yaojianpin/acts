@@ -224,12 +224,11 @@ port = 10082
 #   NATS  — the `token` field of the action JSON body
 #
 # [acl]
-# Without this section the engine is anonymous and read-only: callers may list
-# and get models, processes, tasks, messages, events and packages, and nothing
-# else (no writes, no control, no admin actions, no snapshot scope, no
-# subscription). Add the section to name your callers — the smallest useful one
-# is the `token` shorthand below — or write `enabled = false` to lift the
-# limits on purpose.
+# Without this section the engine is anonymous and catalogue-only: callers may
+# list and get models and packages, and nothing else (no other read, no write,
+# no control, no admin action, no snapshot scope, no subscription). Add the
+# section to name your callers — the smallest useful one is the `token`
+# shorthand below — or write `enabled = false` to lift the limits on purpose.
 #
 # role applied to an absent/unknown token; omit to refuse such requests
 # default_role = "guest"
@@ -265,6 +264,14 @@ port = 10082
 # connect-timeout-ms = 10000
 # whole-request timeout in ms; omitted or 0 disables it
 # timeout-ms = 30000
+
+# shell package — acts-package-shell script policy. Two glob lists over the
+# whole script text; `deny` wins, and an empty pair means no restriction. A
+# refused script fails the act before any shell is spawned. This is policy,
+# not a sandbox: a hostile workflow needs an OS boundary around the server.
+# [shell]
+# allow = ["ls", "ls *", "cat *.txt", "nu *"]
+# deny = ["*rm -rf*", "*sudo *"]
 
 # nats service — acts-plugin-nats. Only connected when this [nats] section
 # exists. Server actions are request/reply on "<subject>.cmd"; engine events
