@@ -38,7 +38,7 @@ impl ActTask for Step {
         // branch nor a restored process can repeat it. A branch that already
         // fired skips instead, which keeps the chain fall-through reaching the
         // branches that have not fired.
-        if let Some(owner) = timeout_owner(&task) {
+        if let Some(owner) = task.timeout_owner() {
             let node_id = task.node().id();
             if !owner.claim_timeout(node_id) {
                 task.set_state(TaskState::Skipped);
@@ -72,6 +72,25 @@ impl ActTask for Step {
 
     async fn next(&self, ctx: &Context) -> Result<NextAction> {
         let task = ctx.task();
+
+        // A timeout branch belongs to the task that timed out, and only that
+        // task's tick knows which of its branches is due — it is the only caller
+        // that consults the one-shot markers. Advancing to the branch declared
+        // after this one therefore goes through the same dispatcher the tick
+        // uses, never through a raw `next`/`chain` jump: that path ignores the
+        // markers, so a sibling that already fired (or is still in flight) would
+        // gain a second task, once per tick.
+        if let Some(owner) = task.timeout_owner() {
+            let state = task.state();
+            if !state.is_skip() && !state.is_success() {
+                return Ok(NextAction::Parent);
+            }
+            return if dispatch_next_timeout_branch(ctx, &owner)? {
+                Ok(NextAction::Continue)
+            } else {
+                Ok(NextAction::Parent)
+            };
+        }
 
         if task.state().is_skip() {
             // A skipped step (its `if`/`while` condition failed) must not
@@ -128,59 +147,51 @@ impl ActTask for Step {
         // Write cost to parent task so timeout children read it via $cost()
         task.set_data_with(|data| data.set(consts::TASK_COST, cost));
 
-        // The branches are dispatched one at a time, in declaration order: a
-        // tick schedules the first branch that has not fired, and that branch's
-        // `next`/`chain` fall-through evaluates the ones after it — so a branch
-        // whose window has not opened is skipped, not fired. The marker is
-        // claimed by the branch itself when its guards hold (see `init`), which
-        // is what keeps a false-guarded branch's slot open for a later tick.
-        //
-        // A branch that is still queued or running is never dispatched a
-        // second time: the marker only records the branches that already fired,
-        // and a tick landing while the previous dispatch is still in flight
-        // must not create a duplicate. Once every branch has fired there is
-        // nothing left to reach — dispatching again would only create one task
-        // per tick.
-        let tree = ctx.proc.tree();
-        for branch in self.timeouts.iter() {
-            if task.is_timeout_claimed(&branch.id) {
-                continue;
-            }
-            // `parent_id` (not `parent()`) keeps this scan lock-free: it runs
-            // while `find_tasks` holds the process task lock.
-            let in_flight = ctx.proc.find_tasks(|t| {
-                t.node().id() == branch.id.as_str()
-                    && !t.state().is_completed()
-                    && t.parent_id().as_deref() == Some(task.id.as_str())
-            });
-            if !in_flight.is_empty() {
-                break;
-            }
-            if let Some(node) = tree.node(&branch.id) {
-                ctx.sched_task(&node, task.clone())?;
-            }
-            break;
-        }
+        dispatch_next_timeout_branch(ctx, &task)?;
 
         Ok(())
     }
 }
 
-/// The timed-out task a timeout branch belongs to, when `task`'s node is
-/// declared as one of its step's `timeouts`. That task owns the one-shot
-/// marker of the branch (see [`Task::claim_timeout`]); the branch is a partial
-/// projection of its declaration, so the declaration is the identity.
-fn timeout_owner(task: &Arc<Task>) -> Option<Arc<Task>> {
-    let parent = task.parent()?;
-    match &parent.node().content {
-        NodeContent::Step(step)
-            if step
-                .timeouts
-                .iter()
-                .any(|branch| branch.id == task.node().id()) =>
-        {
-            Some(parent)
+/// Dispatch the timed-out task's first branch that has neither fired nor is in
+/// flight, and report whether one was dispatched.
+///
+/// This is the single dispatcher of a timed-out task's timeout branches: the
+/// tick calls it, and a branch that just ran reaches the branch declared after
+/// it through [`Step::next`] → here. A branch scheduling its declared sibling
+/// directly would bypass the one-shot markers below, so a sibling that already
+/// fired would gain a second task on every tick.
+///
+/// One branch per call, in declaration order: a branch whose guards do not hold
+/// is skipped without claiming its marker, so a later call re-evaluates it (the
+/// window may open), and the callers stop at the first branch that is still in
+/// flight instead of running ahead of it.
+fn dispatch_next_timeout_branch(ctx: &Context, owner: &Arc<Task>) -> Result<bool> {
+    let NodeContent::Step(step) = &owner.node().content else {
+        return Ok(false);
+    };
+    let tree = ctx.proc.tree();
+    for branch in step.timeouts.iter() {
+        if owner.is_timeout_claimed(&branch.id) {
+            continue;
         }
-        _ => None,
+        // `parent_id` (not `parent()`) keeps this scan lock-free: it runs while
+        // `find_tasks` holds the process task lock.
+        let in_flight = ctx.proc.find_tasks(|t| {
+            t.node().id() == branch.id.as_str()
+                && !t.state().is_completed()
+                && t.parent_id().as_deref() == Some(owner.id.as_str())
+        });
+        if !in_flight.is_empty() {
+            return Ok(false);
+        }
+        let Some(node) = tree.node(&branch.id) else {
+            return Ok(false);
+        };
+        // `schedule_once`: an instance the tick (or a crash replay) already
+        // created for this branch and predecessor is reused, not duplicated.
+        ctx.schedule_once(&node, owner.clone())?;
+        return Ok(true);
     }
+    Ok(false)
 }

@@ -75,6 +75,11 @@ impl ProcessGate {
             ),
         }
     }
+    /// Number of lanes. The scheduler's queue pool is sized by this, so the
+    /// routing below always addresses a real lane.
+    pub(crate) fn lanes(&self) -> usize {
+        self.locks.len()
+    }
 
     /// This intentionally uses the same FNV-1a lane mapping as the scheduler,
     /// so a process's event handlers serialize against that process's lane.

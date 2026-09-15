@@ -1,4 +1,3 @@
-use crate::{Config, config::ConfigData};
 use crate::{
     ActError, Workflow,
     scheduler::{NodeTree, TaskState},
@@ -7,6 +6,7 @@ use crate::{
         test::{USES_CODE, auto_complete, create_proc, create_proc_with_config},
     },
 };
+use crate::{Config, config::ConfigData};
 use serial_test::serial;
 
 #[tokio::test]
@@ -18,9 +18,10 @@ async fn sch_proc_send() {
     let sig = engine.signal(());
     auto_complete(&engine, &sig);
     rt.launch(&proc).await.unwrap();
-    rt.queue().next().await.unwrap();
+    // the lane worker drives the root task on its own
+    sig.recv().await;
 
-    assert!(rt.proc(&id).await.unwrap().is_some())
+    assert_eq!(proc.state(), TaskState::Completed);
 }
 
 #[tokio::test]

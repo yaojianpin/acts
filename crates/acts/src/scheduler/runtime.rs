@@ -22,7 +22,7 @@ use std::{
     task::{Context as TaskContext, Poll},
     time::Duration,
 };
-use tokio::{runtime::Handle, sync::mpsc, time};
+use tokio::{runtime::Handle, time};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, instrument};
 
@@ -44,65 +44,20 @@ pub(crate) struct SnapshotRegistry {
     stores: ShareLock<HashMap<String, Arc<SnapshotStore>>>,
 }
 
-/// A unit accepted by the scheduler lane pool. The original queue item's
-/// process lease is carried through dispatch so a finished/evicted process
-/// cannot invalidate work that was already admitted.
-#[derive(Debug)]
-enum SchedulerJob {
-    Exec { task: Arc<Task>, proc: Arc<Process> },
-    Next { task: Arc<Task>, proc: Arc<Process> },
+/// The two kinds of work a lane worker executes. The name is what a caught
+/// panic is reported under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JobOp {
+    Exec,
+    Next,
 }
 
-/// Fixed set of serial workers. Jobs are assigned by pid hash, so all work for
-/// one process is queued on the same lane and preserves FIFO order while
-/// independent processes can run on different lanes.
-#[derive(Debug)]
-struct SchedulerLanes {
-    senders: Vec<mpsc::UnboundedSender<SchedulerJob>>,
-    gate: ProcessGate,
-}
-
-impl SchedulerLanes {
-    fn new(count: usize, emitter: Arc<Emitter>, shutdown: CancellationToken) -> Self {
-        let count = count.max(1);
-        let gate = emitter.process_gate();
-        let mut senders = Vec::with_capacity(count);
-        for _ in 0..count {
-            let (sender, mut receiver) = mpsc::unbounded_channel::<SchedulerJob>();
-            let shutdown = shutdown.clone();
-            let gate = emitter.process_gate();
-            tokio::spawn(async move {
-                loop {
-                    let job = tokio::select! {
-                        _ = shutdown.cancelled() => break,
-                        job = receiver.recv() => job,
-                    };
-                    let Some(job) = job else { break };
-                    let pid = match &job {
-                        SchedulerJob::Exec { task, .. } | SchedulerJob::Next { task, .. } => {
-                            task.pid.clone()
-                        }
-                    };
-                    let gate = gate.lock(&pid).await;
-                    Runtime::execute_job(job).await;
-                    drop(gate);
-                }
-            });
-            senders.push(sender);
+impl JobOp {
+    fn as_str(self) -> &'static str {
+        match self {
+            JobOp::Exec => "task.exec",
+            JobOp::Next => "task.next",
         }
-        Self { senders, gate }
-    }
-
-    fn dispatch(&self, job: SchedulerJob) -> crate::Result<()> {
-        let pid = match &job {
-            SchedulerJob::Exec { task, .. } | SchedulerJob::Next { task, .. } => &task.pid,
-        };
-        // The event gate uses the same stable FNV-1a mapping; this ensures a
-        // process's user event handlers cannot interleave with its lane job.
-        let lane = self.gate.lane_index(pid);
-        self.senders[lane]
-            .send(job)
-            .map_err(|err| ActError::Runtime(err.to_string()))
     }
 }
 
@@ -255,10 +210,20 @@ impl Runtime {
         self.cache.store().clone()
     }
 
-    /// Bounded scheduler-queue metrics: capacity, current depth, and high
-    /// watermark. The durable outbox backlog is visible through pending ops.
+    /// Scheduler-backlog metrics: the configured bound, the per-lane bound, the
+    /// number of jobs currently buffered in the lanes, and the high watermark of
+    /// that depth. The backlog is real: a lane that is full refuses its
+    /// producers, so `depth` can never exceed the effective bound (the lane
+    /// count × the per-lane bound) — the work beyond it is in the durable
+    /// outbox, visible through pending ops.
     pub fn scheduler_queue_capacity(&self) -> usize {
         self.queue.capacity()
+    }
+
+    /// Per-lane bound: how much work one process can have buffered at once
+    /// (`scheduler_queue_cap` split across the lanes).
+    pub fn scheduler_lane_capacity(&self) -> usize {
+        self.queue.lane_capacity()
     }
 
     pub fn scheduler_queue_depth(&self) -> usize {
@@ -795,55 +760,60 @@ impl Runtime {
             .await
     }
 
+    /// Start the fixed lane workers. Every lane owns one bounded queue and runs
+    /// its jobs serially, so all work of one process stays FIFO on that
+    /// process's lane while independent processes overlap on the other lanes.
+    /// The lane count is the explicit in-flight limit (jobs executing at once);
+    /// the lanes' bounds are the in-memory backlog limit — a lane that is full
+    /// refuses its producer, which durably queues the work instead of letting a
+    /// slow lane absorb an unbounded amount of it.
     pub fn event_loop(self: &Arc<Self>) {
         let queue = self.queue.clone();
-        let emitter = self.emitter.clone();
+        let gate = self.emitter.process_gate();
         let shutdown = self.shutdown.clone();
-        // The dispatcher only dequeues/admits work. Fixed serial lanes provide
-        // the explicit in-flight cap while preserving per-pid ordering.
-        let lanes =
-            SchedulerLanes::new(self.config().scheduler_workers(), emitter, shutdown.clone());
+        let mut workers = Vec::with_capacity(queue.lanes());
+        for mut receiver in queue.take_receivers() {
+            let gate = gate.clone();
+            let shutdown = shutdown.clone();
+            workers.push(tokio::spawn(async move {
+                loop {
+                    let data = tokio::select! {
+                        _ = shutdown.cancelled() => break,
+                        data = receiver.recv() => match data {
+                            Some(data) => data,
+                            // every sender is gone: nothing can be admitted again
+                            None => break,
+                        },
+                    };
+                    let (task, proc, operation) = match data {
+                        QueueData::Task { task, proc } => (task, proc, JobOp::Exec),
+                        QueueData::Next { task, proc } => (task, proc, JobOp::Next),
+                        QueueData::Abort => break,
+                    };
+                    // Serialization: the lane already orders one process's jobs,
+                    // and the gate (same pid hash) keeps the pid's workflow
+                    // event handlers from interleaving with them.
+                    let _gate = gate.lock(&task.pid).await;
+                    Runtime::execute_job(task, proc, operation).await;
+                }
+            }));
+        }
         tokio::spawn(async move {
-            // If this future is dropped or unwinds unexpectedly, make the
-            // failure visible to producers (`queue.send`) instead of letting an
-            // unbounded queue accumulate work for a dead scheduler.
+            // The lease lives exactly as long as the pool: producers that
+            // outlive every worker are refused instead of buffering work
+            // nothing will run. A lane whose worker died refuses on its own —
+            // its channel is closed and `try_push` reports that to the producer.
             let _consumer = queue.consumer_lease();
-            loop {
-                let next = tokio::select! {
-                    _ = shutdown.cancelled() => break,
-                    next = queue.next() => next,
-                };
-                match next {
-                    Ok(data) => match data {
-                        QueueData::Task { task, proc } => {
-                            if let Err(err) = lanes.dispatch(SchedulerJob::Exec { task, proc }) {
-                                error!(error = %err, "scheduler lane dispatch failed");
-                            }
-                        }
-                        QueueData::Next { task, proc } => {
-                            if let Err(err) = lanes.dispatch(SchedulerJob::Next { task, proc }) {
-                                error!(error = %err, "scheduler lane dispatch failed");
-                            }
-                        }
-                        QueueData::Abort => {
-                            break;
-                        }
-                    },
-                    Err(err) => {
-                        error!(error = %err, "queue.next failed");
-                        break;
-                    }
+            for (lane, worker) in workers.into_iter().enumerate() {
+                if let Err(err) = worker.await {
+                    error!(lane, error = %err, "scheduler lane worker exited");
                 }
             }
         });
     }
 
     /// Build an execution context while catching a panic at the poll boundary.
-    async fn execute_job(job: SchedulerJob) {
-        let (task, proc, operation) = match job {
-            SchedulerJob::Exec { task, proc } => (task, proc, "task.exec"),
-            SchedulerJob::Next { task, proc } => (task, proc, "task.next"),
-        };
+    async fn execute_job(task: Arc<Task>, proc: Arc<Process>, operation: JobOp) {
         let Some(ctx) = Self::isolate_context(task.clone(), proc).await else {
             return;
         };
@@ -851,12 +821,12 @@ impl Runtime {
         let reporting_ctx = ctx.clone();
         let result = CatchPanic::new(async move {
             match operation {
-                "task.exec" => Self::run_exec_job(task, ctx).await,
-                _ => Self::run_next_job(task, ctx).await,
+                JobOp::Exec => Self::run_exec_job(task, ctx).await,
+                JobOp::Next => Self::run_next_job(task, ctx).await,
             }
         })
         .await;
-        Self::report_task_panic(operation, reporting_task, reporting_ctx, result).await;
+        Self::report_task_panic(operation.as_str(), reporting_task, reporting_ctx, result).await;
     }
 
     async fn run_exec_job(task: Arc<Task>, ctx: Context) {
@@ -943,9 +913,11 @@ impl Runtime {
         let env = Arc::new(Environment::new());
         let cache = Arc::new(Cache::new(config, store)?);
         let process_gate = ProcessGate::new(config.scheduler_workers());
-        let emitter = Arc::new(Emitter::with_process_gate(process_gate));
+        let emitter = Arc::new(Emitter::with_process_gate(process_gate.clone()));
         let package = Arc::new(Package::new());
-        let queue = Queue::new(config.scheduler_queue_cap());
+        // The same gate routes jobs: a lane is the pid hash both the queue and
+        // the event handlers use, so the two can never disagree.
+        let queue = Queue::new(config.scheduler_queue_cap(), process_gate);
         let shutdown = CancellationToken::new();
         let schema_cache = Arc::new(SchemaCache::new());
         let snapshots = Arc::new(SnapshotRegistry::new());

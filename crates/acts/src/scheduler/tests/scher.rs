@@ -15,16 +15,13 @@ async fn sch_scher_next() {
     let store = cache.store();
     let workflow = Workflow::new().with_id(&utils::longid());
 
-    let s = runtime.clone();
     store.deploy(&workflow, None).await.unwrap();
-    tokio::spawn(async move {
-        let mut options = Vars::new();
-        options.insert("pid".to_string(), json!(utils::longid()));
-        s.start(&workflow, options).await.unwrap();
-    });
+    let mut options = Vars::new();
+    options.insert("pid".to_string(), json!(utils::longid()));
+    runtime.start(&workflow, options).await.unwrap();
 
-    let ret = runtime.queue().next().await;
-    assert!(ret.is_ok());
+    // the root task waits on its lane; no worker runs in this test
+    assert_eq!(runtime.queue().depth(), 1);
 }
 
 #[serial]
@@ -36,8 +33,8 @@ async fn sch_scher_task() {
     let pid = utils::longid();
     let proc = runtime.create_proc(&pid, &workflow);
     runtime.launch(&proc).await.unwrap();
-    let ret = runtime.queue().next().await;
-    assert!(ret.is_ok());
+    // the root task waits on its lane; no worker runs in this test
+    assert_eq!(runtime.queue().depth(), 1);
 }
 
 #[serial]
@@ -61,7 +58,6 @@ async fn sch_scher_start_with_vars() {
     vars.insert("b".to_string(), json!("string"));
 
     let proc = runtime.start(&workflow, vars).await.unwrap();
-    let _ = runtime.queue().next().await;
 
     assert_eq!(proc.inputs().get::<i64>("a").unwrap(), 100);
     assert_eq!(proc.inputs().get::<String>("b").unwrap(), "string");

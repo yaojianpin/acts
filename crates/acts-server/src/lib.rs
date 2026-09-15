@@ -126,8 +126,10 @@ max_node_run_times = 1000
 # tasks for the same pid are pinned to one lane and remain FIFO ordered.
 scheduler_workers = 4
 
-# Maximum scheduler jobs buffered in memory. Overflowing task/next work is
-# retained in the durable outbox and replayed after the queue drains.
+# Maximum scheduler jobs buffered in memory, split evenly across the lanes
+# (at least one job each). A lane that is full spills task/next work to the
+# durable outbox instead of buffering it, so this is the real in-memory
+# backlog bound.
 scheduler_queue_cap = 4096
 
 # [log] — file logging: hourly rolling acts.log files under dir, at level

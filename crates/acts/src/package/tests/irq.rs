@@ -740,9 +740,12 @@ async fn pack_irq_do_action_rets() {
     auto_complete(&engine, &rx);
     let channel = engine.channel();
 
+    // The action is only the input: the options reach the step when the act's
+    // `next` propagation returns them to it, so the test waits for the
+    // workflow-complete signal (`auto_complete`) rather than signalling itself
+    // here — a self-signal would race the propagation on the task's lane.
     channel.on_message(move |e| {
         let rt = rt.clone();
-        let rx = rx.clone();
         async move {
             if e.state() == MessageState::Created && e.is_irq() {
                 let uid = e.params().unwrap().get::<String>("uid").unwrap();
@@ -756,7 +759,6 @@ async fn pack_irq_do_action_rets() {
 
                 let action = Action::new(&e.pid, &e.tid, EventAction::Next, options);
                 rt.do_action(&action).await.unwrap();
-                rx.close();
             }
         }
     });

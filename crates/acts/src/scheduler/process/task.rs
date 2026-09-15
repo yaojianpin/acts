@@ -482,6 +482,23 @@ impl Task {
         }
     }
 
+    /// The task that timed out, when this task is one of its step's declared
+    /// `timeouts` branches. That task owns the branch's one-shot marker (see
+    /// [`Self::claim_timeout`]), and it is also the key the tick dispatches a
+    /// branch under ([`Self::on_timeout`](crate::ActTask::on_timeout) in
+    /// `Step`), because a branch is a partial projection of that declaration.
+    pub fn timeout_owner(&self) -> Option<Arc<Task>> {
+        let parent = self.parent()?;
+        match &parent.node().content {
+            NodeContent::Step(step) => step
+                .timeouts
+                .iter()
+                .any(|branch| branch.id == self.node().id())
+                .then_some(parent),
+            _ => None,
+        }
+    }
+
     /// Whether the timeout branch `node_id` already fired for this task (see
     /// [`Self::claim_timeout`]).
     pub fn is_timeout_claimed(&self, node_id: &str) -> bool {

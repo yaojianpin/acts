@@ -98,8 +98,9 @@ impl EngineBuilder {
         self
     }
 
-    /// Set the maximum in-memory scheduler queue length. Overflowing `next`
-    /// work spills to the durable outbox; overflowing fresh starts are rejected.
+    /// Set the maximum in-memory scheduler backlog. It is split across the task
+    /// lanes, and a lane that is full overflows its producers to the durable
+    /// outbox (`next` work spills; a fresh start fails).
     pub fn scheduler_queue_cap(mut self, cap: usize) -> Self {
         self.config_mut().data.scheduler_queue_cap = Some(cap);
         self

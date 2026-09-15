@@ -1,6 +1,6 @@
 use crate::{
-    Engine, Message, Vars, Workflow,
-    scheduler::{Process, TaskState},
+    Config, Engine, Message, Vars, Workflow,
+    scheduler::{Process, Runtime, TaskState},
     store::{KvStore, MemoryStore},
     utils::{
         self,
@@ -152,15 +152,18 @@ async fn sch_step_timeout_fires_each_branch_once_across_ticks_and_restart() {
     assert_eq!(proc.task_by_nid("timeout1").len(), 1);
     assert_eq!(proc.task_by_nid("timeout2").len(), 1);
 
-    // the marker is durable state of the timed-out task: a process restored
-    // from the store does not fire a branch that already fired
+    // The marker is durable state of the timed-out task: a process restored
+    // from the store does not fire a branch that already fired — even though
+    // its step is still in flight and its branches are terminal instances the
+    // tick would otherwise re-create.
+    //
+    // The reload runs on a bare runtime over the same store, not on a second
+    // started engine: a started engine's first sweep deletes the rows of a
+    // finished process, and a reload racing that sweep reads the proc row but
+    // not its task rows (`load_proc` reads them separately) — the reload would
+    // then assert against an empty process.
     engine.close().await;
-    let engine2 = Engine::builder()
-        .set_store(kv.clone())
-        .start()
-        .await
-        .unwrap();
-    let rt2 = engine2.runtime();
+    let rt2 = Runtime::new(&Config::default(), Some(kv.clone())).unwrap();
     let restored = rt2
         .cache()
         .store()
@@ -168,13 +171,18 @@ async fn sch_step_timeout_fires_each_branch_once_across_ticks_and_restart() {
         .await
         .unwrap()
         .unwrap();
+
+    // put the timed-out step back in flight: this is the state a crash leaves
+    // it in (its branches already ran, the step never completed), and the only
+    // thing that can keep the tick from firing them again is the restored
+    // marker
+    let step = restored.task_by_nid("step1").first().unwrap().clone();
+    step.set_state(TaskState::Running);
     for _ in 0..3 {
         restored.do_tick().await;
     }
     assert_eq!(restored.task_by_nid("timeout1").len(), 1);
     assert_eq!(restored.task_by_nid("timeout2").len(), 1);
-
-    engine2.close().await;
 }
 
 /// The duplicate the tick used to produce was an external side effect, not just

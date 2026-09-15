@@ -2703,6 +2703,26 @@ async fn export_message_store_with_emit_id_and_options() {
     assert!(pattern.get::<bool>("ack").unwrap());
 }
 
+/// Read a delivery row, waiting for `status` when the write that reaches it
+/// happens outside the point the test can synchronize on. A channel handler
+/// signs off from inside itself, and the handover it caused is recorded after
+/// the handler returns — so a single read can catch the row in its previous
+/// state.
+async fn wait_for_delivery(
+    store: &Arc<crate::store::Store>,
+    delivery_id: &str,
+    status: data::DeliveryStatus,
+) -> data::Delivery {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let row = store.deliveries().find(delivery_id).await.unwrap();
+        if row.status == status || tokio::time::Instant::now() >= deadline {
+            return row;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn export_message_multi_channels_share_message_single_delivery_each() {
@@ -2777,9 +2797,11 @@ async fn export_message_multi_channels_share_message_single_delivery_each() {
 
     let row_a = store.deliveries().find(&delivery_a).await.unwrap();
     assert_eq!(row_a.status, data::DeliveryStatus::Acked);
-    // channel b received the message but never acked it: its delivery was
-    // handed over (`Delivered`) and stays pending
-    let row_b = store.deliveries().find(&delivery_b).await.unwrap();
+    // Channel b received the message but never acked it: its delivery was
+    // handed over (`Delivered`) and stays pending. The handover is recorded
+    // after the handler returns, and the signal above fires from inside the
+    // handler — so wait for the state instead of reading it once.
+    let row_b = wait_for_delivery(&store, &delivery_b, data::DeliveryStatus::Delivered).await;
     assert_eq!(row_b.status, data::DeliveryStatus::Delivered);
 }
 

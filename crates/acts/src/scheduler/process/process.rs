@@ -338,7 +338,18 @@ impl Process {
         *self.env.write() = value.clone();
     }
 
+    /// Fire the timeout branches of this process's in-flight tasks.
+    ///
+    /// Serialized against the process's lane job by the same gate: a tick's
+    /// "has this branch been dispatched?" check and the dispatch that follows
+    /// must not interleave with a lane job that schedules the same branch — a
+    /// branch's `next` reaches its declared sibling (and the tick reaches every
+    /// branch), and neither side creating under the other's nose is what keeps
+    /// one branch at one task. The tick itself is not a lane job (it runs on
+    /// the process's timer and, in tests, directly), so the gate, not the lane,
+    /// is what orders it.
     pub(crate) async fn do_tick(&self) {
+        let _gate = self.runtime.emitter().process_gate().lock(&self.id).await;
         // only run the timeout check for tasks that are running or interrupted, since
         // tasks that are completed or skipped will not be timed out
         let tasks = self.find_tasks(|t| {
