@@ -3,6 +3,7 @@ mod action;
 mod branch;
 mod cancel;
 mod claim_leak;
+mod health;
 mod message;
 mod proc;
 mod runtime;

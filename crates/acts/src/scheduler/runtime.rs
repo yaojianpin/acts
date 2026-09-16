@@ -1,3 +1,4 @@
+use super::health::{LoopGuard, SchedulerHealth};
 use super::validation::SchemaCache;
 use super::{ActTask, Context, Process, Sign, Task, TaskState};
 use crate::snapshot::{SnapshotOptions, SnapshotStore};
@@ -37,7 +38,17 @@ pub struct Runtime {
     shutdown: CancellationToken,
     schema_cache: Arc<SchemaCache>,
     pub(crate) snapshots: Arc<SnapshotRegistry>,
+    /// Failure state of the schedule-trigger timer (see [`SchedulerHealth`]).
+    trigger_health: Arc<LoopGuard>,
+    /// Failure state of the message-retry timer (see [`SchedulerHealth`]).
+    retry_health: Arc<LoopGuard>,
 }
+
+/// Tick the periodic timers run on under test — short enough that a test can
+/// watch several ticks, and the one source of truth for tests that reason in
+/// ticks (see `scheduler::tests`).
+#[cfg(test)]
+pub(crate) const TEST_TICK_MS: u64 = 800;
 
 /// Registry of snapshot-backed sealed-data targets (see [`crate::snapshot`]).
 pub(crate) struct SnapshotRegistry {
@@ -157,6 +168,7 @@ impl std::fmt::Debug for Runtime {
                 "snapshots",
                 &format_args!("<{} entries>", self.snapshots.len()),
             )
+            .field("health", &self.scheduler_health())
             .finish()
     }
 }
@@ -247,6 +259,19 @@ impl Runtime {
     /// until its backlog drains.
     pub fn store_writer_saturated(&self) -> bool {
         self.cache.store_writer_saturated()
+    }
+
+    /// Failure state of the store-facing background timers: consecutive failed
+    /// ticks and the backoff window each is on (see [`SchedulerHealth`]). A
+    /// loop whose store keeps failing is reported `Degraded` and skips ticks
+    /// instead of polling the store at the full tick rate, so this is where a
+    /// host reads *why* scheduled triggers are late or deliveries are not
+    /// being re-sent.
+    pub fn scheduler_health(&self) -> SchedulerHealth {
+        SchedulerHealth {
+            trigger: self.trigger_health.snapshot(),
+            retry: self.retry_health.snapshot(),
+        }
     }
 
     #[allow(unused)]
@@ -951,6 +976,8 @@ impl Runtime {
             shutdown,
             schema_cache,
             snapshots,
+            trigger_health: LoopGuard::new("schedule-trigger"),
+            retry_health: LoopGuard::new("message-retry"),
         });
 
         runtime.initialize()?;
@@ -1088,12 +1115,13 @@ impl Runtime {
             (secs * 1000) as u64
         };
         #[cfg(test)]
-        let interval_ms = 800u64;
+        let interval_ms = TEST_TICK_MS;
 
         let evt = self.emitter().clone();
         let cache = self.cache.clone();
         let rt = self.clone();
         let shutdown = self.shutdown.clone();
+        let health = self.retry_health.clone();
         Handle::current().spawn(async move {
             let mut intv = time::interval(Duration::from_millis(interval_ms));
             loop {
@@ -1101,6 +1129,18 @@ impl Runtime {
                     _= shutdown.cancelled() => break,
                     _ = intv.tick() => {}
                 }
+                // A degraded loop sits this tick out: the store has failed
+                // every recent attempt, so another query now would fail too
+                // (and log again) — the guard decides when the next attempt is
+                // worth making.
+                if !health.attempt() {
+                    continue;
+                }
+                // One tick is one attempt: every store call below runs, and the
+                // tick counts as failed if any of them did — a store that
+                // cannot serve one of them cannot serve the next tick either.
+                let mut failure: Option<ActError> = None;
+
                 // each not-yet-acked delivery row is re-sent to the channel it
                 // belongs to only
                 match cache
@@ -1129,7 +1169,10 @@ impl Runtime {
                             }
                         }
                     }
-                    Err(err) => error!(error = %err, "no-response deliveries query failed"),
+                    Err(err) => {
+                        error!(error = %err, "no-response deliveries query failed");
+                        failure = Some(err);
+                    }
                 }
 
                 // delete finished processes whose deliveries have all settled
@@ -1137,12 +1180,19 @@ impl Runtime {
                 // for the deliveries that lag behind)
                 if let Err(err) = cache.sweep_removable().await {
                     error!(error = %err, "settled-process sweep failed");
+                    failure.get_or_insert(err);
                 }
 
                 // Replay durable scheduler overflow after the in-memory queue
                 // has had one full tick to drain.
                 if let Err(err) = rt.recover_overflow((interval_ms * 2) as i64).await {
                     error!(error = %err, "scheduler overflow recovery failed");
+                    failure.get_or_insert(err);
+                }
+
+                match failure {
+                    Some(err) => health.failed(&err),
+                    None => health.recovered(),
                 }
             }
         });
@@ -1191,11 +1241,12 @@ impl Runtime {
             }
         };
         #[cfg(test)]
-        let interval_ms = 800u64;
+        let interval_ms = TEST_TICK_MS;
 
         let store = self.store();
         let shutdown = self.shutdown.clone();
         let rt = self.clone();
+        let health = self.trigger_health.clone();
         tokio::spawn(async move {
             let mut intv = time::interval(Duration::from_millis(interval_ms));
             loop {
@@ -1203,7 +1254,21 @@ impl Runtime {
                     _ = shutdown.cancelled() => break,
                     _ = intv.tick() => {}
                 }
+                // A degraded loop sits this tick out: the store has failed
+                // every recent attempt, so another query now would fail too
+                // (and log again) — the guard decides when the next attempt is
+                // worth making.
+                if !health.attempt() {
+                    continue;
+                }
                 let now = crate::utils::time::time_millis();
+                // The due query is the loop's one store round trip and the only
+                // failure that counts against its health: a trigger whose own
+                // fire failed is that row's problem, and it repeats only when
+                // the row itself is unusable (its model is gone, its payload
+                // does not parse) — one such row must not throttle the
+                // schedules that are fine. What the health is about is reaching
+                // the store, and that is what this query decides.
                 let due = match store
                     .events()
                     .query(
@@ -1215,9 +1280,13 @@ impl Runtime {
                     )
                     .await
                 {
-                    Ok(rows) => rows.rows,
+                    Ok(rows) => {
+                        health.recovered();
+                        rows.rows
+                    }
                     Err(err) => {
                         error!(error = %err, "schedule query failed");
+                        health.failed(&err);
                         continue;
                     }
                 };
@@ -1243,7 +1312,7 @@ impl Runtime {
             }
         };
         #[cfg(test)]
-        let interval_ms = 800u64;
+        let interval_ms = TEST_TICK_MS;
 
         let registry = self.snapshot_registry();
         let shutdown = self.shutdown.clone();
