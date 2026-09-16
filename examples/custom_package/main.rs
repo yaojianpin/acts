@@ -22,7 +22,11 @@ async fn main() -> acts::Result<()> {
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text)?;
     workflow.print();
-    engine.executor(&acts::Principal::unrestricted()).model().deploy(&workflow, None).await?;
+    engine
+        .executor(&acts::Principal::unrestricted())
+        .model()
+        .deploy(&workflow, None)
+        .await?;
 
     executor.proc().start(&workflow.id, vars).await?;
     let chan = engine.channel();

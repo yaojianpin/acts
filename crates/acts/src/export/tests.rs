@@ -1748,7 +1748,11 @@ async fn export_executor_start() {
     vars.insert("uid".to_string(), json!("u1"));
     vars.insert("pid".to_string(), json!(pid));
 
-    let result = engine.executor(&crate::Principal::unrestricted()).proc().start(&model.id, vars).await;
+    let result = engine
+        .executor(&crate::Principal::unrestricted())
+        .proc()
+        .start(&model.id, vars)
+        .await;
     sig.recv().await;
     assert!(result.is_ok());
 }
@@ -1771,7 +1775,11 @@ async fn export_executor_start_not_found_model() {
     vars.insert("uid".to_string(), json!("u1"));
     vars.insert("pid".to_string(), json!(pid));
 
-    let result = engine.executor(&crate::Principal::unrestricted()).proc().start("not_exists", vars).await;
+    let result = engine
+        .executor(&crate::Principal::unrestricted())
+        .proc()
+        .start("not_exists", vars)
+        .await;
     assert!(result.is_err());
 }
 
@@ -2816,7 +2824,12 @@ async fn export_message_multi_channels_share_message_single_delivery_each() {
     let delivery_a = received_a.delivery_id.clone().unwrap();
     let delivery_b = received_b.delivery_id.clone().unwrap();
     assert_ne!(delivery_a, delivery_b);
-    engine.executor(&crate::Principal::unrestricted()).msg().ack(&delivery_a).await.unwrap();
+    engine
+        .executor(&crate::Principal::unrestricted())
+        .msg()
+        .ack(&delivery_a)
+        .await
+        .unwrap();
 
     let row_a = store.deliveries().find(&delivery_a).await.unwrap();
     assert_eq!(row_a.status, data::DeliveryStatus::Acked);
@@ -2925,7 +2938,12 @@ async fn export_message_clear_error_messages_by_none() {
         .await
         .unwrap();
     assert_eq!(ret.status, data::DeliveryStatus::Error);
-    engine.executor(&crate::Principal::unrestricted()).msg().clear(None).await.unwrap();
+    engine
+        .executor(&crate::Principal::unrestricted())
+        .msg()
+        .clear(None)
+        .await
+        .unwrap();
     assert!(
         !engine
             .runtime()
@@ -3023,7 +3041,12 @@ async fn export_message_resend_error_messages() {
         .await
         .unwrap();
     assert_eq!(ret.status, data::DeliveryStatus::Error);
-    engine.executor(&crate::Principal::unrestricted()).msg().redo().await.unwrap();
+    engine
+        .executor(&crate::Principal::unrestricted())
+        .msg()
+        .redo()
+        .await
+        .unwrap();
 
     let ret = engine
         .runtime()

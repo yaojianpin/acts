@@ -34,7 +34,11 @@ async fn main() -> Result<()> {
 
     workflow.print();
     let executor = engine.executor(&acts::Principal::unrestricted());
-    engine.executor(&acts::Principal::unrestricted()).model().deploy(&workflow, None).await?;
+    engine
+        .executor(&acts::Principal::unrestricted())
+        .model()
+        .deploy(&workflow, None)
+        .await?;
 
     let mut vars = Vars::new();
     vars.insert("pid".to_string(), nanoid!().into());

@@ -190,7 +190,11 @@ mod tests {
             executor.pack().get("test_pack").await.map(|_| ()),
             executor.pack().rm("test_pack").await.map(|_| ()),
             executor.proc().start("m1", Vars::new()).await.map(|_| ()),
-            executor.proc().start_from_model("", "yml", Vars::new()).await.map(|_| ()),
+            executor
+                .proc()
+                .start_from_model("", "yml", Vars::new())
+                .await
+                .map(|_| ()),
             executor.proc().list(&Query::new()).await.map(|_| ()),
             executor.proc().get("p1").await.map(|_| ()),
             executor.proc().get_process("p1").await.map(|_| ()),
@@ -209,9 +213,15 @@ mod tests {
             executor.evt().get("e1").await.map(|_| ()),
             executor.evt().start("e1", &json!(null)).await.map(|_| ()),
             executor.act().complete("p1", "t1", Vars::new()).await,
-            executor.act().do_action("p1", "t1", crate::event::EventAction::Push, Vars::new()).await,
+            executor
+                .act()
+                .do_action("p1", "t1", crate::event::EventAction::Push, Vars::new())
+                .await,
             executor.ext().register_var(&TestVar).map(|_| ()),
-            executor.ext().register_package(&TestVar::definition()).await,
+            executor
+                .ext()
+                .register_package(&TestVar::definition())
+                .await,
         ];
         for result in results {
             let err = result.expect_err("an ungranted operation must be refused");
@@ -243,7 +253,10 @@ mod tests {
         assert!(executor.model().list(&Query::new()).await.is_ok());
         assert!(executor.pack().list(&Query::new()).await.is_ok());
         assert!(matches!(
-            executor.model().deploy(&Workflow::new().with_id("m1"), None).await,
+            executor
+                .model()
+                .deploy(&Workflow::new().with_id("m1"), None)
+                .await,
             Err(ActError::Denied(_))
         ));
         assert!(matches!(

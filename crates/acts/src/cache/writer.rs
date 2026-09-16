@@ -152,7 +152,8 @@ impl Backlog {
         // Re-open the writer to new work only once most of the backlog is
         // gone: a single free slot right after a refusal would just refuse the
         // next op too, and each refusal is an error the caller has to act on.
-        if previous.saturating_sub(1) * 2 <= self.capacity && self.saturated.swap(false, Ordering::AcqRel)
+        if previous.saturating_sub(1) * 2 <= self.capacity
+            && self.saturated.swap(false, Ordering::AcqRel)
         {
             info!("store writer backlog drained, accepting new work again");
         }
@@ -383,9 +384,7 @@ impl StoreWriter {
                 }
                 Err(_) => {
                     if failed.is_none() {
-                        failed = Some(ActError::Runtime(
-                            "store writer task dropped".to_string(),
-                        ));
+                        failed = Some(ActError::Runtime("store writer task dropped".to_string()));
                     }
                 }
             }

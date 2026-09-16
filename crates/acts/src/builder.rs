@@ -78,11 +78,13 @@ impl EngineBuilder {
     /// enabled = false
     /// ```
     pub fn disable_acl(mut self) -> Self {
-        self.config_mut()
-            .table
-            .insert("acl".to_string(), toml::Value::Table(toml::Table::from_iter(
-                [("enabled".to_string(), toml::Value::Boolean(false))],
-            )));
+        self.config_mut().table.insert(
+            "acl".to_string(),
+            toml::Value::Table(toml::Table::from_iter([(
+                "enabled".to_string(),
+                toml::Value::Boolean(false),
+            )])),
+        );
         self
     }
 

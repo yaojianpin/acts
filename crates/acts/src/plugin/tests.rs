@@ -80,10 +80,20 @@ async fn plugin_package_register() {
         .await
         .unwrap();
 
-    let pack1 = engine.executor(&crate::Principal::unrestricted()).pack().get("test_package").await.unwrap();
+    let pack1 = engine
+        .executor(&crate::Principal::unrestricted())
+        .pack()
+        .get("test_package")
+        .await
+        .unwrap();
     assert_eq!(pack1.run_as, ActRunAs::Irq);
 
-    let pack2 = engine.executor(&crate::Principal::unrestricted()).pack().get("test_package2").await.unwrap();
+    let pack2 = engine
+        .executor(&crate::Principal::unrestricted())
+        .pack()
+        .get("test_package2")
+        .await
+        .unwrap();
     assert_eq!(pack2.run_as, ActRunAs::Msg);
 }
 

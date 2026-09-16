@@ -88,7 +88,11 @@ async fn pack_irq_multi_threads() {
     });
 
     for _ in 0..len {
-        e2.executor(&crate::Principal::unrestricted()).proc().start("m1", Vars::new()).await.unwrap();
+        e2.executor(&crate::Principal::unrestricted())
+            .proc()
+            .start("m1", Vars::new())
+            .await
+            .unwrap();
     }
 
     let ret = s2.recv().await;

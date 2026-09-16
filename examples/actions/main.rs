@@ -15,7 +15,11 @@ async fn main() -> Result<()> {
     workflow.print();
 
     let executor = engine.executor(&acts::Principal::unrestricted()).clone();
-    engine.executor(&acts::Principal::unrestricted()).model().deploy(&workflow, None).await?;
+    engine
+        .executor(&acts::Principal::unrestricted())
+        .model()
+        .deploy(&workflow, None)
+        .await?;
     executor
         .proc()
         .start(&workflow.id, Vars::new())

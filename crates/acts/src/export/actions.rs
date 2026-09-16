@@ -269,7 +269,12 @@ pub async fn apply_as(
         "proc:start_from_model" => {
             let fmt = pop(&mut options, "fmt")?;
             let model = pop(&mut options, "model")?;
-            value(executor.proc().start_from_model(&model, &fmt, options).await)
+            value(
+                executor
+                    .proc()
+                    .start_from_model(&model, &fmt, options)
+                    .await,
+            )
         }
         "proc:ls" => {
             let query = options

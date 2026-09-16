@@ -1,5 +1,6 @@
 use crate::{
-    PackageInfo, Principal, Result, data::Package, query::Query, scheduler::Runtime, store::PageData,
+    PackageInfo, Principal, Result, data::Package, query::Query, scheduler::Runtime,
+    store::PageData,
 };
 use std::sync::Arc;
 use tracing::instrument;

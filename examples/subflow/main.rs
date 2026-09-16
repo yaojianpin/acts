@@ -58,7 +58,11 @@ async fn main() -> Result<()> {
         }
     });
 
-    engine.executor(&acts::Principal::unrestricted()).proc().start("main", Vars::new()).await?;
+    engine
+        .executor(&acts::Principal::unrestricted())
+        .proc()
+        .start("main", Vars::new())
+        .await?;
 
     sig.recv().await;
 

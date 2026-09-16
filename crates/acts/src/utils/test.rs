@@ -57,7 +57,10 @@ pub(crate) async fn start_engine_owned(
     runtime
         .start(
             workflow,
-            vars.with(crate::utils::consts::PROC_OWNER, crate::ScopePolicy::unrestricted()),
+            vars.with(
+                crate::utils::consts::PROC_OWNER,
+                crate::ScopePolicy::unrestricted(),
+            ),
         )
         .await
 }

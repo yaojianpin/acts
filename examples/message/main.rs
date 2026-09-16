@@ -9,7 +9,11 @@ async fn main() -> Result<()> {
     let text = include_str!("./model.yml");
     let workflow = Workflow::from_yml(text).unwrap();
     workflow.print();
-    engine.executor(&acts::Principal::unrestricted()).model().deploy(&workflow, None).await?;
+    engine
+        .executor(&acts::Principal::unrestricted())
+        .model()
+        .deploy(&workflow, None)
+        .await?;
 
     executor.proc().start(&workflow.id, Vars::new()).await?;
 
