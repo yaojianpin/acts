@@ -5,13 +5,13 @@
 use acts::{ActPlugin, Channel, ChannelOptions, Engine, Vars};
 use acts_channel::{Message, MessageOptions, acts_service_server::*};
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
-use tokio::sync::mpsc::{self, Sender};
+use tokio::sync::mpsc::{self, Sender, error::TrySendError};
 use tokio_stream::{Stream, wrappers::ReceiverStream};
 use tonic::{Code, Response, Status, transport::Server};
 
-pub use config::GrpcConfig;
+pub use config::{DEFAULT_QUEUE_SIZE, GrpcConfig};
 
 mod config;
 
@@ -63,36 +63,52 @@ impl Stream for GuardedMessageStream {
     }
 }
 
-#[derive(Clone)]
+/// One `on_message` subscriber: its queue, its channel options and the channel
+/// it registered (shared, so a handler invocation clones an `Arc`, not this).
 struct MessageClient {
     addr: String,
     sender: Sender<Result<Message, Status>>,
     options: ChannelOptions,
+    /// The channel this stream registered, used to end the subscription of a
+    /// client that stopped reading. Weak because the handler that holds this
+    /// client is owned by the engine's emitter, which the channel's own runtime
+    /// owns: a strong reference would keep the runtime alive from inside itself.
+    chan: Weak<Channel>,
 }
 
 impl MessageClient {
+    /// Hand one message (or one stream error) to the client and never wait for
+    /// it: the bounded queue is the whole backlog of an RPC, and a message that
+    /// does not fit means the client stopped reading — the stream is ended
+    /// there and then. Spawning a task per message to await room instead made
+    /// the queue no bound at all: every message past it left a task (and the
+    /// message it held) alive until the client read, which a client that never
+    /// reads never does.
+    ///
+    /// A client disconnected this way loses nothing the engine still owes the
+    /// channel: a delivery that was handed over but not acked, of a process
+    /// that has not settled, is re-sent by the retry timer to the channel the
+    /// client registers again (the same client id composes the same key).
     fn send(&self, message: Result<Message, Status>) {
-        let msg = message;
-        let client = self.clone();
-        if client.sender.is_closed() {
-            tracing::warn!("client {}({}) is closed", client.addr, client.options.id);
-            return;
-        }
-        tokio::spawn(async move {
-            match client.sender.send(msg).await {
-                Ok(_) => {
-                    tracing::info!("send to {}({})", client.addr, client.options.id);
-                }
-                Err(err) => {
-                    tracing::error!(
-                        "send to {}({}), error={:?}",
-                        client.addr,
-                        client.options.id,
-                        err
-                    );
+        match self.sender.try_send(message) {
+            Ok(()) => {
+                tracing::info!("send to {}({})", self.addr, self.options.id);
+            }
+            Err(TrySendError::Full(_)) => {
+                tracing::warn!(
+                    "client {}({}) is not reading; closing the subscription",
+                    self.addr,
+                    self.options.id
+                );
+                if let Some(chan) = self.chan.upgrade() {
+                    chan.close();
                 }
             }
-        });
+            // the response stream (and so the receiver) is already gone
+            Err(TrySendError::Closed(_)) => {
+                tracing::warn!("client {}({}) is closed", self.addr, self.options.id);
+            }
+        }
     }
 }
 
@@ -209,26 +225,36 @@ impl ActsService for GrpcServer {
         .to_string();
 
         tracing::info!("on_message: options={options:?} chan={chan_id}");
-        let (tx, rx) = mpsc::channel::<Result<Message, Status>>(128);
-        let client = MessageClient {
-            addr: addr.to_string(),
-            sender: tx,
-            options: ChannelOptions {
-                r#type: options.r#type.clone(),
-                state: options.state.clone(),
-                uses: options.uses.clone(),
-                id: chan_id.clone(),
-                ack: true,
-                options: {
-                    let mut vars = Vars::new();
-                    for (k, v) in &options.options {
-                        vars.set(k, v.clone());
-                    }
-                    vars
-                },
+        let queue_size = self
+            .engine
+            .config()
+            .get::<GrpcConfig>("grpc")
+            .unwrap_or_default()
+            .queue_size();
+        let (tx, rx) = mpsc::channel::<Result<Message, Status>>(queue_size);
+        let chan_options = ChannelOptions {
+            r#type: options.r#type.clone(),
+            state: options.state.clone(),
+            uses: options.uses.clone(),
+            id: chan_id.clone(),
+            ack: true,
+            options: {
+                let mut vars = Vars::new();
+                for (k, v) in &options.options {
+                    vars.set(k, v.clone());
+                }
+                vars
             },
         };
-        let chan = self.engine.channel_with_options(&client.options);
+        let chan = self.engine.channel_with_options(&chan_options);
+        // one shared client: the handler clones the `Arc`, not the client (its
+        // channel options carry strings and vars a delivery never reads)
+        let client = Arc::new(MessageClient {
+            addr: addr.to_string(),
+            sender: tx,
+            options: chan_options,
+            chan: Arc::downgrade(&chan),
+        });
         chan.on_message(move |e| {
             let client = client.clone();
             async move {

@@ -180,6 +180,16 @@ messages it emitted.
   globs, whoever started the emitting process; what a caller may do with the
   messages it receives is decided by the actions it holds. A role that must not
   read message payloads simply has no `msg:sub` (and no `msg:ls`/`msg:get`).
+- **A subscription's backlog is bounded.** Every subscriber has one fixed-size
+  queue (`[grpc].queue_size`, default 128; `[web].queue_size`, default 100): a
+  delivery never waits for the client, and a full queue means the client
+  stopped reading, so that subscription is disconnected — the engine does not
+  leave one waiting task per message that did not fit. What the engine still
+  owes the channel is not dropped with it: a delivery that was handed over but
+  not acked, of a process that has not settled, is re-sent by the retry timer
+  once the client subscribes again under the same id (which composes the same
+  channel key). As after any disconnect, a channel only receives messages
+  emitted while it is registered.
 - `msg:ack` and `msg:unsub` are ordinary actions too: any role granted them may
   ack any delivery id and unsubscribe any channel in its own namespace. The
   delivery id is not addressed per client, so grant `msg:ack` the way you would

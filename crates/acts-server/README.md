@@ -130,9 +130,12 @@ max_files = 168
 ```toml
 [grpc]                          # acts-plugin-grpc
 port = 10080                    # default 10080
+queue_size = 128                # messages that may wait for one subscriber
+                                # (default 128); a full queue ends the stream
 
 [web]                           # acts-plugin-web (only when this section exists)
 port = 10082                    # default 10082
+queue_size = 100                # same for one SSE subscriber (default 100)
 
 [nats]                          # acts-plugin-nats — only connected when
 url = "nats://127.0.0.1:4222"   # this section is present
@@ -149,6 +152,12 @@ Plugin registration mirrors the config:
 - the gRPC and web plugins always start (default ports 10080 / 10082);
 - the NATS plugin is registered only when a `[nats]` section exists, so a
   server without NATS never tries to reach a broker.
+
+A subscription's queue is its only backlog: a message that does not fit is never
+awaited on, and a subscriber that fills its queue has its stream ended instead
+of leaving behind a task that waits for room with the message in hand. Its
+unacked deliveries of processes that have not settled stay in the store, so the
+retry timer re-sends them when the client subscribes again.
 
 ### Snapshot targets
 

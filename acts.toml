@@ -103,12 +103,28 @@ ttl = "1h"
 # port the gRPC server listens on
 port = 10080
 
+# how many messages may wait for one `on_message` subscriber (default 128). The
+# queue is the only backlog an RPC has: a message that does not fit is never
+# awaited on, and a subscriber whose queue is full has its stream ended instead
+# of growing a waiting task per message. Its unacked deliveries of processes
+# that have not settled stay in the store, so the retry timer re-sends them
+# when the client subscribes again.
+# queue_size = 128
+
 # web service — acts-plugin-web. Serves the HTTP API (/api/*) and workflow
 # hooks (/hooks/{model-id}:{trigger-id}). Only started when this [web]
 # section exists.
 [web]
 # port the web server listens on
 port = 10082
+
+# how many messages may wait for one SSE subscriber (default 100). The queue is
+# the only backlog a stream has: a message that does not fit is never awaited
+# on, and a subscriber whose queue is full is disconnected instead of growing a
+# waiting task per message. Its unacked deliveries of processes that have not
+# settled stay in the store, so the retry timer re-sends them when the client
+# subscribes again.
+# queue_size = 100
 
 # http package — acts-package-http rules for every `acts.core.http` act.
 # Outbound requests are blocked by default when the target is a

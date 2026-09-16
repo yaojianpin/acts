@@ -12,7 +12,7 @@ mod config;
 mod objects;
 mod routes;
 mod sse;
-pub use config::HttpConfig;
+pub use config::{DEFAULT_QUEUE_SIZE, HttpConfig};
 
 #[derive(Clone)]
 pub struct WebPlugin;

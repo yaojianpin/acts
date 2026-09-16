@@ -1,3 +1,4 @@
+use crate::HttpConfig;
 use crate::objects::{AppError, RespData};
 use acts::{Channel, ChannelOptions, Engine, Message, Principal, Vars};
 use axum::{
@@ -11,7 +12,8 @@ use axum::{
 use futures_util::stream::Stream;
 use serde::Deserialize;
 use std::{convert::Infallible, sync::Arc};
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{self, error::TrySendError};
+use tracing::warn;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct MessageQuery {
@@ -70,21 +72,58 @@ pub async fn sse(
     .unwrap_or_default()
     .to_string();
 
-    let (tx, mut rx) = mpsc::channel::<Message>(100);
+    let queue_size = state
+        .config()
+        .get::<HttpConfig>("web")
+        .unwrap_or_default()
+        .queue_size();
+    let (tx, mut rx) = mpsc::channel::<Message>(queue_size);
 
     let chan = state.channel_with_options(&ChannelOptions {
-        id: chan_id,
+        id: chan_id.clone(),
         ack: true,
         r#type: query.r#type.unwrap_or("*".to_string()),
         state: query.state.unwrap_or("*".to_string()),
         uses: query.uses.unwrap_or("*".to_string()),
         options: query.options,
     });
+    // The handler hands a message to the stream and never waits for the client:
+    // it writes into the bounded queue, and a message that does not fit means
+    // the client stopped reading — the subscription is closed there and then.
+    // Spawning a task per message to await room instead made the queue no bound
+    // at all: every message past it left a task (and the message it held) alive
+    // until the client read, which a client that never reads never does.
+    //
+    // A client disconnected this way loses nothing the engine still owes the
+    // channel: a delivery that was handed over but not acked, of a process that
+    // has not settled, is re-sent by the retry timer to the channel the client
+    // registers again (the same client id composes the same key). As after any
+    // disconnect, a channel only receives messages emitted while it is
+    // registered, and a settled process's deliveries settle with it.
+    //
+    // The channel handle is weak because the handler is owned by the engine's
+    // emitter, which the channel's own runtime owns: a strong reference would
+    // keep the runtime alive from inside itself.
+    let chan_ref = Arc::downgrade(&chan);
+    // logged on the overflow path only; shared so a delivery does not clone a
+    // channel key it never prints
+    let chan_name = Arc::new(chan_id);
     chan.on_message(move |e| {
         let tx = tx.clone();
+        let chan = chan_ref.clone();
+        let chan_id = chan_name.clone();
         async move {
-            let msg = e.inner().clone();
-            tokio::spawn(async move { tx.send(msg).await });
+            match tx.try_send(e.inner().clone()) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    warn!(chan = %chan_id, "SSE subscriber is not reading; closing the subscription");
+                    if let Some(chan) = chan.upgrade() {
+                        chan.close();
+                    }
+                }
+                // the stream (and so the receiver) is already gone
+                Err(TrySendError::Closed(_)) => {}
+            }
         }
     });
 
@@ -130,6 +169,7 @@ mod tests {
     use axum::response::IntoResponse;
     use futures_util::StreamExt;
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
     /// Two tenants, both allowed to start runs, subscribe and ack.
@@ -153,6 +193,20 @@ allow = ["model:deploy", "proc:start", "msg:ack", "msg:sub"]
             data: Default::default(),
             table,
         };
+        Engine::builder().set_config(&config).start().await.unwrap()
+    }
+
+    /// `engine_with_acl` with the engine's retry tick pinned to a second, the
+    /// way a config file would fill it (`tick_interval_secs` is read from
+    /// `ConfigData`, not from the raw table these cases build). The redelivery
+    /// case needs a re-sent delivery rather than the 15-second default.
+    async fn engine_with_acl_and_retry_tick(text: &str) -> Engine {
+        let table: toml::Table = toml::from_str(text).unwrap();
+        let mut config = acts::Config {
+            data: Default::default(),
+            table,
+        };
+        config.data.tick_interval_secs = Some(1);
         Engine::builder().set_config(&config).start().await.unwrap()
     }
 
@@ -443,6 +497,109 @@ allow = ["msg:sub"]
         .await
         .expect("msg:sub opens the stream");
         drop(response);
+
+        engine.close().await;
+    }
+
+    /// A subscriber that stops reading must be disconnected, not served
+    /// forever: the handler writes into a bounded queue and never waits for
+    /// room, so the queue is the whole backlog of a subscription — once it is
+    /// full the subscription is closed instead of growing a waiting task per
+    /// message. What the client was owed is not dropped with it: the deliveries
+    /// it left unacked (of a process that has not settled) are re-sent to the
+    /// channel it registers again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn sse_slow_subscriber_is_disconnected_instead_of_queueing() {
+        // a two-message queue: one run already emits past the bound
+        let engine =
+            engine_with_acl_and_retry_tick("[acl]\nenabled = false\n[web]\nqueue_size = 2\n").await;
+
+        // spy channel: counts every dispatched workflow message without
+        // storing anything (ack = false), so the emissions are observable
+        // while the subscription under test is left unread
+        let received = Arc::new(AtomicUsize::new(0));
+        let spy = engine.channel_with_options(&ChannelOptions {
+            ack: false,
+            ..Default::default()
+        });
+        let spy_received = received.clone();
+        spy.on_message(move |_e| {
+            let received = spy_received.clone();
+            async move {
+                received.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+
+        // open a subscription and never read it: the response body is not
+        // polled, so nothing drains its queue
+        let query = MessageQuery {
+            id: "slow-reader".to_string(),
+            r#type: None,
+            uses: None,
+            state: None,
+            key: None,
+            options: Vars::new(),
+        };
+        let response = sse(
+            State(Arc::new(engine.clone())),
+            Extension(engine.anonymous()),
+            Query(query),
+        )
+        .await
+        .expect("msg:sub opens the stream")
+        .into_response();
+
+        // two runs emit at least 6 messages, so the queue (2) is exceeded even
+        // while the count lags the handler under test by the message in flight
+        run_irq_workflow(&engine, "slow1").await;
+        run_irq_workflow(&engine, "slow2").await;
+        let seen = || received.load(Ordering::Relaxed);
+        wait_until(|| seen() >= 6, "workflow messages to be dispatched").await;
+
+        // the overflow closed the subscription: the stream flushes what was
+        // queued and ends, instead of waiting for a reader that never came
+        let mut stream = response.into_body().into_data_stream();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(5), stream.next()).await {
+                Ok(Some(Ok(_))) => continue,
+                Ok(Some(Err(err))) => panic!("SSE stream failed: {err}"),
+                Ok(None) => break,
+                Err(_) => panic!(
+                    "a subscriber that stopped reading must be disconnected, not left queued"
+                ),
+            }
+        }
+
+        // and the channel is deregistered: later messages are not delivered to
+        // (and not stored for) the closed subscription
+        let rows = stored_message_count(&engine).await;
+        run_irq_workflow(&engine, "after").await;
+        wait_until(
+            || seen() >= 9,
+            "messages of the last workflow to be dispatched",
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(
+            stored_message_count(&engine).await,
+            rows,
+            "a disconnected SSE channel must not store further deliveries"
+        );
+
+        // the disconnect loses nothing: the deliveries it left unacked are
+        // re-sent by the retry timer to the channel this client occupies again
+        // (the same client id composes the same channel key)
+        let anonymous = engine.anonymous();
+        let mut second = subscribe(&engine, &anonymous, "slow-reader").await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
+        let mut redelivered = Vec::new();
+        while redelivered.is_empty() && tokio::time::Instant::now() < deadline {
+            redelivered = drain(&mut second, 1_000).await;
+        }
+        assert!(
+            !redelivered.is_empty(),
+            "a disconnected subscriber must receive its unacked deliveries again after resubscribing"
+        );
 
         engine.close().await;
     }

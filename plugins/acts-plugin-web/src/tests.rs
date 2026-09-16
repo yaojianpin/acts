@@ -1,5 +1,5 @@
 use crate::{
-    HttpConfig, WebPlugin,
+    DEFAULT_QUEUE_SIZE, HttpConfig, WebPlugin,
     objects::{AppError, RespData, RespStatus},
 };
 use axum::response::IntoResponse;
@@ -11,6 +11,23 @@ use serde_json::json;
 fn test_http_config_default() {
     let config = HttpConfig::default();
     assert_eq!(config.port, None);
+    assert_eq!(
+        config.queue_size(),
+        DEFAULT_QUEUE_SIZE,
+        "an unconfigured subscription queue keeps the default capacity"
+    );
+}
+
+/// The configured queue capacity is what the subscription is built with, and
+/// `0` is clamped to a queue of one: a zero-capacity queue would open a stream
+/// that can never receive a message.
+#[test]
+fn test_http_config_queue_size_is_honored_and_clamped() {
+    let config: HttpConfig = serde_json::from_value(json!({"queue_size": 8})).unwrap();
+    assert_eq!(config.queue_size(), 8);
+
+    let config: HttpConfig = serde_json::from_value(json!({"queue_size": 0})).unwrap();
+    assert_eq!(config.queue_size(), 1);
 }
 
 #[test]

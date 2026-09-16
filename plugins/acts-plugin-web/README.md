@@ -33,7 +33,16 @@ In `config/acts.toml`:
 ```toml
 [web]
 port = 10082
+# how many messages may wait for one SSE subscriber (default 100)
+queue_size = 100
 ```
+
+`queue_size` is the whole backlog of one subscription: a message that does not
+fit is never awaited on, and a subscriber whose queue is full is disconnected
+rather than leaving behind a task that waits for room with the message in hand.
+Its unacked deliveries of processes that have not settled stay in the store, so
+the engine's retry timer re-sends them to the channel the client registers again
+(the client sees the stream end and resubscribes).
 
 ## Authentication
 

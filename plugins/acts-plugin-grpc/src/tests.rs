@@ -3,6 +3,7 @@ use acts::query::Query as StoreQuery;
 use acts::{ChannelOptions, Engine, Vars, Workflow};
 use acts_channel::{MessageOptions, acts_service_server::ActsService};
 use serde_json::json;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio_stream::StreamExt as _;
@@ -25,6 +26,23 @@ fn test_grpc_config_deserialize_empty() {
     let json = json!({});
     let config: GrpcConfig = serde_json::from_value(json).unwrap();
     assert_eq!(config.port, None);
+    assert_eq!(
+        config.queue_size(),
+        crate::DEFAULT_QUEUE_SIZE,
+        "an unconfigured subscription queue keeps the default capacity"
+    );
+}
+
+/// The configured queue capacity is what the subscription is built with, and
+/// `0` is clamped to a queue of one: a zero-capacity queue would open a stream
+/// that can never receive a message.
+#[test]
+fn test_grpc_config_queue_size_is_honored_and_clamped() {
+    let config: GrpcConfig = serde_json::from_value(json!({"queue_size": 8})).unwrap();
+    assert_eq!(config.queue_size(), 8);
+
+    let config: GrpcConfig = serde_json::from_value(json!({"queue_size": 0})).unwrap();
+    assert_eq!(config.queue_size(), 1);
 }
 
 #[test]
@@ -51,8 +69,17 @@ fn free_port() -> u16 {
 /// the gRPC surface, so their caller must be unrestricted. The ACL cases below
 /// build their own policies.
 async fn engine_with_grpc(port: u16) -> Engine {
-    let table: toml::Table =
-        toml::from_str(&format!("[acl]\nenabled = false\n[grpc]\nport = {port}\n")).unwrap();
+    engine_with_grpc_queue(port, None).await
+}
+
+/// The same engine with `[grpc].queue_size` pinned — the slow-subscriber case
+/// needs a queue one run can fill.
+async fn engine_with_grpc_queue(port: u16, queue_size: Option<usize>) -> Engine {
+    let mut table = format!("[acl]\nenabled = false\n[grpc]\nport = {port}\n");
+    if let Some(queue_size) = queue_size {
+        table.push_str(&format!("queue_size = {queue_size}\n"));
+    }
+    let table: toml::Table = toml::from_str(&table).unwrap();
     let cfg = acts::Config {
         data: Default::default(),
         table,
@@ -277,6 +304,87 @@ async fn test_on_message_stream_drop_deregisters_channel() {
         stored_message_count(&engine).await,
         alive_rows,
         "dropped gRPC channel must not store further deliveries"
+    );
+
+    engine.close().await;
+}
+
+/// A subscriber that stops reading must be disconnected, not served forever:
+/// `MessageClient::send` writes into a bounded queue and never waits for room,
+/// so the queue is the whole backlog of an RPC — once it is full the stream
+/// ends instead of growing a waiting task per message. Nothing is lost: the
+/// delivery stays unacked, so the engine's retry timer re-sends it when the
+/// client subscribes again.
+#[tokio::test(flavor = "multi_thread")]
+async fn test_on_message_slow_subscriber_is_disconnected() {
+    // a two-message queue: one run already emits past the bound
+    let engine = engine_with_grpc_queue(free_port(), Some(2)).await;
+    let server = GrpcServer::new(&engine);
+
+    // spy channel: counts every dispatched workflow message without storing
+    // anything (ack = false), so the emissions are observable while the
+    // subscription under test is left unread
+    let received = Arc::new(AtomicUsize::new(0));
+    let spy = engine.channel_with_options(&ChannelOptions {
+        ack: false,
+        ..Default::default()
+    });
+    let spy_received = received.clone();
+    spy.on_message(move |_e| {
+        let received = spy_received.clone();
+        async move {
+            received.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+
+    // subscribe like a gRPC client would, and never read the stream
+    let options = MessageOptions {
+        client_id: "slow-reader".to_string(),
+        r#type: "*".to_string(),
+        state: "*".to_string(),
+        uses: "*".to_string(),
+        options: Default::default(),
+    };
+    let response = server
+        .on_message(tonic::Request::new(options))
+        .await
+        .expect("the subscription opens");
+
+    // two runs emit at least 6 messages, so the queue (2) is exceeded even
+    // while the count lags the handler under test by the message in flight
+    run_irq_workflow(&engine, "slow1").await;
+    run_irq_workflow(&engine, "slow2").await;
+    let seen = || received.load(Ordering::Relaxed);
+    wait_until(|| seen() >= 6, "workflow messages to be dispatched").await;
+
+    // the overflow ended the RPC: the stream flushes what was queued and is
+    // done, instead of waiting for a reader that never came
+    let mut stream = response.into_inner();
+    loop {
+        match tokio::time::timeout(Duration::from_secs(5), stream.next()).await {
+            Ok(Some(Ok(_))) => continue,
+            Ok(Some(Err(status))) => panic!("subscription failed: {status}"),
+            Ok(None) => break,
+            Err(_) => {
+                panic!("a subscriber that stopped reading must be disconnected, not left queued")
+            }
+        }
+    }
+
+    // and the channel is deregistered: later messages are not delivered to
+    // (and not stored for) the closed subscription
+    let rows = stored_message_count(&engine).await;
+    run_irq_workflow(&engine, "after").await;
+    wait_until(
+        || seen() >= 9,
+        "messages of the last workflow to be dispatched",
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        stored_message_count(&engine).await,
+        rows,
+        "a disconnected gRPC channel must not store further deliveries"
     );
 
     engine.close().await;
