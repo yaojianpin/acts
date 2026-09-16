@@ -5,7 +5,7 @@ edition = "2024"
 publish = false
 
 [dependencies]
-tokio = { version = "1.44", features = ["full"] }
-acts = { path = "../../../crates/acts" }
-acts-package-shell = { path = "../../../packages/acts-package-shell" }
-serde_json = "1.0.140"
+tokio = { features = ["full"], workspace = true }
+acts = { workspace = true }
+acts-package-shell = { workspace = true }
+serde_json = { workspace = true }

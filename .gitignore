@@ -2,7 +2,10 @@ target
 test_data
 .vscode
 log
-Cargo.lock
+# The workspace lock is committed (that is what CI builds with `--locked`);
+# the stale per-example lock files left over from standalone builds are not.
+**/Cargo.lock
+!/Cargo.lock
 .idea
 /test_data
 /test

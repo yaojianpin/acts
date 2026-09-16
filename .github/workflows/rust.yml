@@ -23,7 +23,7 @@ jobs:
           components: rustfmt, clippy
 
       - name: Build
-        run: cargo build --verbose
+        run: cargo build --verbose --locked
 
   fmt:
     runs-on: ubuntu-latest
@@ -49,17 +49,4 @@ jobs:
           override: true
           components: rustfmt, clippy
       - name: Clippy Check
-        run: cargo clippy --all-targets --all-features --workspace -- -D warnings
-
-  audit:
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
-        with:
-          toolchain: stable
-      - name: Install cargo-audit
-        run: cargo install cargo-audit
-      - name: Audit Check
-        run: cargo audit --ignore RUSTSEC-2023-0071
+        run: cargo clippy --all-targets --all-features --workspace --locked -- -D warnings

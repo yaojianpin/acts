@@ -13,20 +13,20 @@ include = ["src/**/*"]
 [dependencies]
 acts = { workspace = true }
 async-trait = { workspace = true }
-async-nats = { version = "0.49.1", optional = true }
-futures = { version = "0.3", optional = true }
-redis = { version = "0.27", optional = true, features = ["aio", "tokio-comp"] }
+async-nats = { optional = true, workspace = true }
+futures = { optional = true, workspace = true }
+redis = { optional = true, workspace = true }
 sled = { version = "0.34", optional = true }
 sqlx = { version = "0.8", features = ["runtime-tokio"], optional = true }
-tokio = { version = "1.52", features = ["rt", "sync"] }
+tokio = { features = ["rt", "sync"], workspace = true }
 
 [dev-dependencies]
 acts = { workspace = true }
-nanoid = "0.4"
+nanoid = { workspace = true }
 serde_json = { workspace = true }
-serial_test = { version = "3", features = ["async"] }
-tokio = { version = "1.52", features = ["macros", "rt-multi-thread", "sync", "time"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serial_test = { workspace = true }
+tokio = { features = ["macros", "rt-multi-thread", "sync", "time"], workspace = true }
+tracing-subscriber = { features = ["env-filter"], workspace = true }
 
 [features]
 default = []

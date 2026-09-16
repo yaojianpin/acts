@@ -17,8 +17,8 @@ tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tonic = { workspace = true }
 async-trait = { workspace = true }
-tracing = "0.1.37"
+tracing = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
-toml = "0.8.22"
+toml = { workspace = true }

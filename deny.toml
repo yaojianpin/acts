@@ -1,0 +1,121 @@
+# Dependency policy for the whole workspace, enforced by `cargo deny check`
+# (.github/workflows/supply-chain.yml).
+#
+# Versions live in exactly one place: [workspace.dependencies] in the root
+# Cargo.toml. This file is the other half of that policy — it fails the build
+# when a member stops inheriting the workspace version (`bans.workspace-
+# dependencies`, the check that would have caught the `redis 0.27` vs `0.31`
+# and `async-nats 0.49` vs `0.50` split), when the resolved graph grows a *new*
+# duplicate version of a crate, a known advisory, an unapproved license, or a
+# dependency from an unapproved source.
+#
+# The `skip` list is the reviewed baseline of duplicates we cannot remove from
+# here, every one of them transitive. Inspect them with:
+#     cargo tree --workspace --duplicates -e normal
+# and refresh a crate with `cargo update -p <crate> --precise <version>`;
+# cargo-deny warns about a `skip` entry that no longer matches the graph.
+
+[graph]
+# cargo-deny is only ever intended to run on the "normal" tier-1 targets. The
+# release workflow ships linux/macos/windows binaries, so the gate covers the
+# union of their graphs instead of only the CI runner's host platform.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
+]
+# `acts-server` enables every `acts-store` backend and the clippy job runs
+# `--all-features`, so the gate must see the same graph.
+all-features = true
+
+[advisories]
+# An unmaintained crate is a security-fix cost, not a vulnerability: report the
+# ones the workspace depends on directly (ours to replace), not every
+# unmaintained crate in a transitive graph.
+unmaintained = "workspace"
+# All of the tree, since an unsound dependency is unsound wherever it sits.
+unsound = "all"
+# No ignores: `cargo deny` works on the resolved crate graph (all features, the
+# shipped platforms), so an advisory that is merely unused in `Cargo.lock` does
+# not show up here. The lock-level view is the `audit` job of the same workflow
+# (`cargo audit` parses Cargo.lock directly, which is why it carries the
+# RUSTSEC-2023-0071 ignore for the `rsa` entry that no feature set enables).
+
+[bans]
+# The point of this file: a second copy of a crate is a second thing to patch,
+# and the drift is silent otherwise.
+multiple-versions = "deny"
+wildcards = "deny"
+
+skip = [
+    { crate = "core-foundation@0.9.4", reason = "system-configuration 0.7 (hyper-util) is still on 0.9 while security-framework 3 uses 0.10; macOS-only" },
+    { crate = "cpufeatures@0.2.17", reason = "sha2 0.10 and curve25519-dalek 4 (nkeys) pin cpufeatures 0.2, chacha20 0.10 needs 0.3" },
+    { crate = "getrandom@0.2.17", reason = "ring 0.17, nkeys 0.4 and rand_core 0.6 (rand 0.8) resolve 0.2" },
+    { crate = "getrandom@0.3.4", reason = "ahash 0.8 and rand_core 0.9 (rand 0.9/0.10) resolve 0.3" },
+    { crate = "hashbrown@0.12.3", reason = "indexmap 1.9.3, reached only through tower 0.4.13 (tonic 0.12)" },
+    { crate = "hashbrown@0.14.5", reason = "dashmap 6.2" },
+    { crate = "hashbrown@0.15.5", reason = "hashlink 0.10 and sqlx-core 0.8" },
+    { crate = "indexmap@1.9.3", reason = "tower 0.4.13 (tonic 0.12); axum/reqwest are on indexmap 2" },
+    { crate = "parking_lot@0.11.2", reason = "sled 0.34 has not moved past parking_lot 0.11" },
+    { crate = "parking_lot_core@0.8.6", reason = "parking_lot 0.11.2, reached only through sled 0.34" },
+    { crate = "rand@0.8.8", reason = "nanoid 0.4, nkeys 0.4, nuid 0.5, sqlx-postgres 0.8, tokio-websockets 0.10 and tower 0.4 resolve 0.8" },
+    { crate = "rand@0.9.5", reason = "mockito 1.7, used only by examples/packages/http" },
+    { crate = "rand_chacha@0.3.1", reason = "rand 0.8.8" },
+    { crate = "rand_core@0.6.4", reason = "rand 0.8.8 and signatory 0.27 (async-nats nkeys)" },
+    { crate = "rand_core@0.9.5", reason = "rand 0.9.5 via mockito 1.7 (examples/packages/http); async-nats 0.50 already uses rand 0.10" },
+    { crate = "socket2@0.5.10", reason = "redis 0.31 and tonic 0.12 have not moved past socket2 0.5" },
+    { crate = "syn@2.0.119", reason = "derive crates (prost-derive, tracing-attributes, rquickjs-macro, sqlx-macros, validator_derive, ...) are still on syn 2" },
+    { crate = "toml_datetime@0.6.11", reason = "toml 0.8, our direct dependency, pulls toml_edit 0.22" },
+    { crate = "toml_edit@0.22.27", reason = "toml 0.8, our direct dependency; proc-macro-crate 3 uses toml_edit 0.25" },
+    { crate = "tower@0.4.13", reason = "tonic 0.12 pins tower 0.4; axum and reqwest use tower 0.5" },
+    { crate = "webpki-roots@0.26.11", reason = "sqlx-core 0.8 and tokio-websockets 0.10 still use webpki-roots 0.26" },
+    { crate = "winnow@0.7.15", reason = "toml_edit 0.22, reached only through toml 0.8" },
+]
+
+# windows-sys (and the windows-targets/windows_*_msvc crates below it) bumps
+# its major version faster than the ecosystem can agree on one, so the subtree
+# below each tolerated major is exempt instead of listing every leaf crate.
+skip-tree = [
+    { crate = "windows-sys@0.48.0", reason = "etcetera 0.8.0 has not moved past windows-sys 0.48" },
+    { crate = "windows-sys@0.52.0", reason = "ring 0.17 and socket2 0.5 have not moved past windows-sys 0.52" },
+]
+
+[bans.workspace-dependencies]
+# A crate declared by two members MUST use `workspace = true`; otherwise the two
+# declarations are free to drift apart (that is how `redis 0.27`/`0.31` and
+# `async-nats 0.49`/`0.50` got in).
+duplicates = "deny"
+# Hoisting a version into [workspace.dependencies] that no member ends up using
+# is dead policy — deny that too.
+unused = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+
+[licenses]
+# A wrong license inference is worse than a reported-then-approved one.
+confidence-threshold = 0.93
+# The example crates are unpublished workspace members with no license field;
+# they are not shipped, so there is no expression to check.
+private = { ignore = true }
+# Every entry is permissive, and each is listed globally rather than as a
+# per-crate exception so that a *new* copyleft or source-available dependency
+# fails the check instead of sliding in.
+allow = [
+    "Apache-2.0",          # ours, and most of the tree
+    "MIT",                 # most of the tree
+    "BSD-2-Clause",        # zerocopy, zerocopy-derive
+    "BSD-3-Clause",        # redis 0.31, curve25519-dalek, encoding_rs
+    "BSL-1.0",             # ryu, whoami
+    "CDLA-Permissive-2.0", # webpki-roots (permissive data license)
+    "ISC",                 # ring, rustls, hyper-rustls
+    "MIT-0",               # borrow-or-share
+    "MPL-2.0",             # colored — file-level copyleft, consumed unmodified
+    "Unicode-3.0",         # ICU4X crates
+    "Unlicense",           # aho-corasick, memchr, globset, byteorder
+    "Zlib",                # foldhash, tinyvec
+]

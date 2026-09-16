@@ -15,13 +15,13 @@ acts = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 time = { version = "0.3.36", features = ["macros"] }
-tokio = { version = "1.26.0", features = ["full"] }
-tracing = "0.1.37"
+tokio = { features = ["full"], workspace = true }
+tracing = { workspace = true }
 tracing-appender = "0.2.5"
-tracing-subscriber = { version = "0.3.16", features = [
+tracing-subscriber = { features = [
     "local-time",
     "env-filter",
-] }
+], workspace = true }
 acts-package-http = { workspace = true }
 acts-package-shell = { workspace = true }
 acts-package-state = { workspace = true }
@@ -32,8 +32,8 @@ acts-plugin-nats = { workspace = true }
 acts-channel = { workspace = true }
 acts-store = { workspace = true, features = ["sled", "sqlite", "postgres", "redis", "nats"] }
 [dev-dependencies]
-async-nats = "0.50"
-toml = "0.8.22"
+async-nats = { workspace = true }
+toml = { workspace = true }
 
 [features]
 default = []

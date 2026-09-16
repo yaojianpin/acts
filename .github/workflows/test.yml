@@ -59,7 +59,7 @@ jobs:
           done
           test -n "$ready" || { echo "NATS did not become ready on 127.0.0.1:4222" >&2; exit 1; }
       - name: Build
-        run: cargo build --verbose
+        run: cargo build --verbose --locked
       - name: Run tests acts
         run: cargo test -p acts --verbose
       - name: Run tests channel

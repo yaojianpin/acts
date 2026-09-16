@@ -6,6 +6,6 @@ publish = false
 
 
 [dependencies]
-tokio = { version = "1.44", features = ["full"] }
-acts = { path = "../../../crates/acts" }
-acts-package-state = { path = "../../../packages/acts-package-state" }
+tokio = { features = ["full"], workspace = true }
+acts = { workspace = true }
+acts-package-state = { workspace = true }

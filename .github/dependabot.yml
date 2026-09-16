@@ -1,0 +1,16 @@
+version: 2
+updates:
+  # Cargo.lock is committed, so a dependency update is a reviewed resolution
+  # change rather than something that happens implicitly on the next build.
+  # Patch and minor moves arrive as one grouped PR a week; majors stay separate
+  # because they are the ones that need a migration (`redis 0.27 -> 0.31` is
+  # exactly the change that used to be made in two manifests at once).
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      cargo-minor-patch:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]

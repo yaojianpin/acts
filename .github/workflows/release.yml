@@ -50,7 +50,7 @@ jobs:
           target: ${{ matrix.target }}
 
       - name: Build release binaries
-        run: cargo build --release --target ${{ matrix.target }} -p acts-server -p acts-cli
+        run: cargo build --release --locked --target ${{ matrix.target }} -p acts-server -p acts-cli
 
       - name: Stage binaries
         shell: bash

@@ -7,5 +7,5 @@ publish = false
 [dependencies]
 tokio = { workspace = true }
 acts = { workspace = true }
-acts-plugin-web = { path = "../../../plugins/acts-plugin-web" }
+acts-plugin-web = { workspace = true }
 serde_json = { workspace = true }

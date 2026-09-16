@@ -1,0 +1,74 @@
+name: supply chain
+
+# One place for everything that guards the dependency graph:
+#
+#   deny  — advisories, duplicate versions, the license policy and the allowed
+#           sources, configured in deny.toml (the gate for dependency drift:
+#           it also fails when a workspace member stops inheriting a version
+#           from [workspace.dependencies]).
+#   audit — the same lockfile as cargo-audit sees it, which includes the
+#           entries that no feature set enables.
+#
+# The schedule matters more than the triggers: advisories are published against
+# versions that are already in the committed Cargo.lock, so a weekly re-check
+# surfaces them without waiting for a dependency to change.
+on:
+  push:
+    branches: ['main', 'develop']
+  pull_request:
+    branches: ['main', 'develop']
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # deny.toml is written against this version's configuration schema; bump both
+  # together (the release binaries below are what the job uses).
+  CARGO_DENY_VERSION: 0.20.2
+
+jobs:
+  deny:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Install cargo-deny
+        run: |
+          set -euo pipefail
+          target=x86_64-unknown-linux-musl
+          curl --proto '=https' --tlsv1.2 -sSfL \
+            "https://github.com/EmbarkStudios/cargo-deny/releases/download/${CARGO_DENY_VERSION}/cargo-deny-${CARGO_DENY_VERSION}-${target}.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/cargo-deny-${CARGO_DENY_VERSION}-${target}" >> "$GITHUB_PATH"
+
+      # --locked: the committed Cargo.lock must already match the manifests, so
+      # a version change that forgot to refresh the lock fails here rather than
+      # resolving something different on every CI run.
+      - name: Deny advisories, duplicate versions, licenses and sources
+        run: cargo deny --locked check
+
+  audit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      # cargo-audit reads Cargo.lock directly, so unlike the graph-level `deny`
+      # job it also sees entries no feature set enables — `rsa` is one of those
+      # (neither `sqlx/postgres` nor `sqlx/sqlite` reaches it) and it is never
+      # used to decrypt, only to verify certificates.
+      - name: Audit Check
+        run: cargo audit --ignore RUSTSEC-2023-0071

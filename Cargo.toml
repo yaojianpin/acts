@@ -18,25 +18,57 @@ license = "Apache-2.0"
 repository = "https://github.com/yaojianpin/acts.git"
 version = "0.24.0"
 
+# Every version below is the single source of truth for the workspace: a member
+# referencing one of these crates MUST use `workspace = true` and may only add
+# the features it needs. Pinning a version in a member manifest reintroduces
+# multi-version drift (two `redis`/`async-nats` clients whose TLS and retry
+# semantics can differ, two copies of a fixed advisory, doubled build cost);
+# `cargo deny check` in CI fails on a new duplicate version.
 [workspace.dependencies]
+# async runtime
 tokio = { version = "1.52", features = ["full"] }
+tokio-stream = { version = "0.1.12" }
 async-trait = { version = "0.1.88" }
-cron = "0.12"
+futures = { version = "0.3.31" }
+futures-util = { version = "0.3.31" }
+async-stream = { version = "0.3.6" }
+# serialization / configuration
 serde = "1.0.219"
 serde_json = "1.0.140"
+serde_yaml = "0.9"
+toml = "0.8.22"
+# logging
+tracing = "0.1"
+tracing-subscriber = "0.3"
+# errors
+anyhow = "1.0.100"
+thiserror = "2"
+# utilities
+chrono = "0.4"
+regex = "1.11"
+globset = { version = "0.4", default-features = false }
+nanoid = "0.4"
+parking_lot = "0.12"
+cron = "0.12"
 strum = { version = "0.27", features = ["derive"] }
+# grpc / web
 tonic = { version = "0.12", default-features = false, features = [
     "prost",
     "channel",
     "codegen",
 ] }
+prost = "0.13"
 prost-types = "0.13"
 axum = "0.7"
 validator = { version = "0.20.0", features = ["derive"] }
-futures-util = "0.3.31"
-async-stream = "0.3.6"
-anyhow = "1.0.100"
-tokio-stream = "0.1.12"
+# message brokers / stores
+async-nats = "0.50"
+redis = { version = "0.31", default-features = false, features = [
+    "aio",
+    "tokio-comp",
+] }
+# dev
+serial_test = { version = "3", features = ["async"] }
 acts = { path = "./crates/acts", version = "0.24.0" }
 acts-channel = { path = "./crates/acts-channel", version = "0.24.0" }
 acts-store = { path = "./crates/acts-store", version = "0.24.0" }

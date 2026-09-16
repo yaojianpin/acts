@@ -12,10 +12,10 @@ edition.workspace = true
 acts = { workspace = true }
 async-trait = { workspace = true }
 futures-util = { workspace = true }
-async-nats = "0.50"
+async-nats = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
-toml = "0.8"
+toml = { workspace = true }

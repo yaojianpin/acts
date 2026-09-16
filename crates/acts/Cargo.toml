@@ -14,33 +14,33 @@ version.workspace = true
 [dependencies]
 tokio = { features = ["full", "macros"], workspace = true }
 async-trait = { workspace = true }
-chrono = { version = "0.4" }
+chrono = { workspace = true }
 cron = { workspace = true }
-globset = { version = "0.4", default-features = false }
+globset = { default-features = false, workspace = true }
 inventory = "0.3.20"
 jsonschema = { version = "0.30.0", default-features = false }
-nanoid = "0.4"
-regex = "1.10"
+nanoid = { workspace = true }
+regex = { workspace = true }
 rquickjs = { version = "0.9", features = ["macro", "parallel"] }
 serde = { features = ["derive", "rc"], workspace = true }
 serde_json = { workspace = true }
 serde_repr = "0.1"
-serde_yaml = "0.9"
+serde_yaml = { workspace = true }
 strum = { features = ["derive"], workspace = true }
 sha2 = "0.10"
-thiserror = "2"
-tracing = "0.1"
-toml = "0.8.22"
+thiserror = { workspace = true }
+tracing = { workspace = true }
+toml = { workspace = true }
 dashmap = "6.1.0"
 tokio-util = "0.7.18"
-parking_lot = "0.12"
+parking_lot = { workspace = true }
 bitflags = { version = "2.13.1", features = ["serde"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["async_tokio", "async_futures"] }
-serial_test = { version = "3", features = ["async"] }
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-parking_lot = "0.12"
+serial_test = { workspace = true }
+tracing-subscriber = { features = ["env-filter"], workspace = true }
+parking_lot = { workspace = true }
 
 [[bench]]
 harness = false
