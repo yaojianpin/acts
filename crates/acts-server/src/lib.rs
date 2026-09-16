@@ -2,13 +2,15 @@
 //! integration tests so they exercise exactly what `acts-server` runs.
 
 use acts::{
-    Config, Engine, EngineBuilder, KvStore, MissingParamAction, SnapshotOptions, SnapshotPolicy,
+    Config, ConfigLog, Engine, EngineBuilder, KvStore, MissingParamAction, SnapshotOptions,
+    SnapshotPolicy,
 };
 use serde::Deserialize;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+use tracing_appender::rolling::{RollingFileAppender, Rotation};
 
 /// Which plugins the built engine registers.
 #[derive(Debug, Clone, Default)]
@@ -146,9 +148,16 @@ store_writer_queue_cap = 16384
 
 # [log] — file logging: hourly rolling acts.log files under dir, at level
 # (the ACTS_LOG env var overrides level at runtime).
+#
+# max_files bounds the disk the logs can grow to: the hourly files kept under
+# dir. The oldest is deleted at every rotation, and stale files are pruned
+# once at startup, so a restart also reclaims the space (at least 2 files are
+# kept: the current one and the previous). Default 168 (one week of hourly
+# files); 0 keeps every file.
 [log]
 dir = '@ACTS_DIR@/log'
 level = "INFO"
+max_files = 168
 
 # storage backend. The default is sled, stored under the config directory.
 # Other backends need both `type` and `database_url` in this [db] table
@@ -345,6 +354,35 @@ pub fn ensure_default_config(dir: &Path) -> std::io::Result<PathBuf> {
         )?;
     }
     Ok(path)
+}
+
+/// Prefix of the hourly rolling log files: the appender writes
+/// `<dir>/acts.log.<YYYY-MM-DD-HH>` (UTC), which is also how older files from
+/// a previous run are recognized for pruning.
+const LOG_FILE_PREFIX: &str = "acts.log";
+
+/// Open the hourly rolling log file appender described by `[log]`: creates
+/// `dir` and applies the configured retention
+/// ([`ConfigLog::retained_files`]), so a long-running server deletes its
+/// oldest hourly file at every rotation — and once at startup — instead of
+/// keeping every hour it ever logged.
+///
+/// The appender writes to the current hour's file as soon as it is built, so
+/// the file exists on disk before the first event is logged.
+pub fn log_file_appender(log: &ConfigLog) -> std::io::Result<RollingFileAppender> {
+    std::fs::create_dir_all(&log.dir).map_err(|err| {
+        std::io::Error::new(
+            err.kind(),
+            format!("failed to create log dir {}: {err}", log.dir),
+        )
+    })?;
+    let mut builder = RollingFileAppender::builder()
+        .rotation(Rotation::HOURLY)
+        .filename_prefix(LOG_FILE_PREFIX);
+    if let Some(max_files) = log.retained_files() {
+        builder = builder.max_log_files(max_files);
+    }
+    builder.build(&log.dir).map_err(std::io::Error::other)
 }
 
 /// Open the KvStore backend selected by the `[db]` config.
@@ -800,6 +838,85 @@ ttl = "5m"
         assert_eq!(store.one("k").await.unwrap(), Some(b"v".to_vec()));
 
         store.delete("k").await.unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Scratch log dir, wiped so each case starts from a known state. The dir
+    /// itself is created by [`log_file_appender`].
+    fn log_test_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("acts-log-{}-{name}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        dir
+    }
+
+    fn log_files(dir: &Path) -> Vec<String> {
+        let mut names = std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .filter_map(|entry| {
+                        let entry = entry.unwrap();
+                        entry
+                            .metadata()
+                            .unwrap()
+                            .is_file()
+                            .then(|| entry.file_name().to_string_lossy().into_owned())
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    /// Write `count` stale hourly log files, as a previous run left them.
+    fn stale_log_files(dir: &Path, count: usize) {
+        std::fs::create_dir_all(dir).unwrap();
+        for hour in 1..=count {
+            std::fs::write(
+                dir.join(format!("{LOG_FILE_PREFIX}.2020-01-01-{hour:02}")),
+                b"old\n",
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn log_file_appender_prunes_stale_hourly_files() {
+        // 10 hourly files from earlier runs, retention of 3: opening the
+        // appender prunes down to the limit (the appender keeps max_files - 1
+        // existing files and then opens the current hour's file), so a server
+        // that restarts after hours of logging does not keep growing its log
+        // directory.
+        let dir = log_test_dir("retain");
+        stale_log_files(&dir, 10);
+
+        let appender = log_file_appender(&ConfigLog {
+            dir: dir.to_string_lossy().into_owned(),
+            level: "INFO".to_string(),
+            max_files: Some(3),
+        })
+        .unwrap();
+
+        let files = log_files(&dir);
+        assert_eq!(files.len(), 3, "kept {files:?}");
+        drop(appender);
+
+        // max_files = 0 keeps every file
+        let dir = log_test_dir("unlimited");
+        stale_log_files(&dir, 10);
+        let appender = log_file_appender(&ConfigLog {
+            dir: dir.to_string_lossy().into_owned(),
+            level: "INFO".to_string(),
+            max_files: Some(0),
+        })
+        .unwrap();
+        assert_eq!(
+            log_files(&dir).len(),
+            11,
+            "10 stale files plus the current one"
+        );
+        drop(appender);
+
         std::fs::remove_dir_all(&dir).ok();
     }
 }

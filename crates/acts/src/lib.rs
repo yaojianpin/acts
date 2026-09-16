@@ -29,7 +29,7 @@ use std::sync::Arc;
 
 pub use acl::{ACTION_SUBSCRIBE, Acl, AclConfig, AclError, Principal, RoleConfig, ScopePolicy};
 pub use builder::EngineBuilder;
-pub use config::{Config, MissingParamAction};
+pub use config::{Config, ConfigLog, DEFAULT_LOG_MAX_FILES, MissingParamAction};
 pub use engine::Engine;
 pub use env::ActUserVar;
 pub use error::{ActError, Error};

@@ -69,7 +69,6 @@ async fn shutdown_signal() {
 
 fn init_log(#[allow(unused_variables)] config: &Config) -> Result<(), anyhow::Error> {
     use anyhow::Context;
-    use std::path::Path;
     use time::macros::format_description;
     use tracing_subscriber::EnvFilter;
     use tracing_subscriber::fmt::time::LocalTime;
@@ -77,16 +76,14 @@ fn init_log(#[allow(unused_variables)] config: &Config) -> Result<(), anyhow::Er
 
     const ACTS_ENV_LOG: &str = "ACTS_LOG";
 
-    let log_dir = config.log().dir;
-    std::fs::create_dir_all(&log_dir)
-        .with_context(|| format!("failed to create log dir {log_dir}"))?;
-    let log_dir = Path::new(&log_dir);
-    let file_appender = tracing_appender::rolling::hourly(log_dir, "acts.log");
+    let log = config.log();
+    let file_appender = acts_server::log_file_appender(&log)
+        .with_context(|| format!("failed to open the log file under {}", log.dir))?;
     let timer = LocalTime::new(format_description!(
         "[year]-[month]-[day] [hour]:[minute]:[second].[subsecond digits:9]"
     ));
     unsafe {
-        std::env::set_var(ACTS_ENV_LOG, &config.log().level);
+        std::env::set_var(ACTS_ENV_LOG, &log.level);
     }
 
     tracing_subscriber::fmt()

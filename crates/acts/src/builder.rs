@@ -90,6 +90,7 @@ impl EngineBuilder {
         self.config_mut().data.log = Some(ConfigLog {
             dir: dir.to_string(),
             level: level.to_string(),
+            max_files: None,
         });
         self
     }

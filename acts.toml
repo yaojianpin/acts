@@ -47,9 +47,16 @@ store_writer_queue_cap = 16384
 
 # [log] — file logging: hourly rolling acts.log files under dir, at level
 # (the ACTS_LOG env var overrides level at runtime).
+#
+# max_files bounds the disk the logs can grow to: the hourly files kept under
+# dir. The oldest is deleted at every rotation, and stale files are pruned
+# once at startup, so a restart also reclaims the space (at least 2 files are
+# kept: the current one and the previous). Default 168 (one week of hourly
+# files); 0 keeps every file.
 [log]
 dir = "data"
 level = "INFO"
+max_files = 168
 
 # storage backend. The default is sled; other backends need both `type` and
 # `database_url` (the ACTS_DATABASE_URL env var overrides database_url):

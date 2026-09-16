@@ -17,7 +17,7 @@ serde_json = { workspace = true }
 time = { version = "0.3.36", features = ["macros"] }
 tokio = { version = "1.26.0", features = ["full"] }
 tracing = "0.1.37"
-tracing-appender = "0.2.2"
+tracing-appender = "0.2.5"
 tracing-subscriber = { version = "0.3.16", features = [
     "local-time",
     "env-filter",

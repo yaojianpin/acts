@@ -109,6 +109,22 @@ conditional write, or a lock held across the read. A single `batch` is not
 that: it is atomic on its own, while a read followed by another process's batch
 is not.
 
+### Logging (`[log]`)
+
+The server logs to stdout and to hourly rolling files under `[log].dir`
+(`acts.log.<YYYY-MM-DD-HH>`, UTC). `[log].max_files` bounds how many of those
+files are kept: the oldest goes at every rotation, and stale files are pruned
+once at startup, so a restart also reclaims the space. It defaults to 168
+(one week of hourly files); `0` keeps every file, and at least 2 files are
+always kept (the current one and the previous).
+
+```toml
+[log]
+dir = "/var/log/acts"
+level = "INFO"     # ACTS_LOG overrides the level at runtime
+max_files = 168
+```
+
 ### Transports
 
 ```toml

@@ -8,10 +8,35 @@ pub struct Config {
     pub table: Table,
 }
 
+/// Hourly log files kept on disk when `[log].max_files` does not say
+/// otherwise: one week of hourly files.
+pub const DEFAULT_LOG_MAX_FILES: usize = 168;
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ConfigLog {
     pub dir: String,
     pub level: String,
+    /// Hourly log files kept under `dir`, oldest removed first. Omitted uses
+    /// [`DEFAULT_LOG_MAX_FILES`], `0` keeps every file. Read through
+    /// [`ConfigLog::retained_files`], which applies the floor.
+    #[serde(default)]
+    pub max_files: Option<usize>,
+}
+
+impl ConfigLog {
+    /// Number of hourly log files to keep under `dir`, or `None` to keep every
+    /// file: `max_files` when configured (`0` disables the limit), else
+    /// [`DEFAULT_LOG_MAX_FILES`]. At least 2 files are kept, because the
+    /// appender prunes down to `max_files - 1` of the existing files before it
+    /// writes the next one — `max_files = 1` would remove the file the server
+    /// is still writing to.
+    pub fn retained_files(&self) -> Option<usize> {
+        match self.max_files {
+            Some(0) => None,
+            Some(files) => Some(files.max(2)),
+            None => Some(DEFAULT_LOG_MAX_FILES),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -197,6 +222,7 @@ impl Config {
         self.data.log.clone().unwrap_or(ConfigLog {
             dir: "log".to_string(),
             level: "INFO".to_string(),
+            max_files: None,
         })
     }
 }
@@ -332,6 +358,48 @@ dir = "other"
 
         let bad = write(&dir, "bad.toml", "this is not [ valid toml");
         assert!(config.overlay_file(&bad).is_err());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn log_file_retention_defaults_and_parses_max_files() {
+        let dir = scratch("log-retention");
+
+        // a [log] section written before max_files existed still parses, and
+        // falls back to a bounded file count instead of keeping every hourly
+        // file forever
+        let base = write(
+            &dir,
+            "base.toml",
+            "[log]\ndir = \"data\"\nlevel = \"INFO\"\n",
+        );
+        let config = Config::create(&base).unwrap();
+        assert_eq!(config.log().max_files, None);
+        assert_eq!(config.log().retained_files(), Some(DEFAULT_LOG_MAX_FILES));
+
+        // an explicit count is honored, 0 disables retention, and fewer than 2
+        // files cannot be honored (the appender prunes the existing files down
+        // to max_files - 1 before writing the next one)
+        for (line, want) in [
+            ("max_files = 48", Some(48)),
+            ("max_files = 0", None),
+            ("max_files = 1", Some(2)),
+        ] {
+            let path = write(
+                &dir,
+                "limit.toml",
+                &format!("[log]\ndir = \"data\"\nlevel = \"INFO\"\n{line}\n"),
+            );
+            let config = Config::create(&path).unwrap();
+            assert_eq!(config.log().retained_files(), want, "{line}");
+        }
+
+        // the shortcut used by embedders keeps the default count as well
+        assert_eq!(
+            Config::default().log().retained_files(),
+            Some(DEFAULT_LOG_MAX_FILES)
+        );
 
         std::fs::remove_dir_all(&dir).ok();
     }
