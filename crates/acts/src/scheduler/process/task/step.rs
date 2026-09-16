@@ -82,7 +82,7 @@ impl ActTask for Step {
         // gain a second task, once per tick.
         if let Some(owner) = task.timeout_owner() {
             let state = task.state();
-            if !state.is_skip() && !state.is_success() {
+            if !state.is_skip() && !state.is_biz_success() {
                 return Ok(NextAction::Parent);
             }
             return if dispatch_next_timeout_branch(ctx, &owner)? {
@@ -104,7 +104,7 @@ impl ActTask for Step {
             return Ok(NextAction::Parent);
         }
 
-        if task.state().is_success() {
+        if task.state().is_biz_success() {
             if self.r#while.is_some() {
                 // loop back to self; the next iteration re-evaluates the
                 // while condition in init and exits (skips) when it fails

@@ -245,7 +245,7 @@ async fn a_saturated_lane_overflows_to_the_durable_outbox() {
     );
     for proc in procs {
         assert!(
-            proc.state().is_success(),
+            proc.state().is_biz_success(),
             "process {} ended in {:?}",
             proc.id(),
             proc.state()

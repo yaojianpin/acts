@@ -58,7 +58,7 @@ impl ActTask for Act {
 
         if task.state().is_interrupted() {
             return Ok(NextAction::Continue);
-        } else if task.state().is_success() || task.state().is_skip() {
+        } else if task.state().is_biz_success() || task.state().is_skip() {
             // Schedule the next if the step.next is not empty
             if task.move_next(ctx)? {
                 return Ok(NextAction::Continue);

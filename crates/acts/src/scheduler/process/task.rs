@@ -693,7 +693,7 @@ impl Task {
                         "cannot find parent step task by tid '{}'",
                         ctx.task().id,
                     )))?;
-                    if !task.state().is_success() {
+                    if !task.state().is_biz_success() {
                         return Err(ActError::Action(format!(
                             "task('{}') is not allowed to cancel",
                             task.id
@@ -867,7 +867,7 @@ impl Task {
                     // fix the branch.default state
                     if siblings.iter().any(|iter| {
                         iter.state().is_error()
-                            || iter.state().is_success()
+                            || iter.state().is_biz_success()
                             || iter.state().is_abort()
                     }) {
                         self.set_state(TaskState::Skipped);

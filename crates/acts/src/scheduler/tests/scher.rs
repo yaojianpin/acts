@@ -127,5 +127,5 @@ async fn sch_scher_do_action() {
     engine.runtime().launch(&proc).await.unwrap();
     tx.recv().await;
 
-    assert!(proc.state().is_success());
+    assert!(proc.state().is_biz_success());
 }

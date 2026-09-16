@@ -47,7 +47,7 @@ async fn sch_action_duplicate_complete() {
     assert!(rt.do_action(&action).await.is_err());
 
     tx.recv().await;
-    assert!(proc.state().is_success());
+    assert!(proc.state().is_biz_success());
 }
 
 /// A `Pending` outbox record (crash after enqueue, before `next` ran) is
@@ -94,7 +94,7 @@ async fn sch_action_recover_pending() {
     rt.recover_actions().await.unwrap();
 
     tx.recv().await;
-    assert!(proc.state().is_success());
+    assert!(proc.state().is_biz_success());
 }
 
 /// A `next` that already completed is a no-op on recovery: the durable
@@ -406,7 +406,7 @@ async fn sch_action_next_op_pending_until_children_complete() {
     .await
     .unwrap();
     tx.recv().await;
-    assert!(proc.state().is_success());
+    assert!(proc.state().is_biz_success());
 
     // both the act's and the step's records are eventually closed
     for _ in 0..100 {

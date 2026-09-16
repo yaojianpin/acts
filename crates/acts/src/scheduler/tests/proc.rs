@@ -215,7 +215,10 @@ async fn sch_step_while_loop_self_next() {
     let add_tasks = proc.task_by_nid("add");
     assert_eq!(add_tasks.len(), 4);
     assert_eq!(
-        add_tasks.iter().filter(|t| t.state().is_success()).count(),
+        add_tasks
+            .iter()
+            .filter(|t| t.state().is_biz_success())
+            .count(),
         3
     );
     assert!(add_tasks.last().unwrap().state().is_skip());
@@ -256,7 +259,10 @@ async fn sch_step_while_attr_loops() {
     let add_tasks = proc.task_by_nid("add");
     assert_eq!(add_tasks.len(), 4);
     assert_eq!(
-        add_tasks.iter().filter(|t| t.state().is_success()).count(),
+        add_tasks
+            .iter()
+            .filter(|t| t.state().is_biz_success())
+            .count(),
         3
     );
     assert!(add_tasks.last().unwrap().state().is_skip());

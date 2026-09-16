@@ -56,6 +56,8 @@ impl TaskState {
         )
     }
 
+    /// task is completed
+    /// Note: This is different from `is_biz_success`, which only includes business success states.
     pub fn is_completed(&self) -> bool {
         matches!(
             self,
@@ -94,7 +96,12 @@ impl TaskState {
         *self == TaskState::Pending
     }
 
-    pub fn is_success(&self) -> bool {
+    /// task is completed successfully for business purposes, including completed, submitted, backed, removed, cancelled
+    ///
+    /// Note: This is different from `is_completed`, which includes error, skipped, aborted, etc.
+    /// the `sucess` here means the task is completed in business action successfully, and the task can be considered as done.
+    /// business action means cancel, back, submit, remove, complete, etc. are all business actions.
+    pub fn is_biz_success(&self) -> bool {
         *self == TaskState::Completed
             || *self == TaskState::Submitted
             || *self == TaskState::Backed
