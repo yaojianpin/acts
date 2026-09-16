@@ -39,10 +39,39 @@ steps:
         $data | split row ',' | each { |it| $it | str trim  } | to json
 ```
 
-The shell runs asynchronously and does not block the workflow executor.
-Output capture is unbounded unless `max-output-bytes` is set. That option
-limits the number of bytes captured from each of stdout and stderr and fails
-the act when the limit is exceeded.
+The shell runs asynchronously and does not block the workflow executor, and
+one act is bounded on both axes — time and output — by the deployment's
+`[shell]` section:
+
+```toml
+[shell]
+# deadline of one act; when it is reached the shell is killed, reaped, and the
+# act fails. 1..=3600000, defaults to 300000 (5 minutes).
+timeout-ms = 300000
+# bytes captured from each of stdout and stderr; the act fails and the shell is
+# killed when a stream exceeds it. 1..=67108864, defaults to 1048576 (1 MiB).
+max-output-bytes = 1048576
+```
+
+Both bounds are always in force — no value disables them, a value outside its
+range fails startup, and an act has no parameter that widens them. They exist
+because a script that never exits, or that floods a stream, otherwise holds a
+scheduler lane forever: all of the engine's concurrency is a fixed number of
+lanes, so one unbounded act is one lane that never comes back.
+
+Neither bound waits for the other to finish. A stream that hits the capture
+limit ends the act immediately and the child is killed — a script that keeps
+writing is not waited for — and a shell that closed its output but kept running
+is killed at the same deadline. In every case the child is killed and waited
+for, so the act leaves no zombie behind it.
+
+Cancellation reaches the child too: when the engine shuts down, or an action
+(`abort`, `cancel`, `skip`, `remove`, `next`, `error`) overrides the task while
+the act runs, the shell is killed and the act reports no failure of its own —
+the action owns the task's state, and a shutdown leaves the task for the next
+start to resume.
+
+End-to-end tests for all of this live in `tests/bounds.rs`.
 
 ## Script policy
 

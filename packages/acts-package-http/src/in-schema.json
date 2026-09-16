@@ -58,7 +58,8 @@
             "type": "integer",
             "title": "Timeout (ms)",
             "minimum": 1,
-            "description": "Total request timeout in milliseconds. Leave empty to disable the timeout."
+            "maximum": 3600000,
+            "description": "Total request timeout for this act, in milliseconds. An act may only tighten the server's [http].timeout-ms, never widen it; leave empty to use the configured bound."
         }
     },
     "dependencies": {

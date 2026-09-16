@@ -840,6 +840,16 @@ impl Runtime {
 
     async fn run_exec_job(task: Arc<Task>, ctx: Context) {
         if let Err(err) = task.exec(&ctx).await {
+            // An action applied while the act ran (`abort`, `cancel`, `skip`,
+            // `remove`, `next`, an external `error`) already decided this
+            // task's outcome. An act that noticed — its cancellation token
+            // fires — and returned an error reports the consequence of that
+            // decision, not a new one, and must not overwrite it: the state a
+            // workflow asked for has to stick.
+            if task.state().is_completed() {
+                debug!(error = %err, "task was overridden while it ran; its act's error is ignored");
+                return;
+            }
             error!(error = %err, "task.exec failed");
             task.set_err(&err.clone().into());
             ctx.set_task(&task);

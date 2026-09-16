@@ -1,19 +1,47 @@
 use acts::{
-    ActError, ActPackage, ActPackageCatalog, ActPackageDefinition, ActRunAs, Result, Vars,
-    include_json,
+    ActError, ActPackage, ActPackageCatalog, ActPackageDefinition, ActRunAs, CancellationToken,
+    Context, Result, Vars, include_json,
 };
 use globset::{GlobBuilder, GlobMatcher};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
 use std::path::Path;
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
+use std::time::Duration;
 use strum::AsRefStr;
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
-    process::Command,
+    process::{Child, Command},
+    time::Instant,
 };
 
 const DATA_KEY: &str = "data";
+
+/// Deadline of a shell act when `[shell].timeout-ms` is unset. A shell act
+/// without a deadline holds its scheduler lane for as long as the script runs:
+/// a script that waits forever takes an unbounded share of the engine's job
+/// capacity with it.
+pub const DEFAULT_TIMEOUT_MS: u64 = 5 * 60 * 1000;
+
+/// Largest `[shell].timeout-ms` accepted: the platform's ceiling on how long
+/// one act may hold a lane. A longer wait belongs in a workflow-level timeout
+/// or a message act, not in a blocking shell act.
+pub const MAX_TIMEOUT_MS: u64 = 60 * 60 * 1000;
+
+/// Bytes captured from each stream (stdout and stderr separately) when
+/// `[shell].max-output-bytes` is unset.
+pub const DEFAULT_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
+
+/// Largest `[shell].max-output-bytes` accepted. The capture is held in memory
+/// and becomes the act's output vars, so it is bounded well below what the
+/// machine could hold.
+pub const MAX_OUTPUT_BYTES: usize = 64 * 1024 * 1024;
+
+/// How long a killed child is given to be reaped before the act gives up on
+/// it. The wait is what removes the process-table entry; a wait that outlives
+/// the grace would hold the act's lane for it, which is the failure this
+/// package is bounding in the first place.
+const REAP_GRACE_SECS: u64 = 5;
 
 #[derive(Debug, Clone, Deserialize, Serialize, AsRefStr)]
 pub enum Shell {
@@ -47,18 +75,19 @@ pub struct ShellPackageParams {
     script: String,
     #[serde(rename(deserialize = "content-type"))]
     content_type: Option<ContentType>,
-    /// Optional maximum number of bytes for each captured output stream. This
-    /// is opt-in to avoid changing the behavior of existing workflows.
-    #[serde(default, rename(deserialize = "max-output-bytes"))]
-    max_output_bytes: Option<usize>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ShellPackage {
     policy: ScriptPolicy,
+    /// Deadline of one act, from `[shell].timeout-ms`.
+    timeout_ms: u64,
+    /// Bytes captured per stream, from `[shell].max-output-bytes`.
+    max_output_bytes: usize,
 }
 
-/// Package-level `[shell]` configuration: what a workflow's script may be.
+/// Package-level `[shell]` configuration: what a workflow's script may be, and
+/// how long it may run.
 ///
 /// ```toml
 /// [shell]
@@ -66,6 +95,11 @@ pub struct ShellPackage {
 /// allow = ["ls", "ls *", "cat *.txt", "nu *"]
 /// # always refused, allow or not
 /// deny = ["*rm -rf*", "*sudo *", "*> /etc/*"]
+/// # deadline of one shell act; defaults to 300000 (1..=3600000)
+/// timeout-ms = 300000
+/// # bytes captured per stream before the act fails; default 1048576
+/// # (1..=67108864)
+/// max-output-bytes = 1048576
 /// ```
 ///
 /// Patterns are globs over the **whole script text** — `*` matches any run of
@@ -82,6 +116,11 @@ pub struct ShellPackage {
 /// startup error, never a silent allow: a policy that cannot be enforced must
 /// not run.
 ///
+/// `timeout-ms` and `max-output-bytes` bound one act's resources. They are the
+/// deployment's decision and always in force — no value disables them, a value
+/// outside the range is a startup error rather than a silent clamp, and an act
+/// has no param that widens them.
+///
 /// **This is a policy, not a sandbox.** A glob over script text cannot see
 /// what the script will do — `a=rm; $a -rf /` names no forbidden word, and a
 /// script can do anything the server's own account may do that
@@ -90,12 +129,19 @@ pub struct ShellPackage {
 /// below them; a hostile workflow still needs an OS boundary (a container or a
 /// namespace around the server).
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "kebab-case")]
 pub struct ShellConfig {
     /// Script globs that may run. Empty means "anything not denied".
     pub allow: Vec<String>,
     /// Script globs that never run; wins over [`ShellConfig::allow`].
     pub deny: Vec<String>,
+    /// Deadline of one shell act in milliseconds. `None` uses
+    /// [`DEFAULT_TIMEOUT_MS`]; the accepted range is `1..=MAX_TIMEOUT_MS`.
+    pub timeout_ms: Option<u64>,
+    /// Bytes captured from each of stdout and stderr before the act fails.
+    /// `None` uses [`DEFAULT_MAX_OUTPUT_BYTES`]; the accepted range is
+    /// `1..=MAX_OUTPUT_BYTES`.
+    pub max_output_bytes: Option<usize>,
 }
 
 /// The compiled [`ShellConfig`]: allow/deny globs, deny first.
@@ -156,7 +202,7 @@ impl ActPackage for ShellPackage {
             doc: "",
             schema: include_json!("./schema.json"),
             options: Some(json!({
-                "ui:order": ["shell", "script", "content-type", "max-output-bytes"],
+                "ui:order": ["shell", "script", "content-type"],
                 "script": {
                     "ui:widget": "textarea",
                 },
@@ -178,11 +224,7 @@ impl ActPackage for ShellPackage {
         Self::from_config(&config)
     }
 
-    async fn execute(
-        &self,
-        ctx: &acts::Context,
-        params: &serde_json::Value,
-    ) -> Result<Option<Vars>> {
+    async fn execute(&self, ctx: &Context, params: &serde_json::Value) -> Result<Option<Vars>> {
         let mut ret = Vars::new();
 
         let params = serde_json::from_value::<ShellPackageParams>(params.clone()).map_err(|e| {
@@ -192,6 +234,12 @@ impl ActPackage for ShellPackage {
                 e
             ))
         })?;
+
+        // Both bounds are the deployment's `[shell]` section, resolved and
+        // validated at load: a workflow cannot widen what the deployment
+        // bounded, and there is no per-act value that leaves an act unbounded.
+        let timeout_ms = self.timeout_ms;
+        let max_output_bytes = self.max_output_bytes;
 
         // The `[shell]` allow/deny lists, checked before anything is spawned:
         // a script the deployment did not admit never reaches the shell.
@@ -217,7 +265,11 @@ impl ActPackage for ShellPackage {
             .arg("-c")
             .arg(&params.script)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
+            .stderr(Stdio::piped())
+            // Last-resort bound: if the act's future is dropped mid-flight
+            // (runtime teardown), tokio kills the child and reaps it through
+            // its orphan queue instead of leaving the script running.
+            .kill_on_drop(true);
         if let Some(dir) = &workdir {
             // The working directory confines relative paths; the home and temp
             // variables keep the tools that default to them inside too, and
@@ -232,26 +284,22 @@ impl ActPackage for ShellPackage {
                 .env("TMP", dir)
                 .env(WORKDIR_ENV, dir);
         }
-        let mut child = command
+
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms);
+        let cancel = ctx.cancellation_token();
+        let child = command
             .spawn()
             .map_err(|err| ActError::Package(format!("{err}")))?;
-
-        let mut stdout = child
-            .stdout
-            .take()
-            .ok_or_else(|| ActError::Package("failed to capture shell stdout".to_string()))?;
-        let mut stderr = child
-            .stderr
-            .take()
-            .ok_or_else(|| ActError::Package("failed to capture shell stderr".to_string()))?;
-        let (stdout_data, stderr_data, status) = tokio::join!(
-            read_captured(&mut stdout, params.max_output_bytes),
-            read_captured(&mut stderr, params.max_output_bytes),
-            child.wait(),
-        );
-        let stdout = stdout_data?;
-        let stderr = stderr_data?;
-        let status = status.map_err(|err| ActError::Package(format!("{err}")))?;
+        // `None` when the act was cancelled: it gave up its child and reports
+        // no outcome of its own (see `capture`).
+        let Some(Captured {
+            stdout,
+            stderr,
+            status,
+        }) = capture(child, max_output_bytes, timeout_ms, deadline, &cancel).await?
+        else {
+            return Ok(None);
+        };
 
         if !status.success() {
             let err = String::from_utf8(stderr)?;
@@ -279,36 +327,231 @@ impl ShellPackage {
     pub fn from_config(config: &ShellConfig) -> Result<Self> {
         Ok(Self {
             policy: ScriptPolicy::new(config)?,
+            timeout_ms: bounded(
+                config.timeout_ms,
+                DEFAULT_TIMEOUT_MS,
+                MAX_TIMEOUT_MS,
+                "timeout-ms",
+            )
+            .map_err(ActError::Config)?,
+            max_output_bytes: bounded(
+                config.max_output_bytes,
+                DEFAULT_MAX_OUTPUT_BYTES,
+                MAX_OUTPUT_BYTES,
+                "max-output-bytes",
+            )
+            .map_err(ActError::Config)?,
         })
     }
 }
 
-async fn read_captured<R>(reader: &mut R, max_output_bytes: Option<usize>) -> Result<Vec<u8>>
+/// Resolve one bound: the act's (or the config's) value, or `default` when it
+/// is absent. Zero and anything above the platform's `max` are refused, never
+/// clamped — a bound that is silently not the one that was asked for is worse
+/// than a loud error, and zero is exactly the unbounded value this package no
+/// longer runs.
+fn bounded<T>(value: Option<T>, default: T, max: T, field: &str) -> std::result::Result<T, String>
+where
+    T: Copy + Default + PartialOrd + std::fmt::Display,
+{
+    let value = value.unwrap_or(default);
+    if value <= T::default() || value > max {
+        return Err(format!(
+            "shell {field} must be between 1 and {max} (got {value})"
+        ));
+    }
+    Ok(value)
+}
+
+/// One finished shell act: both captured streams and the exit status.
+struct Captured {
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+    status: ExitStatus,
+}
+
+/// Drive one shell act to a bounded end.
+///
+/// Every wait in here is bounded by the same absolute `deadline` and by the
+/// act's cancellation, and none of them waits on anything else first:
+///
+/// - both pipes are drained concurrently — a script that fills the pipe of the
+///   stream nobody reads blocks on write and never exits;
+/// - a stream that hits the capture limit ends the act, and the child is
+///   terminated instead of being waited for (a script that keeps writing would
+///   otherwise never be waited up on);
+/// - the wait for the child is bounded too, because closing both streams is
+///   not the same as exiting.
+///
+/// On every path that does not end in a normal exit the child is killed and
+/// reaped before this returns, so the act never leaves a process behind it and
+/// never holds its scheduler lane waiting for one. `Ok(None)` is the cancelled
+/// case: the child is gone and the act reports no outcome of its own.
+async fn capture(
+    mut child: Child,
+    max_output_bytes: usize,
+    timeout_ms: u64,
+    deadline: Instant,
+    cancel: &CancellationToken,
+) -> Result<Option<Captured>> {
+    let mut stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| ActError::Package("failed to capture shell stdout".to_string()))?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| ActError::Package("failed to capture shell stderr".to_string()))?;
+
+    // Both streams are drained at once, and the first failing one ends the
+    // act: the other may stay silent until the deadline (a stream nobody
+    // reads blocks the child on write, so it does not end by itself), and
+    // waiting for it first is exactly the hang this bounds.
+    let mut stdout_read = Box::pin(read_captured(
+        &mut stdout,
+        max_output_bytes,
+        timeout_ms,
+        deadline,
+        cancel,
+    ));
+    let mut stderr_read = Box::pin(read_captured(
+        &mut stderr,
+        max_output_bytes,
+        timeout_ms,
+        deadline,
+        cancel,
+    ));
+    let mut stdout_data: Option<Vec<u8>> = None;
+    let mut stderr_data: Option<Vec<u8>> = None;
+    while stdout_data.is_none() || stderr_data.is_none() {
+        // the side travels with the outcome: the arms are otherwise identical
+        let (stdout_side, outcome) = tokio::select! {
+            result = &mut stdout_read, if stdout_data.is_none() => (true, result),
+            result = &mut stderr_read, if stderr_data.is_none() => (false, result),
+        };
+        match outcome {
+            Bounded::Done(data) => {
+                if stdout_side {
+                    stdout_data = Some(data);
+                } else {
+                    stderr_data = Some(data);
+                }
+            }
+            Bounded::Cancelled => {
+                terminate(&mut child).await;
+                return Ok(None);
+            }
+            Bounded::Failed(err) => {
+                terminate(&mut child).await;
+                return Err(err);
+            }
+        }
+    }
+    let (stdout, stderr) = (
+        stdout_data.expect("both streams are read to an outcome"),
+        stderr_data.expect("both streams are read to an outcome"),
+    );
+
+    // Both streams reached EOF. The child normally exits with them; one that
+    // closed its output and kept running does not, so its wait is bounded by
+    // the same deadline.
+    let exit = tokio::select! {
+        status = child.wait() => Exit::Status(status),
+        _ = tokio::time::sleep_until(deadline) => Exit::Deadline,
+        _ = cancel.cancelled() => Exit::Cancelled,
+    };
+
+    match exit {
+        Exit::Status(status) => Ok(Some(Captured {
+            stdout,
+            stderr,
+            status: status.map_err(|err| ActError::Package(format!("{err}")))?,
+        })),
+        Exit::Deadline => {
+            terminate(&mut child).await;
+            Err(timed_out(timeout_ms))
+        }
+        Exit::Cancelled => {
+            terminate(&mut child).await;
+            Ok(None)
+        }
+    }
+}
+
+/// Why the wait for the child ended.
+enum Exit {
+    Status(std::io::Result<ExitStatus>),
+    Deadline,
+    Cancelled,
+}
+
+/// Kill the child and wait for it.
+///
+/// The wait is what removes the process-table entry, so a confirmed kill
+/// leaves no zombie; the grace bounds that wait so a kill the OS refuses (or a
+/// child that survives one) cannot hold the act open. Like every other bound
+/// here, giving up is the point: the act fails, the lane is released.
+async fn terminate(child: &mut Child) {
+    let _ = child.start_kill();
+    let _ = tokio::time::timeout(Duration::from_secs(REAP_GRACE_SECS), child.wait()).await;
+}
+
+/// The act's deadline ran out.
+fn timed_out(timeout_ms: u64) -> ActError {
+    ActError::Package(format!(
+        "shell command timed out after {timeout_ms} ms (timeout-ms)"
+    ))
+}
+
+/// How one bounded wait of a shell act ended.
+///
+/// Cancellation is a third outcome rather than an error: the act did not fail,
+/// it was stopped — the action that overrode the task owns the task's state,
+/// and during a shutdown the task stays running so the next start resumes it.
+/// Turning it into an error here would overwrite both.
+enum Bounded<T> {
+    Done(T),
+    Failed(ActError),
+    Cancelled,
+}
+
+async fn read_captured<R>(
+    reader: &mut R,
+    max_output_bytes: usize,
+    timeout_ms: u64,
+    deadline: Instant,
+    cancel: &CancellationToken,
+) -> Bounded<Vec<u8>>
 where
     R: AsyncRead + Unpin,
 {
     let mut data = Vec::new();
-    let mut captured_size = 0_usize;
     let mut buf = [0_u8; 8 * 1024];
 
     loop {
-        let size = reader.read(&mut buf).await?;
+        let size = tokio::select! {
+            size = reader.read(&mut buf) => match size {
+                Ok(size) => size,
+                Err(err) => return Bounded::Failed(ActError::Package(format!("{err}"))),
+            },
+            _ = tokio::time::sleep_until(deadline) => {
+                return Bounded::Failed(timed_out(timeout_ms));
+            }
+            _ = cancel.cancelled() => return Bounded::Cancelled,
+        };
         if size == 0 {
             break;
         }
 
-        if let Some(max_output_bytes) = max_output_bytes {
-            captured_size += size;
-            if captured_size > max_output_bytes {
-                return Err(ActError::Package(format!(
-                    "shell output stream exceeded max-output-bytes limit ({max_output_bytes})"
-                )));
-            }
+        if data.len() + size > max_output_bytes {
+            return Bounded::Failed(ActError::Package(format!(
+                "shell output stream exceeded max-output-bytes limit ({max_output_bytes})"
+            )));
         }
         data.extend_from_slice(&buf[..size]);
     }
 
-    Ok(data)
+    Bounded::Done(data)
 }
 
 /// Environment variable naming the process workdir, so a script can address
@@ -442,6 +685,7 @@ mod tests {
         ScriptPolicy::new(&ShellConfig {
             allow: allow.iter().map(|s| s.to_string()).collect(),
             deny: deny.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
         })
         .expect("compile policy")
     }
@@ -506,17 +750,23 @@ mod tests {
     fn an_invalid_pattern_is_a_config_error() {
         let err = ScriptPolicy::new(&ShellConfig {
             allow: vec!["ls [unclosed".to_string()],
-            deny: vec![],
+            ..Default::default()
         })
         .unwrap_err();
-        assert!(err.to_string().contains("invalid shell allow pattern"), "{err}");
+        assert!(
+            err.to_string().contains("invalid shell allow pattern"),
+            "{err}"
+        );
 
         let err = ScriptPolicy::new(&ShellConfig {
-            allow: vec![],
             deny: vec!["a{b".to_string()],
+            ..Default::default()
         })
         .unwrap_err();
-        assert!(err.to_string().contains("invalid shell deny pattern"), "{err}");
+        assert!(
+            err.to_string().contains("invalid shell deny pattern"),
+            "{err}"
+        );
     }
 
     /// The config lookup is the `[shell]` section, and a section with no lists
@@ -538,5 +788,70 @@ mod tests {
         // No section: nothing is restricted.
         let package = ShellPackage::new(&acts::Config::default()).unwrap();
         assert!(package.policy.allows("anything at all"));
+    }
+
+    /// A deployment that says nothing still gets bounded acts: the package's
+    /// own defaults are in force, never "no bound".
+    #[test]
+    fn a_silent_config_still_bounds_the_act() {
+        let package = ShellPackage::from_config(&ShellConfig::default()).unwrap();
+        assert_eq!(package.timeout_ms, DEFAULT_TIMEOUT_MS);
+        assert_eq!(package.max_output_bytes, DEFAULT_MAX_OUTPUT_BYTES);
+    }
+
+    /// The `[shell]` section tunes both bounds, kebab-cased like the rest of
+    /// the config.
+    #[test]
+    fn the_section_sets_both_bounds() {
+        let config = acts::Config {
+            data: Default::default(),
+            table: toml::from_str::<toml::Table>(
+                "[shell]\ntimeout-ms = 1500\nmax-output-bytes = 2048\n",
+            )
+            .unwrap(),
+        };
+        let package = ShellPackage::new(&config).unwrap();
+        assert_eq!(package.timeout_ms, 1500);
+        assert_eq!(package.max_output_bytes, 2048);
+    }
+
+    /// Zero (the unbounded value) and anything above the platform ceiling are
+    /// startup errors, not a silent clamp to something else.
+    #[test]
+    fn a_bound_outside_the_platform_range_is_a_config_error() {
+        for config in [
+            ShellConfig {
+                timeout_ms: Some(0),
+                ..Default::default()
+            },
+            ShellConfig {
+                timeout_ms: Some(MAX_TIMEOUT_MS + 1),
+                ..Default::default()
+            },
+            ShellConfig {
+                max_output_bytes: Some(0),
+                ..Default::default()
+            },
+            ShellConfig {
+                max_output_bytes: Some(MAX_OUTPUT_BYTES + 1),
+                ..Default::default()
+            },
+        ] {
+            let err = ShellPackage::from_config(&config).unwrap_err();
+            assert!(
+                matches!(err, ActError::Config(_)),
+                "expected a config error, got {err:?}"
+            );
+        }
+
+        // The inclusive ends are accepted.
+        let package = ShellPackage::from_config(&ShellConfig {
+            timeout_ms: Some(MAX_TIMEOUT_MS),
+            max_output_bytes: Some(MAX_OUTPUT_BYTES),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(package.timeout_ms, MAX_TIMEOUT_MS);
+        assert_eq!(package.max_output_bytes, MAX_OUTPUT_BYTES);
     }
 }

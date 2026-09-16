@@ -297,9 +297,11 @@ port = 10082
 # allow-private-addresses = false
 # maximum response body bytes; larger bodies fail the act
 # max-response-bytes = 67108864
-# connect timeout in ms; 0 disables it
+# connect timeout in ms; must be 1..=300000
 # connect-timeout-ms = 10000
-# whole-request timeout in ms; omitted or 0 disables it
+# whole-request timeout in ms, including reading the body; must be 1..=3600000.
+# Neither timeout can be disabled, and an act's own `timeout-ms` may only
+# tighten this value, never widen it.
 # timeout-ms = 30000
 
 # shell package — acts-package-shell script policy. Two glob lists over the
@@ -309,6 +311,13 @@ port = 10082
 # [shell]
 # allow = ["ls", "ls *", "cat *.txt", "nu *"]
 # deny = ["*rm -rf*", "*sudo *"]
+# deadline of one shell act in ms; must be 1..=3600000. The shell is killed and
+# the act fails when it is reached, so a script that waits forever cannot hold
+# a scheduler lane. Cannot be disabled.
+# timeout-ms = 300000
+# bytes captured from each of stdout and stderr before the act fails and the
+# shell is killed; must be 1..=67108864. Cannot be disabled.
+# max-output-bytes = 1048576
 
 # nats service — acts-plugin-nats. Only connected when this [nats] section
 # exists. Server actions are request/reply on "<subject>.cmd"; engine events
@@ -318,6 +327,10 @@ port = 10082
 # url = "nats://localhost:4222"
 # action/event subject prefix
 # subject = "acts"
+# deadline of one acts.app.pubsub.nats act in ms; must be 1..=3600000. A
+# subscribe that never receives a message, or a broker that never answers,
+# fails the act instead of holding its scheduler lane. Cannot be disabled.
+# timeout-ms = 30000
 # how many actions received on "<subject>.cmd" may execute at once (default 256,
 # 0 selects the default). Beyond it an action is refused to its caller instead
 # of being started: a task per message made a busy subject unbounded work — the

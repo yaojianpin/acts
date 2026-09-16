@@ -1,6 +1,6 @@
 use acts::{
-    ActError, ActPackage, ActPackageCatalog, ActPackageDefinition, ActRunAs, Result, Vars,
-    include_json,
+    ActError, ActPackage, ActPackageCatalog, ActPackageDefinition, ActRunAs, CancellationToken,
+    Context, Result, Vars, include_json,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures_util::StreamExt;
@@ -54,12 +54,31 @@ pub const DEFAULT_MAX_RESPONSE_BYTES: u64 = 64 * 1024 * 1024;
 /// Connect timeout applied when `[http].connect-timeout-ms` is not set.
 pub const DEFAULT_CONNECT_TIMEOUT_MS: u64 = 10_000;
 
+/// Largest `[http].connect-timeout-ms` accepted: the platform's ceiling on
+/// waiting for a connection.
+pub const MAX_CONNECT_TIMEOUT_MS: u64 = 5 * 60 * 1000;
+
+/// Whole-request timeout applied when neither `[http].timeout-ms` nor the
+/// act's own `timeout-ms` is set. A request without a deadline waits on the
+/// remote server for as long as it keeps the connection: a black-holed or
+/// endless response would hold the act — and its scheduler lane — with it.
+pub const DEFAULT_TIMEOUT_MS: u64 = 30_000;
+
+/// Largest `timeout-ms` accepted, from `[http]` or from an act: the platform's
+/// ceiling on how long one request may hold a lane. A longer wait belongs in a
+/// workflow-level timeout, not in a request that blocks its act.
+pub const MAX_TIMEOUT_MS: u64 = 60 * 60 * 1000;
+
 fn default_max_response_bytes() -> u64 {
     DEFAULT_MAX_RESPONSE_BYTES
 }
 
 fn default_connect_timeout_ms() -> u64 {
     DEFAULT_CONNECT_TIMEOUT_MS
+}
+
+fn default_timeout_ms() -> u64 {
+    DEFAULT_TIMEOUT_MS
 }
 
 /// Package-level `[http]` configuration.
@@ -74,11 +93,17 @@ fn default_connect_timeout_ms() -> u64 {
 /// allow-private-addresses = false
 /// # Hard cap on a response body; larger bodies fail the act.
 /// max-response-bytes = 67108864
-/// # Connect timeout; 0 disables it.
+/// # Connect timeout; defaults to 10000 (1..=300000)
 /// connect-timeout-ms = 10000
-/// # Whole-request timeout; omitted or 0 disables it.
+/// # Whole-request timeout, including reading the body; defaults to 30000
+/// # (1..=3600000)
 /// timeout-ms = 30000
 /// ```
+///
+/// Both timeouts are always in force: there is no value that disables them,
+/// and a value outside its range is a startup error rather than a silent
+/// clamp. An act's own `timeout-ms` param overrides `timeout-ms` for that act
+/// (never above [`MAX_TIMEOUT_MS`]).
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct HttpConfig {
@@ -93,13 +118,14 @@ pub struct HttpConfig {
     /// Maximum response body size in bytes; the act fails beyond it.
     #[serde(default = "default_max_response_bytes")]
     pub max_response_bytes: u64,
-    /// Connection establishment timeout in milliseconds; 0 disables it.
+    /// Connection establishment timeout in milliseconds, in
+    /// `1..=MAX_CONNECT_TIMEOUT_MS`.
     #[serde(default = "default_connect_timeout_ms")]
     pub connect_timeout_ms: u64,
-    /// Total request timeout in milliseconds, including reading the body;
-    /// `None` or 0 leaves the request unbounded.
-    #[serde(default)]
-    pub timeout_ms: Option<u64>,
+    /// Total request timeout in milliseconds, including reading the body, in
+    /// `1..=MAX_TIMEOUT_MS`.
+    #[serde(default = "default_timeout_ms")]
+    pub timeout_ms: u64,
 }
 
 impl Default for HttpConfig {
@@ -109,7 +135,7 @@ impl Default for HttpConfig {
             allow_private_addresses: false,
             max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             connect_timeout_ms: DEFAULT_CONNECT_TIMEOUT_MS,
-            timeout_ms: None,
+            timeout_ms: DEFAULT_TIMEOUT_MS,
         }
     }
 }
@@ -322,6 +348,9 @@ pub struct HttpPackage {
     client: Client,
     policy: Arc<EgressPolicy>,
     max_response_bytes: u64,
+    /// The configured whole-request timeout: the ceiling an act's own
+    /// `timeout-ms` may tighten, never widen.
+    timeout_ms: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -336,8 +365,10 @@ pub struct HttpPackageParams {
     #[serde(default)]
     pub params: Vec<Pair>,
     pub body: Option<JsonValue>,
-    /// Total request timeout in milliseconds. Overrides the client-wide
-    /// `[http].timeout-ms` default; when unset the config default applies.
+    /// Total request timeout in milliseconds for this act. Only ever a
+    /// tightening of the client-wide `[http].timeout-ms` — a value above it
+    /// (or zero, which is what leaves a request unbounded) fails the act.
+    /// Unset means the configured bound applies.
     #[serde(default, rename(deserialize = "timeout-ms"))]
     pub timeout_ms: Option<u64>,
 }
@@ -372,11 +403,7 @@ impl ActPackage for HttpPackage {
         Self::from_config(&config)
     }
 
-    async fn execute(
-        &self,
-        _ctx: &acts::Context,
-        params: &serde_json::Value,
-    ) -> Result<Option<Vars>> {
+    async fn execute(&self, ctx: &Context, params: &serde_json::Value) -> Result<Option<Vars>> {
         let params = serde_json::from_value::<HttpPackageParams>(params.clone()).map_err(|e| {
             ActError::Package(format!(
                 "invalid ActPackage({}) params: {}",
@@ -385,7 +412,7 @@ impl ActPackage for HttpPackage {
             ))
         })?;
 
-        self.request(&params).await
+        self.request(&ctx.cancellation_token(), &params).await
     }
 }
 
@@ -398,19 +425,31 @@ impl HttpPackage {
                 "http.max-response-bytes must be greater than zero".to_string(),
             ));
         }
+        // Both timeouts are always in force: zero (the unbounded value) and
+        // anything above the platform's ceiling are refused at load, never
+        // silently replaced by a bound the deployment did not ask for.
+        if !(1..=MAX_CONNECT_TIMEOUT_MS).contains(&config.connect_timeout_ms) {
+            return Err(ActError::Config(format!(
+                "http.connect-timeout-ms must be between 1 and {MAX_CONNECT_TIMEOUT_MS} \
+                 (got {})",
+                config.connect_timeout_ms
+            )));
+        }
+        if !(1..=MAX_TIMEOUT_MS).contains(&config.timeout_ms) {
+            return Err(ActError::Config(format!(
+                "http.timeout-ms must be between 1 and {MAX_TIMEOUT_MS} (got {})",
+                config.timeout_ms
+            )));
+        }
+
         let policy = Arc::new(EgressPolicy::new(config));
-        let mut builder = Client::builder()
+        let client = Client::builder()
             .dns_resolver(Arc::new(SafeResolver {
                 policy: policy.clone(),
             }))
-            .redirect(redirect_policy(policy.clone()));
-        if config.connect_timeout_ms > 0 {
-            builder = builder.connect_timeout(Duration::from_millis(config.connect_timeout_ms));
-        }
-        if let Some(timeout_ms) = config.timeout_ms.filter(|timeout| *timeout > 0) {
-            builder = builder.timeout(Duration::from_millis(timeout_ms));
-        }
-        let client = builder
+            .redirect(redirect_policy(policy.clone()))
+            .connect_timeout(Duration::from_millis(config.connect_timeout_ms))
+            .timeout(Duration::from_millis(config.timeout_ms))
             .build()
             .map_err(|err| ActError::Config(format!("failed to build http client: {err}")))?;
 
@@ -418,10 +457,15 @@ impl HttpPackage {
             client,
             policy,
             max_response_bytes: config.max_response_bytes,
+            timeout_ms: config.timeout_ms,
         })
     }
 
-    async fn request(&self, params: &HttpPackageParams) -> Result<Option<Vars>> {
+    async fn request(
+        &self,
+        cancel: &CancellationToken,
+        params: &HttpPackageParams,
+    ) -> Result<Option<Vars>> {
         let mut ret = Vars::new();
         let mut headers = HeaderMap::new();
         headers.insert(
@@ -459,10 +503,16 @@ impl HttpPackage {
             .headers(headers)
             .query(&query);
         if let Some(timeout_ms) = params.timeout_ms {
-            if timeout_ms == 0 {
-                return Err(ActError::Package(
-                    "timeout-ms must be greater than zero".to_string(),
-                ));
+            // An act may only tighten the deployment's bound: how long one
+            // request may hold a lane is the deployment's judgement, and the
+            // act's own `timeout-ms` cannot widen it — nor disable it, since
+            // the client-wide bound already applies.
+            if timeout_ms == 0 || timeout_ms > self.timeout_ms {
+                return Err(ActError::Package(format!(
+                    "timeout-ms must be between 1 and the configured \
+                     [http].timeout-ms ({}) (got {timeout_ms})",
+                    self.timeout_ms
+                )));
             }
             request = request.timeout(Duration::from_millis(timeout_ms));
         }
@@ -504,7 +554,15 @@ impl HttpPackage {
             _ => {}
         }
 
-        let res = request.send().await.map_err(map_send_err)?;
+        // The request is raced against the act's cancellation: a cancelled
+        // act must not keep its scheduler lane waiting on a remote server.
+        // Cancellation reports no outcome of its own — it is not this act's
+        // failure: the action that overrode the task owns its state, and a
+        // shutdown leaves the task for the next start to resume.
+        let res = tokio::select! {
+            res = request.send() => res.map_err(map_send_err)?,
+            _ = cancel.cancelled() => return Ok(None),
+        };
 
         let status = res.status();
         let content_type = match res.headers().get(CONTENT_TYPE) {
@@ -518,7 +576,9 @@ impl HttpPackage {
         };
         let response_type = get_content_type(content_type.as_deref().unwrap_or("application/json"));
         if !matches!(response_type, ContentType::None) {
-            let body = read_body_capped(res, self.max_response_bytes).await?;
+            let Some(body) = read_body_capped(res, self.max_response_bytes, cancel).await? else {
+                return Ok(None);
+            };
             match response_type {
                 ContentType::Text | ContentType::Html => {
                     ret.insert(
@@ -553,7 +613,21 @@ impl HttpPackage {
 }
 
 fn map_package_err(err: reqwest::Error) -> ActError {
-    ActError::Package(err.to_string())
+    ActError::Package(error_chain(&err))
+}
+
+/// The error and its source chain on one line: reqwest's `Display` prints only
+/// a generic prefix, and the reason — a timeout, a policy refusal, a truncated
+/// body — lives further down the chain.
+fn error_chain(err: &dyn std::error::Error) -> String {
+    let mut message = err.to_string();
+    let mut source = err.source();
+    while let Some(err) = source {
+        message.push_str(": ");
+        message.push_str(&err.to_string());
+        source = err.source();
+    }
+    message
 }
 
 fn get_content_type(mime_type: &str) -> ContentType {
@@ -581,7 +655,15 @@ fn get_content_type(mime_type: &str) -> ContentType {
 
 /// Read a body into memory, failing once `max_bytes` is exceeded. Streaming
 /// keeps the cap enforced for chunked responses without `Content-Length`.
-async fn read_body_capped(res: Response, max_bytes: u64) -> Result<Vec<u8>> {
+///
+/// The chunks are read under the act's cancellation as well as the request's
+/// own timeout: a server that keeps a body open cannot hold a cancelled act's
+/// lane while it waits for the next chunk.
+async fn read_body_capped(
+    res: Response,
+    max_bytes: u64,
+    cancel: &CancellationToken,
+) -> Result<Option<Vec<u8>>> {
     if let Some(length) = res.content_length()
         && length > max_bytes
     {
@@ -589,14 +671,21 @@ async fn read_body_capped(res: Response, max_bytes: u64) -> Result<Vec<u8>> {
     }
     let mut body = Vec::new();
     let mut stream = res.bytes_stream();
-    while let Some(chunk) = stream.next().await {
+    loop {
+        let chunk = tokio::select! {
+            chunk = stream.next() => chunk,
+            _ = cancel.cancelled() => return Ok(None),
+        };
+        let Some(chunk) = chunk else {
+            break;
+        };
         let chunk = chunk.map_err(map_package_err)?;
         if body.len() as u64 + chunk.len() as u64 > max_bytes {
             return Err(over_limit(max_bytes));
         }
         body.extend_from_slice(&chunk);
     }
-    Ok(body)
+    Ok(Some(body))
 }
 
 fn over_limit(max_bytes: u64) -> ActError {
@@ -638,17 +727,10 @@ fn redirect_policy(policy: Arc<EgressPolicy>) -> Policy {
     })
 }
 
-/// Include the error source chain: reqwest's `Display` prints only a generic
-/// prefix, and the policy/resolver reason lives further down the chain.
+/// A send failure is the engine's to retry or surface as an error; the chain
+/// is included like [`map_package_err`]'s, so the reason is visible.
 fn map_send_err(err: reqwest::Error) -> ActError {
-    let mut message = err.to_string();
-    let mut source = std::error::Error::source(&err);
-    while let Some(err) = source {
-        message.push_str(": ");
-        message.push_str(&err.to_string());
-        source = err.source();
-    }
-    ActError::Runtime(format!("Http error: {message}"))
+    ActError::Runtime(format!("Http error: {}", error_chain(&err)))
 }
 
 #[cfg(test)]
@@ -671,6 +753,12 @@ mod tests {
 
     fn package(config: HttpConfig) -> HttpPackage {
         HttpPackage::from_config(&config).expect("build http package")
+    }
+
+    /// A token that never fires: these tests drive the request path directly,
+    /// without an act to cancel.
+    fn never() -> CancellationToken {
+        CancellationToken::new()
     }
 
     /// Serve one HTTP/1.1 response on an ephemeral loopback port.
@@ -743,7 +831,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_loopback_ip_literal() {
         let err = package(HttpConfig::default())
-            .request(&params("http://127.0.0.1:9/".into()))
+            .request(&never(), &params("http://127.0.0.1:9/".into()))
             .await
             .unwrap_err();
         assert!(
@@ -755,7 +843,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_hostname_resolving_to_loopback() {
         let err = package(HttpConfig::default())
-            .request(&params("http://localhost:9/".into()))
+            .request(&never(), &params("http://localhost:9/".into()))
             .await
             .unwrap_err();
         let message = err.to_string();
@@ -772,7 +860,7 @@ mod tests {
             ..Default::default()
         };
         let err = package(config)
-            .request(&params("http://blocked.example/".into()))
+            .request(&never(), &params("http://blocked.example/".into()))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("not in allowed-hosts"), "{err}");
@@ -790,7 +878,7 @@ mod tests {
             ..Default::default()
         };
         let out = package(config)
-            .request(&params(format!("http://{addr}/")))
+            .request(&never(), &params(format!("http://{addr}/")))
             .await
             .unwrap()
             .unwrap();
@@ -810,7 +898,7 @@ mod tests {
             ..Default::default()
         };
         let err = package(config)
-            .request(&params(format!("http://{addr}/")))
+            .request(&never(), &params(format!("http://{addr}/")))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("max-response-bytes"), "{err}");
@@ -830,7 +918,7 @@ mod tests {
             ..Default::default()
         };
         let err = package(config)
-            .request(&params(format!("http://{addr}/")))
+            .request(&never(), &params(format!("http://{addr}/")))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("max-response-bytes"), "{err}");
@@ -849,13 +937,15 @@ mod tests {
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
                 .await;
         });
+        // the act tightens the client-wide bound (30s) to 150ms
+        let mut params = params(format!("http://{addr}/"));
+        params.timeout_ms = Some(150);
         let config = HttpConfig {
             allow_private_addresses: true,
-            timeout_ms: Some(150),
             ..Default::default()
         };
         let err = package(config)
-            .request(&params(format!("http://{addr}/")))
+            .request(&never(), &params)
             .await
             .unwrap_err();
         assert!(err.to_string().contains("Http error"), "{err}");
@@ -873,9 +963,178 @@ mod tests {
             ..Default::default()
         };
         let err = package(config)
-            .request(&params(format!("http://{addr}/")))
+            .request(&never(), &params(format!("http://{addr}/")))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("not in allowed-hosts"), "{err}");
+    }
+
+    /// The request deadline covers the whole request, not just the connection:
+    /// a server that answers the headers and then stops sending leaves the act
+    /// waiting for the body, and that wait is the timeout's to end.
+    #[tokio::test]
+    async fn request_timeout_covers_a_stalled_body() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = socket.read(&mut buf).await;
+            // headers promise 100 bytes, then the server goes quiet with the
+            // connection open
+            let _ = socket
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 100\r\n\r\npartial",
+                )
+                .await;
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        let config = HttpConfig {
+            allow_private_addresses: true,
+            timeout_ms: 300,
+            ..Default::default()
+        };
+
+        let start = std::time::Instant::now();
+        let err = package(config)
+            .request(&never(), &params(format!("http://{addr}/")))
+            .await
+            .unwrap_err();
+        let elapsed = start.elapsed();
+
+        assert!(
+            err.to_string().contains("timed out"),
+            "the stall must end as a timeout, not as a truncated body: {err}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "the act waited for the server instead of its deadline: {elapsed:?}"
+        );
+    }
+
+    /// A request that is never answered fails at the client-wide deadline when
+    /// the act sets none of its own — the default is a bound, not "no bound".
+    #[tokio::test]
+    async fn the_config_default_bounds_an_act_without_a_param() {
+        assert_eq!(HttpConfig::default().timeout_ms, DEFAULT_TIMEOUT_MS);
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            // accept and never answer
+            let (_socket, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        let config = HttpConfig {
+            allow_private_addresses: true,
+            timeout_ms: 300,
+            ..Default::default()
+        };
+        let err = package(config)
+            .request(&never(), &params(format!("http://{addr}/")))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("timed out"), "{err}");
+    }
+
+    /// Both timeouts are always in force: zero (the unbounded value) and
+    /// anything above the platform ceiling fail at load, rather than running a
+    /// request with a bound the deployment did not ask for.
+    #[test]
+    fn a_timeout_outside_the_platform_range_is_a_config_error() {
+        for config in [
+            HttpConfig {
+                timeout_ms: 0,
+                ..Default::default()
+            },
+            HttpConfig {
+                timeout_ms: MAX_TIMEOUT_MS + 1,
+                ..Default::default()
+            },
+            HttpConfig {
+                connect_timeout_ms: 0,
+                ..Default::default()
+            },
+            HttpConfig {
+                connect_timeout_ms: MAX_CONNECT_TIMEOUT_MS + 1,
+                ..Default::default()
+            },
+        ] {
+            let err = HttpPackage::from_config(&config).unwrap_err();
+            assert!(
+                matches!(err, ActError::Config(_)),
+                "expected a config error, got {err:?}"
+            );
+        }
+
+        // the inclusive ends are accepted
+        HttpPackage::from_config(&HttpConfig {
+            timeout_ms: MAX_TIMEOUT_MS,
+            connect_timeout_ms: MAX_CONNECT_TIMEOUT_MS,
+            ..Default::default()
+        })
+        .expect("the ceilings are valid values");
+    }
+
+    /// An act may only tighten the configured bound: a `timeout-ms` above it,
+    /// or zero (the unbounded value), fails the act before anything is sent.
+    #[tokio::test]
+    async fn an_act_timeout_may_only_tighten_the_configured_bound() {
+        let config = HttpConfig {
+            allow_private_addresses: true,
+            timeout_ms: 1_000,
+            ..Default::default()
+        };
+        for timeout_ms in [0, 1_001, MAX_TIMEOUT_MS] {
+            let mut params = params("http://127.0.0.1:9/".into());
+            params.timeout_ms = Some(timeout_ms);
+            let err = package(config.clone())
+                .request(&never(), &params)
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(err, ActError::Package(_)),
+                "expected a package error, got {err:?}"
+            );
+            assert!(
+                err.to_string().contains("[http].timeout-ms (1000)"),
+                "the failure must name the configured bound: {err}"
+            );
+        }
+    }
+
+    /// A cancelled act gives up its request before any deadline, and reports
+    /// no outcome of its own: it did not fail, it was stopped.
+    #[tokio::test]
+    async fn a_cancelled_act_gives_up_its_request() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (_socket, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(5)).await;
+        });
+        let config = HttpConfig {
+            allow_private_addresses: true,
+            timeout_ms: 60_000,
+            ..Default::default()
+        };
+        let cancel = CancellationToken::new();
+        let token = cancel.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            token.cancel();
+        });
+
+        let start = std::time::Instant::now();
+        let out = package(config)
+            .request(&cancel, &params(format!("http://{addr}/")))
+            .await
+            .expect("a cancelled act reports no failure of its own");
+
+        assert!(out.is_none(), "a cancelled act yields no outcome: {out:?}");
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "the act waited for its deadline instead of the cancellation"
+        );
     }
 }

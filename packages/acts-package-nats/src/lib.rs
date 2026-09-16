@@ -1,3 +1,3 @@
 mod package;
 
-pub use package::NatsPackage;
+pub use package::{DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, NatsPackage};

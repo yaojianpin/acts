@@ -25,6 +25,7 @@ use std::sync::{
     Weak,
     atomic::{AtomicBool, AtomicU64, Ordering},
 };
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, instrument};
 
 #[derive(Clone)]
@@ -56,6 +57,11 @@ pub struct Task {
 
     /// task state
     state: ShareLock<TaskState>,
+
+    /// Fired when this task is overridden while it is running (see
+    /// [`Task::cancelled`]); the act executing under it reads it through
+    /// [`Context::cancelled`].
+    cancel: CancellationToken,
 
     /// task error
     err: ShareLock<Option<Error>>,
@@ -94,6 +100,9 @@ impl Task {
             vars_dirty: Arc::new(AtomicBool::new(false)),
             vars_gen: Arc::new(AtomicU64::new(0)),
             state: Arc::new(RwLock::new(TaskState::None)),
+            // a child of the runtime's shutdown token: this task's token fires
+            // when the task is overridden *or* when the engine shuts down
+            cancel: rt.shutdown_token().child_token(),
             err: Arc::new(RwLock::new(None)),
             start_time: Arc::new(RwLock::new(0)),
             end_time: Arc::new(RwLock::new(0)),
@@ -148,6 +157,14 @@ impl Task {
     pub fn state(&self) -> TaskState {
         let state = &*self.state.read();
         state.clone()
+    }
+
+    /// A token that fires once this task was overridden while it was running
+    /// (see [`Task::set_state`]) or the engine began shutting down — the task's
+    /// token is a child of the runtime's shutdown token. Acts read it through
+    /// [`Context::cancellation_token`].
+    pub fn cancellation_token(&self) -> CancellationToken {
+        self.cancel.clone()
     }
 
     pub fn cost(&self) -> i64 {
@@ -403,6 +420,20 @@ impl Task {
     }
 
     pub fn set_state(&self, state: TaskState) {
+        // An override of a running task (an `abort`/`cancel`/`skip`/`next`/
+        // `remove` action, or an error) must stop the work the task started.
+        // The token reaches the act's own execution through
+        // [`Context::cancelled`], so the act gives up its child process,
+        // request or subscription instead of holding its scheduler lane until
+        // it finishes on its own.
+        //
+        // Only a running task is overridden: a task that already reached a
+        // terminal state is never dispatched again (a redo builds a new task),
+        // so the token is never observed by a later run of this instance.
+        if self.state().is_running() && state.is_completed() {
+            self.cancel.cancel();
+        }
+
         if state.is_completed() {
             self.set_end_time(utils::time::time_millis());
 

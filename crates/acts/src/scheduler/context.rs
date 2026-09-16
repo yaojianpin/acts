@@ -13,6 +13,7 @@ use crate::{
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::sync::Arc;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, instrument};
 
 tokio::task_local! {
@@ -121,6 +122,33 @@ impl Context {
     pub fn workdir(&self) -> Option<std::path::PathBuf> {
         self.proc.workdir()
     }
+
+    /// A token that fires once this act should stop the work it started: the
+    /// engine is shutting down, or the task was overridden while it ran (an
+    /// `abort`/`cancel`/`skip`/`remove`/`next` action, or an error — see
+    /// [`Task::set_state`](crate::Task::set_state)).
+    ///
+    /// A package that starts something outside the engine — a child process,
+    /// an HTTP request, a subscription — selects on it and gives that work up
+    /// when it fires, so a cancelled act does not hold its scheduler lane
+    /// until its own deadline. It is a "stop now" signal, not a bound on how
+    /// long an act may run: that is the act's own timeout.
+    ///
+    /// ```no_run
+    /// # use acts::{ActError, Context, Result};
+    /// # async fn wait(ctx: &Context) -> Result<()> {
+    /// let cancel = ctx.cancellation_token();
+    /// tokio::select! {
+    ///     response = some_request() => Ok(response),
+    ///     _ = cancel.cancelled() => Err(ActError::Runtime("cancelled".to_string())),
+    /// }
+    /// # }
+    /// # async fn some_request() -> () {}
+    /// ```
+    pub fn cancellation_token(&self) -> CancellationToken {
+        self.task().cancellation_token()
+    }
+
     pub async fn prepare(&self) -> Result<()> {
         self.init_vars(&self.task());
         self.resolve_sealed().await?;

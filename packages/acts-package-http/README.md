@@ -70,11 +70,27 @@ allowed-hosts = ["api.example.com", "*.example.org"]
 allow-private-addresses = false
 # Hard cap on a response body; larger bodies fail the act.
 max-response-bytes = 67108864
-# Connect timeout; 0 disables it.
+# Connect timeout; 1..=300000.
 connect-timeout-ms = 10000
-# Whole-request timeout; omitted or 0 disables it.
+# Whole-request timeout, including reading the body; 1..=3600000.
 timeout-ms = 30000
 ```
+
+Neither timeout can be disabled: a request without a deadline waits on the
+remote server for as long as it keeps the connection, and that wait is a
+scheduler lane the engine cannot hand to anyone else. `timeout-ms` and
+`connect-timeout-ms` out of range fail startup rather than being clamped.
+
+An act may set its own `timeout-ms` param, but only to *tighten* the
+configured value — a request that must not outlive a workflow's own horizon
+fails fast instead of waiting out the deployment's bound. A value above the
+configured one (or zero) fails the act before anything is sent.
+
+Cancellation reaches the request too: when the engine shuts down, or an action
+(`abort`, `cancel`, `skip`, `remove`, `next`, `error`) overrides the task while
+the act runs, the request is dropped and the act reports no failure of its own
+— the action owns the task's state, and a shutdown leaves the task for the next
+start to resume.
 
 ## Egress policy
 
@@ -93,8 +109,9 @@ connection time:
 The request uses one package-level async client, so connections and TLS
 sessions are reused. `timeout-ms`, `connect-timeout-ms` and
 `max-response-bytes` bound how long an act can hang and how much a single
-response can allocate; without them a remote server could stream
-indefinitely.
+response can allocate. The request deadline covers the whole request —
+connecting, redirects, and streaming the body — so a server that answers the
+headers and then stalls cannot hold the act open.
 
 Local example servers (e.g. `http://127.0.0.1:1234`) need
 `allow-private-addresses = true`.

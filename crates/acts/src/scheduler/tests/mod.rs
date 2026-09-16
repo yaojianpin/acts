@@ -1,6 +1,7 @@
 mod act;
 mod action;
 mod branch;
+mod cancel;
 mod claim_leak;
 mod message;
 mod proc;

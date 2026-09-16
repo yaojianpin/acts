@@ -16,3 +16,6 @@ async-nats = "0.50"
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
+
+[dev-dependencies]
+toml = "0.8"
