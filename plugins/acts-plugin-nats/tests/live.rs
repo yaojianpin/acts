@@ -11,8 +11,10 @@ use async_nats::Client;
 use futures_util::StreamExt;
 use serde_json::{Value as JsonValue, json};
 use std::{
+    collections::HashMap,
     path::PathBuf,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Duration,
 };
 
 fn nats_url() -> String {
@@ -32,14 +34,17 @@ async fn connect_or_skip() -> Option<Client> {
 }
 
 /// Write a temporary acts config with the given `[nats]` section text.
+///
+/// The file name carries the process id and a counter rather than a timestamp:
+/// the live tests run in parallel threads, and two of them landing on one
+/// timestamp (the clock is coarser than a nanosecond on every platform) would
+/// have one read the file the other is still writing.
 fn temp_config(nats_section: &str) -> (PathBuf, Config) {
+    static SEQ: AtomicUsize = AtomicUsize::new(0);
     let path = std::env::temp_dir().join(format!(
         "acts_nats_test_{}_{}.toml",
         std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        SEQ.fetch_add(1, Ordering::Relaxed)
     ));
     std::fs::write(
         &path,
@@ -314,6 +319,99 @@ async fn acl_enforced_over_nats() {
     assert!(
         reply["err"].is_null(),
         "an allowed action must run: {reply}"
+    );
+
+    engine.close().await;
+    std::fs::remove_file(&path).ok();
+}
+
+/// A busy actions subject must not turn into unbounded work: past
+/// `max_in_flight` an action is refused to its caller instead of being started,
+/// and every request is still answered — the caller never hangs, and never has
+/// to guess whether its action ran.
+///
+/// The burst shares one reply inbox so the replies can be counted. With
+/// `max_in_flight = 1` one admitted action (a store read) takes far longer than
+/// the loop needs to pull the next message, so almost every message of the
+/// burst is refused while the first one still runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn actions_beyond_the_in_flight_bound_are_refused() {
+    let Some(client) = connect_or_skip().await else {
+        return;
+    };
+
+    let subject = "acts-inflight-test.cmd".to_string();
+    let (path, config) = temp_config(
+        "[acl]\nenabled = false\n\n\
+         [nats]\nurl = \"nats://127.0.0.1:4222\"\nsubject = \"acts-inflight-test\"\nmax_in_flight = 1\n",
+    );
+    let engine = engine_with_nats(&config).await;
+
+    // wait for the actions subscription to be live: its reply must be a run,
+    // not a refusal
+    let reply = request_action(
+        &client,
+        subject.clone(),
+        json!({"name": "model:ls", "seq": "req-warmup"}),
+    )
+    .await;
+    assert!(
+        reply["err"].is_null(),
+        "the subscription must be live: {reply}"
+    );
+
+    let inbox = client.new_inbox();
+    let mut replies = client.subscribe(inbox.clone()).await.unwrap();
+    let burst = 256;
+    for i in 0..burst {
+        let payload = serde_json::to_vec(&json!({
+            "name": "model:ls",
+            "seq": format!("req-{i}"),
+        }))
+        .unwrap();
+        client
+            .publish_with_reply(subject.clone(), inbox.clone(), payload.into())
+            .await
+            .unwrap();
+    }
+    client.flush().await.unwrap();
+
+    // every request of the burst answers: the refused ones with `err`, the
+    // admitted ones with their action's result
+    let mut answered: HashMap<String, JsonValue> = HashMap::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
+    while answered.len() < burst && tokio::time::Instant::now() < deadline {
+        match tokio::time::timeout(Duration::from_secs(2), replies.next()).await {
+            Ok(Some(msg)) => {
+                let reply: JsonValue = serde_json::from_slice(&msg.payload).unwrap();
+                let seq = reply["ack"].as_str().unwrap().to_string();
+                answered.insert(seq, reply);
+            }
+            _ => break,
+        }
+    }
+    assert_eq!(
+        answered.len(),
+        burst,
+        "every request must be answered, refused ones included"
+    );
+
+    let refused = answered
+        .values()
+        .filter(|reply| {
+            reply["err"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("too many actions in flight")
+        })
+        .count();
+    assert!(
+        refused > 0,
+        "a burst past max_in_flight must be refused instead of queued: {refused} of {burst} refused"
+    );
+    assert!(
+        refused < burst,
+        "an action under the bound must still run: {refused} of {burst} refused"
     );
 
     engine.close().await;

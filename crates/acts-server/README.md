@@ -140,6 +140,8 @@ queue_size = 100                # same for one SSE subscriber (default 100)
 [nats]                          # acts-plugin-nats — only connected when
 url = "nats://127.0.0.1:4222"   # this section is present
 subject = "acts"
+max_in_flight = 256             # actions running at once (default 256); past it
+                                # a caller is answered `err` instead of started
 
 [[nats.channels]]               # engine events forwarded to NATS
 id = "ops"
@@ -152,6 +154,10 @@ Plugin registration mirrors the config:
 - the gRPC and web plugins always start (default ports 10080 / 10082);
 - the NATS plugin is registered only when a `[nats]` section exists, so a
   server without NATS never tries to reach a broker.
+
+`[nats].max_in_flight` bounds the actions running at once; a burst past it is
+refused to its callers (`err`) rather than started, so a busy actions subject
+cannot turn into unbounded work.
 
 A subscription's queue is its only backlog: a message that does not fit is never
 awaited on, and a subscriber that fills its queue has its stream ended instead

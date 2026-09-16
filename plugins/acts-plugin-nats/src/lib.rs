@@ -39,8 +39,10 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-pub use config::{NatsChannelConfig, NatsConfig};
+pub use config::{DEFAULT_MAX_IN_FLIGHT, NatsChannelConfig, NatsConfig};
 mod config;
 
 /// Wire format of an inbound action request — mirrors the gRPC `Message`
@@ -104,6 +106,71 @@ async fn connect(config: &NatsConfig) -> std::result::Result<Client, String> {
         .map_err(|e| format!("failed to connect to NATS({}): {e}", config.url))
 }
 
+/// Admission control for the actions arriving on the command subject: at most
+/// `max_in_flight` of them execute at once, and one that cannot be admitted is
+/// refused to its caller instead of being started.
+///
+/// Without it every message became a task of its own the moment it arrived,
+/// with nothing bounding how many of them existed: a publisher that kept the
+/// subject busy (a retry loop, a bug, or a hostile client) grew tasks — and the
+/// deploys, process starts, store writes and outbound calls they run — for as
+/// long as it kept publishing.
+///
+/// The overload is latched the way the store writer's saturation is: entering
+/// and leaving the bound are one log line each, not one per refused message
+/// (which would make the flood's cost a log line per message). The callers
+/// themselves are told individually, by their replies.
+struct ActionsInFlight {
+    max_in_flight: usize,
+    permits: Arc<Semaphore>,
+    saturated: Arc<AtomicBool>,
+}
+
+impl ActionsInFlight {
+    fn new(max_in_flight: usize) -> Self {
+        Self {
+            max_in_flight,
+            permits: Arc::new(Semaphore::new(max_in_flight)),
+            saturated: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Admit one action: `None` means the plugin is at its bound, and the
+    /// caller must refuse the action rather than start it. The permit (in the
+    /// returned guard) is held for the whole action, so the deploys, starts,
+    /// store writes and outbound calls it runs all happen under it.
+    fn try_enter(&self) -> Option<OwnedSemaphorePermit> {
+        match self.permits.clone().try_acquire_owned() {
+            Ok(permit) => {
+                if self.saturated.swap(false, Ordering::AcqRel) {
+                    tracing::info!(
+                        max_in_flight = self.max_in_flight,
+                        "nats actions dropped below their bound, accepting them again"
+                    );
+                }
+                Some(permit)
+            }
+            Err(_) => {
+                if !self.saturated.swap(true, Ordering::AcqRel) {
+                    tracing::warn!(
+                        max_in_flight = self.max_in_flight,
+                        "nats actions reached their in-flight bound, refusing further ones"
+                    );
+                }
+                None
+            }
+        }
+    }
+
+    /// The error a refused caller receives, naming the bound it hit.
+    fn refusal(&self) -> String {
+        format!(
+            "too many actions in flight ({}); retry later",
+            self.max_in_flight
+        )
+    }
+}
+
 /// One engine channel forwarded to its NATS subject.
 fn register_channel(engine: &Engine, client: Client, channel: &NatsChannelConfig, base: &str) {
     let subject = channel
@@ -150,11 +217,16 @@ fn register_channel(engine: &Engine, client: Client, channel: &NatsChannelConfig
 
 /// Handle the inbound action subject: apply each command and reply to its
 /// request subject (when present).
+///
+/// An action is admitted only while the plugin is under `max_in_flight`
+/// running ones ([`ActionsInFlight`]); a message beyond it is answered
+/// `too many actions in flight` and never reaches the engine.
 async fn serve_actions(
     client: Client,
     subject: String,
     engine: Engine,
     shutdown: CancellationToken,
+    max_in_flight: usize,
 ) {
     let mut sub = match client.subscribe(subject.clone()).await {
         Ok(sub) => sub,
@@ -163,8 +235,9 @@ async fn serve_actions(
             return;
         }
     };
-    tracing::info!(subject = %subject, "nats actions subscription ready");
+    tracing::info!(subject = %subject, max_in_flight, "nats actions subscription ready");
 
+    let actions = ActionsInFlight::new(max_in_flight);
     loop {
         let msg = tokio::select! {
             _ = shutdown.cancelled() => break,
@@ -173,25 +246,47 @@ async fn serve_actions(
                 None => break,
             },
         };
+
+        // Parse before admitting: the refusal answers the same envelope a run
+        // would, so a caller learns which of its actions was not started.
+        let cmd: WireMessage = match serde_json::from_slice(&msg.payload) {
+            Ok(cmd) => cmd,
+            Err(err) => {
+                tracing::error!(error = %err, "nats action payload parse failed");
+                if let Some(subject) = msg.reply {
+                    let out = WireReply {
+                        name: String::new(),
+                        ack: None,
+                        data: JsonValue::Null,
+                        err: Some(format!("invalid payload: {err}")),
+                    };
+                    let _ = client.publish(subject, reply_bytes(&out).into()).await;
+                }
+                continue;
+            }
+        };
+
+        // At the bound: refuse instead of spawning. A task per message was
+        // unbounded work — and each one ran a full action — so a busy subject
+        // could exhaust the engine from outside.
+        let Some(permit) = actions.try_enter() else {
+            if let Some(subject) = msg.reply {
+                let out = WireReply {
+                    name: cmd.name,
+                    ack: cmd.seq,
+                    data: JsonValue::Null,
+                    err: Some(actions.refusal()),
+                };
+                let _ = client.publish(subject, reply_bytes(&out).into()).await;
+            }
+            continue;
+        };
+
         let client = client.clone();
         let engine = engine.clone();
         tokio::spawn(async move {
-            let cmd: WireMessage = match serde_json::from_slice(&msg.payload) {
-                Ok(cmd) => cmd,
-                Err(err) => {
-                    tracing::error!(error = %err, "nats action payload parse failed");
-                    if let Some(subject) = msg.reply {
-                        let out = WireReply {
-                            name: String::new(),
-                            ack: None,
-                            data: JsonValue::Null,
-                            err: Some(format!("invalid payload: {err}")),
-                        };
-                        let _ = client.publish(subject, reply_bytes(&out).into()).await;
-                    }
-                    return;
-                }
-            };
+            // released when the action is done, whatever it did
+            let _permit = permit;
             tracing::info!(
                 "nats do-action name={} seq={:?} ack={:?}",
                 cmd.name,
@@ -290,6 +385,7 @@ impl ActPlugin for NatsPlugin {
 
             let base = config.subject.clone();
             let cmd_subject = format!("{base}.cmd");
+            let max_in_flight = config.max_in_flight();
             let actions_client = client.clone();
             let actions_engine = engine.clone();
             let actions_shutdown = shutdown.clone();
@@ -299,6 +395,7 @@ impl ActPlugin for NatsPlugin {
                     cmd_subject,
                     actions_engine,
                     actions_shutdown,
+                    max_in_flight,
                 )
                 .await;
             });
@@ -320,6 +417,34 @@ impl ActPlugin for NatsPlugin {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// The in-flight bound is admission, not advice: an action beyond it is
+    /// refused (its caller answers `busy`), and a finished action frees its
+    /// slot for the next one.
+    #[test]
+    fn actions_are_admitted_only_under_the_bound() {
+        let actions = ActionsInFlight::new(2);
+
+        let first = actions.try_enter().expect("the first action is admitted");
+        let second = actions.try_enter().expect("the second action is admitted");
+        assert!(
+            actions.try_enter().is_none(),
+            "an action past the bound must be refused, not started"
+        );
+        assert!(
+            actions.refusal().contains("too many actions in flight (2)"),
+            "the refusal names the bound: {}",
+            actions.refusal()
+        );
+
+        drop(first);
+        assert!(
+            actions.try_enter().is_some(),
+            "a finished action must free its slot"
+        );
+        drop(second);
+        assert!(actions.try_enter().is_some());
+    }
 
     #[test]
     fn wire_reply_serde() {

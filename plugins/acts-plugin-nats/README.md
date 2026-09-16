@@ -31,6 +31,8 @@ url = "nats://127.0.0.1:4222"          # optional, default nats://127.0.0.1:4222
 # username = "u"                        # or user/password auth
 # password = "p"
 subject = "acts"                        # optional subject prefix, default "acts"
+max_in_flight = 256                     # actions running at once (default 256)
+                                        # 0 selects the default
 
 # one entry per remote event subscriber — the filter fields mirror the gRPC
 # `OnMessage` `MessageOptions`
@@ -42,6 +44,21 @@ state = "*"
 uses = "*"
 # options = { tag = "deploy" }          # custom option glob filters
 ```
+
+`max_in_flight` bounds the actions running at once. Every message on the actions
+subject used to be answered by a task of its own the moment it arrived, with
+nothing bounding how many of them existed — so a publisher that kept the subject
+busy (a retry loop, a bug, a hostile client) grew tasks, and the deploys,
+process starts, store writes and outbound calls they run, for as long as it kept
+publishing. Past the bound an action is refused to its caller instead of being
+started:
+
+```json
+{ "name": "proc:start", "seq": "req-7", "ack": "req-7", "err": "too many actions in flight (256); retry later" }
+```
+
+Nothing is dropped silently: the refused caller is told, and it can retry —
+the engine itself is never entered for it.
 
 The default subject prefix is `acts`:
 

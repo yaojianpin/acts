@@ -318,6 +318,12 @@ port = 10082
 # url = "nats://localhost:4222"
 # action/event subject prefix
 # subject = "acts"
+# how many actions received on "<subject>.cmd" may execute at once (default 256,
+# 0 selects the default). Beyond it an action is refused to its caller instead
+# of being started: a task per message made a busy subject unbounded work — the
+# deploys, starts, store writes and outbound calls they run grew with whatever
+# kept publishing.
+# max_in_flight = 256
 
 # [[nats.channels]]
 # forward engine events matching these filters to the given subject:
