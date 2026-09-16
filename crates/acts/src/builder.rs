@@ -131,6 +131,23 @@ impl EngineBuilder {
         self
     }
 
+    /// Set the number of concurrent store-writer shards. Independent pids are
+    /// persisted concurrently, one consumer per shard; the ops of one pid
+    /// always land in the same shard and keep their enqueue order.
+    pub fn store_writer_workers(mut self, workers: usize) -> Self {
+        self.config_mut().data.store_writer_workers = Some(workers);
+        self
+    }
+
+    /// Set the maximum store-writer backlog. It is split across the shards; a
+    /// shard with no room makes the writer refuse new work (`QueueFull`) until
+    /// the backlog drains, while the bookkeeping of work already in flight
+    /// waits for room.
+    pub fn store_writer_queue_cap(mut self, cap: usize) -> Self {
+        self.config_mut().data.store_writer_queue_cap = Some(cap);
+        self
+    }
+
     /// register plugin
     ///
     /// ## Example

@@ -221,7 +221,11 @@ impl Cache {
             claimed: Arc::new(RwLock::new(HashSet::new())),
             pending_resume: Arc::new(RwLock::new(PendingResume::default())),
             store: store.clone(),
-            writer: StoreWriter::spawn(store),
+            writer: StoreWriter::spawn(
+                store,
+                config.store_writer_workers(),
+                config.store_writer_queue_cap(),
+            ),
             admission: Arc::new(Mutex::new(Admission::default())),
         })
     }
@@ -245,6 +249,12 @@ impl Cache {
 
     pub fn store_writer_high_watermark(&self) -> usize {
         self.writer.high_watermark()
+    }
+
+    /// Whether the store write path is saturated — refusing new work until its
+    /// backlog drains (see [`StoreWriter`]).
+    pub fn store_writer_saturated(&self) -> bool {
+        self.writer.saturated()
     }
 
     /// Snapshot of the boot-resume overflow queue (test visibility).
@@ -773,6 +783,9 @@ impl Cache {
         Ok(())
     }
 
+    /// Persist a task's state update off the caller's hot path. This is the
+    /// bookkeeping of work already admitted, so it waits for room when the
+    /// write path is behind instead of being refused.
     #[instrument(skip(self, task), fields(pid = %task.pid, tid = %task.id))]
     pub(crate) async fn upsert_async(&self, task: &Arc<Task>) -> Result<()> {
         self.push_task_mem(task)?;
@@ -781,14 +794,23 @@ impl Cache {
     }
 
     /// Non-blocking persistence for synchronous schedulers. Used only before a
-    /// durable `Exec` outbox handoff; if the writer is full the caller rejects
-    /// the work explicitly instead of buffering an unbounded process graph.
+    /// durable `Exec` outbox handoff; when the write path is saturated the
+    /// task is refused with [`ActError::QueueFull`] (the caller turns it into
+    /// that overflow, or rejects the work) instead of buffering an unbounded
+    /// process graph.
     pub(crate) fn try_upsert_async(&self, task: &Arc<Task>) -> Result<()> {
+        // Refuse before registering the task in memory: a write the saturated
+        // path will not take must not leave a task behind that no durable row
+        // backs.
+        if self.writer.saturated() {
+            return Err(ActError::QueueFull);
+        }
         self.push_task_mem(task)?;
         self.writer.try_send(WriteOp::Task(task.clone()))
     }
 
     /// Try to persist a disk overflow marker for synchronous task admission.
+    /// Same refusal contract as [`Self::try_upsert_async`].
     pub(crate) fn try_enqueue_exec(&self, task: &Arc<Task>) -> Result<()> {
         self.writer.try_send(WriteOp::EnqueueExec {
             pid: task.pid.clone(),

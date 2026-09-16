@@ -2,6 +2,7 @@ use crate::{
     Event, Result, ShareLock,
     event::Message,
     scheduler::{Process, Task},
+    utils::pid_lane,
 };
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -81,15 +82,10 @@ impl ProcessGate {
         self.locks.len()
     }
 
-    /// This intentionally uses the same FNV-1a lane mapping as the scheduler,
+    /// This intentionally uses the same lane mapping as the scheduler ([`pid_lane`]),
     /// so a process's event handlers serialize against that process's lane.
     pub(crate) fn lane_index(&self, pid: &str) -> usize {
-        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-        for byte in pid.as_bytes() {
-            hash ^= u64::from(*byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        (hash as usize) % self.locks.len()
+        pid_lane(pid, self.locks.len())
     }
 
     pub(crate) async fn lock(&self, pid: &str) -> tokio::sync::OwnedMutexGuard<()> {

@@ -242,6 +242,13 @@ impl Runtime {
         self.cache.store_writer_high_watermark()
     }
 
+    /// Whether the store write path is saturated and therefore refusing new
+    /// work (a task's state write, or the outbox record standing in for it)
+    /// until its backlog drains.
+    pub fn store_writer_saturated(&self) -> bool {
+        self.cache.store_writer_saturated()
+    }
+
     #[allow(unused)]
     pub fn config(&self) -> &Arc<Config> {
         &self.config

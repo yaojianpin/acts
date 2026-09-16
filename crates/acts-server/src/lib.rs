@@ -132,6 +132,18 @@ scheduler_workers = 4
 # backlog bound.
 scheduler_queue_cap = 4096
 
+# Number of concurrent store-writer shards. Independent pids are persisted
+# concurrently, one queue consumer per shard; the writes of one pid always
+# land in the same shard and keep their enqueue order.
+store_writer_workers = 4
+
+# Maximum store-writer backlog, split evenly across the shards (at least one
+# op each). When a shard runs out of room the writer refuses new work with a
+# QueueFull error (the producer falls back to its durable overflow path, or
+# the request fails) until the backlog drains, so a backed-up store is never
+# fed more work; the bookkeeping of in-flight work waits for room instead.
+store_writer_queue_cap = 16384
+
 # [log] — file logging: hourly rolling acts.log files under dir, at level
 # (the ACTS_LOG env var overrides level at runtime).
 [log]
