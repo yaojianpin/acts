@@ -50,7 +50,7 @@ fn key_matches(k: &str, key: &str, prefix: &str, op: &ScanOperation) -> bool {
 
 #[async_trait::async_trait]
 impl KvStore for MemoryStore {
-    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    async fn one(&self, key: &str) -> Result<Option<Vec<u8>>> {
         Ok(self.data.read().get(key).cloned())
     }
 

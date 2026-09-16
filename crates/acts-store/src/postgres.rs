@@ -45,7 +45,7 @@ impl PostgresStore {
 
 #[async_trait::async_trait]
 impl KvStore for PostgresStore {
-    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    async fn one(&self, key: &str) -> Result<Option<Vec<u8>>> {
         sqlx::query(&format!(
             "SELECT value FROM {} WHERE key = $1",
             consts::ACTS_STORE_NAME
@@ -83,7 +83,7 @@ impl KvStore for PostgresStore {
         Ok(())
     }
 
-    async fn mget(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+    async fn many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
         if keys.is_empty() {
             return Ok(Vec::new());
         }

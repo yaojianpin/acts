@@ -47,7 +47,7 @@ fn key_matches(k: &str, key: &str, prefix: &str, op: &ScanOperation) -> bool {
 
 #[async_trait::async_trait]
 impl KvStore for SledStore {
-    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    async fn one(&self, key: &str) -> Result<Option<Vec<u8>>> {
         let db = self.db.clone();
         let key = key.to_owned();
         tokio::task::spawn_blocking(move || {
@@ -89,7 +89,7 @@ impl KvStore for SledStore {
         .map_err(|e| ActError::Store(e.to_string()))?
     }
 
-    async fn mget(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+    async fn many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
         if keys.is_empty() {
             return Ok(Vec::new());
         }

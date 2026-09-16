@@ -1143,8 +1143,8 @@ impl GatedKv {
 
 #[async_trait::async_trait]
 impl KvStore for GatedKv {
-    async fn get(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
-        self.inner.get(key).await
+    async fn one(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
+        self.inner.one(key).await
     }
 
     async fn put(&self, key: &str, value: Vec<u8>) -> crate::Result<()> {
@@ -1385,7 +1385,7 @@ struct FailKv;
 
 #[async_trait::async_trait]
 impl KvStore for FailKv {
-    async fn get(&self, _key: &str) -> crate::Result<Option<Vec<u8>>> {
+    async fn one(&self, _key: &str) -> crate::Result<Option<Vec<u8>>> {
         Err(crate::ActError::Store("backend unavailable".to_string()))
     }
 

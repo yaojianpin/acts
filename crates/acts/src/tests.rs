@@ -848,7 +848,7 @@ fn key_matches(k: &str, key: &str, prefix: &str, op: &ScanOperation) -> bool {
 
 #[async_trait::async_trait]
 impl KvStore for CustomStore {
-    async fn get(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
+    async fn one(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
         Ok(self.data.lock().get(key).cloned())
     }
 
@@ -993,9 +993,13 @@ async fn snapshot_per_proc_pins_value_until_process_ends() {
     });
 
     let pid = utils::longid();
-    start_engine_owned(&engine.runtime(), &workflow, Vars::new().with("pid", pid.clone()))
-        .await
-        .unwrap();
+    start_engine_owned(
+        &engine.runtime(),
+        &workflow,
+        Vars::new().with("pid", pid.clone()),
+    )
+    .await
+    .unwrap();
 
     sig.recv().await;
 
@@ -1079,9 +1083,13 @@ async fn snapshot_per_task_reads_latest_value() {
     });
 
     let pid = utils::longid();
-    start_engine_owned(&engine.runtime(), &workflow, Vars::new().with("pid", pid.clone()))
-        .await
-        .unwrap();
+    start_engine_owned(
+        &engine.runtime(),
+        &workflow,
+        Vars::new().with("pid", pid.clone()),
+    )
+    .await
+    .unwrap();
 
     sig.recv().await;
 
@@ -1167,9 +1175,13 @@ async fn snapshot_scope_keyed_by_task_params() {
     });
 
     let pid = utils::longid();
-    start_engine_owned(&engine.runtime(), &workflow, Vars::new().with("pid", pid.clone()))
-        .await
-        .unwrap();
+    start_engine_owned(
+        &engine.runtime(),
+        &workflow,
+        Vars::new().with("pid", pid.clone()),
+    )
+    .await
+    .unwrap();
 
     sig.recv().await;
 

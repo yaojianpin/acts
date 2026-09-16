@@ -123,7 +123,7 @@ fn like_pattern(prefix: &str) -> String {
 
 #[async_trait::async_trait]
 impl KvStore for SqliteStore {
-    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    async fn one(&self, key: &str) -> Result<Option<Vec<u8>>> {
         sqlx::query(&format!(
             "SELECT value FROM {} WHERE key = ?",
             consts::ACTS_STORE_NAME
@@ -163,7 +163,7 @@ impl KvStore for SqliteStore {
         Ok(())
     }
 
-    async fn mget(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+    async fn many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
         if keys.is_empty() {
             return Ok(Vec::new());
         }

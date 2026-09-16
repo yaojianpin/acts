@@ -42,8 +42,8 @@ impl FailOnceProcBatchKv {
 
 #[async_trait::async_trait]
 impl KvStore for FailOnceProcBatchKv {
-    async fn get(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
-        self.inner.get(key).await
+    async fn one(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
+        self.inner.one(key).await
     }
 
     async fn put(&self, key: &str, value: Vec<u8>) -> crate::Result<()> {

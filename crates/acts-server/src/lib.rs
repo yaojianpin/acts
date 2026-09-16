@@ -785,7 +785,7 @@ ttl = "5m"
         let store = open_store(&dir, &DbConfig::default()).await.unwrap();
         assert!(dir.join("data").is_dir(), "sled data dir under config dir");
         store.put("k", b"v".to_vec()).await.unwrap();
-        assert_eq!(store.get("k").await.unwrap(), Some(b"v".to_vec()));
+        assert_eq!(store.one("k").await.unwrap(), Some(b"v".to_vec()));
 
         store.delete("k").await.unwrap();
         std::fs::remove_dir_all(&dir).ok();

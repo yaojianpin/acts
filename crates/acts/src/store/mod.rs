@@ -151,8 +151,27 @@ pub enum StoreBatchOp {
 
 #[async_trait::async_trait]
 pub trait KvStore: Send + Sync {
-    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>>;
+    /// Read one key. Backends that support a native batch read should override
+    /// [`KvStore::many`] for efficiency; the default loops over `one`.
+    async fn one(&self, key: &str) -> Result<Option<Vec<u8>>>;
+
+    /// Read several keys in one logical call. The default preserves
+    /// compatibility for stores without a native batch read; backends with a
+    /// network or SQL round trip should override it.
+    async fn many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+        let mut values = Vec::with_capacity(keys.len());
+        for key in keys {
+            values.push(self.one(key).await?);
+        }
+        Ok(values)
+    }
+
+    /// Write one key. Backends that support a native batch write should override
+    /// [`KvStore::batch`] for efficiency; the default loops over `put`.
     async fn put(&self, key: &str, value: Vec<u8>) -> Result<()>;
+
+    /// Delete one key. Backends that support a native batch write should override
+    /// [`KvStore::batch`] for efficiency; the default loops over `delete`.
     async fn delete(&self, key: &str) -> Result<()>;
 
     /// Apply every mutation of `ops` as one unit: on success all ops are
@@ -177,17 +196,6 @@ pub trait KvStore: Send + Sync {
             }
         }
         Ok(())
-    }
-
-    /// Read several keys in one logical call. The default preserves
-    /// compatibility for stores without a native batch read; backends with a
-    /// network or SQL round trip should override it.
-    async fn mget(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
-        let mut values = Vec::with_capacity(keys.len());
-        for key in keys {
-            values.push(self.get(key).await?);
-        }
-        Ok(values)
     }
 
     /// Return every entry whose key starts with `key` and matches `options`.

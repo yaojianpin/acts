@@ -55,7 +55,7 @@ fn key_matches(k: &str, key: &str, prefix: &str, op: &ScanOperation) -> bool {
 
 #[async_trait::async_trait]
 impl KvStore for NatsStore {
-    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    async fn one(&self, key: &str) -> Result<Option<Vec<u8>>> {
         self.kv
             .get(key)
             .await

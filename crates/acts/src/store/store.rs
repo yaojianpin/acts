@@ -708,8 +708,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl KvStore for CountingKv {
-        async fn get(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
-            self.inner.get(key).await
+        async fn one(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
+            self.inner.one(key).await
         }
 
         async fn put(&self, key: &str, value: Vec<u8>) -> crate::Result<()> {
@@ -781,9 +781,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl KvStore for GateKv {
-        async fn get(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
+        async fn one(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
             self.park(&self.gate_get).await;
-            self.inner.get(key).await
+            self.inner.one(key).await
         }
 
         async fn put(&self, key: &str, value: Vec<u8>) -> crate::Result<()> {

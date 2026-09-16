@@ -197,7 +197,7 @@ impl<T> KvCollection<T> {
     async fn read_json(&self, id: &str) -> Result<Option<JsonValue>> {
         let key = self.data_key(id);
         self.kv
-            .get(&key)
+            .one(&key)
             .await?
             .map(|data| serde_json::from_slice(&data).map_err(map_db_err))
             .transpose()
@@ -211,7 +211,7 @@ impl<T> KvCollection<T> {
         }
 
         let keys: Vec<String> = ids.iter().map(|id| self.data_key(id)).collect();
-        let values = self.kv.mget(&keys).await?;
+        let values = self.kv.many(&keys).await?;
         let mut docs = Vec::with_capacity(values.len());
         for data in values.into_iter().flatten() {
             docs.push(serde_json::from_slice(&data).map_err(map_db_err)?);
@@ -915,7 +915,7 @@ where
 
     async fn exists(&self, id: &str) -> crate::Result<bool> {
         let key = self.data_key(id);
-        self.kv.get(&key).await.map(|v| v.is_some())
+        self.kv.one(&key).await.map(|v| v.is_some())
     }
 
     async fn find(&self, id: &str) -> crate::Result<Self::Item> {
@@ -926,7 +926,7 @@ where
 
     async fn find_opt(&self, id: &str) -> crate::Result<Option<Self::Item>> {
         let key = self.data_key(id);
-        let Some(data) = self.kv.get(&key).await? else {
+        let Some(data) = self.kv.one(&key).await? else {
             return Ok(None);
         };
         let json: JsonValue = serde_json::from_slice(&data).map_err(map_db_err)?;
@@ -1722,11 +1722,11 @@ mod tests {
         assert_eq!(page.count, 0, "fresh key deleted, doc b unreachable");
         assert!(col.rebuild_index().await.unwrap() >= 2);
         assert!(
-            kv.get(&legacy).await.unwrap().is_none(),
+            kv.one(&legacy).await.unwrap().is_none(),
             "legacy key removed"
         );
         assert!(
-            kv.get(&fresh).await.unwrap().is_some(),
+            kv.one(&fresh).await.unwrap().is_some(),
             "fresh key restored"
         );
         let page = query(&col, Filter::and().expr(Expr::eq("state", "w9"))).await;
@@ -1854,8 +1854,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl KvStore for UnorderedScanKv {
-        async fn get(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
-            self.inner.get(key).await
+        async fn one(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
+            self.inner.one(key).await
         }
 
         async fn put(&self, key: &str, value: Vec<u8>) -> crate::Result<()> {
@@ -2017,8 +2017,8 @@ mod tests {
 
     #[async_trait::async_trait]
     impl KvStore for CountingKv {
-        async fn get(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
-            self.inner.get(key).await
+        async fn one(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
+            self.inner.one(key).await
         }
 
         async fn put(&self, key: &str, value: Vec<u8>) -> crate::Result<()> {
@@ -2036,9 +2036,9 @@ mod tests {
             self.inner.batch(ops).await
         }
 
-        async fn mget(&self, keys: &[String]) -> crate::Result<Vec<Option<Vec<u8>>>> {
+        async fn many(&self, keys: &[String]) -> crate::Result<Vec<Option<Vec<u8>>>> {
             self.mgets.fetch_add(1, Ordering::SeqCst);
-            self.inner.mget(keys).await
+            self.inner.many(keys).await
         }
 
         async fn scan_prefix(
@@ -2313,11 +2313,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl KvStore for GatedKv {
-        async fn get(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
+        async fn one(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
             if self.ordered() {
                 self.park().await;
             }
-            self.inner.get(key).await
+            self.inner.one(key).await
         }
 
         async fn put(&self, key: &str, value: Vec<u8>) -> crate::Result<()> {

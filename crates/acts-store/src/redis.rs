@@ -44,7 +44,7 @@ fn key_matches(k: &str, key: &str, prefix: &str, op: &ScanOperation) -> bool {
 
 #[async_trait::async_trait]
 impl KvStore for RedisStore {
-    async fn get(&self, key: &str) -> Result<Option<Vec<u8>>> {
+    async fn one(&self, key: &str) -> Result<Option<Vec<u8>>> {
         let mut conn = self.conn.clone();
         conn.get(key)
             .await
@@ -65,7 +65,7 @@ impl KvStore for RedisStore {
             .map_err(|e| ActError::Store(e.to_string()))
     }
 
-    async fn mget(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
+    async fn many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>> {
         if keys.is_empty() {
             return Ok(Vec::new());
         }
