@@ -60,11 +60,17 @@ jobs:
           test -n "$ready" || { echo "NATS did not become ready on 127.0.0.1:4222" >&2; exit 1; }
       - name: Build
         run: cargo build --verbose
-      - name: Run tests
-        run: cargo test --verbose
+      - name: Run tests acts
+        run: cargo test -p acts --verbose
       - name: Run tests channel
-        run: cargo test --verbose -p acts-channel --features=docker_test
+        run: cargo test -p acts-channel --verbose --features=docker_test
       - name: Run tests plugins
-        run: cargo test --verbose -p acts-plugin-*
+        run: cargo test -p acts-plugin-* --verbose
       - name: Run tests packages
-        run: cargo test --verbose -p acts-package-*
+        run: cargo test -p acts-package-* --verbose
+      - name: Run tests store
+        run: cargo test -p acts-store --verbose --features sled,sqlite,nats,postgres,redis
+      - name: Run tests cli
+        run: cargo test -p acts-cli --verbose
+      - name: Run tests server
+        run: cargo test -p acts-server --verbose

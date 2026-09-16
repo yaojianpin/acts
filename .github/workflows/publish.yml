@@ -38,8 +38,20 @@ jobs:
           PY
       - name: Build
         run: cargo build --workspace --verbose
-      - name: Run tests
-        run: cargo test --workspace --verbose --exclude acts-store && cargo test --verbose -p acts-store --features sled,sqlite
+      - name: Run tests acts
+        run: cargo test -p acts --verbose
+      - name: Run tests channel
+        run: cargo test -p acts-channel --verbose --features=docker_test
+      - name: Run tests plugins
+        run: cargo test -p acts-plugin-* --verbose
+      - name: Run tests packages
+        run: cargo test -p acts-package-* --verbose
+      - name: Run tests store
+        run: cargo test -p acts-store --verbose --features sled,sqlite
+      - name: Run tests cli
+        run: cargo test -p acts-cli --verbose
+      - name: Run tests server
+        run: cargo test -p acts-server --verbose
       - name: Run Publish
         run: |
           cp README.md crates/acts/ &&
