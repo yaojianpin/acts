@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "acts"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "async-trait",
  "bitflags 2.13.2",
@@ -36,7 +36,7 @@ dependencies = [
 
 [[package]]
 name = "acts-channel"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "acts",
  "anyhow",
@@ -58,7 +58,7 @@ dependencies = [
 
 [[package]]
 name = "acts-cli"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "acts-channel",
  "anyhow",
@@ -130,7 +130,7 @@ dependencies = [
 
 [[package]]
 name = "acts-package-http"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "acts",
  "async-trait",
@@ -146,7 +146,7 @@ dependencies = [
 
 [[package]]
 name = "acts-package-nats"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "acts",
  "async-nats",
@@ -160,7 +160,7 @@ dependencies = [
 
 [[package]]
 name = "acts-package-shell"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "acts",
  "async-trait",
@@ -174,7 +174,7 @@ dependencies = [
 
 [[package]]
 name = "acts-package-state"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "acts",
  "async-trait",
@@ -186,7 +186,7 @@ dependencies = [
 
 [[package]]
 name = "acts-plugin-grpc"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "acts",
  "acts-channel",
@@ -202,7 +202,7 @@ dependencies = [
 
 [[package]]
 name = "acts-plugin-nats"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "acts",
  "async-nats",
@@ -216,7 +216,7 @@ dependencies = [
 
 [[package]]
 name = "acts-plugin-web"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "acts",
  "async-stream",
@@ -233,7 +233,7 @@ dependencies = [
 
 [[package]]
 name = "acts-server"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "acts",
  "acts-channel",
@@ -259,7 +259,7 @@ dependencies = [
 
 [[package]]
 name = "acts-store"
-version = "0.24.0"
+version = "0.25.0"
 dependencies = [
  "acts",
  "async-nats",
