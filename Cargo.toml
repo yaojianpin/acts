@@ -63,7 +63,7 @@ axum = "0.7"
 validator = { version = "0.20.0", features = ["derive"] }
 # message brokers / stores
 async-nats = "0.50"
-redis = { version = "0.31", default-features = false, features = [
+redis = { version = "1.7", default-features = false, features = [
     "aio",
     "tokio-comp",
 ] }
