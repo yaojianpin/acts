@@ -21,7 +21,7 @@ inventory = "0.3.20"
 jsonschema = { version = "0.30.0", default-features = false }
 nanoid = { workspace = true }
 regex = { workspace = true }
-rquickjs = { version = "0.9", features = ["macro", "parallel"] }
+rquickjs = { version = "0.13", features = ["macro", "parallel"] }
 serde = { features = ["derive", "rc"], workspace = true }
 serde_json = { workspace = true }
 serde_repr = "0.1"
