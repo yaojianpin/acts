@@ -8,7 +8,7 @@ use crate::{
         KvStore, MemoryStore,
         query::{Expr, Filter, Query},
     },
-    utils::test::{USES_IRQ, USES_PARALLEL, auto_complete, create_proc},
+    utils::test::{USES_CODE, USES_IRQ, USES_PARALLEL, auto_complete, create_proc},
     utils::{self, consts},
 };
 use serial_test::serial;
@@ -1233,4 +1233,93 @@ async fn sch_action_completed_proc_cleans_message_and_delivery_rows() {
         store.deliveries().query(&q).await.unwrap().rows.is_empty(),
         "no delivery row may reappear after the removal"
     );
+}
+
+/// A delivery row can reach the store after the close that settles its task:
+/// the emission path and the task's terminal write are concurrent, so a
+/// message of a task that is already over can still be stored. Nothing settles
+/// a delivery of a finished task afterwards, so such a row is born `Completed`
+/// — stored open it would keep the process's rows (and its pid, and its
+/// workdir) alive forever, since the sweeper only deletes a process whose
+/// deliveries have all settled.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_a_delivery_stored_after_its_task_closed_is_born_settled() {
+    let engine = Engine::builder().start().await.unwrap();
+    let rt = engine.runtime();
+    // s1 finishes on its own, s2 waits for a client: the process — and with it
+    // s1's closed task — is still there when the straggler is emitted
+    let workflow = Workflow::new()
+        .with_step(|step| {
+            step.with_id("s1")
+                .with_uses_code(USES_CODE, r#"$set("done", 1);"#)
+        })
+        .with_step(|step| {
+            step.with_id("s2")
+                .with_uses(USES_IRQ, Vars::new().with("key", "hold"))
+        });
+
+    // the first message of a finished task names it: by then its task row is
+    // closed (the task write is queued before the message is emitted)
+    let finished = engine.signal::<(String, String)>((String::new(), String::new()));
+    let (f, f2) = finished.double();
+    engine.channel().on_message(move |e| {
+        let f2 = f2.clone();
+        async move {
+            if e.is_state(MessageState::Completed) {
+                f2.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+                f2.close();
+            }
+        }
+    });
+
+    let chan = engine.channel_with_options(&ChannelOptions {
+        id: "settle-lane".to_string(),
+        ack: true,
+        ..Default::default()
+    });
+    let straggler = utils::longid();
+    let (delivered, received) = engine.signal::<String>(String::new()).double();
+    let wanted = straggler.clone();
+    chan.on_message(move |e| {
+        let delivered = delivered.clone();
+        let wanted = wanted.clone();
+        async move {
+            if e.id == wanted {
+                delivered.update(|d| *d = e.delivery_id.clone().unwrap_or_default());
+                delivered.close();
+            }
+        }
+    });
+
+    let proc = rt.create_proc(&utils::longid(), &workflow);
+    rt.launch(&proc).await.unwrap();
+    let (pid, tid) = f.recv().await;
+
+    // a message of the closed task, emitted while the process still runs
+    rt.emitter().emit_message(&crate::Message {
+        id: straggler,
+        pid,
+        tid,
+        ..Default::default()
+    });
+    let delivery_id = received.recv().await;
+    assert!(
+        !delivery_id.is_empty(),
+        "the straggler of an ack channel must be stored as a delivery"
+    );
+    let delivery = rt
+        .cache()
+        .store()
+        .deliveries()
+        .find(&delivery_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        delivery.status,
+        crate::data::DeliveryStatus::Completed,
+        "a delivery stored after its task closed must be born settled"
+    );
+
+    engine.close().await;
 }

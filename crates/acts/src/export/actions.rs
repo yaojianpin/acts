@@ -888,18 +888,24 @@ mod tests {
         .await
         .unwrap();
 
-        // u1 subscribes under a client id u2 also names below.
-        let received = std::sync::Arc::new(parking_lot::Mutex::new(0usize));
-        let count = received.clone();
+        // u1 subscribes under a client id u2 also names below. The channel
+        // records the messages it received by id: an ack channel that never
+        // acks has its delivery re-sent by the retry timer, and a redelivery
+        // of a message already received is the same message reaching the
+        // channel again, not a new one.
+        let received = std::sync::Arc::new(parking_lot::Mutex::new(std::collections::HashSet::<
+            String,
+        >::new()));
+        let seen = received.clone();
         let chan = engine.channel_with_options(&ChannelOptions {
             id: ChannelOptions::subscription_id("u1", "shared-client"),
             ack: true,
             ..Default::default()
         });
-        chan.on_message(move |_| {
-            let count = count.clone();
+        chan.on_message(move |e| {
+            let seen = seen.clone();
             async move {
-                *count.lock() += 1;
+                seen.lock().insert(e.id.clone());
             }
         });
 
@@ -931,18 +937,21 @@ mod tests {
         .await
         .unwrap();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
-        while *received.lock() == 0 && tokio::time::Instant::now() < deadline {
+        while received.lock().is_empty() && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        let after_foreign_unsub = *received.lock();
+        let after_foreign_unsub = received.lock().clone();
         assert!(
-            after_foreign_unsub > 0,
+            !after_foreign_unsub.is_empty(),
             "another subject's unsub silenced u1's channel"
         );
 
         // The subscriber's own unsub names the same client id and DOES reach
         // its channel: the composition is symmetric, so the id a client
-        // unsubscribes with is the id it subscribed with.
+        // unsubscribes with is the id it subscribed with. The channel is
+        // compared by the message ids it received, so the retry timer
+        // re-sending the unacked delivery above (at-least-once) cannot read as
+        // a second message arriving.
         apply_as(
             &engine,
             &u1,

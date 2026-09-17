@@ -78,6 +78,30 @@ pub(crate) enum WriteOp {
     RemoveProc {
         pid: String,
     },
+    /// Store the canonical message row and one ack-channel delivery row of a
+    /// message (see [`Store::store_message_delivery`]).
+    ///
+    /// The row is written on the process's own shard because it is created
+    /// off the task's writes: the close of a finished task settles every
+    /// delivery of that task, and the sweeper deletes a finished process's
+    /// rows (after any still-queued write). A delivery created outside that
+    /// order can land after either — left open on a process whose rows are
+    /// already gone (nothing would ever settle it, the sweeper needs every
+    /// delivery settled), or re-created behind the removal. On the shard the
+    /// three are sequential: the close sees the row, or the row sees a task
+    /// that is already closed (and is born settled), or the removal came first
+    /// (and it is dropped).
+    ///
+    /// The rows are boxed: every shard's bounded queue is pre-allocated at
+    /// op-size slots, and a message plus a delivery inline would multiply that
+    /// buffer by their ~500 bytes for an op that is one row pair.
+    StoreDelivery {
+        message: Box<crate::data::Message>,
+        delivery: Box<crate::data::Delivery>,
+        /// `Ok(true)` stored; `Ok(false)` the process was already gone and
+        /// nothing was stored; `Err` the store failed.
+        reply: oneshot::Sender<Result<bool>>,
+    },
     Barrier(oneshot::Sender<Result<()>>),
 }
 
@@ -99,6 +123,9 @@ impl WriteOp {
             | WriteOp::EnqueueAction { pid, .. }
             | WriteOp::OpDone { pid, .. }
             | WriteOp::RemoveProc { pid } => Some(pid.as_str()),
+            // the message's process is the shard its row must follow: the
+            // task writes and the removal of that process
+            WriteOp::StoreDelivery { delivery, .. } => Some(delivery.pid.as_str()),
             // Only the barrier has no process: `flush` queues one on every
             // shard, so it acks once the whole backlog is applied.
             WriteOp::Barrier(_) => None,
@@ -445,6 +472,21 @@ impl StoreWriter {
             WriteOp::RemoveProc { pid } => {
                 store.remove_proc(&pid).await?;
                 Ok(())
+            }
+            WriteOp::StoreDelivery {
+                message,
+                delivery,
+                reply,
+            } => {
+                let stored = store.store_message_delivery(&message, &delivery).await;
+                // the caller (the channel delivery path) decides on the
+                // outcome; the failure travels back to it and stays a shard
+                // failure for the next barrier
+                let _ = reply.send(match &stored {
+                    Ok(stored) => Ok(*stored),
+                    Err(err) => Err(err.clone()),
+                });
+                stored.map(|_| ())
             }
             // Acked by the writer loop before `apply`, never reached here.
             WriteOp::Barrier(_) => unreachable!("barrier is acked by the writer loop"),

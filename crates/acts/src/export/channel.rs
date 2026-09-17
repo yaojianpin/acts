@@ -303,8 +303,16 @@ async fn deliver(
 /// ack it. The canonical message row is stored once per message id and every
 /// channel delivery of the same event gets its own delivery row. Returns
 /// `Ok(Some(delivery_id))` when a fresh delivery row was stored, `Ok(None)`
-/// when nothing needs storing (non-ack channel or a redelivery that already
-/// has its row), `Err` when the store failed.
+/// when nothing needs storing (non-ack channel, a redelivery that already has
+/// its row, or a process whose rows are already gone), `Err` when the store
+/// failed.
+///
+/// The row is written through the process's writer shard
+/// ([`Cache::store_delivery`]), not straight into the store: it has to be
+/// ordered with the process's task writes, and the close of a finished task is
+/// what settles the deliveries of that task. A row created off that order can
+/// land after the close — open on a task that is already over — and keep the
+/// process's rows alive forever.
 async fn store_if(
     runtime: &Arc<Runtime>,
     ack: bool,
@@ -314,18 +322,20 @@ async fn store_if(
 ) -> Result<Option<String>> {
     if ack && !chan_id.is_empty() && message.delivery_id.is_none() {
         info!(r#type = message.r#type, pid = %message.pid, tid = %message.tid, mid = %message.mid,  state = %message.state, "delivery stored");
-        let store = runtime.cache().store();
-
-        // the canonical message is stored once per message id — later
-        // channel deliveries of the same event reuse the row
-        if !store.messages().exists(&message.id).await? {
-            store.messages().create(&message.into_message()).await?;
-        }
 
         // each channel delivery gets its own delivery row
         let delivery = message.into_delivery(chan_id, pattern);
-        match store.deliveries().create(&delivery).await {
-            Ok(_) => Ok(Some(delivery.id)),
+        match runtime
+            .cache()
+            .store_delivery(&message.into_message(), &delivery)
+            .await
+        {
+            // stored: the handler is handed this delivery id to ack
+            Ok(true) => Ok(Some(delivery.id)),
+            // the process is gone — its rows were swept — so the message is
+            // handed over without a delivery row: there is nothing left to
+            // ack, and re-creating rows behind the removal would strand them
+            Ok(false) => Ok(None),
             Err(err) => {
                 error!(error = %err, "channel store failure");
                 Err(err)

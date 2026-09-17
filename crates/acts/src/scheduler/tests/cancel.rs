@@ -184,11 +184,11 @@ async fn sch_shutdown_reaches_the_running_act() {
 
     engine.close().await;
 
-    // the act gave its wait up rather than being abandoned with the engine
-    assert_eq!(
-        proc.with_env(|env| env.get::<String>(PROBE)).as_deref(),
-        Some("stopped")
-    );
+    // the act gave its wait up rather than being abandoned with the engine.
+    // `close` fires the token; the act's own task is scheduled after that, so
+    // its report is waited for instead of assumed to have landed before the
+    // close returned
+    wait_probe(&proc, "stopped").await;
 }
 
 /// An act that fails *because* it was overridden does not overwrite the state

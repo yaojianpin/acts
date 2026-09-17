@@ -852,6 +852,29 @@ impl Cache {
             .await
     }
 
+    /// Store one message's canonical row and one ack-channel delivery row,
+    /// written on the process's shard so the create cannot land after the
+    /// close (or the removal) that decides the row's fate — see
+    /// [`WriteOp::StoreDelivery`]. `Ok(false)` means nothing was stored: the
+    /// process is gone, so the message is delivered without a delivery row
+    /// instead of re-creating rows behind its removal.
+    pub(crate) async fn store_delivery(
+        &self,
+        message: &crate::data::Message,
+        delivery: &crate::data::Delivery,
+    ) -> Result<bool> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.writer
+            .send(WriteOp::StoreDelivery {
+                message: Box::new(message.clone()),
+                delivery: Box::new(delivery.clone()),
+                reply: tx,
+            })
+            .await?;
+        rx.await
+            .map_err(|_| ActError::Runtime("store writer dropped the delivery".to_string()))?
+    }
+
     /// Close the deliveries of a finished task (deferred to the writer
     /// thread). The store keeps an `Error` row for manual handling.
     pub(crate) async fn close_deliveries(&self, pid: &str, tid: &str) -> Result<()> {

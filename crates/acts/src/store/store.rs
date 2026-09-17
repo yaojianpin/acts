@@ -545,6 +545,69 @@ impl Store {
         Ok(())
     }
 
+    /// Store the canonical row of one message together with one channel's
+    /// delivery row for it.
+    ///
+    /// The caller writes this on the process's own writer shard
+    /// ([`WriteOp::StoreDelivery`](crate::cache::writer::WriteOp)), which is
+    /// what makes the two decisions below decidable: a task write (its close
+    /// included), a removal, and this create are applied in enqueue order, so
+    /// there is no window in which the row can slip past the close that should
+    /// have settled it.
+    ///
+    /// - the process row is gone: its rows were already swept, and a delivery
+    ///   created now would belong to a process nothing ever sweeps again — it
+    ///   is dropped (the message is delivered without a delivery row) instead
+    ///   of re-creating rows behind the removal;
+    /// - the task is already closed: the close (`close_deliveries`) settled
+    ///   every delivery of that task, and this row reached the store after it.
+    ///   Nothing else ever settles a delivery of a finished task, so it is
+    ///   born `Completed` — created open it would keep the process's rows
+    ///   alive forever (the sweeper needs every delivery settled);
+    /// - otherwise it is born `Created` for the client to ack.
+    ///
+    /// A message emitted outside a process (`Emitter::emit_message` from an
+    /// embedder or a transport) names neither process nor task: there is no
+    /// lifecycle to be ordered against, so it is stored the way it always was.
+    pub(crate) async fn store_message_delivery(
+        &self,
+        message: &data::Message,
+        delivery: &data::Delivery,
+    ) -> Result<bool> {
+        let carries_task = !delivery.pid.is_empty() && !delivery.tid.is_empty();
+        if carries_task && !self.procs().exists(&delivery.pid).await? {
+            return Ok(false);
+        }
+        if !self.messages().exists(&message.id).await? {
+            self.messages().create(message).await?;
+        }
+        let mut delivery = delivery.clone();
+        if carries_task && self.task_closed(&delivery.pid, &delivery.tid).await? {
+            delivery.status = DeliveryStatus::Completed;
+        }
+        self.deliveries().create(&delivery).await?;
+        Ok(true)
+    }
+
+    /// Whether the task `tid` of `pid` is already in a terminal state — the
+    /// state a delivery must be born in when it reaches the store after that
+    /// task closed.
+    ///
+    /// A row that is not there at all is NOT closed: a task admitted while the
+    /// write path was saturated has no durable row yet (its own write was
+    /// refused and only the `Exec` overflow descriptor was queued), and
+    /// absence says nothing about its state — the client must still be able to
+    /// ack a delivered message. Absence caused by a removal is the caller's
+    /// process check, which the shared shard keeps in the order of the removal
+    /// itself.
+    async fn task_closed(&self, pid: &str, tid: &str) -> Result<bool> {
+        let id = utils::Id::new(pid, tid).id();
+        match self.tasks().find(&id).await {
+            Ok(task) => Ok(TaskState::from(task.state.as_str()).is_completed()),
+            Err(_) => Ok(false),
+        }
+    }
+
     /// Collect deliveries with no response: re-arm the ones that were handed
     /// over but never acked (`Delivered` — as well as `Created` rows that were
     /// never successfully dispatched) and mark the ones that exceeded
@@ -1121,6 +1184,139 @@ mod tests {
         assert!(store.procs().find("p-completed").await.is_err());
         assert!(store.messages().query(&q).await.unwrap().rows.is_empty());
         assert!(store.deliveries().query(&q).await.unwrap().rows.is_empty());
+    }
+
+    /// A delivery row is decided as it is written, on the process's own shard:
+    /// the create is ordered with that process's task writes and its removal,
+    /// so a row can never land after the close (or the removal) that should
+    /// have settled or dropped it. The outcomes:
+    ///
+    /// - the task is still running: an open row for the client to ack;
+    /// - the task closed first: born `Completed` — the close settled every
+    ///   delivery of that task and nothing settles a later one, so an open row
+    ///   here would keep the finished process's rows (and its pid, and its
+    ///   workdir) alive forever;
+    /// - the task has no durable row (admitted while the write path was
+    ///   saturated): absence is not a close, the row stays open;
+    /// - the message names no process at all: nothing to order it against;
+    /// - the process is gone: nothing is written, so no message/delivery row
+    ///   is re-created behind the removal that swept them.
+    #[tokio::test]
+    async fn a_delivery_is_born_settled_when_its_task_already_closed() {
+        let (_, store) = counting_store();
+        let now = crate::utils::time::time_millis();
+        store
+            .procs()
+            .create(&crate::store::data::Proc {
+                id: "p-born".to_string(),
+                state: "running".to_string(),
+                mid: "m1".to_string(),
+                name: "t".to_string(),
+                start_time: now,
+                end_time: 0,
+                timestamp: now,
+                model: "{}".to_string(),
+                env: "{}".to_string(),
+                err: None,
+                removable: false,
+                v: 0,
+            })
+            .await
+            .unwrap();
+        for (tid, state) in [("t-run", "running"), ("t-done", "completed")] {
+            store
+                .tasks()
+                .create(&crate::store::data::Task {
+                    id: crate::utils::Id::new("p-born", tid).id(),
+                    pid: "p-born".to_string(),
+                    tid: tid.to_string(),
+                    node_data: "{}".to_string(),
+                    kind: "act".to_string(),
+                    prev: None,
+                    next: Vec::new(),
+                    parent: None,
+                    name: "n".to_string(),
+                    state: state.to_string(),
+                    err: None,
+                    start_time: now,
+                    end_time: 0,
+                    timestamp: now,
+                    v: 0,
+                })
+                .await
+                .unwrap();
+        }
+
+        async fn store_delivery(store: &Store, tid: &str, id: &str) -> crate::Result<bool> {
+            let message = crate::store::data::Message {
+                id: format!("m-{id}"),
+                pid: "p-born".to_string(),
+                tid: tid.to_string(),
+                ..Default::default()
+            };
+            let delivery = crate::store::data::Delivery {
+                id: format!("d-{id}"),
+                msg_id: format!("m-{id}"),
+                pid: "p-born".to_string(),
+                tid: tid.to_string(),
+                ..Default::default()
+            };
+            store.store_message_delivery(&message, &delivery).await
+        }
+
+        // the task is still running: the row waits for the client's ack
+        assert!(store_delivery(&store, "t-run", "open").await.unwrap());
+        assert_eq!(
+            store.deliveries().find("d-open").await.unwrap().status,
+            DeliveryStatus::Created
+        );
+
+        // the task closed before the row reached the store: it is born
+        // settled, with the canonical message row it carries
+        assert!(store_delivery(&store, "t-done", "late").await.unwrap());
+        assert_eq!(
+            store.deliveries().find("d-late").await.unwrap().status,
+            DeliveryStatus::Completed
+        );
+        assert!(store.messages().find("m-late").await.is_ok());
+
+        // no durable task row at all (a task admitted while the write path was
+        // saturated has none yet): absence is not a close — the client is
+        // still asked to ack
+        assert!(store_delivery(&store, "t-unwritten", "new").await.unwrap());
+        assert_eq!(
+            store.deliveries().find("d-new").await.unwrap().status,
+            DeliveryStatus::Created
+        );
+
+        // a message emitted outside any process names no task: there is no
+        // lifecycle to be ordered against, so it is stored open as before
+        assert!(
+            store
+                .store_message_delivery(
+                    &crate::store::data::Message {
+                        id: "m-free".to_string(),
+                        ..Default::default()
+                    },
+                    &crate::store::data::Delivery {
+                        id: "d-free".to_string(),
+                        msg_id: "m-free".to_string(),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store.deliveries().find("d-free").await.unwrap().status,
+            DeliveryStatus::Created
+        );
+
+        // the process's rows are gone: the message is not stored at all
+        store.procs().delete("p-born").await.unwrap();
+        assert!(!store_delivery(&store, "t-done", "ghost").await.unwrap());
+        assert!(store.deliveries().find("d-ghost").await.is_err());
+        assert!(store.messages().find("m-ghost").await.is_err());
     }
 
     /// The terminal delivery close settles the engine-owned rows of the task
