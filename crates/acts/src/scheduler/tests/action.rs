@@ -3,13 +3,12 @@ use serde_json::json;
 use crate::{
     Act, Action, ChannelOptions, Engine, MessageState, TaskState, Vars, Workflow,
     event::EventAction,
-    scheduler::Sign,
     store::{
         KvStore, MemoryStore,
         query::{Expr, Filter, Query},
     },
+    utils,
     utils::test::{USES_CODE, USES_IRQ, USES_PARALLEL, auto_complete, create_proc},
-    utils::{self, consts},
 };
 use serial_test::serial;
 use std::sync::Arc;
@@ -98,7 +97,7 @@ async fn sch_action_recover_pending() {
 }
 
 /// A `next` that already completed is a no-op on recovery: the durable
-/// `NEXT_COMPLETE` marker stops re-propagation, so reloading after a crash
+/// The applied propagation phase stops re-propagation, so reloading after a crash
 /// never duplicates tasks.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
@@ -172,7 +171,7 @@ async fn sch_action_recover_completed_next_is_noop() {
     engine.close().await;
 
     // reload from the same store: recovery re-dispatches the record, but the
-    // durable NEXT_COMPLETE marker turns the re-run into a no-op
+    // durable applied propagation phase turns the re-run into a no-op
     let engine2 = Engine::builder()
         .set_store(store.clone())
         .start()
@@ -198,8 +197,8 @@ async fn sch_action_recover_completed_next_is_noop() {
     );
 
     // the outbox close is ordered after the persist: act1's stored vars row
-    // must already carry the NEXT_COMPLETE marker (the async write was drained
-    // by the flush barrier before the op was marked `Done`)
+    // must already carry the applied propagation phase (the async write was
+    // drained by the flush barrier before the op was marked `Done`)
     let q = Query::new().filter(
         Filter::and()
             .expr(Expr::eq("pid", pid.clone()))
@@ -208,8 +207,10 @@ async fn sch_action_recover_completed_next_is_noop() {
     let rows = store2.vars().query(&q).await.unwrap().rows;
     assert_eq!(rows.len(), 1);
     let data: Vars = serde_json::from_str(&rows[0].data).unwrap();
-    let sign = data.get::<Sign>(consts::TASK_SIGN).unwrap();
-    assert!(sign.contains(Sign::NEXT_COMPLETE));
+    let phase = data
+        .get::<String>(crate::scheduler::PropagationPhase::task_key())
+        .unwrap();
+    assert_eq!(phase, "applied");
 
     let reloaded = rt2.proc(&pid).await.unwrap().unwrap();
     assert!(reloaded.state().is_running());
@@ -416,6 +417,12 @@ async fn sch_action_next_op_pending_until_children_complete() {
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
     assert!(store.load_pending_ops().await.unwrap().is_empty());
+    let rows = store.ops().query(&q).await.unwrap().rows;
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].phase,
+        crate::store::data::OpPhase::Completed.as_ref()
+    );
 }
 
 /// A non-`Next` action whose outbox record landed but whose task state write

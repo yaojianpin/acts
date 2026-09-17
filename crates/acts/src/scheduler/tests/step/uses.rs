@@ -4,7 +4,7 @@ use crate::MessageState;
 use crate::event::EventAction;
 use crate::{
     Message, Vars, Workflow,
-    scheduler::{ActTask, Sign, TaskState},
+    scheduler::{ActTask, PropagationPhase, Sign, TaskState},
     utils::{
         self,
         test::{USES_ACTION, USES_IRQ, USES_MSG, USES_SET, auto_complete, create_proc},
@@ -294,7 +294,7 @@ async fn sch_step_uses_irq_and_then_branch() {
 /// while the child's `next` is dispatched separately, so the step's `next` can
 /// run in between. Counting the terminal state alone then completes the step —
 /// and the whole workflow — with the child's outputs missing; the step must
-/// wait for the child's [`Sign::NEXT_COMPLETE`] marker, which only the child's
+/// wait for the child's applied propagation phase, which only the child's
 /// `next` sets.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
@@ -341,7 +341,7 @@ async fn sch_step_uses_waits_for_child_next_before_complete() {
     );
 
     // the child's `next` propagated its outputs into the step
-    child.set_sign(Sign::NEXT_COMPLETE);
+    child.set_propagation_phase(PropagationPhase::Applied);
     for _ in 0..4 {
         ActTask::next(&step, &ctx).await.unwrap();
         if step.state().is_completed() {

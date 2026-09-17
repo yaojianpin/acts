@@ -1,6 +1,6 @@
 use super::health::{LoopGuard, SchedulerHealth};
 use super::validation::SchemaCache;
-use super::{ActTask, Context, Process, Sign, Task, TaskState};
+use super::{ActTask, Context, Process, Task, TaskState};
 use crate::snapshot::{SnapshotOptions, SnapshotStore};
 use crate::{
     ActError, Action, Config, Error, Package, Result, ShareLock, Vars, Workflow,
@@ -61,6 +61,8 @@ pub(crate) struct SnapshotRegistry {
 enum JobOp {
     Exec,
     Next,
+    Error,
+    Abort,
 }
 
 impl JobOp {
@@ -68,6 +70,8 @@ impl JobOp {
         match self {
             JobOp::Exec => "task.exec",
             JobOp::Next => "task.next",
+            JobOp::Error => "propagation.error",
+            JobOp::Abort => "propagation.abort",
         }
     }
 }
@@ -480,7 +484,7 @@ impl Runtime {
     /// before the record lands is
     /// consistent (nothing to replay); a crash after it lands is recovered by
     /// [`Self::recover_actions`]; a crash after the operation ran is a no-op
-    /// thanks to the durably persisted `NEXT_COMPLETE` marker.
+    /// thanks to the durably persisted applied propagation phase.
     pub(crate) async fn enqueue_next(&self, task: &Arc<Task>) -> Result<()> {
         self.cache.enqueue_next(task).await?;
         match self.queue.send_next(task) {
@@ -497,7 +501,7 @@ impl Runtime {
     }
 
     /// Durable outbox close for a task whose `next` propagation finished: queue
-    /// the task persist (with the `NEXT_COMPLETE` marker) and then the outbox
+    /// the task persist (with the applied propagation phase) and then the outbox
     /// record close, in order, on the store writer — non-blocking. Called from
     /// `Task::next` once the task reaches a terminal state (also for the
     /// idempotent replay guard), and from the event loop when `next` ends in
@@ -527,7 +531,7 @@ impl Runtime {
     /// persisted, or before a client action's state write became durable).
     /// Re-enqueueing is idempotent:
     /// - `next` records of a task whose `next` already completed are skipped
-    ///   by the durable `NEXT_COMPLETE` guard and closed;
+    ///   by the durable applied propagation guard and closed;
     /// - `next` records of a task whose `next` never ran are dispatched again,
     ///   and re-scheduling is deduplicated against tasks created before the
     ///   crash;
@@ -608,7 +612,27 @@ impl Runtime {
                         Err(err) => return Err(err),
                     }
                 }
-            } else if task.is_sign(Sign::NEXT_COMPLETE) {
+            } else if r#type == data::OpType::Error.as_ref() {
+                match self.queue.send_error(&task) {
+                    Ok(()) => {
+                        if let Err(err) = self.cache.mark_op_dispatched(&op).await {
+                            error!(error = %err, pid = %pid, tid = %tid, "failed to mark replayed error dispatched");
+                        }
+                    }
+                    Err(ActError::QueueFull) => continue,
+                    Err(err) => return Err(err),
+                }
+            } else if r#type == data::OpType::Abort.as_ref() {
+                match self.queue.send_abort(&task) {
+                    Ok(()) => {
+                        if let Err(err) = self.cache.mark_op_dispatched(&op).await {
+                            error!(error = %err, pid = %pid, tid = %tid, "failed to mark replayed abort dispatched");
+                        }
+                    }
+                    Err(ActError::QueueFull) => continue,
+                    Err(err) => return Err(err),
+                }
+            } else if task.is_propagation_applied() {
                 // propagation already completed durably; just close the record
                 // and settle the engine-owned deliveries (an `Error` row stays)
                 self.cache.store().complete_ops(&pid, &tid, &r#type).await?;
@@ -642,7 +666,11 @@ impl Runtime {
                 && op.status == data::OpStatus::Pending.as_ref();
             let is_next_overflow = r#type == data::OpType::Next.as_ref()
                 && op.status == data::OpStatus::Overflow.as_ref();
-            if !is_exec_overflow && !is_next_overflow {
+            let is_error_pending = r#type == data::OpType::Error.as_ref()
+                && op.status == data::OpStatus::Pending.as_ref();
+            let is_abort_pending = r#type == data::OpType::Abort.as_ref()
+                && op.status == data::OpStatus::Pending.as_ref();
+            if !is_exec_overflow && !is_next_overflow && !is_error_pending && !is_abort_pending {
                 continue;
             }
 
@@ -656,12 +684,20 @@ impl Runtime {
                 continue;
             };
 
-            if task.state().is_completed() {
+            let is_propagation =
+                r#type == data::OpType::Error.as_ref() || r#type == data::OpType::Abort.as_ref();
+            let propagation_applied =
+                is_propagation && data::OpPhase::from_task_value(op.phase.as_str()).is_applied();
+            if task.state().is_completed() && !propagation_applied {
                 store.complete_ops(&pid, &tid, &r#type).await?;
                 continue;
             }
 
-            let queued = if is_next_overflow {
+            let queued = if r#type == data::OpType::Error.as_ref() {
+                self.queue.send_error(&task)
+            } else if r#type == data::OpType::Abort.as_ref() {
+                self.queue.send_abort(&task)
+            } else if is_next_overflow {
                 self.queue.send_next(&task)
             } else {
                 self.queue.send(&task)
@@ -822,6 +858,8 @@ impl Runtime {
                     let (task, proc, operation) = match data {
                         QueueData::Task { task, proc } => (task, proc, JobOp::Exec),
                         QueueData::Next { task, proc } => (task, proc, JobOp::Next),
+                        QueueData::Error { task, proc } => (task, proc, JobOp::Error),
+                        QueueData::AbortPropagation { task, proc } => (task, proc, JobOp::Abort),
                         QueueData::Abort => break,
                     };
                     // Serialization: the lane already orders one process's jobs,
@@ -848,6 +886,25 @@ impl Runtime {
 
     /// Build an execution context while catching a panic at the poll boundary.
     async fn execute_job(task: Arc<Task>, proc: Arc<Process>, operation: JobOp) {
+        // The operation has left the queue. Record that boundary before the
+        // effect starts; a failed phase note is observability damage, not a
+        // reason to drop already-accepted work.
+        if operation != JobOp::Exec {
+            let op_type = match operation {
+                JobOp::Next => data::OpType::Next,
+                JobOp::Error => data::OpType::Error,
+                JobOp::Abort => data::OpType::Abort,
+                JobOp::Exec => unreachable!(),
+            };
+            if let Err(err) = task
+                .runtime()
+                .cache()
+                .mark_op_phase(&task.pid, &task.id, op_type, data::OpPhase::EffectInFlight)
+                .await
+            {
+                error!(error = %err, "failed to mark operation effect-in-flight");
+            }
+        }
         let Some(ctx) = Self::isolate_context(task.clone(), proc).await else {
             return;
         };
@@ -857,6 +914,8 @@ impl Runtime {
             match operation {
                 JobOp::Exec => Self::run_exec_job(task, ctx).await,
                 JobOp::Next => Self::run_next_job(task, ctx).await,
+                JobOp::Error => Self::run_error_job(task, ctx).await,
+                JobOp::Abort => Self::run_abort_job(task, ctx).await,
             }
         })
         .await;
@@ -899,6 +958,42 @@ impl Runtime {
         // On success the record is closed inside `next` once the task reaches
         // a terminal state; outcomes with children still in flight or an
         // interrupt leave it `Pending` for recovery to replay.
+    }
+
+    /// Run an Error propagation descriptor. `on_error` may schedule a catch
+    /// branch and handle the error locally, or continue through the established
+    /// parent handler; the outbox record is closed only after this returns.
+    async fn run_error_job(task: Arc<Task>, ctx: Context) {
+        let result = task.on_error(&ctx).await;
+        if let Err(err) = result {
+            error!(error = %err, "error propagation failed");
+        }
+        if let Err(err) = task
+            .runtime()
+            .cache()
+            .complete_propagation(&task, data::OpType::Error)
+            .await
+        {
+            error!(error = %err, "complete error propagation failed");
+        }
+    }
+
+    /// Run one hop of abort propagation. The target is already terminal in the
+    /// normal path; this job settles its non-terminal descendants and queues
+    /// the parent hop, rather than walking the ancestor chain inline.
+    async fn run_abort_job(task: Arc<Task>, ctx: Context) {
+        let result = ctx.abort_one_hop(&task).await;
+        if let Err(err) = result {
+            error!(error = %err, "abort propagation failed");
+        }
+        if let Err(err) = task
+            .runtime()
+            .cache()
+            .complete_propagation(&task, data::OpType::Abort)
+            .await
+        {
+            error!(error = %err, "complete abort propagation failed");
+        }
     }
 
     async fn isolate_context(task: Arc<Task>, proc: Arc<Process>) -> Option<Context> {

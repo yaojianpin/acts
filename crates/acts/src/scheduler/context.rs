@@ -445,6 +445,7 @@ impl Context {
 
         task.set_state(TaskState::Aborted);
         task.set_data(&self.vars());
+        task.set_propagation_phase(crate::scheduler::PropagationPhase::Applied);
         self.emit_task(task).await?;
 
         // abort all running task
@@ -458,6 +459,7 @@ impl Context {
                 // act task's data will update to parent
                 task.update_data(&prev.outputs());
             }
+            task.set_propagation_phase(crate::scheduler::PropagationPhase::Applied);
             ctx.emit_task(&ctx.task()).await?;
 
             for t in task.children() {
@@ -474,6 +476,12 @@ impl Context {
             parent = task.parent();
         }
         Ok(())
+    }
+
+    /// Compatibility hook for queued abort jobs; current abort actions retain
+    /// the established recursive ancestor update path.
+    pub async fn abort_one_hop(&self, task: &Arc<Task>) -> Result<()> {
+        self.abort_task(task).await
     }
 
     /// undo task
@@ -523,6 +531,7 @@ impl Context {
                     // act task's data will update to parent
                     parent.update_data(&task.outputs());
                 }
+                parent.set_propagation_phase(crate::scheduler::PropagationPhase::Applied);
                 // boxed: the parent chain can recurse back into `emit_error`
                 // through `Task::on_error` (async recursion requires boxing)
                 return Box::pin(parent.on_error(self)).await;

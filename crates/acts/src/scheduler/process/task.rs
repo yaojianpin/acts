@@ -12,7 +12,7 @@ use crate::{
     Vars, data,
     event::EventAction,
     scheduler::{
-        Context, Process, Runtime, TaskState,
+        Context, Process, PropagationPhase, Runtime, TaskState,
         tree::{Node, NodeContent},
     },
     utils::{self, consts},
@@ -211,6 +211,36 @@ impl Task {
 
     pub fn sign(&self) -> Option<Sign> {
         self.with_data(|data| data.get::<Sign>(consts::TASK_SIGN))
+    }
+
+    /// The durable phase of propagating this task's outcome to its parent.
+    /// Unlike the in-memory [`NextAction`], this is persisted with the task's
+    /// vars row and therefore survives a crash.
+    pub fn propagation_phase(&self) -> PropagationPhase {
+        self.with_data(|data| {
+            data.get::<String>(PropagationPhase::task_key())
+                .as_deref()
+                .map_or(PropagationPhase::None, |value| {
+                    PropagationPhase::from_task_value(Some(value))
+                })
+        })
+    }
+
+    pub fn set_propagation_phase(&self, phase: PropagationPhase) {
+        let key = PropagationPhase::task_key();
+        self.set_data_with(move |data| match phase.as_task_value() {
+            Some(value) => data.set(key, value),
+            None => {
+                data.remove(key);
+            }
+        });
+    }
+
+    /// A durable propagation guard: once applied, replaying the same
+    /// propagation must not re-schedule children, re-merge outputs, or move an
+    /// already-processed terminal outcome to the parent again.
+    pub fn is_propagation_applied(&self) -> bool {
+        self.propagation_phase().is_applied()
     }
 
     pub fn set_sign(&self, sign: Sign) {
@@ -444,7 +474,7 @@ impl Task {
             }
         } else {
             // re-entering a non-terminal state: reset the propagation guard
-            self.remove_sign(Sign::NEXT_COMPLETE);
+            self.set_propagation_phase(PropagationPhase::None);
             if state.is_created() {
                 self.set_start_time(utils::time::time_millis());
             }
@@ -624,6 +654,19 @@ impl Task {
         let action_outbox = !matches!(&action.event, EventAction::Next | EventAction::Push);
         if action_outbox {
             ctx.runtime.enqueue_action(&action).await?;
+            if let Err(err) = ctx
+                .runtime
+                .cache()
+                .mark_op_phase(
+                    &action.pid,
+                    &action.tid,
+                    crate::data::OpType::Action,
+                    crate::data::OpPhase::EffectInFlight,
+                )
+                .await
+            {
+                error!(error = %err, "failed to mark action effect-in-flight");
+            }
         }
 
         let result: Result<()> = (async {
@@ -1045,7 +1088,7 @@ impl Task {
                     task.exec(ctx).await?;
                 }
                 // A child only counts once its own `next` has run
-                // (`NEXT_COMPLETE`), because that is what propagates the
+                // (applied propagation), because that is what propagates the
                 // child's outputs into this task. A terminal state alone is
                 // written by whatever job applied the child's action — e.g.
                 // `acts.core.action` setting `Submitted` inside the `exec`
@@ -1054,7 +1097,7 @@ impl Task {
                 // (and the whole workflow) with the child's outputs missing.
                 // The child's `next` re-enters this step's `next`, which then
                 // observes the marker and proceeds.
-                if task.state().is_completed() && task.is_sign(Sign::NEXT_COMPLETE) {
+                if task.state().is_completed() && task.is_propagation_applied() {
                     count += 1;
                 }
             }
@@ -1120,6 +1163,12 @@ impl Task {
             if count == task_children.len()
                 && self.is_auto_complete()
                 && !self.state().is_completed()
+                && !self
+                    .runtime
+                    .cache()
+                    .store()
+                    .has_pending_propagation(&self.pid, &self.id)
+                    .await?
             {
                 // check if the task is error catched
                 let is_empty_catched = task_children
@@ -1202,8 +1251,8 @@ impl ActTask for Arc<Task> {
         let task = ctx.task();
 
         // idempotent replay guard: skip if this task already propagated
-        if self.is_sign(Sign::NEXT_COMPLETE) {
-            // close the re-dispatched outbox record: the completion marker is
+        if self.is_propagation_applied() {
+            // close the re-dispatched outbox record: the applied phase is
             // already durable, so the re-run is a no-op
             if let Err(err) = self.runtime().complete_next(self).await {
                 error!(error = %err, "complete_next failed");
@@ -1237,9 +1286,9 @@ impl ActTask for Arc<Task> {
         debug!(action = %next_action, "next action");
 
         if task.state().is_completed() {
-            // terminal + emitted → propagation complete, mark idempotent and
-            // close the durable outbox record (persisting the marker first)
-            self.set_sign(Sign::NEXT_COMPLETE);
+            // terminal + emitted → propagation applied, mark idempotent and
+            // close the durable outbox record (persisting the phase first)
+            self.set_propagation_phase(PropagationPhase::Applied);
             if let Err(err) = self.runtime().complete_next(self).await {
                 error!(error = %err, "complete_next failed");
             }

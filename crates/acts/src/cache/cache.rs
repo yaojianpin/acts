@@ -826,6 +826,8 @@ impl Cache {
             .send(WriteOp::EnqueueNext {
                 pid: task.pid.clone(),
                 tid: task.id.clone(),
+                target_tid: task.parent_id(),
+                source_version: task.timestamp,
             })
             .await
     }
@@ -836,6 +838,23 @@ impl Cache {
                 pid: op.pid.clone(),
                 tid: op.tid.clone(),
                 r#type: op.r#type.clone(),
+            })
+            .await
+    }
+
+    pub(crate) async fn mark_op_phase(
+        &self,
+        pid: &str,
+        tid: &str,
+        r#type: crate::data::OpType,
+        phase: crate::data::OpPhase,
+    ) -> Result<()> {
+        self.writer
+            .send(WriteOp::MarkOpPhase {
+                pid: pid.to_string(),
+                tid: tid.to_string(),
+                r#type: r#type.as_ref().to_string(),
+                phase,
             })
             .await
     }
@@ -906,6 +925,16 @@ impl Cache {
     /// message status) were already queued by the caller, so FIFO order makes
     /// `Done` durable only after both.
     pub(crate) async fn complete_action(&self, task: &Arc<Task>) -> Result<()> {
+        // The task/message writes were queued before this call. The durable
+        // EffectDurable note is therefore ordered before the outbox close.
+        self.writer
+            .send(WriteOp::MarkOpPhase {
+                pid: task.pid.clone(),
+                tid: task.id.clone(),
+                r#type: crate::data::OpType::Action.as_ref().to_string(),
+                phase: crate::data::OpPhase::EffectDurable,
+            })
+            .await?;
         self.writer
             .send(WriteOp::OpDone {
                 pid: task.pid.clone(),
@@ -915,15 +944,47 @@ impl Cache {
             .await
     }
 
-    /// Durable outbox close: queue the task persist (capturing the
-    /// `NEXT_COMPLETE` marker), then queue the record close after it — FIFO
-    /// order makes `Done` durable only after the marker, without blocking the
+    /// Close a one-hop propagation after its local effect is durable.
+    pub(crate) async fn complete_propagation(
+        &self,
+        task: &Arc<Task>,
+        r#type: crate::data::OpType,
+    ) -> Result<()> {
+        self.writer
+            .send(WriteOp::MarkOpPhase {
+                pid: task.pid.clone(),
+                tid: task.id.clone(),
+                r#type: r#type.as_ref().to_string(),
+                phase: crate::data::OpPhase::EffectDurable,
+            })
+            .await?;
+        self.writer
+            .send(WriteOp::OpDone {
+                pid: task.pid.clone(),
+                tid: task.id.clone(),
+                r#type: r#type.as_ref().to_string(),
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Durable outbox close: queue the task persist (capturing the applied
+    /// propagation phase), then queue the record close after it — FIFO
+    /// order makes `Done` durable only after the phase, without blocking the
     /// event loop. If the process crashes between the two, the record is still
-    /// `Pending` and recovery re-dispatches it; the durable marker turns the
+    /// `Pending` and recovery re-dispatches it; the durable phase turns the
     /// re-run into a no-op. Safe to call repeatedly: already-closed records
     /// are left untouched.
     pub(crate) async fn complete_next(&self, task: &Arc<Task>) -> Result<()> {
         self.upsert_async(task).await?;
+        self.writer
+            .send(WriteOp::MarkOpPhase {
+                pid: task.pid.clone(),
+                tid: task.id.clone(),
+                r#type: crate::data::OpType::Next.as_ref().to_string(),
+                phase: crate::data::OpPhase::EffectDurable,
+            })
+            .await?;
         self.writer
             .send(WriteOp::OpDone {
                 pid: task.pid.clone(),

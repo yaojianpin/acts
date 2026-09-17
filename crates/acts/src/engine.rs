@@ -149,7 +149,7 @@ impl Engine {
         self.runtime.event_loop();
 
         // Outbox replay first: every task that has a durable pending record is
-        // driven deterministically to its next checkpoint (NEXT_COMPLETE /
+        // driven deterministically to its next checkpoint (applied propagation /
         // applied-action guards make the replay idempotent); resume runs after
         // so it only sees what the replay left mid-flight and never overlaps
         // the replay on the same task.

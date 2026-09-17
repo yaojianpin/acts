@@ -1,5 +1,8 @@
 use core::{clone::Clone, fmt};
 use serde::{Deserialize, Serialize};
+use strum::AsRefStr;
+
+use crate::utils::consts;
 
 #[derive(Debug, Deserialize, Serialize, Default, Clone, PartialEq)]
 pub enum TaskState {
@@ -42,6 +45,52 @@ pub enum TaskState {
 
     /// task is removed
     Removed,
+}
+
+/// Durable idempotency phase of a task's propagation to its parent.
+///
+/// This is intentionally separate from [`TaskState`]: a task can be terminal
+/// while the propagation of its terminal outcome is still in flight. The phase
+/// is stored with the task's durable vars row, so once it says `Applied` the
+/// same durable write that carries the propagation result also carries the
+/// idempotency guard.
+#[derive(Debug, Deserialize, Serialize, Default, Clone, Copy, PartialEq, Eq, AsRefStr)]
+#[strum(serialize_all = "snake_case")]
+#[serde(rename_all = "snake_case")]
+pub enum PropagationPhase {
+    /// No parent propagation has started yet.
+    #[default]
+    None,
+    /// The propagation is pending or dispatched; recovery may replay it.
+    Pending,
+    /// The target received this task's outcome and that result is durable.
+    /// Replaying must never apply the outcome twice.
+    Applied,
+    /// The propagation operation and its outbox close are complete.
+    Completed,
+}
+
+impl PropagationPhase {
+    pub fn is_applied(self) -> bool {
+        matches!(self, Self::Applied | Self::Completed)
+    }
+
+    pub fn as_task_value(self) -> Option<String> {
+        (!matches!(self, Self::None)).then(|| self.as_ref().to_string())
+    }
+
+    pub fn from_task_value(value: Option<&str>) -> Self {
+        match value {
+            Some("applied") => Self::Applied,
+            Some("completed") => Self::Completed,
+            Some("pending") => Self::Pending,
+            _ => Self::None,
+        }
+    }
+
+    pub fn task_key() -> &'static str {
+        consts::TASK_PROPAGATION
+    }
 }
 
 impl TaskState {

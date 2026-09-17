@@ -19,7 +19,7 @@ pub use crate::Result;
 pub use context::Context;
 pub use process::{Process, Task};
 pub use runtime::Runtime;
-pub use state::TaskState;
+pub use state::{PropagationPhase, TaskState};
 
 #[allow(unused_imports)]
 pub use tree::{Node, NodeContent, NodeData, NodeKind, NodeTree};
@@ -54,9 +54,6 @@ bitflags! {
         /// uses action completed
         const USES_COMPLETE  = 0b0000_0000_0100_0000;
 
-        /// task `next` propagation completed (durable replay guard: persisted
-        /// before the outbox record is closed, so recovery skips completed work)
-        const NEXT_COMPLETE  = 0b0000_0000_1000_0000;
     }
 }
 

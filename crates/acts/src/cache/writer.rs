@@ -32,6 +32,8 @@ pub(crate) enum WriteOp {
     EnqueueNext {
         pid: String,
         tid: String,
+        target_tid: Option<String>,
+        source_version: i64,
     },
     /// Durable outbox enqueue: record a task execution as pending when the
     /// in-memory scheduler queue is full. The task state is queued before this
@@ -52,6 +54,14 @@ pub(crate) enum WriteOp {
         pid: String,
         tid: String,
         r#type: String,
+    },
+    /// Advance an operation's public lifecycle phase without closing it. This
+    /// is ordered by the same process shard as the writes it observes.
+    MarkOpPhase {
+        pid: String,
+        tid: String,
+        r#type: String,
+        phase: crate::data::OpPhase,
     },
     /// Durable outbox enqueue: record a client action (event + options) as
     /// pending, before the action is applied in memory, so a crash before the
@@ -120,6 +130,7 @@ impl WriteOp {
             | WriteOp::EnqueueExec { pid, .. }
             | WriteOp::MarkOpDispatched { pid, .. }
             | WriteOp::MarkOpOverflow { pid, .. }
+            | WriteOp::MarkOpPhase { pid, .. }
             | WriteOp::EnqueueAction { pid, .. }
             | WriteOp::OpDone { pid, .. }
             | WriteOp::RemoveProc { pid } => Some(pid.as_str()),
@@ -438,8 +449,15 @@ impl StoreWriter {
                 let _ = store.try_mark_removable(&pid).await;
                 Ok(())
             }
-            WriteOp::EnqueueNext { pid, tid } => {
-                store.enqueue_next_op(&pid, &tid).await?;
+            WriteOp::EnqueueNext {
+                pid,
+                tid,
+                target_tid,
+                source_version,
+            } => {
+                store
+                    .enqueue_next_op_details(&pid, &tid, target_tid, source_version)
+                    .await?;
                 Ok(())
             }
             WriteOp::EnqueueExec { pid, tid } => {
@@ -452,6 +470,15 @@ impl StoreWriter {
             }
             WriteOp::MarkOpOverflow { pid, tid, r#type } => {
                 store.mark_op_overflow(&pid, &tid, &r#type).await?;
+                Ok(())
+            }
+            WriteOp::MarkOpPhase {
+                pid,
+                tid,
+                r#type,
+                phase,
+            } => {
+                store.mark_op_phase(&pid, &tid, &r#type, phase).await?;
                 Ok(())
             }
             WriteOp::EnqueueAction {
@@ -505,7 +532,7 @@ impl StoreWriter {
         }
         // lifecycle row + the vars rows of every dirty scope on the parent
         // chain (scope vars are decoupled from task state writes). FIFO order
-        // keeps the scope vars (e.g. the `NEXT_COMPLETE` marker) durable
+        // keeps the scope vars (e.g. the applied propagation phase) durable
         // before any outbox record queued after this write.
         store.persist_task_rows(task).await?;
         if let Some(p) = task.proc() {
@@ -722,6 +749,8 @@ mod tests {
             .send(WriteOp::EnqueueNext {
                 pid: pid.to_string(),
                 tid: "t1".to_string(),
+                target_tid: None,
+                source_version: 0,
             })
             .await
             .unwrap();
@@ -827,6 +856,8 @@ mod tests {
             .send(WriteOp::EnqueueNext {
                 pid: "p2".to_string(),
                 tid: "t1".to_string(),
+                target_tid: None,
+                source_version: 0,
             })
             .await
             .unwrap_err();
@@ -903,6 +934,8 @@ mod tests {
         let op = |tid: &str| WriteOp::EnqueueNext {
             pid: "p1".to_string(),
             tid: tid.to_string(),
+            target_tid: None,
+            source_version: 0,
         };
 
         // park the consumer inside a write: the op it took is off the queue,
@@ -942,6 +975,8 @@ mod tests {
         let op = |pid: &str, tid: &str| WriteOp::EnqueueNext {
             pid: pid.to_string(),
             tid: tid.to_string(),
+            target_tid: None,
+            source_version: 0,
         };
 
         // fill the busy shard: its consumer is parked inside a write, so the op

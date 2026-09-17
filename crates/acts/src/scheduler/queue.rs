@@ -47,6 +47,16 @@ pub enum QueueData {
         task: Arc<Task>,
         proc: Arc<Process>,
     },
+    /// One-hop unhandled-error propagation.
+    Error {
+        task: Arc<Task>,
+        proc: Arc<Process>,
+    },
+    /// One-hop abort propagation.
+    AbortPropagation {
+        task: Arc<Task>,
+        proc: Arc<Process>,
+    },
     /// Wake sentinel for an idle lane worker (see [`Queue::abort`]); it belongs
     /// to no process, so it is pushed to a lane directly.
     Abort,
@@ -150,6 +160,34 @@ impl Queue {
         self.try_push(
             self.gate.lane_index(&task.pid),
             QueueData::Next {
+                task: task.clone(),
+                proc,
+            },
+        )
+    }
+
+    /// Queue one-hop error propagation. Same failure contract as
+    /// [`Self::send`].
+    pub(crate) fn send_error(&self, task: &Arc<Task>) -> Result<()> {
+        self.check_alive()?;
+        let proc = Self::item_proc(task)?;
+        self.try_push(
+            self.gate.lane_index(&task.pid),
+            QueueData::Error {
+                task: task.clone(),
+                proc,
+            },
+        )
+    }
+
+    /// Queue one-hop abort propagation. Same failure contract as
+    /// [`Self::send`].
+    pub(crate) fn send_abort(&self, task: &Arc<Task>) -> Result<()> {
+        self.check_alive()?;
+        let proc = Self::item_proc(task)?;
+        self.try_push(
+            self.gate.lane_index(&task.pid),
+            QueueData::AbortPropagation {
                 task: task.clone(),
                 proc,
             },

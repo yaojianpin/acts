@@ -11,7 +11,7 @@ pub use delivery::Delivery;
 pub use event::Event;
 pub use message::{DeliveryStatus, Message};
 pub use model::Model;
-pub use op::{Op, OpStatus, OpType};
+pub use op::{Op, OpPhase, OpStatus, OpType};
 pub use package::Package;
 pub use proc::Proc;
 pub use task::Task;

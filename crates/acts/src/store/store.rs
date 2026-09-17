@@ -1863,7 +1863,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn recovery_and_removal_are_exhaustive_past_one_query_page() {
         use super::{KvCollection, StoreIden};
-        use crate::store::data::{Op, OpStatus};
+        use crate::store::data::{Op, OpPhase, OpStatus};
 
         let (kv, store) = counting_store();
         let pid = "p-huge";
@@ -1879,7 +1879,12 @@ mod tests {
                 ops.create_ops(&Op {
                     id: format!("{pid}op{i}"),
                     pid: pid.to_string(),
+                    source_tid: "t1".to_string(),
                     tid: "t1".to_string(),
+                    target_tid: None,
+                    source_version: 0,
+                    causal_op_id: None,
+                    phase: OpPhase::DurablePending.as_ref().to_string(),
                     r#type: "next".to_string(),
                     status: OpStatus::Pending.as_ref().to_string(),
                     event: None,

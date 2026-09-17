@@ -181,14 +181,33 @@ impl Store {
     /// *before* the in-memory queue dispatch, after the task state write, so a
     /// `Pending` record always has a durable task behind it.
     pub async fn enqueue_next_op(&self, pid: &str, tid: &str) -> Result<()> {
-        self.enqueue_op(pid, tid, data::OpType::Next, None, None)
-            .await
+        self.enqueue_next_op_details(pid, tid, None, 0).await
+    }
+
+    pub async fn enqueue_next_op_details(
+        &self,
+        pid: &str,
+        tid: &str,
+        target_tid: Option<String>,
+        source_version: i64,
+    ) -> Result<()> {
+        self.enqueue_op(
+            pid,
+            tid,
+            tid,
+            data::OpType::Next,
+            None,
+            None,
+            target_tid,
+            source_version,
+        )
+        .await
     }
 
     /// Record a durable outbox entry for task execution. This is the disk
     /// overflow queue used when the in-memory scheduler queue is full.
     pub async fn enqueue_exec_op(&self, pid: &str, tid: &str) -> Result<()> {
-        self.enqueue_op(pid, tid, data::OpType::Exec, None, None)
+        self.enqueue_op(pid, tid, tid, data::OpType::Exec, None, None, None, 0)
             .await
     }
 
@@ -208,20 +227,27 @@ impl Store {
         self.enqueue_op(
             pid,
             tid,
+            tid,
             data::OpType::Action,
             Some(event.to_string()),
             Some(options.to_string()),
+            None,
+            0,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn enqueue_op(
         &self,
         pid: &str,
         tid: &str,
+        source_tid: &str,
         r#type: data::OpType,
         event: Option<String>,
         options: Option<String>,
+        target_tid: Option<String>,
+        source_version: i64,
     ) -> Result<()> {
         let collection = self.ops();
         // Dedup against an in-flight Pending record for this (pid, tid, type).
@@ -246,7 +272,12 @@ impl Store {
         let op = data::Op {
             id: utils::longid(),
             pid: pid.to_string(),
+            source_tid: source_tid.to_string(),
             tid: tid.to_string(),
+            target_tid,
+            source_version,
+            phase: data::OpPhase::DurablePending.as_ref().to_string(),
+            causal_op_id: None,
             r#type: r#type.as_ref().to_string(),
             status: data::OpStatus::Pending.as_ref().to_string(),
             event,
@@ -275,6 +306,23 @@ impl Store {
         self.ops().query_all(&q).await
     }
 
+    /// Whether a task still has an unresolved Error/Abort propagation hop.
+    /// Terminal parent completion must wait for these operations: otherwise a
+    /// normal completion pass can run between the source failure and the queued
+    /// ancestor handler and mark the process completed before the failure does.
+    pub async fn has_pending_propagation(&self, pid: &str, tid: &str) -> Result<bool> {
+        let collection = self.ops();
+        let q = Query::new().filter(
+            Filter::and()
+                .expr(Expr::eq("pid", pid.to_string()))
+                .expr(Expr::eq("tid", tid.to_string())),
+        );
+        Ok(collection.query_all(&q).await?.iter().any(|op| {
+            matches!(op.r#type.as_str(), "error" | "abort")
+                && op.status != data::OpStatus::Done.as_ref()
+        }))
+    }
+
     /// Mark a record as handed to the in-memory scheduler. Boot recovery still
     /// treats this state as replayable; periodic overflow recovery does not.
     pub async fn mark_op_dispatched(&self, pid: &str, tid: &str, r#type: &str) -> Result<()> {
@@ -290,6 +338,7 @@ impl Store {
                     || op.status == data::OpStatus::Overflow.as_ref())
             {
                 op.status = data::OpStatus::Dispatched.as_ref().to_string();
+                op.phase = data::OpPhase::Dispatched.as_ref().to_string();
                 op.update_time = utils::time::time_millis();
                 collection.update(&op).await?;
             }
@@ -325,7 +374,7 @@ impl Store {
     /// filtered by operation type: a `next` close must not sweep away a
     /// concurrent client-action record of the same task (and vice versa). Must
     /// only be called after the operation's effects (the task state write,
-    /// including the `NEXT_COMPLETE` marker) were durably persisted — the
+    /// including the applied propagation phase) were durably persisted — the
     /// writer FIFO order guarantees this.
     pub async fn complete_ops(&self, pid: &str, tid: &str, r#type: &str) -> Result<()> {
         let collection = self.ops();
@@ -341,6 +390,7 @@ impl Store {
                     || op.status == data::OpStatus::Overflow.as_ref())
             {
                 op.status = data::OpStatus::Done.as_ref().to_string();
+                op.phase = data::OpPhase::Completed.as_ref().to_string();
                 op.update_time = utils::time::time_millis();
                 collection.update(&op).await?;
             }
@@ -360,6 +410,8 @@ impl Store {
         for mut op in collection.query_all(&q).await? {
             if op.r#type == r#type && op.status == data::OpStatus::Pending.as_ref() {
                 op.status = data::OpStatus::Overflow.as_ref().to_string();
+                // Overflow changes where the operation waits, not the caller
+                // phase: it remains Durable-Pending.
                 op.update_time = utils::time::time_millis();
                 collection.update(&op).await?;
             }
@@ -374,6 +426,60 @@ impl Store {
         self.ops()
             .delete_all(Some(&Filter::and().expr(Expr::eq("pid", pid.to_string()))))
             .await
+    }
+
+    /// Advance the lifecycle phase of in-flight records. The update is
+    /// forward-only and filtered by operation type, so a phase note for a
+    /// `next` cannot close or regress a concurrent action/error/abort record.
+    pub async fn mark_op_phase(
+        &self,
+        pid: &str,
+        tid: &str,
+        r#type: &str,
+        next: data::OpPhase,
+    ) -> Result<()> {
+        let collection = self.ops();
+        let q = Query::new().filter(
+            Filter::and()
+                .expr(Expr::eq("pid", pid.to_string()))
+                .expr(Expr::eq("tid", tid.to_string())),
+        );
+        for mut op in collection.query_all(&q).await? {
+            let current = data::OpPhase::from_task_value(op.phase.as_str());
+            if op.r#type == r#type
+                && op.status != data::OpStatus::Done.as_ref()
+                && current.can_advance_to(next)
+            {
+                op.phase = next.as_ref().to_string();
+                op.update_time = utils::time::time_millis();
+                collection.update(&op).await?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Record a durable one-hop error/abort propagation. `tid` is the target
+    /// whose propagation job will run; `source_tid` names the task whose
+    /// terminal outcome caused it.
+    pub async fn enqueue_propagation_op(
+        &self,
+        source_tid: &str,
+        source_version: i64,
+        target: &crate::scheduler::Task,
+        r#type: data::OpType,
+    ) -> Result<()> {
+        let target_tid = target.parent_id();
+        self.enqueue_op(
+            &target.pid,
+            &target.id,
+            source_tid,
+            r#type,
+            None,
+            None,
+            target_tid,
+            source_version,
+        )
+        .await
     }
 
     /// Advance a stored delivery from `Created` to `Delivered` — the channel
@@ -540,7 +646,7 @@ impl Store {
                 // is cleared only when no mutation raced it — a mutation that
                 // landed while the row was being written keeps the scope
                 // dirty so the next persist persists it (clearing it away
-                // would durably lose the mutation, e.g. a `NEXT_COMPLETE`
+                // would durably lose the mutation, e.g. an applied propagation
                 // marker that recovery relies on)
                 let generation = t.vars_gen();
                 self.upsert_task_vars(&t).await?;

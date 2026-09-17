@@ -16,6 +16,7 @@ pub const ACT_INDEX: &str = "$index";
 pub const ACT_VALUE: &str = "$value";
 
 pub const TASK_SIGN: &str = "__sign";
+pub const TASK_PROPAGATION: &str = "__propagation";
 pub const TASK_COST: &str = "__cost";
 
 /// Node ids of the timeout branches that already fired for one task
