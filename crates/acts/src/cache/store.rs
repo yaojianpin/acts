@@ -179,7 +179,8 @@ impl Store {
     /// in-flight record per operation, matching the previous
     /// `Sign::NEXT_PENDING` semantics. Queued on the store writer (FIFO)
     /// *before* the in-memory queue dispatch, after the task state write, so a
-    /// `Pending` record always has a durable task behind it.
+    /// `Pending` record always has a durable task behind it. Applied on the
+    /// pid's writer shard only (see `enqueue_op`).
     pub async fn enqueue_next_op(&self, pid: &str, tid: &str) -> Result<()> {
         self.enqueue_next_op_details(pid, tid, None, 0).await
     }
@@ -205,7 +206,8 @@ impl Store {
     }
 
     /// Record a durable outbox entry for task execution. This is the disk
-    /// overflow queue used when the in-memory scheduler queue is full.
+    /// overflow queue used when the in-memory scheduler queue is full. Applied
+    /// on the pid's writer shard only (see `enqueue_op`).
     pub async fn enqueue_exec_op(&self, pid: &str, tid: &str) -> Result<()> {
         self.enqueue_op(pid, tid, tid, data::OpType::Exec, None, None, None, 0)
             .await
@@ -216,7 +218,8 @@ impl Store {
     /// task's in-flight `next` record (an interrupt act keeps its `next` op
     /// `Pending` while waiting for the client). Written before the action is
     /// applied so recovery can re-apply it when the crash happened before the
-    /// task state write became durable.
+    /// task state write became durable. Applied on the pid's writer shard only
+    /// (see `enqueue_op`).
     pub async fn enqueue_action_op(
         &self,
         pid: &str,
@@ -237,6 +240,15 @@ impl Store {
         .await
     }
 
+    /// Record one outbox row, deduplicated per `(pid, tid, type)`: at most one
+    /// in-flight `Pending` record per operation. The check-then-create is
+    /// race-free ONLY under the writer's serialization — every caller applies
+    /// on the pid's one shard consumer (`WriteOp::Enqueue*`), which runs its
+    /// ops strictly sequentially, so two creates for one pid can never
+    /// interleave. A caller off the shard races the consumer and can store a
+    /// duplicate `Pending` record (replayed twice on recovery); the KV layer
+    /// has no atomic unique insert to fall back on. Never call this — or the
+    /// `enqueue_*_op` wrappers — from outside the writer.
     #[allow(clippy::too_many_arguments)]
     async fn enqueue_op(
         &self,
@@ -456,30 +468,6 @@ impl Store {
             }
         }
         Ok(())
-    }
-
-    /// Record a durable one-hop error/abort propagation. `tid` is the target
-    /// whose propagation job will run; `source_tid` names the task whose
-    /// terminal outcome caused it.
-    pub async fn enqueue_propagation_op(
-        &self,
-        source_tid: &str,
-        source_version: i64,
-        target: &crate::scheduler::Task,
-        r#type: data::OpType,
-    ) -> Result<()> {
-        let target_tid = target.parent_id();
-        self.enqueue_op(
-            &target.pid,
-            &target.id,
-            source_tid,
-            r#type,
-            None,
-            None,
-            target_tid,
-            source_version,
-        )
-        .await
     }
 
     /// Advance a stored delivery from `Created` to `Delivered` — the channel

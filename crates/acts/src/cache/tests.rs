@@ -317,6 +317,47 @@ async fn cache_writes_after_remove_are_skipped() {
     assert!(!store.procs().exists(&pid).await.unwrap());
 }
 
+/// Racing producers cannot duplicate a Pending outbox record: every create
+/// runs on the pid's one writer shard, so the dedup check-then-create in
+/// `enqueue_op` is serialized — N concurrent enqueues of the same record
+/// leave exactly one. Fails if shard application is ever made concurrent.
+#[tokio::test(flavor = "multi_thread")]
+async fn cache_concurrent_enqueues_leave_one_pending_record() {
+    let engine = Engine::builder().start().await.unwrap();
+    let cache = engine.runtime().cache().clone();
+    let pid = utils::longid();
+
+    let mut racers = Vec::new();
+    for _ in 0..32 {
+        let cache = cache.clone();
+        let pid = pid.clone();
+        racers.push(tokio::spawn(async move {
+            let action = Action::new(&pid, "t1", EventAction::Next, Vars::new());
+            cache.enqueue_action(&action).await.unwrap();
+        }));
+    }
+    for racer in racers {
+        racer.await.unwrap();
+    }
+    cache.flush().await.unwrap();
+
+    let pending: Vec<_> = cache
+        .store()
+        .load_pending_ops()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|op| op.pid == pid && op.tid == "t1" && op.r#type == "action")
+        .collect();
+    assert_eq!(
+        pending.len(),
+        1,
+        "racing enqueues must not duplicate the Pending record"
+    );
+
+    engine.close().await;
+}
+
 /// `start_parked` touches ONLY parked rows (durable `None` state): it starts them
 /// into free slots and leaves every other row alone. Non-`None` non-terminal
 /// rows (`Ready`/`Running`/`Pending`) belong to processes with no in-memory
