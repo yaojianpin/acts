@@ -393,7 +393,7 @@ impl StoreWriter {
     /// Block until all previously enqueued writes have been applied: a barrier
     /// is queued behind the backlog of every shard, and every one of them must
     /// ack, so the flush covers all shards rather than the one the caller's pid
-    /// would hash to.
+    /// would hash to. A pid-scoped reader needs only [`Self::flush_pid`].
     ///
     /// Returns the first failure of a write enqueued since the previous
     /// flush: a flush only acks `Ok` when every write queued before the
@@ -430,6 +430,32 @@ impl StoreWriter {
         match failed {
             Some(err) => Err(err),
             None => Ok(()),
+        }
+    }
+
+    /// Block until every write previously queued for `pid` has been applied:
+    /// a barrier on the one shard the pid hashes to, where all of the pid's
+    /// ops are FIFO. A pid-scoped read — a cache-miss load of the process —
+    /// needs exactly this visibility (never a row older than the pid's
+    /// pending writes) without paying [`Self::flush`]'s wait for the backlog
+    /// of every other shard.
+    ///
+    /// Fails like [`Self::flush`]: the writer is closed, or a write queued
+    /// before the barrier on that shard failed.
+    pub(crate) async fn flush_pid(&self, pid: &str) -> Result<()> {
+        let senders = self.senders().ok_or_else(Self::closed)?;
+        let (tx, rx) = oneshot::channel();
+        // Room first, then the count — a cancelled barrier must not stay in a
+        // backlog it never queued (same discipline as `flush`).
+        let permit = senders[pid_lane(pid, senders.len())]
+            .reserve()
+            .await
+            .map_err(|_| Self::closed())?;
+        self.backlog.record_accepted();
+        permit.send(WriteOp::Barrier(tx));
+        match rx.await {
+            Ok(result) => result,
+            Err(_) => Err(ActError::Runtime("store writer task dropped".to_string())),
         }
     }
 
@@ -607,6 +633,10 @@ mod tests {
         fail_put: AtomicBool,
         gate: AtomicBool,
         in_gate: AtomicBool,
+        /// When set, only the `put`s whose key carries this substring (a pid)
+        /// park on the gate: holds one shard's write in flight while every
+        /// other shard keeps applying.
+        gate_key: Mutex<Option<String>>,
         /// Number of concurrent `put`s the join gate opens at; 0 is off.
         join: AtomicUsize,
         in_flight: AtomicUsize,
@@ -632,6 +662,7 @@ mod tests {
                 fail_put: AtomicBool::new(false),
                 gate: AtomicBool::new(false),
                 in_gate: AtomicBool::new(false),
+                gate_key: Mutex::new(None),
                 join: AtomicUsize::new(0),
                 in_flight: AtomicUsize::new(0),
                 open: AtomicBool::new(false),
@@ -649,6 +680,25 @@ mod tests {
 
         fn disarm_gate(&self) {
             self.gate.store(false, Ordering::SeqCst);
+        }
+
+        /// Park only the `put`s whose key carries this pid (a collection row's
+        /// index keys embed the pid): that pid's shard writer stalls inside
+        /// the store while every other shard keeps working.
+        fn gate_pid(&self, pid: &str) {
+            *self.gate_key.lock() = Some(pid.to_string());
+        }
+
+        fn disarm_pid_gate(&self) {
+            *self.gate_key.lock() = None;
+        }
+
+        fn key_gated(&self, key: &str) -> bool {
+            self.gate_key
+                .lock()
+                .as_deref()
+                .map(|needle| key.contains(needle))
+                .unwrap_or(false)
         }
 
         /// Let a `put` through only once `writes` of them have been inside the
@@ -700,9 +750,9 @@ mod tests {
 
         async fn put(&self, key: &str, value: Vec<u8>) -> Result<()> {
             let _gate = self.join_gate().await;
-            if self.gate.load(Ordering::SeqCst) {
+            if self.gate.load(Ordering::SeqCst) || self.key_gated(key) {
                 self.in_gate.store(true, Ordering::SeqCst);
-                while self.gate.load(Ordering::SeqCst) {
+                while self.gate.load(Ordering::SeqCst) || self.key_gated(key) {
                     tokio::time::sleep(Duration::from_millis(1)).await;
                 }
             }
@@ -802,6 +852,43 @@ mod tests {
     async fn flush_is_clean_without_failures() {
         let (_, _, writer) = test_writer();
         writer.flush().await.unwrap();
+    }
+
+    /// `flush_pid` barriers the pid's own shard only: it acks while another
+    /// shard is stuck mid-write — where the global `flush` waits for it.
+    #[tokio::test]
+    async fn flush_pid_waits_only_for_its_own_shard() {
+        let (store, kv, writer) = test_writer();
+        let (a, b) = pids_on_distinct_shards(SHARDS);
+
+        // park only the writes of `b`: its shard's writer task stalls inside
+        // the store while `a`'s shard keeps applying. Index keys encode the
+        // pid value with `-` escaped (`pids-b2` lands as `pids=2Db2`), so the
+        // gate must match the escaped form.
+        kv.gate_pid(&b.replace('-', "=2D"));
+        enqueue(&writer, &b).await;
+        kv.wait_entered().await;
+
+        // a write for `a` lands, and its shard barrier acks, while `b` stalls
+        enqueue(&writer, &a).await;
+        tokio::time::timeout(Duration::from_secs(5), writer.flush_pid(&a))
+            .await
+            .expect("flush_pid must not wait for another shard's backlog")
+            .unwrap();
+        assert!(durable(&store, &a).await);
+
+        // the global flush covers every shard: it cannot complete while `b`
+        // is stuck
+        assert!(
+            tokio::time::timeout(Duration::from_millis(200), writer.flush())
+                .await
+                .is_err(),
+            "flush must wait for the stalled shard"
+        );
+
+        kv.disarm_pid_gate();
+        writer.flush().await.unwrap();
+        assert!(durable(&store, &b).await);
     }
 
     /// `close` flushes pending writes first, waits for an in-flight write to

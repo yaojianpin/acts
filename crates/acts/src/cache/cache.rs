@@ -284,7 +284,12 @@ impl Cache {
         match self.get_proc(pid) {
             Some(proc) => Ok(Some(proc.clone())),
             None => {
-                self.flush().await?;
+                // The load must not observe rows older than the writes still
+                // queued for this pid. Every op of one pid is FIFO on one
+                // shard, so a barrier on that shard gives the same
+                // read-after-write visibility as a full `flush` — without
+                // waiting for the backlog of every other shard.
+                self.writer.flush_pid(pid).await?;
                 // Coalesce misses. The insert/remove critical section is short;
                 // only the leader performs store I/O, while waiters clone the
                 // same process pointer from the watch result.
@@ -354,6 +359,21 @@ impl Cache {
 
     #[instrument(skip(self), fields(pid = %pid))]
     pub async fn remove(&self, pid: &str) -> Result<bool> {
+        self.queue_removal(pid).await?;
+        // When this returns, the removal is durable and no pending write can
+        // resurrect the rows afterwards.
+        self.writer.flush().await?;
+        Ok(true)
+    }
+
+    /// Evict the process from memory and queue its durable removal without
+    /// waiting for it: `RemoveProc` is serialized through the writer (FIFO),
+    /// so it can never race writes still queued for the process — its
+    /// completion markers are applied first, then the rows are dropped once
+    /// the shard reaches the op. Callers that need the removal to be durable
+    /// when they return flush afterwards: [`Self::remove`] for one pid,
+    /// [`Self::sweep_removable`] once for the whole batch.
+    async fn queue_removal(&self, pid: &str) -> Result<()> {
         debug!("remove pid={pid}");
         // Read before the writer drops the row: the directory lives in the
         // process's env, and a swept process's instance is already evicted.
@@ -366,18 +386,11 @@ impl Cache {
         // on, while the reverse order would strand the directory with no row
         // left to find it.
         remove_workdir(pid, workdir);
-        // Removal is serialized through the writer (FIFO) so it can never
-        // race writes still queued for the process — its completion markers
-        // are applied first, then the rows are dropped. `flush` keeps the
-        // callers' contract: when this returns, the removal is durable and
-        // no pending write can resurrect the rows afterwards.
         self.writer
             .send(WriteOp::RemoveProc {
                 pid: pid.to_string(),
             })
-            .await?;
-        self.writer.flush().await?;
-        Ok(true)
+            .await
     }
 
     /// The sweeper: delete every finished process whose deliveries have all
@@ -390,7 +403,14 @@ impl Cache {
     pub(crate) async fn sweep_removable(&self) -> Result<usize> {
         let pids = self.store.sweep_settled_procs(256).await?;
         for pid in &pids {
-            self.remove(pid).await?;
+            self.queue_removal(pid).await?;
+        }
+        // One barrier covers the whole sweep: each `RemoveProc` is already
+        // FIFO after its process's pending writes, so the batch flush only
+        // bounds how long the dropped rows can linger for readers — it must
+        // not pay one all-shard wait per process.
+        if !pids.is_empty() {
+            self.writer.flush().await?;
         }
         Ok(pids.len())
     }
@@ -995,6 +1015,11 @@ impl Cache {
         Ok(())
     }
 
+    /// Global writer barrier — test visibility only. Runtime callers never
+    /// wait for the whole writer: a cache-miss load barriers the pid's own
+    /// shard (`writer.flush_pid`), the sweeper batches one barrier per sweep,
+    /// and shutdown drains through `close`.
+    #[cfg(test)]
     pub(crate) async fn flush(&self) -> Result<()> {
         self.writer.flush().await
     }
