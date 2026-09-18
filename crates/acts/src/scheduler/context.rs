@@ -309,6 +309,13 @@ impl Context {
 
     #[instrument(skip(self, node, prev))]
     pub fn sched_task(&self, node: &Arc<Node>, prev: Arc<Task>) -> Result<()> {
+        // never grow a process that is already over: a terminal walk (abort,
+        // error, completion) can race a pending dispatch, and the task it would
+        // create is unreachable — no client is asked for it and its completion
+        // is refused — so it waits forever and wedges the run.
+        if self.proc.state().is_completed() {
+            return Ok(());
+        }
         debug!(nid = %node.id(), kind = %node.kind(), name = %node.name(), "task scheduled");
         let task = self.proc.create_task(node, Some(prev))?;
         self.runtime.push(&task)?;
@@ -322,6 +329,13 @@ impl Context {
         vars: Vars,
         parent: Arc<Task>,
     ) -> Result<()> {
+        // never grow a process that is already over: a terminal walk (abort,
+        // error, completion) can race a pending dispatch, and the task it would
+        // create is unreachable — no client is asked for it and its completion
+        // is refused — so it waits forever and wedges the run.
+        if self.proc.state().is_completed() {
+            return Ok(());
+        }
         debug!(nid = %node.id(), kind = %node.kind(), name = %node.name(), "task scheduled");
         let task = self.proc.create_task(node, Some(parent))?;
         task.set_data(&vars);
@@ -338,6 +352,16 @@ impl Context {
     /// skipped, …) are left alone so legitimate re-execution (redo, timeout
     /// re-evaluation) still creates fresh tasks.
     pub fn schedule_once(&self, node: &Arc<Node>, prev: Arc<Task>) -> Result<()> {
+        // A predecessor the engine has already given up on must not schedule
+        // forward work. An abort/error walk marks its tasks terminal while a
+        // `next` dispatch may still be in flight for the same slot; the task
+        // that would result is unreachable — no client is ever asked for it
+        // and its completion is refused — so it waits forever (and the run
+        // never finishes). Refusing here keeps a dead predecessor's pending
+        // propagation from growing the tree.
+        if prev.state().is_abort() || prev.state().is_error() {
+            return Ok(());
+        }
         if let Some(existing) = self.proc.task_for_node_prev(node.id(), &prev.id)
             && !existing.state().is_completed()
         {
@@ -351,6 +375,13 @@ impl Context {
 
     #[instrument(skip(self, act, vars), fields(uses = %act.uses, name = %act.name))]
     pub fn dispatch_act(&self, act: &Act, vars: Vars) -> Result<()> {
+        // never grow a process that is already over: a terminal walk (abort,
+        // error, completion) can race a pending dispatch, and the task it would
+        // create is unreachable — no client is asked for it and its completion
+        // is refused — so it waits forever and wedges the run.
+        if self.proc.state().is_completed() {
+            return Ok(());
+        }
         debug!(nid = %act.id, "act dispatched");
         let task = self.task();
 
@@ -400,6 +431,27 @@ impl Context {
         if let Some(prev) = task.prev_id()
             && let Some(prev_task) = self.proc.task(&prev)
         {
+            // One redo per `(node, prev)` slot while that redo is still live. A
+            // duplicate `Cancel`/`Back` (the same delivery, or a redelivery of
+            // its durable record) reaches the same slot again; creating a
+            // second instance would leave a whole redo path the client never
+            // drives — an orphan step/act that waits forever and wedges the
+            // process. A redo that already finished is not "live", so a
+            // *legitimate* later rewind (redo, then cancel again) still creates
+            // its own instance, exactly like `Context::schedule_once`'s reuse
+            // rule for replayed `next` work.
+            let node_id = task.node().id().to_string();
+            let live = !self
+                .proc
+                .find_tasks(|t| {
+                    t.node().id() == node_id
+                        && t.prev_id().as_deref() == Some(prev.as_str())
+                        && !t.state().is_completed()
+                })
+                .is_empty();
+            if live {
+                return Ok(());
+            }
             let task = self.proc.create_task(task.node(), Some(prev_task))?;
             self.runtime.push(&task)?;
         }

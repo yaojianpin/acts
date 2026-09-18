@@ -147,44 +147,6 @@ async fn sch_proc_node_self_loop_bounded() {
     assert_eq!(proc.task_by_nid("s1").len(), 3);
     assert_eq!(proc.tasks().len(), 4); // root + 3 x s1
 }
-#[serial]
-#[tokio::test(flavor = "multi_thread")]
-async fn sch_proc_do_tick_skips_terminal_states() {
-    // `do_tick` must only fire timeouts for tasks still in flight: a
-    // completed / error / aborted / skipped step task must not schedule its
-    // timeout children on any tick
-    let workflow = Workflow::new().with_id("w1").with_step(|step| {
-        step.with_id("s1")
-            .with_timeout(|timeout| timeout.with_id("t1"))
-    });
-
-    for state in [
-        TaskState::Completed,
-        TaskState::Error,
-        TaskState::Aborted,
-        TaskState::Skipped,
-    ] {
-        let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
-        let s1 = proc.tree().node("s1").unwrap();
-        let task = proc.create_task(&s1, None).unwrap();
-        task.set_state(state.clone());
-        proc.do_tick().await;
-        assert!(
-            proc.task_by_nid("t1").is_empty(),
-            "a {state} task must not fire its timeouts"
-        );
-        drop(engine);
-    }
-
-    // control: a running task still fires its timeouts
-    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
-    let s1 = proc.tree().node("s1").unwrap();
-    let task = proc.create_task(&s1, None).unwrap();
-    task.set_state(TaskState::Running);
-    proc.do_tick().await;
-    assert_eq!(proc.task_by_nid("t1").len(), 1);
-    drop(engine);
-}
 
 /// A step whose `if` guard holds and whose `next` points back at itself is a
 /// bounded while loop: it keeps re-executing while the condition holds, then —

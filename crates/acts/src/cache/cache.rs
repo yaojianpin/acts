@@ -181,6 +181,12 @@ pub struct Cache {
     /// lookup/admit race. It is process-local: multi-instance deployments still
     /// need an external uniqueness guarantee for externally supplied pids.
     claimed: Arc<RwLock<HashSet<String>>>,
+    /// Pids whose process rows the sweeper has already removed. The removal is
+    /// queued on the writer (FIFO), but a close enqueued *before* the removal
+    /// can still be applied after it — writing a row back under a process that
+    /// no longer exists, which nothing would ever delete. The outbox close
+    /// paths consult this set and skip that dead bookkeeping.
+    removed: Arc<RwLock<HashSet<String>>>,
     /// Boot-resume overflow queue: pids of in-flight (`Ready`/`Running`/
     /// `Pending`) rows that did not fit the resident cap at boot, oldest
     /// first. [`Self::resume_from_queue`] drains them into free slots (the
@@ -219,6 +225,7 @@ impl Cache {
             procs: Arc::new(RwLock::new(HashMap::new())),
             loading: Arc::new(RwLock::new(HashMap::new())),
             claimed: Arc::new(RwLock::new(HashSet::new())),
+            removed: Arc::new(RwLock::new(HashSet::new())),
             pending_resume: Arc::new(RwLock::new(PendingResume::default())),
             store: store.clone(),
             writer: StoreWriter::spawn(
@@ -380,6 +387,8 @@ impl Cache {
         let workdir = self.store.proc_workdir(pid).await;
         self.procs.write().remove(pid);
         self.claimed.write().remove(pid);
+        // anything this process enqueues after this point is dead bookkeeping
+        self.removed.write().insert(pid.to_string());
         // The directory is created by the start and holds nothing the rows
         // depend on, so it goes with them — and goes FIRST: a crash between
         // the two leaves the row still marked, which the next sweep converges
@@ -945,6 +954,12 @@ impl Cache {
     /// message status) were already queued by the caller, so FIFO order makes
     /// `Done` durable only after both.
     pub(crate) async fn complete_action(&self, task: &Arc<Task>) -> Result<()> {
+        // a close that reaches the writer after the process was removed would
+        // re-create a row nothing deletes: skip it (the removal swept the
+        // process's rows, and a closed record is never replayed)
+        if self.removed.read().contains(&task.pid) {
+            return Ok(());
+        }
         // The task/message writes were queued before this call. The durable
         // EffectDurable note is therefore ordered before the outbox close.
         self.writer
@@ -996,6 +1011,9 @@ impl Cache {
     /// re-run into a no-op. Safe to call repeatedly: already-closed records
     /// are left untouched.
     pub(crate) async fn complete_next(&self, task: &Arc<Task>) -> Result<()> {
+        if self.removed.read().contains(&task.pid) {
+            return Ok(());
+        }
         self.upsert_async(task).await?;
         self.writer
             .send(WriteOp::MarkOpPhase {

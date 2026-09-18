@@ -450,6 +450,26 @@ impl Task {
     }
 
     pub fn set_state(&self, state: TaskState) {
+        self.set_state_impl(state, false);
+    }
+
+    /// Move the task to `state` only while it is still `Running`, as one
+    /// atomic step: a decision that landed meanwhile — a client `abort`, an
+    /// error, or the terminal walk of the task's own subtree — must stick
+    /// instead of being overwritten by a completion pass that read the state
+    /// before it changed. Returns whether the transition happened.
+    pub fn set_state_if_running(&self, state: TaskState) -> bool {
+        self.set_state_impl(state, true)
+    }
+
+    fn set_state_impl(&self, state: TaskState, only_if_running: bool) -> bool {
+        // The check and the write share one lock: a `is_running()` read
+        // followed by a write is exactly the window a racing decision slips
+        // through.
+        let mut cur = self.state.write();
+        if only_if_running && !cur.is_running() {
+            return false;
+        }
         // An override of a running task (an `abort`/`cancel`/`skip`/`next`/
         // `remove` action, or an error) must stop the work the task started.
         // The token reaches the act's own execution through
@@ -460,7 +480,7 @@ impl Task {
         // Only a running task is overridden: a task that already reached a
         // terminal state is never dispatched again (a redo builds a new task),
         // so the token is never observed by a later run of this instance.
-        if self.state().is_running() && state.is_completed() {
+        if cur.is_running() && state.is_completed() {
             self.cancel.cancel();
         }
 
@@ -479,12 +499,14 @@ impl Task {
                 self.set_start_time(utils::time::time_millis());
             }
         }
-        *self.state.write() = state.clone();
+        *cur = state.clone();
+        drop(cur);
 
         // clean the err
         if state != TaskState::Error {
             *self.err.write() = None;
         }
+        true
     }
 
     pub fn set_err(&self, err: &Error) {
@@ -784,6 +806,19 @@ impl Task {
                         return Err(ActError::Action("cannot find cancelled tasks".to_string()));
                     }
 
+                    // A cancel rewinds forward work. When that work is already
+                    // terminal the cancel was already applied — a duplicate
+                    // delivery or a replayed durable record — and rewinding
+                    // again would create a second redo path the client never
+                    // drives: an orphan step/act that waits forever and wedges
+                    // the run. Refuse before any redo is created.
+                    if nexts.iter().all(|n| n.state().is_completed()) {
+                        return Err(ActError::Action(format!(
+                            "task('{}') is not allowed to cancel",
+                            task.id
+                        )));
+                    }
+
                     // Register the replacement task BEFORE the undo marks the
                     // cancelled path terminal — same hazard as `Back`: between
                     // the terminal states and the redo task, a concurrently
@@ -874,6 +909,14 @@ impl Task {
                     task.set_err(&err);
                     task.set_data(&ctx.vars());
                     task.on_error(ctx).await?;
+                    // The error walk queued this act's state write; a transient
+                    // store fault there would leave the act durably waiting
+                    // (`interrupt`) while the client was already told it
+                    // errored — a crash would then restore an act nobody will
+                    // ever complete. Re-emit the task so the write is queued
+                    // again and the durable row converges to `error` as soon as
+                    // the backend does.
+                    ctx.emit_task(task).await?;
                 }
                 EventAction::SetProcessVars => {
                     if self.state().is_completed() {
@@ -1191,7 +1234,9 @@ impl Task {
                     ctx.emit_error().await?;
                     return Ok(NextAction::Stop);
                 } else {
-                    self.set_state(TaskState::Completed);
+                    // only complete a task that is still running: a decision
+                    // that landed meanwhile (abort/error) must stick
+                    self.set_state_if_running(TaskState::Completed);
                 }
             }
 

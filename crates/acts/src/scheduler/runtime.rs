@@ -912,7 +912,15 @@ impl Runtime {
         let reporting_ctx = ctx.clone();
         let result = CatchPanic::new(async move {
             match operation {
-                JobOp::Exec => Self::run_exec_job(task, ctx).await,
+                JobOp::Exec => {
+                    // never execute work for a process that is already over:
+                    // a terminal walk can race a queued dispatch, and running
+                    // it would grow the tree under a dead run
+                    if task.proc().is_some_and(|p| p.state().is_completed()) {
+                        return;
+                    }
+                    Self::run_exec_job(task, ctx).await
+                }
                 JobOp::Next => Self::run_next_job(task, ctx).await,
                 JobOp::Error => Self::run_error_job(task, ctx).await,
                 JobOp::Abort => Self::run_abort_job(task, ctx).await,
