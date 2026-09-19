@@ -285,6 +285,22 @@ impl Cache {
         self.procs.read().values().cloned().collect()
     }
 
+    /// The resident process for `pid`, if the engine holds it in memory. A
+    /// process that is parked (`None`), queued for a later slot, or already
+    /// evicted is not resident; its durable rows are the store's to answer for.
+    pub(crate) fn resident(&self, pid: &str) -> Option<Arc<Process>> {
+        self.get_proc(pid)
+    }
+
+    /// Slots currently committed to an in-flight load, plus the resident count
+    /// — the two halves of the capacity decision (see [`Self::reserve_slots`]).
+    /// Test visibility: a pass that leaked its reservation, or a resident set
+    /// that never released a slot, is invisible from the rows alone.
+    #[cfg(test)]
+    pub(crate) fn capacity_state(&self) -> (usize, usize) {
+        (self.procs.read().len(), self.admission.lock().reserved)
+    }
+
     #[instrument(skip(self, rt), fields(pid = %pid))]
     pub async fn proc(&self, pid: &str, rt: &Arc<Runtime>) -> Result<Option<Arc<Process>>> {
         debug!("process: pid={pid}");
@@ -633,11 +649,13 @@ impl Cache {
         // the two never decode — and re-drive — the same durable row.
         let Some(mut reservation) = self.reserve_slots() else {
             // Resident set already at cap (a concurrent pass filled it) —
-            // anything else in flight waits in the overflow queue.
-            let cached: HashSet<String> = self.procs().iter().map(|p| p.id().to_string()).collect();
-            if self.store.count_resumable().await? > cached.len() {
-                self.enqueue_resume_overflow().await?;
-            }
+            // anything else in flight waits in the overflow queue. Whether
+            // anything *else* is in flight is the queue's own question: a
+            // resident row can be a finished process (one this boot loaded
+            // because it still owned an outbox record) that no longer counts
+            // as in-flight, and comparing counts would then read "everything
+            // is loaded" while an over-cap row waited in the store forever.
+            self.enqueue_resume_overflow().await?;
             return Ok(Vec::new());
         };
         let cached: HashSet<String> = self.procs().iter().map(|p| p.id().to_string()).collect();
@@ -657,9 +675,7 @@ impl Cache {
         // the cap window, plus any that were skipped above because the
         // resident set was already full) so the terminal-event refill can load
         // them into later-free slots
-        if cached.len() + resident.len() < self.store.count_resumable().await? {
-            self.enqueue_resume_overflow().await?;
-        }
+        self.enqueue_resume_overflow().await?;
         if !resident.is_empty() {
             debug!(loaded = resident.len(), "in-flight processes loaded");
         }

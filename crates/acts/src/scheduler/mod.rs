@@ -1,6 +1,7 @@
 mod context;
 pub(crate) mod cron;
 mod health;
+pub(crate) mod ops;
 mod process;
 mod queue;
 mod runtime;

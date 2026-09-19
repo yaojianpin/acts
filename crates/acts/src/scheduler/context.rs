@@ -14,7 +14,7 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, instrument};
+use tracing::{debug, error, instrument};
 
 tokio::task_local! {
     static CONTEXT: Context;
@@ -536,6 +536,24 @@ impl Context {
         self.abort_task(task).await
     }
 
+    /// Close the `next` outbox record of a task whose state a **decision walk**
+    /// just set — the cancel/back/skip paths and the siblings an error skips.
+    ///
+    /// Those tasks were decided by the walk itself: it carried their outcome to
+    /// the ancestors that needed it and scheduled whatever the decision left
+    /// behind, so there is nothing for their own propagation to do. Their
+    /// applied-propagation marker stays **unset** — a uses-step must not count
+    /// them (`check_uses_action` requires the marker, which is what keeps the
+    /// cancel path's redo instance driving its step) — but their record is
+    /// closed, because an *open* record is indistinguishable from a propagation
+    /// that is still owed: the runtime outbox pass and the boot replay would
+    /// re-run `Task::next` for them and re-schedule work the decision removed.
+    pub(crate) async fn close_decided_propagation(&self, task: &Arc<Task>) {
+        if let Err(err) = self.runtime.complete_next(task).await {
+            error!(error = %err, pid = %task.pid, tid = %task.id, "failed to close a decided task's outbox record");
+        }
+    }
+
     /// undo task
     /// the undo task is a step task, set the task as completed and set the children acts as cancelled
     pub async fn undo_task(&self, task: &Arc<Task>) -> Result<()> {
@@ -556,6 +574,7 @@ impl Context {
                 }
                 t.set_state(TaskState::Cancelled);
                 self.emit_task(t).await?;
+                self.close_decided_propagation(t).await;
                 nexts.extend_from_slice(&t.children());
             }
 
@@ -563,6 +582,7 @@ impl Context {
         }
         task.set_state(TaskState::Completed);
         self.emit_task(task).await?;
+        self.close_decided_propagation(task).await;
 
         Ok(())
     }

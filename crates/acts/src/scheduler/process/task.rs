@@ -270,6 +270,42 @@ impl Task {
         self.propagation_phase().is_applied()
     }
 
+    /// Whether this task's propagation is *finished*, and a replay of its
+    /// `next` may be treated as a no-op that only closes its outbox record.
+    ///
+    /// The applied marker alone is not that proof. It lives in the scope's
+    /// vars row, which is flushed by whichever write reaches the store first —
+    /// including a **descendant's** persist, whose scope walk writes the dirty
+    /// vars of its ancestors — while the lifecycle row carrying the terminal
+    /// state is written by the task's own transitions. A write cut (a crash)
+    /// between the two therefore leaves `applied` beside a non-terminal state
+    /// — a pair in which the propagation genuinely never finished (the parent
+    /// was never completed), so recovery must replay it instead of closing it
+    /// as done. Both halves together are the guard.
+    pub fn is_propagation_done(&self) -> bool {
+        self.state().is_completed() && self.is_propagation_applied()
+    }
+
+    /// Whether this task's own `next` pass still has work that in-memory
+    /// progress can do — i.e. re-driving it can only move the run forward:
+    ///
+    /// - **running and auto-completing**: the pass completes the task from its
+    ///   children, which is what carries a finished subtree to its parent.
+    ///
+    /// Everything else is left to the path that already owns it. A `next`
+    /// record of a *terminal* task is **closed** by the outbox pass, never
+    /// replayed: a re-run would schedule from a state a decision walk (cancel,
+    /// back, remove, abort) or an interrupted act already resolved, and a
+    /// decision's work is not the scheduler's to redo. A task that is not
+    /// `Running` and not terminal waits on the outside world by design — an
+    /// `Interrupt` for a client action, a `Pending` for its sibling branches,
+    /// a `None`/`Ready` for its first run, a subflow act (`NO_AUTO_COMPLETE`)
+    /// for the child process it started — and its open record is the contract,
+    /// not a stall.
+    pub(crate) fn next_is_drivable(&self) -> bool {
+        self.state().is_running() && self.is_auto_complete()
+    }
+
     pub fn set_sign(&self, sign: Sign) {
         self.set_data_with(move |data| {
             if let Some(ref v) = data.get::<Sign>(consts::TASK_SIGN) {
@@ -866,9 +902,11 @@ impl Task {
                         if p.state().is_running() {
                             p.set_state(TaskState::Completed);
                             ctx.emit_task(&p).await?;
+                            ctx.close_decided_propagation(&p).await;
                         } else if p.state().is_pending() {
                             p.set_state(TaskState::Skipped);
                             ctx.emit_task(&p).await?;
+                            ctx.close_decided_propagation(&p).await;
                         }
                     }
 
@@ -899,6 +937,7 @@ impl Task {
                         }
                         task.set_state(TaskState::Skipped);
                         ctx.emit_task(&task).await?;
+                        ctx.close_decided_propagation(&task).await;
                     }
 
                     // set both current act and parent step to skip
@@ -938,6 +977,7 @@ impl Task {
                         }
                         sub.set_state(TaskState::Skipped);
                         ctx.emit_task(sub).await?;
+                        ctx.close_decided_propagation(sub).await;
                     }
                     task.set_err(&err);
                     task.set_data(&ctx.vars());
@@ -1164,16 +1204,18 @@ impl Task {
                     task.exec(ctx).await?;
                 }
                 // A child only counts once its own `next` has run
-                // (applied propagation), because that is what propagates the
-                // child's outputs into this task. A terminal state alone is
+                // (a finished propagation), because that is what propagates
+                // the child's outputs into this task. A terminal state alone is
                 // written by whatever job applied the child's action — e.g.
                 // `acts.core.action` setting `Submitted` inside the `exec`
                 // above — and the child's queued `next` may still be behind
                 // this job, so counting the state would complete this step
                 // (and the whole workflow) with the child's outputs missing.
                 // The child's `next` re-enters this step's `next`, which then
-                // observes the marker and proceeds.
-                if task.state().is_completed() && task.is_propagation_applied() {
+                // observes the marker and proceeds. The marker alone is not
+                // enough either: a cut write can leave it durable beside a
+                // non-terminal state (see [`Task::is_propagation_done`]).
+                if task.is_propagation_done() {
                     count += 1;
                 }
             }
@@ -1340,7 +1382,7 @@ impl ActTask for Arc<Task> {
         let task = ctx.task();
 
         // idempotent replay guard: skip if this task already propagated
-        if self.is_propagation_applied() {
+        if self.is_propagation_done() {
             // close the re-dispatched outbox record: the applied phase is
             // already durable, so the re-run is a no-op
             if let Err(err) = self.runtime().complete_next(self).await {

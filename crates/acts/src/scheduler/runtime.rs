@@ -1,4 +1,5 @@
 use super::health::{LoopGuard, SchedulerHealth};
+use super::ops::{OpClaim, OpClaims, OpKey, has_live_descendant};
 use super::validation::SchemaCache;
 use super::{ActTask, Context, Process, Task, TaskState};
 use crate::snapshot::{SnapshotOptions, SnapshotStore};
@@ -21,11 +22,11 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context as TaskContext, Poll},
-    time::Duration,
+    time::{Duration, Instant},
 };
 use tokio::{runtime::Handle, time};
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, info, instrument};
+use tracing::{debug, error, info, instrument, warn};
 
 #[derive(Clone)]
 pub struct Runtime {
@@ -42,6 +43,13 @@ pub struct Runtime {
     trigger_health: Arc<LoopGuard>,
     /// Failure state of the message-retry timer (see [`SchedulerHealth`]).
     retry_health: Arc<LoopGuard>,
+    /// The propagation operations this engine's jobs own, and the ones a job
+    /// left behind (see [`crate::scheduler::ops`]).
+    op_claims: Arc<OpClaims>,
+    /// How long a stalled operation waits before its first liveness re-drive;
+    /// the window doubles per attempt from here (one timer tick, so a stall is
+    /// noticed within a tick of the job that abandoned it).
+    stall_backoff: Duration,
 }
 
 /// Tick the periodic timers run on under test — short enough that a test can
@@ -49,6 +57,12 @@ pub struct Runtime {
 /// ticks (see `scheduler::tests`).
 #[cfg(test)]
 pub(crate) const TEST_TICK_MS: u64 = 800;
+
+/// How many liveness re-drives a stalled `next` propagation gets before its
+/// condition is reported as a warning: the pass keeps retrying on a widening
+/// window, so this is the point at which "it has not converged" is worth
+/// saying out loud.
+const STALLED_OP_WARN_ATTEMPTS: u32 = 4;
 
 /// Registry of snapshot-backed sealed-data targets (see [`crate::snapshot`]).
 pub(crate) struct SnapshotRegistry {
@@ -224,6 +238,18 @@ impl Runtime {
 
     pub fn store(&self) -> Arc<Store> {
         self.cache.store().clone()
+    }
+
+    /// The propagation operations this engine's jobs own, and the ones a job
+    /// left behind (see [`crate::scheduler::ops`]).
+    pub(crate) fn op_claims(&self) -> &Arc<OpClaims> {
+        &self.op_claims
+    }
+
+    /// How long an operation abandoned by its job waits before the liveness
+    /// pass re-drives it.
+    pub(crate) fn stall_backoff(&self) -> Duration {
+        self.stall_backoff
     }
 
     /// Scheduler-backlog metrics: the configured bound, the per-lane bound, the
@@ -632,9 +658,13 @@ impl Runtime {
                     Err(ActError::QueueFull) => continue,
                     Err(err) => return Err(err),
                 }
-            } else if task.is_propagation_applied() {
+            } else if task.is_propagation_done() {
                 // propagation already completed durably; just close the record
-                // and settle the engine-owned deliveries (an `Error` row stays)
+                // and settle the engine-owned deliveries (an `Error` row stays).
+                // A durable `applied` marker beside a *non-terminal* state is
+                // not that proof (see `Task::is_propagation_done`): it falls
+                // through to the replay below, which is what finishes the
+                // propagation the cut interrupted.
                 self.cache.store().complete_ops(&pid, &tid, &r#type).await?;
                 self.cache.store().close_deliveries(&pid, &tid).await?;
                 continue;
@@ -658,23 +688,61 @@ impl Runtime {
     /// queue was full. This is the disk-queue consumer for overload: records
     /// stay pending on disk and are handed back to memory only after they age
     /// past one tick, giving the normal queue time to drain.
-    async fn recover_overflow(self: &Arc<Self>, older_than_millis: i64) -> Result<()> {
+    ///
+    /// The same pass is the **liveness net for `next` propagation**: a record
+    /// whose job ended without closing it (a panic, a cancelled future, a queue
+    /// that refused the dispatch, a close whose write was lost) has no other
+    /// runtime re-drive — the boot replay only runs at startup — so the record
+    /// stays open, its task's parent waits for a propagation that will never
+    /// come, and the process holds a resident slot forever. Re-driving is
+    /// guarded on all four sides:
+    ///
+    /// - the in-memory claim of the operation ([`OpClaims`]): a record a job is
+    ///   running *right now* is never replayed;
+    /// - the task's propagation phase: a record whose propagation is already
+    ///   durable is closed instead of replayed — the effect happened, only the
+    ///   close was lost;
+    /// - the task's own state ([`Task::next_is_drivable`]): only a *running*
+    ///   auto-completing task is re-driven. A terminal task's record is closed,
+    ///   never replayed (a re-run would schedule work a cancel/back/remove/abort
+    ///   decision already resolved), and a task waiting on the outside world —
+    ///   a client action, a sibling branch, its first run, a subflow's child
+    ///   process — owns its open record by design;
+    /// - the task's subtree: while a descendant is still in flight, its
+    ///   completion recurses into this task's `next` and closes the record, so
+    ///   the pass leaves it alone (this is what stops a legitimately waiting
+    ///   parent from being re-driven every tick);
+    /// - the row's own identity (`source_version`/`target_tid`): a record
+    ///   written for a superseded generation of the same task slot is closed,
+    ///   never replayed onto the current one.
+    ///
+    /// A re-drive is idempotent because the operation itself is: `Task::next`
+    /// starts from the durable applied-propagation guard, `schedule_once`
+    /// reuses the task instance a replay would have created, and the task state
+    /// transitions are guarded (`set_state_if_running`). The pass retries on a
+    /// doubling window (see [`OpClaims::attempted`]), so a record that cannot
+    /// make progress is reported instead of hammering the store.
+    pub(crate) async fn recover_outbox(self: &Arc<Self>, older_than_millis: i64) -> Result<()> {
         let store = self.cache.store();
-        for op in store.load_overflow_ops(older_than_millis).await? {
+        let now = Instant::now();
+        // Claims of processes the engine no longer holds: their rows are swept
+        // with them, so there is nothing left to re-drive.
+        self.op_claims
+            .retain_processes(&|pid| self.cache.resident(pid).is_some());
+        for op in store.load_scheduled_ops(older_than_millis).await? {
             let r#type = op.r#type.clone();
+            let (pid, tid) = (op.pid.clone(), op.tid.clone());
             let is_exec_overflow = r#type == data::OpType::Exec.as_ref()
                 && op.status == data::OpStatus::Pending.as_ref();
-            let is_next_overflow = r#type == data::OpType::Next.as_ref()
-                && op.status == data::OpStatus::Overflow.as_ref();
+            let is_next = r#type == data::OpType::Next.as_ref();
             let is_error_pending = r#type == data::OpType::Error.as_ref()
                 && op.status == data::OpStatus::Pending.as_ref();
             let is_abort_pending = r#type == data::OpType::Abort.as_ref()
                 && op.status == data::OpStatus::Pending.as_ref();
-            if !is_exec_overflow && !is_next_overflow && !is_error_pending && !is_abort_pending {
+            if !is_exec_overflow && !is_next && !is_error_pending && !is_abort_pending {
                 continue;
             }
 
-            let (pid, tid) = (op.pid.clone(), op.tid.clone());
             let Some(proc) = self.cache.proc(&pid, self).await? else {
                 store.complete_ops(&pid, &tid, &r#type).await?;
                 continue;
@@ -684,6 +752,62 @@ impl Runtime {
                 continue;
             };
 
+            if is_next {
+                let key = OpKey::new(&pid, &tid, data::OpType::Next);
+                // a job is running this operation right now: the row belongs
+                // to it, and its own close (or its own release) is what moves
+                // the record on
+                if self.op_claims.is_running(&key) {
+                    continue;
+                }
+                if task.is_propagation_done() {
+                    // the propagation is durable and only its close was lost
+                    store.complete_ops(&pid, &tid, &r#type).await?;
+                    store.close_deliveries(&pid, &tid).await?;
+                    self.op_claims.clear(&key);
+                    continue;
+                }
+                // a descendant's completion re-enters this task's `next`,
+                // which is what closes this record; and a task waiting on the
+                // outside world (a client action, a sibling branch, its first
+                // run, a subflow's child process) owns an open record by
+                // design, so neither is a re-drive target
+                if has_live_descendant(&task) || !task.next_is_drivable() {
+                    continue;
+                }
+                if !self.op_claims.may_retry(&key, now) {
+                    continue;
+                }
+                // the record must describe *this* task's propagation: a row
+                // written for a superseded generation of the same slot has
+                // nothing left to do
+                if op.source_version != task.timestamp || op.target_tid != task.parent_id() {
+                    store.complete_ops(&pid, &tid, &r#type).await?;
+                    continue;
+                }
+                match self.queue.send_next(&task) {
+                    Ok(()) => {
+                        if let Err(err) = self.cache.mark_op_dispatched(&op).await {
+                            error!(error = %err, pid = %pid, tid = %tid, "failed to mark re-driven next dispatched");
+                        }
+                    }
+                    // Still full: the record becomes the disk queue's work.
+                    Err(ActError::QueueFull) => {
+                        if let Err(err) = self.cache.mark_next_overflow(&task).await {
+                            error!(error = %err, pid = %pid, tid = %tid, "failed to mark re-driven next overflow");
+                        }
+                    }
+                    Err(err) => {
+                        error!(error = %err, pid = %pid, tid = %tid, "cannot re-drive the stalled next propagation");
+                    }
+                }
+                let attempts = self.op_claims.attempted(&key, self.stall_backoff);
+                if attempts == STALLED_OP_WARN_ATTEMPTS {
+                    warn!(pid = %pid, tid = %tid, attempts, "a next propagation cannot make progress: its task waits on a child that is already terminal without a finished propagation, or on a store that keeps refusing its state write");
+                }
+                continue;
+            }
+
             let is_propagation =
                 r#type == data::OpType::Error.as_ref() || r#type == data::OpType::Abort.as_ref();
             let propagation_applied =
@@ -692,13 +816,24 @@ impl Runtime {
                 store.complete_ops(&pid, &tid, &r#type).await?;
                 continue;
             }
+            // a hop a job owns right now is not re-driven: the row belongs to
+            // that job, which closes it after its effect (`next` records are
+            // guarded the same way above)
+            if is_propagation {
+                let hop = if r#type == data::OpType::Error.as_ref() {
+                    data::OpType::Error
+                } else {
+                    data::OpType::Abort
+                };
+                if self.op_claims.is_running(&OpKey::new(&pid, &tid, hop)) {
+                    continue;
+                }
+            }
 
             let queued = if r#type == data::OpType::Error.as_ref() {
                 self.queue.send_error(&task)
             } else if r#type == data::OpType::Abort.as_ref() {
                 self.queue.send_abort(&task)
-            } else if is_next_overflow {
-                self.queue.send_next(&task)
             } else {
                 self.queue.send(&task)
             };
@@ -748,11 +883,17 @@ impl Runtime {
         Ok(())
     }
 
-    /// Terminal-event restore: a process just finished and its terminal event
-    /// evicted it. Loads queued in-flight rows (boot-resume overflow that did
-    /// not fit the cap) into the freed slots and re-dispatches them, then
-    /// refills parked (`None`) rows — non-`None` first, matching boot
-    /// priority.
+    /// Resident-set refill: a slot just freed (a process finished and its
+    /// terminal event evicted it), so load queued in-flight rows (boot-resume
+    /// overflow that did not fit the cap) into the free slots and re-dispatch
+    /// them, then refill parked (`None`) rows — non-`None` first, matching
+    /// boot priority.
+    ///
+    /// Called on a terminal event, and on the periodic tick as well: a process
+    /// the *sweeper* deletes from the store also frees its slot (its rows were
+    /// swept, so no terminal event follows), and without the tick's call the
+    /// refill would wait for a trigger that never comes — the parked processes
+    /// behind it would never start.
     pub(crate) async fn restore(self: &Arc<Self>) -> Result<()> {
         let loaded = self.cache.resume_from_queue(self).await?;
         if !loaded.is_empty() {
@@ -889,21 +1030,35 @@ impl Runtime {
         // The operation has left the queue. Record that boundary before the
         // effect starts; a failed phase note is observability damage, not a
         // reason to drop already-accepted work.
-        if operation != JobOp::Exec {
-            let op_type = match operation {
-                JobOp::Next => data::OpType::Next,
-                JobOp::Error => data::OpType::Error,
-                JobOp::Abort => data::OpType::Abort,
-                JobOp::Exec => unreachable!(),
-            };
-            if let Err(err) = task
+        let op_type = match operation {
+            JobOp::Next => Some(data::OpType::Next),
+            JobOp::Error => Some(data::OpType::Error),
+            JobOp::Abort => Some(data::OpType::Abort),
+            JobOp::Exec => None,
+        };
+        // Claim the operation for as long as this job runs it. The guard is
+        // installed even when the phase note fails: what makes a stranded
+        // record findable is knowing that *no* job owns it — a claim released
+        // by the drop below is that knowledge, on every exit path (a return,
+        // a caught panic, a dropped future), and the liveness pass re-drives
+        // what no job closed.
+        let mut claim = op_type.map(|op_type| {
+            OpClaim::start(
+                task.runtime().op_claims(),
+                &task.pid,
+                &task.id,
+                op_type,
+                task.runtime().stall_backoff(),
+            )
+        });
+        if let Some(op_type) = op_type
+            && let Err(err) = task
                 .runtime()
                 .cache()
                 .mark_op_phase(&task.pid, &task.id, op_type, data::OpPhase::EffectInFlight)
                 .await
-            {
-                error!(error = %err, "failed to mark operation effect-in-flight");
-            }
+        {
+            error!(error = %err, "failed to mark operation effect-in-flight");
         }
         let Some(ctx) = Self::isolate_context(task.clone(), proc).await else {
             return;
@@ -917,17 +1072,38 @@ impl Runtime {
                     // a terminal walk can race a queued dispatch, and running
                     // it would grow the tree under a dead run
                     if task.proc().is_some_and(|p| p.state().is_completed()) {
-                        return;
+                        return true;
                     }
-                    Self::run_exec_job(task, ctx).await
+                    Self::run_exec_job(task, ctx).await;
+                    true
                 }
                 JobOp::Next => Self::run_next_job(task, ctx).await,
-                JobOp::Error => Self::run_error_job(task, ctx).await,
-                JobOp::Abort => Self::run_abort_job(task, ctx).await,
+                JobOp::Error => {
+                    Self::run_error_job(task, ctx).await;
+                    true
+                }
+                JobOp::Abort => {
+                    Self::run_abort_job(task, ctx).await;
+                    true
+                }
             }
         })
         .await;
-        Self::report_task_panic(operation.as_str(), reporting_task, reporting_ctx, result).await;
+        let closed =
+            Self::report_task_panic(operation.as_str(), reporting_task, reporting_ctx, result)
+                .await
+                .unwrap_or(false);
+        // A panic is `Err` here, and the operation it interrupted did not
+        // close anything: the claim is released as stalled, and the liveness
+        // pass decides whether anything else can finish it. The Error/Abort
+        // runners reach their record close on their own path, and `next`
+        // reports whether it closed its record, so `Some(true)` means "the
+        // effect ran to its end" — what the guard needs to know.
+        if let Some(claim) = claim.as_mut()
+            && closed
+        {
+            claim.close();
+        }
     }
 
     async fn run_exec_job(task: Arc<Task>, ctx: Context) {
@@ -949,7 +1125,16 @@ impl Runtime {
         }
     }
 
-    async fn run_next_job(task: Arc<Task>, ctx: Context) {
+    /// Run a task's `next` propagation and report whether it *closed* the
+    /// task's durable outbox record.
+    ///
+    /// `false` means the record is still open when this job ends. That is a
+    /// legitimate outcome — children in flight, an interrupt, a step that has
+    /// not finished counting its children — and it is what the claim guard
+    /// hands to the liveness pass: the record stays open, and whether anything
+    /// else re-enters the task (a descendant's completion) decides if the pass
+    /// has to.
+    async fn run_next_job(task: Arc<Task>, ctx: Context) -> bool {
         let result = task.next(&ctx).await;
         if let Err(err) = result {
             error!(error = %err, "task.next failed");
@@ -962,10 +1147,13 @@ impl Runtime {
             if let Err(err) = task.runtime().complete_next(&task).await {
                 error!(error = %err, "complete_next failed");
             }
+            return true;
         }
         // On success the record is closed inside `next` once the task reaches
-        // a terminal state; outcomes with children still in flight or an
-        // interrupt leave it `Pending` for recovery to replay.
+        // a terminal state (the applied propagation marker is that close's
+        // in-memory witness); outcomes with children still in flight or an
+        // interrupt leave it open.
+        task.is_propagation_applied()
     }
 
     /// Run an Error propagation descriptor. `on_error` may schedule a catch
@@ -1022,16 +1210,21 @@ impl Runtime {
     /// Convert a panic that escaped `task.exec`/`task.next` into the ordinary
     /// task-error path. The recovery work itself is isolated as well, because a
     /// corrupted task may panic again while being reported.
+    ///
+    /// Returns what the operation reported about its outbox record (`None` when
+    /// it panicked — the record is left exactly as it is, for the claim guard
+    /// to hand to the liveness pass).
     async fn report_task_panic(
         operation: &'static str,
         task: Arc<Task>,
         ctx: Context,
-        result: std::result::Result<(), Box<dyn Any + Send>>,
-    ) {
-        let Err(err) = result else {
-            return;
+        result: std::result::Result<bool, Box<dyn Any + Send>>,
+    ) -> Option<bool> {
+        let payload = match result {
+            Ok(closed) => return Some(closed),
+            Err(payload) => payload,
         };
-        let err = Self::panic_payload_error(err);
+        let err = Self::panic_payload_error(payload);
         error!(operation, error = %err, "scheduler operation panicked");
         let report_result = CatchPanic::new(async move {
             task.set_err(&err.clone().into());
@@ -1042,6 +1235,7 @@ impl Runtime {
         if report_result.is_err() {
             error!(operation, "reporting the panicked task panicked");
         }
+        None
     }
 
     fn panic_payload_error(payload: Box<dyn Any + Send>) -> ActError {
@@ -1081,6 +1275,8 @@ impl Runtime {
             snapshots,
             trigger_health: LoopGuard::new("schedule-trigger"),
             retry_health: LoopGuard::new("message-retry"),
+            op_claims: Arc::new(OpClaims::new()),
+            stall_backoff: Self::tick_interval(config),
         });
 
         runtime.initialize()?;
@@ -1205,20 +1401,28 @@ impl Runtime {
         Ok(())
     }
 
+    /// The periodic timers' interval: the configured tick, or the engine's
+    /// default of 15s, and [`TEST_TICK_MS`] under test. One rule for every
+    /// timer that reasons in ticks (and for how long an abandoned outbox
+    /// operation waits before its first liveness re-drive).
+    fn tick_interval(config: &Config) -> Duration {
+        #[cfg(test)]
+        {
+            let _ = config;
+            Duration::from_millis(TEST_TICK_MS)
+        }
+        #[cfg(not(test))]
+        {
+            let secs = config.tick_interval_secs();
+            let secs = if secs > 0 { secs } else { 15 };
+            Duration::from_millis((secs * 1000) as u64)
+        }
+    }
+
     pub fn init_retry_timer(self: &Arc<Self>) -> crate::Result<()> {
         // Message retry timer — periodically re-send unacknowledged messages
         let max_message_retry_times = self.config().max_message_retry_times();
-        #[cfg(not(test))]
-        let interval_ms = {
-            let secs = if self.config().tick_interval_secs() > 0 {
-                self.config().tick_interval_secs()
-            } else {
-                15
-            };
-            (secs * 1000) as u64
-        };
-        #[cfg(test)]
-        let interval_ms = TEST_TICK_MS;
+        let interval_ms = Self::tick_interval(self.config()).as_millis() as u64;
 
         let evt = self.emitter().clone();
         let cache = self.cache.clone();
@@ -1286,10 +1490,22 @@ impl Runtime {
                     failure.get_or_insert(err);
                 }
 
-                // Replay durable scheduler overflow after the in-memory queue
-                // has had one full tick to drain.
-                if let Err(err) = rt.recover_overflow((interval_ms * 2) as i64).await {
-                    error!(error = %err, "scheduler overflow recovery failed");
+                // A swept process released its resident slot without a
+                // terminal event of its own (its rows were swept, so nobody
+                // else will notice), and a queued in-flight row waits for a
+                // slot as well: refilling here is what keeps a parked process
+                // from waiting for a trigger that never comes.
+                if let Err(err) = rt.restore().await {
+                    error!(error = %err, "resident-set refill failed");
+                    failure.get_or_insert(err);
+                }
+
+                // Hand durable outbox work back to memory after the in-memory
+                // queue has had one full tick to drain: the records overflow
+                // spilled, and the `next` records whose job ended without
+                // closing them.
+                if let Err(err) = rt.recover_outbox((interval_ms * 2) as i64).await {
+                    error!(error = %err, "scheduler outbox recovery failed");
                     failure.get_or_insert(err);
                 }
 
@@ -1334,17 +1550,7 @@ impl Runtime {
     /// trigger row and rolls its `next_run` forward. Deployed rows arm with
     /// their next cron fire; a changed schedule re-arms the same way.
     pub fn init_trigger_timer(self: &Arc<Self>) {
-        #[cfg(not(test))]
-        let interval_ms = {
-            let secs = self.config().tick_interval_secs();
-            if secs > 0 {
-                (secs * 1000) as u64
-            } else {
-                15_000
-            }
-        };
-        #[cfg(test)]
-        let interval_ms = TEST_TICK_MS;
+        let interval_ms = Self::tick_interval(self.config()).as_millis() as u64;
 
         let store = self.store();
         let shutdown = self.shutdown.clone();
@@ -1405,17 +1611,7 @@ impl Runtime {
     /// Snapshot TTL sweep — periodically drops expired cache entries so
     /// never-read, never-tombstoned scopes cannot grow the cache forever.
     pub fn init_snapshot_timer(self: &Arc<Self>) {
-        #[cfg(not(test))]
-        let interval_ms = {
-            let secs = self.config().tick_interval_secs();
-            if secs > 0 {
-                (secs * 1000) as u64
-            } else {
-                15_000
-            }
-        };
-        #[cfg(test)]
-        let interval_ms = TEST_TICK_MS;
+        let interval_ms = Self::tick_interval(self.config()).as_millis() as u64;
 
         let registry = self.snapshot_registry();
         let shutdown = self.shutdown.clone();

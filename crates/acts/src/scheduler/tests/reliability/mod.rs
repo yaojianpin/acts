@@ -9,6 +9,7 @@ mod error;
 mod next;
 mod parallel;
 mod remove;
+mod stall;
 mod subflow;
 mod timeout;
 mod timer;

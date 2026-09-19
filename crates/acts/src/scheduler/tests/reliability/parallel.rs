@@ -94,6 +94,11 @@ struct FailOnceTaskBatchKv {
     inner: MemoryStore,
     armed: AtomicBool,
     fired: AtomicUsize,
+    /// The task rows the next armed batch may fail: the cell's own branch
+    /// acts. Matching by row key (not by "any task batch") keeps the fault
+    /// where the cell means it — another writer's task-row write (a parked
+    /// process a tick starts) can no longer consume it.
+    target: Mutex<Vec<String>>,
 }
 
 impl FailOnceTaskBatchKv {
@@ -102,10 +107,14 @@ impl FailOnceTaskBatchKv {
             inner: MemoryStore::new(),
             armed: AtomicBool::new(false),
             fired: AtomicUsize::new(0),
+            target: Mutex::new(Vec::new()),
         }
     }
 
-    fn arm(&self) {
+    /// Arm the fault for the next batch that writes one of `rows` (full task
+    /// row keys, see [`task_data_key`]).
+    fn arm_rows(&self, rows: Vec<String>) {
+        *self.target.lock() = rows;
         self.armed.store(true, Ordering::SeqCst);
     }
 
@@ -133,7 +142,16 @@ impl KvStore for FailOnceTaskBatchKv {
             StoreBatchOp::Put { key, .. } => key.starts_with("tasks-id-"),
             StoreBatchOp::Delete { key } => key.starts_with("tasks-id-"),
         });
-        if task_row && self.armed.swap(false, Ordering::SeqCst) {
+        let targeted = task_row && {
+            let target = self.target.lock();
+            !target.is_empty()
+                && ops.iter().any(|op| match op {
+                    StoreBatchOp::Put { key, .. } | StoreBatchOp::Delete { key } => {
+                        target.iter().any(|t| t == key)
+                    }
+                })
+        };
+        if targeted && self.armed.swap(false, Ordering::SeqCst) {
             self.fired.fetch_add(1, Ordering::SeqCst);
             return Err(ActError::Store(
                 "injected: branch-act task write failed".to_string(),
@@ -208,10 +226,12 @@ async fn sch_parallel_store_fault_branch_write_heals_inner() {
     let tid2 = acts[1].1.clone();
     assert_ne!(tid1, tid2, "each branch runs its own act task");
 
-    // settle every setup write, THEN arm: the first task-row batch the writer
-    // sees from now on is the completion write of the branch completed first
+    // settle every setup write, THEN arm: the next write of either branch
+    // act's row is what fails. Targeting the two rows (not "any task batch")
+    // keeps the injected fault on the write the cell means, whatever else the
+    // engine writes meanwhile.
     rt.cache().flush().await.unwrap();
-    kv.arm();
+    kv.arm_rows(vec![task_data_key(&pid, &tid1), task_data_key(&pid, &tid2)]);
 
     // both branches complete; the durable write of the first one fails
     rt.do_action(&Action::new(&pid, &tid1, EventAction::Next, Vars::new()))

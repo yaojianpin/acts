@@ -111,7 +111,9 @@ const DEFAULT_ACTS_TOML: &str = r#"# acts-server default configuration.
 cache_cap = 1024
 
 # Engine scan interval in seconds: the periodic sweep that re-sends
-# unacknowledged message deliveries and resumes parked/queued processes.
+# unacknowledged message deliveries, resumes parked/queued processes, and
+# re-drives scheduler outbox records no job owns any more (a `next`
+# propagation whose job ended without closing it is retried on this tick).
 tick_interval_secs = 15
 
 # Max times an unacknowledged message delivery is re-sent before it turns

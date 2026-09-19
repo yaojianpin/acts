@@ -46,9 +46,8 @@ impl Store {
 
     /// Load up to `cap` resumable processes: durable rows that were running
     /// when the engine crashed (`Ready`/`Running`/`Pending`), oldest first —
-    /// the boot-resume working set. The number of matching rows beyond the
-    /// cap is found with [`Self::count_resumable`]; the caller queues their
-    /// pids for later slots. See `Runtime::resume`.
+    /// the boot-resume working set. The pids beyond the cap are queued for
+    /// later slots by `Cache::enqueue_resume_overflow`. See `Runtime::resume`.
     pub async fn load_resumable(
         &self,
         cap: usize,
@@ -80,21 +79,6 @@ impl Store {
             }
         }
         Ok(ret)
-    }
-
-    /// Count durable rows that were in flight when the engine crashed
-    /// (`Ready`/`Running`/`Pending`) — used at boot to detect processes that
-    /// do not fit the resident cap and must wait in the resume queue.
-    pub async fn count_resumable(&self) -> Result<usize> {
-        let query = Query::new()
-            .filter(
-                Filter::or()
-                    .expr(Expr::eq("state", TaskState::Ready.to_string()))
-                    .expr(Expr::eq("state", TaskState::Running.to_string()))
-                    .expr(Expr::eq("state", TaskState::Pending.to_string())),
-            )
-            .limit(1);
-        Ok(self.procs().query(&query).await?.count)
     }
 
     /// Decode one durable proc row into an in-memory process (model, state,
@@ -336,7 +320,11 @@ impl Store {
     }
 
     /// Mark a record as handed to the in-memory scheduler. Boot recovery still
-    /// treats this state as replayable; periodic overflow recovery does not.
+    /// treats this state as replayable, and so does the periodic outbox pass
+    /// (it filters against the in-memory claims). The phase note is
+    /// forward-only like every other phase write: a record whose effect was
+    /// already in flight keeps that phase, so the durable history never
+    /// regresses.
     pub async fn mark_op_dispatched(&self, pid: &str, tid: &str, r#type: &str) -> Result<()> {
         let collection = self.ops();
         let q = Query::new().filter(
@@ -350,7 +338,10 @@ impl Store {
                     || op.status == data::OpStatus::Overflow.as_ref())
             {
                 op.status = data::OpStatus::Dispatched.as_ref().to_string();
-                op.phase = data::OpPhase::Dispatched.as_ref().to_string();
+                let current = data::OpPhase::from_task_value(op.phase.as_str());
+                if current.can_advance_to(data::OpPhase::Dispatched) {
+                    op.phase = data::OpPhase::Dispatched.as_ref().to_string();
+                }
                 op.update_time = utils::time::time_millis();
                 collection.update(&op).await?;
             }
@@ -358,16 +349,25 @@ impl Store {
         Ok(())
     }
 
-    /// Load stale, not-yet-dispatched overflow records. `Dispatched` records
-    /// are deliberately excluded while the engine is running: replaying them
-    /// would duplicate work that is queued or executing in memory.
-    pub async fn load_overflow_ops(&self, older_than_millis: i64) -> Result<Vec<data::Op>> {
+    /// Load the not-yet-closed outbox records the periodic consumer owns:
+    /// every `Pending`/`Overflow`/`Dispatched` row that has aged past
+    /// `older_than_millis`, oldest first.
+    ///
+    /// `Dispatched` is included because a record can be handed to memory and
+    /// then outlive its job (a panic, a cancelled future, a close whose write
+    /// was lost): the caller filters what it finds against its in-memory claims
+    /// and against the task's own progress, so a record a job is running right
+    /// now is never replayed. The age bound is what keeps a record that was
+    /// dispatched a moment ago — its job is queued, not orphaned — out of the
+    /// pass.
+    pub async fn load_scheduled_ops(&self, older_than_millis: i64) -> Result<Vec<data::Op>> {
         let q = Query::new()
             .filter(Filter::and().expr(Expr::r#in(
                 "status",
                 vec![
                     data::OpStatus::Pending.as_ref(),
                     data::OpStatus::Overflow.as_ref(),
+                    data::OpStatus::Dispatched.as_ref(),
                 ],
             )))
             .order("create_time", Sort::Asc);

@@ -6,7 +6,7 @@ use crate::Result;
 use crate::store::{DbCollectionIden, StoreIden};
 
 /// The operation an outbox record represents.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, AsRefStr)]
 #[strum(serialize_all = "snake_case")]
 #[serde(rename_all = "snake_case")]
 pub enum OpType {
