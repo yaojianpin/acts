@@ -20,7 +20,10 @@ use std::{
     future::Future,
     panic::{AssertUnwindSafe, catch_unwind},
     pin::Pin,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     task::{Context as TaskContext, Poll},
     time::{Duration, Instant},
 };
@@ -50,6 +53,13 @@ pub struct Runtime {
     /// the window doubles per attempt from here (one timer tick, so a stall is
     /// noticed within a tick of the job that abandoned it).
     stall_backoff: Duration,
+    /// Set when a durable record was handed to the disk queue (the bounded
+    /// lane refused it): the periodic outbox pass scans the store for
+    /// not-yet-closed records, and this is the signal that makes the scan
+    /// worthwhile on the next tick. The pass also runs while the claim
+    /// registry holds a stalled operation, and at least every
+    /// [`OUTBOX_SWEEP_EVERY`] ticks as a safety net.
+    outbox_dirty: Arc<AtomicBool>,
 }
 
 /// Tick the periodic timers run on under test — short enough that a test can
@@ -63,6 +73,13 @@ pub(crate) const TEST_TICK_MS: u64 = 800;
 /// window, so this is the point at which "it has not converged" is worth
 /// saying out loud.
 const STALLED_OP_WARN_ATTEMPTS: u32 = 4;
+
+/// How many ticks pass between two outbox scans even when nothing signalled
+/// work (see [`Runtime::outbox_dirty`]). The pass exists to notice a record no
+/// job owns, and a durable record can outlive every in-memory signal — a crash
+/// is the boot replay's, but a signal lost with the process that set it is
+/// not — so the periodic scan is also its own safety net.
+const OUTBOX_SWEEP_EVERY: u64 = 8;
 
 /// Registry of snapshot-backed sealed-data targets (see [`crate::snapshot`]).
 pub(crate) struct SnapshotRegistry {
@@ -250,6 +267,12 @@ impl Runtime {
     /// pass re-drives it.
     pub(crate) fn stall_backoff(&self) -> Duration {
         self.stall_backoff
+    }
+
+    /// Record that a durable record was spilled to the disk queue, so the next
+    /// tick's outbox pass looks for what it has to re-drive.
+    fn mark_outbox_dirty(&self) {
+        self.outbox_dirty.store(true, Ordering::SeqCst);
     }
 
     /// Scheduler-backlog metrics: the configured bound, the per-lane bound, the
@@ -519,6 +542,7 @@ impl Runtime {
             // overflow state. The periodic recovery consumer owns it until it
             // is successfully handed back to memory.
             Err(ActError::QueueFull) => {
+                self.mark_outbox_dirty();
                 self.cache.mark_next_overflow(task).await?;
                 Ok(())
             }
@@ -1277,6 +1301,7 @@ impl Runtime {
             retry_health: LoopGuard::new("message-retry"),
             op_claims: Arc::new(OpClaims::new()),
             stall_backoff: Self::tick_interval(config),
+            outbox_dirty: Arc::new(AtomicBool::new(false)),
         });
 
         runtime.initialize()?;
@@ -1431,6 +1456,7 @@ impl Runtime {
         let health = self.retry_health.clone();
         Handle::current().spawn(async move {
             let mut intv = time::interval(Duration::from_millis(interval_ms));
+            let mut ticks: u64 = 0;
             loop {
                 tokio::select! {
                     _= shutdown.cancelled() => break,
@@ -1503,10 +1529,20 @@ impl Runtime {
                 // Hand durable outbox work back to memory after the in-memory
                 // queue has had one full tick to drain: the records overflow
                 // spilled, and the `next` records whose job ended without
-                // closing them.
-                if let Err(err) = rt.recover_outbox((interval_ms * 2) as i64).await {
-                    error!(error = %err, "scheduler outbox recovery failed");
-                    failure.get_or_insert(err);
+                // closing them. The scan is a full read of the not-yet-closed
+                // records, so it is paid when there is a reason to expect one
+                // — a spill signalled it, or the claim registry holds an
+                // operation a job left behind — and as a safety net every
+                // `OUTBOX_SWEEP_EVERY` ticks.
+                ticks += 1;
+                if rt.outbox_dirty.swap(false, Ordering::SeqCst)
+                    || rt.op_claims().has_stalled()
+                    || ticks % OUTBOX_SWEEP_EVERY == 0
+                {
+                    if let Err(err) = rt.recover_outbox((interval_ms * 2) as i64).await {
+                        error!(error = %err, "scheduler outbox recovery failed");
+                        failure.get_or_insert(err);
+                    }
                 }
 
                 match failure {

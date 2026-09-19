@@ -189,6 +189,17 @@ impl OpClaims {
         self.claims.lock().retain(|key, _| resident(&key.pid));
     }
 
+    /// Whether any operation is stalled — a job ended without closing its
+    /// record. This is the outbox pass's own "is there anything to look at?"
+    /// question, so an engine with nothing stranded does not pay the store
+    /// scan every tick.
+    pub(crate) fn has_stalled(&self) -> bool {
+        self.claims
+            .lock()
+            .values()
+            .any(|claim| matches!(claim, Claim::Stalled { .. }))
+    }
+
     #[cfg(test)]
     pub(crate) fn len(&self) -> usize {
         self.claims.lock().len()
