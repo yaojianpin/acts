@@ -134,21 +134,37 @@ pub struct Outcome {
     pub outputs: String,
 }
 
-/// Deploy the one-step shell act `mid` names: the act step `run_shell` and
-/// `run_shells` start, exposed for the tests that drive a run by hand.
-pub async fn deploy(engine: &Engine, principal: &Principal, mid: &str, script: &str) {
-    // The step is built from text rather than with a closure: `with_step` takes
-    // a plain `fn`, and the script is a parameter of this test. The block
-    // scalar's lines all have to be indented, whatever the script is.
-    let script = script
+/// `script` as the body of a YAML block scalar: every line indented to the
+/// depth a `script: |` under `params:` needs. The models here are built from
+/// text rather than with a closure — `with_step` takes a plain `fn`, and the
+/// script is a parameter of the test — so the indentation is spelled once.
+pub fn block(script: &str) -> String {
+    script
         .lines()
         .map(|line| format!("        {line}"))
         .collect::<Vec<_>>()
-        .join("\n");
-    let workflow = Workflow::from_yml(&format!(
-        "name: shell run\nid: {mid}\nver: \"0.1.0\"\nsteps:\n  - id: s1\n    uses: acts.app.shell\n    params:\n      shell: bash\n      script: |\n{script}\n"
-    ))
-    .unwrap();
+        .join("\n")
+}
+
+/// The one-step workflow text `deploy` builds: the act step the tests that run
+/// a single shell act start.
+pub fn one_step(mid: &str, script: &str) -> String {
+    format!(
+        "name: shell run\nid: {mid}\nver: \"0.1.0\"\nsteps:\n  - id: s1\n    uses: acts.app.shell\n    params:\n      shell: bash\n      script: |\n{}\n",
+        block(script)
+    )
+}
+
+/// Deploy the one-step shell act `mid` names: the act step `run_shell` and
+/// `run_shells` start, exposed for the tests that drive a run by hand.
+pub async fn deploy(engine: &Engine, principal: &Principal, mid: &str, script: &str) {
+    deploy_text(engine, principal, &one_step(mid, script)).await;
+}
+
+/// Deploy a workflow from its own text — for a test whose model needs more
+/// than the one step `deploy` builds: a second step, workflow-level vars.
+pub async fn deploy_text(engine: &Engine, principal: &Principal, yml: &str) {
+    let workflow = Workflow::from_yml(yml).unwrap();
     engine
         .executor(principal)
         .model()
@@ -194,12 +210,8 @@ pub async fn run_shell(
         .expect("one run reports one outcome")
 }
 
-/// Run `mids.len()` copies of one shell act at once and report how each ended.
-///
-/// Every handler on the channel sees every event, so a per-run signal cannot
-/// tell whose end it was: the pid in the event is what identifies the run, and
-/// the wait is counted — the signal fires once the `count`-th terminal event
-/// has been recorded, and the outcomes are read back by pid.
+/// Run `mids.len()` copies of one shell act at once and report how each ended:
+/// each is deployed first, then all are started together.
 pub async fn run_shells(
     engine: &Engine,
     principal: &Principal,
@@ -209,7 +221,16 @@ pub async fn run_shells(
     for mid in mids {
         deploy(engine, principal, mid, script).await;
     }
+    run(engine, principal, mids).await
+}
 
+/// Run the already-deployed workflows `mids` name and report how each ended.
+///
+/// Every handler on the channel sees every event, so a per-run signal cannot
+/// tell whose end it was: the pid in the event is what identifies the run, and
+/// the wait is counted — the signal fires once the `count`-th terminal event
+/// has been recorded, and the outcomes are read back by pid.
+pub async fn run(engine: &Engine, principal: &Principal, mids: &[&str]) -> Vec<Outcome> {
     // Both handlers are installed before any start, so no outcome is missed.
     let count = mids.len();
     let done = Arc::new(AtomicUsize::new(0));
