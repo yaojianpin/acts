@@ -1535,15 +1535,13 @@ impl Runtime {
                 // operation a job left behind — and as a safety net every
                 // `OUTBOX_SWEEP_EVERY` ticks.
                 ticks += 1;
-                if rt.outbox_dirty.swap(false, Ordering::SeqCst)
+                if (rt.outbox_dirty.swap(false, Ordering::SeqCst)
                     || rt.op_claims().has_stalled()
-                    || ticks % OUTBOX_SWEEP_EVERY == 0
-                {
-                    if let Err(err) = rt.recover_outbox((interval_ms * 2) as i64).await {
+                    || ticks.is_multiple_of(OUTBOX_SWEEP_EVERY))
+                    && let Err(err) = rt.recover_outbox((interval_ms * 2) as i64).await {
                         error!(error = %err, "scheduler outbox recovery failed");
                         failure.get_or_insert(err);
                     }
-                }
 
                 match failure {
                     Some(err) => health.failed(&err),
