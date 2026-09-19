@@ -1,52 +1,25 @@
 //! End-to-end proof that a shell act is bounded on a real run: a script that
-//! never exits is killed at the `[shell]` deadline, a script that floods a
-//! stream is killed at the capture limit, and neither leaves work behind.
+//! waits past the `[shell]` deadline fails at it, a script that floods a stream
+//! fails at the capture limit, and neither takes a scheduler lane with it.
 
 mod support;
 
-use acts::Engine;
-use acts_package_shell::ShellPackage;
 use std::time::Duration;
 use support::{
-    config, endless_flood, endless_stderr_flood, flood, late_writer, quick, run_shell, run_shells,
-    run_vars, scratch, sleeper,
+    engine, engine_with_lanes, flood, late_writer, quick, run_shell, run_shells, scratch, workdir,
 };
 
-/// The engine whose `[shell]` section is `toml_text`.
-async fn engine(toml_text: &str) -> Engine {
-    Engine::builder()
-        .set_config(&config(toml_text))
-        .add_package::<ShellPackage>()
-        .start()
-        .await
-        .unwrap()
-}
-
-/// The same engine with its scheduler lanes pinned: a claim about a lane ("the
-/// flood gave it back") is only a claim when a flood can occupy every lane
-/// there is.
-async fn engine_with_lanes(toml_text: &str, lanes: usize) -> Engine {
-    Engine::builder()
-        .set_config(&config(toml_text))
-        .scheduler_workers(lanes)
-        .add_package::<ShellPackage>()
-        .start()
-        .await
-        .unwrap()
-}
-
-/// A script that never stops fails at the deployment's deadline instead of
-/// holding the run (and a scheduler lane) for as long as it likes — and the
-/// shell it started is gone: the file it would have written when it woke up
-/// never appears.
+/// A script that waits past the deployment's deadline fails instead of holding
+/// the run (and a scheduler lane) for as long as it likes — and the work it
+/// would have done after waking never happens: the file it writes when it gets
+/// there never appears.
 #[tokio::test]
 async fn a_script_that_never_exits_fails_at_the_deadline() {
     let dir = scratch("deadline");
-    let target = dir.join("late.txt");
-    let (shell, script) = late_writer(&target, 2);
-    let engine = engine("[shell]\ntimeout-ms = 300\n").await;
+    let (engine, principal) = engine(&dir, "[shell]\ntimeout-ms = 300\n").await;
 
-    let outcome = run_shell(&engine, "shell-deadline", shell, &script).await;
+    let script = late_writer("late.txt", 2);
+    let outcome = run_shell(&engine, &principal, "shell-deadline", &script).await;
 
     assert!(outcome.failed, "the run must fail");
     let elapsed = outcome.elapsed;
@@ -55,19 +28,19 @@ async fn a_script_that_never_exits_fails_at_the_deadline() {
         "the act must not wait for the script: took {elapsed:?}"
     );
     assert!(
-        run_vars(&engine, &outcome.pid)
-            .await
-            .contains("timed out after 300 ms"),
-        "the failure must name the deadline"
+        outcome.outputs.contains("timed out after 300 ms"),
+        "the failure must name the deadline, got: {}",
+        outcome.outputs
     );
 
-    // outlive the script's own sleep: a shell that was only abandoned (not
-    // killed) writes the file and proves it was still running
+    // Outlive the script's own sleep: a script that was only abandoned (not
+    // stopped) would reach its write and leave the file behind.
     tokio::time::sleep(Duration::from_millis(2_500)).await;
+    let late = workdir(&dir, &outcome.pid).join("late.txt");
     assert!(
-        !target.exists(),
-        "the killed script wrote {} after the act failed",
-        target.display()
+        !late.exists(),
+        "the stopped script wrote {} after the act failed",
+        late.display()
     );
 
     std::fs::remove_dir_all(&dir).ok();
@@ -75,43 +48,81 @@ async fn a_script_that_never_exits_fails_at_the_deadline() {
 }
 
 /// A stream that floods is stopped at the deployment's capture limit — on
-/// stderr as well as on stdout, since a stream nobody drains blocks the
-/// writing script.
+/// `stdout` and on `stderr`, since each stream is captured and each is bounded
+/// by itself.
 #[tokio::test]
-async fn a_flooding_stream_is_stopped_at_the_capture_limit() {
-    let (shell, script) = flood(true);
-    let engine = engine("[shell]\nmax-output-bytes = 4096\n").await;
+async fn a_flooding_stdout_is_stopped_at_the_capture_limit() {
+    let dir = scratch("flood-out");
+    let (engine, principal) = engine(&dir, "[shell]\nmax-output-bytes = 4096\n").await;
 
-    let outcome = run_shell(&engine, "shell-flood", shell, &script).await;
+    let outcome = run_shell(
+        &engine,
+        &principal,
+        "shell-flood-out",
+        &flood(1_000, false),
+    )
+    .await;
 
     assert!(outcome.failed, "the run must fail");
     assert!(
-        run_vars(&engine, &outcome.pid)
-            .await
-            .contains("max-output-bytes limit (4096)"),
-        "the failure must name the capture limit"
+        outcome.outputs.contains("max-output-bytes limit (4096)"),
+        "the failure must name the capture limit, got: {}",
+        outcome.outputs
     );
 
+    std::fs::remove_dir_all(&dir).ok();
     engine.close().await;
 }
 
-/// A `[shell]` section that says nothing about bounds still bounds the act:
-/// the package's own defaults are in force, never "no bound".
+/// The other stream, on its own: `stderr` is captured and capped whether or not
+/// the script writes anything to `stdout`.
 #[tokio::test]
-async fn the_default_capture_limit_bounds_a_stream() {
-    let (shell, script) = flood(false);
-    let engine = engine("").await;
+async fn a_flooding_stderr_is_stopped_at_the_capture_limit() {
+    let dir = scratch("flood-err");
+    let (engine, principal) = engine(&dir, "[shell]\nmax-output-bytes = 4096\n").await;
 
-    let outcome = run_shell(&engine, "shell-default-flood", shell, &script).await;
+    let outcome = run_shell(
+        &engine,
+        &principal,
+        "shell-flood-err",
+        &flood(1_000, true),
+    )
+    .await;
 
     assert!(outcome.failed, "the run must fail");
     assert!(
-        run_vars(&engine, &outcome.pid)
-            .await
-            .contains("max-output-bytes limit (1048576)"),
-        "the default limit must be the one the act reports"
+        outcome.outputs.contains("max-output-bytes limit (4096)"),
+        "the failure must name the capture limit, got: {}",
+        outcome.outputs
     );
 
+    std::fs::remove_dir_all(&dir).ok();
+    engine.close().await;
+}
+
+/// A `[shell]` section that says nothing about bounds still bounds the act: the
+/// package's own defaults are in force, never "no bound".
+#[tokio::test]
+async fn the_default_capture_limit_bounds_a_stream() {
+    let dir = scratch("default-flood");
+    let (engine, principal) = engine(&dir, "").await;
+
+    let outcome = run_shell(
+        &engine,
+        &principal,
+        "shell-default-flood",
+        &flood(30_000, false),
+    )
+    .await;
+
+    assert!(outcome.failed, "the run must fail");
+    assert!(
+        outcome.outputs.contains("max-output-bytes limit (1048576)"),
+        "the default limit must be the one the act reports, got: {}",
+        outcome.outputs
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
     engine.close().await;
 }
 
@@ -120,90 +131,67 @@ async fn the_default_capture_limit_bounds_a_stream() {
 /// refusal of shell acts.
 #[tokio::test]
 async fn the_default_deadline_does_not_refuse_a_quick_script() {
-    let (shell, script) = sleeper(0);
-    let engine = engine("").await;
+    let dir = scratch("default-quick");
+    let (engine, principal) = engine(&dir, "").await;
 
-    let outcome = run_shell(&engine, "shell-default-quick", shell, &script).await;
+    let outcome = run_shell(&engine, &principal, "shell-default-quick", &quick()).await;
 
     assert!(
         !outcome.failed,
-        "a script inside the deadline must complete"
+        "a script inside the deadline must complete: {}",
+        outcome.outputs
+    );
+    assert!(
+        outcome.outputs.contains("ok"),
+        "the script's output must reach the act, got: {}",
+        outcome.outputs
     );
 
+    std::fs::remove_dir_all(&dir).ok();
     engine.close().await;
 }
 
-/// A script that never stops writing is stopped at the capture limit and gives
-/// its lane back: the engine has a single lane here, so the ordinary act that
-/// runs afterwards can only have run on the lane the flood held.
-///
-/// The script cannot end by itself — the sibling helper `flood` is a bounded
-/// loop on Windows, which is why that path had no coverage there — so an act
-/// that waited for the writer would never return, and the guard turns that
-/// regression into a failure instead of a hung suite.
+/// A script the deadline stopped gives its lane back: the engine has a single
+/// lane here, so the ordinary act that runs afterwards can only have run on the
+/// lane the stopped script held.
 #[tokio::test]
-async fn a_flood_that_never_stops_releases_the_lane() {
-    let engine = engine_with_lanes("[shell]\nmax-output-bytes = 4096\n", 1).await;
-    let (shell, script) = endless_flood();
+async fn a_stopped_script_releases_its_lane() {
+    let dir = scratch("lane");
+    let (engine, principal) = engine_with_lanes(&dir, "[shell]\ntimeout-ms = 300\n", 1).await;
 
+    let script = late_writer("late.txt", 2);
     let outcome = tokio::time::timeout(
         Duration::from_secs(30),
-        run_shell(&engine, "shell-endless-flood", shell, &script),
+        run_shell(&engine, &principal, "shell-lane-deadline", &script),
     )
     .await
-    .expect("the act must fail at the capture limit, not wait for a script that never stops");
+    .expect("the act must fail at the deadline, not wait for the script");
 
     assert!(outcome.failed, "the run must fail");
     assert!(
-        run_vars(&engine, &outcome.pid)
-            .await
-            .contains("max-output-bytes limit (4096)"),
-        "the failure must name the capture limit"
+        outcome.outputs.contains("timed out after 300 ms"),
+        "the failure must name the deadline, got: {}",
+        outcome.outputs
     );
 
-    let (shell, script) = quick();
     let after = tokio::time::timeout(
         Duration::from_secs(30),
-        run_shell(&engine, "shell-after-flood", shell, &script),
+        run_shell(&engine, &principal, "shell-after-deadline", &quick()),
     )
     .await
-    .expect("the lane the flood held must be released");
-    assert!(!after.failed, "an act after the flood must complete");
+    .expect("the lane the stopped script held must be released");
     assert!(
-        run_vars(&engine, &after.pid).await.contains("ok"),
-        "the act after the flood must have run and reported its output"
+        !after.failed,
+        "an act after the failure must complete: {}",
+        after.outputs
+    );
+    assert!(
+        after.outputs.contains("ok"),
+        "the act after the failure must have run and reported its output, got: {}",
+        after.outputs
     );
 
-    engine.close().await;
-}
-
-/// The stream nobody drains is bounded by itself: an endless writer on
-/// `stderr` fails the act at the capture limit instead of blocking on a full
-/// pipe, which is what an act that reads only the stream it cares about does.
-///
-/// On Windows `flood(true)` writes both streams while Unix's writes `stderr`
-/// alone, so this is the missing half: a script flooding `stderr` only, with a
-/// writer that never stops on either platform.
-#[tokio::test]
-async fn an_endless_flood_on_stderr_fails_at_the_limit() {
-    let engine = engine_with_lanes("[shell]\nmax-output-bytes = 4096\n", 1).await;
-    let (shell, script) = endless_stderr_flood();
-
-    let outcome = tokio::time::timeout(
-        Duration::from_secs(30),
-        run_shell(&engine, "shell-endless-stderr", shell, &script),
-    )
-    .await
-    .expect("a flood on stderr must fail the act, not block on the full pipe");
-
-    assert!(outcome.failed, "the run must fail");
-    assert!(
-        run_vars(&engine, &outcome.pid)
-            .await
-            .contains("max-output-bytes limit (4096)"),
-        "the failure must name the capture limit"
-    );
-
+    std::fs::remove_dir_all(&dir).ok();
     engine.close().await;
 }
 
@@ -214,20 +202,22 @@ async fn an_endless_flood_on_stderr_fails_at_the_limit() {
 #[tokio::test]
 async fn floods_on_every_lane_leave_the_worker_running() {
     const LANES: usize = 4;
-    let engine = engine_with_lanes("[shell]\nmax-output-bytes = 4096\n", LANES).await;
-    let (shell, script) = endless_flood();
+    let dir = scratch("lanes");
+    let (engine, principal) =
+        engine_with_lanes(&dir, "[shell]\nmax-output-bytes = 4096\n", LANES).await;
+    let script = flood(1_000, false);
 
     let outcomes = tokio::time::timeout(
         Duration::from_secs(60),
         run_shells(
             &engine,
+            &principal,
             &[
                 "shell-flood-lane-0",
                 "shell-flood-lane-1",
                 "shell-flood-lane-2",
                 "shell-flood-lane-3",
             ],
-            shell,
             &script,
         ),
     )
@@ -238,25 +228,29 @@ async fn floods_on_every_lane_leave_the_worker_running() {
     for outcome in &outcomes {
         assert!(outcome.failed, "every flood must fail");
         assert!(
-            run_vars(&engine, &outcome.pid)
-                .await
-                .contains("max-output-bytes limit (4096)"),
-            "each failure must name the capture limit"
+            outcome.outputs.contains("max-output-bytes limit (4096)"),
+            "each failure must name the capture limit, got: {}",
+            outcome.outputs
         );
     }
 
-    let (shell, script) = quick();
     let after = tokio::time::timeout(
         Duration::from_secs(30),
-        run_shell(&engine, "shell-after-lane-floods", shell, &script),
+        run_shell(&engine, &principal, "shell-after-lane-floods", &quick()),
     )
     .await
     .expect("the lanes the floods held must be released");
-    assert!(!after.failed, "an act after the floods must complete");
     assert!(
-        run_vars(&engine, &after.pid).await.contains("ok"),
-        "the act after the floods must have run and reported its output"
+        !after.failed,
+        "an act after the floods must complete: {}",
+        after.outputs
+    );
+    assert!(
+        after.outputs.contains("ok"),
+        "the act after the floods must have run and reported its output, got: {}",
+        after.outputs
     );
 
+    std::fs::remove_dir_all(&dir).ok();
     engine.close().await;
 }

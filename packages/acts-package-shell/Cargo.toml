@@ -11,11 +11,11 @@ edition.workspace = true
 [dependencies]
 acts = { workspace = true }
 async-trait = { workspace = true }
+bashkit = { workspace = true }
 globset = { default-features = true, workspace = true }
 serde = { workspace = true }
 tokio = { workspace = true }
 serde_json = { workspace = true }
-strum = { workspace = true }
 
 [dev-dependencies]
 toml = { workspace = true }

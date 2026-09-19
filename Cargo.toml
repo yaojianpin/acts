@@ -61,6 +61,14 @@ prost = "0.13"
 prost-types = "0.13"
 axum = "0.7"
 validator = { version = "0.20.0", features = ["derive"] }
+# shell
+# `acts-package-shell` runs a workflow's script in bashkit's virtual bash. The
+# `realfs` feature is what lets the interpreter's root be the run's own
+# directory; the default features (the LLM tool contract, tz data) are not used
+# here.
+bashkit = { version = "0.18", default-features = false, features = [
+    "realfs",
+] }
 # message brokers / stores
 async-nats = "0.50"
 redis = { version = "0.31", default-features = false, features = [

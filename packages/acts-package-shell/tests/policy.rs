@@ -1,39 +1,37 @@
 //! End-to-end proof that the `[shell]` allow/deny lists are enforced on a
-//! real run: a script the policy refuses never reaches the shell, so its
+//! real run: a script the policy refuses never reaches the interpreter, so its
 //! side effect never happens — while the same script under a policy that
 //! admits it does run.
 
 mod support;
 
-use acts::Engine;
-use acts_package_shell::ShellPackage;
-use support::{config, run_shell, scratch, writer};
+use support::{engine, run_shell, scratch, workdir, writer};
 
-/// A denied script is refused before the shell is spawned: the file it would
-/// have written does not exist.
+/// The policy's own words, as the act reports them.
+const REFUSED: &str = "refused by the [shell] policy";
+
+/// A denied script is refused before anything runs: the file it would have
+/// written does not exist, and the act says why.
 #[tokio::test]
 async fn a_denied_script_never_runs() {
     let dir = scratch("deny");
-    let target = dir.join("pwned.txt");
-    let (shell, script) = writer(&target);
+    let (engine, principal) = engine(&dir, "[shell]\ndeny = [\"*pwned*\"]\n").await;
 
-    let engine = Engine::builder()
-        .set_config(&config("[shell]\ndeny = [\"*pwned*\"]\n"))
-        .add_package::<ShellPackage>()
-        .start()
-        .await
-        .unwrap();
+    let outcome = run_shell(&engine, &principal, "shell-denied", &writer("pwned.txt")).await;
 
-    let failed = run_shell(&engine, "shell-denied", shell, &script)
-        .await
-        .failed;
-
-    assert!(failed, "the run must fail");
+    assert!(outcome.failed, "the run must fail");
+    assert!(
+        outcome.outputs.contains(REFUSED),
+        "the failure must name the policy, got: {}",
+        outcome.outputs
+    );
+    let target = workdir(&dir, &outcome.pid).join("pwned.txt");
     assert!(
         !target.exists(),
-        "the script reached the shell: {} exists",
+        "the script ran: {} exists",
         target.display()
     );
+
     std::fs::remove_dir_all(&dir).ok();
     engine.close().await;
 }
@@ -43,26 +41,21 @@ async fn a_denied_script_never_runs() {
 #[tokio::test]
 async fn an_admitted_script_runs() {
     let dir = scratch("allow");
-    let target = dir.join("ok.txt");
-    let (shell, script) = writer(&target);
+    let (engine, principal) = engine(&dir, "[shell]\nallow = [\"echo *\"]\n").await;
 
-    let engine = Engine::builder()
-        .set_config(&config("[shell]\nallow = [\"echo *\"]\n"))
-        .add_package::<ShellPackage>()
-        .start()
-        .await
-        .unwrap();
+    let outcome = run_shell(&engine, &principal, "shell-allowed", &writer("ok.txt")).await;
 
-    let failed = run_shell(&engine, "shell-allowed", shell, &script)
-        .await
-        .failed;
-
-    assert!(!failed, "the run must complete");
     assert!(
-        target.exists(),
-        "the admitted script did not run: {} is missing",
-        target.display()
+        !outcome.failed,
+        "the run must complete, got: {}",
+        outcome.outputs
     );
+    assert!(
+        outcome.outputs.contains("ok"),
+        "the admitted script did not run, got: {}",
+        outcome.outputs
+    );
+
     std::fs::remove_dir_all(&dir).ok();
     engine.close().await;
 }
@@ -72,24 +65,23 @@ async fn an_admitted_script_runs() {
 #[tokio::test]
 async fn deny_wins_on_a_run() {
     let dir = scratch("both");
-    let target = dir.join("both.txt");
-    let (shell, script) = writer(&target);
+    let (engine, principal) = engine(
+        &dir,
+        "[shell]\nallow = [\"echo *\"]\ndeny = [\"*both.txt*\"]\n",
+    )
+    .await;
 
-    let engine = Engine::builder()
-        .set_config(&config(
-            "[shell]\nallow = [\"echo *\"]\ndeny = [\"*both.txt*\"]\n",
-        ))
-        .add_package::<ShellPackage>()
-        .start()
-        .await
-        .unwrap();
+    let outcome = run_shell(&engine, &principal, "shell-both", &writer("both.txt")).await;
 
-    let failed = run_shell(&engine, "shell-both", shell, &script)
-        .await
-        .failed;
-
-    assert!(failed, "deny must win over allow");
+    assert!(outcome.failed, "deny must win over allow");
+    assert!(
+        outcome.outputs.contains(REFUSED),
+        "the failure must name the policy, got: {}",
+        outcome.outputs
+    );
+    let target = workdir(&dir, &outcome.pid).join("both.txt");
     assert!(!target.exists(), "{} must not exist", target.display());
+
     std::fs::remove_dir_all(&dir).ok();
     engine.close().await;
 }

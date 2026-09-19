@@ -157,18 +157,20 @@ port = 10082
 # shorthand: one token with unrestricted access (the requirepass equivalent)
 # token = "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
 
-# shell package — acts-package-shell script policy: glob lists over the whole
-# script text, `deny` over `allow`, empty pair = no restriction. A refused
-# script fails the act before any shell is spawned.
+# shell package — acts-package-shell. The script runs in bashkit's virtual bash
+# (`shell: bash` is the only accepted value) with the run's own directory as its
+# filesystem root. Script policy: glob lists over the whole script text, `deny`
+# over `allow`, empty pair = no restriction; a refused script fails the act
+# before anything runs.
 # [shell]
-# allow = ["ls", "ls *", "cat *.txt", "nu *"]
+# allow = ["ls", "ls *", "cat *.txt"]
 # deny = ["*rm -rf*", "*sudo *"]
-# deadline of one shell act in ms; must be 1..=3600000. The shell is killed and
-# the act fails when it is reached, so a script that waits forever cannot hold
-# a scheduler lane. Cannot be disabled.
+# deadline of one shell act in ms; must be 1..=3600000. The interpreter is
+# stopped and the act fails when it is reached, so a script that waits forever
+# cannot hold a scheduler lane. Cannot be disabled.
 # timeout-ms = 300000
-# bytes captured from each of stdout and stderr before the act fails and the
-# shell is killed; must be 1..=67108864. Cannot be disabled.
+# bytes captured from each of stdout and stderr before the act fails; must be
+# 1..=67108864. Cannot be disabled.
 # max-output-bytes = 1048576
 
 # nats service — acts-plugin-nats. Only connected when this [nats] section

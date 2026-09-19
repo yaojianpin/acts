@@ -236,9 +236,17 @@ not accumulate one directory per historical process; a run whose row is kept
 anything a run needs to outlive itself must be exported, not left in the
 workdir.
 
-`acts.app.shell` adds a script policy of its own: `[shell] allow`/`deny` are
-globs over the whole script text (`*` spans `/` and newlines, `deny` wins), and
-a script the policy refuses fails the act before any shell is spawned.
+`acts.app.shell` mounts that directory as the root of the script's filesystem:
+the script runs in [bashkit](https://github.com/everruns/bashkit), a virtual
+bash with no process behind it, where `/` is the run's own directory and the
+rest of the host filesystem is not part of the filesystem it was given. A file
+the host puts there is readable at the same relative path, and what the script
+writes there is the file the host sees. A run with no workdir still runs its
+script, on an in-memory filesystem with no host behind it. The package also
+adds a script policy of its own: `[shell] allow`/`deny` are globs over the whole
+script text (`*` spans `/` and newlines, `deny` wins), and a script the policy
+refuses fails the act before anything runs. `shell: bash` is the only accepted
+shell.
 
 See the commented template in the generated default config
 (`~/.acts/acts.toml`) or the access-control chapter of the book.

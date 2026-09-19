@@ -246,14 +246,15 @@ port = 10082
 # pid that is not one safe component is refused. It applies to every role unless
 # the role sets its own. Acts read that directory through `Context::workdir()`,
 # and a script reads the same one as `$env.WORK_DIR` (engine-owned: a write to
-# that name is dropped); `acts.app.shell` runs the script inside it (cwd, HOME,
-# TMPDIR, ACTS_WORKDIR) and refuses a script naming an absolute path or a `..`
-# segment. This is a per-run boundary and a policy check, not a sandbox: hostile
-# workflows still need an OS one. The directory is removed with the process's
+# that name is dropped); `acts.app.shell` mounts it as the root of the script's
+# filesystem, so `/` inside the script is that directory (HOME, PWD, TMPDIR and
+# ACTS_WORKDIR point at it) and the rest of the host is not part of the
+# filesystem the script was given. The directory is removed with the process's
 # rows, once the process finished and every delivery of its messages settled — so
 # nothing left in it outlives the run (a run that must keep a file has to export
 # it), and a finished run whose row is kept (an errored delivery awaiting a manual
-# retry) keeps its directory as well. Omitted means no directory control.
+# retry) keeps its directory as well. Omitted means no directory control, and a
+# shell act then runs on an in-memory filesystem with no host behind it.
 #
 # Transport credentials:
 #   gRPC  — `authorization: Bearer <token>` metadata
@@ -304,16 +305,17 @@ port = 10082
 # tighten this value, never widen it.
 # timeout-ms = 30000
 
-# shell package — acts-package-shell script policy. Two glob lists over the
-# whole script text; `deny` wins, and an empty pair means no restriction. A
-# refused script fails the act before any shell is spawned. This is policy,
-# not a sandbox: a hostile workflow needs an OS boundary around the server.
+# shell package — acts-package-shell. The script runs in bashkit's virtual bash
+# (no PowerShell, Nushell or POSIX `sh`: `shell: bash` is the only accepted
+# value) with the run's own directory as its filesystem root. Two glob lists
+# over the whole script text; `deny` wins, and an empty pair means no
+# restriction. A refused script fails the act before anything runs.
 # [shell]
-# allow = ["ls", "ls *", "cat *.txt", "nu *"]
+# allow = ["ls", "ls *", "cat *.txt"]
 # deny = ["*rm -rf*", "*sudo *"]
-# deadline of one shell act in ms; must be 1..=3600000. The shell is killed and
-# the act fails when it is reached, so a script that waits forever cannot hold
-# a scheduler lane. Cannot be disabled.
+# deadline of one shell act in ms; must be 1..=3600000. The interpreter is
+# stopped and the act fails when it is reached, so a script that waits forever
+# cannot hold a scheduler lane. Cannot be disabled.
 # timeout-ms = 300000
 # bytes captured from each of stdout and stderr before the act fails and the
 # shell is killed; must be 1..=67108864. Cannot be disabled.

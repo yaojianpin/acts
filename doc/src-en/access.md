@@ -244,20 +244,16 @@ exactly as long as the process's durable rows: the sweeper removes it with them
 and its directory with it), and a start that never became durable removes its
 own directory immediately — so nothing left in there outlives the run.
 
-`acts.app.shell` uses it: the script runs with that directory as its working
-directory, `HOME`, `TMPDIR`/`TEMP`/`TMP` and `PWD` point inside it, and
-`ACTS_WORKDIR` names it for the script. A script that names an absolute path
-(`/etc/passwd`, `C:\Windows`) or a `..` segment is refused before it runs.
+`acts.app.shell` mounts it: the script runs in bashkit's virtual bash with that
+directory as the **root of its filesystem**, so `pwd` is `/`, a relative path
+resolves inside the run's directory, and `/` is the only tree the script can
+name — the rest of the host is not part of the filesystem it was given. The two
+names are one file: what the host puts in the run's directory the script reads
+at the same relative path, and what the script writes there the host sees.
+`HOME`, `TMPDIR`/`TEMP`/`TMP` and `PWD` point at the root, and `ACTS_WORKDIR`
+names it (`/`) for the script.
 
-That textual check is **policy, not a sandbox**: it is what makes the direct
-escape a loud failure instead of a silent success, but a shell can spell a
-path in ways no textual check follows (`a=/etc; cat $a/passwd`, a symlink
-inside the workdir) — the containment that actually holds is the child's
-working directory. Treat a hostile workflow as needing an OS boundary (a
-container or namespace around the server); per-process directories keep such
-runs from colliding meanwhile.
-
-The shell package has a second, script-level policy of its own — two glob lists
+The shell package also has a script-level policy of its own — two glob lists
 over the **whole script text**:
 
 ```toml
@@ -270,14 +266,18 @@ deny = ["*rm -rf*", "*sudo *"]
 
 `*` matches any run of characters, `/` and newlines included, and `deny` wins.
 Both lists empty means no restriction; a pattern that does not compile fails
-startup. Like the workdir check it is policy rather than a sandbox — a glob
-over script text cannot see what the script will do (`a=rm; $a -rf /` names no
-forbidden word), so it is for stating intent and refusing the obvious, and a
-hostile workflow still needs an OS boundary.
+startup. This one is policy rather than a sandbox — a glob over script text
+cannot see what the script will do (`a=rm; $a -rf /` names no forbidden word) —
+so it is for stating intent and refusing the obvious. What a script can actually
+reach is decided by the filesystem it was given, which is the run's own
+directory and nothing else of the host. `shell: bash` is the only accepted
+interpreter: the package runs bashkit, not PowerShell, Nushell or POSIX `sh`,
+and a workflow naming one of those fails when its params are read.
 
-Without `workdir`, no directory control applies and a process may touch
-whatever the server's own account can — the behaviour before this option
-existed.
+Without `workdir`, no directory is mounted and a shell act runs on the
+interpreter's in-memory filesystem instead: its writes succeed against a
+filesystem with no host behind it, so the run leaves nothing behind — but it
+also keeps nothing, and the script cannot read anything the host holds.
 
 ## Transport credentials
 

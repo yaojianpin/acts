@@ -447,7 +447,7 @@ acts:
     - [ ] ai (plugins/ai)
     - [x] state (packages/acts-package-state)
     - [x] http (packages/acts-package-http)
-    - [x] shell (packages/acts-package-shell) support nushell, bash and powershell
+    - [x] shell (packages/acts-package-shell) runs a bash script in bashkit's virtual filesystem
     - [x] pubsub (packages/acts-package-nats)
     - [ ] database (plugins/database)
     - [ ] mail (plugins/mail)
