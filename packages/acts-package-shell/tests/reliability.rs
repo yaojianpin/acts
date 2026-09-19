@@ -16,8 +16,8 @@ use acts::{
     ActError, KvStore, MemoryStore, Principal, ScanOptions, StoreBatchOp,
     query::{Expr, Filter, Query},
 };
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use support::{deploy, engine_on, quick, run_shell, scratch, start, wait_for, workdir};
 

@@ -55,13 +55,7 @@ async fn a_flooding_stdout_is_stopped_at_the_capture_limit() {
     let dir = scratch("flood-out");
     let (engine, principal) = engine(&dir, "[shell]\nmax-output-bytes = 4096\n").await;
 
-    let outcome = run_shell(
-        &engine,
-        &principal,
-        "shell-flood-out",
-        &flood(1_000, false),
-    )
-    .await;
+    let outcome = run_shell(&engine, &principal, "shell-flood-out", &flood(1_000, false)).await;
 
     assert!(outcome.failed, "the run must fail");
     assert!(
@@ -81,13 +75,7 @@ async fn a_flooding_stderr_is_stopped_at_the_capture_limit() {
     let dir = scratch("flood-err");
     let (engine, principal) = engine(&dir, "[shell]\nmax-output-bytes = 4096\n").await;
 
-    let outcome = run_shell(
-        &engine,
-        &principal,
-        "shell-flood-err",
-        &flood(1_000, true),
-    )
-    .await;
+    let outcome = run_shell(&engine, &principal, "shell-flood-err", &flood(1_000, true)).await;
 
     assert!(outcome.failed, "the run must fail");
     assert!(

@@ -81,13 +81,7 @@ async fn without_a_workdir_the_script_gets_a_sandbox_with_no_host_behind_it() {
         .unwrap();
 
     let script = "echo hi > f.txt\ncat f.txt";
-    let outcome = run_shell(
-        &engine,
-        &Principal::unrestricted(),
-        "shell-sandbox",
-        script,
-    )
-    .await;
+    let outcome = run_shell(&engine, &Principal::unrestricted(), "shell-sandbox", script).await;
 
     assert!(!outcome.failed, "the act itself must still run");
     assert!(

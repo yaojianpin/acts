@@ -267,12 +267,14 @@ impl ActPackage for ShellPackage {
         // at: it gets bashkit's own in-memory filesystem, so the act still runs
         // and its script still has a filesystem, one with no host behind it.
         if let Some(dir) = ctx.workdir() {
-            let fs = RealFs::open(&dir, RealFsMode::ReadWrite).await.map_err(|err| {
-                ActError::Package(format!(
-                    "failed to open the run's directory {}: {err}",
-                    dir.display()
-                ))
-            })?;
+            let fs = RealFs::open(&dir, RealFsMode::ReadWrite)
+                .await
+                .map_err(|err| {
+                    ActError::Package(format!(
+                        "failed to open the run's directory {}: {err}",
+                        dir.display()
+                    ))
+                })?;
             builder = builder
                 .cwd("/")
                 .env("HOME", "/")

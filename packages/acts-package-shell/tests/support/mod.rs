@@ -64,7 +64,11 @@ pub async fn engine_with_lanes(root: &Path, toml_text: &str, lanes: usize) -> (E
 
 /// The same engine over the caller's store backend: the reliability cells own
 /// the store the run's rows land in.
-pub async fn engine_on(root: &Path, toml_text: &str, store: Arc<dyn KvStore>) -> (Engine, Principal) {
+pub async fn engine_on(
+    root: &Path,
+    toml_text: &str,
+    store: Arc<dyn KvStore>,
+) -> (Engine, Principal) {
     engine_with(root, toml_text, None, Some(store)).await
 }
 
@@ -198,12 +202,7 @@ pub async fn start(engine: &Engine, principal: &Principal, mid: &str) -> String 
 }
 
 /// Run one shell act to completion, or to the failure that ends it early.
-pub async fn run_shell(
-    engine: &Engine,
-    principal: &Principal,
-    mid: &str,
-    script: &str,
-) -> Outcome {
+pub async fn run_shell(engine: &Engine, principal: &Principal, mid: &str, script: &str) -> Outcome {
     run_shells(engine, principal, &[mid], script)
         .await
         .pop()
@@ -239,8 +238,12 @@ pub async fn run(engine: &Engine, principal: &Principal, mids: &[&str]) -> Vec<O
     let (error_done, complete_done) = (done.clone(), done.clone());
     let began = Instant::now();
     engine.channel().on_error(move |e| {
-        let (ended, done, pid, outputs) =
-            (on_error.clone(), error_done.clone(), e.pid.clone(), e.outputs.to_string());
+        let (ended, done, pid, outputs) = (
+            on_error.clone(),
+            error_done.clone(),
+            e.pid.clone(),
+            e.outputs.to_string(),
+        );
         async move { record(&ended, &done, count, true, began, pid, outputs) }
     });
     engine.channel().on_complete(move |e| {
