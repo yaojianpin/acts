@@ -421,12 +421,12 @@ async fn sch_error_duplicate_delivery_is_terminal_noop_inner() {
 }
 
 /// 并发 × ERROR: `Error` and `Next` fired at the same in-flight act tid in the
-/// same instant must converge to one decision: every racer gets a verdict, a
-/// losing racer is rejected by the terminal guard (the check-then-apply guard
-/// may admit both — the exactly-once guarantee is the single durable outcome),
-/// the act holds exactly one terminal state, exactly one act task exists, no
-/// task of the finished process is left non-terminal, and the process sweeps
-/// cleanly. Several rounds cover the interleavings.
+/// same instant must converge to one decision: every racer gets a verdict,
+/// exactly one applies and the loser is rejected by the terminal guard (the
+/// application is exclusive per task — `Task::enter_action`), the act holds
+/// exactly one terminal state, exactly one act task exists, no task of the
+/// finished process is left non-terminal, and the process sweeps cleanly.
+/// Several rounds cover the interleavings.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_error_racing_complete_converges_single_terminal() {
@@ -485,7 +485,10 @@ async fn sch_error_racing_complete_converges_single_terminal_inner_inner() {
             }
         }
         assert_eq!(oks + errs.len(), 2, "every racer must get a verdict");
-        assert!(oks >= 1, "at least one racer applies: {errs:?}");
+        assert_eq!(
+            oks, 1,
+            "round {round}: exactly one racer may decide the act: {errs:?}"
+        );
         assert!(
             errs.iter()
                 .all(|e| matches!(e, ActError::Action(msg) if msg.contains("already completed"))),

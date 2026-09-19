@@ -314,12 +314,10 @@ async fn sch_action_concurrent_next_exactly_once_inner_inner() {
         }
     }
     assert_eq!(oks + errs.len(), RACERS, "every racer must get a verdict");
-    // The act's guard is check-then-apply: racers that observe the act before
-    // the winner's terminal write lands are accepted too — one Ok is the
-    // floor, not the ceiling. The exactly-once guarantee lives downstream:
-    // the durable applied-propagation phase collapses duplicate applications
-    // to one effect (asserted below).
-    assert!(oks >= 1, "at least one racer applies the action: {errs:?}");
+    // The application is exclusive per task (`Task::enter_action`): the racer
+    // that claims the act decides it, and every later racer reads that
+    // decision and is refused by the guard — one Ok, exactly.
+    assert_eq!(oks, 1, "exactly one racer may decide the act: {errs:?}");
     for err in &errs {
         assert!(
             matches!(err, ActError::Action(msg) if msg.contains("already completed")),

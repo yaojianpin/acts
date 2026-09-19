@@ -86,6 +86,12 @@ pub struct Task {
 
     node: Arc<Node>,
 
+    /// Serializes one task's action applications (see [`Self::enter_action`]):
+    /// the guard check, the state write that decides the task and the walk the
+    /// action triggers are one exclusive step per task, so two actions racing
+    /// on the same task cannot both pass their guard and double-decide it.
+    action_lock: Arc<tokio::sync::Mutex<()>>,
+
     runtime: Arc<Runtime>,
 }
 
@@ -111,6 +117,7 @@ impl Task {
             parent: Arc::new(RwLock::new(None)),
             timestamp: utils::time::timestamp(),
             proc: Arc::downgrade(proc),
+            action_lock: Arc::new(tokio::sync::Mutex::new(())),
             runtime: rt.clone(),
         }
     }
@@ -141,6 +148,26 @@ impl Task {
 
     pub(crate) fn runtime(&self) -> &Arc<Runtime> {
         &self.runtime
+    }
+
+    /// Enter this task's action application — one at a time, in arrival order.
+    ///
+    /// [`Self::update`] holds the guard for the whole application, so an
+    /// action's terminal guard, the state write that decides the task and the
+    /// walk that write triggers (an abort's ancestor chain, a back's rewind)
+    /// are exclusive against any other action on the same task. Without it the
+    /// guards are check-then-apply and two racers (`Next` against `Abort`/
+    /// `Back`, or a redelivery against the original) can both read a
+    /// non-terminal state and both apply, leaving the task's state and the
+    /// run's outcome decided twice.
+    ///
+    /// The second racer waits here rather than being turned away, then its own
+    /// guard reads the decision the first one wrote — a genuine "already
+    /// completed" refusal, and an action that failed before deciding does not
+    /// swallow the one behind it. The lock is per task and never held while
+    /// waiting on another task's application, so it cannot close a cycle.
+    pub(crate) async fn enter_action(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.action_lock.clone().lock_owned().await
     }
 
     pub fn node(&self) -> &Arc<Node> {
@@ -661,6 +688,12 @@ impl Task {
 
     #[instrument(skip(self, ctx), fields(pid = %self.pid, tid = %self.id))]
     pub async fn update(self: &Arc<Self>, ctx: &Context) -> Result<()> {
+        // One action at a time decides this task. Everything below — the
+        // terminal guards, the state write the winning arm makes and the walk
+        // it runs — happens under this task's claim, so an action racing it
+        // (another client event on the same tid, a redelivered one) waits and
+        // then reads the decision instead of passing the same guard.
+        let _action = self.enter_action().await;
         debug!("task updated");
         let action = ctx.action().ok_or(ActError::Action(
             "cannot find action in context".to_string(),
@@ -1203,7 +1236,18 @@ impl Task {
                 }
             }
 
-            if count == task_children.len()
+            // A child the abort walk stopped is not a business success: that
+            // walk owns this task's outcome and marks the ancestors `Aborted`
+            // itself. It sets the target `Aborted` first and only then moves
+            // up, so completing here in between would re-complete a step the
+            // walk has not reached yet as `Completed` and let it schedule its
+            // chain under a run the walk is ending. The other terminal states
+            // stay completable: a skipped/cancelled/removed child is a
+            // business decision, not a stopped subtree.
+            let aborted = task_children.iter().any(|t| t.state().is_abort());
+
+            if !aborted
+                && count == task_children.len()
                 && self.is_auto_complete()
                 && !self.state().is_completed()
                 && !self

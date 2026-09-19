@@ -642,8 +642,7 @@ async fn sch_back_duplicate_delivery_is_noop_inner() {
 /// both racers were regularly admitted (`oks == 2`) — observed in a loaded
 /// full-suite round and in every round of the engine owner's probe harness.
 /// `Task::enter_action` now makes the application exclusive per task, so the
-/// loser is refused before it can decide anything.
-#[ignore = "engine bug: racing Next with this walk-based action can admit both decisions — a per-task atomic claim is required, and a lock/claim held across the application deadlocks against the runtime's own jobs for the same task (verified: 3/3 hangs with a waiting lock, 1 hang with an atomic claim + bounded spin)"]
+/// loser waits for the first to decide and is then refused by its guard.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_back_racing_complete_converges_single_terminal() {

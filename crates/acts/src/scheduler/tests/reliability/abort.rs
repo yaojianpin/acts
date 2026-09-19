@@ -655,9 +655,8 @@ async fn sch_abort_leaves_no_live_downstream_act_inner() {
 /// accept settled incoherently (the process `aborted` while the act's state
 /// write could land last, and the accepted `Next`'s propagation dropped).
 /// `Task::enter_action` now makes the application exclusive per task: the
-/// second racer is refused before it can decide anything. Re-introduce the
-/// ignore if this ever admits both racers again.
-#[ignore = "engine bug: racing Next with this walk-based action can admit both decisions — a per-task atomic claim is required, and a lock/claim held across the application deadlocks against the runtime's own jobs for the same task (verified: 3/3 hangs with a waiting lock, 1 hang with an atomic claim + bounded spin)"]
+/// second racer waits for the first to decide, then its own guard refuses it.
+/// Re-introduce the ignore if this ever admits both racers again.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_abort_racing_next_converges_single_terminal() {
