@@ -13,6 +13,14 @@ gen_store_tests!(async {
     ))))
 });
 
+gen_guarded_batch_tests!({
+    // Sled holds an exclusive file lock, so one database is one handle here;
+    // its transactions still race each other, which is what the two spawns
+    // below put under test.
+    let store: Arc<dyn KvStore> = Arc::new(SledStore::open_in_memory().unwrap());
+    (store.clone(), store)
+});
+
 #[tokio::test]
 async fn sled_scan_uses_eq_value_prefix() {
     let store = SledStore::open_in_memory().unwrap();

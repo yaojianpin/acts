@@ -19,7 +19,7 @@ use crate::{
     Act, ActError, Action, Engine, MessageState, TaskState, Vars, Workflow,
     event::EventAction,
     store::{
-        KvStore, MemoryStore, ScanOptions, StoreBatchOp,
+        KvStore, MemoryStore, ScanOptions, StoreBatchOp, StoreGuard,
         query::{Expr, Filter, Query},
     },
     utils,
@@ -137,7 +137,7 @@ impl KvStore for FailOnceTaskBatchKv {
         self.inner.delete(key).await
     }
 
-    async fn batch(&self, ops: &[StoreBatchOp]) -> crate::Result<()> {
+    async fn batch(&self, ops: &[StoreBatchOp], guards: &[StoreGuard]) -> crate::Result<bool> {
         let task_row = ops.iter().any(|op| match op {
             StoreBatchOp::Put { key, .. } => key.starts_with("tasks-id-"),
             StoreBatchOp::Delete { key } => key.starts_with("tasks-id-"),
@@ -157,7 +157,7 @@ impl KvStore for FailOnceTaskBatchKv {
                 "injected: branch-act task write failed".to_string(),
             ));
         }
-        self.inner.batch(ops).await
+        self.inner.batch(ops, guards).await
     }
 
     async fn scan_prefix(

@@ -15,6 +15,17 @@ gen_store_tests!(async {
     ))))
 });
 
+gen_guarded_batch_tests!({
+    // Two pools on one database: the guarded batch locks the guard row (or
+    // takes the key's advisory lock for an absent one) inside the transaction
+    // that writes the ops — the race below crosses two connections, which is
+    // what a second process would open.
+    let url = "postgres://postgres:yao@localhost:5433/tests";
+    let first: Arc<dyn KvStore> = Arc::new(PostgresStore::open(url).await.unwrap());
+    let second: Arc<dyn KvStore> = Arc::new(PostgresStore::open(url).await.unwrap());
+    (first, second)
+});
+
 #[tokio::test(flavor = "multi_thread")]
 #[serial(store_tests)]
 async fn postgres_scan_pushes_eq_value_prefix_into_where() {

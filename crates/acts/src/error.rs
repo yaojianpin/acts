@@ -50,6 +50,21 @@ pub enum ActError {
     /// The caller is authenticated but not allowed to run the operation.
     #[error("{0}")]
     Denied(String),
+
+    /// Another live instance holds the database's exclusive lease. Startup
+    /// refuses to run an engine on that database — a second engine over one
+    /// database duplicates recovery and scheduling, which is what the lease
+    /// exists to prevent. The holder is named in the message; a crashed
+    /// holder's lease expires on its own and a restart may claim it then.
+    #[error("database lease is held by another instance: {0}")]
+    LeaseHeld(String),
+
+    /// This instance's exclusive database lease was taken over (its renewal
+    /// was refused). Every write is refused from then on, so the instance
+    /// cannot overwrite the new holder's rows: the engine's work has to move
+    /// to the holder.
+    #[error("database lease lost: this instance no longer owns the database")]
+    LeaseLost,
 }
 
 #[derive(Default, Debug, Clone, Deserialize, Serialize)]

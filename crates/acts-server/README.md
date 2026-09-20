@@ -90,8 +90,6 @@ database_url = "postgres://user:pass@host:5432/acts"
 | `sled`   | directory path (default)              |
 | `sqlite` | sqlite file path                      |
 | `postgres` | `postgres://user:pass@host:5432/db` |
-| `redis`  | `redis://host:6379`                   |
-| `nats`   | `nats://host:4222` (JetStream KV)     |
 
 ```toml
 [db]
@@ -99,15 +97,40 @@ type = "sqlite"
 database_url = "./data/acts.db"   # or set ACTS_DATABASE_URL
 ```
 
-Every database has **one writer**, and the document locks that keep a row and
-its index entries consistent are process-local: two servers on one database
-have no mutual exclusion, so their concurrent writes to the same row can leave
+Every database has **one writer**, and the server takes an exclusive lease on
+it before starting an engine:
+
+```toml
+[db]
+lease = true          # default; the database's exclusive lease
+lease_ttl_secs = 30   # a dead holder blocks a restart for at most this long
+lease_renew_secs = 10 # at most half the TTL
+# lease_owner = "acts-1"   # default "<host>:<pid>"
+```
+
+The lease is a row in the database itself (`__acts_lease__`), claimed with an
+atomic compare-and-swap and renewed on an interval; every write the engine
+makes commits only while this server still holds it. Two servers on one
+database therefore cannot both run: the second fails its startup with
+`LeaseHeld` naming the holder (and succeeds once the first stops — a graceful
+stop hands the lease back, a crash leaves it to expire). An instance whose
+renewals fail for longer than the TTL is taken over, and from that moment every
+write of it is refused with `LeaseLost` and its engine is stopped, so it can
+never overwrite the new holder's rows. The holder's fence rises with every
+acquisition — across crashes and restarts — and a write carrying a stale fence
+is refused inside the same atomic write that would have committed it.
+
+That matters because the document locks that keep a row and its index entries
+consistent are process-local: two servers on one database have no mutual
+exclusion of their own, so their concurrent writes to the same row could leave
 a query matching a row that no longer holds the value, or missing one that
-does. Run one `acts-server` per database; a deployment that needs several gives
-each its own, or supplies coordination the store does not — a backend
-conditional write, or a lock held across the read. A single `batch` is not
-that: it is atomic on its own, while a read followed by another process's batch
-is not.
+does. The lease is what makes one server the writer; it is on by default and
+needs no configuration.
+
+`lease = false` turns it off and leaves one writer per database to you: give
+each server its own database, or coordinate outside the engine. An embedded
+engine (`EngineBuilder::set_store`) never takes a lease either — it is the raw
+store you passed, so the single-writer rule is yours there too.
 
 ### Logging (`[log]`)
 

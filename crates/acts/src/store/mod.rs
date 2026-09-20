@@ -1,5 +1,6 @@
 mod collection;
 pub mod data;
+mod lease;
 mod memory;
 pub mod query;
 
@@ -19,6 +20,11 @@ use strum::{AsRefStr, EnumIter};
 
 #[allow(unused_imports)]
 pub use memory::MemoryStore;
+
+pub use lease::{
+    DEFAULT_LEASE_RENEW, DEFAULT_LEASE_TTL, DbLease, FencedStore, LEASE_KEY, LeaseKeeper,
+    LeaseRecord,
+};
 
 fn map_db_err(err: impl Error) -> ActError {
     ActError::Store(err.to_string())
@@ -149,6 +155,45 @@ pub enum StoreBatchOp {
     Delete { key: String },
 }
 
+/// The state a [`KvStore::batch`] requires `key` to hold *at the moment its ops
+/// commit* — the read a read-modify-write decided on, moved inside the write's
+/// atomic unit.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreGuard {
+    /// The key whose stored bytes gate the batch.
+    pub key: String,
+    /// The exact bytes `key` MUST hold for the batch to apply; `None` requires
+    /// the key to be absent.
+    pub expected: Option<Vec<u8>>,
+}
+
+impl StoreGuard {
+    /// Require `key` to still hold `expected`.
+    pub fn holds(key: impl Into<String>, expected: impl Into<Vec<u8>>) -> Self {
+        Self {
+            key: key.into(),
+            expected: Some(expected.into()),
+        }
+    }
+
+    /// Require `key` to still be absent.
+    pub fn absent(key: impl Into<String>) -> Self {
+        Self {
+            key: key.into(),
+            expected: None,
+        }
+    }
+
+    /// Whether `stored` satisfies this guard.
+    pub fn matches(&self, stored: Option<&[u8]>) -> bool {
+        match (&self.expected, stored) {
+            (None, None) => true,
+            (Some(expected), Some(stored)) => expected.as_slice() == stored,
+            _ => false,
+        }
+    }
+}
+
 #[async_trait::async_trait]
 pub trait KvStore: Send + Sync {
     /// Read one key. Backends that support a native batch read should override
@@ -166,44 +211,69 @@ pub trait KvStore: Send + Sync {
         Ok(values)
     }
 
-    /// Write one key. Backends that support a native batch write should override
-    /// [`KvStore::batch`] for efficiency; the default loops over `put`.
+    /// Write one key.
     async fn put(&self, key: &str, value: Vec<u8>) -> Result<()>;
 
-    /// Delete one key. Backends that support a native batch write should override
-    /// [`KvStore::batch`] for efficiency; the default loops over `delete`.
+    /// Delete one key.
     async fn delete(&self, key: &str) -> Result<()>;
 
-    /// Apply every mutation of `ops` as one unit: on success all ops are
-    /// visible; on failure — for backends that commit atomically — none is.
-    /// The collection layer uses this for `create`/`update`/`delete` so a
-    /// document row and its index entries are written together instead of as
-    /// a sequence of independently committed keys that a mid-write failure
-    /// could tear.
+    /// Apply `ops` as one unit, and only while every guard still holds.
     ///
-    /// `MemoryStore` (in `acts`) and the `acts-store` backends `SledStore`,
-    /// `SqliteStore`, `PostgresStore` and `RedisStore` commit through a
-    /// native transaction/batch (a single-op batch falls back to
-    /// `put`/`delete`, skipping transaction overhead). A backend without
-    /// cross-key transactions (`NatsStore` — JetStream KV is per-key)
-    /// inherits the default sequential loop: order is preserved, but a
-    /// mid-batch failure leaves the earlier ops applied.
-    async fn batch(&self, ops: &[StoreBatchOp]) -> Result<()> {
-        for op in ops {
-            match op {
-                StoreBatchOp::Put { key, value } => self.put(key, value.clone()).await?,
-                StoreBatchOp::Delete { key } => self.delete(key).await?,
+    /// One call, one atomic step of the backend:
+    ///
+    /// - with no guards, all of `ops` become visible together, or — on a
+    ///   backend that commits atomically — none of them does. The collection
+    ///   layer uses this for `create`/`update`/`delete`, so a document row and
+    ///   its index entries are written together instead of as a sequence of
+    ///   independently committed keys a mid-write failure could tear.
+    /// - with guards, the guard reads join that same unit: `Ok(false)` says a
+    ///   guard did not hold **and no op was applied**, which is the caller's
+    ///   signal to re-read and decide again, never a partial write. This is
+    ///   what makes a read-modify-write safe against another writer — the
+    ///   read the write was computed from is re-checked at commit time, not
+    ///   before it — and it is the primitive [`crate::DbLease`] builds an
+    ///   exclusive database lease on.
+    ///
+    /// A backend that cannot put the guard reads in the same atomic unit as
+    /// the writes MUST report an error rather than commit a check-then-write:
+    /// the default below does exactly that, so a custom [`KvStore`] inherits a
+    /// safe refusal instead of a silent race. `MemoryStore` (in `acts`) and
+    /// the `acts-store` backends `SledStore`, `SqliteStore` and
+    /// `PostgresStore` commit through a native transaction with the guards
+    /// included (a guardless single-op batch falls back to `put`/`delete`,
+    /// skipping transaction overhead).
+    ///
+    /// A guard set rather than one optional guard, because a decorator has to
+    /// be able to add its own condition to the caller's: [`crate::FencedStore`]
+    /// commits the lease row *and* whatever guard the caller passed, in one
+    /// batch. Every caller in this workspace passes `&[]` or a one-element
+    /// slice — a read-modify-write over several documents (a model and its
+    /// trigger rows, a process and all of its rows) is what the shape is for
+    /// beyond that.
+    async fn batch(&self, ops: &[StoreBatchOp], guards: &[StoreGuard]) -> Result<bool> {
+        if guards.is_empty() {
+            for op in ops {
+                match op {
+                    StoreBatchOp::Put { key, value } => self.put(key, value.clone()).await?,
+                    StoreBatchOp::Delete { key } => self.delete(key).await?,
+                }
             }
+            return Ok(true);
         }
-        Ok(())
+        let _ = ops;
+        Err(ActError::Store(
+            "this store cannot commit a guarded batch: it cannot make a read \
+             and the writes it decided on one atomic unit, so an exclusive \
+             database lease cannot be provided on it"
+                .to_string(),
+        ))
     }
 
     /// Return every entry whose key starts with `key` and matches `options`.
     ///
     /// Entry order is unspecified: a backend may iterate an ordered key space
-    /// (SQLite/Postgres `ORDER BY key`, an in-memory `BTreeMap`) or return
-    /// keys in arbitrary order (`RedisStore` uses `SCAN`). Callers that need
-    /// an order MUST impose it themselves.
+    /// (SQLite/Postgres `ORDER BY key`, an in-memory `BTreeMap`). Callers that
+    /// need an order MUST impose it themselves.
     async fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>>;
 }
 
@@ -219,9 +289,12 @@ pub trait KvStore: Send + Sync {
 ///
 /// That serialization is per document *and per process*: `batch` makes a
 /// single write all-or-nothing, it does not make a read-then-batch pair atomic
-/// against another writer. A database written by more than one process needs
-/// coordination the backend provides — see the document-lock registry notes in
-/// the store's `collection` module.
+/// against another writer. A database written by more than one process is
+/// coordinated outside this layer — [`crate::DbLease`] takes an exclusive
+/// lease on the database and commits every write through the fence
+/// ([`KvStore::batch`] under a [`StoreGuard`]), so an instance that lost the
+/// lease has its writes refused instead of interleaving with the holder's. See
+/// the document-lock registry notes in the store's `collection` module.
 ///
 /// [`DbCollection::query`] answers one page; recovery, cleanup and
 /// reconciliation read whole match sets through

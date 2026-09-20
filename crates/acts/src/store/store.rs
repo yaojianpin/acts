@@ -154,7 +154,7 @@ impl Store {
             self.trigger_ops(&model.on, &model.id, &model.ver, &mut locks)
                 .await?,
         );
-        self.kv.batch(&ops).await?;
+        self.kv.batch(&ops, &[]).await?;
         Ok(true)
     }
 
@@ -326,7 +326,7 @@ impl Store {
             ops.extend(events.delete_ops(row_id).await?);
         }
         ops.extend(models.delete_ops(id).await?);
-        self.kv.batch(&ops).await?;
+        self.kv.batch(&ops, &[]).await?;
         Ok(true)
     }
 
@@ -395,7 +395,7 @@ impl Store {
             batch.extend(deliveries.delete_ops(id).await?);
         }
         batch.extend(procs.delete_ops(pid).await?);
-        self.kv.batch(&batch).await?;
+        self.kv.batch(&batch, &[]).await?;
         Ok(true)
     }
 
@@ -490,7 +490,7 @@ impl Store {
             written.push(next);
         }
         if !ops.is_empty() {
-            self.kv.batch(&ops).await?;
+            self.kv.batch(&ops, &[]).await?;
         }
         Ok(written)
     }
@@ -741,7 +741,7 @@ impl Store {
         if let Some(task_data) = &task_data {
             ops.extend(tasks.update_ops(task_data).await?);
         }
-        self.kv.batch(&ops).await?;
+        self.kv.batch(&ops, &[]).await?;
         Ok(())
     }
 }
@@ -752,7 +752,7 @@ mod tests {
     use crate::Workflow;
     use crate::store::data::DeliveryStatus;
     use crate::store::query::{Expr, Filter, Query};
-    use crate::store::{KvStore, MemoryStore, ScanOptions, StoreBatchOp};
+    use crate::store::{KvStore, MemoryStore, ScanOptions, StoreBatchOp, StoreGuard};
     use crate::utils::consts::MODEL_ID;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -785,9 +785,9 @@ mod tests {
             self.inner.delete(key).await
         }
 
-        async fn batch(&self, ops: &[StoreBatchOp]) -> crate::Result<()> {
+        async fn batch(&self, ops: &[StoreBatchOp], guards: &[StoreGuard]) -> crate::Result<bool> {
             self.batches.fetch_add(1, Ordering::SeqCst);
-            self.inner.batch(ops).await
+            self.inner.batch(ops, guards).await
         }
 
         async fn scan_prefix(
@@ -1896,12 +1896,12 @@ mod tests {
                 .unwrap(),
             );
             if pending.len() >= 4096 * 4 {
-                kv.batch(&pending).await.unwrap();
+                kv.batch(&pending, &[]).await.unwrap();
                 pending.clear();
             }
         }
         if !pending.is_empty() {
-            kv.batch(&pending).await.unwrap();
+            kv.batch(&pending, &[]).await.unwrap();
         }
 
         let filter = Filter::and().expr(Expr::eq("pid", pid.to_string()));

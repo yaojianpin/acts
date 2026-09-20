@@ -19,7 +19,7 @@ use crate::{
     event::EventAction,
     scheduler::NodeKind,
     store::{
-        KvStore, MemoryStore, ScanOptions, StoreBatchOp,
+        KvStore, MemoryStore, ScanOptions, StoreBatchOp, StoreGuard,
         query::{Expr, Filter, Query},
     },
     utils,
@@ -87,7 +87,7 @@ impl KvStore for FailStep2TaskWriteKv {
         self.inner.delete(key).await
     }
 
-    async fn batch(&self, ops: &[StoreBatchOp]) -> crate::Result<()> {
+    async fn batch(&self, ops: &[StoreBatchOp], guards: &[StoreGuard]) -> crate::Result<bool> {
         if self.armed.load(Ordering::SeqCst)
             && ops.iter().any(|op| match op {
                 StoreBatchOp::Put { key, value } => {
@@ -102,7 +102,7 @@ impl KvStore for FailStep2TaskWriteKv {
                 "injected: step2 task write failed".to_string(),
             ));
         }
-        self.inner.batch(ops).await
+        self.inner.batch(ops, guards).await
     }
 
     async fn scan_prefix(
@@ -155,7 +155,7 @@ impl KvStore for FailNextRecordWriteKv {
         self.inner.delete(key).await
     }
 
-    async fn batch(&self, ops: &[StoreBatchOp]) -> crate::Result<()> {
+    async fn batch(&self, ops: &[StoreBatchOp], guards: &[StoreGuard]) -> crate::Result<bool> {
         if self.armed.load(Ordering::SeqCst)
             && ops
                 .iter()
@@ -167,7 +167,7 @@ impl KvStore for FailNextRecordWriteKv {
                 "injected: next outbox record write failed".to_string(),
             ));
         }
-        self.inner.batch(ops).await
+        self.inner.batch(ops, guards).await
     }
 
     async fn scan_prefix(

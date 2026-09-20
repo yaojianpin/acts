@@ -27,6 +27,7 @@
 //! to finish it.
 
 use super::*;
+use crate::StoreGuard;
 use crate::{
     TaskState,
     event::{Action, EventAction},
@@ -114,10 +115,10 @@ impl CutKv {
     }
 
     /// The result a refused write reports: an error, or the silent success of
-    /// a write whose process is already gone.
-    fn refused(&self) -> crate::Result<()> {
+    /// a write whose process is already gone (`true`: nothing was refused).
+    fn refused(&self) -> crate::Result<bool> {
         if self.drop_writes.load(Ordering::SeqCst) {
-            Ok(())
+            Ok(true)
         } else {
             Err(ActError::Store("cut: the process crashed".into()))
         }
@@ -132,23 +133,23 @@ impl KvStore for CutKv {
 
     async fn put(&self, key: &str, value: Vec<u8>) -> crate::Result<()> {
         if !self.allow() {
-            return self.refused();
+            return self.refused().map(|_| ());
         }
         self.inner.put(key, value).await
     }
 
     async fn delete(&self, key: &str) -> crate::Result<()> {
         if !self.allow() {
-            return self.refused();
+            return self.refused().map(|_| ());
         }
         self.inner.delete(key).await
     }
 
-    async fn batch(&self, ops: &[StoreBatchOp]) -> crate::Result<()> {
+    async fn batch(&self, ops: &[StoreBatchOp], guards: &[StoreGuard]) -> crate::Result<bool> {
         if !self.allow() {
             return self.refused();
         }
-        self.inner.batch(ops).await
+        self.inner.batch(ops, guards).await
     }
 
     async fn scan_prefix(

@@ -36,9 +36,9 @@ pub struct KvCollection<T> {
 /// of the value it does hold (a query misses it).
 ///
 /// [`lock_docs`] serializes every read-modify-write of a document from its
-/// read until its batch has been applied. The guarantee ends at the process
-/// boundary — the store's contract is one writer per database — and both edges
-/// of it are worth stating, because neither is enforced anywhere:
+/// read until its batch has been applied. That serialization is per document
+/// *and per process*; the cross-process half of the same invariant is the
+/// exclusive database lease:
 ///
 /// - The registry is a process-wide `static`, so every engine and every store
 ///   handle in this process share one table. Keys are full document keys, so
@@ -48,16 +48,18 @@ pub struct KvCollection<T> {
 ///   a shared table can wrongly exclude, not wrongly admit — and it is what
 ///   makes two engines over one database in a single process safe without any
 ///   further coordination.
-/// - There is no cross-process mutex. Two processes writing one database (a
-///   multi-instance deployment over a remote postgres/redis/nats backend, or a
-///   second server on the same sqlite/sled file) each hold a private registry,
-///   so the read in `update_ops`/`delete_ops` and the batch computed from it
-///   can interleave and both inconsistent outcomes above are reachable. Such a
-///   deployment needs coordination the engine does not provide: one writer per
-///   database (the supported deployment), a backend conditional write (a
-///   compare-and-swap on the row), or a backend lock held across the read —
-///   [`KvStore::batch`] makes one write atomic, not a read against another
-///   process's write.
+/// - There is no cross-process mutex here, so two processes writing one
+///   database (a multi-instance deployment over a remote postgres/redis/nats
+///   backend, or a second server on the same sqlite/sled file) each hold a
+///   private registry. What keeps them apart is [`crate::DbLease`]: one
+///   instance holds the database's lease, the engine runs on the
+///   [`crate::FencedStore`] view of the store, and every write it commits
+///   carries the holder's fence as a guard inside the same atomic unit — so a
+///   second instance's read-modify-write cannot interleave with the holder's,
+///   it is refused as [`crate::ActError::LeaseLost`] instead. A deployment
+///   without the lease (an embedder that sets its own store, or `[db].lease =
+///   false`) is back to one writer per database: [`KvStore::batch`] makes one
+///   write atomic, not a read against another process's write.
 static DOC_LOCKS: LazyLock<DocLockRegistry> = LazyLock::new(DocLockRegistry::default);
 
 #[derive(Default)]
@@ -1043,7 +1045,7 @@ where
         // document's lock (`lock_docs`).
         let _lock = lock_docs([self.data_key(id)]).await;
         let ops = self.delete_ops(id).await?;
-        self.kv.batch(&ops).await?;
+        self.kv.batch(&ops, &[]).await?;
         Ok(true)
     }
 
@@ -1098,7 +1100,7 @@ where
         let json = serde_json::to_value(data).map_err(map_db_err)?;
         let _lock = lock_docs([self.data_key(&extract_id(&json)?)]).await;
         let ops = self.update_ops_json(&json).await?;
-        self.kv.batch(&ops).await?;
+        self.kv.batch(&ops, &[]).await?;
         Ok(true)
     }
 }
@@ -1998,7 +2000,7 @@ mod tests {
 
     // ========== atomic batch write tests ==========
 
-    use crate::store::{MemoryStore, ScanOptions, StoreBatchOp};
+    use crate::store::{MemoryStore, ScanOptions, StoreBatchOp, StoreGuard};
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// Kv wrapper that counts how the collection writes: a document write
@@ -2031,9 +2033,9 @@ mod tests {
             self.inner.delete(key).await
         }
 
-        async fn batch(&self, ops: &[StoreBatchOp]) -> crate::Result<()> {
+        async fn batch(&self, ops: &[StoreBatchOp], guards: &[StoreGuard]) -> crate::Result<bool> {
             self.batches.fetch_add(1, Ordering::SeqCst);
-            self.inner.batch(ops).await
+            self.inner.batch(ops, guards).await
         }
 
         async fn many(&self, keys: &[String]) -> crate::Result<Vec<Option<Vec<u8>>>> {
@@ -2334,11 +2336,15 @@ mod tests {
             self.inner.delete(key).await
         }
 
-        async fn batch(&self, ops: &[crate::store::StoreBatchOp]) -> crate::Result<()> {
+        async fn batch(
+            &self,
+            ops: &[crate::store::StoreBatchOp],
+            guards: &[crate::store::StoreGuard],
+        ) -> crate::Result<bool> {
             if self.ordered() {
                 self.park().await;
             }
-            self.inner.batch(ops).await
+            self.inner.batch(ops, guards).await
         }
 
         async fn scan_prefix(

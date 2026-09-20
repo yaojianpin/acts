@@ -13,7 +13,7 @@
 mod support;
 
 use acts::{
-    ActError, KvStore, MemoryStore, Principal, ScanOptions, StoreBatchOp,
+    ActError, KvStore, MemoryStore, Principal, ScanOptions, StoreBatchOp, StoreGuard,
     query::{Expr, Filter, Query},
 };
 use std::sync::Arc;
@@ -80,7 +80,7 @@ impl KvStore for FlakyTaskWriteKv {
         self.inner.delete(key).await
     }
 
-    async fn batch(&self, ops: &[StoreBatchOp]) -> acts::Result<()> {
+    async fn batch(&self, ops: &[StoreBatchOp], guards: &[StoreGuard]) -> acts::Result<bool> {
         // Only a `Put` of a task row is faulted: the completion write of a
         // finished act. Removals (`Delete`) of task rows are the process
         // sweep's cleanup — faulting those would strand a finished process
@@ -92,7 +92,7 @@ impl KvStore for FlakyTaskWriteKv {
             self.fired.store(true, Ordering::SeqCst);
             return Err(ActError::Store("injected: task-state write failed".into()));
         }
-        self.inner.batch(ops).await
+        self.inner.batch(ops, guards).await
     }
 
     async fn scan_prefix(

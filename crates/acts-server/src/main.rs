@@ -23,18 +23,45 @@ async fn main() -> Result<(), anyhow::Error> {
     } else {
         acts_server::DbConfig::default()
     };
-    let store = acts_server::open_store(&config_dir, &db).await?;
-    let engine = Arc::new(
-        acts_server::engine_builder(&config, store, &acts_server::ServerPlugins::full())?
-            .start()
-            .await?,
-    );
+    // Opening the store also takes the database's exclusive lease: a second
+    // server on the same database is refused here, before an engine exists to
+    // duplicate recovery and scheduling.
+    let opened = acts_server::open_store(&config_dir, &db).await?;
+    let started = match acts_server::engine_builder(
+        &config,
+        opened.store.clone(),
+        &acts_server::ServerPlugins::full(),
+    ) {
+        Ok(builder) => builder.start().await,
+        Err(err) => Err(err),
+    };
+    let engine = match started {
+        Ok(engine) => Arc::new(engine),
+        Err(err) => {
+            // A startup that failed hands the lease back: fixing the config and
+            // restarting must not wait out the TTL.
+            if let Some(lease) = opened.lease()
+                && let Err(release) = lease.release().await
+            {
+                tracing::warn!(error = %release, "failed to release the database lease");
+            }
+            return Err(err.into());
+        }
+    };
+    // The lease is renewed while the engine runs, and the engine is stopped if
+    // it is lost (every write is refused from that point on).
+    let keeper = opened.keep_lease(&engine);
 
     print_logo();
 
     shutdown_signal().await;
     info!("shutdown signal received, closing the engine");
     engine.close().await;
+    if let Some(keeper) = keeper {
+        // Waits for the release, so the successor of a rolling update starts
+        // at once instead of waiting out the lease TTL.
+        keeper.stop().await;
+    }
     info!("engine closed, exiting");
 
     Ok(())

@@ -1,5 +1,5 @@
 use crate::consts;
-use acts::{ActError, KvStore, Result, ScanOperation, ScanOptions, StoreBatchOp};
+use acts::{ActError, KvStore, Result, ScanOperation, ScanOptions, StoreBatchOp, StoreGuard};
 use sqlx::{Row, postgres::PgPoolOptions};
 use std::time::Duration;
 
@@ -115,32 +115,75 @@ impl KvStore for PostgresStore {
         Ok(values)
     }
 
-    async fn batch(&self, ops: &[StoreBatchOp]) -> Result<()> {
-        if ops.is_empty() {
-            return Ok(());
+    async fn batch(&self, ops: &[StoreBatchOp], guards: &[StoreGuard]) -> Result<bool> {
+        if ops.is_empty() && guards.is_empty() {
+            return Ok(true);
         }
-        if ops.len() == 1 {
-            // A single-key batch skips the BEGIN/COMMIT round trip.
+        if guards.is_empty() && ops.len() == 1 {
+            // A guardless single-key batch skips the BEGIN/COMMIT round trip.
             return match &ops[0] {
-                StoreBatchOp::Put { key, value } => self.put(key, value.clone()).await,
-                StoreBatchOp::Delete { key } => self.delete(key).await,
+                StoreBatchOp::Put { key, value } => {
+                    self.put(key, value.clone()).await.map(|()| true)
+                }
+                StoreBatchOp::Delete { key } => self.delete(key).await.map(|()| true),
             };
         }
-        // One connection for the whole batch: `tx` commits everything or,
-        // when an op fails and the method returns early, is dropped and
-        // rolls the whole batch back.
+
+        // One transaction for the guard reads and the ops, and each guard key
+        // is locked before it is read:
+        //
+        // - an expected value locks the row (`FOR UPDATE`), so a concurrent
+        //   write of the same key waits and then compares against the
+        //   committed bytes — never against the snapshot it started with;
+        // - an absent guard cannot lock a row that does not exist, so it takes
+        //   a transaction-scoped advisory lock on the key instead, which is
+        //   what serializes two creators of a key that is not there yet.
+        //
+        // Either way the comparison and the writes commit together, or the
+        // transaction is dropped (rolled back) with nothing applied.
+        let table = consts::ACTS_STORE_NAME;
         let mut tx = self
             .pool
             .begin()
             .await
             .map_err(|e| ActError::Store(e.to_string()))?;
+        for guard in guards {
+            let row = if guard.expected.is_none() {
+                sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+                    .bind(&guard.key)
+                    .execute(&mut *tx)
+                    .await
+                    .map_err(|e| ActError::Store(e.to_string()))?;
+                sqlx::query_as::<_, (Vec<u8>,)>(&format!(
+                    "SELECT value FROM {} WHERE key = $1",
+                    table
+                ))
+                .bind(&guard.key)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| ActError::Store(e.to_string()))?
+            } else {
+                sqlx::query_as::<_, (Vec<u8>,)>(&format!(
+                    "SELECT value FROM {} WHERE key = $1 FOR UPDATE",
+                    table
+                ))
+                .bind(&guard.key)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|e| ActError::Store(e.to_string()))?
+            };
+            if !guard.matches(row.as_ref().map(|(value,)| value.as_slice())) {
+                // Dropping `tx` without committing rolls the whole batch back.
+                return Ok(false);
+            }
+        }
         for op in ops {
             match op {
                 StoreBatchOp::Put { key, value } => {
                     sqlx::query(&format!(
                         "INSERT INTO {} (key, value) VALUES ($1, $2)
                          ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
-                        consts::ACTS_STORE_NAME
+                        table
                     ))
                     .bind(key)
                     .bind(value)
@@ -149,21 +192,18 @@ impl KvStore for PostgresStore {
                     .map_err(|e| ActError::Store(e.to_string()))?;
                 }
                 StoreBatchOp::Delete { key } => {
-                    sqlx::query(&format!(
-                        "DELETE FROM {} WHERE key = $1",
-                        consts::ACTS_STORE_NAME
-                    ))
-                    .bind(key)
-                    .execute(&mut *tx)
-                    .await
-                    .map_err(|e| ActError::Store(e.to_string()))?;
+                    sqlx::query(&format!("DELETE FROM {} WHERE key = $1", table))
+                        .bind(key)
+                        .execute(&mut *tx)
+                        .await
+                        .map_err(|e| ActError::Store(e.to_string()))?;
                 }
             }
         }
         tx.commit()
             .await
             .map_err(|e| ActError::Store(e.to_string()))?;
-        Ok(())
+        Ok(true)
     }
 
     async fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>> {

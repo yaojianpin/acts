@@ -1,4 +1,11 @@
-use acts::{ActError, KvStore, Result, ScanOperation, ScanOptions, StoreBatchOp};
+use acts::{ActError, KvStore, Result, ScanOperation, ScanOptions, StoreBatchOp, StoreGuard};
+use sled::transaction::{ConflictableTransactionError, TransactionError};
+
+/// How many times sled may re-run a guarded batch's closure before the batch
+/// is reported as a conflict instead. sled retries on its own whenever a key
+/// the transaction read changed, so this bound only matters when the guard key
+/// is written continuously — a guard that keeps changing cannot be proven held.
+const BATCH_MAX_ATTEMPTS: usize = 32;
 
 pub struct SledStore {
     db: sled::Db,
@@ -109,30 +116,76 @@ impl KvStore for SledStore {
         .map_err(|e| ActError::Store(e.to_string()))?
     }
 
-    async fn batch(&self, ops: &[StoreBatchOp]) -> Result<()> {
-        if ops.is_empty() {
-            return Ok(());
+    async fn batch(&self, ops: &[StoreBatchOp], guards: &[StoreGuard]) -> Result<bool> {
+        if ops.is_empty() && guards.is_empty() {
+            return Ok(true);
         }
         let db = self.db.clone();
         let ops = ops.to_vec();
+        let guards = guards.to_vec();
         tokio::task::spawn_blocking(move || {
-            let mut sled_batch = sled::Batch::default();
-            for op in ops {
-                match op {
-                    StoreBatchOp::Put { key, value } => {
-                        sled_batch.insert(key.as_bytes(), value);
-                    }
-                    StoreBatchOp::Delete { key } => {
-                        sled_batch.remove(key.as_bytes());
+            if guards.is_empty() {
+                let mut sled_batch = sled::Batch::default();
+                for op in ops {
+                    match op {
+                        StoreBatchOp::Put { key, value } => {
+                            sled_batch.insert(key.as_bytes(), value);
+                        }
+                        StoreBatchOp::Delete { key } => {
+                            sled_batch.remove(key.as_bytes());
+                        }
                     }
                 }
+                db.apply_batch(sled_batch)
+                    .map_err(|e| ActError::Store(e.to_string()))?;
+                // One durability boundary belongs to the atomic batch itself.
+                db.flush().map_err(|e| ActError::Store(e.to_string()))?;
+                return Ok(true);
             }
-            db.apply_batch(sled_batch)
-                .map_err(|e| ActError::Store(e.to_string()))?;
-            // One durability boundary belongs to the atomic batch itself.
-            db.flush()
-                .map(|_| ())
-                .map_err(|e| ActError::Store(e.to_string()))
+
+            // `Transaction` is the backend's serializable multi-key unit: the
+            // guard reads below and the ops are one transaction, and sled
+            // re-runs the closure whenever a key it read changed under it, so
+            // a guard read can never be stale at commit time. A conflict that
+            // keeps repeating (the guard key written continuously by another
+            // writer) is bounded here instead of retrying forever.
+            let attempts = std::cell::Cell::new(0usize);
+            let outcome = db.transaction(|tx| {
+                if attempts.replace(attempts.get() + 1) > BATCH_MAX_ATTEMPTS {
+                    return Err(ConflictableTransactionError::Abort(false));
+                }
+                for guard in &guards {
+                    let stored = tx.get(guard.key.as_bytes())?;
+                    if !guard.matches(stored.as_ref().map(|value| value.as_ref())) {
+                        return Err(ConflictableTransactionError::Abort(false));
+                    }
+                }
+                for op in &ops {
+                    match op {
+                        StoreBatchOp::Put { key, value } => {
+                            tx.insert(key.as_bytes(), value.clone())?;
+                        }
+                        StoreBatchOp::Delete { key } => {
+                            tx.remove(key.as_bytes())?;
+                        }
+                    }
+                }
+                Ok(true)
+            });
+            let applied = match outcome {
+                Ok(applied) => applied,
+                // Our own guard mismatch (or the retry bound), reported
+                // through the abort channel.
+                Err(TransactionError::Abort(applied)) => applied,
+                Err(TransactionError::Storage(err)) => {
+                    return Err(ActError::Store(err.to_string()));
+                }
+            };
+            if applied {
+                // The transaction's durability boundary, as the plain batch has.
+                db.flush().map_err(|e| ActError::Store(e.to_string()))?;
+            }
+            Ok(applied)
         })
         .await
         .map_err(|e| ActError::Store(e.to_string()))?

@@ -2,7 +2,21 @@ use crate::Result;
 use parking_lot::RwLock;
 use std::collections::BTreeMap;
 
-use crate::store::{KvStore, ScanOperation, ScanOptions, StoreBatchOp};
+use crate::store::{KvStore, ScanOperation, ScanOptions, StoreBatchOp, StoreGuard};
+
+/// Apply every op of a batch to `data`.
+fn apply_ops(data: &mut BTreeMap<String, Vec<u8>>, ops: &[StoreBatchOp]) {
+    for op in ops {
+        match op {
+            StoreBatchOp::Put { key, value } => {
+                data.insert(key.clone(), value.clone());
+            }
+            StoreBatchOp::Delete { key } => {
+                data.remove(key.as_str());
+            }
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct MemoryStore {
@@ -64,24 +78,21 @@ impl KvStore for MemoryStore {
         Ok(())
     }
 
-    async fn batch(&self, ops: &[StoreBatchOp]) -> Result<()> {
-        if ops.is_empty() {
-            return Ok(());
+    /// One write lock for the whole batch: concurrent readers can never
+    /// observe a partially applied batch, and a guarded batch reads its guards
+    /// under the same lock, so no other mutation can interleave.
+    async fn batch(&self, ops: &[StoreBatchOp], guards: &[StoreGuard]) -> Result<bool> {
+        if ops.is_empty() && guards.is_empty() {
+            return Ok(true);
         }
-        // One write lock for the whole batch: concurrent readers can never
-        // observe a partially applied batch.
         let mut data = self.data.write();
-        for op in ops {
-            match op {
-                StoreBatchOp::Put { key, value } => {
-                    data.insert(key.clone(), value.clone());
-                }
-                StoreBatchOp::Delete { key } => {
-                    data.remove(key.as_str());
-                }
+        for guard in guards {
+            if !guard.matches(data.get(&guard.key).map(Vec::as_slice)) {
+                return Ok(false);
             }
         }
-        Ok(())
+        apply_ops(&mut data, ops);
+        Ok(true)
     }
 
     async fn scan_prefix(&self, key: &str, options: ScanOptions) -> Result<Vec<(String, Vec<u8>)>> {

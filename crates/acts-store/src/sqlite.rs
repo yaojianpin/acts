@@ -1,5 +1,5 @@
 use crate::consts;
-use acts::{ActError, KvStore, Result, ScanOperation, ScanOptions, StoreBatchOp};
+use acts::{ActError, KvStore, Result, ScanOperation, ScanOptions, StoreBatchOp, StoreGuard};
 use std::time::Duration;
 
 use sqlx::Row;
@@ -192,29 +192,45 @@ impl KvStore for SqliteStore {
         Ok(values)
     }
 
-    async fn batch(&self, ops: &[StoreBatchOp]) -> Result<()> {
-        if ops.is_empty() {
-            return Ok(());
+    async fn batch(&self, ops: &[StoreBatchOp], guards: &[StoreGuard]) -> Result<bool> {
+        if ops.is_empty() && guards.is_empty() {
+            return Ok(true);
         }
-        if ops.len() == 1 {
-            // A single-key batch skips the BEGIN/COMMIT round trip.
+        if guards.is_empty() && ops.len() == 1 {
+            // A guardless single-key batch skips the BEGIN/COMMIT round trip.
             return match &ops[0] {
-                StoreBatchOp::Put { key, value } => self.put(key, value.clone()).await,
-                StoreBatchOp::Delete { key } => self.delete(key).await,
+                StoreBatchOp::Put { key, value } => {
+                    self.put(key, value.clone()).await.map(|()| true)
+                }
+                StoreBatchOp::Delete { key } => self.delete(key).await.map(|()| true),
             };
         }
 
-        // Use an explicit immediate transaction so the batch waits for any
-        // active writer before taking SQLite's write lock. The pooled
-        // connection is returned on commit or rollback.
+        // An explicit immediate transaction so the batch waits for any active
+        // writer before taking SQLite's write lock: every other connection's
+        // writes are ordered against it, which is what lets the guard reads
+        // below share the commit with the ops. The pooled connection is
+        // returned on commit or rollback.
         let mut conn = self
             .pool
             .acquire()
             .await
             .map_err(|e| ActError::Store(e.to_string()))?;
         let table = consts::ACTS_STORE_NAME;
-        let res: std::result::Result<(), sqlx::Error> = async {
+        let res: std::result::Result<bool, sqlx::Error> = async {
             sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await?;
+            for guard in guards {
+                let row = sqlx::query_as::<_, (Vec<u8>,)>(&format!(
+                    "SELECT value FROM {} WHERE key = ?",
+                    table
+                ))
+                .bind(&guard.key)
+                .fetch_optional(&mut *conn)
+                .await?;
+                if !guard.matches(row.as_ref().map(|(value,)| value.as_slice())) {
+                    return Ok(false);
+                }
+            }
             for op in ops {
                 match op {
                     StoreBatchOp::Put { key, value } => {
@@ -237,12 +253,18 @@ impl KvStore for SqliteStore {
                 }
             }
             sqlx::query("COMMIT").execute(&mut *conn).await?;
-            Ok(())
+            Ok(true)
         }
         .await;
 
         match res {
-            Ok(()) => Ok(()),
+            Ok(true) => Ok(true),
+            Ok(applied) => {
+                // Nothing was applied: close the open transaction so its
+                // (empty) write lock is released.
+                let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+                Ok(applied)
+            }
             Err(err) => {
                 // Roll back the failed batch: without this the partial
                 // writes would stay in the open transaction, invisible

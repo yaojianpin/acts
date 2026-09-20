@@ -11,6 +11,7 @@
 //! pointing troubleshooting at a phantom duplicate instead of the store fault
 //! that really happened.
 
+use crate::StoreGuard;
 use crate::{
     ActError, Config, Vars, Workflow,
     config::ConfigData,
@@ -54,7 +55,7 @@ impl KvStore for FailOnceProcBatchKv {
         self.inner.delete(key).await
     }
 
-    async fn batch(&self, ops: &[StoreBatchOp]) -> crate::Result<()> {
+    async fn batch(&self, ops: &[StoreBatchOp], guards: &[StoreGuard]) -> crate::Result<bool> {
         let proc_row = ops.iter().any(|op| match op {
             StoreBatchOp::Put { key, .. } | StoreBatchOp::Delete { key } => {
                 key.starts_with("procs-id-")
@@ -63,7 +64,7 @@ impl KvStore for FailOnceProcBatchKv {
         if proc_row && self.armed.swap(false, Ordering::SeqCst) {
             return Err(ActError::Store("injected: backend unavailable".to_string()));
         }
-        self.inner.batch(ops).await
+        self.inner.batch(ops, guards).await
     }
 
     async fn scan_prefix(

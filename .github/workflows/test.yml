@@ -14,9 +14,9 @@ jobs:
     runs-on: ubuntu-latest
 
     services:
-      # live backends for the acts-store cross-backend suites — acts-server
+      # live backend for the acts-store cross-backend suite — acts-server
       # enables every acts-store feature, so the workspace test run compiles
-      # and runs tests/{nats,postgres,redis}.rs; they need real services
+      # and runs tests/postgres.rs; it needs a real service
       postgres:
         image: postgres:16
         env:
@@ -24,10 +24,6 @@ jobs:
           POSTGRES_DB: tests
         ports:
           - 5433:5432 # acts-store/tests/postgres.rs connects to localhost:5433
-      redis:
-        image: redis:7
-        ports:
-          - 6379:6379
 
     env:
       ACTS_NATS_URL: nats://127.0.0.1:4222
@@ -47,8 +43,8 @@ jobs:
       # `-js` JetStream flag cannot be passed through the nats service; start
       # it directly (a JetStream server also serves the core-NATS tests of
       # acts-channel/acts-plugin-nats/acts-server)
-      # a skipped acts-store nats suite must not read as a green run, so the
-      # step fails when the server never accepts connections
+      # the suites that skip when the broker is absent must not read as a green
+      # run, so the step fails when the server never accepts connections
       - name: Start NATS (JetStream)
         run: |
           docker run -d --name nats -p 4222:4222 nats:2 -js
@@ -69,7 +65,7 @@ jobs:
       - name: Run tests packages
         run: cargo test -p acts-package-* --verbose
       - name: Run tests store
-        run: cargo test -p acts-store --verbose --features sled,sqlite,nats,postgres,redis
+        run: cargo test -p acts-store --verbose --features sled,sqlite,postgres
       - name: Run tests cli
         run: cargo test -p acts-cli --verbose
       - name: Run tests server

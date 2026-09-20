@@ -36,7 +36,7 @@ use crate::{
     event::EventAction,
     scheduler::NodeKind,
     store::{
-        KvStore, MemoryStore, ScanOptions, StoreBatchOp,
+        KvStore, MemoryStore, ScanOptions, StoreBatchOp, StoreGuard,
         query::{Expr, Filter, Query},
     },
     utils,
@@ -213,7 +213,7 @@ impl KvStore for FailOnceSubflowStartKv {
         self.inner.delete(key).await
     }
 
-    async fn batch(&self, ops: &[StoreBatchOp]) -> crate::Result<()> {
+    async fn batch(&self, ops: &[StoreBatchOp], guards: &[StoreGuard]) -> crate::Result<bool> {
         let starts_proc = ops
             .iter()
             .any(|op| matches!(op, StoreBatchOp::Put { key, .. } if key.starts_with("procs-id-")));
@@ -225,7 +225,7 @@ impl KvStore for FailOnceSubflowStartKv {
             }
             self.armed.store(true, Ordering::SeqCst);
         }
-        self.inner.batch(ops).await
+        self.inner.batch(ops, guards).await
     }
 
     async fn scan_prefix(

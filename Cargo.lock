@@ -248,6 +248,7 @@ dependencies = [
  "acts-store",
  "anyhow",
  "async-nats",
+ "async-trait",
  "serde",
  "serde_json",
  "time",
@@ -263,11 +264,8 @@ name = "acts-store"
 version = "0.25.0"
 dependencies = [
  "acts",
- "async-nats",
  "async-trait",
- "futures",
  "nanoid",
- "redis",
  "serde_json",
  "serial_test",
  "sled",

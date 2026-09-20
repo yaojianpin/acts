@@ -64,17 +64,41 @@ max_files = 168
 # `database_url` (the ACTS_DATABASE_URL env var overrides database_url):
 #   type = "sqlite"   database_url = "acts.db"
 #   type = "postgres" database_url = "postgres://user:pass@host:5432/acts"
-#   type = "redis"    database_url = "redis://127.0.0.1:6379"
-#   type = "nats"     database_url = "nats://127.0.0.1:4222"
 #
-# One writer per database: the document locks that keep a row and its index
-# entries consistent are process-local, so two servers on the same database
-# have no mutual exclusion between them. Give each server its own database, or
-# coordinate outside the engine (see the storage section of the acts-server
-# README).
+# Exclusive database lease (on unless it is turned off). The engine's document
+# locks, write lanes, scheduler lanes and recovery claims are process-local, so
+# two servers on one database would both recover the same rows and run the same
+# work. With `lease = true` the server takes a lease row in the database itself
+# — `__acts_lease__`, claimed with an atomic compare-and-swap and renewed every
+# `lease_renew_secs` — and commits every write only while it still holds it:
+#   * a second server on the same database fails its startup with a
+#     `LeaseHeld` error naming the instance that holds it, instead of starting
+#     an engine that duplicates recovery and scheduling;
+#   * an instance whose lease is taken over (its renewals failed for longer
+#     than `lease_ttl_secs`) has every write refused with `LeaseLost` and its
+#     engine stopped, so it can never overwrite the new holder's rows;
+#   * a holder's fence rises with every acquisition — across crashes and
+#     restarts — and a write carrying a stale fence is refused inside the same
+#     atomic write that would have committed it.
+# A graceful stop releases the lease, so a rolling restart takes over at once;
+# a crashed holder blocks a restart for at most `lease_ttl_secs`.
+#
+# `lease = false` accepts the older contract instead: one writer per database
+# is yours to guarantee (separate databases per server, or coordination
+# outside the engine). An embedded engine that sets its own store never takes
+# a lease either — the store is whatever you passed.
+#
+# lease_ttl_secs / lease_renew_secs accept bare seconds or a suffixed duration
+# ("30s", "5m"); `lease_renew_secs` must be at most half the TTL. `lease_owner`
+# is the instance id another server's startup error names (default
+# "<host>:<pid>").
 [db]
 type = "sled"
 database_url = "./data"
+lease = true
+# lease_ttl_secs = 30
+# lease_renew_secs = 10
+# lease_owner = "acts-1"
 
 # snapshot-backed sealed-data targets.
 # Data is fed through the web/grpc/nats snapshot APIs and sealed into tasks

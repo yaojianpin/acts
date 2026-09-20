@@ -13,6 +13,18 @@ gen_store_tests!(async {
     ))))
 });
 
+gen_guarded_batch_tests!({
+    // One file, two pools: the guarded batch is committed by two independent
+    // connections, which is what a second process would open. The file is
+    // keyed by the test process (the keys inside are unique per run) and is
+    // left in the temp dir rather than deleted under the open handles.
+    let path = std::env::temp_dir().join(format!("acts-store-guard-{}.db", std::process::id()));
+    let path = path.to_string_lossy().into_owned();
+    let first: Arc<dyn KvStore> = Arc::new(SqliteStore::open(&path).await.unwrap());
+    let second: Arc<dyn KvStore> = Arc::new(SqliteStore::open(&path).await.unwrap());
+    (first, second)
+});
+
 #[tokio::test]
 async fn sqlite_scan_pushes_eq_value_prefix_into_where() {
     let store = SqliteStore::open_in_memory().await.unwrap();

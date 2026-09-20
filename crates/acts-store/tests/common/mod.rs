@@ -4556,3 +4556,157 @@ macro_rules! gen_store_tests {
         }
     };
 }
+
+/// Guarded-batch contract for one backend: the guard read and the ops it
+/// decided on are ONE atomic unit on the wire, so a stale guard applies
+/// nothing, and two writers racing the same guard cannot both win it.
+///
+/// `$two_handles` must yield two `Arc<dyn KvStore>` over one database — two
+/// connections where the backend has them, or the same handle for an embedded
+/// store (its transactions still race each other independently). The engine's
+/// exclusive database lease is built on exactly this primitive, so a backend
+/// whose `batch` accepts guards has to pass this.
+///
+macro_rules! gen_guarded_batch_tests {
+    ($two_handles:expr) => {
+        #[tokio::test(flavor = "multi_thread")]
+        #[serial(store_tests)]
+        async fn guarded_batch_is_atomic() {
+            use acts::{KvStore, StoreBatchOp, StoreGuard};
+
+            let (first, second): (std::sync::Arc<dyn KvStore>, std::sync::Arc<dyn KvStore>) =
+                $two_handles;
+
+            let id = shortid();
+            let key = format!("guard-{id}-row");
+            let other = format!("guard-{id}-side");
+            let fresh = format!("guard-{id}-fresh");
+            first.put(&key, b"v1".to_vec()).await.unwrap();
+
+            // The guard holds: the ops apply, together.
+            let applied = first
+                .batch(
+                    &[
+                        StoreBatchOp::Put {
+                            key: key.clone(),
+                            value: b"v2".to_vec(),
+                        },
+                        StoreBatchOp::Put {
+                            key: other.clone(),
+                            value: b"index".to_vec(),
+                        },
+                    ],
+                    &[StoreGuard::holds(&key, b"v1".to_vec())],
+                )
+                .await
+                .unwrap();
+            assert!(applied);
+            assert_eq!(first.one(&key).await.unwrap(), Some(b"v2".to_vec()));
+            assert_eq!(first.one(&other).await.unwrap(), Some(b"index".to_vec()));
+
+            // The guard is stale (the row moved since it was read): nothing
+            // applies — not even the ops whose keys nobody touched.
+            let conflict = first
+                .batch(
+                    &[
+                        StoreBatchOp::Put {
+                            key: key.clone(),
+                            value: b"stale".to_vec(),
+                        },
+                        StoreBatchOp::Put {
+                            key: other.clone(),
+                            value: b"stale-index".to_vec(),
+                        },
+                    ],
+                    &[StoreGuard::holds(&key, b"v1".to_vec())],
+                )
+                .await
+                .unwrap();
+            assert!(!conflict);
+            assert_eq!(first.one(&key).await.unwrap(), Some(b"v2".to_vec()));
+            assert_eq!(first.one(&other).await.unwrap(), Some(b"index".to_vec()));
+
+            // Absence is a guard of its own: one creator wins, the next is
+            // refused.
+            let created = first
+                .batch(
+                    &[StoreBatchOp::Put {
+                        key: fresh.clone(),
+                        value: b"first".to_vec(),
+                    }],
+                    &[StoreGuard::absent(&fresh)],
+                )
+                .await
+                .unwrap();
+            assert!(created);
+            let taken = first
+                .batch(
+                    &[StoreBatchOp::Put {
+                        key: fresh.clone(),
+                        value: b"second".to_vec(),
+                    }],
+                    &[StoreGuard::absent(&fresh)],
+                )
+                .await
+                .unwrap();
+            assert!(!taken);
+            assert_eq!(first.one(&fresh).await.unwrap(), Some(b"first".to_vec()));
+
+            // A delete guarded by the row it removes.
+            let removed = first
+                .batch(
+                    &[StoreBatchOp::Delete { key: key.clone() }],
+                    &[StoreGuard::holds(&key, b"v2".to_vec())],
+                )
+                .await
+                .unwrap();
+            assert!(removed);
+            assert_eq!(first.one(&key).await.unwrap(), None);
+
+            // Two writers race the same absent guard from separate handles:
+            // the compare-and-swap admits exactly one of them, whichever
+            // connection the backend puts them on.
+            let race = format!("guard-{id}-race");
+            let (left_key, right_key) = (race.clone(), race.clone());
+            let left_handle = first.clone();
+            let left = tokio::spawn(async move {
+                left_handle
+                    .batch(
+                        &[StoreBatchOp::Put {
+                            key: left_key.clone(),
+                            value: b"a".to_vec(),
+                        }],
+                        &[StoreGuard::absent(&left_key)],
+                    )
+                    .await
+                    .unwrap()
+            });
+            let right_handle = second.clone();
+            let right = tokio::spawn(async move {
+                right_handle
+                    .batch(
+                        &[StoreBatchOp::Put {
+                            key: right_key.clone(),
+                            value: b"b".to_vec(),
+                        }],
+                        &[StoreGuard::absent(&right_key)],
+                    )
+                    .await
+                    .unwrap()
+            });
+            let (left, right) = (left.await.unwrap(), right.await.unwrap());
+            assert_eq!(
+                [left, right].iter().filter(|applied| **applied).count(),
+                1,
+                "exactly one contender may win an absent guard: {left:?}/{right:?}"
+            );
+            assert!(
+                matches!(
+                    first.one(&race).await.unwrap().as_deref(),
+                    Some(b"a") | Some(b"b")
+                ),
+                "the winner's value is stored"
+            );
+        }
+    };
+}

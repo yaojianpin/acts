@@ -30,7 +30,7 @@ use crate::{
     MessageState, Result, Signal, Vars, Workflow,
     scheduler::{Process, Runtime, Task},
     store::{
-        KvStore, MemoryStore, ScanOptions, StoreBatchOp,
+        KvStore, MemoryStore, ScanOptions, StoreBatchOp, StoreGuard,
         query::{Expr, Filter, Query},
     },
     utils,
@@ -137,7 +137,7 @@ impl KvStore for FailOnceTaskWriteKv {
         self.inner.delete(key).await
     }
 
-    async fn batch(&self, ops: &[StoreBatchOp]) -> crate::Result<()> {
+    async fn batch(&self, ops: &[StoreBatchOp], guards: &[StoreGuard]) -> crate::Result<bool> {
         let hit = self.armed.load(Ordering::SeqCst)
             && match self.target.lock().as_deref() {
                 Some(target) => ops
@@ -153,7 +153,7 @@ impl KvStore for FailOnceTaskWriteKv {
                 "injected: task row write failed".to_string(),
             ));
         }
-        self.inner.batch(ops).await
+        self.inner.batch(ops, guards).await
     }
 
     async fn scan_prefix(
@@ -368,7 +368,7 @@ impl KvStore for FailOnceTaskPutKv {
         self.inner.delete(key).await
     }
 
-    async fn batch(&self, ops: &[StoreBatchOp]) -> crate::Result<()> {
+    async fn batch(&self, ops: &[StoreBatchOp], guards: &[StoreGuard]) -> crate::Result<bool> {
         if self.armed.load(Ordering::SeqCst) {
             let target = self.target.lock().clone();
             let hit = ops.iter().find_map(|op| {
@@ -391,7 +391,7 @@ impl KvStore for FailOnceTaskPutKv {
                 return Err(ActError::Store("injected: task put failed".to_string()));
             }
         }
-        self.inner.batch(ops).await
+        self.inner.batch(ops, guards).await
     }
 
     async fn scan_prefix(

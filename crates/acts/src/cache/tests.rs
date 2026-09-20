@@ -1,3 +1,4 @@
+use crate::StoreGuard;
 use crate::{
     Act, Action, Config, Engine, Vars, Workflow,
     config::ConfigData,
@@ -1202,11 +1203,11 @@ impl KvStore for GatedKv {
         self.inner.delete(key).await
     }
 
-    async fn batch(&self, ops: &[StoreBatchOp]) -> crate::Result<()> {
+    async fn batch(&self, ops: &[StoreBatchOp], guards: &[StoreGuard]) -> crate::Result<bool> {
         if self.write_gate.load(Ordering::SeqCst) {
             Self::park(&self.write_gate, &self.write_entered).await;
         }
-        self.inner.batch(ops).await
+        self.inner.batch(ops, guards).await
     }
 
     async fn scan_prefix(

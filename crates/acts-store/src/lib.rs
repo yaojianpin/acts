@@ -21,29 +21,24 @@
 //!
 //! - [`SqliteStore`] — feature `sqlite`
 //! - [`PostgresStore`] — feature `postgres`
-//! - [`RedisStore`] — feature `redis`
-//! - [`NatsStore`] — feature `nats`
 //! - [`SledStore`] — feature `sled`
+//!
+//! Every backend here commits a batch with its guards (see
+//! [`KvStore::batch`](acts::KvStore::batch)), which is what
+//! [`DbLease`](acts::DbLease) needs to hold a database exclusively across
+//! processes.
 
 mod consts;
 
-#[cfg(feature = "nats")]
-mod nats;
 #[cfg(feature = "postgres")]
 mod postgres;
-#[cfg(feature = "redis")]
-mod redis;
 #[cfg(feature = "sled")]
 mod sled;
 #[cfg(feature = "sqlite")]
 mod sqlite;
 
-#[cfg(feature = "nats")]
-pub use nats::NatsStore;
 #[cfg(feature = "postgres")]
 pub use postgres::PostgresStore;
-#[cfg(feature = "redis")]
-pub use redis::RedisStore;
 #[cfg(feature = "sled")]
 pub use sled::SledStore;
 #[cfg(feature = "sqlite")]

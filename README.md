@@ -358,7 +358,7 @@ cargo add acts-store --features sqlite
 
 ```rust,ignore
 use acts::Engine;
-use acts_store::SqliteStore; // or PostgresStore / RedisStore / NatsStore / SledStore
+use acts_store::SqliteStore; // or PostgresStore / SledStore
 use std::sync::Arc;
 
 #[tokio::main]
@@ -377,12 +377,11 @@ Backends enabled by the matching `acts-store` feature:
 - `MemoryStore` — built into `acts`, in-memory store, no persistence (default when unset)
 - `SqliteStore` — `acts-store` feature `sqlite`
 - `PostgresStore` — `acts-store` feature `postgres`
-- `RedisStore` — `acts-store` feature `redis`
-- `NatsStore` — `acts-store` feature `nats`
 - `SledStore` — `acts-store` feature `sled`
 
-Custom stores can be built by implementing `acts::KvStore` and passed to
-`set_store` the same way.
+Custom stores can be built by implementing `acts::KvStore` (including its
+`batch` with the guards in the same atomic unit — an exclusive database lease
+depends on it) and passed to `set_store` the same way.
 
 ## Package
 
@@ -424,8 +423,6 @@ acts:
   - [x] memory
   - [x] sqlite
   - [x] postgres
-  - [x] nats
-  - [x] redis
   - [x] sled
 
 - packages

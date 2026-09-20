@@ -9,6 +9,7 @@ use serde::Deserialize;
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 
@@ -44,10 +45,6 @@ pub enum DbType {
     Sqlite,
     /// PostgreSQL — `database_url` is a connection URL.
     Postgres,
-    /// Redis — `database_url` is a connection URL.
-    Redis,
-    /// NATS JetStream KV — `database_url` is a broker URL.
-    Nats,
 }
 
 impl DbType {
@@ -56,8 +53,6 @@ impl DbType {
             DbType::Sled => "sled",
             DbType::Sqlite => "sqlite",
             DbType::Postgres => "postgres",
-            DbType::Redis => "redis",
-            DbType::Nats => "nats",
         }
     }
 }
@@ -69,17 +64,124 @@ impl std::fmt::Display for DbType {
 }
 
 /// The optional `[db]` config section. Missing → [`DbConfig::default`]
-/// (sled under the config directory). Non-sled backends need both `type`
-/// and `database_url`.
-#[derive(Debug, Clone, Default, Deserialize)]
+/// (sled under the config directory, with the exclusive lease on). Non-sled
+/// backends need both `type` and `database_url`.
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct DbConfig {
     /// Store backend to open; `sled` when omitted.
     #[serde(rename = "type")]
     pub kind: DbType,
     /// Backend location: directory (sled), file (sqlite) or connection URL
-    /// (postgres/redis/nats). The `ACTS_DATABASE_URL` env var overrides it.
+    /// (postgres). The `ACTS_DATABASE_URL` env var overrides it.
     pub database_url: Option<String>,
+    /// Hold the database's exclusive lease while this server runs (default
+    /// `true`). The lease is a row in the database itself, taken with an
+    /// atomic compare-and-swap, and every write the engine makes is committed
+    /// only while this instance still holds it — so a second server on the
+    /// same database is refused at startup instead of duplicating recovery
+    /// and scheduling, and one that loses the lease mid-run (a takeover after
+    /// a stall longer than the TTL) has its writes refused and its engine
+    /// stopped. `false` accepts the older contract: one writer per database is
+    /// then the operator's to guarantee.
+    pub lease: bool,
+    /// How long an unrenewed lease stays valid — a suffixed duration
+    /// (`"30s"`, `"5m"`) or bare seconds; default 30. A crashed holder blocks
+    /// a restart for at most this long.
+    #[serde(default, deserialize_with = "de_ttl_secs")]
+    pub lease_ttl_secs: Option<u64>,
+    /// How often the lease is renewed, in the same units as
+    /// [`DbConfig::lease_ttl_secs`]; default 10, and at most half the TTL so
+    /// two renewals can fail before the lease expires.
+    #[serde(default, deserialize_with = "de_ttl_secs")]
+    pub lease_renew_secs: Option<u64>,
+    /// Instance id written into the lease row — the name another instance's
+    /// `LeaseHeld` startup error reports. Default `<host>:<pid>`.
+    pub lease_owner: Option<String>,
+}
+
+impl Default for DbConfig {
+    fn default() -> Self {
+        Self {
+            kind: DbType::default(),
+            database_url: None,
+            lease: true,
+            lease_ttl_secs: None,
+            lease_renew_secs: None,
+            lease_owner: None,
+        }
+    }
+}
+
+/// The lease settings of one server, resolved and validated from `[db]`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaseConfig {
+    /// Whether the server must hold the exclusive database lease.
+    pub enabled: bool,
+    /// How long an unrenewed lease stays valid.
+    pub ttl: Duration,
+    /// How often the holder renews it.
+    pub renew: Duration,
+    /// The instance id the lease row names.
+    pub owner: String,
+}
+
+impl DbConfig {
+    /// Resolve `[db]`'s lease settings, or report a combination that cannot
+    /// work (a renewal that is not well inside the TTL would drop the lease
+    /// under normal jitter, so it is rejected rather than tuned).
+    pub fn lease_config(&self) -> acts::Result<LeaseConfig> {
+        let ttl = self.lease_ttl_secs.unwrap_or(DEFAULT_LEASE_TTL_SECS);
+        let renew = self.lease_renew_secs.unwrap_or(DEFAULT_LEASE_RENEW_SECS);
+        if !self.lease {
+            return Ok(LeaseConfig {
+                enabled: false,
+                ttl: Duration::from_secs(ttl),
+                renew: Duration::from_secs(renew),
+                owner: self.owner(),
+            });
+        }
+        if ttl == 0 || renew == 0 {
+            return Err(acts::ActError::Config(
+                "[db].lease_ttl_secs and [db].lease_renew_secs must be greater than 0".to_string(),
+            ));
+        }
+        if renew.saturating_mul(2) > ttl {
+            return Err(acts::ActError::Config(format!(
+                "[db].lease_renew_secs ({renew}s) must be at most half of \
+                 [db].lease_ttl_secs ({ttl}s): a renewal that is not well inside the TTL \
+                 drops the lease under ordinary scheduling jitter"
+            )));
+        }
+        Ok(LeaseConfig {
+            enabled: true,
+            ttl: Duration::from_secs(ttl),
+            renew: Duration::from_secs(renew),
+            owner: self.owner(),
+        })
+    }
+
+    fn owner(&self) -> String {
+        self.lease_owner
+            .clone()
+            .filter(|owner| !owner.is_empty())
+            .unwrap_or_else(default_lease_owner)
+    }
+}
+
+/// `[db].lease_ttl_secs` / `[db].lease_renew_secs` default.
+const DEFAULT_LEASE_TTL_SECS: u64 = 30;
+/// `[db].lease_renew_secs` default — a third of the default TTL.
+const DEFAULT_LEASE_RENEW_SECS: u64 = 10;
+
+/// The default instance id in the lease row: the host and the process id, so
+/// a `LeaseHeld` startup error names the machine and pid an operator has to
+/// look at.
+fn default_lease_owner() -> String {
+    let host = std::env::var("HOSTNAME")
+        .or_else(|_| std::env::var("COMPUTERNAME"))
+        .unwrap_or_else(|_| "unknown-host".to_string());
+    format!("{host}:{}", std::process::id())
 }
 
 /// Name of the config file inside the config directory.
@@ -166,16 +268,40 @@ max_files = 168
 # (the ACTS_DATABASE_URL env var overrides database_url):
 #   type = "sqlite"   database_url = "acts.db"
 #   type = "postgres" database_url = "postgres://user:pass@host:5432/acts"
-#   type = "redis"    database_url = "redis://127.0.0.1:6379"
-#   type = "nats"     database_url = "nats://127.0.0.1:4222"
 #
-# One writer per database: the document locks that keep a row and its index
-# entries consistent are process-local, so two servers on the same database
-# have no mutual exclusion between them. Give each server its own database, or
-# coordinate outside the engine (see the storage section of the README).
+# Exclusive database lease (on unless it is turned off). The engine's document
+# locks, write lanes, scheduler lanes and recovery claims are process-local, so
+# two servers on one database would both recover the same rows and run the same
+# work. With `lease = true` the server takes a lease row in the database itself
+# — `__acts_lease__`, claimed with an atomic compare-and-swap and renewed every
+# `lease_renew_secs` — and commits every write only while it still holds it:
+#   * a second server on the same database fails its startup with a
+#     `LeaseHeld` error naming the instance that holds it, instead of starting
+#     an engine that duplicates recovery and scheduling;
+#   * an instance whose lease is taken over (its renewals failed for longer
+#     than `lease_ttl_secs`) has every write refused with `LeaseLost` and its
+#     engine stopped, so it can never overwrite the new holder's rows;
+#   * a holder's fence rises with every acquisition — across crashes and
+#     restarts — and a write carrying a stale fence is refused inside the same
+#     atomic write that would have committed it.
+# A graceful stop releases the lease, so a rolling restart takes over at once;
+# a crashed holder blocks a restart for at most `lease_ttl_secs`.
+#
+# `lease = false` accepts the older contract instead: one writer per database
+# is yours to guarantee (separate databases per server, or coordination
+# outside the engine).
+#
+# lease_ttl_secs / lease_renew_secs accept bare seconds or a suffixed duration
+# ("30s", "5m"); `lease_renew_secs` must be at most half the TTL. `lease_owner`
+# is the instance id another server's startup error names (default
+# "<host>:<pid>").
 [db]
 type = "sled"
 database_url = '@ACTS_DIR@/data'
+lease = true
+# lease_ttl_secs = 30
+# lease_renew_secs = 10
+# lease_owner = "acts-1"
 
 # snapshot-backed sealed-data targets.
 # Data is fed through the web/grpc/nats snapshot APIs and sealed into tasks
@@ -424,25 +550,109 @@ pub fn log_file_appender(log: &ConfigLog) -> std::io::Result<RollingFileAppender
     builder.build(&log.dir).map_err(std::io::Error::other)
 }
 
-/// Open the KvStore backend selected by the `[db]` config.
+/// A database this server may run on, with the exclusive lease that makes it
+/// the only writer of that database.
+///
+/// [`OpenedStore::store`] is what [`engine_builder`] takes: with the lease on
+/// it is a [`acts::FencedStore`] view, so the engine's every durable mutation
+/// is committed only while this instance holds the lease.
+#[derive(Clone)]
+pub struct OpenedStore {
+    /// The store to hand the engine.
+    pub store: Arc<dyn KvStore>,
+    lease: Option<Arc<acts::DbLease>>,
+    renew: Duration,
+}
+
+impl OpenedStore {
+    /// The lease this instance holds, or `None` when `[db].lease = false`.
+    pub fn lease(&self) -> Option<&Arc<acts::DbLease>> {
+        self.lease.as_ref()
+    }
+
+    /// Renew the lease while `engine` runs, and stop `engine` when it is lost.
+    ///
+    /// The keeper renews every `[db].lease_renew_secs`. If a renewal reports
+    /// the lease as taken over (or its deadline passes while the store is
+    /// unreachable), the lease is marked lost — every further write is refused
+    /// with [`acts::ActError::LeaseLost`] — and the engine's shutdown token is
+    /// cancelled, so the scheduler's lanes, the store writer and the timers
+    /// stop admitting work. On a graceful shutdown the keeper releases the
+    /// lease, so a rolling restart takes over immediately instead of waiting
+    /// out the TTL.
+    ///
+    /// Returns `None` when the lease is disabled: nothing keeps an instance
+    /// apart from another writer then.
+    pub fn keep_lease(&self, engine: &acts::Engine) -> Option<acts::LeaseKeeper> {
+        let lease = self.lease.clone()?;
+        Some(acts::LeaseKeeper::start(
+            lease,
+            self.renew,
+            engine.shutdown_token(),
+        ))
+    }
+}
+
+/// Open the KvStore backend selected by the `[db]` config, and take the
+/// database's exclusive lease unless `[db].lease = false`.
 ///
 /// `database_url` resolution: the `ACTS_DATABASE_URL` env var, then
 /// `[db].database_url`, then the default `<config_dir>/data` for sled.
 /// Any other type without a url is an error.
-pub async fn open_store(config_dir: &Path, db: &DbConfig) -> acts::Result<Arc<dyn KvStore>> {
+///
+/// Fails — instead of starting a second engine over one database — when
+/// another live instance holds the lease ([`acts::ActError::LeaseHeld`],
+/// naming it).
+pub async fn open_store(config_dir: &Path, db: &DbConfig) -> acts::Result<OpenedStore> {
     let url = database_url(config_dir, db)?;
-    match db.kind {
+    let raw: Arc<dyn KvStore> = match db.kind {
         DbType::Sled => {
             ensure_store_dir(&url)?;
-            Ok(Arc::new(acts_store::SledStore::open(&url)?))
+            Arc::new(acts_store::SledStore::open(&url)?)
         }
         DbType::Sqlite => {
             ensure_store_dir(&url)?;
-            Ok(Arc::new(acts_store::SqliteStore::open(&url).await?))
+            Arc::new(acts_store::SqliteStore::open(&url).await?)
         }
-        DbType::Postgres => Ok(Arc::new(acts_store::PostgresStore::open(&url).await?)),
-        DbType::Redis => Ok(Arc::new(acts_store::RedisStore::open(&url).await?)),
-        DbType::Nats => Ok(Arc::new(acts_store::NatsStore::open(&url).await?)),
+        DbType::Postgres => Arc::new(acts_store::PostgresStore::open(&url).await?),
+    };
+
+    let lease_config = db.lease_config()?;
+    if !lease_config.enabled {
+        tracing::warn!(
+            "[db].lease = false: nothing keeps a second server off this database. \
+             One writer per database is yours to guarantee."
+        );
+        return Ok(OpenedStore {
+            store: raw,
+            lease: None,
+            renew: lease_config.renew,
+        });
+    }
+    let lease =
+        match acts::DbLease::acquire(raw.clone(), &lease_config.owner, lease_config.ttl).await? {
+            Some(lease) => lease,
+            None => {
+                return Err(acts::ActError::LeaseHeld(lease_holder_text(&raw).await));
+            }
+        };
+    let store = lease.fenced();
+    Ok(OpenedStore {
+        store,
+        lease: Some(Arc::new(lease)),
+        renew: lease_config.renew,
+    })
+}
+
+/// Describe the live lease that blocked a startup, for the operator reading
+/// the error. Never fails: an unreadable row is still a reason not to start.
+async fn lease_holder_text(store: &Arc<dyn KvStore>) -> String {
+    let Ok(Some(bytes)) = store.one(acts::LEASE_KEY).await else {
+        return "the database lease row is held".to_string();
+    };
+    match serde_json::from_slice::<acts::LeaseRecord>(&bytes) {
+        Ok(record) => record.describe(),
+        Err(_) => "the database lease row is unreadable".to_string(),
     }
 }
 
@@ -840,6 +1050,75 @@ ttl = "5m"
         std::fs::remove_dir(&dir).ok();
     }
 
+    /// The lease is on unless a deployment turns it off, and its knobs are
+    /// validated where they are read: a renewal that is not well inside the
+    /// TTL would drop the lease under ordinary jitter, so it fails startup
+    /// with a diagnostic instead of being silently tuned.
+    #[test]
+    fn lease_config_defaults_validates_and_turns_off() {
+        let default = DbConfig::default().lease_config().unwrap();
+        assert!(default.enabled, "the lease is on by default");
+        assert_eq!(default.ttl, Duration::from_secs(30));
+        assert_eq!(default.renew, Duration::from_secs(10));
+        assert!(
+            default.owner.ends_with(&format!(":{}", std::process::id())),
+            "the default owner names the process: {}",
+            default.owner
+        );
+
+        // Suffixed durations and bare seconds both parse, and the owner is
+        // whatever the deployment named.
+        let (_dir, path) = write_config(
+            "[db]\ntype = \"sqlite\"\ndatabase_url = \"a.db\"\nlease_ttl_secs = \"5m\"\n\
+             lease_renew_secs = 60\nlease_owner = \"acts-1\"\n",
+        );
+        let db = Config::create(&path)
+            .unwrap()
+            .get::<DbConfig>("db")
+            .unwrap();
+        let lease = db.lease_config().unwrap();
+        assert_eq!(lease.ttl, Duration::from_secs(300));
+        assert_eq!(lease.renew, Duration::from_secs(60));
+        assert_eq!(lease.owner, "acts-1");
+
+        // A renewal past half the TTL, or a zero, is refused.
+        for body in [
+            "[db]\nlease_ttl_secs = 30\nlease_renew_secs = 16\n",
+            "[db]\nlease_ttl_secs = 30\nlease_renew_secs = 30\n",
+            "[db]\nlease_ttl_secs = 1\nlease_renew_secs = 1\n",
+            "[db]\nlease_ttl_secs = 0\nlease_renew_secs = 0\n",
+        ] {
+            let (dir, path) = write_config(body);
+            let db = Config::create(&path)
+                .unwrap()
+                .get::<DbConfig>("db")
+                .unwrap();
+            let err = db.lease_config().unwrap_err();
+            assert!(matches!(err, acts::ActError::Config(_)), "{body}: {err}");
+            std::fs::remove_file(&path).ok();
+            std::fs::remove_dir(&dir).ok();
+        }
+        // Half the TTL exactly is accepted.
+        let (dir, path) = write_config("[db]\nlease_ttl_secs = 30\nlease_renew_secs = 15\n");
+        let db = Config::create(&path)
+            .unwrap()
+            .get::<DbConfig>("db")
+            .unwrap();
+        assert_eq!(db.lease_config().unwrap().renew, Duration::from_secs(15));
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
+
+        // Turning the lease off is honored (and needs no valid renewal).
+        let (dir, path) = write_config("[db]\nlease = false\nlease_ttl_secs = 0\n");
+        let db = Config::create(&path)
+            .unwrap()
+            .get::<DbConfig>("db")
+            .unwrap();
+        assert!(!db.lease_config().unwrap().enabled);
+        std::fs::remove_file(&path).ok();
+        std::fs::remove_dir(&dir).ok();
+    }
+
     #[test]
     fn database_url_prefers_config_then_sled_default() {
         let config_dir = Path::new("/tmp/acts");
@@ -847,10 +1126,12 @@ ttl = "5m"
         let pg = DbConfig {
             kind: DbType::Postgres,
             database_url: Some("postgres://h/db".to_string()),
+            ..DbConfig::default()
         };
         let pg_no_url = DbConfig {
             kind: DbType::Postgres,
             database_url: None,
+            ..DbConfig::default()
         };
 
         // no env set (guarded): config url wins, sled falls back under the
@@ -871,12 +1152,89 @@ ttl = "5m"
     #[tokio::test]
     async fn open_store_default_sled_creates_dir_and_roundtrips() {
         let (dir, _) = write_config("");
-        let store = open_store(&dir, &DbConfig::default()).await.unwrap();
+        let opened = open_store(&dir, &DbConfig::default()).await.unwrap();
         assert!(dir.join("data").is_dir(), "sled data dir under config dir");
+        let store = opened.store.clone();
         store.put("k", b"v".to_vec()).await.unwrap();
         assert_eq!(store.one("k").await.unwrap(), Some(b"v".to_vec()));
 
         store.delete("k").await.unwrap();
+        // The default config takes the database's lease before handing the
+        // store to the engine: the mutations above went through its fence.
+        let lease = opened
+            .lease()
+            .expect("the default config leases the database");
+        assert_eq!(lease.fence(), 1);
+        lease.release().await.unwrap();
+        let err = store.put("k", b"v".to_vec()).await.unwrap_err();
+        assert!(
+            matches!(err, acts::ActError::LeaseLost),
+            "a released lease stops writing: {err}"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Two servers over one database: the second startup is refused while the
+    /// first holds the lease, and accepted after it hands it back — with a
+    /// higher fence, so its writes can never be confused with the first's.
+    ///
+    /// SQLite is the backend that exercises this in-process (sled holds its own
+    /// file lock, so a second open of the same directory never gets as far as
+    /// the lease check): each `open_store` builds its own pool, and the
+    /// guarded batches below are committed by different connections in ONE
+    /// order, which is what a multi-process deployment does.
+    #[tokio::test]
+    async fn a_second_server_is_refused_the_leased_database() {
+        let (dir, _) = write_config("");
+        let db = DbConfig {
+            kind: DbType::Sqlite,
+            database_url: Some(dir.join("acts.db").to_string_lossy().into_owned()),
+            lease_owner: Some("first".to_string()),
+            ..DbConfig::default()
+        };
+
+        let first = open_store(&dir, &db).await.unwrap();
+        assert_eq!(first.lease().unwrap().fence(), 1);
+        first.store.put("held", b"first".to_vec()).await.unwrap();
+
+        let second = DbConfig {
+            lease_owner: Some("second".to_string()),
+            ..db.clone()
+        };
+        let err = match open_store(&dir, &second).await {
+            Ok(_) => panic!("a second server must not start on a leased database"),
+            Err(err) => err,
+        };
+        assert!(matches!(err, acts::ActError::LeaseHeld(_)), "got: {err}");
+        assert!(
+            err.to_string().contains("owner=first"),
+            "the error names the holder: {err}"
+        );
+
+        // A graceful stop hands the lease back, and the next startup takes it
+        // with a strictly higher fence.
+        first.lease().unwrap().release().await.unwrap();
+        let third = open_store(&dir, &second).await.unwrap();
+        assert_eq!(third.lease().unwrap().fence(), 2);
+        // The new holder writes; the old instance's fence is stale.
+        third.store.put("held", b"third".to_vec()).await.unwrap();
+        assert_eq!(
+            first.store.one("held").await.unwrap(),
+            Some(b"third".to_vec())
+        );
+        let err = first
+            .store
+            .put("held", b"first".to_vec())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, acts::ActError::LeaseLost), "got: {err}");
+        assert_eq!(
+            first.store.one("held").await.unwrap(),
+            Some(b"third".to_vec()),
+            "the stale instance's write did not land"
+        );
+
         std::fs::remove_dir_all(&dir).ok();
     }
 

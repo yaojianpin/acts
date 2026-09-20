@@ -15,7 +15,7 @@ use crate::{
     event::EventAction,
     scheduler::{Process, Runtime, TaskState},
     store::{
-        KvStore, MemoryStore, ScanOptions, StoreBatchOp, StoreIden,
+        KvStore, MemoryStore, ScanOptions, StoreBatchOp, StoreGuard, StoreIden,
         query::{Expr, Filter, Query},
     },
     utils::{
@@ -103,7 +103,7 @@ impl KvStore for TimeoutClaimFaultKv {
         self.inner.delete(key).await
     }
 
-    async fn batch(&self, ops: &[StoreBatchOp]) -> crate::Result<()> {
+    async fn batch(&self, ops: &[StoreBatchOp], guards: &[StoreGuard]) -> crate::Result<bool> {
         let claim_key = self.claim_key.lock().clone();
         let carries_claim = claim_key.is_some_and(|key| {
             ops.iter().any(|op| match op {
@@ -120,7 +120,7 @@ impl KvStore for TimeoutClaimFaultKv {
                 "injected: backend lost the timeout claim write".to_string(),
             ));
         }
-        self.inner.batch(ops).await
+        self.inner.batch(ops, guards).await
     }
 
     async fn scan_prefix(

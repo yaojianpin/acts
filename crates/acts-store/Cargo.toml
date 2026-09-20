@@ -1,6 +1,6 @@
 [package]
 authors.workspace = true
-description = "external KvStore backends (sqlite / postgres / redis / nats / sled) for the acts workflow engine"
+description = "external KvStore backends (sqlite / postgres / sled) for the acts workflow engine"
 keywords = ["workflow", "store"]
 edition.workspace = true
 license.workspace = true
@@ -13,9 +13,6 @@ include = ["src/**/*"]
 [dependencies]
 acts = { workspace = true }
 async-trait = { workspace = true }
-async-nats = { optional = true, workspace = true }
-futures = { optional = true, workspace = true }
-redis = { optional = true, workspace = true }
 sled = { version = "0.34", optional = true }
 sqlx = { version = "0.8", features = ["runtime-tokio"], optional = true }
 tokio = { features = ["rt", "sync"], workspace = true }
@@ -30,8 +27,6 @@ tracing-subscriber = { features = ["env-filter"], workspace = true }
 
 [features]
 default = []
-nats = ["dep:async-nats", "dep:futures"]
 postgres = ["dep:sqlx", "sqlx/postgres", "sqlx/tls-rustls"]
-redis = ["dep:redis"]
 sled = ["dep:sled"]
 sqlite = ["dep:sqlx", "sqlx/sqlite"]
