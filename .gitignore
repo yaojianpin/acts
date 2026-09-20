@@ -2,6 +2,12 @@ target
 test_data
 .vscode
 log
+# `cargo llvm-cov` writes its summary where `.github/workflows/coverage.yml`
+# reads it and the badge next to it; a local reproduction run writes the same
+# two paths, and neither is a file of this repository (the badge CI publishes
+# lives on the `badges` branch).
+/coverage.json
+/badges/
 # The workspace lock is committed (that is what CI builds with `--locked`);
 # the stale per-example lock files left over from standalone builds are not.
 **/Cargo.lock

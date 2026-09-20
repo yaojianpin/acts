@@ -1,0 +1,220 @@
+name: coverage
+
+# Coverage is the test suite with the instrumentation on, so it runs where the
+# suite runs (`test.yml` has the same triggers): a pull request that lowers
+# coverage is visible in this run's summary before it is merged. Only `main`
+# publishes the badge, and a second job does that.
+on:
+  push:
+    branches: ['main', 'develop']
+  pull_request:
+    branches: ['main', 'develop']
+  workflow_dispatch:
+
+# Read-only for the job that runs the suite. The write token this workflow
+# needs exists on the badge job alone, which is the only step that pushes
+# anything anywhere.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+  # Pinned like `CARGO_DENY_VERSION` in supply-chain.yml, and for the same
+  # reason: the badge is rendered from this tool's own summary format
+  # (`data[0].totals`), so an unpinned latest would be free to change the
+  # shape of what `.github/scripts/coverage-badge.sh` reads under a workflow
+  # nobody edited. The released binary is fetched, not built — the checkout is
+  # a workspace of 17 crates and does not want a 18th.
+  CARGO_LLVM_COV_VERSION: 0.9.1
+
+  # One file carries the whole report's totals: it is what the badge script
+  # renders from, what the step summary is printed from, and what the artifact
+  # keeps next to the HTML report.
+  COVERAGE_SUMMARY: coverage.json
+
+jobs:
+  coverage:
+    runs-on: ubuntu-latest
+
+    services:
+      # The same live backend `test.yml` gives the acts-store cross-backend
+      # suite (acts-server enables every acts-store feature, so the workspace
+      # compile includes tests/postgres.rs).
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: yao
+          POSTGRES_DB: tests
+        ports:
+          - 5433:5432 # acts-store/tests/postgres.rs connects to localhost:5433
+
+    env:
+      ACTS_NATS_URL: nats://127.0.0.1:4222
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+
+      # `llvm-profdata` and `llvm-cov` are what cargo-llvm-cov shells out to,
+      # and they live in this component, which a default rustup install does
+      # not carry: without it every step below fails before it compiles
+      # anything.
+      - name: Add the LLVM tools
+        run: rustup component add llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        run: |
+          set -euo pipefail
+          target=x86_64-unknown-linux-musl
+          curl --proto '=https' --tlsv1.2 -sSfL \
+            "https://github.com/taiki-e/cargo-llvm-cov/releases/download/v${CARGO_LLVM_COV_VERSION}/cargo-llvm-cov-${CARGO_LLVM_COV_VERSION}-${target}.tar.gz" \
+            | tar -xz -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/cargo-llvm-cov-${CARGO_LLVM_COV_VERSION}-${target}" >> "$GITHUB_PATH"
+
+      - name: Install build tools
+        shell: bash
+        run: |
+          sudo apt install -y git g++ cmake ninja-build libssl-dev
+
+      # A JetStream server also serves the core-NATS tests of
+      # acts-channel/acts-plugin-nats/acts-server; the suites that skip when the
+      # broker is absent must not read as a green run, so the step fails when
+      # the server never accepts connections.
+      - name: Start NATS (JetStream)
+        run: |
+          docker run -d --name nats -p 4222:4222 nats:2 -js
+          ready=""
+          for i in $(seq 1 30); do
+            nc -z 127.0.0.1 4222 && { ready=1; break; }
+            sleep 1
+          done
+          test -n "$ready" || { echo "NATS did not become ready on 127.0.0.1:4222" >&2; exit 1; }
+
+      # The suite below is `test.yml`'s, crate for crate and feature set for
+      # feature set, so the number this measures is the coverage of the tests
+      # the project runs and not of a second, differently-built suite. The one
+      # difference is `--no-report`: each invocation appends its profiles to a
+      # single profile set instead of reporting on its own, and the report over
+      # all of them is built once, after the last suite.
+      - name: Run tests acts
+        run: cargo llvm-cov --no-report --locked -p acts --verbose
+      - name: Run tests channel
+        run: cargo llvm-cov --no-report --locked -p acts-channel --verbose --features=docker_test
+      - name: Run tests plugins
+        run: cargo llvm-cov --no-report --locked -p acts-plugin-* --verbose
+      - name: Run tests packages
+        run: cargo llvm-cov --no-report --locked -p acts-package-* --verbose
+      - name: Run tests store
+        run: cargo llvm-cov --no-report --locked -p acts-store --verbose --features sled,sqlite,postgres
+      - name: Run tests cli
+        run: cargo llvm-cov --no-report --locked -p acts-cli --verbose
+      - name: Run tests server
+        run: cargo llvm-cov --no-report --locked -p acts-server --verbose
+
+      # `--summary-only --json` is the totals for everything that ran; `--html`
+      # is the same data per line, and it is what a reader opens to find the
+      # uncovered lines behind the number. Both read the accumulated profiles,
+      # so this step runs no test.
+      - name: Build the report
+        run: |
+          set -euo pipefail
+          cargo llvm-cov report --json --summary-only --output-path "$COVERAGE_SUMMARY"
+          # `--output-dir` is the directory the pages' own `html/` subdirectory
+          # goes into (the tool's default is `target/llvm-cov`), so this is the
+          # path the artifact below uploads.
+          cargo llvm-cov report --html --output-dir target/llvm-cov
+
+      # `bash <script>` and not `./<script>`: the checkout's file mode is whatever
+      # git recorded, and a mode change is not something this repository can
+      # rely on (it is not tracked on Windows, this project's own workstation).
+      - name: Render the badge
+        run: |
+          set -euo pipefail
+          mkdir -p badges
+          bash .github/scripts/coverage-badge.sh "$COVERAGE_SUMMARY" badges/coverage.svg
+
+      # The number a reviewer reads without opening anything. The badge job
+      # renders the same file and the same `printf '%.1f'` formats both, so the
+      # summary and the badge cannot disagree — `lines` is the row both read.
+      - name: Summarize the run
+        run: |
+          set -euo pipefail
+          {
+            echo "## Coverage"
+            echo
+            echo '| metric | covered | total | percent |'
+            echo '| --- | --- | --- | --- |'
+            jq -r '.data[0].totals | to_entries[] | select(.value.count > 0) | "\(.key) \(.value.covered) \(.value.count) \(.value.percent)"' \
+              "$COVERAGE_SUMMARY" \
+              | awk '{ printf "| %s | %s | %s | %.1f%% |\n", $1, $2, $3, $4 }'
+            echo
+            echo "The badge is this table's \`lines\` row."
+            echo "Per-line detail is in the \`coverage-report\` artifact of this run."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            target/llvm-cov/html
+            ${{ env.COVERAGE_SUMMARY }}
+          if-no-files-found: error
+          # The report is a page per source file and is only read while the run
+          # it describes is current; the badge branch keeps the number itself.
+          retention-days: 14
+
+      - name: Upload the badge
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-badge
+          path: badges/coverage.svg
+          if-no-files-found: error
+
+  # Publishing the badge is the only write in this workflow, and it is its own
+  # job so that the token for it exists nowhere near the tests. The branch it
+  # writes carries one file and publishes nothing, so a badge can never depend
+  # on a page build.
+  #
+  # Only `main` publishes: a pull request from a fork cannot write, and a badge
+  # drawn from a pull request would describe a tree that is not on `main`.
+  # `workflow_dispatch` is accepted so the branch can be seeded — and the
+  # README's badge made to resolve — right after this workflow lands, and it is
+  # held to `main` for the same reason.
+  badge:
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    needs: coverage
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write
+
+    # Two pushes to `main` in quick succession would otherwise race on the one
+    # branch, and the loser's force-push would leave the older number up.
+    concurrency:
+      group: coverage-badge
+      cancel-in-progress: false
+
+    steps:
+      # The badge is written into the workspace the checkout makes, which is the
+      # directory the publishing action commits from.
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: coverage-badge
+          path: badges
+
+      # `raw.githubusercontent.com` serves the file straight out of this branch,
+      # which is the URL the README reads — no service in between, and the
+      # badge is a commit anyone can trace back to the run that wrote it.
+      - uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: badges
+          publish_dir: ./badges
+          commit_message: "coverage badge for ${{ github.sha }}"
