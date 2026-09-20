@@ -8,7 +8,14 @@ license = "Apache-2.0"
 name = "acts"
 homepage = "https://docs.rs/acts"
 repository = "https://github.com/yaojianpin/acts.git"
-include = ["src/**/*", "../LICENSE", "../README.md", "!**/tests/**/*"]
+# What the registry tarball carries, in the paths it packs them at: an entry
+# that escapes the package root packs nothing at all (`../README.md` used to be
+# one, and the published crate then carried no README and no license), and
+# `cargo package` builds what it packs, so `src/lib.rs` can document itself from
+# the `README.md` beside this manifest. That README and `LICENSE` are copies of
+# the repository's own, kept identical by the `crate-files` job in
+# `.github/workflows/rust.yml`.
+include = ["src/**/*", "LICENSE", "README.md", "!**/tests/**/*"]
 version.workspace = true
 rust-version.workspace = true
 

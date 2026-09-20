@@ -2,19 +2,80 @@ name: Publish
 
 on:
   push:
-    tags:
-      - '*'
+    # `v*` and not `*`: the tag is read as the version below, and a tag that is
+    # not a release has no version to read — `.github/workflows/release.yml`
+    # draws the same line for the same reason.
+    tags: ['v*']
+
+# Read-only: the one credential this job needs is the registry's, and it comes
+# from a secret.
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
+  publish:
     runs-on: ubuntu-latest
 
     steps:
+      # The crates that reach the registry are the tree the tag names, byte for
+      # byte, which is what makes a published crate checkable against a commit:
+      # nothing below rewrites a manifest or a source file on the way to the
+      # registry, and nothing below passes `--allow-dirty`. That is deliberate —
+      # a `cp`/`sed` that edited the checkout before publishing is why the
+      # tarballs this replaces could not be traced back to anything.
+      # The default depth is enough: a tag push is fetched by ref
+      # (`+refs/tags/<tag>:refs/tags/<tag>`), so the tag the checks below read is
+      # in the repository, and no step here walks history.
       - uses: actions/checkout@v4
-      - name: Install dependency
-        run: cargo install cargo-workspaces
+
+      # Runs before anything is built, so a checkout that is not the tag fails
+      # in seconds. `git status` is the same question `cargo package` asks
+      # (minus the flag that waives it): everything from here on packages the
+      # working tree as it stands.
+      - name: Validate the checkout is the tag
+        run: |
+          set -euo pipefail
+          commit="$(git rev-parse "$GITHUB_REF_NAME^{commit}")"
+          test "$(git rev-parse HEAD)" = "$commit"
+          dirty="$(git status --porcelain)"
+          if [ -n "$dirty" ]; then
+            echo "error: $GITHUB_REF_NAME does not check out clean; the published crates must be the tagged tree:" >&2
+            echo "$dirty" >&2
+            exit 1
+          fi
+          echo "$GITHUB_REF_NAME is $commit, and the tree is clean"
+
+      # Every crate inherits `version.workspace = true`, so one tag is one
+      # version for the whole release; this fails the release before anything is
+      # built if a crate was left behind at another version, because a workspace
+      # published in dependency order cannot carry a crate that disagrees with
+      # the tag it was cut from.
+      - name: Validate the tag against the published version
+        run: |
+          python3 - "$GITHUB_REF_NAME" <<'PY'
+          import json, subprocess, sys
+          tag = sys.argv[1]
+          version = tag[1:]                        # `v0.25.0` names 0.25.0
+          meta = json.loads(subprocess.check_output(
+              ["cargo", "metadata", "--no-deps", "--format-version", "1"],
+              text=True,
+          ))
+          publishable = [p for p in meta["packages"] if p.get("publish") != []]
+          if not publishable:
+              print("error: no publishable crate in the workspace", file=sys.stderr)
+              sys.exit(1)
+          stale = [f'{p["name"]} {p["version"]}'
+                   for p in publishable if p["version"] != version]
+          if stale:
+              print(f"error: {tag} names {version}, but these crates publish "
+                    "another version: " + ", ".join(stale), file=sys.stderr)
+              sys.exit(1)
+          print(f"{tag}: {len(publishable)} crates publish {version}")
+          PY
+
       - name: Validate crate metadata (license)
         run: |
           python3 - <<'PY'
@@ -52,10 +113,24 @@ jobs:
         run: cargo test -p acts-cli --verbose
       - name: Run tests server
         run: cargo test -p acts-server --verbose
-      - name: Run Publish
-        run: |
-          cp README.md crates/acts/ &&
-          cp LICENSE crates/acts/ &&
-          sed -i 's|include_str!("../../../README.md")|include_str!("../README.md")|' crates/acts/src/lib.rs &&
-          sed -i 's|"../LICENSE", "../README.md"|"LICENSE", "README.md"|' crates/acts/Cargo.toml
-          cargo ws publish --publish-as-is --token=${{secrets.CARGO_TOKEN}} --allow-dirty
+
+      # The whole release, one step short of the registry: cargo packs every
+      # crate that is not `publish = false`, builds each tarball it made as if
+      # the workspace crates it depends on were already published, and uploads
+      # nothing. A crate that cannot be packaged — a file its manifest claims
+      # and does not carry, a document it cannot compile — fails here, before
+      # the first crate of the release is on the registry for good. Publishing
+      # is not atomic even so, which is what makes this step worth its build.
+      - name: Package without publishing
+        run: cargo publish --workspace --dry-run --locked
+
+      # Cargo has published a workspace itself since 1.90: it orders the crates
+      # by their dependencies and waits for each to reach the index before
+      # uploading the crates that depend on it, so the `cargo-workspaces` install
+      # this used to run is gone.
+      - name: Publish
+        env:
+          # `cargo publish` takes its token from here; the `--token` flag no
+          # longer exists.
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_TOKEN }}
+        run: cargo publish --workspace --locked

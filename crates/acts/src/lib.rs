@@ -1,6 +1,10 @@
 //! A lightweight, fast, tiny, extensiable workflow engine
 
-#![doc = include_str!("../../../README.md")]
+// `include_str!` is resolved against this file when the crate is built, and the
+// crate is also built from the tarball `cargo package` makes — whose root is
+// `crates/acts`, where `../../../README.md` does not exist. The README the crate
+// ships is the one beside its manifest.
+#![doc = include_str!("../README.md")]
 
 mod acl;
 mod builder;

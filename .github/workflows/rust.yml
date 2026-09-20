@@ -64,6 +64,32 @@ jobs:
       - name: Fmt Check
         run: cargo fmt --check
 
+  # `crates/acts` is the one crate that carries the repository's README and
+  # LICENSE inside its package: the registry tarball has its own root, so a
+  # `../README.md` in `src/lib.rs` or in the manifest's `include` list resolves
+  # to nothing there, and the crate builds from that tarball — on docs.rs, in
+  # `cargo install`, everywhere. Copies and not links, because a link is a text
+  # file wherever `core.symlinks` is off (Windows, this project's own
+  # workstation), and checked and not trusted, because a stale copy is the
+  # crate's rendered documentation and the license text under which it was
+  # published — the two files a reader has least reason to doubt. The publish
+  # workflow packages the checkout as it stands and cannot repair them, which is
+  # the point: what is tagged is what is uploaded.
+  crate-files:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - name: Crate files match the repository's
+        run: |
+          for f in README.md LICENSE; do
+            if ! cmp "$f" "crates/acts/$f"; then
+              echo "error: crates/acts/$f differs from $f; run: cp $f crates/acts/$f" >&2
+              exit 1
+            fi
+          done
+          echo "crates/acts carries the repository's README and LICENSE"
+
   clippy:
     runs-on: ubuntu-latest
 
