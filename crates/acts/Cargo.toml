@@ -37,7 +37,7 @@ parking_lot = { workspace = true }
 bitflags = { version = "2.13.1", features = ["serde"] }
 
 [dev-dependencies]
-criterion = { version = "0.5", features = ["async_tokio", "async_futures"] }
+criterion = { version = "0.8", features = ["async_tokio", "async_futures"] }
 serial_test = { workspace = true }
 tracing-subscriber = { features = ["env-filter"], workspace = true }
 parking_lot = { workspace = true }
