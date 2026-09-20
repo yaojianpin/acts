@@ -47,7 +47,7 @@ thiserror = "2"
 chrono = "0.4"
 regex = "1.11"
 globset = { version = "0.4", default-features = false }
-nanoid = "0.4"
+nanoid = "0.5"
 parking_lot = "0.12"
 cron = "0.12"
 strum = { version = "0.27", features = ["derive"] }
@@ -71,7 +71,7 @@ bashkit = { version = "0.18", default-features = false, features = [
 ] }
 # message brokers / stores
 async-nats = "0.50"
-redis = { version = "0.31", default-features = false, features = [
+redis = { version = "1.7", default-features = false, features = [
     "aio",
     "tokio-comp",
 ] }
