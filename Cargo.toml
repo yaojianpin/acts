@@ -52,13 +52,18 @@ parking_lot = "0.12"
 cron = "0.12"
 strum = { version = "0.27", features = ["derive"] }
 # grpc / web
-tonic = { version = "0.12", default-features = false, features = [
-    "prost",
+# 0.14 is split: `tonic` is the transport and the generated code's skeleton, the
+# prost codec and its codegen are the separate `tonic-prost`/`tonic-prost-build`
+# crates, and the `prost` feature is gone. The generated bindings therefore name
+# `tonic_prost::ProstCodec`, and a member that wants it must depend on the crate
+# (see acts-channel).
+tonic = { version = "0.14", default-features = false, features = [
     "channel",
     "codegen",
 ] }
-prost = "0.13"
-prost-types = "0.13"
+tonic-prost = "0.14"
+prost = "0.14"
+prost-types = "0.14"
 axum = "0.7"
 validator = { version = "0.20.0", features = ["derive"] }
 # shell

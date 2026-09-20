@@ -7,6 +7,17 @@ updates:
   # exactly the change that used to be made in two manifests at once).
   - package-ecosystem: cargo
     directory: "/"
+    # Bumps are opened against `develop`, the integration branch, and the
+    # manifests they are resolved from are read from `develop` too. A bump is a
+    # change that has to be reviewed and merged with the work that adapts to it;
+    # landing one on the default branch alone is how `tonic-build` 0.14 arrived
+    # in a workspace still running `tonic` 0.12 (reverted in 4d9eb24, migrated
+    # properly in the commit that moved the workspace to 0.14).
+    #
+    # This option is version updates only: security updates always use the
+    # repository's default branch and ignore it. The file itself must also stay
+    # on the default branch — that is where Dependabot reads its configuration.
+    target-branch: develop
     schedule:
       interval: weekly
     open-pull-requests-limit: 5

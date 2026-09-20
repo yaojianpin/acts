@@ -41,9 +41,12 @@ async fn serve_service<S: ActsService>(service: S, rx: Receiver<()>) -> u16 {
     let (ready_tx, ready_rx) = oneshot::channel::<()>();
     tokio::spawn(async move {
         ready_tx.send(()).ok();
+        // tonic 0.14's service router (`add_service`) is behind its `router`
+        // feature and routes by service name; one service needs no router, and
+        // `serve_with_incoming` takes it directly: the generated
+        // `ActsServiceServer` dispatches the gRPC paths itself.
         Server::builder()
-            .add_service(grpc)
-            .serve_with_incoming(incoming)
+            .serve_with_incoming(grpc, incoming)
             .await
             .unwrap();
     });
