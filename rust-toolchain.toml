@@ -1,0 +1,16 @@
+# The channel a checkout builds with when nothing else selects one: CI's fast
+# leg (`stable`) and a contributor's `cargo` on the same compiler, which is what
+# makes "it builds here" mean something.
+#
+# This is deliberately *not* the MSRV. The floor the crates promise lives in
+# `rust-version` in Cargo.toml and has a leg of its own in
+# `.github/workflows/rust.yml` (1.88.0), because the two answer different
+# questions: this file says what the project develops against, that one says
+# what an installer is allowed to have.
+#
+# `components` is explicit so `cargo fmt --check` and `cargo clippy` — the two
+# other CI jobs — work on a fresh toolchain without a manual
+# `rustup component add`.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]

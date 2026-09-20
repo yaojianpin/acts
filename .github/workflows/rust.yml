@@ -13,17 +13,43 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      # Both ends of the range the manifests promise, so a regression fails here
+      # instead of at whoever installs a crate: `stable` is what the project
+      # develops against (and what `rust-toolchain.toml` selects locally),
+      # `1.88.0` is the floor `rust-version` in Cargo.toml declares — the
+      # version the locked graph's own dependencies already need (`async-nats`
+      # 0.50, `tonic` 0.14, `redis` 1.7, `time` 0.3.55, `globset` 0.4.20,
+      # `encoding_rs` 0.8.41 and `validator_derive` 0.20 each declare it, and
+      # edition 2024 needs 1.85). A bump whose own floor is above 1.88, or a
+      # language feature newer than it, breaks this leg rather than the promise.
+      matrix:
+        toolchain: [stable, '1.88.0']
+    name: build (${{ matrix.toolchain }})
 
     steps:
       - uses: actions/checkout@v4
       - uses: actions-rs/toolchain@v1
         with:
-          toolchain: stable
+          toolchain: ${{ matrix.toolchain }}
           override: true
           components: rustfmt, clippy
 
+      # `+${{ matrix.toolchain }}` (not a bare `cargo`): `rust-toolchain.toml`
+      # names a channel too, and the `+toolchain` argument is the one selector
+      # that outranks it — without it the 1.88.0 leg would run whatever the file
+      # says the moment the action's directory override stops applying, and the
+      # leg would pass while measuring `stable` twice.
+      #
+      # `--all-features` on purpose: a feature-gated dependency (`acts-store`'s
+      # sqlx postgres/sqlite, its sled, `acts-channel`'s codegen) is compiled
+      # only where its feature is on, and such a dependency is exactly the kind
+      # whose own floor a bump can raise — a leg that builds the default feature
+      # set would call the MSRV true while the crates a downstream consumer
+      # compiles with `--features sqlite` are already above it.
       - name: Build
-        run: cargo build --verbose --locked
+        run: cargo +${{ matrix.toolchain }} build --verbose --locked --workspace --all-features
 
   fmt:
     runs-on: ubuntu-latest

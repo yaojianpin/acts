@@ -8,6 +8,7 @@ name = "acts-cli"
 repository.workspace = true
 homepage = "https://github.com/yaojianpin/acts"
 version.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 acts-channel = { workspace = true }

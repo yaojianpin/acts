@@ -10,6 +10,10 @@
 cargo add acts
 ```
 
+从源码构建需要 Rust 1.88 及以上版本：这是每个 crate 承诺的下限（各 manifest 中的
+`rust-version`，由工作区统一继承），也是当前依赖图本身的要求。CI 用该下限
+（`1.88.0`）和 `stable` 各构建一次，`rust-toolchain.toml` 则为本地检出选择 stable。
+
 ## 安装外部存储
 
 外部存储后端（sqlite/postgres/sled）在独立的 `acts-store` crate 中，

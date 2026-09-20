@@ -8,6 +8,7 @@ name = "acts-store"
 repository.workspace = true
 homepage = "https://github.com/yaojianpin/acts"
 version.workspace = true
+rust-version.workspace = true
 include = ["src/**/*"]
 
 [dependencies]

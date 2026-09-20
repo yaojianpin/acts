@@ -4,6 +4,7 @@ description = "NATS server plugin for acts workflow engine — message actions a
 license = "Apache-2.0"
 keywords = ["workflow", "acts", "nats"]
 version.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 repository.workspace = true
 edition.workspace = true

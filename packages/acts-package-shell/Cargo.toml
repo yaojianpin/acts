@@ -3,6 +3,7 @@ name = "acts-package-shell"
 description = "acts package for shell"
 homepage = "https://docs.rs/acts-package-http"
 version.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true

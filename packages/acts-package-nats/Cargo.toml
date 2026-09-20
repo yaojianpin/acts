@@ -3,6 +3,7 @@ name = "acts-package-nats"
 description = "acts package for NATS pub/sub"
 homepage = "https://docs.rs/acts-package-nats"
 version.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true

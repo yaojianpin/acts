@@ -10,6 +10,7 @@ homepage = "https://docs.rs/acts"
 repository = "https://github.com/yaojianpin/acts.git"
 include = ["src/**/*", "../LICENSE", "../README.md", "!**/tests/**/*"]
 version.workspace = true
+rust-version.workspace = true
 
 [dependencies]
 tokio = { features = ["full", "macros"], workspace = true }

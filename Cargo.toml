@@ -16,6 +16,19 @@ keywords = ["workflow"]
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/yaojianpin/acts.git"
+# The floor every crate promises, declared once: members inherit it with
+# `rust-version.workspace = true`, so a downstream `cargo` reads the same number
+# from each crate it installs, and `.github/workflows/rust.yml` builds this same
+# version in a leg beside `stable`.
+#
+# 1.88 is what the dependency graph already requires — `async-nats` 0.50,
+# `tonic` 0.14, `redis` 1.7, `time` 0.3.55, `globset` 0.4.20, `encoding_rs`
+# 0.8.41 and `validator_derive` 0.20 each declare it — so the declaration costs
+# nothing and buys two things: `cargo` refuses to build a crate whose dependency
+# outgrew the promise instead of failing at a user's machine, and the
+# MSRV-aware resolver (resolver "3" below) stops `cargo update` from resolving a
+# version the floor cannot compile.
+rust-version = "1.88"
 version = "0.25.0"
 
 # Every version below is the single source of truth for the workspace: a member

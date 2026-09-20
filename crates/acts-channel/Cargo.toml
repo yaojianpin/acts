@@ -5,6 +5,7 @@ documentation = "https://github.com/yaojianpin/acts"
 homepage = "https://github.com/yaojianpin/acts"
 keywords = ["workflow-channel"]
 version.workspace = true
+rust-version.workspace = true
 authors.workspace = true
 license.workspace = true
 repository.workspace = true

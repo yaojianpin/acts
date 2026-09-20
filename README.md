@@ -52,6 +52,12 @@ The easiest way to get the latest version of `acts` is to install it via `cargo`
 cargo add acts
 ```
 
+Building from source needs Rust 1.88 or newer: it is the floor every crate
+promises (`rust-version` in each manifest, inherited from the workspace) and
+what the current dependency graph already requires. CI builds that floor
+(`1.88.0`) beside `stable`, and `rust-toolchain.toml` selects the stable channel
+for a checkout.
+
 ## Documents
 [`Chinese`](https://yaojianpin.github.io/acts/zh/)
 [`English`](https://yaojianpin.github.io/acts/en/)
