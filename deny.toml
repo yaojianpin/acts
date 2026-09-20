@@ -53,24 +53,21 @@ wildcards = "deny"
 skip = [
     { crate = "core-foundation@0.9.4", reason = "system-configuration 0.7 (hyper-util) is still on 0.9 while security-framework 3 uses 0.10; macOS-only" },
     { crate = "cpufeatures@0.2.17", reason = "sha2 0.10 and curve25519-dalek 4 (nkeys) pin cpufeatures 0.2, chacha20 0.10 needs 0.3" },
+    { crate = "foldhash@0.1.5", reason = "hashbrown 0.15.5 (hashlink/sqlx-core, and petgraph 0.8 behind prost-build 0.14) is still on foldhash 0.1 while hashbrown 0.17 (indexmap 2, rquickjs-core) uses 0.2" },
     { crate = "getrandom@0.2.17", reason = "ring 0.17, nkeys 0.4 and rand_core 0.6 (rand 0.8) resolve 0.2" },
     { crate = "getrandom@0.3.4", reason = "ahash 0.8 and rand_core 0.9 (rand 0.9/0.10) resolve 0.3" },
-    { crate = "hashbrown@0.12.3", reason = "indexmap 1.9.3, reached only through tower 0.4.13 (tonic 0.12)" },
     { crate = "hashbrown@0.14.5", reason = "dashmap 6.2" },
-    { crate = "hashbrown@0.15.5", reason = "hashlink 0.10 and sqlx-core 0.8" },
-    { crate = "indexmap@1.9.3", reason = "tower 0.4.13 (tonic 0.12); axum/reqwest are on indexmap 2" },
+    { crate = "hashbrown@0.15.5", reason = "hashlink 0.10, petgraph 0.8 and sqlx-core 0.8" },
     { crate = "parking_lot@0.11.2", reason = "sled 0.34 has not moved past parking_lot 0.11" },
     { crate = "parking_lot_core@0.8.6", reason = "parking_lot 0.11.2, reached only through sled 0.34" },
-    { crate = "rand@0.8.8", reason = "nanoid 0.4, nkeys 0.4, nuid 0.5, sqlx-postgres 0.8, tokio-websockets 0.10 and tower 0.4 resolve 0.8" },
+    { crate = "rand@0.8.8", reason = "nkeys 0.4, nuid 0.5, num-bigint-dig 0.8 and sqlx-mysql/sqlx-postgres 0.8 resolve 0.8, as does tokio-websockets 0.10" },
     { crate = "rand@0.9.5", reason = "mockito 1.7, used only by examples/packages/http" },
     { crate = "rand_chacha@0.3.1", reason = "rand 0.8.8" },
     { crate = "rand_core@0.6.4", reason = "rand 0.8.8 and signatory 0.27 (async-nats nkeys)" },
     { crate = "rand_core@0.9.5", reason = "rand 0.9.5 via mockito 1.7 (examples/packages/http); async-nats 0.50 already uses rand 0.10" },
-    { crate = "socket2@0.5.10", reason = "redis 0.31 and tonic 0.12 have not moved past socket2 0.5" },
     { crate = "syn@2.0.119", reason = "derive crates (prost-derive, tracing-attributes, rquickjs-macro, sqlx-macros, validator_derive, ...) are still on syn 2" },
     { crate = "toml_datetime@0.6.11", reason = "toml 0.8, our direct dependency, pulls toml_edit 0.22" },
     { crate = "toml_edit@0.22.27", reason = "toml 0.8, our direct dependency; proc-macro-crate 3 uses toml_edit 0.25" },
-    { crate = "tower@0.4.13", reason = "tonic 0.12 pins tower 0.4; axum and reqwest use tower 0.5" },
     { crate = "webpki-roots@0.26.11", reason = "sqlx-core 0.8 and tokio-websockets 0.10 still use webpki-roots 0.26" },
     { crate = "winnow@0.7.15", reason = "toml_edit 0.22, reached only through toml 0.8" },
 ]
@@ -80,7 +77,6 @@ skip = [
 # below each tolerated major is exempt instead of listing every leaf crate.
 skip-tree = [
     { crate = "windows-sys@0.48.0", reason = "etcetera 0.8.0 has not moved past windows-sys 0.48" },
-    { crate = "windows-sys@0.52.0", reason = "ring 0.17 and socket2 0.5 have not moved past windows-sys 0.52" },
 ]
 
 [bans.workspace-dependencies]

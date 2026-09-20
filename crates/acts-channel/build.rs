@@ -6,7 +6,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         unsafe {
             std::env::set_var("PROTOC", protoc_bin_vendored::protoc_bin_path()?);
         }
-        tonic_build::configure()
+        // `tonic-build` 0.14 generates only the transport skeleton; the prost
+        // codec the bindings use lives in `tonic-prost`, so the codegen half is
+        // `tonic-prost-build`.
+        tonic_prost_build::configure()
             .out_dir("proto")
             .compile_protos(&["acts.proto"], &["proto"])?;
     }

@@ -328,9 +328,15 @@ impl ActPlugin for GrpcPlugin {
                 "The gRPC server is now ready to accept connections on port {}",
                 port
             );
-            let serve = Server::builder()
-                .add_service(grpc)
-                .serve_with_shutdown(addr, shutdown.cancelled_owned());
+            // tonic 0.14's `add_service` is part of its `router` feature (an
+            // axum 0.8 dependency): it exists to route several named services.
+            // This plugin serves exactly one, and the generated
+            // `ActsServiceServer` already dispatches the gRPC paths itself and
+            // answers `UNIMPLEMENTED` to anything else — the same thing the
+            // router's fallback does — so the service goes to `serve` directly
+            // and the transport stays free of the HTTP framework.
+            let serve =
+                Server::builder().serve_with_shutdown(addr, grpc, shutdown.cancelled_owned());
             if let Err(err) = serve.await {
                 tracing::error!(addr = %addr, error = %err, "gRPC server stopped");
             } else {
