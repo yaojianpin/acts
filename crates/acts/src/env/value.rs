@@ -143,7 +143,10 @@ impl<'js> FromJs<'js> for ActJsValue {
                     .collect::<rquickjs::Result<Vec<_>>>()?;
                 Ok(serde_json::Value::Array(values))
             }
-            rquickjs::Type::Object => {
+            // rquickjs reports a `Proxy` as its own type, but `as_object`
+            // accepts it, so its properties (through the traps) read like a
+            // plain object's.
+            rquickjs::Type::Object | rquickjs::Type::Proxy => {
                 let mut value = serde_json::Map::<String, serde_json::Value>::new();
                 let inner = JsObject::new(ctx.clone())?;
                 let object = v.as_object().unwrap_or(&inner);
