@@ -274,14 +274,12 @@ impl Task {
     /// `next` may be treated as a no-op that only closes its outbox record.
     ///
     /// The applied marker alone is not that proof. It lives in the scope's
-    /// vars row, which is flushed by whichever write reaches the store first —
-    /// including a **descendant's** persist, whose scope walk writes the dirty
-    /// vars of its ancestors — while the lifecycle row carrying the terminal
-    /// state is written by the task's own transitions. A write cut (a crash)
-    /// between the two therefore leaves `applied` beside a non-terminal state
-    /// — a pair in which the propagation genuinely never finished (the parent
-    /// was never completed), so recovery must replay it instead of closing it
-    /// as done. Both halves together are the guard.
+    /// vars row while the lifecycle row carrying the terminal state is written
+    /// by the task's own transitions, and the two are separate store writes; a
+    /// write cut (a crash) between them therefore leaves `applied` beside a
+    /// non-terminal state — a pair in which the propagation genuinely never
+    /// finished (the parent was never completed), so recovery must replay it
+    /// instead of closing it as done. Both halves together are the guard.
     pub fn is_propagation_done(&self) -> bool {
         self.state().is_completed() && self.is_propagation_applied()
     }
@@ -572,8 +570,17 @@ impl Task {
         true
     }
 
-    pub fn set_err(&self, err: &Error) {
+    pub fn set_err(self: &Arc<Self>, err: &Error) {
         *self.err.write() = Some(err.clone());
+
+        // An errored scope carries its own data only (see [`Self::update_data`]),
+        // so the local overlay a failed run left behind is refreshed with the
+        // data it started from — its **inputs** ([`Self::inputs`]: the
+        // predecessor's outputs plus this task's node vars) — before the error
+        // fields land. The parent scope is one level above this task and is not
+        // what seeded it, so it is not the source here; the input values are
+        // written onto this scope's data.
+        self.set_data(&self.inputs());
 
         self.set_data_with(|data| {
             data.set(consts::ACT_ERR_CODE, &err.ecode);
@@ -999,7 +1006,17 @@ impl Task {
                         )));
                     }
 
-                    self.expect_proc().set_data(&ctx.vars());
+                    let proc = self.expect_proc();
+                    proc.set_data(&ctx.vars());
+                    // The root scope's row is written by the root's own persist
+                    // (no descendant's persist walks up to it any more), so
+                    // queue it here: FIFO keeps the vars row durable before the
+                    // action's outbox record closes, so an acknowledged
+                    // `set_process_var` survives a cut that lands before the
+                    // root's next event.
+                    if let Some(root) = proc.root() {
+                        ctx.runtime.cache().upsert_async(&root).await?;
+                    }
                     // emit the task change (issue #)
                     ctx.emit_task(self).await?;
                 }
@@ -1432,7 +1449,8 @@ impl ActTask for Arc<Task> {
             let parent = task.parent();
             if let Some(p) = &parent.clone() {
                 let outputs = task.outputs();
-                // Update the parent task's data with current task's outputs
+                // the finished task's outputs fold into its parent — one hop;
+                // the parent's own `next` carries them further up in turn
                 p.update_data(&outputs);
                 return Box::pin(p.next(ctx)).await;
             }
@@ -1494,20 +1512,25 @@ impl Task {
         // Build a lineage chain once and merge each scope exactly once. The
         // previous recursive merge cloned intermediate maps at every level,
         // making deep task chains quadratic in the number of merged vars.
-        let mut chain = vec![self.data()];
+        //
+        // The nearest scope is applied last, so it wins — the same precedence
+        // [`Self::find`] reads with: an ancestor's value only fills a key this
+        // scope does not hold. A write stays in the scope that made it (see
+        // [`Self::update_data`]), so the two paths agree by merge order, not
+        // by mirroring the value into the declaring ancestor.
+        let mut chain = Vec::new();
         let mut cursor = self.parent();
         while let Some(task) = cursor {
             cursor = task.parent();
             chain.push(task.data());
         }
 
-        // Parent scopes win, matching the previous leaf.extend(parent.vars)
-        // merge direction.
-        let mut vars = chain.remove(0);
+        // root first, then down to the nearest parent, then this scope
+        let mut vars = Vars::new();
         while let Some(data) = chain.pop() {
             vars = vars.extend(data);
         }
-        vars
+        vars.extend(self.data())
     }
 
     pub fn with_data<T, F: Fn(&Vars) -> T>(&self, f: F) -> T {
@@ -1535,15 +1558,6 @@ impl Task {
             data.set(name, value);
         }
         self.mark_vars_dirty();
-    }
-
-    pub fn update_data_if_exists<F: Fn(&mut Vars) -> bool>(&self, f: F) -> bool {
-        let mut data = self.data.write();
-        let updated = f(&mut data);
-        if updated {
-            self.mark_vars_dirty();
-        }
-        updated
     }
 
     /// Restore-time write of a scope's persisted vars — fills the in-memory
@@ -1640,35 +1654,18 @@ impl Task {
         None
     }
 
+    /// Write `vars` into this scope's own data.
+    ///
+    /// A key an ancestor scope also holds is written **here only**: the value
+    /// reaches the ancestors in turn, through the propagation of this task's
+    /// outputs ([`Self::outputs`]) when its `next` hands the terminal outcome
+    /// to the parent (`p.update_data(&outputs)`). Nothing walks the parent
+    /// chain at write time, so a sibling subtree never observes this scope's
+    /// writes and the parents' rows stay their own.
+    ///
+    /// Reads are unchanged ([`Self::vars`] and [`Self::find`] merge the parent
+    /// chain), so this scope still sees everything an ancestor holds.
     pub fn update_data(&self, vars: &Vars) {
-        let mut refs = Vec::new();
-        let mut parent = self.parent();
-        while let Some(task) = parent {
-            refs.push(task.clone());
-            parent = task.parent();
-        }
-
-        for (name, value) in vars.iter() {
-            // skip private keys
-            if consts::is_private_key(name) {
-                continue;
-            }
-            for t in refs.iter().rev() {
-                let is_updated = t.update_data_if_exists(|v| {
-                    if v.contains_key(name) {
-                        v.set(name, value);
-                        return true;
-                    }
-                    false
-                });
-
-                if is_updated {
-                    break;
-                }
-            }
-        }
-
-        // also set the to current task
         self.set_data(vars);
     }
 

@@ -803,12 +803,12 @@ async fn cache_vars_row_written_only_on_mutation() {
     );
 }
 
-/// A data write that lands in an ancestor scope — the classic "child output
-/// folds up to the declaring owner" case — persists exactly that owner's
-/// vars row, and restore re-attaches it: the store round-trip keeps the
-/// ancestor's updated vars without ever touching the root row.
+/// A child scope's data write — even for a key an ancestor scope holds —
+/// stays in the child's own row: persisting the act writes the act's vars row
+/// and leaves the step's row (and the root's) exactly as it was, and restore
+/// re-attaches each scope's own row.
 #[tokio::test]
-async fn cache_vars_ancestor_scope_round_trip() {
+async fn cache_vars_child_scope_stays_own_row() {
     let engine = Engine::builder().start().await.unwrap();
     let rt = engine.runtime();
     let store = rt.cache().store();
@@ -820,8 +820,7 @@ async fn cache_vars_ancestor_scope_round_trip() {
     let proc = rt.create_proc(&pid, &workflow);
     proc.set_state(TaskState::Running);
 
-    // root (workflow) > step1 > act; the act's output folds up to step1,
-    // the scope that declares it
+    // root (workflow) > step1 > act; step1 declares `x`, the act writes it
     let root_node = proc.tree().root.clone().unwrap();
     let root = proc.create_task(&root_node, None).unwrap();
     let step1_node = proc.tree().node("step1").unwrap();
@@ -845,7 +844,7 @@ async fn cache_vars_ancestor_scope_round_trip() {
     let step1_tid = step1.id.clone();
     let root_tid = root.id.clone();
 
-    // step1 declares `x`; the act writes it → step1's scope owns the value
+    // step1 declares `x`; the act writes it → the act's own scope holds it
     step1.set_data_with(|data| data.set("x", 1));
     store.persist_task_rows(&step1).await.unwrap();
     store.persist_task_rows(&root).await.unwrap();
@@ -858,15 +857,29 @@ async fn cache_vars_ancestor_scope_round_trip() {
         "root scope has no vars row — it never mutated"
     );
 
-    act.set_data_with(|data| data.set("x", 2));
-    act.update_data(&act.data());
+    act.update_data(&Vars::new().with("x", 2));
     assert!(
-        step1.is_vars_dirty(),
-        "the owner scope must be marked dirty"
+        act.is_vars_dirty(),
+        "the writing scope must be marked dirty"
+    );
+    assert!(
+        !step1.is_vars_dirty(),
+        "the owning scope must stay untouched"
     );
     assert!(!root.is_vars_dirty(), "the root scope must stay untouched");
 
     store.persist_task_rows(&act).await.unwrap();
+    let act_vars = store
+        .vars()
+        .find(&utils::Id::new(&pid, &act.id).id())
+        .await
+        .unwrap();
+    let act_data: Vars = serde_json::from_str(&act_vars.data).unwrap();
+    assert_eq!(
+        act_data.get::<i32>("x").unwrap(),
+        2,
+        "the writing scope's row carries the value"
+    );
     let step1_vars = store
         .vars()
         .find(&utils::Id::new(&pid, &step1_tid).id())
@@ -875,8 +888,8 @@ async fn cache_vars_ancestor_scope_round_trip() {
     let step1_data: Vars = serde_json::from_str(&step1_vars.data).unwrap();
     assert_eq!(
         step1_data.get::<i32>("x").unwrap(),
-        2,
-        "owner scope row updated"
+        1,
+        "the declaring scope's row is not rewritten by a descendant's persist"
     );
     assert!(
         store
@@ -887,14 +900,24 @@ async fn cache_vars_ancestor_scope_round_trip() {
         "root scope still has no vars row"
     );
 
-    // restore: the step scope's vars re-attach to the reloaded task
+    // restore: each scope's own vars re-attach to its reloaded task
     store.upsert_proc(&proc).await.unwrap();
     let restored = store.load_proc(&pid, &rt).await.unwrap().unwrap();
-    let step1 = restored.task(&step1_tid).unwrap();
     assert_eq!(
-        step1.with_data(|d| d.get::<i32>("x")),
+        restored
+            .task(&act.id)
+            .unwrap()
+            .with_data(|d| d.get::<i32>("x")),
         Some(2),
-        "restored owner scope keeps its updated var"
+        "restored child scope keeps the value it wrote"
+    );
+    assert_eq!(
+        restored
+            .task(&step1_tid)
+            .unwrap()
+            .with_data(|d| d.get::<i32>("x")),
+        Some(1),
+        "restored declaring scope keeps its own value"
     );
     assert_eq!(
         restored

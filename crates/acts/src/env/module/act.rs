@@ -51,6 +51,14 @@ mod act {
         Context::with(|ctx| {
             let vars = Vars::new().with(&name, value.inner());
             ctx.proc.set_data(&vars);
+            // The root scope's row is written by the root's own persist (no
+            // descendant's persist walks up to it any more), so queue it here.
+            // Best effort: a saturated writer refuses this one write, and the
+            // value — already in memory — is flushed by the root's own next
+            // persist.
+            if let Some(root) = ctx.proc.root() {
+                let _ = ctx.runtime.cache().try_upsert_async(&root);
+            }
         })
     }
 

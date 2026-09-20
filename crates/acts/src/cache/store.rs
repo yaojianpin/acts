@@ -613,36 +613,33 @@ impl Store {
         Ok(())
     }
 
-    /// Durable write of a task lifecycle row and every scope vars row that
-    /// diverged: the task's own row, then — walking the parent chain to the
-    /// root — each ancestor whose vars changed since its last flush (the
-    /// scope that owns an updated key, which `update_data` resolved at write
-    /// time). A lifecycle-only transition (state/timing change, no data
-    /// touched) writes just the one lifecycle row; scope vars rows are
-    /// written exactly when the owning scope actually mutated. The dirty
-    /// flags are cleared only after each row is durable, so a crash between
-    /// mutations and the next persist loses nothing that the previous design
-    /// would have kept.
+    /// Durable write of a task's lifecycle row and, when its vars changed
+    /// since the last flush, its own scope vars row.
+    ///
+    /// Scope vars are decoupled from the lifecycle row, so a lifecycle-only
+    /// transition (state/timing change, data untouched) writes just the one
+    /// row, and the vars row is written exactly when the scope actually
+    /// mutated. No ancestor row is written here: a scope's data reaches its
+    /// ancestors in turn — each task's outputs are folded into its parent when
+    /// its `next` propagates (see `Task::update_data`) — and an ancestor's own
+    /// rows are flushed by the ancestor's own persist. The dirty flag is
+    /// cleared only after the row is durable, so a crash between a mutation
+    /// and the next persist loses nothing.
     pub async fn persist_task_rows(&self, task: &Arc<scheduler::Task>) -> Result<()> {
         self.upsert_task(task).await?;
-        let mut scope = Some(task.clone());
-        while let Some(t) = scope {
-            if t.is_vars_dirty() {
-                // the vars row must capture every mutation that happened
-                // before the serialization; the generation read here is
-                // compared again after the durable write, and the dirty flag
-                // is cleared only when no mutation raced it — a mutation that
-                // landed while the row was being written keeps the scope
-                // dirty so the next persist persists it (clearing it away
-                // would durably lose the mutation, e.g. an applied propagation
-                // marker that recovery relies on)
-                let generation = t.vars_gen();
-                self.upsert_task_vars(&t).await?;
-                if t.vars_gen() == generation {
-                    t.clear_vars_dirty();
-                }
+        if task.is_vars_dirty() {
+            // the vars row must capture every mutation that happened before
+            // the serialization; the generation read here is compared again
+            // after the durable write, and the dirty flag is cleared only when
+            // no mutation raced it — a mutation that landed while the row was
+            // being written keeps the scope dirty so the next persist persists
+            // it (clearing it away would durably lose the mutation, e.g. an
+            // applied propagation marker that recovery relies on)
+            let generation = task.vars_gen();
+            self.upsert_task_vars(task).await?;
+            if task.vars_gen() == generation {
+                task.clear_vars_dirty();
             }
-            scope = t.parent();
         }
         Ok(())
     }

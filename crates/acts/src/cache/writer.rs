@@ -556,10 +556,11 @@ impl StoreWriter {
         if !store.procs().exists(&task.pid).await? {
             return Ok(());
         }
-        // lifecycle row + the vars rows of every dirty scope on the parent
-        // chain (scope vars are decoupled from task state writes). FIFO order
-        // keeps the scope vars (e.g. the applied propagation phase) durable
-        // before any outbox record queued after this write.
+        // lifecycle row + this task's own vars row when its scope diverged
+        // (scope vars are decoupled from task state writes; an ancestor's row
+        // is flushed by the ancestor's own persist). FIFO order keeps the
+        // scope vars (e.g. the applied propagation phase) durable before any
+        // outbox record queued after this write.
         store.persist_task_rows(task).await?;
         if let Some(p) = task.proc() {
             if p.state().is_completed() {

@@ -508,7 +508,8 @@ impl Context {
             task.set_state(TaskState::Aborted);
             ctx.set_task(&task);
             if prev.is_kind(NodeKind::Act) {
-                // act task's data will update to parent
+                // the act's outputs fold into its parent — one hop; the
+                // parent's own walk carries them further up
                 task.update_data(&prev.outputs());
             }
             task.set_propagation_phase(crate::scheduler::PropagationPhase::Applied);
@@ -600,7 +601,8 @@ impl Context {
             {
                 parent.set_err(&err);
                 if task.is_kind(NodeKind::Act) {
-                    // act task's data will update to parent
+                    // the errored act's outputs fold into its parent — one
+                    // hop; the error walk carries the outcome further up
                     parent.update_data(&task.outputs());
                 }
                 parent.set_propagation_phase(crate::scheduler::PropagationPhase::Applied);

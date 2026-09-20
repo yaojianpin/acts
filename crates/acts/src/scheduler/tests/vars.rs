@@ -1,7 +1,7 @@
 use crate::event::EventAction;
 use crate::utils::test::auto_complete;
 use crate::{
-    Action, MessageState, Variant, VariantTypes, Vars, Workflow,
+    Action, Error, MessageState, Variant, VariantTypes, Vars, Workflow,
     utils::{
         self,
         test::{USES_IRQ, USES_SET, create_proc},
@@ -1152,11 +1152,22 @@ async fn sch_vars_override_global_vars() {
     tx.recv().await;
     proc.print();
 
-    proc.task_by_nid("step1")
-        .first()
-        .unwrap()
-        .update_data(&Vars::new().with("a", 10));
-    assert_eq!(proc.data().get::<i32>("a").unwrap(), json!(10));
+    let step1 = proc.task_by_nid("step1").first().unwrap().clone();
+    step1.update_data(&Vars::new().with("a", 10));
+
+    // The write stays in step1's own scope: the declaring scope (the workflow
+    // root) keeps its value — it only receives step1's output when step1's
+    // `next` propagates, which an in-flight IRQ step never reaches. The read
+    // paths are unchanged and agree, because all of them read from the current
+    // scope outwards.
+    assert_eq!(step1.data().get::<i32>("a").unwrap(), json!(10));
+    assert_eq!(step1.find::<i32>("a").unwrap(), json!(10));
+    assert_eq!(step1.vars().get::<i32>("a").unwrap(), json!(10));
+    assert_eq!(proc.data().get::<String>("a").unwrap(), json!("abc"));
+    assert_eq!(
+        proc.root().unwrap().find::<String>("a").unwrap(),
+        json!("abc")
+    );
 }
 
 #[serial]
@@ -1200,17 +1211,24 @@ async fn sch_vars_override_step_vars() {
     tx.recv().await;
     proc.print();
 
-    proc.task_by_params("key", "act1")
-        .first()
-        .unwrap()
-        .update_data(&Vars::new().with("a", 10));
+    let act1 = proc.task_by_params("key", "act1").first().unwrap().clone();
+    act1.update_data(&Vars::new().with("a", 10));
+
+    // The act's write stays in the act's own scope: the step that declares
+    // `a` keeps its value until the act's `next` folds the act's outputs into
+    // it — the IRQ act is still waiting, so nothing propagates. The act's own
+    // reads agree with each other (they start from the act's scope).
+    assert_eq!(act1.data().get::<i32>("a").unwrap(), json!(10));
+    assert_eq!(act1.find::<i32>("a").unwrap(), json!(10));
+    assert_eq!(act1.vars().get::<i32>("a").unwrap(), json!(10));
     assert_eq!(
         proc.task_by_nid("step1")
             .first()
             .unwrap()
-            .find::<i32>("a")
+            .data()
+            .get::<String>("a")
             .unwrap(),
-        json!(10)
+        json!("abc")
     );
 }
 
@@ -1253,4 +1271,75 @@ async fn sch_vars_private_vars() {
             .unwrap(),
         "abc"
     );
+}
+
+/// An errored scope is refreshed with its inputs — the predecessor's outputs
+/// plus its own node vars — before the error fields land: a value the failed
+/// run wrote for a key its inputs carry is replaced by the input's (not the
+/// parent's, which is one level above and may hold a different value), a key
+/// only this scope held stays, and the error fields are on top.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_vars_error_refreshes_scope_from_inputs() {
+    // step2's prev is step1; its parent is the workflow root, whose `a` is
+    // the workflow's own value — the two differ, so the assertion tells them
+    // apart.
+    let workflow = Workflow::new()
+        .with_var("a", json!("wf"))
+        .with_step(|step| step.with_id("step1").with_var("a", json!("s1")))
+        .with_step(|step| {
+            step.with_id("step2")
+                .with_uses(USES_IRQ, Vars::new().with("key", "act2"))
+        });
+    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
+    let rt = engine.runtime();
+    let sig = engine.signal(());
+    let tx = sig.clone();
+    let rx = sig.clone();
+    let emitter = engine.channel();
+    let tx_close = tx.clone();
+    let tx_close2 = tx.clone();
+    emitter.on_complete(move |_| {
+        let tx_close = tx_close.clone();
+        async move {
+            tx_close.close();
+        }
+    });
+    emitter.on_error(move |_| {
+        let tx_close2 = tx_close2.clone();
+        async move {
+            tx_close2.close();
+        }
+    });
+    emitter.on_message(move |e| {
+        let rx = rx.clone();
+        async move {
+            if e.inner().is_type("act") && e.inner().is_state(MessageState::Created) {
+                rx.close();
+            }
+        }
+    });
+    rt.launch(&proc).await.unwrap();
+    tx.recv().await;
+    proc.print();
+
+    let step2 = proc.task_by_nid("step2").first().unwrap().clone();
+    assert_eq!(step2.data().get::<String>("a").unwrap(), "s1");
+    step2.update_data(&Vars::new().with("a", json!("local")).with("b", json!(1)));
+    assert_eq!(step2.data().get::<String>("a").unwrap(), "local");
+
+    step2.set_err(&Error::new("boom", "err1"));
+
+    assert!(step2.state().is_error());
+    assert_eq!(
+        step2.data().get::<String>("a").unwrap(),
+        "s1",
+        "the input's value is restored over the failed run's local write"
+    );
+    assert_eq!(
+        step2.data().get::<i32>("b").unwrap(),
+        1,
+        "a key the inputs do not hold is kept"
+    );
+    assert_eq!(step2.data().get::<String>("ecode").unwrap(), "err1");
 }

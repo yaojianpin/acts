@@ -1058,10 +1058,10 @@ impl Cache {
         self.writer.flush().await
     }
 
-    /// Persist one task: its lifecycle row plus the vars rows of every dirty
-    /// scope on its parent chain (scope vars are decoupled from task state
-    /// writes, so a pure state transition persists a single small row), then
-    /// mark the proc row terminal when the process finished.
+    /// Persist one task: its lifecycle row plus its own vars row when its
+    /// scope diverged (scope vars are decoupled from task state writes, so a
+    /// pure state transition persists a single small row), then mark the proc
+    /// row terminal when the process finished.
     async fn persist_task(&self, task: &Arc<Task>) -> Result<()> {
         self.store.persist_task_rows(task).await?;
         if let Some(p) = task.proc()

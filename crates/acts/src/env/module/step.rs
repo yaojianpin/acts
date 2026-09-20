@@ -41,7 +41,13 @@ mod step {
                         "Task with nid '{nid}' is already completed, cannot set value",
                     )));
                 }
-                task.update_data(&Vars::new().with(&name, value.inner()))
+                task.update_data(&Vars::new().with(&name, value.inner()));
+                // The target scope's row is written by its own persist (no
+                // descendant's persist walks up to it any more), so queue it
+                // here. Best effort — a saturated writer refuses this one write
+                // and the value, already in memory, is flushed by the task's
+                // own next persist.
+                let _ = ctx.runtime.cache().try_upsert_async(task);
             }
             Ok(())
         })
