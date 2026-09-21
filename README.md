@@ -1,8 +1,8 @@
 # Acts workflow engine
 
-[![Build](https://github.com/yaojianpin/acts/actions/workflows/rust.yml/badge.svg)](https://github.com/yaojianpin/acts/actions?workflow=rust)
-[![Test](https://github.com/yaojianpin/acts/actions/workflows/test.yml/badge.svg)](https://github.com/yaojianpin/acts/actions?workflow=test)
-[![Coverage](https://raw.githubusercontent.com/yaojianpin/acts/badges/coverage.svg)](https://github.com/yaojianpin/acts/actions/workflows/coverage.yml)
+[![Build](https://github.com/yaojianpin/acts/actions/workflows/rust.yml/badge.svg?branch=develop)](https://github.com/yaojianpin/acts/actions?query=branch%3Adevelop)
+[![Test](https://github.com/yaojianpin/acts/actions/workflows/test.yml/badge.svg?branch=develop)](https://github.com/yaojianpin/acts/actions?query=branch%3Adevelop)
+[![Coverage](https://raw.githubusercontent.com/yaojianpin/acts/badges/coverage-develop.svg)](https://github.com/yaojianpin/acts/actions/workflows/coverage.yml)
 
 Acts is a fast, lightweight, extensiable workflow engine that executes workflows defined in YAML format.
 
