@@ -373,7 +373,7 @@ impl StoreWriter {
     }
 
     fn closed() -> ActError {
-        ActError::Runtime("store writer channel closed".to_string())
+        ActError::Shutdown
     }
 
     pub(crate) fn depth(&self) -> usize {
@@ -929,8 +929,8 @@ mod tests {
         );
     }
 
-    /// After `close` the writer is gone: further sends fail, and `close` is
-    /// idempotent.
+    /// After `close` the writer is gone: further sends fail with the
+    /// structured shutdown error, and `close` is idempotent.
     #[tokio::test]
     async fn send_and_flush_fail_after_close() {
         let (store, _, writer) = test_writer();
@@ -949,9 +949,15 @@ mod tests {
             })
             .await
             .unwrap_err();
-        assert!(send_err.to_string().contains("closed"), "{send_err}");
+        assert!(
+            matches!(send_err, ActError::Shutdown),
+            "a post-close send must report the structured shutdown error: {send_err}"
+        );
         let flush_err = writer.flush().await.unwrap_err();
-        assert!(flush_err.to_string().contains("closed"), "{flush_err}");
+        assert!(
+            matches!(flush_err, ActError::Shutdown),
+            "a post-close flush must report the structured shutdown error: {flush_err}"
+        );
     }
 
     /// `RemoveProc` is applied after the writes queued before it, then

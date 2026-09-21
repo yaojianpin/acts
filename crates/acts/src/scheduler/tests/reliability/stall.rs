@@ -636,3 +636,113 @@ async fn strand_completed_act(rt: &Arc<Runtime>, pid: &str) {
         assert_eq!(next.phase, "effect_in_flight");
     }
 }
+
+/// The boot replay must never grow a process the resident set does not hold.
+/// `cache.proc` answers a full set with a loaded-but-uncached instance; a
+/// record replayed on it schedules work into a tree nothing else will ever
+/// see — the durable rows land, but the process a resume loads as *the*
+/// resident never owns the scheduling, its records are then closed as
+/// orphans ("no task"), and the run strands on tasks only the store knows
+/// about. The replay defers such a record instead: it stays exactly as
+/// stored, and is driven once the process is resident.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_next_boot_replay_defers_a_non_resident_process() {
+    bounded(
+        "sch_next_boot_replay_defers_a_non_resident_process",
+        boot_replay_defers_non_resident_inner(),
+    )
+    .await;
+}
+
+async fn boot_replay_defers_non_resident_inner() {
+    let workflow = irq_workflow();
+    let store_kv: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
+
+    // first boot, resident cap 1: one live process holds the slot
+    {
+        let engine = Engine::builder()
+            .cache_size(1)
+            .set_store(store_kv.clone())
+            .start()
+            .await
+            .unwrap();
+        let rt = engine.runtime();
+        start_irq_processes(&rt, &workflow, "ghost-a", 1, 1).await;
+
+        // a second in-flight process, crafted straight into the store: a
+        // running root with a pending `next` record — the shape a crash
+        // mid-propagation leaves behind
+        let proc = rt.create_proc("ghost-b", &workflow);
+        proc.set_state(TaskState::Running);
+        let root = {
+            let tree = proc.tree();
+            proc.create_task(tree.root.as_ref().unwrap(), None).unwrap()
+        };
+        root.set_state(TaskState::Running);
+        let store = rt.cache().store();
+        store.upsert_proc(&proc).await.unwrap();
+        store.upsert_task(&root).await.unwrap();
+        store.enqueue_next_op(proc.id(), &root.id).await.unwrap();
+        engine.close().await;
+    }
+
+    // second boot over the same store: the live process is resumed into the
+    // single slot and the second process waits in the boot-resume overflow
+    let engine = Engine::builder()
+        .cache_size(1)
+        .set_store(store_kv)
+        .start()
+        .await
+        .unwrap();
+    let rt = engine.runtime();
+    let store = rt.cache().store();
+    let pid = "ghost-b".to_string();
+    let q_pid = Query::new().filter(Filter::and().expr(Expr::eq("pid", pid.clone())));
+
+    // the replay runs while the resident set is full: the record must come
+    // out untouched, and no task may be scheduled for the process
+    rt.recover_actions().await.unwrap();
+    assert!(
+        store
+            .ops()
+            .query(&q_pid)
+            .await
+            .unwrap()
+            .rows
+            .iter()
+            .any(|op| op.r#type == "next" && op.status == "pending"),
+        "the deferred record must stay open"
+    );
+    assert_eq!(
+        store.tasks().query(&q_pid).await.unwrap().rows.len(),
+        1,
+        "a non-resident process must not gain tasks from the replay"
+    );
+
+    // once a slot frees, the process is resumed and the deferred record is
+    // what carries it forward: the same replay now schedules its step
+    complete_waiting_act(&rt, "ghost-a0").await;
+    poll_until(|| async { rt.cache().resident(&pid).is_some() }).await;
+    assert!(
+        rt.cache().resident(&pid).is_some(),
+        "the deferred process must be resumed into the freed slot"
+    );
+    rt.recover_actions().await.unwrap();
+    let reloaded = rt
+        .proc(&pid)
+        .await
+        .unwrap()
+        .expect("the process is resident");
+    let grew = poll_until(|| async { reloaded.tasks().len() > 1 }).await;
+    assert!(
+        grew && reloaded.tasks().len() > 1,
+        "the resident process's deferred record must schedule its step"
+    );
+
+    // both processes run to their end and leave nothing behind
+    let pids = vec!["ghost-a0".to_string(), pid];
+    drive_to_end(&rt, &pids).await;
+    sweep_and_assert_clean(&rt, &pids).await;
+    engine.close().await;
+}

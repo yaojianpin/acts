@@ -148,16 +148,23 @@ impl Engine {
         // their channels and handlers.
         self.runtime.event_loop();
 
-        // Outbox replay first: every task that has a durable pending record is
-        // driven deterministically to its next checkpoint (applied propagation /
-        // applied-action guards make the replay idempotent); resume runs after
-        // so it only sees what the replay left mid-flight and never overlaps
-        // the replay on the same task.
-        self.runtime.recover_actions().await?;
-
         // Resume in-flight processes (durable Ready/Running/Pending rows) and
-        // start parked ones.
+        // start parked ones first: the replay below must meet the resident
+        // set the boot decided on. `cache.proc` answers a cache miss with a
+        // loaded instance even when the resident set is full, and a replay
+        // that ran before the resume would dispatch that work onto such an
+        // uncached instance — its durable effects land, but the process the
+        // resume loads as *the* resident never owns the scheduling the replay
+        // did, and the run strands on tasks only the store knows about.
         self.runtime.resume().await?;
+
+        // Outbox replay: every task that has a durable pending record is
+        // driven deterministically to its next checkpoint (applied propagation
+        // / applied-action guards make the replay idempotent). It runs after
+        // the resume so the two never overlap on the same task: the resume
+        // re-dispatches only tasks without a pending record and leaves every
+        // record to this replay.
+        self.runtime.recover_actions().await?;
 
         self.runtime.init_retry_timer()?;
         self.runtime.init_trigger_timer();

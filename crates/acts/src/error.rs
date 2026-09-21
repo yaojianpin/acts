@@ -30,6 +30,13 @@ pub enum ActError {
     #[error("scheduler queue is full")]
     QueueFull,
 
+    /// The engine is closing: the scheduler queue no longer accepts work (or
+    /// the store writer has been drained). Not a business failure — a job
+    /// interrupted by it must leave the durable state replayable, because the
+    /// next engine start re-drives exactly what this refusal interrupted.
+    #[error("scheduler is shutting down")]
+    Shutdown,
+
     #[error("{0}")]
     Store(String),
 
@@ -92,6 +99,18 @@ impl Error {
 
     pub fn from_var(value: &Vars) -> Result<Self> {
         serde_json::from_value::<Self>(value.clone().into()).map_err(|err| err.into())
+    }
+}
+
+impl ActError {
+    /// Whether this error reports the engine closing rather than a failure of
+    /// the work itself: the scheduler queue refused the dispatch (or the store
+    /// writer is already drained). A job interrupted by it must not persist a
+    /// business failure (`Error` state, closed outbox record) — the durable
+    /// state has to stay exactly as the next engine start expects it, so the
+    /// boot resume can re-drive what this shutdown cut short.
+    pub fn is_shutdown(&self) -> bool {
+        matches!(self, ActError::Shutdown)
     }
 }
 

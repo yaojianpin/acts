@@ -517,8 +517,23 @@ impl Runtime {
     pub async fn do_action(self: &Arc<Self>, action: &Action) -> Result<()> {
         debug!("action received");
         let proc = self.cache.proc(&action.pid, self).await?;
+        // A full resident set makes `cache.proc` return a loaded-but-uncached
+        // instance. Applying the action to it would mutate a tree nothing else
+        // ever sees — the resident process the client then reads (or a resume
+        // loads) never saw the action, and a `Next` has no durable record to
+        // replay it from. The check is identity, not lookup: the action is
+        // applied only when this instance *is* the resident one (a concurrent
+        // resume could have replaced the map entry after our load). Refusing
+        // is retryable — the caller re-runs once a slot frees.
+        let resident = self.cache.resident(&action.pid);
         match proc {
-            Some(proc) => proc.do_action(action).await,
+            Some(proc) if resident.is_some_and(|r| Arc::ptr_eq(&r, &proc)) => {
+                proc.do_action(action).await
+            }
+            Some(_) => Err(ActError::Runtime(format!(
+                "process '{}' is in flight but not resident; retry the action",
+                action.pid
+            ))),
             None => Err(ActError::Runtime(format!(
                 "cannot find process '{}' when do_action({:?})",
                 action.pid, action
@@ -603,6 +618,19 @@ impl Runtime {
                 self.cache.store().complete_ops(&pid, &tid, &r#type).await?;
                 continue;
             };
+            // A full resident set makes `cache.proc` return a loaded-but-
+            // uncached instance. Replaying the record on it would mutate a
+            // tree nothing else ever sees: the durable effects land, while the
+            // instance a resume loads as *the* process never owns the work the
+            // replay scheduled — its record is then closed as an orphan
+            // ("no task") and the task itself is unreachable forever. Leave
+            // the record exactly as the crash left it: once the process is
+            // resident (this boot's resume, or the overflow queue), the
+            // liveness pass re-drives it.
+            if self.cache.resident(&pid).is_none() {
+                debug!(pid = %pid, tid = %tid, op_type = %r#type, "replay deferred: process not resident");
+                continue;
+            }
             let Some(task) = proc.task(&tid) else {
                 self.cache.store().complete_ops(&pid, &tid, &r#type).await?;
                 continue;
@@ -767,10 +795,18 @@ impl Runtime {
                 continue;
             }
 
+            // Ghost guard — same shape as the boot replay's: a full resident
+            // set makes `cache.proc` return an uncached instance, and work
+            // re-driven on it lands in a tree the resident process never sees
+            // while the record looks handled. A non-resident row waits for
+            // its resume; this pass re-drives it once it is resident.
             let Some(proc) = self.cache.proc(&pid, self).await? else {
                 store.complete_ops(&pid, &tid, &r#type).await?;
                 continue;
             };
+            if self.cache.resident(&pid).is_none() {
+                continue;
+            }
             let Some(task) = proc.task(&tid) else {
                 store.complete_ops(&pid, &tid, &r#type).await?;
                 continue;
@@ -919,6 +955,14 @@ impl Runtime {
     /// refill would wait for a trigger that never comes — the parked processes
     /// behind it would never start.
     pub(crate) async fn restore(self: &Arc<Self>) -> Result<()> {
+        // A close that lands under this pass must not start new work: a
+        // process started into a closing queue persists a Running row whose
+        // dispatch is refused, and every job it races dies mid-flight. The
+        // rows stay exactly as a crash leaves them — the next start resumes
+        // them.
+        if self.shutdown.is_cancelled() {
+            return Ok(());
+        }
         let loaded = self.cache.resume_from_queue(self).await?;
         if !loaded.is_empty() {
             let redispatched = self.redispatch_resumed(&loaded).await?;
@@ -1142,6 +1186,15 @@ impl Runtime {
                 debug!(error = %err, "task was overridden while it ran; its act's error is ignored");
                 return;
             }
+            // The engine closed under this job. Not a business failure: what
+            // `exec` made durable before the refusal (a dispatched child, an
+            // interrupted act) is exactly what the next engine start replays,
+            // and an `Error` state persisted here would make a resumable row
+            // look decided.
+            if err.is_shutdown() {
+                debug!(pid = %task.pid, tid = %task.id, "task.exec interrupted by shutdown");
+                return;
+            }
             error!(error = %err, "task.exec failed");
             task.set_err(&err.clone().into());
             ctx.set_task(&task);
@@ -1161,6 +1214,13 @@ impl Runtime {
     async fn run_next_job(task: Arc<Task>, ctx: Context) -> bool {
         let result = task.next(&ctx).await;
         if let Err(err) = result {
+            // The engine closed under this job. Not a business failure: the
+            // propagation's durable record stays open exactly as a crash
+            // leaves it, and the next engine start replays it.
+            if err.is_shutdown() {
+                debug!(pid = %task.pid, tid = %task.id, "task.next interrupted by shutdown");
+                return false;
+            }
             error!(error = %err, "task.next failed");
             task.set_err(&err.clone().into());
             ctx.set_task(&task);

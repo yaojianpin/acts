@@ -210,9 +210,7 @@ impl Queue {
 
     fn check_alive(&self) -> Result<()> {
         if !self.alive.load(Ordering::Acquire) {
-            return Err(ActError::Runtime(
-                "scheduler queue consumer is not running".to_string(),
-            ));
+            return Err(ActError::Shutdown);
         }
         Ok(())
     }
@@ -223,9 +221,7 @@ impl Queue {
         if let Err(err) = self.senders[lane].try_send(data) {
             return Err(match err {
                 mpsc::error::TrySendError::Full(_) => ActError::QueueFull,
-                mpsc::error::TrySendError::Closed(_) => {
-                    ActError::Runtime(format!("scheduler lane {lane} consumer is not running"))
-                }
+                mpsc::error::TrySendError::Closed(_) => ActError::Shutdown,
             });
         }
         self.record_accepted();

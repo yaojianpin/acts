@@ -4,6 +4,7 @@ use crate::{
     query::{Expr, Filter, Query},
     scheduler::{Process, Runtime, Task, TaskState},
     store::{KvStore, MemoryStore, Store, query::Sort},
+    utils::consts,
 };
 use parking_lot::{Mutex, RwLock};
 use std::{
@@ -620,8 +621,17 @@ impl Cache {
             // Only the pass that actually makes a process resident starts it:
             // `commit` refuses a row another path already cached, so a
             // duplicate load can never run the workflow twice.
-            if reservation.commit(&proc) {
-                proc.start().await?;
+            if reservation.commit(&proc)
+                && let Err(err) = proc.start().await
+            {
+                // A close that landed under this pass refused the dispatch:
+                // the row is persisted in flight with its root undispatched —
+                // exactly what a crash mid-start leaves — and the next engine
+                // start resumes it. Anything else is a real failure of the
+                // pass.
+                if !err.is_shutdown() {
+                    return Err(err);
+                }
             }
         }
         Ok(())
@@ -1064,11 +1074,21 @@ impl Cache {
     /// row terminal when the process finished.
     async fn persist_task(&self, task: &Arc<Task>) -> Result<()> {
         self.store.persist_task_rows(task).await?;
-        if let Some(p) = task.proc()
-            && p.state().is_completed()
-        {
+        if let Some(p) = task.proc() {
+            if p.state().is_completed() {
+                self.store
+                    .mark_proc_complete(&task.pid, p.end_time(), p.state())
+                    .await?;
+            }
+        } else if task.id == consts::TASK_ROOT_TID && task.state().is_completed() {
+            // The process instance was dropped while this write sat queued
+            // (the terminal event evicted it under writer backlog): the weak
+            // handle no longer upgrades. The root task carries the same truth
+            // the proc row needs — its own terminal state is what the proc
+            // state mirrors — so the row still converges instead of staying
+            // `running` behind a finished workflow forever.
             self.store
-                .mark_proc_complete(&task.pid, p.end_time(), p.state())
+                .mark_proc_complete(&task.pid, task.end_time(), task.state())
                 .await?;
         }
 
