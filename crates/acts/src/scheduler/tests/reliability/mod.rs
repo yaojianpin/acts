@@ -54,20 +54,48 @@ async fn bounded<F: std::future::Future<Output = ()>>(what: &str, fut: F) {
 const WAIT: Duration = Duration::from_secs(20);
 const TICK: Duration = Duration::from_millis(20);
 
-/// Poll `ready` until it holds or `WAIT` runs out. `ready` is an async
-/// closure so every tick can query live engine/store state — the established
-/// deadline convention, never a bare sleep.
-async fn poll_until<F, Fut>(mut ready: F) -> bool
+/// Poll `ready` until it holds or `WAIT` runs out. `what` names the awaited
+/// condition: the deadline panic carries it, so a stall that only shows up
+/// under CI's load says which condition starved instead of a bare deadline.
+/// `ready` is an async closure so every tick can query live engine/store
+/// state — the established deadline convention, never a bare sleep.
+async fn poll_until<F, Fut>(what: &str, ready: F) -> bool
 where
     F: FnMut() -> Fut,
     Fut: Future<Output = bool>,
 {
-    let deadline = Instant::now() + WAIT;
+    poll_until_dumped(what, ready, || async { String::new() }).await
+}
+
+/// [`poll_until`] that also prints `dump()` once the wait passes a few
+/// seconds (and again whenever the dumped state changes): a condition that
+/// only stalls under CI's coverage run ships its live task/row evidence home
+/// in the failure output, instead of leaving the next session to guess which
+/// queue or row family ate the work. Keep the dump coarse — stable states,
+/// no timestamps — so a genuinely stuck state prints once, not every tick.
+async fn poll_until_dumped<F, Fut, D, DumpFut>(what: &str, mut ready: F, dump: D) -> bool
+where
+    F: FnMut() -> Fut,
+    Fut: Future<Output = bool>,
+    D: Fn() -> DumpFut,
+    DumpFut: Future<Output = String>,
+{
+    let start = Instant::now();
+    let deadline = start + WAIT;
+    let mut last = String::new();
     loop {
         if ready().await {
             return true;
         }
-        assert!(Instant::now() < deadline, "poll deadline passed");
+        let elapsed = start.elapsed();
+        if elapsed > Duration::from_secs(5) {
+            let state = dump().await;
+            if state != last {
+                println!("still waiting for {what} after {elapsed:?}: {state}");
+                last = state;
+            }
+        }
+        assert!(Instant::now() < deadline, "{what}: poll deadline passed");
         tokio::time::sleep(TICK).await;
     }
 }
@@ -212,7 +240,8 @@ fn waiting_act(proc: &Arc<Process>, key: &str) -> Option<Arc<Task>> {
 
 /// Poll until an irq act keyed `key` is waiting, and return it.
 async fn wait_waiting_act(proc: &Arc<Process>, key: &str) -> Arc<Task> {
-    poll_until(|| async { waiting_act(proc, key).is_some() }).await;
+    let what = format!("act '{key}' to be waiting");
+    poll_until(&what, || async { waiting_act(proc, key).is_some() }).await;
     waiting_act(proc, key).expect("the waiting act must still be there")
 }
 
@@ -286,7 +315,7 @@ async fn settle_tasks(proc: &Arc<Process>) {
 async fn sweep_until_gone(rt: &Runtime, pid: &str) {
     let store = rt.cache().store();
     let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", pid.to_string())));
-    poll_until(|| async {
+    poll_until("the finished process's proc row to be swept", || async {
         store.procs().find(pid).await.is_err() || {
             let _ = rt.cache().sweep_removable().await;
             false

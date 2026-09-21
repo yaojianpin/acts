@@ -87,7 +87,7 @@ async fn sch_remove_recover_applies_pending_remove_op_inner() {
         .unwrap();
     let rt2 = engine2.runtime();
     let store2 = rt2.cache().store();
-    poll_until(|| async {
+    poll_until("the replayed action records to drain", || async {
         store2
             .load_pending_ops()
             .await
@@ -101,7 +101,7 @@ async fn sch_remove_recover_applies_pending_remove_op_inner() {
     // sweeper already ran the whole lifecycle to completion, nothing of the
     // process survives at all (also a pass: the replay was applied)
     let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", pid.to_string())));
-    let settled_rows = poll_until(|| async {
+    let settled_rows = poll_until("the removed process's rows to settle", || async {
         match store2.procs().find(&pid).await {
             // the sweeper deleted every row: the replayed remove ran to the end
             Err(_) => true,
@@ -197,7 +197,7 @@ async fn sch_remove_store_fail_degrades_and_heals_once_inner() {
     // durable state converges to `Removed` without any retry by the client
     let durable = rt.cache().store();
     let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", pid.to_string())));
-    poll_until(|| async {
+    poll_until("the act row to converge durably to removed", || async {
         durable
             .tasks()
             .query(&q)
@@ -218,7 +218,10 @@ async fn sch_remove_store_fail_degrades_and_heals_once_inner() {
     rt.do_action2(&pid, &act2.id, EventAction::Next, Vars::new())
         .await
         .unwrap();
-    poll_until(|| async { proc.state().is_completed() }).await;
+    poll_until("the process to finish", || async {
+        proc.state().is_completed()
+    })
+    .await;
     assert_settled(&proc);
 
     sweep_until_gone(&rt, &pid).await;
@@ -289,7 +292,10 @@ async fn sch_remove_duplicate_delivery_is_terminal_noop_inner() {
     rt.do_action2(&pid, &act2.id, EventAction::Next, Vars::new())
         .await
         .unwrap();
-    poll_until(|| async { proc.state().is_completed() }).await;
+    poll_until("the process to finish", || async {
+        proc.state().is_completed()
+    })
+    .await;
     assert_settled(&proc);
 
     // durable truth before cleanup: exactly one removed act row for the pid

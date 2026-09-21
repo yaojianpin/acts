@@ -14,6 +14,7 @@
 //! - a `Cancel` racing a `Complete` on the same act tid converges: the act
 //!   ends in exactly one terminal state and the process always settles.
 
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -79,10 +80,25 @@ async fn sch_cancel_duplicate_delivery_is_rejected_cleanly_inner() {
         TaskState::Cancelled,
         "the first cancel must undo the running path"
     );
+    // The redo STEP task is created synchronously by the cancel, but the redo
+    // act is created by that step's own dispatch job on the scheduler lane —
+    // an asynchronous continuation of `do_action`, not part of its result.
+    // Poll for it: an immediate count races the lane (observed once locally
+    // as a 1-vs-2 flake under load).
+    poll_until_dumped(
+        "the redo act1 to be created",
+        || async { acts_of(&proc, "act1").len() >= 2 },
+        dump_state(&rt, &pid, &proc),
+    )
+    .await;
     assert_eq!(
         acts_of(&proc, "act1").len(),
         2,
-        "the first cancel redoes step1 exactly once"
+        "the first cancel redoes step1 exactly once (acts: {:?})",
+        acts_of(&proc, "act1")
+            .iter()
+            .map(|t| (t.id.clone(), t.state()))
+            .collect::<Vec<_>>()
     );
 
     // the duplicate delivery of the same cancel is rejected …
@@ -131,11 +147,72 @@ async fn sch_cancel_duplicate_delivery_is_rejected_cleanly_inner() {
     rt.do_action2(&pid, &redo_act2.id, EventAction::Next, Vars::new())
         .await
         .unwrap();
-    poll_until(|| async { proc.state().is_biz_success() }).await;
+    poll_until_dumped(
+        "the process to settle in business success",
+        || async { proc.state().is_biz_success() },
+        dump_state(&rt, &pid, &proc),
+    )
+    .await;
     assert_settled(&proc);
 
     sweep_until_gone(&rt, &pid).await;
     engine.close().await;
+}
+
+/// The evidence a stalled poll of the duplicate-cancel cell ships home: the
+/// in-memory task set and process state, plus the pid's proc/task/op rows (a
+/// stalled sweep shows up here as a proc row that never turned terminal or a
+/// delivery family that never settled). Coarse on purpose — stable states
+/// only, no timestamps — so a stuck state prints once.
+fn dump_state<'a>(
+    rt: &'a Runtime,
+    pid: &'a str,
+    proc: &'a Arc<Process>,
+) -> impl Fn() -> Pin<Box<dyn Future<Output = String> + Send>> + 'a {
+    let pid = pid.to_string();
+    move || {
+        let rt = rt.clone();
+        let pid = pid.clone();
+        let proc = proc.clone();
+        Box::pin(async move {
+            let store = rt.cache().store();
+            let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", pid.clone())));
+            let task_rows = match store.tasks().query(&q).await {
+                Ok(rows) => rows
+                    .rows
+                    .iter()
+                    .map(|t| format!("{}:{}", t.tid, t.state))
+                    .collect::<Vec<_>>(),
+                Err(err) => vec![format!("query failed: {err}")],
+            };
+            let op_rows = match store.ops().query(&q).await {
+                Ok(rows) => rows
+                    .rows
+                    .iter()
+                    .map(|o| format!("{}:{}:{}", o.tid, o.r#type, o.status))
+                    .collect::<Vec<_>>(),
+                Err(err) => vec![format!("query failed: {err}")],
+            };
+            let delivery_rows = match store.deliveries().query(&q).await {
+                Ok(rows) => rows
+                    .rows
+                    .iter()
+                    .map(|d| format!("{}:{}", d.tid, d.status))
+                    .collect::<Vec<_>>(),
+                Err(err) => vec![format!("query failed: {err}")],
+            };
+            let proc_row = match store.procs().find(&pid).await {
+                Ok(p) => format!("state={} removable={}", p.state, p.removable),
+                Err(err) => format!("gone ({err})"),
+            };
+            format!(
+                "proc({})={} in-memory tasks {:?} | proc row: {proc_row} | task rows: {task_rows:?} | op rows: {op_rows:?} | delivery rows: {delivery_rows:?}",
+                pid,
+                proc.state(),
+                task_snapshot(&proc)
+            )
+        })
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -214,7 +291,10 @@ async fn sch_cancel_store_fail_degrades_and_heals_once_inner() {
     rt.do_action2(&pid, &redo_act2.id, EventAction::Next, Vars::new())
         .await
         .unwrap();
-    poll_until(|| async { proc.state().is_completed() }).await;
+    poll_until("the process to finish", || async {
+        proc.state().is_completed()
+    })
+    .await;
     assert_settled(&proc);
 
     // no work duplicated by the fault: one original + one redo act per step
@@ -291,7 +371,10 @@ async fn sch_cancel_racing_next_converges_single_terminal_inner_inner() {
 
         // let the propagation settle: act2 appears in every interleaving
         // (created by step1's propagation; a winning cancel then cancels it)
-        poll_until(|| async { !acts_of(&proc, "act2").is_empty() }).await;
+        poll_until("the raced round's act2 to be dispatched", || async {
+            !acts_of(&proc, "act2").is_empty()
+        })
+        .await;
 
         if cancel_applied {
             // the cancel won the race: it undid the running path and redid

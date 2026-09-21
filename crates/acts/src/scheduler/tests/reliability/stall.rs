@@ -219,7 +219,7 @@ async fn unfinished(store: &Arc<crate::store::Store>, pids: &[String]) -> Vec<St
 /// proc, task, vars, message, delivery and outbox rows with it.
 async fn sweep_and_assert_clean(rt: &Arc<Runtime>, pids: &[String]) {
     let store = rt.cache().store();
-    let done = poll_until(|| async {
+    let done = poll_until("every swept process's rows to be gone", || async {
         let _ = rt.cache().sweep_removable().await;
         unfinished(&store, pids).await.is_empty()
     })
@@ -337,7 +337,7 @@ async fn start_irq_processes(
         rt.launch(&proc).await.unwrap();
         pids.push(pid);
     }
-    let reached = poll_until(|| async {
+    let reached = poll_until("the resident processes' IRQ acts to be waiting", || async {
         let mut waiting = 0;
         for pid in &pids {
             if waiting_act(&store, pid).await.is_some() {
@@ -462,15 +462,18 @@ async fn stalled_redriven_inner() {
 
     // nothing owns the step's record: the pass has to re-drive it
     rt.recover_outbox(0).await.unwrap();
-    let finished = poll_until(|| async {
-        rt.cache()
-            .store()
-            .procs()
-            .find(&pid)
-            .await
-            .map(|p| TaskState::from(p.state.as_str()).is_completed())
-            .unwrap_or(true)
-    })
+    let finished = poll_until(
+        "the outbox pass to finish the stalled propagation",
+        || async {
+            rt.cache()
+                .store()
+                .procs()
+                .find(&pid)
+                .await
+                .map(|p| TaskState::from(p.state.as_str()).is_completed())
+                .unwrap_or(true)
+        },
+    )
     .await;
     assert!(
         finished,
@@ -504,7 +507,7 @@ async fn stalled_timer_inner() {
     strand_completed_act(&rt, &pid).await;
 
     // the retry timer's own tick (the test tick is 800ms) carries the pass
-    let finished = poll_until(|| async {
+    let finished = poll_until("the timer to finish the stalled propagation", || async {
         rt.cache()
             .store()
             .procs()
@@ -723,7 +726,10 @@ async fn boot_replay_defers_non_resident_inner() {
     // once a slot frees, the process is resumed and the deferred record is
     // what carries it forward: the same replay now schedules its step
     complete_waiting_act(&rt, "ghost-a0").await;
-    poll_until(|| async { rt.cache().resident(&pid).is_some() }).await;
+    poll_until("the freed slot's process to be resumed", || async {
+        rt.cache().resident(&pid).is_some()
+    })
+    .await;
     assert!(
         rt.cache().resident(&pid).is_some(),
         "the deferred process must be resumed into the freed slot"
@@ -734,7 +740,11 @@ async fn boot_replay_defers_non_resident_inner() {
         .await
         .unwrap()
         .expect("the process is resident");
-    let grew = poll_until(|| async { reloaded.tasks().len() > 1 }).await;
+    let grew = poll_until(
+        "the resumed process's deferred record to schedule its step",
+        || async { reloaded.tasks().len() > 1 },
+    )
+    .await;
     assert!(
         grew && reloaded.tasks().len() > 1,
         "the resident process's deferred record must schedule its step"

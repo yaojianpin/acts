@@ -319,7 +319,10 @@ async fn sch_abort_store_fail_degrades_and_heals_once_inner() {
         .unwrap();
 
     // the fault fired once, on the write it was aimed at
-    poll_until(|| async { kv.fired() == 1 }).await;
+    poll_until("the abort's injected fault to fire", || async {
+        kv.fired() == 1
+    })
+    .await;
     assert_eq!(
         kv.fired(),
         1,
@@ -461,7 +464,7 @@ async fn sch_abort_duplicate_delivery_is_terminal_noop_inner() {
     // duplicate sent into the window would be admitted instead of refused
     let store = rt.cache().store();
     let q = Query::new().filter(Filter::and().expr(Expr::eq("pid", pid.clone())));
-    poll_until(|| async {
+    poll_until("the aborted process to converge", || async {
         if store.procs().find(&pid).await.is_err() {
             // finished and swept: the abort was certainly decided
             return true;
@@ -547,7 +550,7 @@ async fn sch_abort_duplicate_delivery_is_terminal_noop_inner() {
     // must not have written a second row or another state — and a process the
     // sweeper already removed has converged the same way (nothing left to
     // contradict the single decision).
-    let one_aborted_row = poll_until(|| async {
+    let one_aborted_row = poll_until("the aborted act row to converge to one", || async {
         if store.procs().find(&pid).await.is_err() {
             return true;
         }
