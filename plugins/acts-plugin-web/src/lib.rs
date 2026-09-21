@@ -67,8 +67,8 @@ impl ActPlugin for WebPlugin {
         // every route added *before* it, so `/health` is registered last and
         // stays open for probes.
         let app = Router::new()
-            // axum 0.7 path syntax: `:param`, not `{param}`.
-            .route("/hooks/:event_id", post(routes::hook))
+            // axum 0.8 path syntax: `{param}`, not `:param`.
+            .route("/hooks/{event_id}", post(routes::hook))
             .route_layer(middleware::from_fn_with_state(
                 engine.clone(),
                 auth::require_auth,

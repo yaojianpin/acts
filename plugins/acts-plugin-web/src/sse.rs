@@ -168,7 +168,6 @@ mod tests {
     use axum::body::Bytes;
     use axum::response::IntoResponse;
     use futures_util::StreamExt;
-    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
@@ -307,9 +306,9 @@ allow = ["model:deploy", "proc:start", "msg:ack", "msg:sub"]
             .count
     }
 
-    async fn wait_until(mut cond: impl FnMut() -> bool, label: &str) {
+    async fn wait_until(mut cond: impl AsyncFnMut() -> bool, label: &str) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        while !cond() {
+        while !cond().await {
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "timed out waiting for {label}"
@@ -330,7 +329,7 @@ allow = ["model:deploy", "proc:start", "msg:ack", "msg:sub"]
 
         // spy channel: counts every dispatched workflow message without
         // storing anything (ack = false)
-        let received = Arc::new(Mutex::new(0usize));
+        let received = Arc::new(AtomicUsize::new(0));
         let spy = engine.channel_with_options(&ChannelOptions {
             ack: false,
             ..Default::default()
@@ -339,7 +338,7 @@ allow = ["model:deploy", "proc:start", "msg:ack", "msg:sub"]
         spy.on_message(move |_e| {
             let received = spy_received.clone();
             async move {
-                *received.lock().unwrap() += 1;
+                received.fetch_add(1, Ordering::Relaxed);
             }
         });
 
@@ -361,9 +360,13 @@ allow = ["model:deploy", "proc:start", "msg:ack", "msg:sub"]
         // positive control: while the stream is alive, its ack channel
         // stores one message row per workflow message
         run_irq_workflow(&engine, "alive").await;
+        // wait for the stored rows, not just the dispatch: the dispatch
+        // counter says nothing about this channel's own handler futures, and
+        // a row one of them writes after `alive_rows` is sampled would fail
+        // the leak check below
         wait_until(
-            || *received.lock().unwrap() >= 3,
-            "workflow messages to be dispatched",
+            || async { stored_message_count(&engine).await >= 3 },
+            "the live channel to store the workflow's deliveries",
         )
         .await;
         let alive_rows = stored_message_count(&engine).await;
@@ -375,7 +378,7 @@ allow = ["model:deploy", "proc:start", "msg:ack", "msg:sub"]
         // new messages must not be stored for the dead channel anymore
         run_irq_workflow(&engine, "dropped").await;
         wait_until(
-            || *received.lock().unwrap() >= 6,
+            || async { received.load(Ordering::Relaxed) >= 6 },
             "messages of the second workflow to be dispatched",
         )
         .await;
@@ -554,7 +557,11 @@ allow = ["msg:sub"]
         run_irq_workflow(&engine, "slow1").await;
         run_irq_workflow(&engine, "slow2").await;
         let seen = || received.load(Ordering::Relaxed);
-        wait_until(|| seen() >= 6, "workflow messages to be dispatched").await;
+        wait_until(
+            || async { seen() >= 6 },
+            "workflow messages to be dispatched",
+        )
+        .await;
 
         // the overflow closed the subscription: the stream flushes what was
         // queued and ends, instead of waiting for a reader that never came
@@ -575,7 +582,7 @@ allow = ["msg:sub"]
         let rows = stored_message_count(&engine).await;
         run_irq_workflow(&engine, "after").await;
         wait_until(
-            || seen() >= 9,
+            || async { seen() >= 9 },
             "messages of the last workflow to be dispatched",
         )
         .await;
