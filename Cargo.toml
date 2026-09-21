@@ -78,7 +78,7 @@ tonic-prost = "0.14"
 prost = "0.14"
 prost-types = "0.14"
 axum = "0.7"
-validator = { version = "0.20.0", features = ["derive"] }
+validator = { version = "0.21.0", features = ["derive"] }
 # shell
 # `acts-package-shell` runs a workflow's script in bashkit's virtual bash. The
 # `realfs` feature is what lets the interpreter's root be the run's own
