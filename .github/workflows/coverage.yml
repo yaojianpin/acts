@@ -2,8 +2,8 @@ name: coverage
 
 # Coverage is the test suite with the instrumentation on, so it runs where the
 # suite runs (`test.yml` has the same triggers): a pull request that lowers
-# coverage is visible in this run's summary before it is merged. Only `main`
-# publishes the badge, and a second job does that.
+# coverage is visible in this run's summary before it is merged. `main` and
+# `develop` publish the badge, and a second job does that.
 on:
   push:
     branches: ['main', 'develop']
@@ -133,11 +133,20 @@ jobs:
       # `bash <script>` and not `./<script>`: the checkout's file mode is whatever
       # git recorded, and a mode change is not something this repository can
       # rely on (it is not tracked on Windows, this project's own workstation).
+      # `main` owns the README's `coverage.svg`; every other ref that publishes
+      # writes `coverage-<branch>.svg`, so two branches can never overwrite
+      # each other's number on the shared `badges` branch. A `/` in the name
+      # (a pull request's `N/merge`) would nest the file and dodge the upload
+      # glob, so any unusual character becomes `-`.
       - name: Render the badge
         run: |
           set -euo pipefail
           mkdir -p badges
-          bash .github/scripts/coverage-badge.sh "$COVERAGE_SUMMARY" badges/coverage.svg
+          suffix=""
+          if [ "${GITHUB_REF_NAME}" != "main" ]; then
+            suffix="-$(printf '%s' "${GITHUB_REF_NAME}" | tr -c 'A-Za-z0-9._-' '-')"
+          fi
+          bash .github/scripts/coverage-badge.sh "$COVERAGE_SUMMARY" "badges/coverage${suffix}.svg"
 
       # The number a reviewer reads without opening anything. The badge job
       # renders the same file and the same `printf '%.1f'` formats both, so the
@@ -174,29 +183,36 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: coverage-badge
-          path: badges/coverage.svg
+          path: badges/coverage*.svg
           if-no-files-found: error
 
   # Publishing the badge is the only write in this workflow, and it is its own
   # job so that the token for it exists nowhere near the tests. The branch it
-  # writes carries one file and publishes nothing, so a badge can never depend
+  # writes carries badge files and publishes nothing, so a badge can never depend
   # on a page build.
   #
-  # Only `main` publishes: a pull request from a fork cannot write, and a badge
-  # drawn from a pull request would describe a tree that is not on `main`.
-  # `workflow_dispatch` is accepted so the branch can be seeded — and the
-  # README's badge made to resolve — right after this workflow lands, and it is
-  # held to `main` for the same reason.
+  # `main` and `develop` publish; a pull request from a fork cannot write, and a
+  # badge drawn from a pull request would describe a tree that is on neither
+  # branch. Each branch writes its own file (`coverage.svg` for `main`, which
+  # the README reads, `coverage-<branch>.svg` otherwise), so one branch's push
+  # never replaces another branch's number — `keep_files` is what lets both
+  # files coexist on the one publishing branch.
+  # `workflow_dispatch` is accepted so a branch's badge can be seeded right
+  # after this workflow lands, and it is held to those two branches for the
+  # same reason.
   badge:
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    if: >-
+      (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/develop')
+      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     needs: coverage
     runs-on: ubuntu-latest
 
     permissions:
       contents: write
 
-    # Two pushes to `main` in quick succession would otherwise race on the one
-    # branch, and the loser's force-push would leave the older number up.
+    # Pushes to either branch in quick succession would otherwise race on the
+    # one publishing branch; the group is global because both branches write
+    # to that same branch, and the loser's push would be a non-fast-forward.
     concurrency:
       group: coverage-badge
       cancel-in-progress: false
@@ -214,9 +230,13 @@ jobs:
       # `raw.githubusercontent.com` serves the file straight out of this branch,
       # which is the URL the README reads — no service in between, and the
       # badge is a commit anyone can trace back to the run that wrote it.
+      # `keep_files` is load-bearing: without it a publish from one branch
+      # would delete the other branch's badge file, since the default is to
+      # prune whatever `publish_dir` does not carry.
       - uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           publish_branch: badges
           publish_dir: ./badges
-          commit_message: "coverage badge for ${{ github.sha }}"
+          keep_files: true
+          commit_message: "coverage badge for ${{ github.ref_name }}@${{ github.sha }}"
