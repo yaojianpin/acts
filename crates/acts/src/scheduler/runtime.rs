@@ -223,6 +223,17 @@ impl Runtime {
         &self.cache
     }
 
+    /// Queue a best-effort durable upsert of `task`'s vars row.
+    ///
+    /// Packages that mutate task or process data outside the scheduler's own
+    /// persist cycle (the code package's `$set`/`$set_process_var`) call this
+    /// so the write reaches the store even when the task's next persist is not
+    /// imminent. Best effort: a saturated writer refuses the write, and the
+    /// value — already in memory — is flushed by the task's own next persist.
+    pub fn try_upsert_task(&self, task: &Arc<Task>) -> crate::Result<()> {
+        self.cache.try_upsert_async(task)
+    }
+
     #[allow(unused)]
     pub fn queue(&self) -> &Arc<Queue> {
         &self.queue

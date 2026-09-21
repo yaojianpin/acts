@@ -676,9 +676,8 @@ async fn sealed_data_js_dollar_profile_access() {
         let token = env.eval::<String>("$profile.secrets.TOKEN").unwrap();
         assert_eq!(token, "sk-123");
 
-        // test $profile is read-only (frozen — assignment throws)
-        let err = env.eval::<serde_json::Value>("$profile.newProp = 1; $profile.newProp");
-        assert!(err.is_err(), "frozen object should reject writes");
+        // CEL is a pure expression language with no assignment, so sealed data
+        // is read-only by construction — there is no way to write to it.
     });
 }
 

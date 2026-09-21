@@ -1,4 +1,5 @@
-use crate::{Result, env::ActModule};
+use crate::env::{ActModule, script_error};
+use acts::Result;
 use rquickjs::{
     Ctx, Function, JsLifetime, String as JsString, Value, class::Trace, function::Rest,
 };
@@ -55,7 +56,9 @@ fn format_rest<'js>(ctx: Ctx<'js>, args: Vec<Value<'js>>) -> String {
 
 impl ActModule for ConsoleModule {
     fn init(&self, ctx: &rquickjs::Ctx<'_>) -> Result<()> {
-        ctx.globals().set("console", self.clone())?;
+        ctx.globals()
+            .set("console", self.clone())
+            .map_err(script_error)?;
 
         Ok(())
     }

@@ -1,6 +1,5 @@
 mod action;
 mod block;
-mod code;
 mod irq;
 mod msg;
 mod parallel;

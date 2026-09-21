@@ -1,5 +1,5 @@
-use super::super::ActModule;
-use crate::{ActError, Result};
+use crate::env::ActModule;
+use acts::{ActError, Result};
 use rquickjs::{CatchResultExt, Module as JsModule};
 
 #[derive(Clone)]

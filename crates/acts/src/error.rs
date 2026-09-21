@@ -158,18 +158,6 @@ impl From<ActError> for std::io::Error {
     }
 }
 
-impl From<rquickjs::Error> for ActError {
-    fn from(error: rquickjs::Error) -> Self {
-        ActError::Script(error.to_string())
-    }
-}
-
-impl From<ActError> for rquickjs::Error {
-    fn from(val: ActError) -> Self {
-        std::io::Error::other(val.to_string()).into()
-    }
-}
-
 impl From<FromUtf8Error> for ActError {
     fn from(_: FromUtf8Error) -> Self {
         ActError::Runtime("Error with utf-8 string convert".to_string())
@@ -179,12 +167,6 @@ impl From<FromUtf8Error> for ActError {
 impl From<serde_json::Error> for ActError {
     fn from(error: serde_json::Error) -> Self {
         ActError::Convert(error.to_string())
-    }
-}
-
-impl<'a> From<rquickjs::CaughtError<'a>> for ActError {
-    fn from(error: rquickjs::CaughtError<'a>) -> Self {
-        ActError::Script(error.to_string())
     }
 }
 

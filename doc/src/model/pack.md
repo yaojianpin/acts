@@ -14,7 +14,7 @@
 | `acts.core.subflow` | 子流程 | 调用另一个工作流模型 |
 | `acts.core.action` | 命令 | 执行引擎命令 |
 | `acts.transform.set` | 变换 | 设置变量值 |
-| `acts.transform.code` | 变换 | 执行 JavaScript 代码 (QuickJS 运行时) |
+| `acts.transform.code.javascript` | 变换 | 执行 JavaScript 代码 (QuickJS 运行时) |
 
 工作流的启动触发器通过 `on` 字段声明（manual/chat/hook/schedule），参见 [触发器](./hooks.md)。
 

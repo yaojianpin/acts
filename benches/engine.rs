@@ -84,10 +84,7 @@ fn expr_workflow(exprs: usize) -> Workflow {
     let mut params = String::from("      key: act1\n");
 
     for i in 0..exprs {
-        params.push_str(&format!(
-            "      v{}: '${{{{ Math.sqrt({}) * 1000 }}}}'\n",
-            i, i
-        ));
+        params.push_str(&format!("      v{}: '${{{{ ({} * 1000) }}}}'\n", i, i));
     }
 
     let text = format!(
@@ -111,8 +108,8 @@ fn expr_workflow(exprs: usize) -> Workflow {
 ///
 /// Scheduler and emitter costs remain approximately constant across the
 /// variants. The slope therefore represents the incremental cost per
-/// expression, including a fresh QuickJS realm, module initialization, and
-/// JavaScript-to-JSON conversion.
+/// expression, including CEL compilation, variable injection, and evaluation
+/// to a JSON value.
 fn expr_eval(c: &mut Criterion) {
     let mut group = c.benchmark_group("expr_eval");
 

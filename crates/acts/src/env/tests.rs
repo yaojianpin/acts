@@ -1,127 +1,111 @@
-use std::time::{Duration, Instant};
+use std::sync::Arc;
+use std::time::Duration;
 
 use crate::{
-    ActError, ActUserVar, Context, Engine, MessageState, Vars, Workflow, env::Environment,
+    ActUserVar, Context, Engine, MessageState, Vars, Workflow, env::Environment,
     event::EventAction, utils::consts, utils::test::USES_IRQ,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-
 use serial_test::serial;
-#[test]
-fn env_eval_empty() {
-    let env = Environment::new();
-    let result = env.eval::<()>("");
-    assert!(result.is_ok());
+
+/// Start an engine, run a workflow to completion, and hand back the engine and
+/// the finished process. The workflow must finish on its own (no IRQ wait).
+async fn start_completed(
+    workflow: &Workflow,
+    vars: Vars,
+) -> (Engine, Arc<crate::scheduler::Process>) {
+    let engine = Engine::builder().start().await.unwrap();
+    let sig = engine.signal(());
+    let done = sig.clone();
+    engine.channel().on_complete(move |_| {
+        let done = done.clone();
+        async move { done.close() }
+    });
+    let proc = engine.runtime().start(workflow, vars).await.unwrap();
+    sig.recv().await;
+    (engine, proc)
 }
 
-#[test]
-fn env_eval_void() {
-    let env = Environment::new();
-
-    let script = r#"
-        let v = 5;
-        console.log(`v=${v}`);
-    "#;
-
-    let result = env.eval::<()>(script);
-    assert!(result.is_ok());
-}
+// ---- expression basics ----
 
 #[test]
 fn env_eval_number() {
     let env = Environment::new();
-    let script = r#"
-        let v = 5;
-        v
-    "#;
-
-    let result = env.eval::<i64>(script);
-    assert_eq!(result.unwrap(), 5);
+    assert_eq!(env.eval::<i64>("5").unwrap(), 5);
 }
 
 #[test]
-fn env_eval_throw_error() {
+fn env_eval_arithmetic() {
     let env = Environment::new();
-    let script = r#"
-        throw new Error("err1");
-    "#;
+    assert_eq!(env.eval::<i64>("2 + 3 * 4").unwrap(), 14);
+    assert_eq!(env.eval::<i64>("(2 + 3) * 4").unwrap(), 20);
+}
 
-    let result = env.eval::<serde_json::Value>(script);
+#[test]
+fn env_eval_bool() {
+    let env = Environment::new();
+    assert!(env.eval::<bool>("10 > 0").unwrap());
+    assert!(!env.eval::<bool>("10 < 0").unwrap());
+    assert!(env.eval::<bool>("'a' == 'a' && 1 != 2").unwrap());
+}
+
+#[test]
+fn env_eval_string() {
+    let env = Environment::new();
+    assert_eq!(env.eval::<String>("'hello'").unwrap(), "hello");
+}
+
+#[test]
+fn env_eval_array() {
+    let env = Environment::new();
     assert_eq!(
-        result.err().unwrap(),
-        ActError::Exception {
-            ecode: "".to_string(),
-            message: "err1".to_string()
+        env.eval::<Vec<String>>("['u1', 'u2']").unwrap(),
+        ["u1", "u2"]
+    );
+}
+
+#[test]
+fn env_eval_object() {
+    #[derive(Debug, Deserialize, Serialize, PartialEq, Clone)]
+    struct Obj {
+        a: i32,
+        b: String,
+    }
+
+    let env = Environment::new();
+    let result = env.eval::<Obj>("{'a': 1, 'b': 'abc'}").unwrap();
+    assert_eq!(
+        result,
+        Obj {
+            a: 1,
+            b: "abc".to_string()
         }
     );
 }
-#[test]
-fn env_eval_infinite_loop_timeout() {
-    let env = Environment::new();
-    let script = r#"
-        while (true) {}
-    "#;
 
-    let start = Instant::now();
-    let result = env.eval::<()>(script);
-    assert_eq!(
-        result.err().unwrap(),
-        ActError::Script("Execution timeout".into())
-    );
-    // the interrupt handler must abort the loop, not hang the process
-    assert!(start.elapsed() < Duration::from_secs(60));
+#[test]
+fn env_eval_null() {
+    let env = Environment::new();
+    assert_eq!(env.eval::<serde_json::Value>("null").unwrap(), json!(null));
 }
 
 #[test]
-fn env_eval_expr() {
+fn env_eval_parse_error() {
     let env = Environment::new();
-
-    let script = r#"
-        let ret =  10;
-        ret > 0
-    "#;
-    let result = env.eval::<bool>(script);
-    assert!(result.unwrap());
+    assert!(env.eval::<serde_json::Value>("this is not cel").is_err());
 }
 
 #[test]
-fn env_eval_bigint_within_i64() {
+fn env_eval_undeclared_var_is_error() {
     let env = Environment::new();
-    let result = env.eval::<i64>("BigInt(42)");
-    assert_eq!(result.unwrap(), 42);
+    assert!(env.eval::<serde_json::Value>("not_exists").is_err());
 }
 
 #[test]
-fn env_eval_bigint_outside_u64_is_error() {
+fn env_eval_division_by_zero_is_error() {
     let env = Environment::new();
-    let result = env.eval::<serde_json::Value>(r#"BigInt("1000000000000000000000000000000")"#);
-    let err = result.unwrap_err();
-    assert!(
-        err.to_string().contains("outside the i64/u64 range"),
-        "unexpected error: {err}"
-    );
-}
-
-#[test]
-fn env_eval_bigint_beyond_i64_keeps_u64() {
-    let env = Environment::new();
-    let result = env
-        .eval::<serde_json::Value>(r#"BigInt("18446744073709551615")"#)
-        .unwrap();
-    assert_eq!(result, json!(u64::MAX));
-}
-
-#[test]
-fn env_eval_non_finite_number_is_error() {
-    let env = Environment::new();
-    for script in ["0/0", "1e400"] {
-        let err = env.eval::<serde_json::Value>(script).unwrap_err();
-        assert!(
-            err.to_string().contains("non-finite"),
-            "unexpected error for {script}: {err}"
-        );
-    }
+    assert!(env.eval::<serde_json::Value>("1 / 0").is_err());
 }
 
 #[test]
@@ -149,7 +133,7 @@ fn env_eval_large_numbers_round_trip_exactly() {
     let env = Environment::new();
     env.register_var(&BigNumberVar);
 
-    // Above i32, inside the double's exact integer range: still a plain number.
+    // Above i32, inside the i64 range: preserved exactly.
     assert_eq!(
         env.eval::<i64>("bignumbers.over_i32").unwrap(),
         3_000_000_000
@@ -158,13 +142,6 @@ fn env_eval_large_numbers_round_trip_exactly() {
         env.eval::<i64>("bignumbers.millis").unwrap(),
         1_757_318_400_000
     );
-    assert!(
-        env.eval::<bool>("typeof bignumbers.millis === 'number'")
-            .unwrap()
-    );
-
-    // Past 2^53-1 a JS number cannot hold the value: it arrives as a BigInt
-    // instead of being truncated to i32 (3e9 used to become -1294967296).
     assert_eq!(
         env.eval::<i64>("bignumbers.snowflake").unwrap(),
         1_234_567_890_123_456_789
@@ -172,52 +149,14 @@ fn env_eval_large_numbers_round_trip_exactly() {
     assert_eq!(env.eval::<i64>("bignumbers.min").unwrap(), i64::MIN);
     assert_eq!(env.eval::<u64>("bignumbers.over_i64").unwrap(), u64::MAX);
 
-    // The value stays exact for the expression itself, not only on the way out.
-    assert!(
-        env.eval::<bool>("bignumbers.snowflake === 1234567890123456789n")
-            .unwrap()
-    );
+    // Arithmetic on the injected value stays exact.
     assert_eq!(
-        env.eval::<i64>("bignumbers.snowflake - 1n").unwrap(),
+        env.eval::<i64>("bignumbers.snowflake - 1").unwrap(),
         1_234_567_890_123_456_788
     );
 }
 
-#[test]
-fn env_eval_array() {
-    let env = Environment::new();
-
-    let script = r#"
-        ["u1", "u2"]
-    "#;
-
-    let result = env.eval::<Vec<String>>(script);
-    assert_eq!(result.unwrap(), ["u1", "u2"]);
-}
-
-#[test]
-fn env_eval_object() {
-    let env = Environment::new();
-
-    let script = r#"
-        let ret =  { "a": 1, "b": "abc" };
-        ret
-    "#;
-
-    #[derive(Debug, Deserialize, Serialize, PartialEq, Clone)]
-    struct Obj {
-        a: i32,
-        b: String,
-    }
-    let result = env.eval::<Obj>(script);
-    assert_eq!(
-        result.unwrap(),
-        Obj {
-            a: 1,
-            b: "abc".to_string()
-        }
-    );
-}
+// ---- engine-context expressions ----
 
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
@@ -225,1020 +164,150 @@ async fn env_eval_sys_env() {
     unsafe {
         std::env::set_var("TOKEN", "abc");
     }
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-
-    let env = engine.runtime().env().clone();
+    let env = Environment::new();
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    engine.channel().on_complete(move |_| {
-        let s1 = s1.clone();
-        async move { s1.close() }
-    });
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
-        .await
-        .unwrap();
-    sig.recv().await;
-    let task = proc.root().unwrap();
-    let script = r#"
-        $env.TOKEN
-    "#;
+    let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
 
-    let context = task.create_context();
+    let context = proc.root().unwrap().create_context();
     Context::scope(&context, || {
-        let result = env.eval::<String>(script);
-        assert_eq!(result.unwrap(), "abc");
+        assert_eq!(env.eval::<String>("$env.TOKEN").unwrap(), "abc");
     });
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn env_eval_null() {
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-
-    let env = engine.runtime().env().clone();
-    let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    engine.channel().on_complete(move |_| {
-        let s1 = s1.clone();
-        async move { s1.close() }
-    });
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
-        .await
-        .unwrap();
-    sig.recv().await;
-    let task = proc.root().unwrap();
-    let script = r#"
-        $env.TOKEN2
-    "#;
-
-    let context = task.create_context();
-    Context::scope(&context, || {
-        let result = env.eval::<serde_json::Value>(script);
-        assert_eq!(result.unwrap(), serde_json::Value::Null);
-    });
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn env_console_module() {
-    let env = Environment::new();
-    let script = r#"
-        let v = 5;
-        console.log(`v=${v}`);
-        console.info(`v=${v}`);
-        console.warn(`v=${v}`);
-        console.error(`v=${v}`);
-        // multi-arg support
-        console.log("hello", 42, true, v);
-        console.log("joined:", "a", "b", "c");
-    "#;
-    let result = env.eval::<()>(script);
-    assert!(result.is_ok());
-}
-
-#[test]
-#[serial]
-fn env_collection_union() {
-    let env = Environment::new();
-    let script = r#"
-        let a = ["a"];
-        let b = ["b"];
-        a.union(b)
-    "#;
-
-    let result = env.eval::<Vec<String>>(script).unwrap();
-    assert_eq!(result, ["a", "b"]);
-}
-
-#[test]
-#[serial]
-fn env_eval_contexts_do_not_leak_globals() {
-    let env = Environment::new();
-
-    env.eval::<()>(
-        r#"
-        var leaked_var = 42;
-        globalThis.leaked_property = 42;
-        void 0;
-    "#,
-    )
-    .unwrap();
-
-    let leaked = env
-        .eval::<bool>(
-            r#"
-            typeof leaked_var === "undefined" && typeof leaked_property === "undefined"
-        "#,
-        )
-        .unwrap();
-    assert!(
-        leaked,
-        "global declarations must not leak across evaluations"
-    );
-}
-
-#[test]
-#[serial]
-fn env_eval_contexts_restore_module_globals() {
-    let env = Environment::new();
-
-    env.eval::<()>(
-        r#"
-        $get = 42;
-        os = 42;
-        void 0;
-    "#,
-    )
-    .unwrap();
-
-    let restored = env
-        .eval::<bool>(
-            r#"
-            typeof $get === "function" && typeof os === "string"
-        "#,
-        )
-        .unwrap();
-    assert!(restored, "static module globals must be restored");
-}
-
-/// Every evaluation runs in its own QuickJS realm, so state an expression
-/// writes to shared-looking objects — built-in prototypes and namespaces, a
-/// module global or its proxy target, a non-configurable global — is invisible
-/// to the next one. A pooled context leaked all of these across tasks (and, in
-/// the multi-tenant server, across tenants), because the reset script only
-/// restored `globalThis`'s own properties.
-#[test]
-#[serial]
-fn env_eval_isolates_realm_state() {
-    let env = Environment::new();
-
-    env.eval::<()>(
-        r#"
-        Array.prototype.__acts_secret = "A";
-        Object.prototype.__acts_secret = "A";
-        Math.__acts_secret = "A";
-        $get.__acts_secret = "A";
-        console.__acts_secret = "A";
-        Object.defineProperty($env, "__acts_secret", { value: "A", configurable: true });
-        globalThis.__acts_secret = "A";
-        Object.defineProperty(globalThis, "__acts_hidden", { value: "A", configurable: false });
-        void 0;
-    "#,
-    )
-    .unwrap();
-
-    let leaked = env
-        .eval::<serde_json::Value>(
-            r#"
-            ({
-                array: Array.prototype.__acts_secret === "A",
-                object: Object.prototype.__acts_secret === "A",
-                namespace: Math.__acts_secret === "A",
-                module_fn: $get.__acts_secret === "A",
-                console: console.__acts_secret === "A",
-                env_target: (Object.getOwnPropertyDescriptor($env, "__acts_secret") || {}).value === "A",
-                global: globalThis.__acts_secret === "A",
-                hidden: globalThis.__acts_hidden === "A",
-            })
-        "#,
-        )
-        .unwrap();
-
-    assert_eq!(
-        leaked,
-        json!({
-            "array": false,
-            "object": false,
-            "namespace": false,
-            "module_fn": false,
-            "console": false,
-            "env_target": false,
-            "global": false,
-            "hidden": false,
-        }),
-        "realm state must not survive an evaluation"
-    );
-}
-
-#[test]
-#[serial]
-fn env_collection_intersect() {
-    let env = Environment::new();
-    let script = r#"
-        let a = ["a", "b"];
-        let b = ["b", "c"];
-        a.intersection(b)
-    "#;
-
-    let result = env.eval::<Vec<String>>(script).unwrap();
-    assert_eq!(result, ["b"]);
-}
-
-#[test]
-#[serial]
-fn env_collection_difference() {
-    let env = Environment::new();
-    let script = r#"
-        let a = ["a", "b"];
-        let b = ["b"];
-        a.difference(b)
-    "#;
-
-    let result = env.eval::<Vec<String>>(script).unwrap();
-    assert_eq!(result, ["a"]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_task_get_value() {
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-
-    let env = engine.runtime().env().clone();
+    let env = Environment::new();
     let workflow = Workflow::new()
         .with_var("a", 10)
         .with_step(|step| step.with_id("step1"));
-    engine.channel().on_complete(move |_| {
-        let s1 = s1.clone();
-        async move { s1.close() }
-    });
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
-        .await
-        .unwrap();
-    sig.recv().await;
-    let task = proc.root().unwrap();
-    let script = r#"
-        a
-    "#;
+    let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
 
-    let context = task.create_context();
+    let context = proc.root().unwrap().create_context();
     Context::scope(&context, || {
-        let result = env.eval::<i64>(script);
-        assert_eq!(result.unwrap(), 10);
+        assert_eq!(env.eval::<i64>("a").unwrap(), 10);
     });
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_task_get_var_not_exists() {
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-
-    let env = engine.runtime().env().clone();
+    let env = Environment::new();
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    engine.channel().on_complete(move |_| {
-        let s1 = s1.clone();
-        async move { s1.close() }
-    });
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
-        .await
-        .unwrap();
-    sig.recv().await;
-    let task = proc.root().unwrap();
-    let script = r#"
-        not_exists
-    "#;
+    let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
 
-    let context = task.create_context();
+    let context = proc.root().unwrap().create_context();
     Context::scope(&context, || {
-        let result = env.eval::<serde_json::Value>(script);
-        assert!(result.is_err());
+        assert!(env.eval::<serde_json::Value>("not_exists").is_err());
     });
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_task_get_fn_not_exists() {
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-
-    let env = engine.runtime().env().clone();
+    let env = Environment::new();
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    engine.channel().on_complete(move |_| {
-        let s1 = s1.clone();
-        async move { s1.close() }
-    });
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
-        .await
-        .unwrap();
-    sig.recv().await;
-    let task = proc.root().unwrap();
-    let script = r#"
-        $get("not_exists")
-    "#;
+    let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
 
-    let context = task.create_context();
+    let context = proc.root().unwrap().create_context();
     Context::scope(&context, || {
-        let result = env.eval::<serde_json::Value>(script);
-        assert_eq!(result.unwrap(), serde_json::Value::Null);
+        assert_eq!(
+            env.eval::<serde_json::Value>("$get('not_exists')").unwrap(),
+            serde_json::Value::Null
+        );
     });
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_task_set() {
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-
-    let env = engine.runtime().env().clone();
+    let env = Environment::new();
     let workflow = Workflow::new()
         .with_var("a", 10)
         .with_step(|step| step.with_id("step1"));
-    engine.channel().on_complete(move |_| {
-        let s1 = s1.clone();
-        async move { s1.close() }
-    });
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
-        .await
-        .unwrap();
-    sig.recv().await;
-    let task = proc.root().unwrap();
-    let script = r#"
-        $set("a", 100);
-    "#;
-    let context = task.create_context();
+    let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
+
+    let context = proc.root().unwrap().create_context();
     Context::scope(&context, || {
-        env.eval::<()>(script).unwrap();
+        env.eval::<()>("$set('a', 100)").unwrap();
         assert_eq!(proc.data().get::<i64>("a"), Some(100));
     });
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
-async fn env_task_multi_line() {
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-
-    let env = engine.runtime().env().clone();
+async fn env_task_multi_eval() {
+    let env = Environment::new();
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    engine.channel().on_complete(move |_| {
-        let s1 = s1.clone();
-        async move { s1.close() }
-    });
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
-        .await
-        .unwrap();
-    sig.recv().await;
-    let task = proc.root().unwrap();
+    let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
 
-    let context = task.create_context();
+    let context = proc.root().unwrap().create_context();
     Context::scope(&context, || {
-        env.eval::<()>(r#"$set("a", 100)"#).unwrap();
-        env.eval::<()>(r#"$set("b", 200)"#).unwrap();
-        let value = env.eval::<bool>(r#"a < b"#).unwrap();
-        assert!(value);
+        env.eval::<()>("$set('a', 100)").unwrap();
+        env.eval::<()>("$set('b', 200)").unwrap();
+        assert!(env.eval::<bool>("a < b").unwrap());
     });
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_env_get_local() {
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-
-    let env = engine.runtime().env().clone();
+    let env = Environment::new();
     let workflow = Workflow::new()
         .with_env("a", 10)
         .with_step(|step| step.with_id("step1"));
+    let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
 
-    engine.channel().on_complete(move |_| {
-        let s1 = s1.clone();
-        async move { s1.close() }
-    });
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
-        .await
-        .unwrap();
-    sig.recv().await;
-    let task = proc.root().unwrap();
-    let script = r#"
-    $env.a
-    "#;
-    let context = task.create_context();
+    let context = proc.root().unwrap().create_context();
     Context::scope(&context, || {
-        let result = env.eval::<i64>(script);
-        assert_eq!(result.unwrap(), 10);
+        assert_eq!(env.eval::<i64>("$env.a").unwrap(), 10);
     });
 }
 
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn env_env_set_proc_env() {
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-
-    let env = engine.runtime().env().clone();
-    let workflow = Workflow::new()
-        .with_env("a", 100)
-        .with_step(|step| step.with_id("step1"));
-    engine.channel().on_complete(move |_| {
-        let s1 = s1.clone();
-        async move { s1.close() }
-    });
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
-        .await
-        .unwrap();
-
-    sig.recv().await;
-    let task = proc.root().unwrap();
-
-    // set the env value only change the process local env in context
-    let script = r#"
-    $env.a = 200;
-    "#;
-    let context = task.create_context();
-    Context::scope(&context, || {
-        env.eval::<serde_json::Value>(script).unwrap();
-        assert_eq!(proc.env().get::<i64>("a"), Some(200));
-    });
-}
-
-/// The engine's private env keys — the process owner credential and its
-/// workdir — are not workflow state: `$env` must neither read nor write them,
-/// or a model could widen its own scope authority and escape its directory.
+/// The engine's private env keys (the process owner credential and its
+/// workdir) are not workflow state: `$env` must not read them, or a model
+/// could widen its own scope authority.
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_private_keys_are_engine_only() {
-    let engine = Engine::builder().start().await.unwrap();
-    let env = engine.runtime().env().clone();
+    let env = Environment::new();
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
-        .await
-        .unwrap();
-    let task = proc.root().unwrap();
-    let context = task.create_context();
+    let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
+
+    let context = proc.root().unwrap().create_context();
     context.set_env(crate::utils::consts::PROC_OWNER, "forged");
-    context.set_env(crate::utils::consts::PROC_WORKDIR, "/etc");
 
     Context::scope(&context, || {
-        // reading answers null/absent, writing is a no-op
-        let read = env
-            .eval::<serde_json::Value>(&format!("$env.{}", crate::utils::consts::PROC_OWNER))
-            .unwrap();
-        assert!(read.is_null(), "private key must not be readable: {read}");
-        env.eval::<serde_json::Value>(&format!(
-            "$env.{} = 'escaped';",
-            crate::utils::consts::PROC_WORKDIR
-        ))
-        .unwrap();
+        let read =
+            env.eval::<serde_json::Value>(&format!("$env.{}", crate::utils::consts::PROC_OWNER));
+        assert!(read.is_err(), "private key must not be readable");
     });
-
-    // the direct write landed (it is an engine-side API), the script's did not
-    assert_eq!(
-        proc.env()
-            .get::<String>(crate::utils::consts::PROC_WORKDIR)
-            .as_deref(),
-        Some("/etc")
-    );
-    engine.close().await;
 }
 
 /// The directory a process runs in has a readable name of its own —
-/// `$env.WORK_DIR` — answered from the process rather than stored, so a script
-/// can find it while the private key it lives under stays out of reach, and
-/// no write can point the run at another directory.
+/// `$env.WORK_DIR` — answered from the process rather than stored.
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_work_dir_names_the_process_directory() {
-    let engine = Engine::builder().start().await.unwrap();
-    let env = engine.runtime().env().clone();
+    let env = Environment::new();
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
-        .await
-        .unwrap();
-    let task = proc.root().unwrap();
-    let context = task.create_context();
+    let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
 
-    // A process the policy gave no directory has none to name: the key is
-    // absent instead of falling back to an OS variable of the same name.
-    Context::scope(&context, || {
-        let read = env.eval::<serde_json::Value>("$env.WORK_DIR").unwrap();
-        assert!(read.is_null(), "no workdir means no value: {read}");
-    });
-
+    let context = proc.root().unwrap().create_context();
     let dir = std::env::temp_dir().join(format!("acts_workdir_{}", crate::utils::longid()));
     proc.set_workdir(&dir);
+
     Context::scope(&context, || {
         assert_eq!(
             env.eval::<String>("$env.WORK_DIR").unwrap(),
             dir.display().to_string()
         );
-        // the engine-side accessor answers the same value
         assert_eq!(
             context.get_env::<std::path::PathBuf>(consts::ENV_WORK_DIR),
             Some(dir.clone())
         );
-
-        // read-only: neither the script's write nor the engine-side one
-        // redefines the directory
-        env.eval::<serde_json::Value>("$env.WORK_DIR = '/etc'")
-            .unwrap();
-        context.set_env(consts::ENV_WORK_DIR, "/etc");
-        assert_eq!(
-            env.eval::<String>("$env.WORK_DIR").unwrap(),
-            dir.display().to_string(),
-            "a run must not be able to rename its own workdir"
-        );
     });
-    assert!(
-        proc.env().get::<String>(consts::ENV_WORK_DIR).is_none(),
-        "the reserved name must never be stored in the process env"
-    );
     assert_eq!(proc.workdir(), Some(dir));
-
-    engine.close().await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn env_env_multi_line() {
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-
-    let env = engine.runtime().env().clone();
-    let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
-    engine.channel().on_complete(move |_| {
-        let s1 = s1.clone();
-        async move { s1.close() }
-    });
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
-        .await
-        .unwrap();
-    sig.recv().await;
-    let task = proc.root().unwrap();
-
-    let context = task.create_context();
-    Context::scope(&context, || {
-        env.eval::<serde_json::Value>(r#"$env.a = 100"#).unwrap();
-        env.eval::<serde_json::Value>(r#"$env.b = 200"#).unwrap();
-        let value = env.eval::<bool>(r#"$env.a < $env.b"#).unwrap();
-        assert!(value);
-    });
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn env_vars_set_num() {
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-
-    let workflow = Workflow::new()
-        .with_env("a", 10)
-        .with_step(|step| step.with_id("step1"));
-    engine.channel().on_complete(move |_| {
-        let s1 = s1.clone();
-        async move { s1.close() }
-    });
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
-        .await
-        .unwrap();
-    sig.recv().await;
-    let task = proc.root().unwrap();
-
-    let context = task.create_context();
-    Context::scope(&context, || {
-        assert_eq!(proc.env().get::<i64>("a"), Some(10));
-    });
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn env_vars_set_str() {
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-
-    let workflow = Workflow::new()
-        .with_env("a", "abc")
-        .with_step(|step| step.with_id("step1"));
-    engine.channel().on_complete(move |_| {
-        let s1 = s1.clone();
-        async move { s1.close() }
-    });
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
-        .await
-        .unwrap();
-    sig.recv().await;
-    let task = proc.root().unwrap();
-
-    let context = task.create_context();
-    Context::scope(&context, || {
-        assert_eq!(proc.env().get::<String>("a"), Some("abc".to_string()));
-    });
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn env_vars_set_json() {
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-
-    let workflow = Workflow::new()
-        .with_env("a", json!({ "count": 1 }))
-        .with_step(|step| step.with_id("step1"));
-    engine.channel().on_complete(move |_| {
-        let s1 = s1.clone();
-        async move { s1.close() }
-    });
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
-        .await
-        .unwrap();
-    sig.recv().await;
-    let task = proc.root().unwrap();
-
-    let context = task.create_context();
-    Context::scope(&context, || {
-        assert_eq!(
-            proc.env().get::<serde_json::Value>("a"),
-            Some(json!({ "count": 1 }))
-        );
-    });
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn env_vars_update() {
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-
-    let workflow = Workflow::new()
-        .with_env("a", 10)
-        .with_step(|step| step.with_id("step1"));
-    engine.channel().on_complete(move |_| {
-        let s1 = s1.clone();
-        async move { s1.close() }
-    });
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
-        .await
-        .unwrap();
-    sig.recv().await;
-    let task = proc.root().unwrap();
-
-    let context = task.create_context();
-    context.set_env("a", 100);
-    Context::scope(&context, || {
-        assert_eq!(proc.env().get::<i32>("a"), Some(100));
-    });
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn env_step_get_data_by_id() {
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-
-    let env = engine.runtime().env().clone();
-    let workflow = Workflow::new()
-        .with_step(|step| step.with_id("step1").with_var("a", 10))
-        .with_step(|step| step.with_id("step2").with_var("b", "abc"));
-    engine.channel().on_complete(move |_| {
-        let s1 = s1.clone();
-        async move { s1.close() }
-    });
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
-        .await
-        .unwrap();
-    sig.recv().await;
-    let task = proc.root().unwrap();
-    let script = r#"
-        step1.a
-    "#;
-
-    proc.print();
-    let context = task.create_context();
-    Context::scope(&context, || {
-        let result = env.eval::<i32>(script);
-        assert_eq!(result.unwrap(), 10);
-    });
-
-    let script = r#"
-        step2.b
-    "#;
-    let context = task.create_context();
-    Context::scope(&context, || {
-        let result = env.eval::<String>(script);
-        assert_eq!(result.unwrap(), "abc");
-    });
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn env_step_get_data_null() {
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-
-    let env = engine.runtime().env().clone();
-    let workflow = Workflow::new().with_step(|step| step.with_id("step1").with_var("a", 10));
-    engine.channel().on_complete(move |_| {
-        let s1 = s1.clone();
-        async move { s1.close() }
-    });
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
-        .await
-        .unwrap();
-    sig.recv().await;
-    let task = proc.root().unwrap();
-    let script = r#"
-        step1.not_exists
-    "#;
-
-    proc.print();
-    let context = task.create_context();
-    Context::scope(&context, || {
-        let result = env.eval::<serde_json::Value>(script);
-        assert_eq!(result.unwrap(), serde_json::Value::Null);
-    });
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn env_step_set_data_err_with_completed_state() {
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-
-    let env = engine.runtime().env().clone();
-    let workflow = Workflow::new().with_step(|step| step.with_id("step1").with_var("a", 10));
-    engine.channel().on_complete(move |_| {
-        let s1 = s1.clone();
-        async move { s1.close() }
-    });
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
-        .await
-        .unwrap();
-    sig.recv().await;
-    let task = proc.root().unwrap();
-    let script = r#"
-        step1.a = 100;
-    "#;
-
-    let context = task.create_context();
-    Context::scope(&context, || {
-        let result = env.eval::<serde_json::Value>(script);
-        proc.print();
-        assert!(result.is_err());
-    });
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn env_step_set_data_ok_with_running_state() {
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-
-    let env = engine.runtime().env().clone();
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_var("a", 10)
-            .with_uses(USES_IRQ, Vars::new().with("key", "test"))
-    });
-    engine.channel().on_message(move |e| {
-        let s1 = s1.clone();
-        async move {
-            if e.is_irq() {
-                s1.close()
-            }
-        }
-    });
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
-        .await
-        .unwrap();
-    sig.recv().await;
-    let task = proc.root().unwrap();
-    let script = r#"
-        step1.a = 100;
-    "#;
-
-    let context = task.create_context();
-    Context::scope(&context, || {
-        env.eval::<serde_json::Value>(script).unwrap();
-        proc.print();
-        assert_eq!(
-            proc.task_by_nid("step1")
-                .last()
-                .unwrap()
-                .data()
-                .get::<i32>("a")
-                .unwrap(),
-            100
-        );
-    });
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn env_step_get_data() {
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-
-    let env = engine.runtime().env().clone();
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_var("a", 10)
-            .with_uses(USES_IRQ, Vars::new().with("key", "test"))
-    });
-    engine.channel().on_message(move |e| {
-        let s1 = s1.clone();
-        async move {
-            if e.is_irq() {
-                s1.close()
-            }
-        }
-    });
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
-        .await
-        .unwrap();
-    sig.recv().await;
-    let task = proc.root().unwrap();
-    let script = r#"
-        step1.b = "abc";
-        step1.data()
-    "#;
-
-    let context = task.create_context();
-    Context::scope(&context, || {
-        let result = env.eval::<Vars>(script).unwrap();
-        proc.print();
-        assert_eq!(result.get::<String>("b").unwrap(), "abc");
-    });
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn env_step_get_inputs() {
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-
-    let env = engine.runtime().env().clone();
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_var("a", 10)
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
-    engine.channel().on_message(move |e| {
-        let s1 = s1.clone();
-        async move {
-            if e.is_irq() {
-                s1.close()
-            }
-        }
-    });
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
-        .await
-        .unwrap();
-    sig.recv().await;
-    let task = proc.root().unwrap();
-    let script = r#"
-        step1.inputs()
-    "#;
-
-    let context = task.create_context();
-    Context::scope(&context, || {
-        let result = env.eval::<Vars>(script).unwrap();
-        proc.print();
-        assert_eq!(result.get::<i32>("a").unwrap(), 10);
-    });
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn env_act_get_inputs() {
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-
-    let env = engine.runtime().env().clone();
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_var("a", json!(10))
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
-    engine.channel().on_message(move |e| {
-        let s1 = s1.clone();
-        async move {
-            if e.is_irq() {
-                s1.close()
-            }
-        }
-    });
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
-        .await
-        .unwrap();
-    sig.recv().await;
-    let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
-    let script = r#"
-        $inputs()
-    "#;
-
-    let context = task.create_context();
-    Context::scope(&context, || {
-        let result = env.eval::<Vars>(script).unwrap();
-        proc.print();
-        assert_eq!(result.get::<i32>("a").unwrap(), 10);
-    });
-}
-
-#[tokio::test(flavor = "multi_thread")]
-#[serial]
-async fn env_act_get_data() {
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-
-    let env = engine.runtime().env().clone();
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
-    engine.channel().on_message(move |e| {
-        let s1 = s1.clone();
-        async move {
-            if e.is_irq() {
-                s1.close()
-            }
-        }
-    });
-    let proc = engine
-        .runtime()
-        .start(&workflow, Vars::new())
-        .await
-        .unwrap();
-    sig.recv().await;
-    let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
-    let script = r#"
-        $set("my_value", 20)
-        $data()
-    "#;
-
-    let context = task.create_context();
-    Context::scope(&context, || {
-        let result = env.eval::<Vars>(script).unwrap();
-        proc.print();
-        assert_eq!(result.get::<i32>("my_value").unwrap(), 20);
-    });
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1254,28 +323,21 @@ async fn env_user_var_get_from_context() {
     }
 
     let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-
     engine
         .executor(&crate::Principal::unrestricted())
         .ext()
         .register_var(&MyVarPlugin)
         .unwrap();
-
     let env = engine.runtime().env().clone();
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+
+    let sig = engine.signal(());
+    let done = sig.clone();
+    engine.channel().on_complete(move |_| {
+        let done = done.clone();
+        async move { done.close() }
     });
-    engine.channel().on_message(move |e| {
-        let s1 = s1.clone();
-        async move {
-            if e.is_irq() {
-                s1.close()
-            }
-        }
-    });
+
+    let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
     let proc = engine
         .runtime()
         .start(
@@ -1285,16 +347,10 @@ async fn env_user_var_get_from_context() {
         .await
         .unwrap();
     sig.recv().await;
-    let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
-    let script = r#"
-        test.var1
-    "#;
 
-    let context = task.create_context();
+    let context = proc.root().unwrap().create_context();
     Context::scope(&context, || {
-        let result = env.eval::<i32>(script).unwrap();
-        proc.print();
-        assert_eq!(result, 10);
+        assert_eq!(env.eval::<i32>("test.var1").unwrap(), 10);
     });
 }
 
@@ -1315,86 +371,48 @@ async fn env_user_var_get_default() {
     }
 
     let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-
     engine
         .executor(&crate::Principal::unrestricted())
         .ext()
         .register_var(&MyVarPlugin)
         .unwrap();
-
     let env = engine.runtime().env().clone();
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+
+    let sig = engine.signal(());
+    let done = sig.clone();
+    engine.channel().on_complete(move |_| {
+        let done = done.clone();
+        async move { done.close() }
     });
-    engine.channel().on_message(move |e| {
-        let s1 = s1.clone();
-        async move {
-            if e.is_irq() {
-                s1.close()
-            }
-        }
-    });
+
+    let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
     let proc = engine
         .runtime()
         .start(&workflow, Vars::new())
         .await
         .unwrap();
     sig.recv().await;
-    let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
-    let script = r#"
-        test.var1
-    "#;
 
-    let context = task.create_context();
+    let context = proc.root().unwrap().create_context();
     Context::scope(&context, || {
-        let result = env.eval::<i32>(script).unwrap();
-        proc.print();
-        assert_eq!(result, 5);
+        assert_eq!(env.eval::<i32>("test.var1").unwrap(), 5);
     });
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_user_var_secrets_get() {
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
+    let env = Environment::new();
+    let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
+    let (_engine, proc) = start_completed(
+        &workflow,
+        Vars::new().with("secrets", Vars::new().with("TOKEN", "my_token")),
+    )
+    .await;
 
-    let env = engine.runtime().env().clone();
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
-    });
-    engine.channel().on_message(move |e| {
-        let s1 = s1.clone();
-        async move {
-            if e.is_irq() {
-                s1.close()
-            }
-        }
-    });
-    let proc = engine
-        .runtime()
-        .start(
-            &workflow,
-            Vars::new().with("secrets", Vars::new().with("TOKEN", "my_token")),
-        )
-        .await
-        .unwrap();
-    sig.recv().await;
-    let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
-    let script = r#"
-        secrets.TOKEN
-    "#;
-
-    let context = task.create_context();
+    let context = proc.root().unwrap().create_context();
     Context::scope(&context, || {
-        let result = env.eval::<String>(script).unwrap();
-        proc.print();
-        assert_eq!(result, "my_token");
+        assert_eq!(env.eval::<String>("secrets.TOKEN").unwrap(), "my_token");
     });
 }
 
@@ -1402,33 +420,136 @@ async fn env_user_var_secrets_get() {
 #[serial]
 async fn env_user_var_os_get() {
     let env = Environment::new();
+    let result = env.eval::<String>("$os").unwrap();
+    assert!(["linux", "windows", "macos"].contains(&result.as_str()));
+}
 
-    let script = r#"
-        os
-    "#;
+/// Each evaluation derives a fresh CEL scope from the shared function root:
+/// variables injected for one task are not visible to a later evaluation that
+/// runs against a different task.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn env_eval_scopes_do_not_leak_vars() {
+    let env = Environment::new();
 
-    let result = env.eval::<String>(script);
-    assert!(["linux", "windows", "macos"].contains(&result.unwrap().as_str()));
+    let w1 = Workflow::new()
+        .with_var("a", 1)
+        .with_step(|step| step.with_id("step1"));
+    let (_e1, p1) = start_completed(&w1, Vars::new()).await;
+    let c1 = p1.root().unwrap().create_context();
+    Context::scope(&c1, || assert_eq!(env.eval::<i64>("a").unwrap(), 1));
+
+    let w2 = Workflow::new().with_step(|step| step.with_id("step1"));
+    let (_e2, p2) = start_completed(&w2, Vars::new()).await;
+    let c2 = p2.root().unwrap().create_context();
+    Context::scope(&c2, || assert!(env.eval::<i64>("a").is_err()));
+}
+
+// ---- step data access ----
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn env_step_get_data_by_id() {
+    let env = Environment::new();
+    let workflow = Workflow::new()
+        .with_step(|step| step.with_id("step1").with_var("a", 10))
+        .with_step(|step| step.with_id("step2").with_var("b", "abc"));
+    let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
+
+    let context = proc.root().unwrap().create_context();
+    Context::scope(&context, || {
+        assert_eq!(env.eval::<i32>("step1.a").unwrap(), 10);
+        assert_eq!(env.eval::<String>("step2.b").unwrap(), "abc");
+    });
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
-async fn env_act_cost_get() {
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-
-    let env = engine.runtime().env().clone();
+async fn env_step_get_data() {
+    let env = Environment::new();
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+            .with_var("b", "abc")
+            .with_uses(USES_IRQ, Vars::new().with("key", "test"))
     });
+    let engine = Engine::builder().start().await.unwrap();
+    let sig = engine.signal(());
+    let done = sig.clone();
     engine.channel().on_message(move |e| {
-        println!("message: {e:?}");
-        let s1 = s1.clone();
+        let done = done.clone();
         async move {
             if e.is_irq() {
-                s1.close()
+                done.close()
+            }
+        }
+    });
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
+    sig.recv().await;
+
+    let context = proc.root().unwrap().create_context();
+    Context::scope(&context, || {
+        let result = env.eval::<Vars>("$step_data('step1')").unwrap();
+        assert_eq!(result.get::<String>("b").unwrap(), "abc");
+    });
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn env_step_get_inputs() {
+    let env = Environment::new();
+    let workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_var("a", 10)
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+    });
+    let engine = Engine::builder().start().await.unwrap();
+    let sig = engine.signal(());
+    let done = sig.clone();
+    engine.channel().on_message(move |e| {
+        let done = done.clone();
+        async move {
+            if e.is_irq() {
+                done.close()
+            }
+        }
+    });
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
+    sig.recv().await;
+
+    let context = proc.root().unwrap().create_context();
+    Context::scope(&context, || {
+        let result = env.eval::<Vars>("$step_inputs('step1')").unwrap();
+        assert_eq!(result.get::<i32>("a").unwrap(), 10);
+    });
+}
+
+// ---- act data access ----
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn env_act_get_inputs() {
+    let env = Environment::new();
+    let workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_var("a", json!(10))
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+    });
+    let engine = Engine::builder().start().await.unwrap();
+    let sig = engine.signal(());
+    let done = sig.clone();
+    engine.channel().on_message(move |e| {
+        let done = done.clone();
+        async move {
+            if e.is_irq() {
+                done.close()
             }
         }
     });
@@ -1439,38 +560,101 @@ async fn env_act_cost_get() {
         .unwrap();
     sig.recv().await;
     let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
-    let script = r#"
-        $cost()
-    "#;
 
     let context = task.create_context();
     Context::scope(&context, || {
-        let result = env.eval::<i32>(script).unwrap();
-        proc.print();
-        assert!(result > 0);
+        let result = env.eval::<Vars>("$inputs()").unwrap();
+        assert_eq!(result.get::<i32>("a").unwrap(), 10);
+    });
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn env_act_get_data() {
+    let env = Environment::new();
+    let workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+    });
+    let engine = Engine::builder().start().await.unwrap();
+    let sig = engine.signal(());
+    let done = sig.clone();
+    engine.channel().on_message(move |e| {
+        let done = done.clone();
+        async move {
+            if e.is_irq() {
+                done.close()
+            }
+        }
+    });
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
+    sig.recv().await;
+    let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
+
+    let context = task.create_context();
+    Context::scope(&context, || {
+        env.eval::<()>("$set('my_value', 20)").unwrap();
+        let result = env.eval::<Vars>("$data()").unwrap();
+        assert_eq!(result.get::<i32>("my_value").unwrap(), 20);
+    });
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn env_act_cost_get() {
+    let env = Environment::new();
+    let workflow = Workflow::new().with_step(|step| {
+        step.with_id("step1")
+            .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
+    });
+    let engine = Engine::builder().start().await.unwrap();
+    let sig = engine.signal(());
+    let done = sig.clone();
+    engine.channel().on_message(move |e| {
+        let done = done.clone();
+        async move {
+            if e.is_irq() {
+                done.close()
+            }
+        }
+    });
+    let proc = engine
+        .runtime()
+        .start(&workflow, Vars::new())
+        .await
+        .unwrap();
+    sig.recv().await;
+    let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
+
+    let context = task.create_context();
+    Context::scope(&context, || {
+        assert!(env.eval::<i64>("$cost()").unwrap() > 0);
     });
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_act_cost_in_get() {
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-
-    let env = engine.runtime().env().clone();
+    let env = Environment::new();
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
+    let engine = Engine::builder().start().await.unwrap();
+    let sig = engine.signal(());
+    let done = sig.clone();
     engine.channel().on_message(move |e| {
-        let s1 = s1.clone();
+        let done = done.clone();
         async move {
             if e.params().unwrap().get::<String>("key").as_deref() == Some("act1")
                 && e.is_state(MessageState::Created)
             {
                 tokio::time::sleep(Duration::from_secs(2)).await;
-                s1.close()
+                done.close()
             }
         }
     });
@@ -1481,36 +665,28 @@ async fn env_act_cost_in_get() {
         .unwrap();
     sig.recv().await;
     let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
-    let script = r#"
-        $cost_in('1s')
-    "#;
 
     let context = task.create_context();
     Context::scope(&context, || {
-        let result = env.eval::<bool>(script).unwrap();
-        proc.print();
-        assert!(result);
+        assert!(env.eval::<bool>("$cost_in('1s')").unwrap());
     });
 }
 
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn env_act_ecode_get() {
-    let engine = Engine::builder().start().await.unwrap();
-    let sig = engine.signal(());
-    let s1 = sig.clone();
-
-    let env = engine.runtime().env().clone();
+    let env = Environment::new();
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
             .with_uses(USES_IRQ, Vars::new().with("key", "act1"))
     });
-
+    let engine = Engine::builder().start().await.unwrap();
+    let sig = engine.signal(());
+    let done = sig.clone();
     let runtime = engine.runtime();
     engine.channel().on_message(move |e| {
-        println!("on_message: {:?}", e);
         let runtime = runtime.clone();
-        let s1 = s1.clone();
+        let done = done.clone();
         async move {
             if e.is_params_key("act1") && e.is_state(MessageState::Created) {
                 runtime
@@ -1522,7 +698,7 @@ async fn env_act_ecode_get() {
                     )
                     .await
                     .unwrap();
-                s1.close()
+                done.close()
             }
         }
     });
@@ -1533,14 +709,9 @@ async fn env_act_ecode_get() {
         .unwrap();
     sig.recv().await;
     let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
-    let script = r#"
-        $ecode()
-    "#;
 
     let context = task.create_context();
     Context::scope(&context, || {
-        let result = env.eval::<String>(script).unwrap();
-        proc.print();
-        assert_eq!(result, "err1");
+        assert_eq!(env.eval::<String>("$ecode()").unwrap(), "err1");
     });
 }

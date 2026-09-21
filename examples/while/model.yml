@@ -14,18 +14,18 @@ exposes:
 steps:
   - name: init
     id: init
-    uses: acts.transform.code
-    params: |
-      $set("value", 0);
-      $set("index", 0);
+    uses: acts.transform.set
+    params:
+      value: 0
+      index: 0
 
   - name: add
     id: add
     while: index <= input
-    uses: acts.transform.code
-    params: |
-      $set("value", value + index);
-      $set("index", index + 1);
+    uses: acts.transform.set
+    params:
+      value: '${{ value + index }}'
+      index: '${{ index + 1 }}'
 
   - name: end
     id: end

@@ -825,7 +825,8 @@ pub fn engine_builder(
         .add_package::<acts_package_http::HttpPackage>()
         .add_package::<acts_package_shell::ShellPackage>()
         .add_package::<acts_package_state::StatePackage>()
-        .add_package::<acts_package_nats::NatsPackage>();
+        .add_package::<acts_package_nats::NatsPackage>()
+        .add_package::<acts_package_javascript::CodePackage>();
     if plugins.nats && config.has("nats") {
         builder = builder.add_plugin(&acts_plugin_nats::NatsPlugin::new());
     }

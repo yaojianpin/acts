@@ -26,7 +26,7 @@
 | `acts.core.irq` | 中断请求 | 由引擎发起中断，等待客户端响应后继续 |
 | `acts.core.msg` | 消息 | 发送消息到客户端，不需要响应 |
 | `acts.transform.set` | 设置 | 设置变量值 |
-| `acts.transform.code` | 代码 | 执行 JavaScript 代码 (QuickJS) |
+| `acts.transform.code.javascript` | 代码 | 执行 JavaScript 代码 (QuickJS) |
 | `acts.core.block` | 块 | 包含子活动列表，按模式执行 |
 | `acts.core.parallel` | 并行 | 对集合进行并行执行 |
 | `acts.core.sequence` | 顺序 | 对集合进行顺序执行 |
@@ -53,7 +53,7 @@
     b: hello
 
 # 执行脚本
-- uses: acts.transform.code
+- uses: acts.transform.code.javascript
   params: |
     let x = $get("a");
     $set("result", x * 2);

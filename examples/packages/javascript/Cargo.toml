@@ -1,0 +1,11 @@
+[package]
+name = "acts-example-package-javascript"
+version = "0.1.0"
+edition = "2024"
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+tokio = { features = ["full"], workspace = true }
+acts = { workspace = true }
+acts-package-javascript = { workspace = true }

@@ -108,40 +108,6 @@ async fn sch_act_params_expr_partial_line() {
 
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
-async fn sch_act_params_expr_multi_statements() {
-    let workflow = Workflow::new().with_step(|step| {
-        step.with_id("step1").with_uses(
-            USES_IRQ,
-            Vars::new().with("key", "act1").with(
-                "data",
-                json!(r#"${{ let a = "hello";let b = "world"; a + " " + b }}"#),
-            ),
-        )
-    });
-
-    workflow.print();
-    let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
-    let (tx, rx) = engine.signal(String::default()).double();
-    auto_complete(&engine, &tx);
-    let channel = engine.channel();
-    channel.on_message(move |e| {
-        let rx = rx.clone();
-        async move {
-            if e.is_params_key("act1") && e.is_state(MessageState::Created) {
-                let params = e.params().unwrap().get::<String>("data").unwrap();
-                rx.send(params);
-            }
-        }
-    });
-    engine.runtime().launch(&proc).await.unwrap();
-    let ret = tx.recv().await;
-    proc.print();
-
-    assert_eq!(ret, "hello world");
-}
-
-#[serial]
-#[tokio::test(flavor = "multi_thread")]
 async fn sch_act_params_expr_multi_line() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1").with_uses(

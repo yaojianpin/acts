@@ -1,0 +1,23 @@
+[package]
+name = "acts-package-javascript"
+description = "acts package that runs JavaScript code with an embedded QuickJS runtime"
+homepage = "https://docs.rs/acts-package-javascript"
+edition = "2024"
+version.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+rquickjs = { version = "0.13", features = ["macro", "parallel"] }
+acts = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+serial_test = { workspace = true }
+jsonschema = { workspace = true }
+serde_yaml = { workspace = true }

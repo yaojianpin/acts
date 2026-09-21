@@ -1018,9 +1018,8 @@ mod tests {
               - name: leaked
             steps:
               - name: read the secret
-                uses: acts.transform.code
-                params: |
-                  return { leaked: secrets.TOKEN };
+                uses: acts.transform.set
+                params: {}
             "#,
         )
         .unwrap();
@@ -1132,9 +1131,9 @@ mod tests {
             ver: 0.1.0
             steps:
               - name: finish
-                uses: acts.transform.code
-                params: |
-                  return { dir: $env.WORK_DIR };
+                uses: acts.transform.set
+                params:
+                  dir: "${{ $env.WORK_DIR }}"
             "#,
         )
         .unwrap();
@@ -1182,7 +1181,7 @@ mod tests {
         // alias of the private key the workflow never saw
         sig.recv().await;
         assert_eq!(
-            proc.task_by_uses(crate::utils::test::USES_CODE)
+            proc.task_by_uses(crate::utils::test::USES_SET)
                 .first()
                 .unwrap()
                 .outputs()

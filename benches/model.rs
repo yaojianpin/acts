@@ -42,7 +42,7 @@ fn schema_validate(c: &mut Criterion) {
     for &fields in &[1usize, 8, 32] {
         let (schema, value) = schema_with(fields, 0);
         group.bench_function(BenchmarkId::new("cached", fields.to_string()), |b| {
-            b.iter(|| schema.validate(black_box(&value)).unwrap());
+            b.iter(|| schema.validate(std::hint::black_box(&value)).unwrap());
         });
     }
 
@@ -57,7 +57,7 @@ fn schema_validate(c: &mut Criterion) {
         b.iter(|| {
             nonce += 1;
             let (schema, value) = schema_with(8, nonce);
-            schema.validate(black_box(&value)).unwrap();
+            schema.validate(std::hint::black_box(&value)).unwrap();
         });
     });
 

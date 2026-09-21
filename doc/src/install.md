@@ -106,7 +106,7 @@ steps:
     params:
       a: 10
   - name: step 2
-    uses: acts.transform.code
+    uses: acts.transform.code.javascript
     params: |
       return { data: a + 10 };
 "#;

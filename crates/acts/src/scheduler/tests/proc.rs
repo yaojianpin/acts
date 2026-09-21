@@ -1,9 +1,9 @@
 use crate::{
-    ActError, Workflow,
+    ActError, Vars, Workflow,
     scheduler::{NodeTree, TaskState},
     utils::{
         self,
-        test::{USES_CODE, auto_complete, create_proc, create_proc_with_config},
+        test::{USES_SET, auto_complete, create_proc, create_proc_with_config},
     },
 };
 use crate::{Config, config::ConfigData};
@@ -162,7 +162,7 @@ async fn sch_step_while_loop_self_next() {
             step.with_id("add")
                 .with_if(r#"index < 3"#)
                 .with_next("add")
-                .with_uses_code(USES_CODE, r#"$set("index", $get("index") + 1);"#)
+                .with_uses(USES_SET, Vars::new().with("index", "${{ index + 1 }}"))
         })
         .with_step(|step| step.with_id("end"));
 
@@ -207,7 +207,7 @@ async fn sch_step_while_attr_loops() {
         .with_step(|step| {
             step.with_id("add")
                 .with_while(r#"index < 3"#)
-                .with_uses_code(USES_CODE, r#"$set("index", $get("index") + 1);"#)
+                .with_uses(USES_SET, Vars::new().with("index", "${{ index + 1 }}"))
         })
         .with_step(|step| step.with_id("end"));
 

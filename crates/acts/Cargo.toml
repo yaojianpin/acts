@@ -26,10 +26,10 @@ chrono = { workspace = true }
 cron = { workspace = true }
 globset = { default-features = false, workspace = true }
 inventory = "0.3.20"
-jsonschema = { version = "0.30.0", default-features = false }
+jsonschema = { workspace = true }
 nanoid = { workspace = true }
 regex = { workspace = true }
-rquickjs = { version = "0.13", features = ["macro", "parallel"] }
+cel-interpreter = { workspace = true }
 serde = { features = ["derive", "rc"], workspace = true }
 serde_json = { workspace = true }
 serde_repr = "0.1"
@@ -80,10 +80,6 @@ name = "simple"
 path = "../../examples/simple/main.rs"
 
 [[example]]
-name = "model_build"
-path = "../../examples/model_build/main.rs"
-
-[[example]]
 name = "actions"
 path = "../../examples/actions/main.rs"
 
@@ -114,14 +110,6 @@ path = "../../examples/subflow/main.rs"
 [[example]]
 name = "timeout"
 path = "../../examples/timeout/main.rs"
-
-[[example]]
-name = "user_var"
-path = "../../examples/user_var/main.rs"
-
-[[example]]
-name = "resolver"
-path = "../../examples/resolver/main.rs"
 
 [[example]]
 name = "prof"

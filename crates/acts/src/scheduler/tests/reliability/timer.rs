@@ -38,7 +38,7 @@ use crate::{
     },
     utils,
     utils::consts::KEY_SEP,
-    utils::test::{USES_CODE, USES_IRQ, create_proc, create_proc_with_config},
+    utils::test::{USES_IRQ, USES_SET, create_proc, create_proc_with_config},
 };
 
 /// The workflow under test: an irq act that waits for a response nobody
@@ -1202,7 +1202,7 @@ async fn sch_a_delivery_stored_after_its_task_closed_is_born_settled_inner() {
     let workflow = Workflow::new()
         .with_step(|step| {
             step.with_id("s1")
-                .with_uses_code(USES_CODE, r#"$set("done", 1);"#)
+                .with_uses(USES_SET, Vars::new().with("done", 1))
         })
         .with_step(|step| {
             step.with_id("s2")

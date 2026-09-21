@@ -50,6 +50,7 @@ serde = "1.0.219"
 serde_json = "1.0.140"
 serde_yaml = "0.9"
 toml = "1.1.6"
+jsonschema = { version = "0.30.0", default-features = false }
 # logging
 tracing = "0.1"
 tracing-subscriber = "0.3"
@@ -64,6 +65,8 @@ nanoid = "0.5"
 parking_lot = "0.12"
 cron = "0.12"
 strum = { version = "0.27", features = ["derive"] }
+# expression language (the engine's `${{ }}` / `if` evaluator)
+cel-interpreter = { version = "0.10", features = ["json"] }
 # grpc / web
 # 0.14 is split: `tonic` is the transport and the generated code's skeleton, the
 # prost codec and its codegen are the separate `tonic-prost`/`tonic-prost-build`
@@ -102,6 +105,7 @@ acts-package-http = { path = "./packages/acts-package-http", version = "0.25.0" 
 acts-package-shell = { path = "./packages/acts-package-shell", version = "0.25.0" }
 acts-package-state = { path = "./packages/acts-package-state", version = "0.25.0" }
 acts-package-nats = { path = "./packages/acts-package-nats", version = "0.25.0" }
+acts-package-javascript = { path = "./packages/acts-package-javascript", version = "0.25.0" }
 acts-plugin-grpc = { path = "./plugins/acts-plugin-grpc", version = "0.25.0" }
 acts-plugin-web = { path = "./plugins/acts-plugin-web", version = "0.25.0" }
 acts-plugin-nats = { path = "./plugins/acts-plugin-nats", version = "0.25.0" }

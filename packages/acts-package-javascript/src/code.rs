@@ -1,15 +1,17 @@
-use crate::package::{ActPackageCatalog, ActPackageDefinition, ActPackageRegister, ActRunAs};
-use crate::{ActPackage, Context, Result, Vars};
+use crate::env::Environment;
+use acts::{ActPackage, ActPackageCatalog, ActPackageDefinition, ActRunAs, Context, Result, Vars};
 use serde_json::json;
 
 #[derive(Debug, Clone)]
-pub struct CodePackage;
+pub struct CodePackage {
+    env: Environment,
+}
 
 #[async_trait::async_trait]
 impl ActPackage for CodePackage {
     fn definition() -> ActPackageDefinition {
         ActPackageDefinition {
-            id: "acts.transform.code",
+            id: "acts.transform.code.javascript",
             name: "Code",
             desc: "run javascript code",
             version: "0.1.0",
@@ -32,23 +34,25 @@ impl ActPackage for CodePackage {
         }
     }
 
-    fn new(_: &crate::Config) -> Result<Self>
+    fn new(_: &acts::Config) -> Result<Self>
     where
         Self: Sized,
     {
-        Ok(Self)
+        Ok(Self {
+            env: Environment::new(),
+        })
     }
 
-    async fn execute(&self, ctx: &Context, params: &serde_json::Value) -> Result<Option<Vars>> {
+    async fn execute(&self, _ctx: &Context, params: &serde_json::Value) -> Result<Option<Vars>> {
         let Some(code) = params.as_str() else {
-            return Err(crate::ActError::Package(
+            return Err(acts::ActError::Package(
                 "Code package requires a string parameter".to_string(),
             ));
         };
 
-        // wrap the code into a function to support return synax
+        // wrap the code into a function to support return syntax
         let code_fn = format!(r#"(()=>{{ {} }})()"#, code);
-        let outputs = ctx.eval::<serde_json::Value>(&code_fn)?;
+        let outputs = self.env.eval::<serde_json::Value>(&code_fn)?;
         let mut ret = None;
         if let serde_json::Value::Object(map) = outputs {
             ret = Some(Vars::from(map));
@@ -57,11 +61,10 @@ impl ActPackage for CodePackage {
     }
 }
 
-inventory::submit!(ActPackageRegister::new::<CodePackage>());
-
 #[cfg(test)]
 mod tests {
-    use crate::ActPackage;
+    use crate::CodePackage;
+    use acts::ActPackage;
 
     #[test]
     fn pack_code_parse() {
@@ -70,7 +73,7 @@ mod tests {
         "#;
 
         let value = serde_yaml::from_str::<serde_json::Value>(params).unwrap();
-        let meta = super::CodePackage::definition();
+        let meta = CodePackage::definition();
         jsonschema::validate(&meta.schema, &value).unwrap()
     }
 }

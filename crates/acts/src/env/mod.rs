@@ -1,30 +1,13 @@
-mod module;
+mod functions;
 #[cfg(test)]
 mod tests;
-mod value;
 
-use crate::{ActError, Result, ShareLock, Vars};
+use crate::{ActError, Context, Result, ShareLock, Vars};
+use cel_interpreter::Program;
 use core::fmt;
 use parking_lot::RwLock;
-use rquickjs::{Context as JsContext, Ctx as JsCtx, FromJs, Runtime as JsRuntime};
 use serde::de::DeserializeOwned;
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
-
-use self::value::ActJsValue;
-
-pub trait ActModule: Send + Sync {
-    fn init(&self, ctx: &JsCtx<'_>) -> Result<()>;
-
-    /// Install context-sensitive globals after [`ActModule::init`], before each
-    /// expression runs. Built-in modules keep their static, realm-wide setup in
-    /// `init` and put the task-dependent globals here.
-    fn refresh(&self, _ctx: &JsCtx<'_>) -> Result<()> {
-        Ok(())
-    }
-}
+use std::sync::Arc;
 
 /// User var trait
 /// It can create user releated context data
@@ -38,16 +21,16 @@ pub trait ActModule: Send + Sync {
 ///     fn name(&self) -> String {
 ///         "my_var".to_string()
 ///     }
-///     
+///
 ///     fn default_data(&self) -> Option<Vars> {
 ///         None
 ///     }
 ///   }
 /// ```
 pub trait ActUserVar: Send + Sync {
-    /// global easier access name in js expression
-    /// such as secrets.TOKEN, the secrets will be the name
-    /// it will get the data by the name from task context
+    /// global easier access name in the expression
+    /// such as `secrets.TOKEN`, the `secrets` will be the name;
+    /// the data is read from the task context by that name.
     fn name(&self) -> String;
 
     /// initialzie default data
@@ -57,15 +40,24 @@ pub trait ActUserVar: Send + Sync {
     }
 }
 
+/// The built-in `secrets` user var: reads the task's `secrets` data.
+#[derive(Clone)]
+struct SecretsVar;
+
+impl ActUserVar for SecretsVar {
+    fn name(&self) -> String {
+        "secrets".to_string()
+    }
+}
+
 #[derive(Clone)]
 pub struct Environment {
-    modules: ShareLock<Vec<Box<dyn ActModule>>>,
     pub(crate) user_vars: ShareLock<Vec<Box<dyn ActUserVar>>>,
 }
 
 impl fmt::Debug for Environment {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Enviroment").finish()
+        f.debug_struct("Environment").finish()
     }
 }
 
@@ -77,12 +69,9 @@ impl Default for Environment {
 
 impl Environment {
     pub fn new() -> Self {
-        let mut env = Environment {
-            modules: Arc::new(RwLock::new(Vec::new())),
-            user_vars: Arc::new(RwLock::new(Vec::new())),
-        };
-        env.init();
-        env
+        Environment {
+            user_vars: Arc::new(RwLock::new(vec![Box::new(SecretsVar)])),
+        }
     }
 
     #[cfg(test)]
@@ -95,87 +84,52 @@ impl Environment {
         user_envs.push(Box::new(module.clone()));
     }
 
-    pub fn register_module(&self, module: Box<dyn ActModule>) {
-        self.modules.write().push(module);
+    /// Resolve every registered user var (the built-in `secrets` and any
+    /// embedder-registered var) to its data: the var's `default_data` overlaid
+    /// with the value the current task holds under the var's name.
+    pub fn user_vars(&self) -> Vec<(String, Vars)> {
+        self.user_vars
+            .read()
+            .iter()
+            .map(|var| {
+                let name = var.name();
+                let mut data = var.default_data().unwrap_or_default();
+                if let Ok(Some(vars)) =
+                    Context::try_with_current(|ctx| ctx.task().find::<Vars>(&name))
+                {
+                    for (k, v) in vars.iter() {
+                        data.set(k, v);
+                    }
+                }
+                (name, data)
+            })
+            .collect()
     }
 
-    /// Evaluate `expr` in its own QuickJS runtime and context (realm).
+    /// Evaluate a CEL expression, returning the value deserialized into `T`.
     ///
-    /// Nothing is pooled: a reused runtime carries state across contexts
-    /// (rquickjs caches class and callable prototypes on the runtime, and a
-    /// realm's intrinsics stay reachable through them), and a reused context
-    /// cannot be scrubbed reliably — an expression may leave state behind that
-    /// a global-property snapshot does not cover (built-in prototypes and
-    /// namespace objects, module-provided proxies and objects,
-    /// non-configurable globals). The next expression, possibly another task or
-    /// tenant, would read it. A fresh runtime shares no mutable state, so
-    /// isolation no longer depends on enumerating what an expression touched.
+    /// The engine's `$`-prefixed built-ins (`$env`, `$get`, `$profile`, …)
+    /// are accepted as in the workflow DSL and rewritten to valid CEL
+    /// identifiers before compilation; task vars, user vars and step ids are
+    /// injected as bare identifiers.
     pub fn eval<T>(&self, expr: &str) -> Result<T>
     where
         T: DeserializeOwned,
     {
-        const TIMEOUT: Duration = Duration::from_millis(15_000);
-        const MAX_MEMORY: usize = 10 * 1024 * 1024;
+        let expr = functions::rewrite(expr);
+        let program = Program::compile(&expr).map_err(|err| ActError::Script(err.to_string()))?;
 
-        let runtime = JsRuntime::new()?;
-        runtime.set_memory_limit(MAX_MEMORY);
-        let ctx = JsContext::full(&runtime)?;
+        // The function registry is shared and initialized once; a child scope
+        // carries only this evaluation's variables.
+        let mut ctx = functions::root().new_inner_scope();
+        functions::inject_vars(self, &mut ctx)?;
 
-        self.eval_in_context(&ctx, expr, TIMEOUT)
-    }
-
-    fn eval_in_context<T>(&self, ctx: &JsContext, expr: &str, timeout: Duration) -> Result<T>
-    where
-        T: DeserializeOwned,
-    {
-        let start = Instant::now();
-        // QuickJS invokes the handler regularly (every 10_000 instructions)
-        // while running script; returning true aborts execution with an
-        // uncatchable exception, so an infinite loop cannot hang the process
-        // past the deadline.
-        ctx.runtime()
-            .set_interrupt_handler(Some(Box::new(move || start.elapsed() > timeout)));
-
-        ctx.with(|ctx| {
-            let global = ctx.globals();
-            // remove eval for safe reason
-            global.remove("eval")?;
-
-            let modules = self.modules.read();
-            for m in modules.iter() {
-                m.init(&ctx)?;
-            }
-            for m in modules.iter() {
-                m.refresh(&ctx)?;
-            }
-
-            // Evaluate inside a block so a top-level declaration stays local to
-            // the expression; the block's completion value is the result, just
-            // like a top-level program.
-            let script = format!("{{\n{expr}\n}}");
-            let result = ctx.eval::<ActJsValue, _>(script);
-            if start.elapsed() > timeout {
-                return Err(ActError::Script("Execution timeout".into()));
-            }
-            if let Err(rquickjs::Error::Exception) = result {
-                match rquickjs::Exception::from_js(&ctx, ctx.catch()) {
-                    Ok(exception) => {
-                        return Err(ActError::Exception {
-                            ecode: "".to_string(),
-                            message: exception.message().unwrap_or_default(),
-                        });
-                    }
-                    Err(exception) => {
-                        return Err(ActError::Script(format!(
-                            "failed to read the thrown exception: {exception}"
-                        )));
-                    }
-                }
-            }
-
-            let value = result.map_err(ActError::from)?;
-            let ret = serde_json::from_value::<T>(value.into()).map_err(ActError::from)?;
-            Ok(ret)
-        })
+        let value = program
+            .execute(&ctx)
+            .map_err(|err| ActError::Script(err.to_string()))?;
+        let json = value
+            .json()
+            .map_err(|err| ActError::Script(err.to_string()))?;
+        serde_json::from_value::<T>(json).map_err(ActError::from)
     }
 }

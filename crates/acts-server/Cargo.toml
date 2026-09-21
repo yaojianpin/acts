@@ -27,6 +27,7 @@ acts-package-http = { workspace = true }
 acts-package-shell = { workspace = true }
 acts-package-state = { workspace = true }
 acts-package-nats = { workspace = true }
+acts-package-javascript = { workspace = true }
 acts-plugin-grpc = { workspace = true }
 acts-plugin-web = { workspace = true }
 acts-plugin-nats = { workspace = true }

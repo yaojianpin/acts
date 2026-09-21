@@ -125,18 +125,24 @@ async fn pack_parallel_in_not_exist() {
     assert!(proc.state().is_error());
 }
 
+/// `in` may name a variable that resolves to the collection to iterate. CEL
+/// replaces the multi-line JavaScript expression the `in` field used to allow
+/// (`${{ let …; a.union(b)… }}`), so this pins the supported variable form.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn pack_parallel_in_code() {
     let workflow = Workflow::new().with_step(|step| {
         step.with_id("step1")
-                .with_uses(USES_PARALLEL, Vars::from(json!({
-                    "in": r#"${{ let a = ["u1", "u2"]; let b = ["u3"];let c = [ "u1" ];let d = [ "u3", "u4" ];a.union(b).difference(c).intersection(d) }}"#,
+            .with_var("items", json!(["u3"]))
+            .with_uses(
+                USES_PARALLEL,
+                Vars::from(json!({
+                    "in": "${{ items }}",
                     "acts": vec![
                         Act::irq(|act| act.with_params_vars(|v| v.with("key", "act1")).with_id("act1"))
                     ]
-                })))
-
+                })),
+            )
     });
 
     workflow.print();
@@ -145,7 +151,6 @@ async fn pack_parallel_in_code() {
     auto_complete(&engine, &rx);
     let channel = engine.channel();
     channel.on_message(move |e| {
-        println!("message: {e:?}");
         let rx = rx.clone();
         async move {
             if e.is_type("act") {

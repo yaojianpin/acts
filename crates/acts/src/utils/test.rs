@@ -10,7 +10,6 @@ pub const USES_SUBFLOW: &str = "acts.core.subflow";
 pub const USES_SEQUENCE: &str = "acts.core.sequence";
 pub const USES_ACTION: &str = "acts.core.action";
 pub const USES_BLOCK: &str = "acts.core.block";
-pub const USES_CODE: &str = "acts.transform.code";
 
 /// Unified test helper. Creates an Engine and a Process from a workflow.
 /// Returns `(Engine, Arc<Process>)`.
