@@ -102,3 +102,26 @@ jobs:
           components: rustfmt, clippy
       - name: Clippy Check
         run: cargo clippy --all-targets --all-features --workspace --locked -- -D warnings
+
+  # The `[[bench]]` targets of `crates/acts` are the one kind of target neither
+  # `cargo build` nor `cargo test` ever compiles, so a bench that stops building
+  # would surface only on whoever next runs `cargo bench` by hand. `--no-run` is
+  # the whole job: compile them (criterion, the harness, the link step) and run
+  # nothing. Running them is not something CI can do honestly — a shared
+  # runner's timings move by double-digit percents between runs, so a number
+  # measured here would describe the neighbor's load, not the engine, and a
+  # regression gate on it would be a random red. Measured benches belong to a
+  # dedicated, pinned runner; this only keeps the code building.
+  # `--all-features` for the reason the Build step above spells out: a bench
+  # that touches feature-gated code must compile where that code compiles.
+  bench-compile:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+      - name: Compile the benches
+        run: cargo bench --no-run --locked --all-features -p acts
