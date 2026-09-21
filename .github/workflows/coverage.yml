@@ -70,10 +70,12 @@ jobs:
         run: |
           set -euo pipefail
           target=x86_64-unknown-linux-musl
+          # Assets are named without the version and extract a flat binary,
+          # not a versioned directory.
           curl --proto '=https' --tlsv1.2 -sSfL \
-            "https://github.com/taiki-e/cargo-llvm-cov/releases/download/v${CARGO_LLVM_COV_VERSION}/cargo-llvm-cov-${CARGO_LLVM_COV_VERSION}-${target}.tar.gz" \
+            "https://github.com/taiki-e/cargo-llvm-cov/releases/download/v${CARGO_LLVM_COV_VERSION}/cargo-llvm-cov-${target}.tar.gz" \
             | tar -xz -C "$RUNNER_TEMP"
-          echo "$RUNNER_TEMP/cargo-llvm-cov-${CARGO_LLVM_COV_VERSION}-${target}" >> "$GITHUB_PATH"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
 
       - name: Install build tools
         shell: bash
