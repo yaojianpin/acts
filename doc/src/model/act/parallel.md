@@ -36,12 +36,12 @@ steps:
 
 ## 代码生成集合
 
-可以结合 `acts.transform.code.javascript` 动态生成集合：
+可以结合 `acts.app.javascript` 动态生成集合：
 
 ```yml
 steps:
     - id: step1
-      uses: acts.transform.code.javascript
+      uses: acts.app.javascript
       params: |
         let list = ["u1", "u2", "u3"];
         $set("items", list);

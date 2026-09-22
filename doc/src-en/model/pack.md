@@ -21,7 +21,7 @@ Packages are reusable functional modules used via `uses` in steps and activities
 | Package | Type | Description |
 | ---- | ---- | ---- |
 | `acts.transform.set` | MSG | Set variable values |
-| `acts.transform.code.javascript` | IRQ | Execute JavaScript code (QuickJS engine) |
+| `acts.app.javascript` | IRQ | Execute JavaScript code (QuickJS engine) |
 
 Workflow start triggers are declared on the `on` field (manual/chat/hook/schedule); see [Triggers](../model/hooks.md).
 
@@ -49,7 +49,7 @@ steps:
 
     # Execute JavaScript
     - id: step4
-      uses: acts.transform.code.javascript
+      uses: acts.app.javascript
       params: |
         return { result: a + 10 };
 ```

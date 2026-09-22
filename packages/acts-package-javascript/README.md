@@ -2,10 +2,10 @@
 
 The acts package plugin that runs JavaScript code with an embedded
 [QuickJS](https://bellard.org/quickjs/) runtime, registered as the
-`acts.transform.code.javascript` workflow act.
+`acts.app.javascript` workflow act.
 
 The engine's own `${{ }}` expression evaluator is `acts-expr` (in the `acts`
-crate); QuickJS lives here, behind the `acts.transform.code.javascript` package
+crate); QuickJS lives here, behind the `acts.app.javascript` package
 that executes arbitrary JavaScript for variable computation and transformation.
 Task data reaches the script through `${{ }}` placeholders (evaluated by the
 engine), and the script hands data back by returning a JSON object.
@@ -41,7 +41,7 @@ vars:
   - name: value
     value: 21
 steps:
-  - uses: acts.transform.code.javascript
+  - uses: acts.app.javascript
     params: |
       return { doubled: ${{ value }} * 2, upper: "hello".toUpperCase() };
 ```

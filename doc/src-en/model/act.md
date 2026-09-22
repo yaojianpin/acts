@@ -55,4 +55,4 @@ steps:
 | `acts.core.subflow` | IRQ | Invoke sub-workflow |
 | `acts.core.action` | MSG | Engine action |
 | `acts.transform.set` | MSG | Set variable values |
-| `acts.transform.code.javascript` | IRQ | Execute JavaScript |
+| `acts.app.javascript` | IRQ | Execute JavaScript |

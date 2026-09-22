@@ -90,7 +90,7 @@ async fn pack_code_outputs() {
         step.with_id("step1")
             .with_expose(Variant::create("my_output", json!(null)))
             .with_uses_code(
-                "acts.transform.code.javascript",
+                "acts.app.javascript",
                 r#"return { "my_output": "abc" };"#,
             )
     });
@@ -104,7 +104,7 @@ async fn pack_code_outputs() {
 async fn pack_code_computes_and_returns() {
     let workflow = Workflow::new().with_id("code_compute").with_step(|step| {
         step.with_id("step1").with_uses_code(
-            "acts.transform.code.javascript",
+            "acts.app.javascript",
             r#"return { sum: 2 + 3, msg: "hi".toUpperCase() };"#,
         )
     });
@@ -124,7 +124,7 @@ async fn pack_code_reads_injected_value() {
         .with_var("value", 21)
         .with_step(|step| {
             step.with_id("step1").with_uses_code(
-                "acts.transform.code.javascript",
+                "acts.app.javascript",
                 r#"return { doubled: ${{ value }} * 2 };"#,
             )
         });

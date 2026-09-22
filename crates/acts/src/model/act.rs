@@ -207,7 +207,7 @@ impl Act {
     pub fn code(code: &str) -> Self {
         Act {
             params: code.into(),
-            uses: "acts.transform.code.javascript".to_string(),
+            uses: "acts.app.javascript".to_string(),
             ..Default::default()
         }
     }

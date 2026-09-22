@@ -46,7 +46,7 @@ steps:
 steps:
     - id: add
       while: index < input
-      uses: acts.transform.code.javascript
+      uses: acts.app.javascript
       params: |
           $set("value", value + index);
           $set("index", index + 1);

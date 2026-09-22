@@ -1,8 +1,8 @@
-//! The `acts.transform.code.javascript` package: runs JavaScript code with an embedded
+//! The `acts.app.javascript` package: runs JavaScript code with an embedded
 //! QuickJS runtime.
 //!
 //! The engine's own `${{ }}` expression evaluator is `acts-expr` (see the
-//! `acts` crate); QuickJS lives here, behind the `acts.transform.code.javascript` package that
+//! `acts` crate); QuickJS lives here, behind the `acts.app.javascript` package that
 //! executes arbitrary JavaScript for variable computation and transformation.
 
 #![allow(rustdoc::bare_urls)]

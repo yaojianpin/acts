@@ -178,7 +178,7 @@ async fn engine_events_forwarded_to_nats() {
         .with_id("nats_event_demo")
         .with_step(|step| {
             step.with_id("step1").with_uses_code(
-                "acts.transform.code.javascript",
+                "acts.app.javascript",
                 r#"return { output: "done" };"#,
             )
         });

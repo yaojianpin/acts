@@ -11,7 +11,7 @@ exposes:
   - name: result
 steps:
     - id: step1
-      uses: acts.transform.code.javascript
+      uses: acts.app.javascript
       params: |
         let a = $get("a");
         $set("result", a * 2);

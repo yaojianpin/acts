@@ -88,7 +88,7 @@ async fn main() {
         params:
             a: 10
       - name: step 2
-        uses: acts.transform.code.javascript
+        uses: acts.app.javascript
         params: |
             return { data: a + 10 };
     "#;
@@ -208,7 +208,7 @@ vars:
 
 steps:
   - name: step1
-    uses: acts.transform.code.javascript
+    uses: acts.app.javascript
     params: |
       // get the a variable
       let v = a + 100;

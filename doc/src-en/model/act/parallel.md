@@ -36,12 +36,12 @@ The engine automatically injects `index` and `value` into each child activity's 
 
 ## Dynamic Collection with Code
 
-Combine with `acts.transform.code.javascript` to dynamically generate collections:
+Combine with `acts.app.javascript` to dynamically generate collections:
 
 ```yml
 steps:
     - id: step1
-      uses: acts.transform.code.javascript
+      uses: acts.app.javascript
       params: |
         let list = ["u1", "u2", "u3"];
         $set("items", list);

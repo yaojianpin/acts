@@ -11,7 +11,7 @@ pub struct CodePackage {
 impl ActPackage for CodePackage {
     fn definition() -> ActPackageDefinition {
         ActPackageDefinition {
-            id: "acts.transform.code.javascript",
+            id: "acts.app.javascript",
             name: "Code",
             desc: "run javascript code",
             version: "0.1.0",
