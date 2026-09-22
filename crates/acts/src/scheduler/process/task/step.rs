@@ -85,6 +85,19 @@ impl ActTask for Step {
             if !state.is_skip() && !state.is_biz_success() {
                 return Ok(NextAction::Parent);
             }
+            // Only a branch that *ran* hands the turn to the branch declared
+            // after it. A branch that was *skipped* must not: its guard did
+            // not hold, the dispatch would pick it up again (its task is done,
+            // so it is not in flight, and a skipped branch claims no marker)
+            // and the pair — dispatch, skip, dispatch — spins as fast as the
+            // evaluator runs. That busy loop is what a scheduler queue
+            // overflow is made of; it was survivable only while every
+            // evaluation cost hundreds of microseconds. The tick is what
+            // re-evaluates the branches a skip did not reach, which is the
+            // cadence the timeout window is written for.
+            if state.is_skip() {
+                return Ok(NextAction::Parent);
+            }
             return if dispatch_next_timeout_branch(ctx, &owner)? {
                 Ok(NextAction::Continue)
             } else {

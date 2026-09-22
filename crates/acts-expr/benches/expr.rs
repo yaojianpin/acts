@@ -55,6 +55,7 @@ fn digest(value: &Value) -> u64 {
         Value::Null => 0,
         Value::Bool(b) => u64::from(*b),
         Value::Int(i) => *i as u64,
+        Value::UInt(u) => *u,
         Value::Float(f) => *f as u64,
         Value::Str(s) => s.len() as u64,
         Value::List(items) => items.len() as u64,

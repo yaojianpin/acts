@@ -29,6 +29,12 @@ pub enum Value {
     /// A 64-bit integer: what an integer literal is, and what `+`, `-`, `*`,
     /// `/` and `%` stay in while both operands are ints.
     Int(i64),
+    /// An integer above `i64::MAX` — what JSON gives a host for one, since a
+    /// JSON integer is an `i64` or a `u64` and nothing else represents
+    /// `u64::MAX` exactly. A value this wide is never produced from a literal
+    /// and only ever shows up injected; arithmetic that mixes it with an `int`
+    /// is exact.
+    UInt(u64),
     /// A 64-bit float. Mixed int/float arithmetic produces a float.
     Float(f64),
     Str(Arc<str>),
@@ -95,6 +101,7 @@ impl Value {
             Value::Null => "null",
             Value::Bool(_) => "bool",
             Value::Int(_) => "int",
+            Value::UInt(_) => "uint",
             Value::Float(_) => "float",
             Value::Str(_) => "string",
             Value::List(_) => "list",
@@ -107,9 +114,9 @@ impl Value {
         matches!(self, Value::Null)
     }
 
-    /// Whether the value is an `int` or a `float`.
+    /// Whether the value is an `int`, a `uint` or a `float`.
     pub fn is_number(&self) -> bool {
-        matches!(self, Value::Int(_) | Value::Float(_))
+        matches!(self, Value::Int(_) | Value::UInt(_) | Value::Float(_))
     }
 
     pub fn as_bool(&self) -> Option<bool> {
@@ -126,6 +133,25 @@ impl Value {
         }
     }
 
+    /// The value as a `u64`, for an `int` that is not negative too.
+    pub fn as_u64(&self) -> Option<u64> {
+        match self {
+            Value::Int(i) => u64::try_from(*i).ok(),
+            Value::UInt(u) => Some(*u),
+            _ => None,
+        }
+    }
+
+    /// The value as a 128-bit integer: exact for both integer kinds, which is
+    /// what lets `int` and `uint` mix without a rounding step.
+    pub fn as_i128(&self) -> Option<i128> {
+        match self {
+            Value::Int(i) => Some(i128::from(*i)),
+            Value::UInt(u) => Some(i128::from(*u)),
+            _ => None,
+        }
+    }
+
     pub fn as_float(&self) -> Option<f64> {
         match self {
             Value::Float(f) => Some(*f),
@@ -133,10 +159,11 @@ impl Value {
         }
     }
 
-    /// The number as an `f64`, whether it is an int or a float.
+    /// The number as an `f64`, whatever kind of number it is.
     pub fn as_number(&self) -> Option<f64> {
         match self {
             Value::Int(i) => Some(*i as f64),
+            Value::UInt(u) => Some(*u as f64),
             Value::Float(f) => Some(*f),
             _ => None,
         }
@@ -176,8 +203,16 @@ impl Value {
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::UInt(a), Value::UInt(b)) => a == b,
             (Value::Float(a), Value::Float(b)) => a == b,
+            // Exact across the integer kinds, in the one width both fit.
+            (Value::Int(a), Value::UInt(b)) | (Value::UInt(b), Value::Int(a)) => {
+                i128::from(*a) == i128::from(*b)
+            }
             (Value::Int(a), Value::Float(b)) | (Value::Float(b), Value::Int(a)) => {
+                (*a as f64) == *b
+            }
+            (Value::UInt(a), Value::Float(b)) | (Value::Float(b), Value::UInt(a)) => {
                 (*a as f64) == *b
             }
             // Immutable and usually shared, so the pointer check answers the
@@ -203,9 +238,14 @@ impl Value {
     pub fn compare(&self, other: &Value) -> Option<std::cmp::Ordering> {
         match (self, other) {
             (Value::Int(a), Value::Int(b)) => Some(a.cmp(b)),
+            (Value::UInt(a), Value::UInt(b)) => Some(a.cmp(b)),
+            (Value::Int(a), Value::UInt(b)) => i128::from(*a).partial_cmp(&i128::from(*b)),
+            (Value::UInt(a), Value::Int(b)) => i128::from(*a).partial_cmp(&i128::from(*b)),
             (Value::Str(a), Value::Str(b)) => Some(a.as_ref().cmp(b.as_ref())),
             (Value::Int(a), Value::Float(b)) => (*a as f64).partial_cmp(b),
+            (Value::UInt(a), Value::Float(b)) => (*a as f64).partial_cmp(b),
             (Value::Float(a), Value::Int(b)) => a.partial_cmp(&(*b as f64)),
+            (Value::Float(a), Value::UInt(b)) => a.partial_cmp(&(*b as f64)),
             (Value::Float(a), Value::Float(b)) => a.partial_cmp(b),
             _ => None,
         }
@@ -221,6 +261,7 @@ impl Value {
             Value::Null => Json::Null,
             Value::Bool(b) => Json::Bool(*b),
             Value::Int(i) => Json::from(*i),
+            Value::UInt(u) => Json::from(*u),
             Value::Float(f) => serde_json::Number::from_f64(*f)
                 .map(Json::Number)
                 .ok_or_else(|| Error::Convert {
@@ -250,6 +291,7 @@ impl fmt::Debug for Value {
             Value::Null => f.write_str("null"),
             Value::Bool(b) => write!(f, "{b}"),
             Value::Int(i) => write!(f, "{i}"),
+            Value::UInt(u) => write!(f, "{u}"),
             Value::Float(v) => write!(f, "{v}"),
             Value::Str(s) => write!(f, "{s:?}"),
             Value::List(items) => f.debug_list().entries(items.iter()).finish(),
@@ -271,6 +313,7 @@ impl fmt::Display for Value {
             Value::Null => write!(f, "null"),
             Value::Bool(b) => write!(f, "{b}"),
             Value::Int(i) => write!(f, "{i}"),
+            Value::UInt(u) => write!(f, "{u}"),
             Value::Float(v) => write!(f, "{v}"),
             Value::Str(s) => write!(f, "{s}"),
             Value::List(items) => {
@@ -324,15 +367,24 @@ impl From<i64> for Value {
 
 impl From<u32> for Value {
     fn from(value: u32) -> Self {
-        Value::Int(value as i64)
+        Value::Int(i64::from(value))
+    }
+}
+
+impl From<u64> for Value {
+    /// A `u64` that fits an `i64` becomes one, so a `uint` only ever holds a
+    /// value that needs the wider type.
+    fn from(value: u64) -> Self {
+        match i64::try_from(value) {
+            Ok(value) => Value::Int(value),
+            Err(_) => Value::UInt(value),
+        }
     }
 }
 
 impl From<usize> for Value {
-    /// A `usize` past `i64::MAX` is not representable, so it saturates — a
-    /// value that far out is a bug in the host, not a workflow.
     fn from(value: usize) -> Self {
-        Value::Int(i64::try_from(value).unwrap_or(i64::MAX))
+        Value::from(value as u64)
     }
 }
 
@@ -386,11 +438,12 @@ impl From<serde_json::Value> for Value {
         match value {
             Json::Null => Value::Null,
             Json::Bool(b) => Value::Bool(b),
-            Json::Number(n) => match n.as_i64() {
-                Some(i) => Value::Int(i),
-                // A `u64` past `i64` has no int form; the float is the same
-                // trade the engine makes for a number that wide.
-                None => Value::Float(n.as_f64().unwrap_or(f64::NAN)),
+            // The same ladder `serde_json` reads its own numbers with: an
+            // `i64`, then a `u64`, and a float only past both.
+            Json::Number(n) => match (n.as_i64(), n.as_u64()) {
+                (Some(i), _) => Value::Int(i),
+                (None, Some(u)) => Value::UInt(u),
+                (None, None) => Value::Float(n.as_f64().unwrap_or(f64::NAN)),
             },
             Json::String(s) => Value::Str(Arc::from(s)),
             Json::Array(items) => Value::List(items.into_iter().map(Value::from).collect()),

@@ -1086,10 +1086,18 @@ mod tests {
         .as_str()
         .unwrap()
         .to_string();
+        // The run is held from before its completion: a finished run is swept
+        // (its resident instance and its rows go), so reading it afterwards is
+        // a race against the sweeper, and the seal is a property of the run.
+        let proc = engine
+            .runtime()
+            .proc(&pid)
+            .await
+            .unwrap()
+            .expect("the run is resident while it runs");
         assert_eq!(sig.recv().await, pid);
 
         // The run sealed its own subject's value, and nothing else.
-        let proc = engine.runtime().proc(&pid).await.unwrap().unwrap();
         assert_eq!(
             proc.root()
                 .unwrap()

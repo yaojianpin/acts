@@ -9,7 +9,7 @@ steps:
       branches:
         - id: b1
           # 分支条件表达式
-          if: '${{ a }} > 0'
+          if: 'a > 0'
           steps:
             - id: step2
 
@@ -20,6 +20,15 @@ steps:
             - id: step3
     - id: step4
 ```
+
+条件是一个表达式（不带 `${{ }}`）：task 的变量、某个 step 的数据（`step1.total`）、
+user var（`secrets.TOKEN`）都是普通名字，直接写 `a > b` 即可；`$get(name)` 只用于
+名字本身是运行时算出来的情况，例如 `$get(prefix + '_token')`（`+` 两侧都是字符串）。
+
+条件里也可以用值自带的方法：
+`name.length()`、`name.startsWith(p)`、`name.endsWith(p)`、`name.indexOf(p)`、
+`name.contains(p)`、`name.is_match(re)`、`items.length()`、`items.contains(v)`、
+`obj.length()`；`length()` 与 `indexOf()` 按字符计数而非字节，注入的同名方法优先。
 
 分支包含的属性有：
 

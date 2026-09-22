@@ -134,7 +134,9 @@ fn eval_node(nodes: &[Node], index: u32, context: &Context) -> Result<Value> {
 
             // The object's own method first — that is what makes an injected
             // object carry its methods — then a method of that name from the
-            // context, which is the `size(x)` / `x.size()` pairing.
+            // context, which is the `size(x)` / `x.size()` pairing, and last
+            // the built-in methods a value type carries of its own
+            // (`name.length()`, `items.contains(x)`).
             let own = receiver
                 .as_map()
                 .and_then(|map| map.get(name.as_ref()))
@@ -143,12 +145,18 @@ fn eval_node(nodes: &[Node], index: u32, context: &Context) -> Result<Value> {
 
             let function = match own {
                 Some(function) => function,
-                None => context
-                    .get(name)
-                    .cloned()
-                    .ok_or_else(|| Error::UnknownMethod {
-                        name: name.to_string(),
-                    })?,
+                None => match context.get(name).cloned() {
+                    Some(function) => function,
+                    None => {
+                        let args = arguments(nodes, args, context)?;
+
+                        return crate::methods::call(name, &receiver, &args)?.ok_or_else(|| {
+                            Error::UnknownMethod {
+                                name: name.to_string(),
+                            }
+                        });
+                    }
+                },
             };
             let Value::Function(function) = function else {
                 return Err(Error::UnknownMethod {
@@ -234,13 +242,16 @@ fn binary(nodes: &[Node], op: BinOp, left: u32, right: u32, context: &Context) -
     }
 }
 
-/// `+`, `-`, `*`, `/` and `%`. Both ints keeps the result an int (so `/`
-/// truncates and `%` is the remainder, as CEL defines them); a float either
-/// side makes it a float. The operator that reads in the source is the one
-/// the error names.
+/// `+`, `-`, `*`, `/` and `%`. Two ints stay an int and keep CEL's semantics
+/// (`/` truncates, `%` is the remainder, a result past `i64` overflows); a
+/// `uint` on either side is computed in 128 bits, exact, and narrowed back to
+/// whichever integer kind holds the result; a float either side makes it a
+/// float. The operator that reads in the source is the one the error names.
 fn arithmetic(op: BinOp, left: &Value, right: &Value) -> Result<Value> {
     let symbol = op.symbol();
 
+    // Two ints stay an int, and a result past `i64` overflows rather than
+    // quietly becoming a wider type.
     if let (Value::Int(a), Value::Int(b)) = (left, right) {
         let (a, b) = (*a, *b);
 
@@ -264,6 +275,35 @@ fn arithmetic(op: BinOp, left: &Value, right: &Value) -> Result<Value> {
         return result
             .map(Value::Int)
             .ok_or(Error::Overflow { operation: symbol });
+    }
+
+    // A `uint` on either side: computed in 128 bits, exact, and narrowed back
+    // to the kind that holds the result.
+    if let (Some(a), Some(b)) = (left.as_i128(), right.as_i128()) {
+        let result = match op {
+            BinOp::Add => a.checked_add(b),
+            BinOp::Sub => a.checked_sub(b),
+            BinOp::Mul => a.checked_mul(b),
+            BinOp::Div | BinOp::Rem => {
+                if b == 0 {
+                    return Err(Error::DivideByZero { operation: symbol });
+                }
+                if op == BinOp::Div {
+                    a.checked_div(b)
+                } else {
+                    a.checked_rem(b)
+                }
+            }
+            _ => unreachable!("only arithmetic reaches here"),
+        };
+
+        let result = result.ok_or(Error::Overflow { operation: symbol })?;
+
+        return match (i64::try_from(result), u64::try_from(result)) {
+            (Ok(value), _) => Ok(Value::Int(value)),
+            (Err(_), Ok(value)) => Ok(Value::UInt(value)),
+            (Err(_), Err(_)) => Err(Error::Overflow { operation: symbol }),
+        };
     }
 
     let (Some(a), Some(b)) = (left.as_number(), right.as_number()) else {

@@ -12,15 +12,21 @@ rust-version.workspace = true
 include = ["src/**/*"]
 
 [dependencies]
-# None. The evaluator is a lexer, a parser and a tree walk over its own value
-# type; `serde_json` interop is the feature below, off by default.
+# The core evaluator — a lexer, a parser and a tree walk over its own value
+# type — has no dependencies; both entries below are behind features that are
+# off by default.
 serde_json = { optional = true, workspace = true }
+# `is_match(pattern)` is the one built-in method that needs a regular
+# expression engine. The engine already depends on `regex` for the `${{ }}`
+# scanner, so turning it on there costs it nothing.
+regex = { optional = true, workspace = true }
 
 [features]
 # `Value` <-> `serde_json::Value` conversion, for hosts (the engine) that speak
-# JSON. Off by default so the crate itself has no dependencies at all.
-default = []
+# JSON.
 json = ["dep:serde_json"]
+# The `is_match(pattern)` string method.
+regex = ["dep:regex"]
 
 [[bench]]
 name = "expr"

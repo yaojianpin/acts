@@ -56,17 +56,25 @@ fn env_eval_string() {
     assert_eq!(env.eval::<String>("'hello'").unwrap(), "hello");
 }
 
-#[test]
-fn env_eval_array() {
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn env_eval_array() {
     let env = Environment::new();
-    assert_eq!(
-        env.eval::<Vec<String>>("['u1', 'u2']").unwrap(),
-        ["u1", "u2"]
-    );
+    let workflow = Workflow::new()
+        .with_var("list", json!(["u1", "u2"]))
+        .with_step(|step| step.with_id("step1"));
+    let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
+
+    let context = proc.root().unwrap().create_context();
+    Context::scope(&context, || {
+        assert_eq!(env.eval::<Vec<String>>("list").unwrap(), ["u1", "u2"]);
+        assert_eq!(env.eval::<String>("list[1]").unwrap(), "u2");
+    });
 }
 
-#[test]
-fn env_eval_object() {
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn env_eval_object() {
     #[derive(Debug, Deserialize, Serialize, PartialEq, Clone)]
     struct Obj {
         a: i32,
@@ -74,14 +82,36 @@ fn env_eval_object() {
     }
 
     let env = Environment::new();
-    let result = env.eval::<Obj>("{'a': 1, 'b': 'abc'}").unwrap();
-    assert_eq!(
-        result,
-        Obj {
-            a: 1,
-            b: "abc".to_string()
-        }
-    );
+    let workflow = Workflow::new()
+        .with_var("obj", json!({ "a": 1, "b": "abc" }))
+        .with_step(|step| step.with_id("step1"));
+    let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
+
+    let context = proc.root().unwrap().create_context();
+    Context::scope(&context, || {
+        let result = env.eval::<Obj>("obj").unwrap();
+        assert_eq!(
+            result,
+            Obj {
+                a: 1,
+                b: "abc".to_string()
+            }
+        );
+        assert_eq!(env.eval::<String>("obj.b").unwrap(), "abc");
+    });
+}
+
+/// Collections are injected, not written into an expression: the evaluator is
+/// an expression evaluator, and a literal would be a second, differently
+/// specified way to spell a value the workflow already holds.
+#[test]
+fn env_eval_collection_literals_are_rejected() {
+    let env = Environment::new();
+
+    for source in ["['u1', 'u2']", "{'a': 1}"] {
+        let err = env.eval::<serde_json::Value>(source).unwrap_err();
+        assert!(err.to_string().contains("inject"), "{source}: {err}");
+    }
 }
 
 #[test]
@@ -93,7 +123,10 @@ fn env_eval_null() {
 #[test]
 fn env_eval_parse_error() {
     let env = Environment::new();
-    assert!(env.eval::<serde_json::Value>("this is not cel").is_err());
+    assert!(
+        env.eval::<serde_json::Value>("this is not an expression")
+            .is_err()
+    );
 }
 
 #[test]
@@ -215,6 +248,36 @@ async fn env_task_get_fn_not_exists() {
             env.eval::<serde_json::Value>("$get('not_exists')").unwrap(),
             serde_json::Value::Null
         );
+    });
+}
+
+/// A name the expression builds itself is the one thing `$get` is for:
+/// everything else is read by its own name — `a > b`, `step1.total`,
+/// `secrets.TOKEN` — which is what an expression is supposed to look like.
+#[tokio::test(flavor = "multi_thread")]
+#[serial]
+async fn env_get_a_name_the_expression_builds() {
+    let env = Environment::new();
+    let workflow = Workflow::new()
+        .with_var("prefix", "var")
+        .with_var("var_a", 7)
+        .with_var("var_b", 9)
+        .with_step(|step| step.with_id("step1").with_var("total", 8));
+    let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
+
+    let context = proc.root().unwrap().create_context();
+    Context::scope(&context, || {
+        // Two vars by name: the condition a workflow is written as.
+        assert!(env.eval::<bool>("var_b > var_a").unwrap());
+        assert_eq!(env.eval::<i64>("var_a + var_b").unwrap(), 16);
+        // A step's data, and a var against it.
+        assert!(
+            env.eval::<bool>("step1.total > var_a && var_b >= step1.total")
+                .unwrap()
+        );
+        // The same comparison, with the name built at runtime.
+        assert_eq!(env.eval::<i64>("$get(prefix + '_a')").unwrap(), 7);
+        assert!(env.eval::<bool>("$get(prefix + '_b') > var_a").unwrap());
     });
 }
 
@@ -629,6 +692,10 @@ async fn env_act_cost_get() {
         .unwrap();
     sig.recv().await;
     let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
+
+    // `$cost()` is the milliseconds since the task started, so the evaluation
+    // has to happen in a later millisecond than the start to be non-zero.
+    tokio::time::sleep(Duration::from_millis(5)).await;
 
     let context = task.create_context();
     Context::scope(&context, || {

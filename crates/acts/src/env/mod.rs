@@ -3,7 +3,7 @@ mod functions;
 mod tests;
 
 use crate::{ActError, Context, Result, ShareLock, Vars};
-use cel::Program;
+use acts_expr::{Context as ExprContext, Expr};
 use core::fmt;
 use parking_lot::RwLock;
 use serde::de::DeserializeOwned;
@@ -84,52 +84,48 @@ impl Environment {
         user_envs.push(Box::new(module.clone()));
     }
 
-    /// Resolve every registered user var (the built-in `secrets` and any
-    /// embedder-registered var) to its data: the var's `default_data` overlaid
-    /// with the value the current task holds under the var's name.
-    pub fn user_vars(&self) -> Vec<(String, Vars)> {
-        self.user_vars
-            .read()
-            .iter()
-            .map(|var| {
-                let name = var.name();
-                let mut data = var.default_data().unwrap_or_default();
-                if let Ok(Some(vars)) =
-                    Context::try_with_current(|ctx| ctx.task().find::<Vars>(&name))
-                {
-                    for (k, v) in vars.iter() {
-                        data.set(k, v);
-                    }
-                }
-                (name, data)
-            })
-            .collect()
+    /// One user var's data — `default_data` overlaid with what the current
+    /// task holds under that name — or `None` if no var is registered by it.
+    pub fn user_var(&self, name: &str) -> Option<Vars> {
+        let mut data = {
+            let vars = self.user_vars.read();
+            let var = vars.iter().find(|var| var.name() == name)?;
+
+            var.default_data().unwrap_or_default()
+        };
+
+        if let Ok(Some(vars)) = Context::try_with_current(|ctx| ctx.task().find::<Vars>(name)) {
+            for (k, v) in vars.iter() {
+                data.set(k, v);
+            }
+        }
+
+        Some(data)
     }
 
-    /// Evaluate a CEL expression, returning the value deserialized into `T`.
+    /// Evaluate an expression, returning the value deserialized into `T`.
     ///
-    /// The engine's `$`-prefixed built-ins (`$env`, `$get`, `$profile`, …)
-    /// are accepted as in the workflow DSL and rewritten to valid CEL
-    /// identifiers before compilation; task vars, user vars and step ids are
-    /// injected as bare identifiers.
+    /// The engine's `$`-prefixed built-ins (`$env`, `$get`, `$profile`, …) are
+    /// ordinary identifiers to the evaluator, so an expression reads exactly
+    /// as it is written. Only the names the expression references are resolved
+    /// (see [`functions::inject`]), and each evaluation gets its own context,
+    /// so nothing an expression injects is visible to the next one.
     pub fn eval<T>(&self, expr: &str) -> Result<T>
     where
         T: DeserializeOwned,
     {
-        let expr = functions::rewrite(expr);
-        let program = Program::compile(&expr).map_err(|err| ActError::Script(err.to_string()))?;
+        let program = Expr::compile(expr).map_err(|err| ActError::Script(err.to_string()))?;
 
-        // The function registry is shared and initialized once; a child scope
-        // carries only this evaluation's variables.
-        let mut ctx = functions::root().new_inner_scope();
-        functions::inject_vars(self, &mut ctx)?;
+        let mut ctx = ExprContext::new();
+        functions::inject(self, &mut ctx, &program.references())?;
 
         let value = program
-            .execute(&ctx)
+            .eval(&ctx)
             .map_err(|err| ActError::Script(err.to_string()))?;
         let json = value
-            .json()
+            .to_json()
             .map_err(|err| ActError::Script(err.to_string()))?;
+
         serde_json::from_value::<T>(json).map_err(ActError::from)
     }
 }

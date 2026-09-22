@@ -2,7 +2,7 @@
 
 Use `acts.transform.code.javascript` to execute JavaScript code (QuickJS engine) for variable computation, data transformation, and conditional logic within a workflow.
 
-Task data reaches the script through `${{ }}` placeholders (evaluated as CEL expressions by the engine), and the script hands data back by returning a JSON object.
+Task data reaches the script through `${{ }}` placeholders (evaluated by the engine's expression evaluator), and the script hands data back by returning a JSON object.
 
 ```yml
 steps:
@@ -16,7 +16,7 @@ steps:
 
 | Mechanism | Description |
 | ---- | ---- |
-| `${{ expr }}` | Injects the CEL expression's result into the script (variables, `$env`, `$data()`, `$inputs()`, …) |
+| `${{ expr }}` | Injects the expression's result into the script (variables, `$env`, `$data()`, `$inputs()`, …) |
 | `return { ... }` | Returns a JSON object written into the task data as the step's output |
 
 ## Use Cases

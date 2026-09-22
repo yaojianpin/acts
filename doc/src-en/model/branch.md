@@ -13,7 +13,7 @@ steps:
       branches:
         - id: b1
           name: branch 1
-          if: '${{ a }} > 0'
+          if: 'a > 0'
           steps:
             - id: step3
               uses: acts.transform.set
@@ -60,12 +60,25 @@ If branch `b1` depends on `b2`, the engine sets `b1` to Pending state until `b2`
 
 ## Expressions in Conditions
 
-Branch conditions use `${{ }}` expression syntax:
+A branch condition *is* an expression — written bare, without the `${{ }}` that
+marks a placeholder inside a param or var string — and it must evaluate to a
+bool:
 
 ```yml
 # Variable comparison
-if: '${{ a }} > 0'
+if: 'a > 0'
 
 # Multi-condition
-if: '${{ a }} > 0 && $get("status") == "active"'
+if: 'a > 0 && status == "active"'
 ```
+
+Task vars, a step's data (`step1.total`) and a user var (`secrets.TOKEN`) are
+ordinary names in an expression — there is nothing to call to read them.
+`$get(name)` is for the one case a name cannot spell: a name the expression
+builds itself, e.g. `$get(prefix + '_token')` (with `+` between two strings).
+
+A condition may also use the methods a value carries of its own:
+`name.length()`, `name.startsWith(p)`, `name.endsWith(p)`, `name.indexOf(p)`,
+`name.contains(p)`, `name.is_match(re)`, `items.length()`, `items.contains(v)`
+and `obj.length()`. `length()` and `indexOf()` count characters, not bytes; an
+injected method of the same name wins over the built-in one.

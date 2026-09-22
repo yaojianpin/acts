@@ -140,6 +140,59 @@ fn division_by_zero_is_an_error() {
 }
 
 #[test]
+fn a_uint_above_i64_stays_exact() {
+    let mut context = Context::new();
+    context
+        .set("big", u64::MAX)
+        .set("snowflake", 1_234_567_890_123_456_789i64)
+        .set("min", i64::MIN);
+
+    // What JSON gives a host for an integer past `i64`, and back out the same.
+    assert_eq!(eval("big", &context).unwrap(), Value::UInt(u64::MAX));
+    assert_eq!(
+        eval("big", &context).unwrap().to_json().unwrap(),
+        serde_json::json!(u64::MAX)
+    );
+    assert_eq!(eval("min", &context).unwrap(), Value::Int(i64::MIN));
+
+    // Arithmetic across the two integer kinds is exact, and only a result past
+    // both of them overflows.
+    assert_eq!(
+        eval("big - 1", &context).unwrap(),
+        Value::UInt(u64::MAX - 1)
+    );
+    assert_eq!(
+        eval("snowflake - 1", &context).unwrap(),
+        Value::from(1_234_567_890_123_456_788i64)
+    );
+    assert_eq!(
+        eval("big > snowflake", &context).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(eval("big == big", &context).unwrap(), Value::Bool(true));
+    assert_eq!(
+        eval("big != snowflake", &context).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        eval("big + 1", &context),
+        Err(Error::Overflow { operation: "+" })
+    );
+    assert_eq!(
+        eval("big * 2", &context),
+        Err(Error::Overflow { operation: "*" })
+    );
+    assert_eq!(
+        eval("-big", &context),
+        Err(Error::Type {
+            operation: "-",
+            got: "uint"
+        })
+    );
+    assert_eq!(eval("big % 2", &context).unwrap(), Value::from(1u64));
+}
+
+#[test]
 fn plus_concatenates_strings() {
     assert_eq!(text("'a' + 'b' + 'c'"), "abc");
     assert_eq!(
@@ -451,6 +504,323 @@ fn unknown_names_and_methods_are_errors() {
             operation: "call",
             got: "int"
         })
+    );
+}
+
+// ---- built-in methods ----
+
+#[test]
+fn string_methods() {
+    let mut context = Context::new();
+    context.set("name", "workflow-engine");
+
+    assert_eq!(eval("name.length()", &context).unwrap(), Value::from(15));
+    assert_eq!(
+        eval("name.startsWith('work')", &context).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        eval("name.startsWith('flow')", &context).unwrap(),
+        Value::Bool(false)
+    );
+    assert_eq!(
+        eval("name.endsWith('engine')", &context).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        eval("name.endsWith('work')", &context).unwrap(),
+        Value::Bool(false)
+    );
+    assert_eq!(
+        eval("name.indexOf('flow')", &context).unwrap(),
+        Value::from(4)
+    );
+    assert_eq!(
+        eval("name.indexOf('nope')", &context).unwrap(),
+        Value::from(-1)
+    );
+
+    // A literal receiver carries the same methods, and both `length` and
+    // `indexOf` count characters, not bytes.
+    assert_eq!(eval("'héllo'.length()", &context).unwrap(), Value::from(5));
+    assert_eq!(
+        eval("'héllo'.indexOf('llo')", &context).unwrap(),
+        Value::from(2)
+    );
+}
+
+#[test]
+fn collection_methods() {
+    let mut context = Context::new();
+    context
+        .set("items", Value::list([1, 2, 3]))
+        .set("names", Value::list(["a", "b"]))
+        .set("obj", Value::map([("k", 1), ("j", 2)]));
+
+    assert_eq!(
+        eval("items.contains(2)", &context).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        eval("items.contains(9)", &context).unwrap(),
+        Value::Bool(false)
+    );
+    assert_eq!(
+        eval("names.contains('b')", &context).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(eval("items.length()", &context).unwrap(), Value::from(3));
+    assert_eq!(eval("obj.length()", &context).unwrap(), Value::from(2));
+
+    // `contains` on a string is a substring test.
+    assert_eq!(
+        eval("'abcdef'.contains('cd')", &context).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        eval("'abcdef'.contains('ce')", &context).unwrap(),
+        Value::Bool(false)
+    );
+}
+
+#[test]
+fn methods_report_a_wrong_receiver_argument_or_arity() {
+    let mut context = Context::new();
+    context.set("count", 3).set("text", "abc");
+
+    let function = |name: &str, message: &str| Error::Function {
+        name: name.to_string(),
+        message: message.to_string(),
+    };
+
+    assert_eq!(
+        eval("count.length()", &context),
+        Err(function("length", "expects a string, list or map, got int"))
+    );
+    assert_eq!(
+        eval("text.startsWith(1)", &context),
+        Err(function(
+            "startsWith",
+            "argument 1 must be a string, got int"
+        ))
+    );
+    assert_eq!(
+        eval("text.startsWith()", &context),
+        Err(function("startsWith", "takes 1 argument(s), got 0"))
+    );
+    assert_eq!(
+        eval("'a'.length(1)", &context),
+        Err(function("length", "takes 0 argument(s), got 1"))
+    );
+    assert_eq!(
+        eval("count.contains(1)", &context),
+        Err(function("contains", "expects a string or list, got int"))
+    );
+    // A name that is not a built-in is still an unknown method.
+    assert_eq!(
+        eval("text.upper()", &context),
+        Err(Error::UnknownMethod {
+            name: "upper".to_string()
+        })
+    );
+}
+
+/// The lookup order is the object's own method, then the context's, then the
+/// built-in one — an injected `length` is the host's to define.
+#[test]
+fn an_injected_method_wins_over_a_builtin_one() {
+    let mut context = Context::new();
+    context
+        .set("text", "abc")
+        .set("length", Value::function(|_| Ok(Value::from(-1))))
+        .set(
+            "obj",
+            Value::map([
+                ("length", Value::function(|_| Ok(Value::from(-2)))),
+                ("k", Value::from(1)),
+            ]),
+        );
+
+    assert_eq!(eval("text.length()", &context).unwrap(), Value::from(-1));
+    assert_eq!(eval("obj.length()", &context).unwrap(), Value::from(-2));
+}
+
+#[cfg(feature = "regex")]
+#[test]
+fn is_match_matches_a_regular_expression() {
+    let mut context = Context::new();
+    context.set("code", "ERR-404");
+
+    assert_eq!(
+        eval("code.is_match('^ERR-[0-9]+$')", &context).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        eval("code.is_match('^OK')", &context).unwrap(),
+        Value::Bool(false)
+    );
+
+    let err = eval("code.is_match('(')", &context).unwrap_err();
+    assert!(err.to_string().contains("regular expression"), "{err}");
+}
+
+#[cfg(not(feature = "regex"))]
+#[test]
+fn is_match_is_unknown_without_the_regex_feature() {
+    assert_eq!(
+        eval("'a'.is_match('a')", &Context::new()),
+        Err(Error::UnknownMethod {
+            name: "is_match".to_string()
+        })
+    );
+}
+
+// ---- nested expressions ----
+
+#[test]
+fn nested_member_and_index_paths() {
+    let mut context = Context::new();
+    context.set(
+        "order",
+        Value::map([
+            ("id", Value::from("o-1")),
+            (
+                "customer",
+                Value::map([
+                    ("name", Value::from("Ada")),
+                    ("tags", Value::list([Value::from("vip"), Value::from("eu")])),
+                ]),
+            ),
+            (
+                "lines",
+                Value::list([
+                    Value::map([("sku", Value::from("A1")), ("qty", Value::from(2))]),
+                    Value::map([("sku", Value::from("B2")), ("qty", Value::from(5))]),
+                ]),
+            ),
+        ]),
+    );
+
+    assert_eq!(
+        eval("order.customer.tags[0]", &context).unwrap(),
+        Value::from("vip")
+    );
+    assert_eq!(
+        eval("order.lines[1].qty * order.lines[0].qty", &context).unwrap(),
+        Value::from(10)
+    );
+    assert_eq!(
+        eval("order.customer.name.startsWith('A')", &context).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        eval("order['customer']['tags'][1] == 'eu'", &context).unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        eval("order.lines[0].sku.indexOf('1')", &context).unwrap(),
+        Value::from(1)
+    );
+}
+
+#[test]
+fn nested_calls_fold_into_one_value() {
+    let mut context = Context::new();
+    context
+        .set("count", 2)
+        .set(
+            "step1",
+            Value::map([("value", Value::from(7)), ("list", Value::list([3, 4]))]),
+        )
+        .set(
+            "twice",
+            Value::function(|args| match args {
+                [Value::Int(value)] => Ok(Value::Int(value * 2)),
+                _ => Err(Error::Function {
+                    name: "twice".to_string(),
+                    message: "expects an int".to_string(),
+                }),
+            }),
+        )
+        .set(
+            "sum",
+            Value::function(|args| {
+                let total: i64 = args.iter().filter_map(Value::as_int).sum();
+
+                Ok(Value::Int(total))
+            }),
+        );
+
+    assert_eq!(
+        eval("twice(twice(count))", &context).unwrap(),
+        Value::from(8)
+    );
+    assert_eq!(
+        eval("sum(step1.list[0], step1.list[1], count)", &context).unwrap(),
+        Value::from(9)
+    );
+    assert_eq!(
+        eval("twice(sum(step1.list[0], step1.value)) + count", &context).unwrap(),
+        Value::from(22)
+    );
+}
+
+/// The shape a step condition has: several levels of member access, a method,
+/// and the operators around them.
+#[test]
+fn nested_predicates() {
+    let mut context = Context::new();
+    context
+        .set("count", 3)
+        .set("status", "ok")
+        .set("secrets", Value::map([("TOKEN", Value::from("sk-abc"))]))
+        .set(
+            "step1",
+            Value::map([
+                ("value", Value::from(7)),
+                ("items", Value::list(["a", "b"])),
+            ]),
+        );
+
+    assert_eq!(
+        eval(
+            "status == 'ok' && (count > 2 || step1.items.contains('z'))",
+            &context
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        eval(
+            "!(step1.value < 5) && (secrets.TOKEN.length() >= 6 || count == 0)",
+            &context
+        )
+        .unwrap(),
+        Value::Bool(true)
+    );
+    assert_eq!(
+        eval("count + step1.items.length() * 2 == 7", &context).unwrap(),
+        Value::Bool(true)
+    );
+}
+
+#[test]
+fn deep_grouping_still_evaluates_to_the_right_value() {
+    let mut context = Context::new();
+    context.set("a", 1).set("b", 2).set("c", 3).set("d", 4);
+
+    // ((1 + 2) * (3 + 4)) - ((1 * 2) + (3 * 4)) = 21 - 14 = 7, and 7 % 7 = 0.
+    assert_eq!(
+        eval(
+            "((((a + b) * (c + d)) - ((a * b) + (c * d))) % 7) + a",
+            &context
+        )
+        .unwrap(),
+        Value::from(1)
+    );
+    assert_eq!(
+        eval("(((((((((1 + 1)))))))))  * (a + 1)", &context).unwrap(),
+        Value::from(4)
     );
 }
 

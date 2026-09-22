@@ -115,7 +115,7 @@ async fn pack_code_computes_and_returns() {
 }
 
 /// Task data reaches the JavaScript through `${{ }}` expressions, which the
-/// engine evaluates (CEL) before the script runs.
+/// engine evaluates before the script runs.
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn pack_code_reads_injected_value() {

@@ -15,11 +15,29 @@
 //! - logic: `&&`, `||`, unary `!`, both short-circuiting
 //! - access: `a.b`, `a['b']`, `list[0]`, and calls `f(x)`, `a.f(x)`
 //!
-//! `==` compares numbers across `int` and `float`, lists and objects
+//! `==` compares numbers across `int`, `uint` and `float`, lists and objects
 //! element-wise, and values of different kinds are not equal (so a workflow
 //! that compares a missing value with a string is `false`, not an error).
 //! Arithmetic requires numbers, `+` also concatenates two strings, and
-//! `&& || !` require bools.
+//! `&& || !` require bools. Two ints stay an int (so `/` truncates and `%` is
+//! the remainder) and an overflow is an error; a `uint` — what JSON gives a
+//! host for a value above `i64::MAX` — stays exact against an int, and any
+//! float either side makes the result a float.
+//!
+//! # Built-in methods
+//!
+//! A value carries a few methods of its own, so the common test needs nothing
+//! injected:
+//!
+//! - a string: `length()`, `startsWith(p)`, `endsWith(p)`, `indexOf(p)`,
+//!   `contains(p)`, and `is_match(pattern)` — a regular expression, behind the
+//!   `regex` feature
+//! - a list: `length()`, `contains(value)` (an element, compared by value)
+//! - a map: `length()` (its entries)
+//!
+//! `length()` and `indexOf()` count characters, not bytes. These are found
+//! last: the object's own method, then a function of that name in the context,
+//! then the built-in — so a host that injects `length` defines what it means.
 //!
 //! # Injection
 //!
@@ -62,13 +80,14 @@
 //! The evaluator answers the expressions a workflow writes — conditions,
 //! arithmetic on task data, string and object access — and nothing more. There
 //! is no assignment, no statement, no ternary (`?:`), no collection literal
-//! (`[...]`, `{...}`), no `in`, no comprehension, no method on a built-in type
-//! (there are no built-in types: a string is a string, and every method is
-//! injected). Each of those is rejected with a message that says so.
+//! (`[...]`, `{...}`), no `in`, no comprehension, and no method beyond the
+//! built-ins above — every other method is one the host injected. Each of the
+//! absent forms is rejected with a message that says so.
 
 mod error;
 mod eval;
 mod lexer;
+mod methods;
 mod parser;
 mod value;
 
