@@ -951,6 +951,22 @@ where
 
         let count = id_set.len();
 
+        // An empty candidate set has an empty page in every branch below — and
+        // the ordered-index branch would scan (and materialize) the whole field
+        // index only to intersect it with nothing. That is the shape a
+        // selective filter takes most of the time (a `state = none` probe
+        // against a database with no parked row, a `pid`/`tid` lookup for a
+        // task with no delivery), so answer it before paginating.
+        if count == 0 {
+            return Ok(PageData {
+                count: 0,
+                page_size: q.limit,
+                page_num: q.offset.checked_div(q.limit).map_or(1, |n| n + 1),
+                page_count: 0,
+                rows: Vec::new(),
+            });
+        }
+
         // Step 3: Paginate. Sorting happens BEFORE pagination when `order_by`
         // is set: every page must be the global top-N slice, not a re-sorted
         // batch of an arbitrary page. Without `order_by` only the page ids
@@ -1877,6 +1893,65 @@ mod tests {
             entries.reverse();
             Ok(entries)
         }
+    }
+
+    /// A query whose filter selects nothing must not pay for the ordering
+    /// index: the ordered branch scans (and materializes) the whole field index
+    /// and then intersects it with an empty candidate set — the shape every
+    /// selective filter takes most of the time (the refill pass's
+    /// `state = none` probe against a database with no parked row).
+    #[tokio::test]
+    async fn indexed_order_skips_the_scan_when_the_filter_selects_nothing() {
+        let (kv, _) = counting_col();
+        let col = KvCollection::<OrderedDoc>::new("ordered", kv.clone());
+        for (id, ord) in [("a", json!(1)), ("b", json!(2))] {
+            col.create(&OrderedDoc {
+                id: id.to_string(),
+                state: "idle".to_string(),
+                ord,
+            })
+            .await
+            .unwrap();
+        }
+        async fn run(
+            col: &KvCollection<OrderedDoc>,
+            state: &str,
+        ) -> crate::store::PageData<OrderedDoc> {
+            col.query(
+                &Query::new()
+                    .filter(Filter::and().expr(Expr::eq("state", state)))
+                    .order("ord", Sort::Asc),
+            )
+            .await
+            .unwrap()
+        }
+
+        kv.scans.store(0, Ordering::SeqCst);
+        let empty = run(&col, "missing").await;
+        assert_eq!(empty.count, 0);
+        assert!(empty.rows.is_empty());
+        assert_eq!(
+            kv.scans.load(Ordering::SeqCst),
+            1,
+            "an empty candidate set must not scan the ordering index"
+        );
+
+        // control: the same query with candidates does consult the order index
+        kv.scans.store(0, Ordering::SeqCst);
+        let matched = run(&col, "idle").await;
+        assert_eq!(
+            matched
+                .rows
+                .iter()
+                .map(|d| d.id.clone())
+                .collect::<Vec<_>>(),
+            vec!["a", "b"]
+        );
+        assert_eq!(
+            kv.scans.load(Ordering::SeqCst),
+            2,
+            "with candidates the filter is scanned and so is the order index"
+        );
     }
 
     #[tokio::test]

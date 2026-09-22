@@ -605,6 +605,17 @@ impl Cache {
         let Some(mut reservation) = self.reserve_slots() else {
             return Ok(());
         };
+        // Nothing is parked, so this pass has nothing to load: skip the
+        // resident-set snapshot and the ordered query below. That is the
+        // steady state — a resident set that never filled parks nothing, and
+        // one whose parked rows all started has none left — and the pass runs
+        // on every terminal event, where the snapshot (a `String` per resident
+        // process) and the ordered query (the whole `timestamp` index of the
+        // collection, materialized only to be intersected with the filter's
+        // candidates) are pure waste. The probe is one indexed `state` lookup.
+        if !self.store.has_parked().await? {
+            return Ok(());
+        }
         // Refill free slots from parked rows (`None` state), oldest first —
         // overflow from a full resident set, or never-started seeds. Crashed
         // in-flight rows (`Ready`/`Running`/`Pending`) are the job of

@@ -9,6 +9,21 @@ use std::{collections::HashSet, sync::Arc};
 use tracing::debug;
 
 impl Store {
+    /// Whether any parked process row exists: a durable row in `None` state,
+    /// which is the only thing [`Self::load_parked`] can refill. The probe
+    /// materializes no document (an indexed `state` lookup, `limit(1)`), so
+    /// the refill pass can ask it before it snapshots the resident set and
+    /// orders the collection by `timestamp` — work that is pure waste in the
+    /// steady state, where nothing is parked because the resident set never
+    /// filled (`Cache::admit` parks only when it is full) or every parked row
+    /// has already started.
+    pub async fn has_parked(&self) -> Result<bool> {
+        let query = Query::new()
+            .filter(Filter::and().expr(Expr::eq("state", TaskState::None.to_string())))
+            .limit(1);
+        Ok(self.procs().query(&query).await?.count > 0)
+    }
+
     /// Load up to `cap` parked processes: durable rows in `None` state — a
     /// process was created while the resident set was full (see
     /// `Cache::admit`) or a never-started leftover from a crash — and never

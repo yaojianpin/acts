@@ -446,6 +446,126 @@ async fn cache_start_parked_refills_only_parked_none_rows() {
     rt.close().await;
 }
 
+/// KV wrapper that records every `scan_prefix` key it is asked for, so a test
+/// can prove which index regions a pass touched.
+#[derive(Default)]
+struct ScanLogKv {
+    inner: MemoryStore,
+    scans: parking_lot::Mutex<Vec<String>>,
+}
+
+#[async_trait::async_trait]
+impl KvStore for ScanLogKv {
+    async fn one(&self, key: &str) -> crate::Result<Option<Vec<u8>>> {
+        self.inner.one(key).await
+    }
+
+    async fn put(&self, key: &str, value: Vec<u8>) -> crate::Result<()> {
+        self.inner.put(key, value).await
+    }
+
+    async fn delete(&self, key: &str) -> crate::Result<()> {
+        self.inner.delete(key).await
+    }
+
+    async fn batch(&self, ops: &[StoreBatchOp], guards: &[StoreGuard]) -> crate::Result<bool> {
+        self.inner.batch(ops, guards).await
+    }
+
+    async fn scan_prefix(
+        &self,
+        key: &str,
+        options: ScanOptions,
+    ) -> crate::Result<Vec<(String, Vec<u8>)>> {
+        self.scans.lock().push(key.to_string());
+        self.inner.scan_prefix(key, options).await
+    }
+}
+
+/// The refill pass runs on every terminal event, so with nothing parked it must
+/// cost a lookup, not a walk of the collection. It asks whether any parked
+/// (`None`-state) row exists — one indexed `state` probe — and returns;
+/// snapshotting every resident pid and ordering the whole `timestamp` index per
+/// pass was pure waste in that (steady) state.
+#[tokio::test]
+async fn cache_start_parked_skips_the_ordered_scan_when_nothing_is_parked() {
+    let config = Config {
+        data: ConfigData {
+            cache_cap: Some(5),
+            ..Default::default()
+        },
+        table: Default::default(),
+    };
+    let kv: Arc<ScanLogKv> = Arc::new(ScanLogKv::default());
+    let rt = Runtime::new(&config, Some(kv.clone())).unwrap();
+    let cache = rt.cache();
+    let model = Workflow::new()
+        .with_id("m1")
+        .with_step(|step| step.with_name("step1"));
+    cache.store().deploy(&model, None).await.unwrap();
+
+    let seed = |state: TaskState| data::Proc {
+        id: utils::longid(),
+        name: "test".to_string(),
+        mid: "m1".to_string(),
+        state: state.to_string(),
+        start_time: 0,
+        end_time: 0,
+        timestamp: 0,
+        model: model.to_json().unwrap(),
+        env: "{}".to_string(),
+        err: None,
+        removable: false,
+        v: data::Proc::version(),
+    };
+
+    // the probe that gates the pass answers the question exactly: only a
+    // `None`-state row is a parked row
+    assert!(
+        !cache.store().has_parked().await.unwrap(),
+        "an empty database has nothing parked"
+    );
+    for state in [
+        TaskState::Ready,
+        TaskState::Running,
+        TaskState::Pending,
+        TaskState::Completed,
+    ] {
+        cache.store().procs().create(&seed(state)).await.unwrap();
+    }
+    assert!(
+        !cache.store().has_parked().await.unwrap(),
+        "a non-`None` row is not a parked row"
+    );
+    kv.scans.lock().clear();
+    cache.start_parked(&rt).await.unwrap();
+    assert_eq!(cache.count(), 0, "a non-parked row is never refilled");
+    let scans = kv.scans.lock().clone();
+    assert!(
+        !scans.iter().any(|key| key.contains("timestamp")),
+        "a pass with nothing parked must not walk the ordering index: {scans:?}"
+    );
+
+    // control: the same pass with one parked row loads it, which does order by
+    // `timestamp`
+    let parked = seed(TaskState::None);
+    cache.store().procs().create(&parked).await.unwrap();
+    assert!(
+        cache.store().has_parked().await.unwrap(),
+        "a `None`-state row is what the probe reports"
+    );
+    kv.scans.lock().clear();
+    cache.start_parked(&rt).await.unwrap();
+    assert_eq!(cache.count(), 1, "the parked row must start");
+    let scans = kv.scans.lock().clone();
+    assert!(
+        scans.iter().any(|key| key.contains("timestamp")),
+        "a pass with a parked row must order the collection: {scans:?}"
+    );
+
+    rt.close().await;
+}
+
 /// A finished process is evicted from the in-memory cache on its terminal
 /// proc event (its store rows stay — the sweeper deletes them only after the
 /// process's deliveries settled), so the freed slot lets the restore pass
