@@ -180,7 +180,7 @@ impl Config {
         let configured = self
             .data
             .scheduler_workers
-            .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()));
+            .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get() / 2));
         configured.clamp(1, 1024)
     }
 
@@ -203,7 +203,7 @@ impl Config {
         let configured = self
             .data
             .store_writer_workers
-            .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get()));
+            .unwrap_or_else(|| std::thread::available_parallelism().map_or(4, |n| n.get() / 2));
         configured.clamp(1, 1024)
     }
 
