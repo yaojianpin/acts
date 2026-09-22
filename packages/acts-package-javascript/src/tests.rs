@@ -89,10 +89,7 @@ async fn pack_code_outputs() {
     let workflow = Workflow::new().with_id("code_outputs").with_step(|step| {
         step.with_id("step1")
             .with_expose(Variant::create("my_output", json!(null)))
-            .with_uses_code(
-                "acts.app.javascript",
-                r#"return { "my_output": "abc" };"#,
-            )
+            .with_uses_code("acts.app.javascript", r#"return { "my_output": "abc" };"#)
     });
 
     let outputs = run_code(&workflow).await;

@@ -177,10 +177,8 @@ async fn engine_events_forwarded_to_nats() {
     let workflow = Workflow::new()
         .with_id("nats_event_demo")
         .with_step(|step| {
-            step.with_id("step1").with_uses_code(
-                "acts.app.javascript",
-                r#"return { output: "done" };"#,
-            )
+            step.with_id("step1")
+                .with_uses_code("acts.app.javascript", r#"return { output: "done" };"#)
         });
     executor.model().deploy(&workflow, None).await.unwrap();
     executor
