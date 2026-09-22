@@ -50,7 +50,9 @@ On the first run acts-server creates its config directory `~/.acts`
 under `~/.acts/log`. The server then blocks until it is asked to stop:
 Ctrl-C (SIGINT), or SIGTERM on macOS/Linux. It logs the signal, closes the
 engine — flushing the store writer and stopping the transport plugins and
-their background tasks — and exits.
+their background tasks — and exits. A signal whose handler cannot be
+installed is logged and that signal stops being a shutdown trigger; the
+server keeps running and every other signal still stops it.
 
 To point the config directory elsewhere, set `ACTS_CONFIG_DIR`.
 

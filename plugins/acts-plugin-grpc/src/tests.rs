@@ -1,7 +1,10 @@
 use crate::{GrpcConfig, GrpcPlugin, GrpcServer};
 use acts::query::Query as StoreQuery;
 use acts::{ChannelOptions, Engine, Vars, Workflow};
-use acts_channel::{MessageOptions, acts_service_server::ActsService};
+use acts_proto::{
+    Message, MessageOptions, acts_service_client::ActsServiceClient,
+    acts_service_server::ActsService,
+};
 use serde_json::json;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -92,33 +95,45 @@ async fn engine_with_grpc_queue(port: u16, queue_size: Option<usize>) -> Engine 
         .unwrap()
 }
 
+/// The wire path end to end: a generated client, the plugin's service, and the
+/// engine behind it — including the graceful shutdown that must release the
+/// port the plugin bound.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_snapshot_upsert_remove_over_grpc() {
-    use acts_channel::{ActsChannel, Vars};
-
     let port = free_port();
     let engine = engine_with_grpc(port).await;
 
-    // connect the client and wait until the server accepts
+    // connect the generated client and wait until the server accepts
     let url = format!("http://127.0.0.1:{port}");
     let mut client = loop {
-        match ActsChannel::connect(&url).await {
-            Ok(c) => break c,
-            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+        match ActsServiceClient::connect(url.clone()).await {
+            Ok(client) => break client,
+            Err(_) => tokio::time::sleep(Duration::from_millis(50)).await,
         }
     };
 
-    let ok = client
-        .upsert_snapshot("profile", "u1", 5, Vars::new().with("val", "x"))
+    let answer = client
+        .send(action(
+            "snap:upsert",
+            json!({"name": "profile", "scope": "u1", "rev": 5, "data": {"val": "x"}}),
+        ))
         .await
-        .unwrap();
-    assert_eq!(ok.data, Some(true));
+        .unwrap()
+        .into_inner();
+    assert_eq!(payload(&answer), json!(true));
     let entry = engine.snapshot().read("profile", "u1").unwrap();
     assert_eq!(entry.rev, 5);
     assert_eq!(entry.data.get::<String>("val").unwrap(), "x");
 
-    let ok = client.remove_snapshot("profile", "u1").await.unwrap();
-    assert_eq!(ok.data, Some(true));
+    let answer = client
+        .send(action(
+            "snap:remove",
+            json!({"name": "profile", "scope": "u1"}),
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(payload(&answer), json!(true));
     assert!(engine.snapshot().read("profile", "u1").is_none());
 
     // graceful shutdown stops the transport: the port must be released
@@ -151,7 +166,7 @@ async fn test_do_action_rejects_malformed_data() {
 
     let malformed: [&[u8]; 4] = [b"[]", b"{", b"null", b"\"msg:clear\""];
     for data in malformed {
-        let message = acts_channel::Message {
+        let message = Message {
             name: "msg:clear".to_string(),
             seq: "seq-1".to_string(),
             ack: None,
@@ -180,7 +195,7 @@ async fn test_do_action_rejects_malformed_data() {
 
     // absent or object-valued data stays valid
     for data in [None, Some(b"{}".to_vec())] {
-        let message = acts_channel::Message {
+        let message = Message {
             name: "msg:clear".to_string(),
             seq: "seq-1".to_string(),
             ack: None,
@@ -409,8 +424,8 @@ tokens = ["op-token"]
 allow = ["msg:clear", "msg:sub"]
 "#;
 
-fn send_request(name: &str, token: Option<&str>) -> tonic::Request<acts_channel::Message> {
-    let mut request = tonic::Request::new(acts_channel::Message {
+fn send_request(name: &str, token: Option<&str>) -> tonic::Request<Message> {
+    let mut request = tonic::Request::new(Message {
         name: name.to_string(),
         seq: "seq-1".to_string(),
         ack: None,
@@ -422,6 +437,25 @@ fn send_request(name: &str, token: Option<&str>) -> tonic::Request<acts_channel:
             .insert("authorization", format!("Bearer {token}").parse().unwrap());
     }
     request
+}
+
+/// One `Send` request carrying `options` as the action payload.
+fn action(name: &str, options: serde_json::Value) -> tonic::Request<Message> {
+    tonic::Request::new(Message {
+        name: name.to_string(),
+        seq: "seq-1".to_string(),
+        ack: None,
+        data: Some(serde_json::to_vec(&options).unwrap()),
+    })
+}
+
+/// The action's own value, decoded from an answer message.
+fn payload(answer: &Message) -> serde_json::Value {
+    let data = answer
+        .data
+        .as_deref()
+        .expect("the answer carries a payload");
+    serde_json::from_slice(data).expect("the answer payload is json")
 }
 
 /// The `authorization: Bearer <token>` metadata is the credential: a request
@@ -516,7 +550,7 @@ async fn start_owned(engine: &Engine, principal: &acts::Principal, mid: &str) ->
 /// `idle_ms`, decoding each wire payload back into an `acts::Message`.
 async fn drain<T>(stream: &mut T, idle_ms: u64) -> Vec<acts::Message>
 where
-    T: tokio_stream::Stream<Item = Result<acts_channel::Message, tonic::Status>> + Unpin,
+    T: tokio_stream::Stream<Item = Result<Message, tonic::Status>> + Unpin,
 {
     let mut out = Vec::new();
     loop {

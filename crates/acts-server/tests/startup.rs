@@ -1,56 +1,81 @@
-//! Startup behavior of the `acts-server` binary: an unusable log directory is
-//! a configuration/deployment error, so the process must exit with a
-//! diagnostic error instead of panicking — a supervisor has to be able to see
-//! *why* the server did not start.
+//! Startup behavior of the `acts-server` binary: an unusable log directory, an
+//! `[acl]` section that cannot be enforced or a `[db]` section that cannot be
+//! read is a configuration/deployment error, so the process — and the engine
+//! builder it runs — must report it and let a supervisor see *why* the server
+//! did not start, instead of panicking.
+//!
+//! The config of every case is loaded the way the binary loads it
+//! (`acts_server::Config::create` on a real `acts.toml`), so what is exercised
+//! is the server's own config path, not a table assembled by hand here.
 
+use acts_server::{Config, ServerPlugins, engine_builder};
+use anyhow::Context;
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Command,
+    sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-fn scratch(name: &str) -> PathBuf {
+fn scratch(name: &str) -> anyhow::Result<PathBuf> {
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|err| anyhow::anyhow!("the clock is before the epoch: {err}"))?
+        .as_nanos();
     let dir = std::env::temp_dir().join(format!(
-        "acts-server-startup-{}-{}-{}",
-        std::process::id(),
-        name,
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        "acts-server-startup-{}-{name}-{stamp}",
+        std::process::id()
     ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    Ok(dir)
+}
+
+/// Write the config a case runs on and load it the way the binary does.
+/// Returns the config directory (what `ACTS_CONFIG_DIR` points at for the
+/// cases that run the binary) and the loaded config.
+fn server_config(dir: &Path, body: &str) -> anyhow::Result<(PathBuf, Config)> {
+    let config_dir = dir.join("config");
+    std::fs::create_dir_all(&config_dir)
+        .with_context(|| format!("failed to create {}", config_dir.display()))?;
+    let path = config_dir.join("acts.toml");
+    std::fs::write(&path, body).with_context(|| format!("failed to write {}", path.display()))?;
+    let config =
+        Config::create(&path).with_context(|| format!("failed to load {}", path.display()))?;
+    Ok((config_dir, config))
+}
+
+/// Run the server binary on `config_dir` and return its stderr.
+fn run_server(dir: &Path, config_dir: &Path) -> anyhow::Result<String> {
+    let bin = env!("CARGO_BIN_EXE_acts-server");
+    let output = Command::new(bin)
+        .current_dir(dir)
+        .env("ACTS_CONFIG_DIR", config_dir)
+        .output()
+        .with_context(|| format!("failed to run {bin}"))?;
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        !output.status.success(),
+        "the server exited successfully on an unusable config: {stderr}"
+    );
+    Ok(stderr)
 }
 
 #[test]
-fn unusable_log_dir_fails_without_panicking() {
-    let dir = scratch("bad-log-dir");
+fn unusable_log_dir_fails_without_panicking() -> anyhow::Result<()> {
+    let dir = scratch("bad-log-dir")?;
     // A regular file can never be a log directory: `create_dir_all` rejects it
     // with "already exists" / ENOTDIR instead of the server dying on a panic.
     let blocker = dir.join("blocker");
-    std::fs::write(&blocker, b"").unwrap();
+    std::fs::write(&blocker, b"")
+        .with_context(|| format!("failed to write {}", blocker.display()))?;
 
-    let config_dir = dir.join("config");
-    std::fs::create_dir_all(&config_dir).unwrap();
     // TOML literal string: the windows path separators stay verbatim.
-    std::fs::write(
-        config_dir.join("acts.toml"),
-        format!("[log]\ndir = '{}'\nlevel = \"INFO\"\n", blocker.display()),
-    )
-    .unwrap();
+    let (config_dir, _) = server_config(
+        &dir,
+        &format!("[log]\ndir = '{}'\nlevel = \"INFO\"\n", blocker.display()),
+    )?;
 
-    let output = Command::new(env!("CARGO_BIN_EXE_acts-server"))
-        .current_dir(&dir)
-        .env("ACTS_CONFIG_DIR", &config_dir)
-        .output()
-        .unwrap();
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !output.status.success(),
-        "server exited successfully with an unusable log dir: {stderr}"
-    );
+    let stderr = run_server(&dir, &config_dir)?;
     assert!(
         stderr.contains("failed to create log dir"),
         "no diagnostic for the unusable log dir in stderr: {stderr}"
@@ -61,41 +86,64 @@ fn unusable_log_dir_fails_without_panicking() {
     );
 
     let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+/// A `[db]` section the server cannot deserialize is refused with a
+/// diagnostic naming the offending section — before a store is ever opened.
+#[test]
+fn a_malformed_db_section_is_reported_not_panicked() -> anyhow::Result<()> {
+    let dir = scratch("bad-db")?;
+    let (config_dir, _) = server_config(&dir, "[db]\ntype = \"nope\"\n")?;
+
+    let stderr = run_server(&dir, &config_dir)?;
+    assert!(
+        stderr.contains("failed to get 'db' config"),
+        "no diagnostic for the malformed [db] in stderr: {stderr}"
+    );
+    assert!(
+        !stderr.contains("panicked"),
+        "startup panicked instead of reporting an error: {stderr}"
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
 }
 
 /// An `[acl]` section that cannot be enforced (enabled, but no role declares
 /// any token) must fail startup with a diagnostic instead of silently
 /// refusing — or silently allowing — every request.
 #[tokio::test(flavor = "multi_thread")]
-async fn unusable_acl_fails_startup() {
-    let table: toml::Table = toml::from_str("[acl]\n").unwrap();
-    let config = acts::Config {
-        data: Default::default(),
-        table,
-    };
-    let result = acts_server::engine_builder(
+async fn unusable_acl_fails_startup() -> anyhow::Result<()> {
+    let dir = scratch("acl-no-token")?;
+    let (_, config) = server_config(&dir, "[acl]\n")?;
+
+    let started = engine_builder(
         &config,
-        std::sync::Arc::new(acts::MemoryStore::new()),
-        &acts_server::ServerPlugins::default(),
-    )
-    .unwrap()
+        Arc::new(acts::MemoryStore::new()),
+        &ServerPlugins::default(),
+    )?
     .start()
     .await;
-    let err = match result {
-        Ok(_) => panic!("an unenforceable acl must fail startup"),
-        Err(err) => err,
-    };
+    let err = started
+        .err()
+        .context("an unenforceable acl must fail startup")?;
     assert!(
         err.to_string().contains("neither a token nor a role"),
         "unexpected startup error: {err}"
     );
+
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
 }
 
 /// A usable `[acl]` compiles and the engine starts; the anonymous caller is
 /// then refused.
 #[tokio::test(flavor = "multi_thread")]
-async fn acl_with_a_role_starts_and_refuses_anonymous() {
-    let table: toml::Table = toml::from_str(
+async fn acl_with_a_role_starts_and_refuses_anonymous() -> anyhow::Result<()> {
+    let dir = scratch("acl-role")?;
+    let (_, config) = server_config(
+        &dir,
         r#"
         [acl]
         [[acl.role]]
@@ -103,21 +151,15 @@ async fn acl_with_a_role_starts_and_refuses_anonymous() {
         tokens = ["op-token"]
         allow = ["model:ls"]
         "#,
-    )
-    .unwrap();
-    let config = acts::Config {
-        data: Default::default(),
-        table,
-    };
-    let engine = acts_server::engine_builder(
+    )?;
+
+    let engine = engine_builder(
         &config,
-        std::sync::Arc::new(acts::MemoryStore::new()),
-        &acts_server::ServerPlugins::default(),
-    )
-    .unwrap()
+        Arc::new(acts::MemoryStore::new()),
+        &ServerPlugins::default(),
+    )?
     .start()
-    .await
-    .unwrap();
+    .await?;
 
     assert!(engine.acl().enabled());
     let err = acts::actions::apply(&engine, "model:ls", acts::Vars::new())
@@ -129,4 +171,6 @@ async fn acl_with_a_role_starts_and_refuses_anonymous() {
     );
 
     engine.close().await;
+    let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
 }

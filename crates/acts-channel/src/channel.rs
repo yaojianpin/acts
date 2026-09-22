@@ -2,7 +2,6 @@ use crate::{
     ActionResult, Message, MessageOptions, Vars,
     acts_service_client::*,
     model::{self, Package},
-    utils,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use std::str::FromStr;
@@ -182,7 +181,7 @@ impl ActsChannel {
             .client
             .send(Request::new(crate::Message {
                 name: "proc:start".to_string(),
-                seq: utils::create_seq(),
+                seq: crate::create_seq(),
                 ack: None,
                 data: Some(options.to_bytes()),
             }))
@@ -227,7 +226,7 @@ impl ActsChannel {
             .client
             .send(Request::new(Message {
                 name: name.to_string(),
-                seq: utils::create_seq(),
+                seq: crate::create_seq(),
                 ack,
                 data: Some(data.to_bytes()),
             }))

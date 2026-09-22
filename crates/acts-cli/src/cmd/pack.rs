@@ -1,5 +1,5 @@
 use super::CommandRunner as Command;
-use crate::util;
+use crate::{client, util};
 use acts_channel::{
     Vars,
     model::{Expr, OrderBy, Package, PackageInfo, PageData},
@@ -62,7 +62,7 @@ catalog: package catalog
     },
 }
 
-pub async fn process(parent: &mut Command<'_>, command: &PacakgeCommands) -> Result<(), String> {
+pub async fn process(parent: &mut Command<'_>, command: &PacakgeCommands) -> anyhow::Result<()> {
     let ret = match command {
         PacakgeCommands::Get { id } => get(parent, id).await,
         PacakgeCommands::Ls {
@@ -79,17 +79,16 @@ pub async fn process(parent: &mut Command<'_>, command: &PacakgeCommands) -> Res
     Ok(())
 }
 
-pub async fn publish(parent: &mut Command<'_>, path: &PathBuf) -> Result<String, String> {
+pub async fn publish(parent: &mut Command<'_>, path: &PathBuf) -> anyhow::Result<String> {
     let mut ret = String::new();
-    let text = std::fs::read_to_string(path).map_err(|err| err.to_string())?;
+    let text = std::fs::read_to_string(path).map_err(|err| {
+        anyhow::anyhow!("failed to read the package file {}: {err}", path.display())
+    })?;
 
-    let package = serde_yaml::from_str::<Package>(&text).map_err(|err| err.to_string())?;
-    let resp = parent
-        .client
-        .publish(&package)
-        .await
-        .map_err(|err| err.message().to_string())?;
-    ret.push_str(&format!("{}", resp.data.unwrap()));
+    let package = serde_yaml::from_str::<Package>(&text)
+        .map_err(|err| anyhow::anyhow!("failed to parse the package file: {err}"))?;
+    let resp = parent.publish(&package).await?;
+    ret.push_str(&format!("{}", client::payload("pack:publish", resp.data)?));
 
     // print the elapsed
     let cost = resp.end_time - resp.start_time;
@@ -98,19 +97,15 @@ pub async fn publish(parent: &mut Command<'_>, path: &PathBuf) -> Result<String,
     Ok(ret)
 }
 
-pub async fn get(parent: &mut Command<'_>, id: &str) -> Result<String, String> {
+pub async fn get(parent: &mut Command<'_>, id: &str) -> anyhow::Result<String> {
     let mut ret = String::new();
     let mut options = Vars::new();
     options.set("id", id);
-    let resp = parent
-        .client
-        .send::<PackageInfo>("pack:get", options)
-        .await
-        .map_err(|err| err.message().to_string())?;
+    let resp = parent.send::<PackageInfo>("pack:get", options).await?;
 
-    let package = resp.data.unwrap();
+    let package = client::payload("pack:get", resp.data)?;
 
-    let text = serde_yaml::to_string(&package).map_err(|err| err.to_string())?;
+    let text = util::to_yaml(&package)?;
     ret.push_str(&text);
 
     // print the elapsed
@@ -126,16 +121,14 @@ pub async fn ls(
     count: &Option<u32>,
     query_by: &Vec<Expr>,
     order_by: &Vec<OrderBy>,
-) -> Result<String, String> {
+) -> anyhow::Result<String> {
     let mut ret = String::new();
     let query = util::to_query(offset, count, query_by, order_by);
     let resp = parent
-        .client
         .send::<PageData<PackageInfo>>("pack:ls", Vars::new().with("query", query))
-        .await
-        .map_err(|err| err.message().to_string())?;
+        .await?;
 
-    let data = resp.data.as_ref().unwrap();
+    let data = client::payload("pack:ls", resp.data.as_ref())?;
     let mut table = Table::new();
     table
         .load_style(UTF8_FULL)
@@ -167,13 +160,11 @@ pub async fn ls(
     Ok(ret)
 }
 
-pub async fn rm(parent: &mut Command<'_>, id: &str) -> Result<String, String> {
+pub async fn rm(parent: &mut Command<'_>, id: &str) -> anyhow::Result<String> {
     let mut ret = String::new();
     let resp = parent
-        .client
         .send::<bool>("pack:rm", Vars::new().with("id", id))
-        .await
-        .map_err(|err| err.message().to_string())?;
+        .await?;
 
     // print the elapsed
     let cost = resp.end_time - resp.start_time;

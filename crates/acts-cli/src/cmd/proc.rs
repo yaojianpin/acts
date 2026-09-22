@@ -1,5 +1,5 @@
 use super::CommandRunner as Command;
-use crate::util;
+use crate::{client, util};
 use acts_channel::{
     Vars,
     model::{Expr, OrderBy, PageData, ProcInfo},
@@ -44,7 +44,7 @@ pub enum ProcCommands {
     },
 }
 
-pub async fn process(parent: &mut Command<'_>, command: &ProcCommands) -> Result<(), String> {
+pub async fn process(parent: &mut Command<'_>, command: &ProcCommands) -> anyhow::Result<()> {
     let ret = match command {
         ProcCommands::Get { id, fmt } => get(parent, id, fmt).await,
         ProcCommands::Ls {
@@ -60,24 +60,20 @@ pub async fn process(parent: &mut Command<'_>, command: &ProcCommands) -> Result
     Ok(())
 }
 
-async fn start(
+pub async fn start(
     parent: &mut Command<'_>,
     mid: &str,
     pid: &Option<String>,
     vars: &Vars,
-) -> Result<String, String> {
+) -> anyhow::Result<String> {
     let mut ret = String::new();
     let mut options = Vars::new().extend(vars);
     if let Some(pid) = pid {
         options.set("pid", pid);
     }
-    let resp = parent
-        .client
-        .start(mid, options)
-        .await
-        .map_err(|err| err.message().to_string())?;
+    let resp = parent.start(mid, options).await?;
 
-    let pid = resp.data.unwrap();
+    let pid = client::payload("proc:start", resp.data)?;
     ret.push_str(&format!("pid={pid}"));
     // print the elapsed
     let cost = resp.end_time - resp.start_time;
@@ -90,7 +86,7 @@ pub async fn get(
     parent: &mut Command<'_>,
     pid: &str,
     fmt: &Option<String>,
-) -> Result<String, String> {
+) -> anyhow::Result<String> {
     let mut ret = String::new();
     let mut options = Vars::new();
     options.set("pid", pid);
@@ -99,14 +95,10 @@ pub async fn get(
         options.set("fmt", fmt);
     };
 
-    let resp = parent
-        .client
-        .send::<ProcInfo>("proc:get", options)
-        .await
-        .map_err(|err| err.message().to_string())?;
+    let resp = parent.send::<ProcInfo>("proc:get", options).await?;
 
-    let proc = resp.data.unwrap();
-    ret.push_str(&serde_json::to_string_pretty(&proc).unwrap());
+    let proc = client::payload("proc:get", resp.data)?;
+    ret.push_str(&util::to_json(&proc)?);
     let cost = resp.end_time - resp.start_time;
     ret.push_str(&format!("(elapsed {cost}ms)"));
 
@@ -119,15 +111,13 @@ pub async fn ls(
     count: &Option<u32>,
     query_by: &Vec<Expr>,
     order_by: &Vec<OrderBy>,
-) -> Result<String, String> {
+) -> anyhow::Result<String> {
     let mut ret = String::new();
     let query = util::to_query(offset, count, query_by, order_by);
     let resp = parent
-        .client
         .send::<PageData<ProcInfo>>("proc:ls", Vars::new().with("query", query))
-        .await
-        .map_err(|err| err.message().to_string())?;
-    let data = resp.data.as_ref().unwrap();
+        .await?;
+    let data = client::payload("proc:ls", resp.data.as_ref())?;
     let mut table = Table::new();
     table
         .load_style(UTF8_FULL)

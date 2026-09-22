@@ -110,7 +110,7 @@ pub enum ActCommands {
     },
 }
 
-pub async fn process(parent: &mut Command<'_>, command: &ActCommands) -> Result<(), String> {
+pub async fn process(parent: &mut Command<'_>, command: &ActCommands) -> anyhow::Result<()> {
     let ret = match command {
         ActCommands::Submit { pid, tid, vars } => send(parent, "act:submit", pid, tid, vars).await,
         ActCommands::Complete { pid, tid, vars } => {
@@ -149,19 +149,14 @@ async fn send(
     pid: &str,
     tid: &str,
     vars: &Vec<(String, serde_json::Value)>,
-) -> Result<String, String> {
+) -> anyhow::Result<String> {
     let mut ret = String::new();
 
-    #[allow(unused_mut, unused_variables)]
     let mut options = Vars::new().with("pid", pid).with("tid", tid);
     for (k, v) in vars {
         options.set(k, v);
     }
-    let resp = parent
-        .client
-        .send::<()>(name, options)
-        .await
-        .map_err(|err| err.message().to_string())?;
+    let resp = parent.send::<()>(name, options).await?;
 
     // print the elapsed
     let cost = resp.end_time - resp.start_time;

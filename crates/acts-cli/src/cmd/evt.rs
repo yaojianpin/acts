@@ -1,5 +1,5 @@
 use super::CommandRunner as Command;
-use crate::util;
+use crate::{client, util};
 use acts_channel::{
     Vars,
     model::{EventInfo, Expr, OrderBy, PageData},
@@ -42,7 +42,7 @@ pub enum EventCommands {
     },
 }
 
-pub async fn process(parent: &mut Command<'_>, command: &EventCommands) -> Result<(), String> {
+pub async fn process(parent: &mut Command<'_>, command: &EventCommands) -> anyhow::Result<()> {
     let ret = match command {
         EventCommands::Get { id } => get(parent, id).await,
         EventCommands::Ls {
@@ -62,18 +62,14 @@ pub async fn start(
     parent: &mut Command<'_>,
     id: &str,
     params: &Option<serde_json::Value>,
-) -> Result<String, String> {
+) -> anyhow::Result<String> {
     let mut ret = String::new();
     let mut vars = Vars::new().with("id", id);
     if let Some(param) = params {
         vars.insert("params".to_string(), param.clone());
     }
-    let resp = parent
-        .client
-        .send::<Option<Vars>>("evt:start", vars)
-        .await
-        .map_err(|err| err.message().to_string())?;
-    ret.push_str(&format!("{:?}", resp.data.unwrap()));
+    let resp = parent.send::<Option<Vars>>("evt:start", vars).await?;
+    ret.push_str(&format!("{:?}", client::payload("evt:start", resp.data)?));
 
     // print the elapsed
     let cost = resp.end_time - resp.start_time;
@@ -82,19 +78,15 @@ pub async fn start(
     Ok(ret)
 }
 
-pub async fn get(parent: &mut Command<'_>, id: &str) -> Result<String, String> {
+pub async fn get(parent: &mut Command<'_>, id: &str) -> anyhow::Result<String> {
     let mut ret = String::new();
     let mut options = Vars::new();
     options.set("id", id);
-    let resp = parent
-        .client
-        .send::<EventInfo>("evt:get", options)
-        .await
-        .map_err(|err| err.message().to_string())?;
+    let resp = parent.send::<EventInfo>("evt:get", options).await?;
 
-    let package = resp.data.unwrap();
+    let event = client::payload("evt:get", resp.data)?;
 
-    let text = serde_yaml::to_string(&package).map_err(|err| err.to_string())?;
+    let text = util::to_yaml(&event)?;
     ret.push_str(&text);
 
     // print the elapsed
@@ -110,16 +102,14 @@ pub async fn ls(
     count: &Option<u32>,
     query_by: &Vec<Expr>,
     order_by: &Vec<OrderBy>,
-) -> Result<String, String> {
+) -> anyhow::Result<String> {
     let mut ret = String::new();
     let query = util::to_query(offset, count, query_by, order_by);
     let resp = parent
-        .client
         .send::<PageData<EventInfo>>("evt:ls", Vars::new().with("query", query))
-        .await
-        .map_err(|err| err.message().to_string())?;
+        .await?;
 
-    let data = resp.data.as_ref().unwrap();
+    let data = client::payload("evt:ls", resp.data.as_ref())?;
     let mut table = Table::new();
     table.set_header(vec!["id", "name", "mid", "ver", "uses", "create time"]);
     for p in &data.rows {

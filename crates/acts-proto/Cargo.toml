@@ -1,0 +1,37 @@
+[package]
+name = "acts-proto"
+description = "The generated gRPC bindings of the acts wire protocol, shared by the client channel and the server plugin"
+keywords = ["workflow", "acts", "grpc", "protobuf"]
+version.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+edition.workspace = true
+
+[dependencies]
+# the generated bindings name the prost codec and derive `prost::Message`
+# directly, and `create_seq` fills the sequence number they carry.
+nanoid = { workspace = true }
+prost = { workspace = true }
+# `transport` carries the `server` + `channel` features both halves of the
+# generated bindings need (`tonic::transport::{Channel, Endpoint, Server}`).
+tonic = { features = ["transport"], workspace = true }
+# The generated bindings name `tonic_prost::ProstCodec`, which `tonic` no
+# longer carries since 0.14.
+tonic-prost = { workspace = true }
+
+[build-dependencies]
+# `transport` is what generates the `connect`/`Channel` halves of the bindings.
+# `cleanup-markdown` (a default in 0.14) is off: it only reformats generated doc
+# comments through `pulldown-cmark`, and the old `tonic-build` did not have it
+# on, so the committed `proto/acts.grpc.rs` is generated identically without the
+# extra build-time dependencies.
+tonic-prost-build = { version = "0.14", default-features = false, features = [
+    "transport",
+] }
+protoc-bin-vendored = { version = "3", optional = true }
+
+[features]
+default = []
+codegen = ["dep:protoc-bin-vendored"]

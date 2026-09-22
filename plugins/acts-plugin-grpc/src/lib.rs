@@ -3,7 +3,7 @@
 #![allow(clippy::result_large_err)]
 
 use acts::{ActPlugin, Channel, ChannelOptions, Engine, Vars};
-use acts_channel::{Message, MessageOptions, acts_service_server::*};
+use acts_proto::{Message, MessageOptions, acts_service_server::*};
 use std::pin::Pin;
 use std::sync::{Arc, Weak};
 use std::task::{Context, Poll};
@@ -177,7 +177,7 @@ impl GrpcServer {
 
         let mut response = Message {
             name,
-            seq: acts_channel::create_seq(),
+            seq: acts_proto::create_seq(),
             ack: None,
             data: Some(serde_json::to_vec(&value).map_err(|e| Status::internal(e.to_string()))?),
         };

@@ -2,9 +2,14 @@
 //! integration tests so they exercise exactly what `acts-server` runs.
 
 use acts::{
-    Config, ConfigLog, Engine, EngineBuilder, KvStore, MissingParamAction, SnapshotOptions,
-    SnapshotPolicy,
+    ConfigLog, Engine, EngineBuilder, KvStore, MissingParamAction, SnapshotOptions, SnapshotPolicy,
 };
+
+/// The engine configuration [`engine_builder`] reads. Re-exported because a
+/// caller of this crate builds the config before it can build the engine — the
+/// tests (and the CLI's) load it the same way the binary does instead of
+/// hand-building a second one.
+pub use acts::Config;
 use serde::Deserialize;
 use std::{
     path::{Path, PathBuf},

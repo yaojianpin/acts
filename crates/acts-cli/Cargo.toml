@@ -17,12 +17,17 @@ chrono = { workspace = true }
 clap = { version = "4.5.21", features = ["derive", "color", "env"] }
 clap-cargo = "0.14.1"
 comfy-table = "8.0.0"
-futures = { workspace = true }
-once_cell = "1.17.1"
 owo-colors = "4.1.0"
-regex = { workspace = true }
 serde = { features = ["derive"], workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 shlex = "2"
 tokio = { features = ["rt-multi-thread"], workspace = true }
+
+# The tests drive the command layer against a real server: the shipped engine
+# with the shipped gRPC plugin — the server `acts-server` assembles — so the
+# CLI is checked against the server it talks to in production, and the test
+# build stays the client's (no store, no packages).
+[dev-dependencies]
+acts = { workspace = true }
+acts-plugin-grpc = { workspace = true }

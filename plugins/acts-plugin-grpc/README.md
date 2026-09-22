@@ -1,6 +1,6 @@
 # acts-plugin-grpc
 
-gRPC server plugin for the acts workflow engine. Spawns a tonic gRPC server that exposes the `ActsService` API — model management, process control, task operations, message streaming, and more.
+gRPC server plugin for the acts workflow engine. Spawns a tonic gRPC server that exposes the `ActsService` API — model management, process control, task operations, message streaming, and more. The bindings it implements are generated in [`acts-proto`](../../crates/acts-proto), the crate both this plugin and the client channel depend on.
 
 ## Installation
 

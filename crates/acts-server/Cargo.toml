@@ -31,7 +31,6 @@ acts-package-javascript = { workspace = true }
 acts-plugin-grpc = { workspace = true }
 acts-plugin-web = { workspace = true }
 acts-plugin-nats = { workspace = true }
-acts-channel = { workspace = true }
 acts-store = { workspace = true, features = ["sled", "sqlite", "postgres"] }
 [dev-dependencies]
 async-nats = { workspace = true }

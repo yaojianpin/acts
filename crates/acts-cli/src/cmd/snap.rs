@@ -1,5 +1,5 @@
 use super::CommandRunner as Command;
-use crate::util;
+use crate::{client, util};
 use acts_channel::Vars;
 use clap::{Args, Subcommand};
 
@@ -45,7 +45,7 @@ pub enum SnapshotCommands {
     },
 }
 
-pub async fn process(parent: &mut Command<'_>, command: &SnapshotCommands) -> Result<(), String> {
+pub async fn process(parent: &mut Command<'_>, command: &SnapshotCommands) -> anyhow::Result<()> {
     let ret = match command {
         SnapshotCommands::Upsert {
             name,
@@ -68,20 +68,16 @@ pub async fn upsert(
     scope: &str,
     rev: u64,
     data: &serde_json::Value,
-) -> Result<String, String> {
+) -> anyhow::Result<String> {
     let mut ret = String::new();
     let mut vars = Vars::new()
         .with("name", name)
         .with("scope", scope)
         .with("rev", rev);
     vars.insert("data".to_string(), data.clone());
-    let resp = parent
-        .client
-        .send::<bool>("snap:upsert", vars)
-        .await
-        .map_err(|err| err.message().to_string())?;
+    let resp = parent.send::<bool>("snap:upsert", vars).await?;
 
-    if resp.data.unwrap_or_default() {
+    if client::payload("snap:upsert", resp.data)? {
         ret.push_str(&format!(
             "snapshot '{name}' scope '{scope}' updated (rev {rev})"
         ));
@@ -94,16 +90,12 @@ pub async fn upsert(
     Ok(ret)
 }
 
-pub async fn remove(parent: &mut Command<'_>, name: &str, scope: &str) -> Result<String, String> {
+pub async fn remove(parent: &mut Command<'_>, name: &str, scope: &str) -> anyhow::Result<String> {
     let mut ret = String::new();
     let vars = Vars::new().with("name", name).with("scope", scope);
-    let resp = parent
-        .client
-        .send::<bool>("snap:remove", vars)
-        .await
-        .map_err(|err| err.message().to_string())?;
+    let resp = parent.send::<bool>("snap:remove", vars).await?;
 
-    if resp.data.unwrap_or_default() {
+    if client::payload("snap:remove", resp.data)? {
         ret.push_str(&format!("snapshot '{name}' scope '{scope}' removed"));
     } else {
         ret.push_str("snapshot remove returned false");
@@ -113,18 +105,14 @@ pub async fn remove(parent: &mut Command<'_>, name: &str, scope: &str) -> Result
 
     Ok(ret)
 }
-pub async fn get(parent: &mut Command<'_>, name: &str, scope: &str) -> Result<String, String> {
+pub async fn get(parent: &mut Command<'_>, name: &str, scope: &str) -> anyhow::Result<String> {
     let mut ret = String::new();
     let vars = Vars::new().with("name", name).with("scope", scope);
-    let resp = parent
-        .client
-        .send::<serde_json::Value>("snap:get", vars)
-        .await
-        .map_err(|err| err.message().to_string())?;
+    let resp = parent.send::<serde_json::Value>("snap:get", vars).await?;
 
     match resp.data {
         Some(value) if !value.is_null() => {
-            let text = serde_yaml::to_string(&value).map_err(|err| err.to_string())?;
+            let text = util::to_yaml(&value)?;
             ret.push_str(&text);
         }
         _ => ret.push_str("snapshot not found"),
@@ -135,17 +123,15 @@ pub async fn get(parent: &mut Command<'_>, name: &str, scope: &str) -> Result<St
     Ok(ret)
 }
 
-pub async fn ls(parent: &mut Command<'_>, name: &str) -> Result<String, String> {
+pub async fn ls(parent: &mut Command<'_>, name: &str) -> anyhow::Result<String> {
     use comfy_table::Table;
 
     let mut ret = String::new();
     let resp = parent
-        .client
         .send::<serde_json::Value>("snap:ls", Vars::new().with("name", name))
-        .await
-        .map_err(|err| err.message().to_string())?;
+        .await?;
 
-    let rows = resp.data.unwrap_or_default();
+    let rows = client::payload("snap:ls", resp.data)?;
     let rows = rows.as_array().cloned().unwrap_or_default();
     if rows.is_empty() {
         ret.push_str(&format!("no snapshot data for target '{name}'"));

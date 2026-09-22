@@ -1,6 +1,6 @@
-use acts::Config;
+use acts_server::Config;
 use std::{path::Path, sync::Arc};
-use tracing::info;
+use tracing::{error, info};
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
@@ -70,19 +70,30 @@ async fn main() -> Result<(), anyhow::Error> {
 /// Resolve when the process is asked to stop: Ctrl-C (SIGINT) everywhere,
 /// plus SIGTERM on unix so a deployment's rolling update drains the engine
 /// instead of force-killing it.
+///
+/// A handler that cannot be installed is a deployment fault, but not one that
+/// justifies killing a server whose engine is healthy: the failure is logged,
+/// that signal stops being a shutdown trigger, and every other one still is —
+/// a supervisor's SIGTERM or SIGKILL included.
 async fn shutdown_signal() {
     let ctrl_c = async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install the Ctrl-C handler");
+        if let Err(err) = tokio::signal::ctrl_c().await {
+            error!(error = %err, "failed to install the Ctrl-C handler; Ctrl-C will not stop the server");
+            std::future::pending::<()>().await;
+        }
     };
 
     #[cfg(unix)]
     let terminate = async {
-        tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-            .expect("failed to install the SIGTERM handler")
-            .recv()
-            .await;
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(err) => {
+                error!(error = %err, "failed to install the SIGTERM handler; SIGTERM will not drain the engine");
+                std::future::pending::<()>().await;
+            }
+        }
     };
 
     #[cfg(not(unix))]

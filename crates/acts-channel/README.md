@@ -1,6 +1,9 @@
 # acts-channel
 
-gRPC client/server channel for the acts workflow engine. Provides the protobuf service definition (`ActsService`), generated client/server stubs, and a high-level `ActsChannel` client.
+gRPC client for an acts-server. Provides the high-level `ActsChannel` client —
+typed action helpers, subscriptions with fault reporting — over the generated
+bindings, which come from [`acts-proto`](../acts-proto) along with the service
+definition and are re-exported here.
 
 ## Installation
 
@@ -52,9 +55,13 @@ client.send::<()>("complete", options).await?;
 
 ## Server Usage
 
-Implement `ActsService` to build a gRPC server. See `acts-plugin-grpc` for a ready-to-use plugin.
+Implement `ActsService` (from `acts-proto`, re-exported here) to build a gRPC
+server. See `acts-plugin-grpc` for a ready-to-use plugin.
 
 ## Proto
+
+The protocol is defined in [`acts-proto`](../acts-proto), the crate both ends of
+the wire depend on:
 
 ```protobuf
 service ActsService {

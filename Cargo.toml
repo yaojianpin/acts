@@ -78,7 +78,7 @@ acts-expr = { path = "./crates/acts-expr", version = "0.25.0" }
 # prost codec and its codegen are the separate `tonic-prost`/`tonic-prost-build`
 # crates, and the `prost` feature is gone. The generated bindings therefore name
 # `tonic_prost::ProstCodec`, and a member that wants it must depend on the crate
-# (see acts-channel).
+# (see acts-proto).
 tonic = { version = "0.14", default-features = false, features = [
     "channel",
     "codegen",
@@ -106,6 +106,7 @@ redis = { version = "1.7", default-features = false, features = [
 serial_test = { version = "3", features = ["async"] }
 acts = { path = "./crates/acts", version = "0.25.0" }
 acts-channel = { path = "./crates/acts-channel", version = "0.25.0" }
+acts-proto = { path = "./crates/acts-proto", version = "0.25.0" }
 acts-store = { path = "./crates/acts-store", version = "0.25.0" }
 acts-package-http = { path = "./packages/acts-package-http", version = "0.25.0" }
 acts-package-shell = { path = "./packages/acts-package-shell", version = "0.25.0" }

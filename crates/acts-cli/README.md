@@ -25,6 +25,24 @@ tap 'help' to list available subcommands and some concept guides
 
 Type `help` inside the session to list the available subcommands.
 
+## Values and errors
+
+A value a command takes (`--data`, `-p`, `-v`) is JSON when it parses as JSON
+— `1`, `null`, `[2, 3]`, `{"a": 1}` — and the string it looks like otherwise,
+so `-v name=user1` is the string and needs no quoting; an object or array that
+is not valid JSON is reported as the typo it is. Quote a JSON value in the
+shell so the session's own tokenizer sees it whole.
+
+A command that fails prints the action and what the server answered, e.g.
+
+```text
+model get missing
+action 'model:get' failed: code: 'Internal error', message: "cannot find models by 'missing'"
+```
+
+and the session continues; only `exit` (or Ctrl-D) leaves it. A line that does
+not parse prints clap's own usage diagnostic instead.
+
 ## Subcommands
 
 | command    | purpose                                   |

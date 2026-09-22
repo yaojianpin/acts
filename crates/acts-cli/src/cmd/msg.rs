@@ -1,5 +1,5 @@
 use super::CommandRunner as Command;
-use crate::util;
+use crate::{client, util};
 use acts_channel::{
     ActsOptions, Vars,
     model::{Expr, MessageInfo, OrderBy, PageData},
@@ -91,7 +91,7 @@ pub enum MessageCommands {
     },
 }
 
-pub async fn process(parent: &mut Command<'_>, command: &MessageCommands) -> Result<(), String> {
+pub async fn process(parent: &mut Command<'_>, command: &MessageCommands) -> anyhow::Result<()> {
     let ret = match command {
         MessageCommands::Get { id } => get(parent, id).await,
         MessageCommands::Ack { id } => ack(parent, id).await,
@@ -125,16 +125,14 @@ pub async fn ls(
     count: &Option<u32>,
     query_by: &Vec<Expr>,
     order_by: &Vec<OrderBy>,
-) -> Result<String, String> {
+) -> anyhow::Result<String> {
     let mut ret = String::new();
     let query = util::to_query(offset, count, query_by, order_by);
     let resp = parent
-        .client
         .send::<PageData<MessageInfo>>("msg:ls", Vars::new().with("query", query))
-        .await
-        .map_err(|err| err.message().to_string())?;
+        .await?;
 
-    let data = resp.data.as_ref().unwrap();
+    let data = client::payload("msg:ls", resp.data.as_ref())?;
     let mut table = Table::new();
     table
         .load_style(UTF8_FULL)
@@ -170,30 +168,22 @@ pub async fn ls(
     Ok(ret)
 }
 
-pub async fn get(parent: &mut Command<'_>, id: &str) -> Result<String, String> {
+pub async fn get(parent: &mut Command<'_>, id: &str) -> anyhow::Result<String> {
     let mut ret = String::new();
     let mut options = Vars::new();
     options.set("id", id);
-    let resp = parent
-        .client
-        .send::<MessageInfo>("msg:get", options)
-        .await
-        .map_err(|err| err.message().to_string())?;
-    let message = resp.data.unwrap();
-    ret.push_str(&serde_json::to_string_pretty(&message).unwrap());
+    let resp = parent.send::<MessageInfo>("msg:get", options).await?;
+    let message = client::payload("msg:get", resp.data)?;
+    ret.push_str(&util::to_json(&message)?);
     let cost = resp.end_time - resp.start_time;
     ret.push_str(&format!("(elapsed {cost}ms)"));
 
     Ok(ret)
 }
 
-pub async fn ack(parent: &mut Command<'_>, id: &str) -> Result<String, String> {
+pub async fn ack(parent: &mut Command<'_>, id: &str) -> anyhow::Result<String> {
     let mut ret = String::new();
-    let resp = parent
-        .client
-        .ack(id)
-        .await
-        .map_err(|err| err.message().to_string())?;
+    let resp = parent.ack(id).await?;
 
     let cost = resp.end_time - resp.start_time;
     ret.push_str(&format!("(elapsed {cost}ms)"));
@@ -201,14 +191,10 @@ pub async fn ack(parent: &mut Command<'_>, id: &str) -> Result<String, String> {
     Ok(ret)
 }
 
-pub async fn redo(parent: &mut Command<'_>) -> Result<String, String> {
+pub async fn redo(parent: &mut Command<'_>) -> anyhow::Result<String> {
     let mut ret = String::new();
     let options = Vars::new();
-    let resp = parent
-        .client
-        .send::<()>("msg:redo", options)
-        .await
-        .map_err(|err| err.message().to_string())?;
+    let resp = parent.send::<()>("msg:redo", options).await?;
 
     // print the elapsed
     let cost = resp.end_time - resp.start_time;
@@ -217,13 +203,11 @@ pub async fn redo(parent: &mut Command<'_>) -> Result<String, String> {
     Ok(ret)
 }
 
-pub async fn rm(parent: &mut Command<'_>, id: &str) -> Result<String, String> {
+pub async fn rm(parent: &mut Command<'_>, id: &str) -> anyhow::Result<String> {
     let mut ret = String::new();
     let resp = parent
-        .client
         .send::<bool>("msg:rm", Vars::new().with("id", id))
-        .await
-        .map_err(|err| err.message().to_string())?;
+        .await?;
 
     // print the elapsed
     let cost = resp.end_time - resp.start_time;
@@ -232,13 +216,11 @@ pub async fn rm(parent: &mut Command<'_>, id: &str) -> Result<String, String> {
     Ok(ret)
 }
 
-pub async fn clear(parent: &mut Command<'_>, pid: &Option<String>) -> Result<String, String> {
+pub async fn clear(parent: &mut Command<'_>, pid: &Option<String>) -> anyhow::Result<String> {
     let mut ret = String::new();
     let resp = parent
-        .client
         .send::<()>("msg:clear", Vars::new().with("pid", pid))
-        .await
-        .map_err(|err| err.message().to_string())?;
+        .await?;
 
     // print the elapsed
     let cost = resp.end_time - resp.start_time;
@@ -256,7 +238,7 @@ async fn sub(
     uses: &Option<String>,
     ack: &bool,
     options: &[(String, String)],
-) -> Result<String, String> {
+) -> anyhow::Result<String> {
     let default_value = "*".to_string();
     // * means to sub all messages
     let r#type = r#type.as_ref().unwrap_or(&default_value);
@@ -280,7 +262,7 @@ async fn sub(
             },
         )
         .await
-        .map_err(|err| err.message().to_string())?;
+        .map_err(|err| client::action_failed("msg:sub", err))?;
 
     // the feed runs in the background: its end must stay visible
     tokio::spawn(async move {
@@ -293,13 +275,11 @@ async fn sub(
     Ok(format!("subscribed server messages as '{client_id}'"))
 }
 
-pub async fn unsub(parent: &mut Command<'_>, client_id: &str) -> Result<String, String> {
+pub async fn unsub(parent: &mut Command<'_>, client_id: &str) -> anyhow::Result<String> {
     let mut ret = String::new();
     let resp = parent
-        .client
         .send::<()>("msg:unsub", Vars::new().with("client_id", client_id))
-        .await
-        .map_err(|err| err.message().to_string())?;
+        .await?;
 
     // print the elapsed
     let cost = resp.end_time - resp.start_time;

@@ -39,38 +39,32 @@ name = "acts-channel"
 version = "0.25.0"
 dependencies = [
  "acts",
+ "acts-plugin-grpc",
+ "acts-proto",
  "anyhow",
  "chrono",
  "futures",
- "nanoid",
- "prost",
- "prost-types",
- "protoc-bin-vendored",
- "regex",
  "serde",
  "serde_json",
  "serde_yaml",
  "tokio",
  "tokio-stream",
  "tonic",
- "tonic-prost",
- "tonic-prost-build",
 ]
 
 [[package]]
 name = "acts-cli"
 version = "0.25.0"
 dependencies = [
+ "acts",
  "acts-channel",
+ "acts-plugin-grpc",
  "anyhow",
  "chrono",
  "clap",
  "clap-cargo",
  "comfy-table",
- "futures",
- "once_cell",
  "owo-colors",
- "regex",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -222,7 +216,7 @@ name = "acts-plugin-grpc"
 version = "0.25.0"
 dependencies = [
  "acts",
- "acts-channel",
+ "acts-proto",
  "async-trait",
  "serde",
  "serde_json",
@@ -265,11 +259,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "acts-proto"
+version = "0.25.0"
+dependencies = [
+ "nanoid",
+ "prost",
+ "protoc-bin-vendored",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+]
+
+[[package]]
 name = "acts-server"
 version = "0.25.0"
 dependencies = [
  "acts",
- "acts-channel",
  "acts-package-http",
  "acts-package-javascript",
  "acts-package-nats",

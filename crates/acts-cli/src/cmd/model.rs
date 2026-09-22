@@ -1,5 +1,5 @@
 use super::CommandRunner as Command;
-use crate::util;
+use crate::{client, util};
 use acts_channel::{
     Vars,
     model::{Expr, ModelInfo, OrderBy, PageData},
@@ -52,7 +52,7 @@ pub enum ModelCommands {
     },
 }
 
-pub async fn process(parent: &mut Command<'_>, command: &ModelCommands) -> Result<(), String> {
+pub async fn process(parent: &mut Command<'_>, command: &ModelCommands) -> anyhow::Result<()> {
     let ret = match command {
         ModelCommands::Get { id, fmt } => get(parent, id, fmt).await,
         ModelCommands::Ls {
@@ -69,14 +69,12 @@ pub async fn process(parent: &mut Command<'_>, command: &ModelCommands) -> Resul
     Ok(())
 }
 
-async fn deploy(parent: &mut Command<'_>, path: &PathBuf) -> Result<String, String> {
+pub async fn deploy(parent: &mut Command<'_>, path: &PathBuf) -> anyhow::Result<String> {
     let mut ret = String::new();
-    let text = std::fs::read_to_string(path).map_err(|err| err.to_string())?;
-    let resp = parent
-        .client
-        .deploy(&text, None)
-        .await
-        .map_err(|err| err.message().to_string())?;
+    let text = std::fs::read_to_string(path).map_err(|err| {
+        anyhow::anyhow!("failed to read the model file {}: {err}", path.display())
+    })?;
+    let resp = parent.deploy(&text).await?;
     // print the elapsed
     let cost = resp.end_time - resp.start_time;
     ret.push_str(&format!("(elapsed {cost}ms)"));
@@ -84,21 +82,19 @@ async fn deploy(parent: &mut Command<'_>, path: &PathBuf) -> Result<String, Stri
     Ok(ret)
 }
 
-async fn ls(
+pub async fn ls(
     parent: &mut Command<'_>,
     offset: &Option<u32>,
     count: &Option<u32>,
     query_by: &Vec<Expr>,
     order_by: &Vec<OrderBy>,
-) -> Result<String, String> {
+) -> anyhow::Result<String> {
     let mut ret = String::new();
     let query = util::to_query(offset, count, query_by, order_by);
     let resp = parent
-        .client
         .send::<PageData<ModelInfo>>("model:ls", Vars::new().with("query", query))
-        .await
-        .map_err(|err| err.message().to_string())?;
-    let data = resp.data.as_ref().unwrap();
+        .await?;
+    let data = client::payload("model:ls", resp.data.as_ref())?;
     let mut table = Table::new();
     table
         .load_style(UTF8_FULL)
@@ -129,7 +125,11 @@ async fn ls(
     Ok(ret)
 }
 
-async fn get(parent: &mut Command<'_>, id: &str, fmt: &Option<String>) -> Result<String, String> {
+pub async fn get(
+    parent: &mut Command<'_>,
+    id: &str,
+    fmt: &Option<String>,
+) -> anyhow::Result<String> {
     let mut ret = String::new();
     let mut options = Vars::new();
     options.set("id", id);
@@ -137,12 +137,8 @@ async fn get(parent: &mut Command<'_>, id: &str, fmt: &Option<String>) -> Result
         options.set("fmt", fmt);
     };
 
-    let resp = parent
-        .client
-        .send::<ModelInfo>("model:get", options)
-        .await
-        .map_err(|err| err.message().to_string())?;
-    let model = resp.data.unwrap();
+    let resp = parent.send::<ModelInfo>("model:get", options).await?;
+    let model = client::payload("model:get", resp.data)?;
     ret.push_str(&model.data);
     let cost = resp.end_time - resp.start_time;
     ret.push_str(&format!("(elapsed {cost}ms)"));
@@ -150,13 +146,11 @@ async fn get(parent: &mut Command<'_>, id: &str, fmt: &Option<String>) -> Result
     Ok(ret)
 }
 
-async fn rm(parent: &mut Command<'_>, id: &str) -> Result<String, String> {
+pub async fn rm(parent: &mut Command<'_>, id: &str) -> anyhow::Result<String> {
     let mut ret = String::new();
     let resp = parent
-        .client
         .send::<bool>("model:rm", Vars::new().with("id", id))
-        .await
-        .map_err(|err| err.message().to_string())?;
+        .await?;
 
     // print the elapsed
     let cost = resp.end_time - resp.start_time;

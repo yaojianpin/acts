@@ -11,7 +11,11 @@ edition.workspace = true
 
 [dependencies]
 acts = { workspace = true }
-acts-channel = { workspace = true }
+# The generated bindings of the wire protocol — the service this plugin
+# implements and the messages it carries. Not `acts-channel`: the client crate
+# is a *user* of this server, and depending on it would make the two form the
+# cycle that keeps either from being published.
+acts-proto = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }

@@ -12,40 +12,26 @@ repository.workspace = true
 edition.workspace = true
 
 [dependencies]
+acts-proto = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
-futures = { workspace = true }
-nanoid = { workspace = true }
-prost = { workspace = true }
-prost-types = { workspace = true }
-regex = { workspace = true }
 serde = { features = ["derive"], workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 # `transport` carries the `server` + `channel` features the client and its test
 # harness use (`tonic::transport::{Channel, Endpoint, Server}`).
 tonic = { features = ["transport"], workspace = true }
-# The generated bindings name the prost codec (`tonic_prost::ProstCodec`),
-# which `tonic` no longer carries since 0.14.
-tonic-prost = { workspace = true }
 tokio = { workspace = true }
 tokio-stream = { features = ["net"], workspace = true }
 
-[build-dependencies]
-# `transport` is what generates the `connect`/`Channel` halves of the bindings.
-# `cleanup-markdown` (a default in 0.14) is off: it only reformats generated doc
-# comments through `pulldown-cmark`, and the old `tonic-build` did not have it
-# on, so the committed `proto/acts.grpc.rs` is generated identically without the
-# extra build-time dependencies.
-tonic-prost-build = { version = "0.14", default-features = false, features = [
-    "transport",
-] }
-protoc-bin-vendored = { version = "3", optional = true }
-
 [features]
 default = []
-codegen = ["dep:protoc-bin-vendored"]
 docker_test = []
 
 [dev-dependencies]
 acts = { workspace = true }
+futures = { workspace = true }
+# The tests boot the server the way `acts-server` boots it — the shipped engine
+# with the shipped gRPC plugin — so the client is exercised against the server
+# it talks to in production rather than a second implementation of it.
+acts-plugin-grpc = { workspace = true }

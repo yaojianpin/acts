@@ -1,5 +1,5 @@
 use super::CommandRunner as Command;
-use crate::util;
+use crate::{client, util};
 use acts_channel::{
     Vars,
     model::{Expr, OrderBy, PageData, TaskInfo},
@@ -37,7 +37,7 @@ pub enum TaskCommands {
     },
 }
 
-pub async fn process(parent: &mut Command<'_>, command: &TaskCommands) -> Result<(), String> {
+pub async fn process(parent: &mut Command<'_>, command: &TaskCommands) -> anyhow::Result<()> {
     let ret = match command {
         TaskCommands::Get { pid, tid } => get(parent, pid, tid).await,
         TaskCommands::Ls {
@@ -58,16 +58,14 @@ pub async fn ls(
     count: &Option<u32>,
     query_by: &Vec<Expr>,
     order_by: &Vec<OrderBy>,
-) -> Result<String, String> {
+) -> anyhow::Result<String> {
     let mut ret = String::new();
     let query = util::to_query(offset, count, query_by, order_by);
     let resp = parent
-        .client
         .send::<PageData<TaskInfo>>("task:ls", Vars::new().with("query", query))
-        .await
-        .map_err(|err| err.message().to_string())?;
+        .await?;
 
-    let data = resp.data.as_ref().unwrap();
+    let data = client::payload("task:ls", resp.data.as_ref())?;
     let mut table = Table::new();
     table
         .load_style(UTF8_FULL)
@@ -101,18 +99,14 @@ pub async fn ls(
     Ok(ret)
 }
 
-pub async fn get(parent: &mut Command<'_>, pid: &str, tid: &str) -> Result<String, String> {
+pub async fn get(parent: &mut Command<'_>, pid: &str, tid: &str) -> anyhow::Result<String> {
     let mut ret = String::new();
     let mut options = Vars::new();
     options.set("pid", pid);
     options.set("tid", tid);
-    let resp = parent
-        .client
-        .send::<TaskInfo>("task:get", options)
-        .await
-        .map_err(|err| err.message().to_string())?;
-    let task = resp.data.unwrap();
-    ret.push_str(&serde_json::to_string_pretty(&task).unwrap());
+    let resp = parent.send::<TaskInfo>("task:get", options).await?;
+    let task = client::payload("task:get", resp.data)?;
+    ret.push_str(&util::to_json(&task)?);
     let cost = resp.end_time - resp.start_time;
     ret.push_str(&format!("(elapsed {cost}ms)"));
 

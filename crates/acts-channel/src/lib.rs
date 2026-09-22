@@ -5,8 +5,6 @@
 // it would break the public API, so suppress the large-Result lint crate-wide.
 #![allow(clippy::result_large_err)]
 
-include!("../proto/acts.grpc.rs");
-
 mod action_result;
 mod channel;
 #[cfg(test)]
@@ -17,5 +15,12 @@ mod vars;
 pub mod model;
 pub use action_result::ActionResult;
 pub use channel::{ActsChannel, ActsOptions, Auth, AuthChannel, Subscription, SubscriptionError};
-pub use utils::create_seq;
 pub use vars::Vars;
+
+// The wire protocol is generated in `acts-proto`, which both this client and
+// the server plugin implement their half of; re-exported here so a caller that
+// reaches for the client keeps finding the messages and the service stubs
+// under this crate, as it always has.
+pub use acts_proto::{
+    Message, MessageOptions, acts_service_client, acts_service_server, create_seq,
+};
