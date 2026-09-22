@@ -337,6 +337,19 @@ async fn sweep_until_gone(rt: &Runtime, pid: &str) {
     );
 }
 
+/// Every arm names the rows it may break, so a lagging persist of another
+/// task cannot steal the fault: a `flush` drains the store writer, not the
+/// engine's in-flight jobs, and a job that was already running queues its task
+/// writes whenever it gets to them — after the arm. An arm on "the next task
+/// write of any task" would then fault that straggler and leave the write the
+/// test means to break untested, passing or failing on which job ran last.
+enum FaultArm {
+    /// One task's own lifecycle row, by full row data key.
+    Row(String),
+    /// Any task-lifecycle row but the listed ones (full row data keys).
+    RowButNot(Vec<String>),
+}
+
 /// KV backend whose task-lifecycle write fails exactly once while armed: the
 /// transient store fault a `do_action(Next)` state persist can hit. The fault
 /// is visible to the test through `injected`, so a run where the condition
@@ -345,9 +358,8 @@ struct FailOnceTaskPutKv {
     inner: MemoryStore,
     armed: AtomicBool,
     injected: AtomicUsize,
-    /// Exact task-row data key whose write must fail while armed; `None`
-    /// fails the next task-lifecycle write of any task.
-    target: Mutex<Option<String>>,
+    /// Which write the arm means to break; set together with `armed`.
+    target: Mutex<Option<FaultArm>>,
     /// Data key of the row write the fault actually hit, so a test can prove
     /// the fault landed on the write it means to break.
     failed: Mutex<Option<String>>,
@@ -364,16 +376,18 @@ impl FailOnceTaskPutKv {
         }
     }
 
-    /// Fail the next task-lifecycle write of any task.
-    fn arm(&self) {
-        *self.target.lock() = None;
-        self.armed.store(true, Ordering::SeqCst);
-    }
-
     /// Fail the next write of one task's own lifecycle row. The row id is
     /// `{pid}{tid}` (see `utils::Id::id`), not the bare tid.
     fn arm_row(&self, pid: &str, tid: &str) {
-        *self.target.lock() = Some(task_data_key(pid, tid));
+        *self.target.lock() = Some(FaultArm::Row(task_data_key(pid, tid)));
+        self.armed.store(true, Ordering::SeqCst);
+    }
+
+    /// Fail the next write of a task row that is not one of `known`: the first
+    /// write of a task that does not exist yet, i.e. of work the call under
+    /// test creates — immune to a lagging write of a task that already did.
+    fn arm_row_but_not(&self, known: Vec<String>) {
+        *self.target.lock() = Some(FaultArm::RowButNot(known));
         self.armed.store(true, Ordering::SeqCst);
     }
 
@@ -399,7 +413,7 @@ impl KvStore for FailOnceTaskPutKv {
 
     async fn batch(&self, ops: &[StoreBatchOp], guards: &[StoreGuard]) -> crate::Result<bool> {
         if self.armed.load(Ordering::SeqCst) {
-            let target = self.target.lock().clone();
+            let target = self.target.lock();
             let hit = ops.iter().find_map(|op| {
                 let key = match op {
                     StoreBatchOp::Put { key, .. } | StoreBatchOp::Delete { key } => key,
@@ -407,10 +421,13 @@ impl KvStore for FailOnceTaskPutKv {
                 if !key.starts_with("tasks-id-") {
                     return None;
                 }
-                match target.as_deref() {
-                    Some(target) if target != key => None,
-                    _ => Some(key.clone()),
-                }
+                let wanted = match target.as_ref() {
+                    // armed without a target: nothing has ever armed it that way
+                    None => false,
+                    Some(FaultArm::Row(row)) => row.as_str() == key,
+                    Some(FaultArm::RowButNot(known)) => !known.contains(key),
+                };
+                wanted.then(|| key.clone())
             });
             if let Some(key) = hit {
                 // consume: exactly one failure, then the backend is whole again

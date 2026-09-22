@@ -74,10 +74,13 @@ async fn sch_action_store_fault_on_complete_heals_exactly_once_inner() {
     let (pid, act1_tid) = s.recv().await;
     let store_ops = rt.cache().store();
 
-    // settle every launch write, then arm the fault: the next task-lifecycle
-    // write is exactly act1's completion persist
+    // settle every launch write, then arm the fault on act1's own lifecycle
+    // row: the write it breaks is exactly act1's completion persist. Naming
+    // the row is what keeps the fault there — a lagging persist of a task the
+    // forward path already created can land after this arm, and an unnamed
+    // arm would break that write instead.
     rt.cache().flush().await.unwrap();
-    kv.arm();
+    kv.arm_row(&pid, &act1_tid);
 
     // the action is accepted: the state write is queued on the store writer,
     // so a store fault cannot fail the client call after the action applied

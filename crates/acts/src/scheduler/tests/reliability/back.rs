@@ -247,6 +247,14 @@ async fn sch_action_recover_closes_applied_back_inner() {
 /// and the redo converges exactly once — one redo step, one redo act, no
 /// duplicate work — the redone path runs to a single business success, and the
 /// finished process sweeps cleanly.
+///
+/// The fault is aimed at the first write of a task the action creates — the
+/// redo step's own row — never at a row that already existed. `flush` drains
+/// the store writer, not the engine's in-flight jobs: a forward-path job can
+/// queue a trailing persist of an existing task after the barrier, and an
+/// unnamed "next task write" arm let that straggler take the fault while the
+/// redo path's lost write went untested (`left: <straggler row>` against the
+/// redo step's row, seen in a loaded suite round).
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn sch_back_store_fail_degrades_and_heals_once() {
@@ -298,10 +306,20 @@ async fn sch_back_store_fail_degrades_and_heals_once_inner() {
     let (_, act2_tid) = s2.recv().await;
     let store_ops = rt.cache().store();
 
-    // settle the forward path, then arm the one-shot fault: the next
-    // task-lifecycle write is the one the redo path persists first
+    // settle the forward path, then arm the one-shot fault on the first write
+    // of a task that does not exist yet: `redo_task` creates the redo step
+    // before `back_task` runs, so that first write is the redo step's own row
+    // (the redo act does not exist yet). Naming what the fault may break is
+    // what keeps it on the redo path: the flush drained the writer, not the
+    // forward path's in-flight jobs, and one of their lagging persists — never
+    // the redo's — can land after this arm.
     rt.cache().flush().await.unwrap();
-    kv.arm();
+    kv.arm_row_but_not(
+        proc.tasks()
+            .iter()
+            .map(|t| task_data_key(&pid, &t.id))
+            .collect(),
+    );
 
     let mut options = Vars::new();
     options.set("to", "step1");
@@ -321,14 +339,10 @@ async fn sch_back_store_fail_degrades_and_heals_once_inner() {
         "exactly one write must have been injected-failed"
     );
 
-    // the back itself is applied and durable: act2 is `Backed` and its own
-    // state write is not the one the fault dropped
+    // the back itself is applied and durable: act2 holds the decision, and the
+    // fault — aimed past the rows that already existed — left its state write
+    // alone
     let failed = kv.failed_key().expect("the fault must have hit a task row");
-    assert_ne!(
-        failed,
-        task_data_key(&pid, &act2_tid),
-        "the fault must not hit the redo decision's own state write"
-    );
     assert_eq!(
         proc.task(&act2_tid).unwrap().state(),
         TaskState::Backed,
