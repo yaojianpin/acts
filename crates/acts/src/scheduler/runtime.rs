@@ -780,9 +780,12 @@ impl Runtime {
     ///   never replayed onto the current one.
     ///
     /// A re-drive is idempotent because the operation itself is: `Task::next`
-    /// starts from the durable applied-propagation guard, `schedule_once`
-    /// reuses the task instance a replay would have created, and the task state
-    /// transitions are guarded (`set_state_if_running`). The pass retries on a
+    /// starts from the durable applied-propagation guard, the flow it drives
+    /// reuses the task instance a replay would have created (`schedule_once`
+    /// for a jump or a loop iteration, [`Context::schedule_visited`] for a
+    /// one-shot visit into a task's children — whose in-memory marker a crash
+    /// can lose), and the task state transitions are guarded
+    /// (`set_state_if_running`). The pass retries on a
     /// doubling window (see [`OpClaims::attempted`]), so a record that cannot
     /// make progress is reported instead of hammering the store.
     pub(crate) async fn recover_outbox(self: &Arc<Self>, older_than_millis: i64) -> Result<()> {

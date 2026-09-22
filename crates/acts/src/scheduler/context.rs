@@ -373,6 +373,39 @@ impl Context {
         self.sched_task(node, prev)
     }
 
+    /// Schedule `node` as a child of `prev`'s one-shot visit — every child of
+    /// a task is created exactly once, when that task first runs into its
+    /// children ([`Task::check_in_children`]). Reports whether this call is
+    /// what put the child there: `false` means the visit found the slot
+    /// already taken.
+    ///
+    /// [`Self::schedule_once`] treats a *terminal* instance of the same
+    /// `(node, prev)` slot as "redo me". That is right for the flow it drives —
+    /// a `while` iteration, a `next`/`chain` jump, a timeout branch
+    /// re-evaluation each legitimately want a fresh instance in the slot — but
+    /// wrong for a visit, whose one-shot marker (`Sign::IN_CHILDREN`) is
+    /// in-memory state a crash can lose. The visiting task's `next` record
+    /// stays `Pending` for as long as its subtree is in flight (by design: a
+    /// descendant's completion re-enters it), so recovery replays the visit;
+    /// with only the marker gone, a replay would schedule a second instance
+    /// under a parent that already visited its children, and the child would
+    /// run twice. The slot is the durable fact the marker cannot be: an
+    /// instance exists for `(node, prev)` ⇒ this visit already created it,
+    /// whatever state that instance reached. A slot persisted but never started
+    /// (`None`) is re-enqueued — the crash cut its first run — and counts as
+    /// this call's doing.
+    pub fn schedule_visited(&self, node: &Arc<Node>, prev: Arc<Task>) -> Result<bool> {
+        if let Some(existing) = self.proc.task_for_node_prev(node.id(), &prev.id) {
+            if existing.state().is_none() {
+                self.runtime.push(&existing)?;
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+        self.sched_task(node, prev)?;
+        Ok(true)
+    }
+
     #[instrument(skip(self, act, vars), fields(uses = %act.uses, name = %act.name))]
     pub fn dispatch_act(&self, act: &Act, vars: Vars) -> Result<()> {
         // never grow a process that is already over: a terminal walk (abort,

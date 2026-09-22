@@ -18,12 +18,13 @@ use serial_test::serial;
 use crate::{
     ActError, Action, ChannelOptions, Engine, MessageState, TaskState, Vars, Workflow,
     event::EventAction,
-    scheduler::{NodeKind, PropagationPhase},
+    scheduler::{NodeKind, PropagationPhase, Sign},
     store::{
         KvStore, MemoryStore,
         query::{Expr, Filter, Query},
     },
     utils,
+    utils::consts,
     utils::test::{USES_IRQ, auto_complete},
 };
 
@@ -560,12 +561,29 @@ async fn sch_action_recover_reapplies_lost_action_inner() {
 async fn sch_action_recover_closes_applied_action() {
     bounded(
         "sch_action_recover_closes_applied_action",
-        sch_action_recover_closes_applied_action_inner(),
+        sch_action_recover_closes_applied_action_inner(false),
     )
     .await;
 }
 
-async fn sch_action_recover_closes_applied_action_inner() {
+/// The same crash, with the running parent's one-shot child-visit marker
+/// (`Sign::IN_CHILDREN`) lost: while a task's children are in flight its own
+/// `next` record stays `Pending` by design, and the marker only reaches the
+/// vars row if a persist reaches that task first — which, for a parent that
+/// never runs on during the window, nothing does. Recovery replays the
+/// parent's `next`; the visit must stay one-shot without its in-memory marker,
+/// i.e. it must not schedule a second `s1` beside the completed one.
+#[serial]
+#[tokio::test(flavor = "multi_thread")]
+async fn sch_action_recover_keeps_one_child_without_visit_marker() {
+    bounded(
+        "sch_action_recover_keeps_one_child_without_visit_marker",
+        sch_action_recover_closes_applied_action_inner(true),
+    )
+    .await;
+}
+
+async fn sch_action_recover_closes_applied_action_inner(lose_visit_marker: bool) {
     let store: Arc<dyn KvStore> = Arc::new(MemoryStore::new());
     let engine = Engine::builder()
         .set_store(store.clone())
@@ -633,12 +651,26 @@ async fn sch_action_recover_closes_applied_action_inner() {
         .enqueue_action_op(&pid, &act1_tid, "skip", "{}")
         .await
         .unwrap();
+    if lose_visit_marker {
+        // the root visited its children while it ran on, and a persist of the
+        // root's scope is what carries that marker to its vars row — the crash
+        // window can end before one reaches it. Drop the marker from the
+        // durable row so the replay below meets exactly that crash state.
+        let root = proc.task(consts::TASK_ROOT_TID).unwrap();
+        root.remove_sign(Sign::IN_CHILDREN);
+        rt.cache().flush().await.unwrap();
+        rt.cache().store().upsert_task_vars(&root).await.unwrap();
+        rt.cache().flush().await.unwrap();
+    }
     engine.close().await;
 
     // reload: recovery sees the task already Skipped (terminal) and closes the
     // record without re-applying (the process keeps its legitimate pending
     // `next` records while act2 is in flight — only the action record drains);
-    // the act message is marked completed
+    // the act message is marked completed. The root's own `next` record is
+    // replayed in that same pass: its subtree is still in flight, so the
+    // replay must sit exactly where the first run stopped — one visit into its
+    // children, marker or no marker
     let engine2 = Engine::builder()
         .set_store(store.clone())
         .start()
@@ -658,7 +690,24 @@ async fn sch_action_recover_closes_applied_action_inner() {
     assert!(drained, "skip action record was not closed");
 
     let reloaded = rt2.proc(&pid).await.unwrap().unwrap();
-    assert_eq!(reloaded.task_by_nid("s1").len(), 1);
+    if lose_visit_marker {
+        // The count below is about the replay of the root's `next`, which the
+        // lane worker runs after this boot: the visit re-marks the root in
+        // memory (the durable row lost that marker), so waiting for the mark
+        // waits for the visit — and reads its outcome instead of racing it.
+        poll_until("the replayed child visit to run", || async {
+            reloaded
+                .task(consts::TASK_ROOT_TID)
+                .unwrap()
+                .is_sign(Sign::IN_CHILDREN)
+        })
+        .await;
+    }
+    assert_eq!(
+        reloaded.task_by_nid("s1").len(),
+        1,
+        "the replayed child visit must reuse s1's slot, not schedule a second one"
+    );
     let act_task = reloaded.task(&act1_tid).unwrap();
     assert_eq!(act_task.state(), TaskState::Skipped);
     assert_eq!(

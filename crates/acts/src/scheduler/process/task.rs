@@ -1251,14 +1251,30 @@ impl Task {
     pub async fn check_in_children(self: &Arc<Self>, ctx: &Context) -> Result<NextAction> {
         if self.state().is_running() {
             // run into children nodes if there is children nodes
+            // The marker is this pass's in-memory fast path. It is not what
+            // makes the pass crash-safe: it lives in the scope's vars row,
+            // which no persist need reach while this task runs on (its own
+            // `next` record stays `Pending` by design while its children are in
+            // flight), so recovery may replay the visit without it. What makes
+            // the replay a no-op is the slot itself — see
+            // [`Context::schedule_visited`].
             if !self.is_sign(Sign::IN_CHILDREN) {
                 let children = self.node().children();
                 if !children.is_empty() {
+                    let mut scheduled = false;
                     for child in &children {
-                        ctx.schedule_once(child, ctx.task())?;
+                        scheduled |= ctx.schedule_visited(child, ctx.task())?;
                     }
                     self.set_sign(Sign::IN_CHILDREN);
-                    return Ok(NextAction::Stop);
+                    // A replay that found every child already scheduled has
+                    // nothing to wait for: it must leave the pass where a
+                    // later one would sit — auto-completing this task when its
+                    // children are all done — instead of stopping on a
+                    // one-shot visit it did not perform. Any child it *did*
+                    // schedule has to run first, so the visit still stops.
+                    if scheduled {
+                        return Ok(NextAction::Stop);
+                    }
                 }
             }
         }

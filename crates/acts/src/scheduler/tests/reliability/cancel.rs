@@ -273,6 +273,13 @@ async fn sch_cancel_store_fail_degrades_and_heals_once_inner() {
         TaskState::Cancelled,
         "the cancel must decide the running act's state even when its write failed"
     );
+    // the redo step dispatches its own act when its queued run reaches it, so
+    // wait for that run before counting: the count below pins "exactly once",
+    // and reading it any earlier races the lane worker (not the cancel)
+    poll_until("the cancel's redo of step1 to dispatch its act", || async {
+        acts_of(&proc, "act1").len() >= 2
+    })
+    .await;
     assert_eq!(
         acts_of(&proc, "act1").len(),
         2,
