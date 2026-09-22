@@ -65,8 +65,17 @@ nanoid = "0.5"
 parking_lot = "0.12"
 cron = "0.12"
 strum = { version = "0.27", features = ["derive"] }
-# expression language (the engine's `${{ }}` / `if` evaluator)
-cel-interpreter = { version = "0.10", features = ["json"] }
+# expression language (the engine's `${{ }}` / `if` evaluator).
+#
+# `cel` 0.14 is `cel-interpreter`'s successor (the parser and the interpreter
+# merged back into one crate), and the default feature set is not what the
+# engine uses: `regex` (CEL `matches`/`replace`), `chrono` (`duration`/
+# `timestamp`) and the additive `bytes`/`structs`/`parser_pratt` features are
+# not reachable from a `${{ }}` expression in this engine, so they are off and
+# only `json` (the value <-> serde_json bridge the evaluator returns through)
+# is on. A feature that is off still has to be added back if an expression
+# ever needs it — that is the point: the trimmed build is the measured one.
+cel = { version = "0.14", default-features = false, features = ["json"] }
 # grpc / web
 # 0.14 is split: `tonic` is the transport and the generated code's skeleton, the
 # prost codec and its codegen are the separate `tonic-prost`/`tonic-prost-build`

@@ -1,8 +1,9 @@
 use crate::{Context, Result, TimeoutLimit, Vars, utils::consts};
-use cel_interpreter::{
+use cel::{
     Context as CelContext, ExecutionError, Value, extractors::Arguments, objects::ResolveResult,
 };
 use serde_json::Value as JsonValue;
+use std::collections::HashMap;
 use std::sync::LazyLock;
 
 /// The identifier prefix `$name` is rewritten to before compilation. CEL
@@ -93,7 +94,7 @@ pub(crate) fn root() -> &'static CelContext<'static> {
 }
 
 /// Register the engine's built-in CEL functions under their `__acts_` names.
-pub(crate) fn register(ctx: &mut cel_interpreter::Context) {
+pub(crate) fn register(ctx: &mut CelContext) {
     ctx.add_function(
         "__acts_get",
         |name: std::sync::Arc<String>| -> ResolveResult {
@@ -247,10 +248,7 @@ pub(crate) fn register(ctx: &mut cel_interpreter::Context) {
 /// Inject the per-evaluation variables: task vars and user vars as bare
 /// identifiers, step data as bare step-id maps, `$env`/`os` and sealed `$name`
 /// under their `__acts_` names.
-pub(crate) fn inject_vars(
-    env: &super::Environment,
-    ctx: &mut cel_interpreter::Context,
-) -> Result<()> {
+pub(crate) fn inject_vars(env: &super::Environment, ctx: &mut CelContext) -> Result<()> {
     // 1. task vars (merged lineage) as bare identifiers
     let task_vars = Context::try_with_current(|ctx| ctx.task().vars()).unwrap_or_default();
     for (key, value) in task_vars.iter() {
@@ -396,11 +394,13 @@ fn json_to_cel(value: JsonValue) -> Value {
         JsonValue::Array(arr) => Value::List(std::sync::Arc::new(
             arr.into_iter().map(json_to_cel).collect(),
         )),
-        JsonValue::Object(map) => {
-            let map: std::collections::HashMap<String, Value> =
-                map.into_iter().map(|(k, v)| (k, json_to_cel(v))).collect();
-            Value::Map(map.into())
-        }
+        // `Value::Map` holds the interpreter's own map type in 0.14; the
+        // `HashMap` -> `Value` conversion is the one that builds it.
+        JsonValue::Object(map) => Value::from(
+            map.into_iter()
+                .map(|(k, v)| (k, json_to_cel(v)))
+                .collect::<HashMap<String, Value>>(),
+        ),
     }
 }
 

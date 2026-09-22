@@ -3,7 +3,7 @@ mod functions;
 mod tests;
 
 use crate::{ActError, Context, Result, ShareLock, Vars};
-use cel_interpreter::Program;
+use cel::Program;
 use core::fmt;
 use parking_lot::RwLock;
 use serde::de::DeserializeOwned;

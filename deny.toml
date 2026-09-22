@@ -75,8 +75,6 @@ skip = [
     { crate = "rand_core@0.9.5", reason = "rand 0.9.5 via mockito 1.7 (examples/packages/http); async-nats 0.50 already uses rand 0.10" },
     { crate = "sha2@0.10.9", reason = "acts' token hashing, sqlx 0.8 and ed25519-dalek 2 are on sha2 0.10; bashkit's checksum builtins use 0.11" },
     { crate = "syn@2.0.119", reason = "derive crates (prost-derive, tracing-attributes, rquickjs-macro, sqlx-macros, validator_derive, ...) are still on syn 2" },
-    { crate = "thiserror@1.0.69", reason = "cel-interpreter 0.10 is on thiserror 1.0 while the workspace uses 2.0" },
-    { crate = "thiserror-impl@1.0.69", reason = "thiserror 1.0.69 (cel-interpreter 0.10)" },
     { crate = "toml_datetime@0.6.11", reason = "toml 0.8, our direct dependency, pulls toml_edit 0.22" },
     { crate = "toml_edit@0.22.27", reason = "toml 0.8, our direct dependency; proc-macro-crate 3 uses toml_edit 0.25" },
     { crate = "webpki-roots@0.26.11", reason = "sqlx-core 0.8 and tokio-websockets 0.10 still use webpki-roots 0.26" },

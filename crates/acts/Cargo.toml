@@ -29,7 +29,7 @@ inventory = "0.3.20"
 jsonschema = { workspace = true }
 nanoid = { workspace = true }
 regex = { workspace = true }
-cel-interpreter = { workspace = true }
+cel = { workspace = true }
 serde = { features = ["derive", "rc"], workspace = true }
 serde_json = { workspace = true }
 serde_repr = "0.1"
