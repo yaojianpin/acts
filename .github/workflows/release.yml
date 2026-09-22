@@ -5,8 +5,12 @@ on:
     tags: ['v*']
   workflow_dispatch:
 
+# The `build` legs only read the tree and upload workflow artifacts; everything
+# that writes to the repository lives in the job below, which asks for the
+# permissions it needs itself. A tag push runs both jobs with this same
+# repository token, so the default here is the read the checkout needs.
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -80,15 +84,38 @@ jobs:
           path: dist/acts-*
           if-no-files-found: error
 
+  # What a release publishes is a chain of trust, and every link after the
+  # archive is written here rather than in the matrix legs: one `SHA256SUMS`
+  # over the merged downloads, a keyless signature over that file, an SPDX SBOM
+  # of the source the binaries were built from, and the two attestations a
+  # consumer checks with `gh attestation verify`. Building it once over the
+  # exact bytes that get uploaded is the point — a checksum computed beside the
+  # build would vouch for something the release never shipped.
   release:
     name: publish GitHub release
     if: startsWith(github.ref, 'refs/tags/')
     needs: build
     runs-on: ubuntu-latest
     permissions:
+      # `contents: write` creates the release and uploads its assets;
+      # `id-token: write` is the OIDC token `cosign` and `actions/attest`
+      # exchange for a short-lived Sigstore signing certificate (this repository
+      # stores no signing key); `attestations: write` persists the attestations
+      # on the repository, which is where `gh attestation verify` reads them.
       contents: write
+      id-token: write
+      attestations: write
 
     steps:
+      # The SBOM describes what was built, so it is generated from the tagged
+      # tree — `Cargo.lock` is the dependency graph it encodes — and not from
+      # the archives.
+      - uses: actions/checkout@v4
+
+      - name: Resolve version
+        shell: bash
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
       - name: Download packages
         uses: actions/download-artifact@v4
         with:
@@ -96,8 +123,97 @@ jobs:
           merge-multiple: true
           path: dist
 
+      # Anchore's syft scans the checkout into one SPDX-JSON document. Its own
+      # artifact and release-asset uploads are off because the SBOM is a release
+      # asset like any other here: `SHA256SUMS` covers it and the last step
+      # uploads it with the archives, so there is one place a consumer looks.
+      - name: Generate SBOM
+        uses: anchore/sbom-action@v0
+        with:
+          path: .
+          format: spdx-json
+          output-file: dist/acts-${{ env.version }}.spdx.json
+          upload-artifact: false
+          upload-release-assets: false
+
+      # Runs inside `dist`, so each line carries the *bare* file name a user has
+      # after downloading — `sha256sum -c SHA256SUMS` works in the directory
+      # they saved the assets in. The SBOM is covered too: it is a download the
+      # signature has to vouch for like any other. `--check --strict` re-reads
+      # what was just written, so a digest that did not come out well-formed
+      # fails here instead of at a consumer's terminal.
+      - name: Checksums (SHA256)
+        shell: bash
+        working-directory: dist
+        run: |
+          set -euo pipefail
+          sha256sum acts-*.tar.gz acts-*.zip acts-*.spdx.json > SHA256SUMS
+          sha256sum --check --strict SHA256SUMS
+
+      # Keyless: Fulcio issues the certificate to *this workflow run*'s OIDC
+      # identity, so verification pins the identity and the issuer instead of a
+      # public key this repository would have to publish and protect. `--bundle`
+      # writes the signature, the certificate and the transparency-log entry in
+      # one file, which is all the verification command needs.
+      #
+      # Pinned to the release and not a major tag the way the actions around it
+      # are: cosign-installer publishes no moving `v4`, so `@v4` would not
+      # resolve. Dependabot bumps the exact version.
+      - uses: sigstore/cosign-installer@v4.1.2
+      - name: Sign the checksums
+        run: cosign sign-blob --yes --bundle dist/SHA256SUMS.sigstore.json dist/SHA256SUMS
+
+      # SLSA build provenance for every asset the release publishes under
+      # `acts-*`: the archives and the SBOM.
+      - name: Attest build provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: dist/acts-*
+
+      # The SBOM as a predicate over the binaries it describes — the archives
+      # only, since an SBOM that lists itself among its subjects says nothing
+      # about them. `gh attestation verify --predicate-type
+      # https://spdx.dev/Document` reads it back.
+      - name: Attest the SBOM
+        uses: actions/attest@v4
+        with:
+          subject-path: |
+            dist/acts-*.tar.gz
+            dist/acts-*.zip
+          sbom-path: dist/acts-${{ env.version }}.spdx.json
+
       - name: Upload to GitHub release
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/acts-*
+          files: dist/*
+          # The assets above are the deliverable, not a side effect: a glob that
+          # matched nothing fails the release instead of publishing the
+          # archives without the material that vouches for them.
+          fail_on_unmatched_files: true
           generate_release_notes: true
+          body: |-
+            ## Verifying this release
+
+            The archives and the SBOM are covered by `SHA256SUMS`, and
+            `SHA256SUMS` is signed keyless by this repository's release
+            workflow, so verification starts at the checksums file:
+
+            ```bash
+            # Integrity: the downloads match the published digests.
+            sha256sum -c SHA256SUMS
+
+            # Origin: those digests came from this repository's release workflow.
+            cosign verify-blob SHA256SUMS \
+              --bundle SHA256SUMS.sigstore.json \
+              --certificate-identity-regexp 'https://github.com/${{ github.repository }}/.github/workflows/release.yml@refs/tags/.*' \
+              --certificate-oidc-issuer 'https://token.actions.githubusercontent.com'
+
+            # Provenance: the asset was built by that workflow run.
+            gh attestation verify acts-${{ env.version }}-<target>.tar.gz \
+              --repo ${{ github.repository }}
+
+            # And the SBOM that run published for it.
+            gh attestation verify acts-${{ env.version }}-<target>.tar.gz \
+              --repo ${{ github.repository }} \
+              --predicate-type https://spdx.dev/Document
+            ```
