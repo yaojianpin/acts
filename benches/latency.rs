@@ -314,13 +314,17 @@ fn schema_compile(fields: usize, n: usize) -> Report {
 
 /// A workflow whose `acts.core.irq` params carry `exprs` `${{ ... }}`
 /// expressions, evaluated while the act params are filled.
+///
+/// The expression is the same arithmetic the criterion bench's scenario uses —
+/// the loop's index scaled — and it is one the engine's evaluator actually
+/// supports. It read `Math.sqrt(i) * 1000` while QuickJS was the evaluator, and
+/// `Math` has been an unknown variable since CEL took over, so the scenario had
+/// been timing a *failing* evaluation: `fill_params` printed the error and
+/// filled every param with null.
 fn expr_workflow(exprs: usize) -> Workflow {
     let mut params = String::from("      key: act1\n");
     for i in 0..exprs {
-        params.push_str(&format!(
-            "      v{}: '${{{{ Math.sqrt({}) * 1000 }}}}'\n",
-            i, i
-        ));
+        params.push_str(&format!("      v{}: '${{{{ {} * 1000 }}}}'\n", i, i));
     }
 
     let text = format!(

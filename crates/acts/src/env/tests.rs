@@ -114,6 +114,23 @@ fn env_eval_collection_literals_are_rejected() {
     }
 }
 
+/// A built-in method inside arithmetic, through the engine's own path (the
+/// crate's tests cover the methods themselves; this pins them where a workflow
+/// uses them, past the JSON bridge).
+#[test]
+fn env_eval_method_with_arithmetic() {
+    let env = Environment::new();
+
+    assert_eq!(
+        env.eval::<i64>(r#"("item".length() + 3) * 1000"#).unwrap(),
+        7000
+    );
+    assert!(
+        env.eval::<bool>(r#""item".contains("te") && "item".startsWith("it")"#)
+            .unwrap()
+    );
+}
+
 #[test]
 fn env_eval_null() {
     let env = Environment::new();
