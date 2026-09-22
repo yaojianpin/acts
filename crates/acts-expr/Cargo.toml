@@ -1,0 +1,27 @@
+[package]
+authors.workspace = true
+description = "the acts expression evaluator: a dependency-free parser and interpreter for the simple expressions a workflow carries"
+keywords = ["workflow", "expression"]
+edition.workspace = true
+license.workspace = true
+name = "acts-expr"
+repository.workspace = true
+homepage = "https://github.com/yaojianpin/acts"
+version.workspace = true
+rust-version.workspace = true
+include = ["src/**/*"]
+
+[dependencies]
+# None. The evaluator is a lexer, a parser and a tree walk over its own value
+# type; `serde_json` interop is the feature below, off by default.
+serde_json = { optional = true, workspace = true }
+
+[features]
+# `Value` <-> `serde_json::Value` conversion, for hosts (the engine) that speak
+# JSON. Off by default so the crate itself has no dependencies at all.
+default = []
+json = ["dep:serde_json"]
+
+[[bench]]
+name = "expr"
+harness = false

@@ -104,6 +104,8 @@ jobs:
       # all of them is built once, after the last suite.
       - name: Run tests acts
         run: cargo llvm-cov --no-report --locked -p acts --verbose
+      - name: Run tests expr
+        run: cargo llvm-cov --no-report --locked -p acts-expr --verbose --all-features
       - name: Run tests channel
         run: cargo llvm-cov --no-report --locked -p acts-channel --verbose --features=docker_test
       - name: Run tests plugins

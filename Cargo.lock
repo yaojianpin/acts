@@ -139,6 +139,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "acts-expr"
+version = "0.25.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "acts-package-http"
 version = "0.25.0"
 dependencies = [
