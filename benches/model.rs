@@ -47,9 +47,9 @@ fn schema_validate(c: &mut Criterion) {
     }
 
     // The miss path is measured with a short window: each iteration compiles a
-    // validator and caches it under a never-reused key (the cache is
-    // unbounded), so the total work is capped to keep the process footprint
-    // bounded.
+    // validator under a key that is never reused, so the total work is capped
+    // to keep the run short. The cache's capacity bound keeps its footprint at
+    // the cap however many iterations run.
     group.measurement_time(std::time::Duration::from_secs(2));
     group.warm_up_time(std::time::Duration::from_millis(500));
     group.bench_function("compile", |b| {

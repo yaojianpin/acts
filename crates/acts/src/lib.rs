@@ -24,6 +24,7 @@ mod signal;
 mod snapshot;
 mod store;
 mod utils;
+mod validator;
 
 #[cfg(test)]
 mod tests;

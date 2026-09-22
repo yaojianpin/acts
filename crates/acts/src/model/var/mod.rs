@@ -1,17 +1,21 @@
 mod variant;
 mod vars;
 
+use crate::validator::ValidatorCache;
 use crate::{ActError, Result};
-use dashmap::DashMap;
-use jsonschema::Validator;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 
 pub use variant::{Variant, VariantTypes};
 pub use vars::Vars;
 
-static VALIDATORS: LazyLock<DashMap<String, Arc<Validator>>> = LazyLock::new(DashMap::new);
+/// Compiled `ActSchema` validators, keyed by the schema's serialized text and
+/// shared by every engine in the process. Bounded (capacity, LRU, idle TTL):
+/// an engine that keeps deploying workflows mints a new schema key on every
+/// revision, so an unbounded map would grow with the revisions a deployment
+/// has ever *seen* instead of the schemas it currently runs.
+static VALIDATORS: LazyLock<ValidatorCache> = LazyLock::new(ValidatorCache::new);
 
 #[derive(Deserialize, Serialize, Debug, Default, Clone)]
 #[serde(untagged)]
@@ -57,17 +61,9 @@ impl ActSchema {
         // validator for a different schema on a hash collision.
         let key = serde_json::to_string(self)
             .map_err(|e| ActError::Model(format!("Schema serialization error: {e}")))?;
-        let validator = if let Some(validator) = VALIDATORS.get(&key) {
-            validator.clone()
-        } else {
-            let schema = self.schema();
-            let validator = Arc::new(
-                Validator::new(&schema)
-                    .map_err(|e| ActError::Model(format!("Schema compilation error: {e}")))?,
-            );
-            VALIDATORS.insert(key, validator.clone());
-            validator
-        };
+        let validator = VALIDATORS
+            .validator(&key, || self.schema())
+            .map_err(|e| ActError::Model(format!("Schema compilation error: {e}")))?;
 
         validator
             .validate(value)

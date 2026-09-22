@@ -294,8 +294,8 @@ fn schema_validate_cached(fields: usize, n: usize) -> Report {
 
 /// Per-validation latency on a schema whose content was never seen before, so
 /// the `VALIDATORS` cache misses and `jsonschema::Validator::new` runs. Each
-/// sample caches one more validator in the unbounded global map; the sample
-/// count bounds that growth.
+/// sample caches one more validator; the cache's capacity bound keeps that
+/// growth from outliving the measurement.
 fn schema_compile(fields: usize, n: usize) -> Report {
     const WARMUP: usize = 50;
 
