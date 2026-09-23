@@ -24,10 +24,6 @@ tonic = { features = ["transport"], workspace = true }
 tokio = { workspace = true }
 tokio-stream = { features = ["net"], workspace = true }
 
-[features]
-default = []
-docker_test = []
-
 [dev-dependencies]
 acts = { workspace = true }
 futures = { workspace = true }

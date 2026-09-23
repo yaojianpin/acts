@@ -102,7 +102,11 @@ jobs:
       - name: Run tests acts
         run: cargo test -p acts --verbose
       - name: Run tests channel
-        run: cargo test -p acts-channel --verbose --features=docker_test
+        # Same SERVER_ADDR contract as test.yml: the bridge gateway is
+        # runtime config for the Linux job, not a feature flag.
+        env:
+          SERVER_ADDR: 172.17.0.1
+        run: cargo test -p acts-channel --verbose
       - name: Run tests plugins
         run: cargo test -p acts-plugin-* --verbose
       - name: Run tests packages

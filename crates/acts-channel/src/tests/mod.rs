@@ -1,3 +1,4 @@
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use acts::{Config, Engine};
@@ -14,11 +15,35 @@ mod subscribe;
 mod vars;
 mod workflow;
 
-#[cfg(feature = "docker_test")]
-pub const SERVER_ADDR: &str = "172.17.0.1";
-
-#[cfg(not(feature = "docker_test"))]
-pub const SERVER_ADDR: &str = "127.0.0.1";
+/// The address the test servers bind and the clients dial: loopback, unless
+/// `SERVER_ADDR` says otherwise — the Docker-bridge gateway (`172.17.0.1`)
+/// where a Linux CI job wants the transport exercised off loopback. An env
+/// var, not a compile-time feature: an address baked in at build time is
+/// right only on the host shape it was baked for, so `--all-features` on a
+/// Windows box bound the Linux bridge and failed every case with
+/// `AddrNotAvailable (10049)`.
+///
+/// The first use is the health check: the value must be an IP address and
+/// accept a bind, so a bad setting stops the case that hit it — at once, with
+/// the reason — instead of surfacing as a bare `AddrNotAvailable` out of every
+/// helper, or as a refused connection after the full ready timeout.
+pub fn server_addr() -> &'static str {
+    static ADDR: LazyLock<String> = LazyLock::new(|| {
+        let addr = std::env::var("SERVER_ADDR").unwrap_or_else(|_| "127.0.0.1".into());
+        if let Err(err) = addr.parse::<std::net::IpAddr>() {
+            panic!(
+                "SERVER_ADDR={addr} is not an IP address: {err}; the test servers bind it directly"
+            );
+        }
+        if let Err(err) = std::net::TcpListener::bind((addr.as_str(), 0)) {
+            panic!(
+                "SERVER_ADDR={addr} is not bindable on this host: {err}; unset SERVER_ADDR or point it at a local address"
+            );
+        }
+        addr
+    });
+    ADDR.as_str()
+}
 
 /// How long a test waits for the server it just started to accept a
 /// connection. The gRPC plugin binds its listener in a spawned task, and CI
@@ -33,7 +58,7 @@ async fn serve_service<S: ActsService>(service: S, rx: Receiver<()>) -> u16 {
     let grpc = ActsServiceServer::new(service);
 
     // Bind to port 0 to let the OS pick a free port
-    let listener = tokio::net::TcpListener::bind(format!("{SERVER_ADDR}:0"))
+    let listener = tokio::net::TcpListener::bind(format!("{}:0", server_addr()))
         .await
         .unwrap();
     let port = listener.local_addr().unwrap().port();
@@ -76,14 +101,18 @@ async fn start_server(rx: Receiver<()>) -> u16 {
         crate::create_seq()
     ));
     std::fs::create_dir_all(&dir).expect("a scratch directory for the test server");
+    let addr = server_addr();
     let port = free_port();
     let config_path = dir.join("acts.toml");
     // `[acl] enabled = false`: these cases exercise the transport, and an
     // engine *without* a section is anonymous and read-only (models and
     // packages only) — the deploy/start cases need more than that.
+    // `[grpc] host` follows `server_addr()`: the plugin must bind the address
+    // the client dials (its own default is loopback only), or the bridge
+    // setting dials an interface nothing listens on.
     std::fs::write(
         &config_path,
-        format!("[acl]\nenabled = false\n[grpc]\nport = {port}\n"),
+        format!("[acl]\nenabled = false\n[grpc]\nhost = \"{addr}\"\nport = {port}\n"),
     )
     .expect("the test server's config file");
     let config = Config::create(&config_path).expect("the test server's config");
@@ -109,7 +138,7 @@ async fn start_server(rx: Receiver<()>) -> u16 {
 /// take it.
 fn free_port() -> u16 {
     let listener =
-        std::net::TcpListener::bind(format!("{SERVER_ADDR}:0")).expect("a port for the server");
+        std::net::TcpListener::bind(format!("{}:0", server_addr())).expect("a port for the server");
     let port = listener.local_addr().expect("the bound address").port();
     drop(listener);
     port
@@ -118,14 +147,15 @@ fn free_port() -> u16 {
 /// Wait until the server accepts a connection: the gRPC plugin binds its
 /// listener in a spawned task, so the first attempts may still be refused.
 async fn wait_for_server(port: u16) {
+    let addr = server_addr();
     let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
     let mut last = String::new();
     while tokio::time::Instant::now() < deadline {
-        match tokio::net::TcpStream::connect((SERVER_ADDR, port)).await {
+        match tokio::net::TcpStream::connect((addr, port)).await {
             Ok(_) => return,
             Err(err) => last = err.to_string(),
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    panic!("the server never accepted a connection on {SERVER_ADDR}:{port}: {last}");
+    panic!("the server never accepted a connection on {addr}:{port}: {last}");
 }

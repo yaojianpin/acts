@@ -11,7 +11,7 @@ use crate::{
     ActsChannel, ActsOptions, Message, MessageOptions, SubscriptionError, Vars,
     acts_service_server::ActsService,
     model,
-    tests::{SERVER_ADDR, serve_service},
+    tests::{serve_service, server_addr},
 };
 
 type MessageStream = Pin<Box<dyn Stream<Item = Result<Message, Status>> + Send + 'static>>;
@@ -82,7 +82,7 @@ impl ActsService for MockService {
 async fn connect(service: MockService) -> (ActsChannel, oneshot::Sender<()>) {
     let (tx, rx) = oneshot::channel();
     let port = serve_service(service, rx).await;
-    let url = format!("http://{}:{port}", SERVER_ADDR);
+    let url = format!("http://{}:{port}", server_addr());
     let client = ActsChannel::connect(&url).await.unwrap();
     (client, tx)
 }

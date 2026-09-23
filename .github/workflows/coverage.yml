@@ -107,7 +107,11 @@ jobs:
       - name: Run tests expr
         run: cargo llvm-cov --no-report --locked -p acts-expr --verbose --all-features
       - name: Run tests channel
-        run: cargo llvm-cov --no-report --locked -p acts-channel --verbose --features=docker_test
+        # Same SERVER_ADDR contract as test.yml: the bridge gateway is
+        # runtime config for the Linux job, not a feature flag.
+        env:
+          SERVER_ADDR: 172.17.0.1
+        run: cargo llvm-cov --no-report --locked -p acts-channel --verbose
       - name: Run tests plugins
         run: cargo llvm-cov --no-report --locked -p acts-plugin-* --verbose
       - name: Run tests packages

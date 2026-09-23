@@ -1,6 +1,6 @@
 use crate::{
     ActsChannel,
-    tests::{SERVER_ADDR, start_server},
+    tests::{server_addr, start_server},
 };
 use tokio::sync::oneshot;
 
@@ -8,7 +8,7 @@ use tokio::sync::oneshot;
 async fn grpc_client_connect() {
     let (tx, rx) = oneshot::channel();
     let port = start_server(rx).await;
-    let url = format!("http://{}:{port}", SERVER_ADDR);
+    let url = format!("http://{}:{port}", server_addr());
 
     let client = ActsChannel::connect(&url).await;
     assert!(client.is_ok());

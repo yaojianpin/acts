@@ -61,7 +61,14 @@ jobs:
       - name: Run tests expr
         run: cargo test -p acts-expr --verbose --all-features
       - name: Run tests channel
-        run: cargo test -p acts-channel --verbose --features=docker_test
+        # SERVER_ADDR moves the channel suite off loopback onto the Docker
+        # bridge gateway — a Linux-only address, so it is runtime config here
+        # and not a feature: a compile-time switch would bind it on every
+        # `--all-features` host, Docker or not. Unset (local runs), the suite
+        # binds 127.0.0.1 and skips nothing.
+        env:
+          SERVER_ADDR: 172.17.0.1
+        run: cargo test -p acts-channel --verbose
       - name: Run tests plugins
         run: cargo test -p acts-plugin-* --verbose
       - name: Run tests packages
