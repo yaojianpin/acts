@@ -63,7 +63,7 @@ regex = "1.11"
 globset = { version = "0.4", default-features = false }
 nanoid = "0.5"
 parking_lot = "0.12"
-cron = "0.12"
+cron = "0.17"
 strum = { version = "0.27", features = ["derive"] }
 # expression language (the engine's `${{ }}` / `if` evaluator).
 #
