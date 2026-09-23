@@ -434,6 +434,38 @@ async fn engine_build_max_node_run_times() {
     assert_eq!(engine.config().max_node_run_times(), 100)
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn engine_start_rejects_max_message_retry_times_below_one() {
+    for times in [0, -1] {
+        let err = Engine::builder()
+            .max_message_retry_times(times)
+            .start()
+            .await
+            .err()
+            .expect("start must refuse a retry budget below 1");
+        assert!(
+            matches!(&err, crate::ActError::Config(msg) if msg.contains("max_message_retry_times")),
+            "{err:?}"
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn engine_start_rejects_max_node_run_times_below_one() {
+    for times in [0, -1] {
+        let err = Engine::builder()
+            .max_node_run_times(times)
+            .start()
+            .await
+            .err()
+            .expect("start must refuse a node-run guard below 1");
+        assert!(
+            matches!(&err, crate::ActError::Config(msg) if msg.contains("max_node_run_times")),
+            "{err:?}"
+        );
+    }
+}
+
 #[serial]
 #[tokio::test(flavor = "multi_thread")]
 async fn engine_drop() {

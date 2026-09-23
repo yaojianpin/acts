@@ -224,13 +224,14 @@ cache_cap = 1024
 tick_interval_secs = 15
 
 # Max times an unacknowledged message delivery is re-sent before it turns
-# into an Error that needs manual handling (msg:resend / msg:clear). 0
-# disables the retry limit.
+# into an Error that needs manual handling (msg:resend / msg:clear). Must be
+# at least 1; a smaller value refuses the engine start.
 max_message_retry_times = 20
 
 # Max times a single tree node can be executed inside one process. Protects
 # against unbounded task creation from a step that loops back on itself or
-# through a cyclic `next`. 0 disables the check.
+# through a cyclic `next`. Must be at least 1; a smaller value refuses the
+# engine start.
 max_node_run_times = 1000
 
 # Number of scheduler task lanes. Independent pids can execute concurrently;

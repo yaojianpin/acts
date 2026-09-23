@@ -107,13 +107,18 @@ impl EngineBuilder {
         self
     }
 
+    /// Set how often an unacknowledged message delivery is re-sent before it
+    /// turns into an `Error` that needs manual handling (default 20). Must be
+    /// at least 1 — `start` refuses a smaller value instead of running with
+    /// the retry budget switched off.
     pub fn max_message_retry_times(mut self, retry_times: i32) -> Self {
         self.config_mut().data.max_message_retry_times = Some(retry_times);
         self
     }
     /// bound the times a tree node can be executed in one process (protects
     /// against unbounded task creation caused by a node self-loop or a cyclic
-    /// `next`); 0 disables the check
+    /// `next`; default 1000). Must be at least 1 — `start` refuses a smaller
+    /// value instead of running with the guard switched off.
     pub fn max_node_run_times(mut self, times: i64) -> Self {
         self.config_mut().data.max_node_run_times = Some(times);
         self

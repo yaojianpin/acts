@@ -1348,6 +1348,8 @@ impl Runtime {
     }
 
     fn create(config: &Config, store: Option<Arc<dyn KvStore>>) -> crate::Result<Arc<Runtime>> {
+        // refuse a config that switches the runaway protections off
+        config.validate()?;
         // let scher = Scheduler::new();
         let env = Arc::new(Environment::new());
         let cache = Arc::new(Cache::new(config, store)?);

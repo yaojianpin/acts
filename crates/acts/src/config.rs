@@ -44,12 +44,13 @@ pub struct ConfigData {
     pub cache_cap: Option<i64>,
     pub tick_interval_secs: Option<i64>,
 
-    // will delete message after the max retries
-    // cancel the settings by setting to 0
+    /// max times an unacknowledged message delivery is re-sent before it
+    /// turns into an `Error` that needs manual handling. Must be at least 1 —
+    /// the engine refuses to start with a smaller value.
     pub max_message_retry_times: Option<i32>,
     /// max times a tree node can be executed in one process; protects against
     /// unbounded task creation caused by a node self-loop / cyclic `next`.
-    /// 0 disables the check
+    /// Must be at least 1 — the engine refuses to start with a smaller value.
     pub max_node_run_times: Option<i64>,
     /// Maximum scheduler task lanes; defaults to available parallelism.
     /// Each lane executes one task at a time.
@@ -158,6 +159,35 @@ impl Config {
         self.data = ConfigData::deserialize(self.table.clone()).map_err(|err| {
             crate::ActError::Config(format!("failed to parse the merged config: {err}"))
         })?;
+        Ok(())
+    }
+
+    /// The runaway protections cannot be switched off. `max_message_retry_times`
+    /// bounds how often an unacknowledged delivery is re-sent before it needs
+    /// manual handling, and `max_node_run_times` bounds how often one node can
+    /// run inside a process before a looping workflow is errored instead of
+    /// creating tasks without end — a value of 0 or below would disable one of
+    /// those bounds, so a config carrying one is refused at engine start
+    /// (`Runtime::create` is the one place every engine is built).
+    pub(crate) fn validate(&self) -> crate::Result<()> {
+        if let Some(times) = self.data.max_message_retry_times {
+            if times < 1 {
+                return Err(crate::ActError::Config(format!(
+                    "max_message_retry_times must be at least 1 (got {times}); it bounds how \
+                     often an unacknowledged message delivery is re-sent before it turns into \
+                     an Error that needs manual handling (msg:resend / msg:clear)"
+                )));
+            }
+        }
+        if let Some(times) = self.data.max_node_run_times {
+            if times < 1 {
+                return Err(crate::ActError::Config(format!(
+                    "max_node_run_times must be at least 1 (got {times}); it bounds how often \
+                     one node can run inside a process, so a looping workflow errors instead of \
+                     creating tasks forever"
+                )));
+            }
+        }
         Ok(())
     }
 
