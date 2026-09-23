@@ -71,9 +71,22 @@ pub struct AppError {
     #[serde(skip_serializing_if = "Option::is_none")]
     details: Option<String>,
     /// HTTP status the error is answered with. Action errors carry their own
-    /// kind (401/403), everything else is a 500.
+    /// kind (401/403), refused client input (validation, out-of-range
+    /// paging) a 400, everything else a 500.
     #[serde(skip)]
     status: StatusCode,
+}
+
+impl AppError {
+    /// The request itself is malformed or exceeds a server bound — a client
+    /// fault, not a server failure.
+    pub fn bad_request(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            details: None,
+            status: StatusCode::BAD_REQUEST,
+        }
+    }
 }
 
 impl IntoResponse for AppError {
@@ -126,7 +139,7 @@ impl From<validator::ValidationErrors> for AppError {
         Self {
             message: value.to_string(),
             details: None,
-            status: StatusCode::INTERNAL_SERVER_ERROR,
+            status: StatusCode::BAD_REQUEST,
         }
     }
 }

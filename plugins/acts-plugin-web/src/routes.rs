@@ -140,12 +140,20 @@ pub async fn proc_start(
     }
 }
 
+/// Widest `/api/pack/list` page the route translates. A larger `size` asks
+/// the store to buffer an unbounded page — a response-amplification vector —
+/// so the value is refused with a 400 instead.
+const MAX_PAGE_SIZE: usize = 100;
+/// Deepest row offset (`(page - 1) * size`) the route forwards. Deeper paging
+/// is refused with a 400 rather than multiplied into a wrapped-around number.
+const MAX_OFFSET: usize = 100_000;
+
 #[derive(Debug, Validate, Deserialize)]
 pub struct PackageParams {
     pub catalog: Option<String>,
     pub search: Option<String>,
     pub order: Option<String>,
-    #[validate(range(min = 1))]
+    #[validate(range(min = 1, max = MAX_PAGE_SIZE))]
     pub size: Option<usize>,
     #[validate(range(min = 1))]
     pub page: Option<usize>,
@@ -201,7 +209,15 @@ pub async fn pack_list(
         if let Some(page) = params.page
             && page > 0
         {
-            query = query.offset((page - 1) * size);
+            let offset = (page - 1)
+                .checked_mul(size)
+                .filter(|offset| *offset <= MAX_OFFSET)
+                .ok_or_else(|| {
+                    AppError::bad_request(format!(
+                        "page * size must not exceed the offset bound {MAX_OFFSET}"
+                    ))
+                })?;
+            query = query.offset(offset);
         }
     }
     query = query.filter(filter);

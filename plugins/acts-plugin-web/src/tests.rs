@@ -1,9 +1,12 @@
 use crate::{
     DEFAULT_HOST, DEFAULT_QUEUE_SIZE, HttpConfig, WebPlugin,
     objects::{AppError, RespData, RespStatus},
+    routes::{PackageParams, pack_list},
 };
-use axum::response::IntoResponse;
+use axum::{Extension, Json, extract::State, response::IntoResponse};
 use serde_json::json;
+use std::sync::Arc;
+use validator::Validate;
 
 // ── HttpConfig ──
 
@@ -114,6 +117,96 @@ fn test_app_error_from_act_error_into_response() {
     let err = AppError::from(act_err);
     let resp = err.into_response();
     assert_eq!(resp.status(), axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[test]
+fn test_app_error_bad_request_into_response() {
+    let resp = AppError::bad_request("page too deep").into_response();
+    assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+}
+
+/// A request that fails validation is the caller's fault, so it answers `400`
+/// — the `500` a server-side failure deserves would tell clients their input
+/// was fine and the service was broken.
+#[test]
+fn test_app_error_from_validation_errors_is_a_400() {
+    let params = PackageParams {
+        catalog: None,
+        search: None,
+        order: None,
+        size: Some(0),
+        page: None,
+    };
+    let err = AppError::from(params.validate().unwrap_err());
+    let resp = err.into_response();
+    assert_eq!(resp.status(), axum::http::StatusCode::BAD_REQUEST);
+}
+
+/// `pack_list` bounds its paging: a page inside the size and offset bounds is
+/// served, anything past them is refused with a `400` — including a `page`
+/// whose `page * size` overflows `usize`, which wrapped around (debug builds:
+/// panicked) before the bound existed, handing back a small offset as if the
+/// deep page were page one.
+#[tokio::test(flavor = "multi_thread")]
+async fn pack_list_serves_pages_inside_the_bounds_and_refuses_the_rest() {
+    let table: toml::Table = toml::from_str("[acl]\nenabled = false\n").unwrap();
+    let cfg = acts::Config {
+        data: Default::default(),
+        table,
+    };
+    let engine = acts::Engine::builder()
+        .set_config(&cfg)
+        .start()
+        .await
+        .unwrap();
+    let state = State(Arc::new(engine.clone()));
+    let principal = Extension(engine.acl().authenticate(None).unwrap());
+
+    let list = |size, page| {
+        pack_list(
+            state.clone(),
+            principal.clone(),
+            Json(PackageParams {
+                catalog: None,
+                search: None,
+                order: None,
+                size,
+                page,
+            }),
+        )
+    };
+
+    // served: a small page, and the widest page at the deepest offset
+    for (size, page) in [(Some(10), Some(1)), (Some(100), Some(1001))] {
+        let resp = list(size, page)
+            .await
+            .expect("a page inside the bounds must be served");
+        assert_eq!(
+            resp.into_response().status(),
+            axum::http::StatusCode::OK,
+            "size {size:?} page {page:?} must be served"
+        );
+    }
+
+    // refused: an oversized page, a page past the offset bound, and a page
+    // whose product cannot be represented
+    for (size, page) in [
+        (Some(101), None),
+        (Some(100), Some(1002)),
+        (Some(100), Some(usize::MAX)),
+    ] {
+        let err = match list(size, page).await {
+            Ok(_) => panic!("a page past the bounds must be refused: size {size:?} page {page:?}"),
+            Err(err) => err,
+        };
+        assert_eq!(
+            err.into_response().status(),
+            axum::http::StatusCode::BAD_REQUEST,
+            "size {size:?} page {page:?} must be a 400"
+        );
+    }
+
+    engine.close().await;
 }
 
 // ── WebPlugin ──
