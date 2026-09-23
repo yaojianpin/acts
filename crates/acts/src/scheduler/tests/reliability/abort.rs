@@ -330,9 +330,24 @@ async fn sch_abort_store_fail_degrades_and_heals_once_inner() {
     );
 
     // graceful degradation, not silent corruption: the writer reports the
-    // write it could not make durable — exactly once
+    // write it could not make durable — exactly once, to whichever durability
+    // barrier arrives first. Usually that is the flush below; but the abort
+    // also finished the process, and the retry timer's sweep (every
+    // `TEST_TICK_MS`) may barrier first and take the report — this flush then
+    // acks clean. Either way the fault must surface once, and only once: a
+    // sweep that took the report has already dropped the process's rows, so
+    // "flush acked clean while the rows are still present" is the only
+    // swallow this assert refuses.
     let flush = rt.cache().flush().await;
-    assert!(matches!(flush, Err(ActError::Store(_))), "{flush:?}");
+    if let Err(err) = &flush {
+        assert!(matches!(err, ActError::Store(_)), "{err:?}");
+    }
+    let reported =
+        flush.is_err() || rt.cache().store().procs().find(&pid).await.is_err();
+    assert!(
+        reported,
+        "the lost write must reach a durability barrier, not be swallowed: {flush:?}"
+    );
     assert!(
         rt.cache().flush().await.is_ok(),
         "the one-shot fault must not be reported twice"

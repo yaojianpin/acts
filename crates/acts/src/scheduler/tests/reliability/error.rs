@@ -180,13 +180,23 @@ async fn sch_error_store_fail_degrades_and_heals_once_inner() {
         .await
         .unwrap();
 
-    // the fault is real, lands on the intended write, and reports exactly once
-    let err = rt
-        .cache()
-        .flush()
-        .await
-        .expect_err("the injected fault must surface on the next flush");
-    assert!(matches!(err, ActError::Store(_)), "{err:?}");
+    // the fault is real, lands on the intended write, and reports exactly
+    // once — to whichever durability barrier arrives first. Usually that is
+    // the flush below; but the error also finished the process, and the retry
+    // timer's sweep (every `TEST_TICK_MS`) may barrier first and take the
+    // report, leaving this flush clean. A sweep that took the report has
+    // already dropped the rows, so a clean flush with the process still
+    // present is the only swallow this refuses.
+    let flush = rt.cache().flush().await;
+    if let Err(err) = &flush {
+        assert!(matches!(err, ActError::Store(_)), "{err:?}");
+    }
+    let reported =
+        flush.is_err() || rt.cache().store().procs().find(&pid).await.is_err();
+    assert!(
+        reported,
+        "the lost write must reach a durability barrier, not be swallowed: {flush:?}"
+    );
     assert_eq!(
         kv.injected.load(Ordering::SeqCst),
         1,
