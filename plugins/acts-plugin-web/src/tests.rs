@@ -306,9 +306,13 @@ async fn bind_conflict_fails_the_engine_start() {
     );
 }
 
-/// The default bind is loopback, not the wildcard: after the server is up, the
-/// wildcard address of the same port is still free, so a caller on another
-/// interface cannot reach the management surface out of the box.
+/// The default bind is loopback, not the wildcard: after the server is up, a
+/// sibling loopback alias of the same port is still free, so a caller on
+/// another interface cannot reach the management surface out of the box. The
+/// wildcard itself is the wrong probe: Linux refuses a wildcard bind that
+/// overlaps a listening specific-address socket regardless of `SO_REUSEADDR`,
+/// so it fails with "address already in use" even when the server binds
+/// loopback only.
 #[tokio::test(flavor = "multi_thread")]
 async fn web_server_defaults_to_loopback() {
     let port = free_port();
@@ -326,12 +330,13 @@ async fn web_server_defaults_to_loopback() {
 
     assert!(wait_for_port("127.0.0.1", port, true).await);
 
-    let wildcard = std::net::TcpListener::bind(("0.0.0.0", port));
+    let alias = std::net::TcpListener::bind(("127.0.0.2", port));
     assert!(
-        wildcard.is_ok(),
-        "the web server must bind loopback only by default: {wildcard:?}"
+        alias.is_ok(),
+        "the web server must hold exactly 127.0.0.1 by default — the loopback \
+         alias of the port must stay free and the wildcard must not be held: {alias:?}"
     );
-    drop(wildcard);
+    drop(alias);
 
     engine.close().await;
 }

@@ -707,20 +707,24 @@ async fn bind_conflict_fails_the_engine_start() {
 }
 
 /// The default bind is loopback, not the wildcard: the listener is bound in
-/// `on_init` — before `start` returns — so after the engine is up, the
-/// wildcard address of the same port is still free. A caller on another
-/// interface cannot reach the service out of the box.
+/// `on_init` — before `start` returns — on exactly `127.0.0.1`, so a sibling
+/// loopback alias of the same port is still free. A caller on another
+/// interface cannot reach the service out of the box. The wildcard itself is
+/// the wrong probe: Linux refuses a wildcard bind that overlaps a listening
+/// specific-address socket regardless of `SO_REUSEADDR`, so it fails with
+/// "address already in use" even when the server is loopback-only.
 #[tokio::test(flavor = "multi_thread")]
 async fn grpc_server_defaults_to_loopback() {
     let port = free_port();
     let engine = engine_with_grpc(port).await;
 
-    let wildcard = std::net::TcpListener::bind(("0.0.0.0", port));
+    let alias = std::net::TcpListener::bind(("127.0.0.2", port));
     assert!(
-        wildcard.is_ok(),
-        "the gRPC server must bind loopback only by default: {wildcard:?}"
+        alias.is_ok(),
+        "the gRPC server must hold exactly 127.0.0.1 by default — the loopback \
+         alias of the port must stay free and the wildcard must not be held: {alias:?}"
     );
-    drop(wildcard);
+    drop(alias);
 
     engine.close().await;
 }

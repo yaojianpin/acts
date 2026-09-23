@@ -170,23 +170,23 @@ impl Config {
     /// those bounds, so a config carrying one is refused at engine start
     /// (`Runtime::create` is the one place every engine is built).
     pub(crate) fn validate(&self) -> crate::Result<()> {
-        if let Some(times) = self.data.max_message_retry_times {
-            if times < 1 {
-                return Err(crate::ActError::Config(format!(
-                    "max_message_retry_times must be at least 1 (got {times}); it bounds how \
+        if let Some(times) = self.data.max_message_retry_times
+            && times < 1
+        {
+            return Err(crate::ActError::Config(format!(
+                "max_message_retry_times must be at least 1 (got {times}); it bounds how \
                      often an unacknowledged message delivery is re-sent before it turns into \
                      an Error that needs manual handling (msg:resend / msg:clear)"
-                )));
-            }
+            )));
         }
-        if let Some(times) = self.data.max_node_run_times {
-            if times < 1 {
-                return Err(crate::ActError::Config(format!(
-                    "max_node_run_times must be at least 1 (got {times}); it bounds how often \
+        if let Some(times) = self.data.max_node_run_times
+            && times < 1
+        {
+            return Err(crate::ActError::Config(format!(
+                "max_node_run_times must be at least 1 (got {times}); it bounds how often \
                      one node can run inside a process, so a looping workflow errors instead of \
                      creating tasks forever"
-                )));
-            }
+            )));
         }
         Ok(())
     }
