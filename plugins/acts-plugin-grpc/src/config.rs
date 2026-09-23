@@ -1,5 +1,10 @@
 use serde::Deserialize;
 
+/// Host the gRPC server binds when `[grpc].host` is not set: loopback only,
+/// so the service is not reachable from the network by default. Set
+/// `host = "0.0.0.0"` to serve remote callers.
+pub const DEFAULT_HOST: &str = "127.0.0.1";
+
 /// Messages that may wait for one `on_message` subscriber when
 /// `[grpc].queue_size` is not set.
 pub const DEFAULT_QUEUE_SIZE: usize = 128;
@@ -11,6 +16,11 @@ const MAX_QUEUE_SIZE: usize = 65_536;
 /// `[grpc]` — the gRPC server.
 #[derive(Deserialize, Default)]
 pub struct GrpcConfig {
+    /// Address the gRPC server binds (`[grpc].host`). Defaults to
+    /// [`DEFAULT_HOST`] — loopback only — so a deployment that wants the
+    /// service reachable from other hosts says so explicitly.
+    pub host: Option<String>,
+
     pub port: Option<u32>,
 
     /// How many messages may wait for one `on_message` subscriber.

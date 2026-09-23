@@ -1,5 +1,5 @@
 use crate::{
-    DEFAULT_QUEUE_SIZE, HttpConfig, WebPlugin,
+    DEFAULT_HOST, DEFAULT_QUEUE_SIZE, HttpConfig, WebPlugin,
     objects::{AppError, RespData, RespStatus},
 };
 use axum::response::IntoResponse;
@@ -11,6 +11,18 @@ use serde_json::json;
 fn test_http_config_default() {
     let config = HttpConfig::default();
     assert_eq!(config.port, None);
+    assert_eq!(
+        config.host, None,
+        "an unconfigured transport resolves its host through DEFAULT_HOST"
+    );
+    assert_eq!(
+        config
+            .host
+            .clone()
+            .unwrap_or_else(|| DEFAULT_HOST.to_string()),
+        "127.0.0.1",
+        "the default bind is loopback, not the wildcard"
+    );
     assert_eq!(
         config.queue_size(),
         DEFAULT_QUEUE_SIZE,
@@ -126,13 +138,11 @@ fn free_port() -> u16 {
         .port()
 }
 
-/// Wait until the port is (un)reachable, or give up after 10s.
-async fn wait_for_port(port: u16, want_reachable: bool) -> bool {
+/// Wait until `host:port` is (un)reachable, or give up after 10s.
+async fn wait_for_port(host: &str, port: u16, want_reachable: bool) -> bool {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     loop {
-        let reachable = tokio::net::TcpStream::connect(("127.0.0.1", port))
-            .await
-            .is_ok();
+        let reachable = tokio::net::TcpStream::connect((host, port)).await.is_ok();
         if reachable == want_reachable {
             return true;
         }
@@ -162,14 +172,106 @@ async fn web_server_stops_on_engine_close() {
         .unwrap();
 
     assert!(
-        wait_for_port(port, true).await,
+        wait_for_port("127.0.0.1", port, true).await,
         "the web server must accept connections while the engine runs"
     );
 
     engine.close().await;
 
     assert!(
-        wait_for_port(port, false).await,
+        wait_for_port("127.0.0.1", port, false).await,
         "engine.close() must stop the web server and release its port"
     );
+}
+
+/// A bind failure must fail the engine start with its reason, not be logged
+/// inside the transport task while the engine reports a clean start: the port
+/// here is already taken, so the plugin cannot listen.
+#[tokio::test(flavor = "multi_thread")]
+async fn bind_conflict_fails_the_engine_start() {
+    let blocker = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = blocker.local_addr().unwrap().port();
+
+    let table: toml::Table = toml::from_str(&format!("[web]\nport = {port}\n")).unwrap();
+    let cfg = acts::Config {
+        data: Default::default(),
+        table,
+    };
+    let started = acts::Engine::builder()
+        .set_config(&cfg)
+        .add_plugin(&WebPlugin::new())
+        .start()
+        .await;
+    let err = match started {
+        Ok(_) => panic!("a taken port must fail the engine start"),
+        Err(err) => err,
+    };
+
+    assert!(
+        err.to_string().contains(&port.to_string()),
+        "the failure must name the address it could not bind: {err}"
+    );
+}
+
+/// The default bind is loopback, not the wildcard: after the server is up, the
+/// wildcard address of the same port is still free, so a caller on another
+/// interface cannot reach the management surface out of the box.
+#[tokio::test(flavor = "multi_thread")]
+async fn web_server_defaults_to_loopback() {
+    let port = free_port();
+    let table: toml::Table = toml::from_str(&format!("[web]\nport = {port}\n")).unwrap();
+    let cfg = acts::Config {
+        data: Default::default(),
+        table,
+    };
+    let engine = acts::Engine::builder()
+        .set_config(&cfg)
+        .add_plugin(&WebPlugin::new())
+        .start()
+        .await
+        .unwrap();
+
+    assert!(wait_for_port("127.0.0.1", port, true).await);
+
+    let wildcard = std::net::TcpListener::bind(("0.0.0.0", port));
+    assert!(
+        wildcard.is_ok(),
+        "the web server must bind loopback only by default: {wildcard:?}"
+    );
+    drop(wildcard);
+
+    engine.close().await;
+}
+
+/// The deployment steers the bind through `[web].host`: the server must hold
+/// exactly the configured address, observable as an exact bind conflict on a
+/// loopback alias — distinct from the default `127.0.0.1` the other cases use.
+#[tokio::test(flavor = "multi_thread")]
+async fn web_server_binds_the_configured_host() {
+    let port = free_port();
+    let table: toml::Table =
+        toml::from_str(&format!("[web]\nhost = \"127.0.0.2\"\nport = {port}\n")).unwrap();
+    let cfg = acts::Config {
+        data: Default::default(),
+        table,
+    };
+    let engine = acts::Engine::builder()
+        .set_config(&cfg)
+        .add_plugin(&WebPlugin::new())
+        .start()
+        .await
+        .unwrap();
+
+    assert!(
+        wait_for_port("127.0.0.2", port, true).await,
+        "the server bound to the configured loopback alias must answer"
+    );
+
+    let alias = std::net::TcpListener::bind(("127.0.0.2", port));
+    assert!(
+        alias.is_err(),
+        "the server must bind exactly the configured host: {alias:?}"
+    );
+
+    engine.close().await;
 }

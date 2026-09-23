@@ -32,10 +32,17 @@ In `config/acts.toml`:
 
 ```toml
 [web]
+host = "127.0.0.1"
 port = 10082
 # how many messages may wait for one SSE subscriber (default 100)
 queue_size = 100
 ```
+
+`host` is the address the server binds. It defaults to `127.0.0.1`, so the
+management surface answers local callers only; set `host = "0.0.0.0"` to serve
+remote callers. The listener is bound while the engine starts: a port another
+process already holds fails the start with the bind error instead of leaving a
+"running" engine without its HTTP transport.
 
 `queue_size` is the whole backlog of one subscription: a message that does not
 fit is never awaited on, and a subscriber whose queue is full is disconnected

@@ -12,7 +12,7 @@ mod config;
 mod objects;
 mod routes;
 mod sse;
-pub use config::{DEFAULT_QUEUE_SIZE, HttpConfig};
+pub use config::{DEFAULT_HOST, DEFAULT_QUEUE_SIZE, HttpConfig};
 
 #[derive(Clone)]
 pub struct WebPlugin;
@@ -35,10 +35,14 @@ impl ActPlugin for WebPlugin {
         let engine = Arc::new(engine.clone());
         let config = engine.config();
         let web_config = config.get::<HttpConfig>("web").unwrap_or_default();
+        let host = web_config
+            .host
+            .clone()
+            .unwrap_or_else(|| DEFAULT_HOST.to_string());
         let port = web_config.port.unwrap_or(10082);
-        let addr: SocketAddr = format!("0.0.0.0:{port}")
-            .parse()
-            .map_err(|e| acts::ActError::Config(format!("invalid web bind address: {e}")))?;
+        let addr: SocketAddr = format!("{host}:{port}").parse().map_err(|e| {
+            acts::ActError::Config(format!("invalid web bind address {host}:{port}: {e}"))
+        })?;
         let shutdown = engine.shutdown_token();
 
         // Every route below resolves an `authorization: Bearer <token>`
@@ -77,21 +81,32 @@ impl ActPlugin for WebPlugin {
             .route("/health", get(|| async { "ok" }))
             .with_state(engine.clone());
 
+        // The listener is bound here, not inside the spawned task: a bind
+        // failure (port taken, address unavailable) is a deployment fault that
+        // must fail the engine start with its reason, instead of logging and
+        // leaving a "running" engine whose HTTP transport never came up.
+        let listener = std::net::TcpListener::bind(addr).map_err(|e| {
+            acts::ActError::Config(format!("failed to bind web server on {addr}: {e}"))
+        })?;
+        listener.set_nonblocking(true).map_err(|e| {
+            acts::ActError::Config(format!(
+                "failed to configure the web listener on {addr}: {e}"
+            ))
+        })?;
+        let listener = tokio::net::TcpListener::from_std(listener).map_err(|e| {
+            acts::ActError::Config(format!(
+                "failed to register the web listener on {addr}: {e}"
+            ))
+        })?;
+
+        info!(addr = %addr, "The Web server is now ready to accept connections");
         tokio::spawn(async move {
-            match tokio::net::TcpListener::bind(addr).await {
-                Ok(listener) => {
-                    info!(addr = %addr, "The Web server is now ready to accept connections");
-                    let serve = axum::serve(listener, app)
-                        .with_graceful_shutdown(async move { shutdown.cancelled().await });
-                    if let Err(err) = serve.await {
-                        tracing::error!(addr = %addr, error = %err, "web server stopped");
-                    } else {
-                        info!(addr = %addr, "web server stopped");
-                    }
-                }
-                Err(err) => {
-                    tracing::error!(addr = %addr, error = %err, "failed to bind web server");
-                }
+            let serve = axum::serve(listener, app)
+                .with_graceful_shutdown(async move { shutdown.cancelled().await });
+            if let Err(err) = serve.await {
+                tracing::error!(addr = %addr, error = %err, "web server stopped");
+            } else {
+                info!(addr = %addr, "web server stopped");
             }
         });
 

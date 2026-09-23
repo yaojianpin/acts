@@ -154,11 +154,13 @@ max_files = 168
 
 ```toml
 [grpc]                          # acts-plugin-grpc
+host = "127.0.0.1"              # bind address; "0.0.0.0" serves remote callers
 port = 10080                    # default 10080
 queue_size = 128                # messages that may wait for one subscriber
                                 # (default 128); a full queue ends the stream
 
 [web]                           # acts-plugin-web (only when this section exists)
+host = "127.0.0.1"              # bind address; "0.0.0.0" serves remote callers
 port = 10082                    # default 10082
 queue_size = 100                # same for one SSE subscriber (default 100)
 

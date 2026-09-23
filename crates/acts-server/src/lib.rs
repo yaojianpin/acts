@@ -333,6 +333,9 @@ ttl = "1h"
 # grpc service — acts-plugin-grpc. Endpoint used by acts-cli and the
 # acts-channel client libraries.
 [grpc]
+# address the gRPC server binds. "127.0.0.1" answers local callers only;
+# set "0.0.0.0" to accept remote connections.
+host = "127.0.0.1"
 # port the gRPC server listens on
 port = 10080
 
@@ -348,6 +351,9 @@ port = 10080
 # hooks (/hooks/{model-id}:{trigger-id}). Only started when this [web]
 # section exists.
 [web]
+# address the web server binds. "127.0.0.1" answers local callers only;
+# set "0.0.0.0" to accept remote connections.
+host = "127.0.0.1"
 # port the web server listens on
 port = 10082
 

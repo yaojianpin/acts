@@ -1,4 +1,4 @@
-use crate::{GrpcConfig, GrpcPlugin, GrpcServer};
+use crate::{DEFAULT_HOST, GrpcConfig, GrpcPlugin, GrpcServer};
 use acts::query::Query as StoreQuery;
 use acts::{ChannelOptions, Engine, Vars, Workflow};
 use acts_proto::{
@@ -15,6 +15,18 @@ use tokio_stream::StreamExt as _;
 fn test_grpc_config_default() {
     let config = GrpcConfig::default();
     assert_eq!(config.port, None);
+    assert_eq!(
+        config.host, None,
+        "an unconfigured transport resolves its host through DEFAULT_HOST"
+    );
+    assert_eq!(
+        config
+            .host
+            .clone()
+            .unwrap_or_else(|| DEFAULT_HOST.to_string()),
+        "127.0.0.1",
+        "the default bind is loopback, not the wildcard"
+    );
 }
 
 #[test]
@@ -661,5 +673,54 @@ async fn test_subscription_needs_the_grant() {
         .await
         .expect("msg:sub opens the stream");
     drop(stream);
+    engine.close().await;
+}
+
+/// A bind failure must fail the engine start with its reason, not be logged
+/// inside the transport task while the engine reports a clean start: the port
+/// here is already taken, so the plugin cannot listen.
+#[tokio::test(flavor = "multi_thread")]
+async fn bind_conflict_fails_the_engine_start() {
+    let blocker = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = blocker.local_addr().unwrap().port();
+
+    let table: toml::Table =
+        toml::from_str(&format!("[acl]\nenabled = false\n[grpc]\nport = {port}\n")).unwrap();
+    let cfg = acts::Config {
+        data: Default::default(),
+        table,
+    };
+    let started = Engine::builder()
+        .set_config(&cfg)
+        .add_plugin(&GrpcPlugin::new())
+        .start()
+        .await;
+    let err = match started {
+        Ok(_) => panic!("a taken port must fail the engine start"),
+        Err(err) => err,
+    };
+
+    assert!(
+        err.to_string().contains(&port.to_string()),
+        "the failure must name the address it could not bind: {err}"
+    );
+}
+
+/// The default bind is loopback, not the wildcard: the listener is bound in
+/// `on_init` — before `start` returns — so after the engine is up, the
+/// wildcard address of the same port is still free. A caller on another
+/// interface cannot reach the service out of the box.
+#[tokio::test(flavor = "multi_thread")]
+async fn grpc_server_defaults_to_loopback() {
+    let port = free_port();
+    let engine = engine_with_grpc(port).await;
+
+    let wildcard = std::net::TcpListener::bind(("0.0.0.0", port));
+    assert!(
+        wildcard.is_ok(),
+        "the gRPC server must bind loopback only by default: {wildcard:?}"
+    );
+    drop(wildcard);
+
     engine.close().await;
 }

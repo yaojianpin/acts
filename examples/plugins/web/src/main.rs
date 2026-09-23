@@ -50,7 +50,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    println!("Web server running on port 10082...");
+    println!("Web server running on 127.0.0.1:10082 (set [web].host to serve remote callers)...");
     sig.recv().await;
 
     Ok(())

@@ -50,7 +50,7 @@ async fn main() -> Result<()> {
         }
     });
 
-    println!("gRPC server running on port 10080...");
+    println!("gRPC server running on 127.0.0.1:10080 (set [grpc].host to serve remote callers)...");
     sig.recv().await;
 
     Ok(())

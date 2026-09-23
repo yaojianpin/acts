@@ -1,5 +1,10 @@
 use serde::Deserialize;
 
+/// Host the HTTP transport binds when `[web].host` is not set: loopback only,
+/// so the management surface is not reachable from the network by default.
+/// Set `host = "0.0.0.0"` to serve remote callers.
+pub const DEFAULT_HOST: &str = "127.0.0.1";
+
 /// Messages that may wait for one SSE subscriber when `[web].queue_size` is
 /// not set.
 pub const DEFAULT_QUEUE_SIZE: usize = 100;
@@ -11,6 +16,11 @@ const MAX_QUEUE_SIZE: usize = 65_536;
 /// `[web]` — the HTTP transport, including the SSE message stream.
 #[derive(Deserialize, Default)]
 pub struct HttpConfig {
+    /// Address the web server binds (`[web].host`). Defaults to
+    /// [`DEFAULT_HOST`] — loopback only — so a deployment that wants the
+    /// transport reachable from other hosts says so explicitly.
+    pub host: Option<String>,
+
     pub port: Option<u32>,
 
     /// How many messages may wait for one SSE subscriber.

@@ -11,7 +11,7 @@ use tokio::sync::mpsc::{self, Sender, error::TrySendError};
 use tokio_stream::{Stream, wrappers::ReceiverStream};
 use tonic::{Code, Response, Status, transport::Server};
 
-pub use config::{DEFAULT_QUEUE_SIZE, GrpcConfig};
+pub use config::{DEFAULT_HOST, DEFAULT_QUEUE_SIZE, GrpcConfig};
 
 mod config;
 
@@ -317,26 +317,53 @@ impl ActPlugin for GrpcPlugin {
         let engine = engine.clone();
         let config = engine.config();
         let grpc_config = config.get::<GrpcConfig>("grpc").unwrap_or_default();
+        let host = grpc_config
+            .host
+            .clone()
+            .unwrap_or_else(|| DEFAULT_HOST.to_string());
         let port = grpc_config.port.unwrap_or(10080);
-        let addr = std::net::SocketAddr::from(([0, 0, 0, 0], port as u16));
+        let addr: std::net::SocketAddr = format!("{host}:{port}").parse().map_err(|e| {
+            acts::ActError::Config(format!("invalid gRPC bind address {host}:{port}: {e}"))
+        })?;
         let shutdown = engine.shutdown_token();
+
+        // The listener is bound here, not inside the spawned task: a bind
+        // failure (port taken, address unavailable) is a deployment fault that
+        // must fail the engine start with its reason, instead of logging and
+        // leaving a "running" engine whose gRPC transport never came up.
+        let listener = std::net::TcpListener::bind(addr).map_err(|e| {
+            acts::ActError::Config(format!("failed to bind gRPC server on {addr}: {e}"))
+        })?;
+        listener.set_nonblocking(true).map_err(|e| {
+            acts::ActError::Config(format!(
+                "failed to configure the gRPC listener on {addr}: {e}"
+            ))
+        })?;
+        let listener = tokio::net::TcpListener::from_std(listener).map_err(|e| {
+            acts::ActError::Config(format!(
+                "failed to register the gRPC listener on {addr}: {e}"
+            ))
+        })?;
+        let incoming = tokio_stream::wrappers::TcpListenerStream::new(listener);
 
         tokio::spawn(async move {
             let server = GrpcServer::new(&engine);
             let grpc = ActsServiceServer::new(server);
-            println!(
-                "The gRPC server is now ready to accept connections on port {}",
-                port
-            );
+            tracing::info!(addr = %addr, "The gRPC server is now ready to accept connections");
             // tonic 0.14's `add_service` is part of its `router` feature (an
             // axum 0.8 dependency): it exists to route several named services.
             // This plugin serves exactly one, and the generated
             // `ActsServiceServer` already dispatches the gRPC paths itself and
             // answers `UNIMPLEMENTED` to anything else — the same thing the
-            // router's fallback does — so the service goes to `serve` directly
-            // and the transport stays free of the HTTP framework.
-            let serve =
-                Server::builder().serve_with_shutdown(addr, grpc, shutdown.cancelled_owned());
+            // router's fallback does — so the service goes to the incoming
+            // stream directly and the transport stays free of the HTTP
+            // framework. The listener was bound in `on_init`, so serving
+            // accepts it instead of binding again.
+            let serve = Server::builder().serve_with_incoming_shutdown(
+                grpc,
+                incoming,
+                shutdown.cancelled_owned(),
+            );
             if let Err(err) = serve.await {
                 tracing::error!(addr = %addr, error = %err, "gRPC server stopped");
             } else {

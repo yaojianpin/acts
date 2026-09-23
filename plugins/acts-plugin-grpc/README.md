@@ -33,10 +33,17 @@ In `config/acts.toml`:
 
 ```toml
 [grpc]
+host = "127.0.0.1"
 port = 10080
 # how many messages may wait for one `on_message` subscriber (default 128)
 queue_size = 128
 ```
+
+`host` is the address the server binds. It defaults to `127.0.0.1`, so the
+service answers local callers only; set `host = "0.0.0.0"` to serve remote
+callers. The listener is bound while the engine starts: a port another process
+already holds fails the start with the bind error instead of leaving a
+"running" engine without its gRPC transport.
 
 `queue_size` is the whole backlog of one subscription: a message that does not
 fit is never awaited on, and a subscriber whose queue is full has its stream
