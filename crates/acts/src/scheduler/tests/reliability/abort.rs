@@ -342,8 +342,7 @@ async fn sch_abort_store_fail_degrades_and_heals_once_inner() {
     if let Err(err) = &flush {
         assert!(matches!(err, ActError::Store(_)), "{err:?}");
     }
-    let reported =
-        flush.is_err() || rt.cache().store().procs().find(&pid).await.is_err();
+    let reported = flush.is_err() || rt.cache().store().procs().find(&pid).await.is_err();
     assert!(
         reported,
         "the lost write must reach a durability barrier, not be swallowed: {flush:?}"
