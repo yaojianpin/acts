@@ -10,7 +10,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-rquickjs = { version = "0.13", features = ["macro", "parallel"] }
+rquickjs = { version = "0.14", features = ["macro", "parallel"] }
 acts = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
