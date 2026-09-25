@@ -24,21 +24,21 @@ async fn main() -> anyhow::Result<()> {
 
     let uri = format!("http://{hostname}:{port}");
     let tip = format!("{}:{} $ ", hostname, port);
-    let mut client = client::connect(&uri, cli.token).await?;
 
-    // Resolve the identity before entering the REPL: a missing or stale token
-    // is a startup problem, not a surprise on the first command.
-    match client::whoami(&mut client).await {
-        Ok(who) => println!("authenticated as {}", client::identity(&who)),
-        Err(err) => {
-            let hint = if std::env::var("ACTS_TOKEN").is_err() {
-                " (no token given: use --token or ACTS_TOKEN)"
-            } else {
-                " (check ACTS_TOKEN / --token)"
-            };
-            writeln!(std::io::stderr(), "{}{}", format!("{err:#}").red(), hint)?;
-            std::process::exit(1);
-        }
+    // Resolve an identity before entering the REPL: an explicit token, a
+    // stored session (refreshed when its access token expired), or a login as
+    // `--user`. A caller with none is anonymous, and the server answers it
+    // the catalogue reads only — said out loud rather than discovered on the
+    // first command.
+    let (mut client, who) =
+        client::connect_and_authenticate(&uri, cli.token, cli.user, cli.password).await?;
+    if who.is_null() {
+        println!(
+            "connected anonymously to {uri}: the catalogue reads are available, nothing else. \
+             Log in with 'auth login <user>' or --user."
+        );
+    } else {
+        println!("authenticated as {}", client::identity(&who));
     }
 
     let mut cmd = CommandRunner::new(&mut client);

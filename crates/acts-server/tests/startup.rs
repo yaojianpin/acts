@@ -1,8 +1,7 @@
-//! Startup behavior of the `acts-server` binary: an unusable log directory, an
-//! `[acl]` section that cannot be enforced or a `[db]` section that cannot be
-//! read is a configuration/deployment error, so the process — and the engine
-//! builder it runs — must report it and let a supervisor see *why* the server
-//! did not start, instead of panicking.
+//! Startup behavior of the `acts-server` binary: an unusable log directory or
+//! a `[db]` section that cannot be read is a configuration/deployment error,
+//! so the process — and the engine builder it runs — must report it and let a
+//! supervisor see *why* the server did not start, instead of panicking.
 //!
 //! The config of every case is loaded the way the binary loads it
 //! (`acts_server::Config::create` on a real `acts.toml`), so what is exercised
@@ -110,48 +109,12 @@ fn a_malformed_db_section_is_reported_not_panicked() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// An `[acl]` section that cannot be enforced (enabled, but no role declares
-/// any token) must fail startup with a diagnostic instead of silently
-/// refusing — or silently allowing — every request.
+/// Access control is always on — there is no `[acl]` section to enable it —
+/// and the anonymous caller is refused everything outside the catalogue.
 #[tokio::test(flavor = "multi_thread")]
-async fn unusable_acl_fails_startup() -> anyhow::Result<()> {
-    let dir = scratch("acl-no-token")?;
-    let (_, config) = server_config(&dir, "[acl]\n")?;
-
-    let started = engine_builder(
-        &config,
-        Arc::new(acts::MemoryStore::new()),
-        &ServerPlugins::default(),
-    )?
-    .start()
-    .await;
-    let err = started
-        .err()
-        .context("an unenforceable acl must fail startup")?;
-    assert!(
-        err.to_string().contains("neither a token nor a role"),
-        "unexpected startup error: {err}"
-    );
-
-    let _ = std::fs::remove_dir_all(&dir);
-    Ok(())
-}
-
-/// A usable `[acl]` compiles and the engine starts; the anonymous caller is
-/// then refused.
-#[tokio::test(flavor = "multi_thread")]
-async fn acl_with_a_role_starts_and_refuses_anonymous() -> anyhow::Result<()> {
-    let dir = scratch("acl-role")?;
-    let (_, config) = server_config(
-        &dir,
-        r#"
-        [acl]
-        [[acl.role]]
-        name = "operator"
-        tokens = ["op-token"]
-        allow = ["model:ls"]
-        "#,
-    )?;
+async fn the_acl_is_on_by_default_and_refuses_anonymous() -> anyhow::Result<()> {
+    let dir = scratch("acl-default")?;
+    let (_, config) = server_config(&dir, "")?;
 
     let engine = engine_builder(
         &config,
@@ -162,13 +125,18 @@ async fn acl_with_a_role_starts_and_refuses_anonymous() -> anyhow::Result<()> {
     .await?;
 
     assert!(engine.acl().enabled());
-    let err = acts::actions::apply(&engine, "model:ls", acts::Vars::new())
+    let err = acts::actions::apply(&engine, "model:rm", acts::Vars::new().with("id", "x"))
         .await
         .unwrap_err();
     assert!(
         matches!(err, acts::actions::Error::Unauthenticated(_)),
         "got: {err}"
     );
+
+    // the catalogue is the anonymous grant: which models exist stays readable
+    acts::actions::apply(&engine, "model:ls", acts::Vars::new())
+        .await
+        .context("the catalogue must stay readable to the anonymous caller")?;
 
     engine.close().await;
     let _ = std::fs::remove_dir_all(&dir);

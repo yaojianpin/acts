@@ -72,8 +72,8 @@ pub struct Message {
 }
 
 impl DbCollectionIden for Message {
-    fn iden() -> StoreIden {
-        StoreIden::Messages
+    fn iden() -> String {
+        StoreIden::Messages.as_ref().to_string()
     }
     fn indexed_fields() -> &'static [&'static str] {
         &["pid", "tid", "nid", "timestamp"]

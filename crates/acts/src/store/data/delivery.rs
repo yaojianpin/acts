@@ -45,8 +45,8 @@ pub struct Delivery {
 }
 
 impl DbCollectionIden for Delivery {
-    fn iden() -> StoreIden {
-        StoreIden::Deliveries
+    fn iden() -> String {
+        StoreIden::Deliveries.as_ref().to_string()
     }
     fn indexed_fields() -> &'static [&'static str] {
         &["pid", "tid", "status", "msg_id", "chan_id", "update_time"]

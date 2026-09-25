@@ -1,7 +1,7 @@
 use crate::snapshot::SnapshotOptions;
 use crate::{
-    ActPackage, ActPlugin, Config, Engine, config::ConfigLog, package::ActPackageRegister,
-    scheduler::Runtime, store::KvStore,
+    AccessControl, ActPackage, ActPlugin, Config, Engine, config::ConfigLog,
+    package::ActPackageRegister, scheduler::Runtime, store::KvStore,
 };
 use std::{path::Path, sync::Arc};
 use tracing::{info, warn};
@@ -12,6 +12,7 @@ pub struct EngineBuilder {
     packages: Vec<ActPackageRegister>,
     snapshots: Vec<(String, SnapshotOptions)>,
     store: Option<Arc<dyn KvStore>>,
+    acl: Option<Arc<dyn AccessControl>>,
 }
 
 impl Default for EngineBuilder {
@@ -44,6 +45,7 @@ impl EngineBuilder {
             packages: Vec::new(),
             snapshots: Vec::new(),
             store: None,
+            acl: None,
         }
     }
 
@@ -61,30 +63,38 @@ impl EngineBuilder {
         Ok(self)
     }
 
+    /// Install the engine's access control — the user registry and session
+    /// store. The shipped implementation is `acts_acl::UserAcl`, whose
+    /// `AclUsers` trait adds the one-call form to this builder:
+    ///
+    /// ```text
+    /// use acts::Engine;
+    /// use acts_acl::AclUsers;
+    ///
+    /// let engine = Engine::builder().with_user_acl().start();
+    /// ```
+    ///
+    /// (A crate outside this one cannot dev-depend on `acts-acl` without
+    /// forming a publish ring, so that example is not a doctest here.)
+    ///
+    /// A bare engine runs [`AnonymousAcl`](crate::AnonymousAcl): no users, no
+    /// login, the anonymous catalogue-only policy for every caller.
+    pub fn set_acl(mut self, acl: Arc<dyn AccessControl>) -> Self {
+        self.acl = Some(acl);
+        self
+    }
+
     /// Turn access control off: every caller resolves to
     /// [`Principal::unrestricted`](crate::Principal::unrestricted) and nothing
     /// is checked.
     ///
     /// This is the explicit opt-out, and the setting a test or a local demo
     /// uses — it is spelled out at the call site, never inferred. There is no
-    /// implicit version of it: an engine whose config has no `[acl]` section
-    /// runs under the read-only `anonymous` policy instead
-    /// ([`Acl::anonymous_access`](crate::Acl::anonymous_access)), and an
-    /// engine that has one runs under exactly the roles that section names.
-    ///
-    /// ```toml
-    /// # the same thing from a config file
-    /// [acl]
-    /// enabled = false
-    /// ```
+    /// implicit version of it: an engine without this call runs whatever
+    /// access control was installed ([`AnonymousAcl`](crate::AnonymousAcl)
+    /// when none was — the anonymous catalogue-only policy).
     pub fn disable_acl(mut self) -> Self {
-        self.config_mut().table.insert(
-            "acl".to_string(),
-            toml::Value::Table(toml::Table::from_iter([(
-                "enabled".to_string(),
-                toml::Value::Boolean(false),
-            )])),
-        );
+        self.acl = Some(Arc::new(crate::DisabledAcl));
         self
     }
 
@@ -104,6 +114,16 @@ impl EngineBuilder {
 
     pub fn tick_interval_secs(mut self, secs: i64) -> Self {
         self.config_mut().data.tick_interval_secs = Some(secs);
+        self
+    }
+
+    /// Set the filesystem root for process directories: every process runs in
+    /// its own `<workdir>/<pid>`, which is what `Process::workdir` and
+    /// `Context::workdir` answer and what `$env.WORK_DIR` names. An empty
+    /// path is refused at `start` (remove the setting to run without
+    /// directory control).
+    pub fn workdir(mut self, workdir: &str) -> Self {
+        self.config_mut().data.workdir = Some(workdir.to_string());
         self
     }
 
@@ -299,11 +319,13 @@ impl EngineBuilder {
             packages,
             snapshots,
             store,
+            acl,
         } = self;
         let config = Arc::new(config);
 
         let runtime = Runtime::new(&config, store)?;
-        let engine = Engine::with_runtime(config, runtime.clone())?;
+        let acl: Arc<dyn AccessControl> = acl.unwrap_or_else(|| Arc::new(crate::AnonymousAcl));
+        let engine = Engine::with_runtime(config, runtime.clone(), acl)?;
 
         match engine.initialize(snapshots, plugins, packages).await {
             Ok(()) => {

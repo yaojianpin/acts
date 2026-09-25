@@ -20,8 +20,8 @@ pub struct Model {
 }
 
 impl DbCollectionIden for Model {
-    fn iden() -> StoreIden {
-        StoreIden::Models
+    fn iden() -> String {
+        StoreIden::Models.as_ref().to_string()
     }
 
     fn indexed_fields() -> &'static [&'static str] {

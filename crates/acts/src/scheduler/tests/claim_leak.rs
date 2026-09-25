@@ -81,6 +81,12 @@ async fn failed_launch_releases_pid_claim() {
     let config = Config {
         data: ConfigData {
             cache_cap: Some(4),
+            workdir: Some(
+                std::env::temp_dir()
+                    .join(format!("acts_workdir_{}", crate::utils::longid()))
+                    .display()
+                    .to_string(),
+            ),
             ..Default::default()
         },
         table: Default::default(),
@@ -91,15 +97,11 @@ async fn failed_launch_releases_pid_claim() {
         .with_id("m1")
         .with_step(|step| step.with_id("step1"));
     let pid = "claimleak";
-    let root = std::env::temp_dir().join(format!("acts_workdir_{}", crate::utils::longid()));
+    let root = config.workdir().expect("configured above");
     let dir = root.join(pid);
-    let vars = Vars::new().with(consts::PROCESS_ID, pid).with(
-        consts::PROC_OWNER,
-        crate::ScopePolicy {
-            workdir_root: Some(root.clone()),
-            ..Default::default()
-        },
-    );
+    let vars = Vars::new()
+        .with(consts::PROCESS_ID, pid)
+        .with(consts::PROC_OWNER, crate::ScopePolicy::default());
 
     // the transient fault: the proc row write fails, so the start errors
     let err = rt.start(&workflow, vars.clone()).await.unwrap_err();

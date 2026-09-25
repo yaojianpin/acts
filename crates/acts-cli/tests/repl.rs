@@ -8,20 +8,17 @@
 //! come back as an error naming the action, never as the panic the `unwrap()`s
 //! here used to be.
 
-use acts::{Config, Engine};
+mod common;
+
+use acts::UserSpec;
 use acts_channel::Vars;
 use acts_cli::{
     client,
     cmd::{CommandRunner, model, proc as proc_cmd, snap, task},
 };
-use acts_plugin_grpc::GrpcPlugin;
 use anyhow::Context;
 use serde_json::json;
-use std::{
-    future::Future,
-    path::PathBuf,
-    time::{Duration, SystemTime, UNIX_EPOCH},
-};
+use std::time::Duration;
 
 /// A model whose step waits for a client act (`acts.core.irq`): the run stays
 /// live, so its process and task rows are there to read — a run that finishes
@@ -38,101 +35,6 @@ steps:
       key: cli-test
 "#;
 
-/// Boot a server for one case and hand its endpoint to `body`.
-///
-/// `config_extra` is the config the server runs on — the `[acl]` section of
-/// the case — and the gRPC port is picked per test, so two cases run in
-/// parallel.
-async fn with_server<F, Fut>(name: &str, config_extra: &str, body: F) -> anyhow::Result<()>
-where
-    F: FnOnce(String) -> Fut,
-    Fut: Future<Output = anyhow::Result<()>>,
-{
-    // The port is picked before the server can bind it, so a collision (the
-    // same ephemeral port handed to a sibling case right after it released it)
-    // is retried on a fresh port instead of failing on a listener that never
-    // came up. A case that fails for its own reason still fails once — the
-    // retry is only for the port.
-    let mut last = None;
-    for _ in 0..3 {
-        let dir = scratch(name)?;
-        let port = free_port()?;
-        let config_path = dir.join("acts.toml");
-        std::fs::write(
-            &config_path,
-            format!("{config_extra}\n[grpc]\nport = {port}\n"),
-        )
-        .with_context(|| format!("failed to write {}", config_path.display()))?;
-
-        // the engine and the transport plugin are the shipped ones — a CLI test
-        // must not be checking a second, hand-rolled wiring that can drift
-        let config = Config::create(&config_path)
-            .with_context(|| format!("failed to load {}", config_path.display()))?;
-        let engine = Engine::builder()
-            .set_config(&config)
-            .add_plugin(&GrpcPlugin::new())
-            .start()
-            .await
-            .context("the test server must start")?;
-
-        let url = format!("http://127.0.0.1:{port}");
-        if let Err(err) = wait_for_server(&url).await {
-            engine.close().await;
-            let _ = std::fs::remove_dir_all(&dir);
-            last = Some(err);
-            continue;
-        }
-
-        let result = body(url).await;
-        engine.close().await;
-        let _ = std::fs::remove_dir_all(&dir);
-        return result;
-    }
-    Err(last.unwrap_or_else(|| anyhow::anyhow!("the server never accepted a connection")))
-}
-
-/// How long a case waits for the server to accept a connection. The gRPC
-/// listener binds in a spawned task, and CI runs this suite instrumented
-/// (`cargo llvm-cov`) on a shared runner, so the budget is generous: waiting
-/// it out means something is actually wrong.
-const READY_TIMEOUT: Duration = Duration::from_secs(30);
-
-async fn wait_for_server(url: &str) -> anyhow::Result<()> {
-    let deadline = tokio::time::Instant::now() + READY_TIMEOUT;
-    let mut last = String::new();
-    while tokio::time::Instant::now() < deadline {
-        match client::connect(url, None).await {
-            Ok(_) => return Ok(()),
-            Err(err) => last = err.to_string(),
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
-    Err(anyhow::anyhow!(
-        "{url} never accepted a connection within {READY_TIMEOUT:?}: {last}"
-    ))
-}
-
-fn scratch(name: &str) -> anyhow::Result<PathBuf> {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|err| anyhow::anyhow!("the clock is before the epoch: {err}"))?
-        .as_nanos();
-    let dir = std::env::temp_dir().join(format!("acts-cli-{}-{name}-{stamp}", std::process::id()));
-    std::fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
-    Ok(dir)
-}
-
-fn free_port() -> anyhow::Result<u16> {
-    let listener =
-        std::net::TcpListener::bind("127.0.0.1:0").context("failed to bind a free port")?;
-    let port = listener
-        .local_addr()
-        .context("failed to read the bound address")?
-        .port();
-    drop(listener);
-    Ok(port)
-}
-
 /// The renderable half of a command's answer: everything before the elapsed
 /// time the CLI appends.
 fn body_of(out: &str) -> &str {
@@ -143,7 +45,7 @@ fn body_of(out: &str) -> &str {
 /// whole model/proc/task/snapshot surface over one live server.
 #[tokio::test(flavor = "multi_thread")]
 async fn commands_render_the_answers_of_a_real_server() {
-    with_server("commands", "[acl]\nenabled = false\n", |url| async move {
+    common::with_server("commands", true, |_engine, url| async move {
         let mut channel = client::connect(&url, None).await?;
         let mut cli = CommandRunner::new(&mut channel);
 
@@ -248,7 +150,7 @@ async fn commands_render_the_answers_of_a_real_server() {
 /// message — the answer the REPL prints instead of dying on a panic.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_refusal_names_the_action_and_the_message() {
-    with_server("refusals", "[acl]\nenabled = false\n", |url| async move {
+    common::with_server("refusals", true, |_engine, url| async move {
         let mut channel = client::connect(&url, None).await?;
         let mut cli = CommandRunner::new(&mut channel);
 
@@ -281,44 +183,73 @@ async fn a_refusal_names_the_action_and_the_message() {
 }
 
 /// An ACL refusal is the transport's, not the engine's: the identity the
-/// startup greeting prints comes from the token, what the role allows is
-/// served, and what it does not is an error naming the action.
+/// startup greeting prints comes from the session a login answered with, what
+/// the user's grants allow is served, and what they do not is an error naming
+/// the action. A caller that never logged in reads the catalogue and nothing
+/// else.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_acl_refusal_names_the_action() {
-    let acl = r#"
-[acl]
-[[acl.role]]
-name = "reader"
-tokens = ["reader-token"]
-allow = ["model:ls"]
-"#;
-    with_server("acl", acl, |url| async move {
-        let mut channel = client::connect(&url, Some("reader-token".to_string())).await?;
+    common::with_server("acl", false, |engine, url| async move {
+        engine
+            .acl()
+            .set_user(&UserSpec {
+                name: "reader".to_string(),
+                add_passwords: vec!["s3cret".to_string()],
+                allow: Some(vec!["model:ls".to_string()]),
+                ..Default::default()
+            })
+            .await?;
+
+        let mut channel =
+            acts_channel::ActsChannel::connect_with_password(&url, "reader", "s3cret")
+                .await
+                .map_err(|err| client::action_failed("acl:login", err))?;
         let who = client::whoami(&mut channel).await?;
-        assert_eq!(client::identity(&who), "roles: reader");
+        assert_eq!(client::identity(&who), "reader");
 
         let mut cli = CommandRunner::new(&mut channel);
         assert!(
             model::ls(&mut cli, &None, &None, &vec![], &vec![])
                 .await
                 .is_ok(),
-            "the role allows model:ls"
+            "the user's grant allows model:ls"
         );
 
         let err = model::rm(&mut cli, "simple").await.unwrap_err();
         let text = format!("{err:#}");
         assert!(text.contains("model:rm"), "unexpected error: {text}");
         assert!(
-            text.contains("is not allowed for role(s) reader"),
+            text.contains("is not allowed for user 'reader'"),
             "a denied action must say so: {text}"
         );
 
-        // without a token the server refuses the startup check itself
+        // without a session the server answers the catalogue reads, and a
+        // missing credential is reported as such — not as a grant
         let mut anonymous = client::connect(&url, None).await?;
-        let err = client::whoami(&mut anonymous).await.unwrap_err();
+        let who = client::whoami(&mut anonymous).await?;
+        assert_eq!(who["user"], json!("anonymous"));
+        assert_eq!(who["authenticated"], json!(false));
+        assert_eq!(
+            client::identity(&who),
+            "anonymous",
+            "an unauthenticated session greets as anonymous"
+        );
         assert!(
-            format!("{err:#}").contains("acl:whoami"),
-            "unexpected error: {err:#}"
+            anonymous
+                .send::<serde_json::Value>("model:ls", Vars::new())
+                .await
+                .is_ok(),
+            "an anonymous caller reads the catalogue"
+        );
+        // over the CLI surface the action is named, and what is missing is the
+        // credential — not a grant
+        let mut anonymous_cli = CommandRunner::new(&mut anonymous);
+        let err = anonymous_cli.run("auth user ls").await.unwrap_err();
+        let text = format!("{err:#}");
+        assert!(text.contains("acl:users"), "unexpected error: {text}");
+        assert!(
+            text.contains("a session token is required"),
+            "a missing credential must be reported as one: {text}"
         );
 
         Ok(())
@@ -327,11 +258,96 @@ allow = ["model:ls"]
     .expect("the acl refusals must be reported as errors");
 }
 
+/// The `auth` command group against the user registry: an administrator
+/// declares, reads and deletes users; an ordinary user is refused by the
+/// server, and the builtin admin cannot be deleted out from under it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_auth_commands_manage_the_engines_users() {
+    common::with_server("users", false, |engine, url| async move {
+        // the builtin admin's password is whatever this case gives it
+        engine
+            .acl()
+            .set_user(&UserSpec {
+                name: "admin".to_string(),
+                add_passwords: vec!["root".to_string()],
+                ..Default::default()
+            })
+            .await?;
+
+        let mut channel = acts_channel::ActsChannel::connect_with_password(&url, "admin", "root")
+            .await
+            .map_err(|err| client::action_failed("acl:login", err))?;
+        let mut cli = CommandRunner::new(&mut channel);
+
+        // `auth user set` is what declares a user now
+        cli.run("auth user set reader --allow @read --password s3cret")
+            .await?;
+        let reader = engine
+            .acl()
+            .get_user("reader")
+            .await
+            .expect("the user the command saved is readable");
+        assert_eq!(reader["name"], json!("reader"));
+        assert_eq!(reader["allow"], json!(["@read"]));
+
+        // `auth user ls` and `get` read the registry back
+        cli.run("auth user ls").await?;
+        assert!(
+            engine
+                .acl()
+                .user_names()
+                .await
+                .contains(&"reader".to_string())
+        );
+        cli.run("auth user get reader").await?;
+
+        // the builtin administrator is not the CLI's to remove
+        let err = cli.run("auth user rm admin").await.unwrap_err();
+        assert!(
+            format!("{err:#}").contains("cannot be deleted"),
+            "unexpected error: {err:#}"
+        );
+
+        // the registry's reads belong to `@read`, so this user may list and
+        // read users — changing them is `@write`, and the server refuses that
+        let mut reader = acts_channel::ActsChannel::connect_with_password(&url, "reader", "s3cret")
+            .await
+            .map_err(|err| client::action_failed("acl:login", err))?;
+        let mut reader_cli = CommandRunner::new(&mut reader);
+        reader_cli.run("auth user ls").await?;
+        reader_cli.run("auth user get reader").await?;
+
+        for line in ["auth user set other --password x", "auth user rm admin"] {
+            let err = reader_cli.run(line).await.unwrap_err();
+            let text = format!("{err:#}");
+            assert!(
+                text.contains("is not allowed for user 'reader'"),
+                "`{line}` must be refused: {text}"
+            );
+        }
+
+        // `auth user rm` deletes the user, and its login is refused from then on
+        cli.run("auth user rm reader").await?;
+        assert!(engine.acl().get_user("reader").await.is_none());
+        let err = acts_channel::ActsChannel::connect_with_password(&url, "reader", "s3cret")
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("invalid user or password"),
+            "unexpected error: {err}"
+        );
+
+        Ok(())
+    })
+    .await
+    .expect("the user commands must answer");
+}
+
 /// The REPL's own paths: a command runs, `help` answers instead of failing,
 /// `exit` ends the session, and a line that names nothing is an error.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_repl_reads_a_line_without_panicking() {
-    with_server("repl", "[acl]\nenabled = false\n", |url| async move {
+    common::with_server("repl", true, |_engine, url| async move {
         let mut channel = client::connect(&url, None).await?;
         let mut cli = CommandRunner::new(&mut channel);
 

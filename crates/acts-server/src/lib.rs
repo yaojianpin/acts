@@ -4,6 +4,7 @@
 use acts::{
     ConfigLog, Engine, EngineBuilder, KvStore, MissingParamAction, SnapshotOptions, SnapshotPolicy,
 };
+use acts_acl::AclUsers;
 
 /// The engine configuration [`engine_builder`] reads. Re-exported because a
 /// caller of this crate builds the config before it can build the engine — the
@@ -256,6 +257,14 @@ store_writer_workers = 4
 # fed more work; the bookkeeping of in-flight work waits for room instead.
 store_writer_queue_cap = 16384
 
+# Filesystem root for process directories. When set, every process runs in its
+# own `<workdir>/<pid>`, which is what `Context::workdir()` answers, what
+# `$env.WORK_DIR` names, and what `acts.app.shell` mounts as the script's
+# filesystem root. The directory lives exactly as long as the process's
+# durable rows. Omitted means no directory control, and a process may touch
+# whatever the server's own account can.
+# workdir = "@ACTS_DIR@/work"
+
 # [log] — file logging: hourly rolling acts.log files under dir, at level
 # (the ACTS_LOG env var overrides level at runtime).
 #
@@ -366,66 +375,55 @@ port = 10082
 # subscribes again.
 # queue_size = 100
 
-# access control — optional. The section's presence turns enforcement ON;
-# without it every request is allowed (the pre-ACL behaviour).
+# access control — always on. There is no `[acl]` section: users live in the
+# store and are managed at runtime, and every engine starts with the builtin
+# `admin` user.
 #
-# A request's token selects a role; the role's allow/deny action-name globs
-# decide what it may do, and `deny` always wins. Because the section is the
-# opt-in, a request with no token (or an unknown one) is refused unless
-# `default_role` names a role. Tokens are matched by sha256 hex digest: store
-# `sha256:<64 hex digits>` to keep the clear text out of this file, or write
-# the token itself and let the server hash it.
+# Log in to become someone: `acl:login` (user + password) answers a session
+# token, presented on every request the same way the old static tokens were —
+# gRPC and HTTP as `authorization: Bearer <token>`, NATS as the `token` field
+# of the action JSON body. A request with no usable token is anonymous: it may
+# read the model/package catalogue and nothing else. The access token expires
+# (one hour); a longer-lived refresh token rotates it (`acl:refresh`), and the
+# shipped clients do that on their own.
 #
-# `snapshot` narrows which scopes of a target a subject owns; `$subject` is
-# the role name, so `["$subject"]` means "my own scope only". A process
-# started through an action carries its caller's rules, and the scheduler
-# re-checks them at every seal — a workflow cannot read another subject's
-# sealed data even when started with someone else's `uid`.
-# `workdir` is a root: it gives each process its own directory (`<workdir>/<pid>`)
-# and confines the process there, and the process id becomes a path segment, so a
-# pid that is not one safe component is refused. It applies to every role unless
-# the role sets its own. Acts read that directory through `Context::workdir()`,
-# and a script reads the same one as `$env.WORK_DIR` (engine-owned: a write to
-# that name is dropped); `acts.app.shell` mounts it as the root of the script's
-# filesystem, so `/` inside the script is that directory (HOME, PWD, TMPDIR and
-# ACTS_WORKDIR point at it) and the rest of the host is not part of the
-# filesystem the script was given. The directory is removed with the process's
-# rows, once the process finished and every delivery of its messages settled — so
-# nothing left in it outlives the run (a run that must keep a file has to export
-# it), and a finished run whose row is kept (an errored delivery awaiting a manual
-# retry) keeps its directory as well. Omitted means no directory control, and a
-# shell act then runs on an in-memory filesystem with no host behind it.
+# The admin password: on the first start of a fresh store the builtin `admin`
+# is created with the password in ACTS_ADMIN_PASSWORD, or with a generated one
+# that is printed to the log once — change it with `acl:setuser`.
 #
-# Transport credentials:
-#   gRPC  — `authorization: Bearer <token>` metadata
-#   HTTP  — `authorization: Bearer <token>` header
-#   NATS  — the `token` field of the action JSON body
+# Grants are the Redis-ACL shape:
+#   commands   `allow`/`deny` patterns over action names (`model:*`,
+#              `proc:start`), plus catalog groups as `@read`, `@write`,
+#              `@deploy`/`@execute`/`@write` (`@all`, or `*`, is everything).
+#              `deny` wins; an `@` token that names no group is refused.
+#   resources  `patterns` over a workflow's `rn` (`orders:eu`): a user may only
+#              deploy and start models whose resource name it matches. A model
+#              without an `rn` claims nothing, so only an unrestricted user may
+#              run it.
+#   snapshot   per target, the scope patterns the user owns; `$subject` is the
+#              user name, so `["$subject"]` means "my own scope only". A run
+#              carries its starter's scopes and the scheduler re-checks them at
+#              every seal — a workflow cannot read another subject's sealed
+#              data even when started with someone else's `uid`.
 #
-# [acl]
-# Without this section the engine is anonymous and catalogue-only: callers may
-# list and get models and packages, and nothing else (no other read, no write,
-# no control, no admin action, no snapshot scope, no subscription). Add the
-# section to name your callers — the smallest useful one is the `token`
-# shorthand below — or write `enabled = false` to lift the limits on purpose.
+# The CLI drives it: `auth login <user>`, `auth user set <user> --allow '@read'
+# --pattern 'orders:*' --snapshot 'secrets=$subject' --password <pw>`,
+# `auth user ls`. Over the wire the actions are `acl:login`, `acl:refresh`,
+# `acl:logout`, `acl:whoami`, `acl:setuser`, `acl:deluser`, `acl:getuser` and
+# `acl:users`.
 #
-# role applied to an absent/unknown token; omit to refuse such requests
-# default_role = "guest"
-#
-# shorthand: one token with unrestricted access (the `requirepass` equivalent)
-# token = "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
-#
-# [[acl.role]]
-# name = "operator"
-# tokens = ["sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"]
-# allow = ["model:ls", "model:get", "proc:ls", "proc:get", "task:*", "msg:ls",
-#          "msg:ack", "msg:sub", "snap:get", "snap:ls", "acl:whoami"]
-# deny = ["model:rm", "pack:publish"]
-# workdir = "/srv/acts"
-#
-# [[acl.role]]
-# name = "guest"
-# tokens = ["sha256:..."]
-# allow = ["model:ls", "acl:whoami"]
+# The process directory root is a global engine setting (see `workdir` above):
+# `<workdir>/<pid>` is the run's own directory, what `Context::workdir()` and
+# `$env.WORK_DIR` answer, and what `acts.app.shell` mounts as the root of the
+# script's filesystem — `/` inside the script is that directory (HOME, PWD,
+# TMPDIR and ACTS_WORKDIR point at it) and the rest of the host is not part of
+# the filesystem the script was given. The directory is removed with the
+# process's rows, once the process finished and every delivery of its messages
+# settled — so nothing left in it outlives the run (a run that must keep a file
+# has to export it), and a finished run whose row is kept (an errored delivery
+# awaiting a manual retry) keeps its directory as well. Omitted means no
+# directory control, and a shell act then runs on an in-memory filesystem with
+# no host behind it.
 
 # http package — acts-package-http rules for every `acts.core.http` act.
 # Outbound requests are blocked by default when the target is a
@@ -818,7 +816,11 @@ pub fn engine_builder(
     store: Arc<dyn KvStore>,
     plugins: &ServerPlugins,
 ) -> acts::Result<EngineBuilder> {
-    let mut builder = Engine::builder().set_config(config).set_store(store);
+    // the store-backed user registry: users, sessions and the builtin admin
+    let mut builder = Engine::builder()
+        .with_user_acl()
+        .set_config(config)
+        .set_store(store);
     if config.has("snapshot") {
         let targets = config.get::<Vec<SnapshotConfig>>("snapshot")?;
         for target in &targets {

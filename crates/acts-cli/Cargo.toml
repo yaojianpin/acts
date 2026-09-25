@@ -30,4 +30,8 @@ tokio = { features = ["rt-multi-thread"], workspace = true }
 # build stays the client's (no store, no packages).
 [dev-dependencies]
 acts = { workspace = true }
+# The user registry lives in its own crate now: a case that logs in (or reads
+# `engine.acl()`'s user registry) installs it on the builder with
+# `with_user_acl()`.
+acts-acl = { workspace = true }
 acts-plugin-grpc = { workspace = true }

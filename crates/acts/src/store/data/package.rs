@@ -29,8 +29,8 @@ pub struct Package {
 }
 
 impl DbCollectionIden for Package {
-    fn iden() -> StoreIden {
-        StoreIden::Packages
+    fn iden() -> String {
+        StoreIden::Packages.as_ref().to_string()
     }
 
     fn indexed_fields() -> &'static [&'static str] {

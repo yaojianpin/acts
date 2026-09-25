@@ -1600,8 +1600,8 @@ mod tests {
     }
 
     impl crate::store::DbCollectionIden for Doc {
-        fn iden() -> crate::store::StoreIden {
-            crate::store::StoreIden::Ops
+        fn iden() -> String {
+            crate::store::StoreIden::Ops.as_ref().to_string()
         }
         fn indexed_fields() -> &'static [&'static str] {
             &["state", "timestamp"]
@@ -1767,8 +1767,8 @@ mod tests {
     }
 
     impl crate::store::DbCollectionIden for SortDoc {
-        fn iden() -> crate::store::StoreIden {
-            crate::store::StoreIden::Ops
+        fn iden() -> String {
+            crate::store::StoreIden::Ops.as_ref().to_string()
         }
         fn indexed_fields() -> &'static [&'static str] {
             &[]
@@ -1807,8 +1807,8 @@ mod tests {
     }
 
     impl crate::store::DbCollectionIden for OrderedDoc {
-        fn iden() -> crate::store::StoreIden {
-            crate::store::StoreIden::Ops
+        fn iden() -> String {
+            crate::store::StoreIden::Ops.as_ref().to_string()
         }
         fn indexed_fields() -> &'static [&'static str] {
             &["state", "ord"]

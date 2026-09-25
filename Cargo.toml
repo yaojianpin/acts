@@ -107,6 +107,7 @@ serial_test = { version = "3", features = ["async"] }
 acts = { path = "./crates/acts", version = "0.25.0" }
 acts-channel = { path = "./crates/acts-channel", version = "0.25.0" }
 acts-proto = { path = "./crates/acts-proto", version = "0.25.0" }
+acts-acl = { path = "./crates/acts-acl", version = "0.25.0" }
 acts-store = { path = "./crates/acts-store", version = "0.25.0" }
 acts-package-http = { path = "./packages/acts-package-http", version = "0.25.0" }
 acts-package-shell = { path = "./packages/acts-package-shell", version = "0.25.0" }

@@ -1,6 +1,7 @@
 use crate::{DEFAULT_HOST, GrpcConfig, GrpcPlugin, GrpcServer};
 use acts::query::Query as StoreQuery;
 use acts::{ChannelOptions, Engine, Vars, Workflow};
+use acts_acl::AclUsers;
 use acts_proto::{
     Message, MessageOptions, acts_service_client::ActsServiceClient,
     acts_service_server::ActsService,
@@ -82,7 +83,7 @@ fn free_port() -> u16 {
 
 /// A transport engine with access control explicitly off: these cases exercise
 /// the gRPC surface, so their caller must be unrestricted. The ACL cases below
-/// build their own policies.
+/// declare their own users.
 async fn engine_with_grpc(port: u16) -> Engine {
     engine_with_grpc_queue(port, None).await
 }
@@ -90,7 +91,7 @@ async fn engine_with_grpc(port: u16) -> Engine {
 /// The same engine with `[grpc].queue_size` pinned — the slow-subscriber case
 /// needs a queue one run can fill.
 async fn engine_with_grpc_queue(port: u16, queue_size: Option<usize>) -> Engine {
-    let mut table = format!("[acl]\nenabled = false\n[grpc]\nport = {port}\n");
+    let mut table = format!("[grpc]\nport = {port}\n");
     if let Some(queue_size) = queue_size {
         table.push_str(&format!("queue_size = {queue_size}\n"));
     }
@@ -101,6 +102,7 @@ async fn engine_with_grpc_queue(port: u16, queue_size: Option<usize>) -> Engine 
     };
     Engine::builder()
         .set_config(&cfg)
+        .disable_acl()
         .add_plugin(&GrpcPlugin::new())
         .start()
         .await
@@ -417,24 +419,35 @@ async fn test_on_message_slow_subscriber_is_disconnected() {
     engine.close().await;
 }
 
-/// An engine whose `[acl]` section is `acl_text`.
-async fn engine_with_acl(acl_text: &str) -> Engine {
-    let config: toml::Table = toml::from_str(acl_text).unwrap();
-    let cfg = acts::Config {
-        data: Default::default(),
-        table: config,
-    };
-    Engine::builder().set_config(&cfg).start().await.unwrap()
+/// An engine with access control on — the default — and one user per
+/// `(name, password, allow)` entry. Credentials live in the store, not in the
+/// config file, so a request carries the session token `login` answers. The
+/// store-backed registry is a separate crate: without it a bare engine refuses
+/// every `acl:*` action, `acl:login` and `set_user` included.
+async fn engine_with_users(users: &[(&str, &str, &[&str])]) -> Engine {
+    let engine = Engine::builder().with_user_acl().start().await.unwrap();
+    for (name, password, allow) in users {
+        engine
+            .acl()
+            .set_user(&acts::UserSpec {
+                name: (*name).to_string(),
+                add_passwords: vec![(*password).to_string()],
+                allow: Some(allow.iter().map(|a| (*a).to_string()).collect()),
+                // every case here deploys or starts a model, so the users own
+                // the `*` resource — the model's own `rn` must still be set
+                patterns: Some(vec!["*".to_string()]),
+                ..Default::default()
+            })
+            .await
+            .unwrap();
+    }
+    engine
 }
 
-const GRPC_ACL: &str = r#"
-[acl]
-
-[[acl.role]]
-name = "operator"
-tokens = ["op-token"]
-allow = ["msg:clear", "msg:sub"]
-"#;
+/// Log `user` in and answer the session token its requests carry.
+async fn login(engine: &Engine, user: &str, password: &str) -> String {
+    engine.acl().login(user, password).await.unwrap().token
+}
 
 fn send_request(name: &str, token: Option<&str>) -> tonic::Request<Message> {
     let mut request = tonic::Request::new(Message {
@@ -471,12 +484,27 @@ fn payload(answer: &Message) -> serde_json::Value {
 }
 
 /// The `authorization: Bearer <token>` metadata is the credential: a request
-/// without one is UNAUTHENTICATED, and a role only gets the actions it was
-/// granted.
+/// without one (or with an unknown one) is UNAUTHENTICATED, and a user only
+/// gets the actions it was granted.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_send_enforces_acl() {
-    let engine = engine_with_acl(GRPC_ACL).await;
+    let engine = engine_with_users(&[("operator", "op-pass", &["msg:clear", "msg:sub"])]).await;
     let server = GrpcServer::new(&engine);
+
+    // `acl:login` needs no grant — the credentials are its payload — and the
+    // token it answers is what every request below presents
+    let answer = server
+        .send(action(
+            "acl:login",
+            json!({"user": "operator", "password": "op-pass"}),
+        ))
+        .await
+        .expect("acl:login must run without a credential")
+        .into_inner();
+    let token = payload(&answer)["token"]
+        .as_str()
+        .expect("acl:login must answer a session token")
+        .to_string();
 
     let status = server
         .send(send_request("msg:clear", None))
@@ -491,13 +519,13 @@ async fn test_send_enforces_acl() {
     assert_eq!(status.code(), tonic::Code::Unauthenticated, "{status}");
 
     let status = server
-        .send(send_request("model:rm", Some("op-token")))
+        .send(send_request("model:rm", Some(&token)))
         .await
-        .expect_err("an action outside the role must be refused");
+        .expect_err("an action outside the user's grants must be refused");
     assert_eq!(status.code(), tonic::Code::PermissionDenied, "{status}");
 
     server
-        .send(send_request("msg:clear", Some("op-token")))
+        .send(send_request("msg:clear", Some(&token)))
         .await
         .expect("an allowed action must run");
 
@@ -512,7 +540,7 @@ async fn test_send_enforces_acl() {
     let mut request = tonic::Request::new(MessageOptions::default());
     request
         .metadata_mut()
-        .insert("authorization", "Bearer op-token".parse().unwrap());
+        .insert("authorization", format!("Bearer {token}").parse().unwrap());
     server
         .on_message(request)
         .await
@@ -520,19 +548,7 @@ async fn test_send_enforces_acl() {
 }
 
 /// Two tenants, both allowed to start runs, subscribe and ack.
-const SUB_ACL: &str = r#"
-[acl]
-
-[[acl.role]]
-name = "u1"
-tokens = ["token-u1"]
-allow = ["model:deploy", "proc:start", "msg:ack", "msg:sub"]
-
-[[acl.role]]
-name = "u2"
-tokens = ["token-u2"]
-allow = ["model:deploy", "proc:start", "msg:ack", "msg:sub"]
-"#;
+const SUB_ALLOW: &[&str] = &["model:deploy", "proc:start", "msg:ack", "msg:sub"];
 
 fn subscribe(client_id: &str, token: &str) -> tonic::Request<MessageOptions> {
     let mut request = tonic::Request::new(MessageOptions {
@@ -585,15 +601,23 @@ where
 /// and the channel filters, not the run's starter.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_subscriptions_are_namespaced_by_subject() {
-    let engine = engine_with_acl(SUB_ACL).await;
+    let engine =
+        engine_with_users(&[("u1", "u1-pass", SUB_ALLOW), ("u2", "u2-pass", SUB_ALLOW)]).await;
     let server = GrpcServer::new(&engine);
-    let u1 = engine.acl().authenticate(Some("token-u1")).unwrap();
-    let u2 = engine.acl().authenticate(Some("token-u2")).unwrap();
+    let u1_token = login(&engine, "u1", "u1-pass").await;
+    let u2_token = login(&engine, "u2", "u2-pass").await;
+    let u1 = engine.acl().authenticate(Some(&u1_token)).unwrap();
+    let u2 = engine.acl().authenticate(Some(&u2_token)).unwrap();
 
-    let model = Workflow::new().with_id("grpc-scope").with_step(|step| {
-        step.with_id("step1")
-            .with_uses("acts.core.irq", Vars::new().with("key", "scope-test"))
-    });
+    // the model names a resource both users own (`patterns = ["*"]`): a model
+    // without an `rn` may only be deployed by an unrestricted user
+    let model = Workflow::new()
+        .with_id("grpc-scope")
+        .with_rn("grpc:scope")
+        .with_step(|step| {
+            step.with_id("step1")
+                .with_uses("acts.core.irq", Vars::new().with("key", "scope-test"))
+        });
     for principal in [&u1, &u2] {
         acts::actions::apply_as(
             &engine,
@@ -605,14 +629,14 @@ async fn test_subscriptions_are_namespaced_by_subject() {
         .unwrap();
     }
 
-    // the same client id on both sides, a different token each
+    // the same client id on both sides, a different session each
     let mut u1_stream = server
-        .on_message(subscribe("shared-client", "token-u1"))
+        .on_message(subscribe("shared-client", &u1_token))
         .await
         .unwrap()
         .into_inner();
     let mut u2_stream = server
-        .on_message(subscribe("shared-client", "token-u2"))
+        .on_message(subscribe("shared-client", &u2_token))
         .await
         .unwrap()
         .into_inner();
@@ -641,35 +665,28 @@ async fn test_subscriptions_are_namespaced_by_subject() {
     engine.close().await;
 }
 
-/// A subscription is an action: a role without `msg:sub` is refused the
+/// A subscription is an action: a user without `msg:sub` is refused the
 /// stream with PERMISSION_DENIED, and one with it is granted a channel.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_subscription_needs_the_grant() {
-    let engine = engine_with_acl(SUB_ACL).await;
+    let engine = engine_with_users(&[("u1", "u1-pass", SUB_ALLOW)]).await;
     let server = GrpcServer::new(&engine);
 
     // `msg:ls` is a read of stored messages; it is not a subscription grant.
-    let engine2 = engine_with_acl(
-        r#"
-        [acl]
-        [[acl.role]]
-        name = "reader"
-        tokens = ["reader-token"]
-        allow = ["msg:ls"]
-        "#,
-    )
-    .await;
+    let engine2 = engine_with_users(&[("reader", "reader-pass", &["msg:ls"])]).await;
     let reader = GrpcServer::new(&engine2);
+    let reader_token = login(&engine2, "reader", "reader-pass").await;
     let status = reader
-        .on_message(subscribe("reader-client", "reader-token"))
+        .on_message(subscribe("reader-client", &reader_token))
         .await
         .err()
-        .expect("a role without msg:sub must not open a stream");
+        .expect("a user without msg:sub must not open a stream");
     assert_eq!(status.code(), tonic::Code::PermissionDenied, "{status}");
     engine2.close().await;
 
+    let u1_token = login(&engine, "u1", "u1-pass").await;
     let stream = server
-        .on_message(subscribe("granted-client", "token-u1"))
+        .on_message(subscribe("granted-client", &u1_token))
         .await
         .expect("msg:sub opens the stream");
     drop(stream);
@@ -684,8 +701,7 @@ async fn bind_conflict_fails_the_engine_start() {
     let blocker = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = blocker.local_addr().unwrap().port();
 
-    let table: toml::Table =
-        toml::from_str(&format!("[acl]\nenabled = false\n[grpc]\nport = {port}\n")).unwrap();
+    let table: toml::Table = toml::from_str(&format!("[grpc]\nport = {port}\n")).unwrap();
     let cfg = acts::Config {
         data: Default::default(),
         table,

@@ -76,6 +76,13 @@ pub struct ConfigData {
     /// flight waits for room instead of being refused. Zero selects the
     /// default.
     pub store_writer_queue_cap: Option<usize>,
+    /// Filesystem root for process directories: a process runs in its own
+    /// `<workdir>/<pid>`, which is what `Process::workdir`/`Context::workdir`
+    /// answer and what `$env.WORK_DIR` names. The directory lives exactly as
+    /// long as the process's durable rows. Omitted means no directory
+    /// control, and a process may touch whatever the server's own account
+    /// can.
+    pub workdir: Option<String>,
     // log config
     pub log: Option<ConfigLog>,
 }
@@ -188,6 +195,17 @@ impl Config {
                      creating tasks forever"
             )));
         }
+        // An empty workdir is an error rather than "no directory control":
+        // the two cannot be told apart in the result, and a typo must not
+        // silently drop the confinement.
+        if let Some(workdir) = self.data.workdir.as_deref()
+            && workdir.trim().is_empty()
+        {
+            return Err(crate::ActError::Config(
+                "workdir cannot be empty; remove the key to run without directory control"
+                    .to_string(),
+            ));
+        }
         Ok(())
     }
 
@@ -246,6 +264,17 @@ impl Config {
             .store_writer_queue_cap
             .unwrap_or(16384)
             .clamp(1, 1_048_576)
+    }
+
+    /// The configured process-directory root, if any (see
+    /// [`ConfigData::workdir`]).
+    pub fn workdir(&self) -> Option<std::path::PathBuf> {
+        self.data
+            .workdir
+            .as_deref()
+            .map(str::trim)
+            .filter(|dir| !dir.is_empty())
+            .map(std::path::PathBuf::from)
     }
 
     pub fn log(&self) -> ConfigLog {

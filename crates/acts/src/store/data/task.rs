@@ -30,8 +30,8 @@ pub struct Task {
 }
 
 impl DbCollectionIden for Task {
-    fn iden() -> StoreIden {
-        StoreIden::Tasks
+    fn iden() -> String {
+        StoreIden::Tasks.as_ref().to_string()
     }
     fn indexed_fields() -> &'static [&'static str] {
         &["pid", "tid", "state", "timestamp", "start_time", "end_time"]
@@ -87,8 +87,8 @@ pub struct TaskVars {
 }
 
 impl DbCollectionIden for TaskVars {
-    fn iden() -> StoreIden {
-        StoreIden::Vars
+    fn iden() -> String {
+        StoreIden::Vars.as_ref().to_string()
     }
     fn indexed_fields() -> &'static [&'static str] {
         &["pid", "tid"]

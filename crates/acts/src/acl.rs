@@ -1,54 +1,46 @@
-//! Access control for engine operations.
+//! Access control: the policy types the engine enforces, and the port its
+//! implementation plugs into.
 //!
 //! Two questions are answered here, and they are deliberately separate:
 //!
-//! - **Who may run an operation** — a request carries a token; the token
-//!   selects a *role*; the role's `allow`/`deny` action patterns decide. A
-//!   `deny` always wins, and when the `[acl]` section exists the default is
-//!   *deny*: a request without a token (or with an unknown one) resolves to
-//!   [`AclConfig::default_role`], or to an empty principal when unset.
-//! - **Whose snapshot data a process may read** — the data plane
-//!   ([`crate::snapshot`]) is addressed by `target` × `scope`. A role may
-//!   declare, per target, which scope patterns it owns; `$subject` is
-//!   substituted with the authenticated subject, so `["$subject"]` means
-//!   "only my own scope". A role with `allow = ["*"]` is unrestricted and
-//!   passes every scope check too.
+//! - **Who may run an operation** — a caller logs in (`acl:login`) with a
+//!   *user* and a *password* and receives a session token; the token selects
+//!   the user; the user's `allow`/`deny` patterns decide. A pattern is either
+//!   a *command* glob (`model:*`, `proc:start`) or a *catalog* reference
+//!   (`@read`, `@write`, `@deploy`, `@execute`, `@all`) naming the group an
+//!   action belongs to — the Redis ACL shape of `+command` and `+@category`.
+//!   A `deny` always wins, and the default is *deny*: a request without a
+//!   token (or with an unknown or expired one) resolves to the read-only
+//!   [`ANONYMOUS_ROLE`] principal.
+//! - **Whose data a process may touch** — a user owns the snapshot scopes it
+//!   may read (per target, `$subject` allowed) and the *resources*
+//!   (`patterns`) it may deploy and run: a workflow declares its resource
+//!   name as `rn` (`orders:eu`), and a user may only deploy and start
+//!   workflows whose `rn` matches one of its patterns — the Redis
+//!   key-pattern shape.
 //!
-//! This module holds *policy only*: transport plugins authenticate a request
-//! into a [`Principal`] and hand it to
-//! [`actions::apply_as`](crate::actions::apply_as), which enforces the
+//! This module holds *policy only*: the users and live sessions — their
+//! storage, passwords, login and expiry — are the [`AccessControl`]
+//! implementation's business, and the shipped one lives in the `acts-acl`
+//! crate (`acts_acl::UserAcl`), which keeps its rows in the engine's store.
+//! An engine without one runs the anonymous policy below.
+//!
+//! Transport plugins authenticate a request into a [`Principal`] and hand it
+//! to [`actions::apply_as`](crate::actions::apply_as), which enforces the
 //! action check. Snapshot scope ownership is enforced at two points: on the
 //! `snap:*` operations themselves (feed/query APIs), and at seal time — the
 //! scheduler re-checks the *process owner* before freezing a snapshot value
 //! into a task, so a workflow cannot reach another subject's data by reading
 //! `secrets.TOKEN` from a process started with someone else's `uid`.
-//!
-//! Tokens are never stored in clear text: config entries are either
-//! `sha256:<64 hex digits>` or a plaintext token, which is hashed at load.
-//!
-//! ```toml
-//! [acl]
-//! enabled = true                     # the section itself already means on
-//!
-//! # shorthand — this single token is unrestricted (admin)
-//! token = "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
-//!
-//! [[acl.role]]
-//! name = "operator"
-//! tokens = ["sha256:2c26b46b68ffc68ff99b453c1d30413413422d706483bfa0f98a5e886266e7ae"]
-//! allow = ["model:ls", "model:get", "proc:*", "snap:get", "snap:ls"]
-//! deny = ["model:rm"]
-//! snapshot = { secrets = ["$subject"], profile = ["$subject/*"] }
-//! ```
 
+use crate::store::Store;
 use crate::{ActError, Result};
 use globset::{Glob, GlobMatcher};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value as JsonValue, json};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 /// Action name that reports the caller's own identity and effective policy.
 /// It is implicitly allowed — but only for an already authenticated caller,
@@ -57,96 +49,50 @@ pub const ACTION_WHOAMI: &str = "acl:whoami";
 
 /// Action name a subscription is checked against. A stream of workflow
 /// messages is a read of the message face, so opening one is an operation like
-/// any other: a role may subscribe only if `msg:sub` is in its `allow` list.
-/// It is a plain pattern (unlike [`ACTION_WHOAMI`], which is implicitly
-/// allowed) — a role that may not read messages must not be able to open a
-/// stream.
+/// any other: a user may subscribe only if `msg:sub` is in its `allow` list.
 pub const ACTION_SUBSCRIBE: &str = "msg:sub";
 
-/// The role an engine without an `[acl]` section runs under, and the subject
-/// its callers are attributed to.
+/// `acl:login` — exchange user + password for a session token pair. Allowed
+/// without a credential: the credentials are the payload.
+pub const ACTION_LOGIN: &str = "acl:login";
+/// `acl:refresh` — exchange a refresh token for a rotated token pair. Allowed
+/// without a credential: the refresh token is the credential.
+pub const ACTION_REFRESH: &str = "acl:refresh";
+/// `acl:logout` — drop the session the request's own token belongs to.
+/// Implicitly allowed for an authenticated caller (it revokes the caller's
+/// own credential, nobody else's).
+pub const ACTION_LOGOUT: &str = "acl:logout";
+/// `acl:setuser` — create or update one user (passwords, command/catalog
+/// patterns, resource patterns, snapshot scopes).
+pub const ACTION_SETUSER: &str = "acl:setuser";
+/// `acl:deluser` — delete one user (never the builtin admin).
+pub const ACTION_DELUSER: &str = "acl:deluser";
+/// `acl:getuser` — read one user's effective policy.
+pub const ACTION_GETUSER: &str = "acl:getuser";
+/// `acl:users` — list user names.
+pub const ACTION_USERS: &str = "acl:users";
+
+/// The role an unauthenticated caller runs under, and the subject it is
+/// attributed to.
 pub const ANONYMOUS_ROLE: &str = "anonymous";
 
 /// What [`ANONYMOUS_ROLE`] may do: the catalogue reads, and nothing else.
 ///
-/// An engine configured without `[acl]` is not locked down but it is not
-/// open either — it answers to anyone, so it must answer to the least anyone
-/// could be trusted with. That least is the *catalogue*: which models are
-/// deployed and which packages exist. Everything else is out:
-///
-/// - every operation over a run (`proc:*`, `task:*`, `act:*`), a message
-///   (`msg:*`) or a trigger (`evt:*`) — reads included: those rows are the
-///   work of a caller the engine cannot name, so it cannot tell that caller
-///   from the next one,
-/// - writes (`model:deploy`, `pack:publish`, `snap:upsert`/`snap:remove`) and
-///   control (`proc:start*`, `act:*`, `evt:start`, `msg:ack`) mutate the
-///   engine,
-/// - admin actions (`*:rm`, `msg:clear`, `msg:redo`, `msg:unsub`) destroy
-///   state,
-/// - `snap:get`/`snap:ls` read scope-owned data, and a scope has an owner
-///   only when a policy names one — without `$subject` there is nobody the
-///   anonymous caller could be,
-/// - `msg:sub` streams live payloads *and* stores a delivery row per message
-///   for a channel it holds, which is a write and a resource, not a read.
-///
-/// Write the smallest `[acl]` section (a `token` shorthand) to get an
-/// administrator, or `enabled = false` to lift the limits on purpose.
-const ANONYMOUS_ALLOW: &[&str] = &["model:ls", "model:get", "pack:get", "pack:ls"];
+/// An engine answers to anyone, so it must answer to the least anyone could
+/// be trusted with. That least is the *catalogue*: which models are deployed
+/// and which packages exist. Everything else is out — writes, control
+/// actions, admin actions, snapshot data, subscriptions. Log in to get more.
+pub const ANONYMOUS_ALLOW: &[&str] = &["model:ls", "model:get", "pack:get", "pack:ls"];
 
-/// The `[acl]` config section. Only read when the section exists — see
-/// [`Acl::from_config`], which turns its presence into "enabled by default".
-#[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
-pub struct AclConfig {
-    /// Explicit override. `None` (the field absent) means enabled, because a
-    /// present `[acl]` section is itself the opt-in.
-    pub enabled: Option<bool>,
-    /// Shorthand single token granting unrestricted access.
-    pub token: Option<String>,
-    /// Role applied to a request whose token is absent or unknown. Must name
-    /// a configured role.
-    pub default_role: Option<String>,
-    /// Filesystem root for the processes this policy starts: each one runs in
-    /// its own directory `<workdir>/<pid>`, which is what
-    /// `Process::workdir`/`Context::workdir` answer and what `$env.WORK_DIR`
-    /// names. The directory lives exactly as long as the process's durable
-    /// rows (the engine removes it once the process finished and its
-    /// deliveries settled; a failed start removes it immediately). Omitted
-    /// means no directory control, and a process may touch whatever the
-    /// server's own account can.
-    pub workdir: Option<String>,
-    /// `[[acl.role]]` entries.
-    pub role: Vec<RoleConfig>,
-}
-
-/// One `[[acl.role]]` entry.
-#[derive(Debug, Clone, Deserialize)]
-pub struct RoleConfig {
-    pub name: String,
-    /// Accepted tokens: `sha256:<hex>` or plaintext (hashed at load).
-    #[serde(default)]
-    pub tokens: Vec<String>,
-    /// Action patterns the role may run (`*` matches everything).
-    #[serde(default)]
-    pub allow: Vec<String>,
-    /// Action patterns the role must never run; wins over `allow`.
-    #[serde(default)]
-    pub deny: Vec<String>,
-    /// Per snapshot target: the scope patterns the role owns. `$subject` is
-    /// replaced by the authenticated subject. A target that is not listed is
-    /// not readable. Only consulted when the role is not unrestricted.
-    #[serde(default)]
-    pub snapshot: HashMap<String, Vec<String>>,
-    /// Filesystem root for this role's processes, overriding the `[acl]`
-    /// `workdir`. See [`AclConfig::workdir`].
-    #[serde(default)]
-    pub workdir: Option<String>,
-}
+/// Every catalog group a user's `allow`/`deny` list may name, plus the
+/// catch-all. A token that matches none of them is a config error rather
+/// than a grant (or a denial) that silently does nothing.
+pub const CATALOG_GROUPS: &[&str] = &["read", "write", "deploy", "execute", "all"];
 
 /// Why an operation was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AclError {
-    /// No token, or a token that matches no role.
+    /// No token, an unknown one, or a bad user/password.
     Unauthenticated(String),
     /// An authenticated caller without the right to run the operation.
     Denied(String),
@@ -156,7 +102,7 @@ impl fmt::Display for AclError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             AclError::Unauthenticated(msg) => write!(f, "unauthenticated: {msg}"),
-            AclError::Denied(msg) => write!(f, "permission denied: {msg}"),
+            AclError::Denied(msg) => write!(f, "denied: {msg}"),
         }
     }
 }
@@ -172,14 +118,90 @@ impl From<AclError> for ActError {
     }
 }
 
+impl From<ActError> for AclError {
+    fn from(err: ActError) -> Self {
+        match err {
+            ActError::Unauthenticated(msg) => AclError::Unauthenticated(msg),
+            ActError::Denied(msg) => AclError::Denied(msg),
+            other => AclError::Denied(other.to_string()),
+        }
+    }
+}
+
+/// One user's grants, as the engine's policy language sees them: the plain
+/// data an [`AccessControl`] implementation stores and hands back, before it
+/// is compiled into a [`Principal`].
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct UserPolicy {
+    /// user name; doubles as the subject a request is attributed to
+    pub name: String,
+    /// a disabled user authenticates nothing, `acl:login` included
+    pub enabled: bool,
+    /// command/catalog patterns the user may run; `*`/`@all` = unrestricted
+    pub allow: Vec<String>,
+    /// command/catalog patterns the user must never run; wins over `allow`
+    pub deny: Vec<String>,
+    /// resource-name (`rn`) patterns the user may deploy and run
+    pub patterns: Vec<String>,
+    /// per snapshot target, the scope patterns the user owns
+    /// (`$subject` is replaced by the user name)
+    pub snapshot: HashMap<String, Vec<String>>,
+}
+
+/// One `acl:setuser` request. `None` fields leave the user's setting
+/// unchanged (or take the default, on create); list fields replace; password
+/// entries are added and removed by value.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct UserSpec {
+    /// User name. Required; it is the subject requests are attributed to and
+    /// it prefixes every subscription key the user opens.
+    pub name: String,
+    /// `Some(false)` disables the user (login refused, sessions dead);
+    /// `None` keeps the current value (new users default to enabled).
+    pub enabled: Option<bool>,
+    /// Passwords to add (plaintext; hashed by the implementation).
+    #[serde(default)]
+    pub add_passwords: Vec<String>,
+    /// Passwords to remove, by their plaintext value.
+    #[serde(default)]
+    pub rm_passwords: Vec<String>,
+    /// Command/catalog patterns the user may run (`model:*`, `@read`,
+    /// `@deploy`, `@execute`); replaces the current list.
+    pub allow: Option<Vec<String>>,
+    /// Command/catalog patterns the user must never run; wins over `allow`.
+    /// Replaces the current list.
+    pub deny: Option<Vec<String>>,
+    /// Resource (`rn`) patterns; replaces the current list.
+    pub patterns: Option<Vec<String>>,
+    /// Per snapshot target, the scope patterns the user owns; replaces the
+    /// current map. `$subject` is allowed.
+    pub snapshot: Option<HashMap<String, Vec<String>>>,
+}
+
+/// What `acl:login` and `acl:refresh` answer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LoginTokens {
+    /// The access token: present it as the `authorization: Bearer …`
+    /// credential on every request.
+    pub token: String,
+    /// The refresh token: present it to `acl:refresh` when the access token
+    /// expired. Every refresh rotates the pair.
+    pub refresh_token: String,
+    /// Access-token lifetime, seconds.
+    pub expires_in: i64,
+    /// Refresh-token lifetime, seconds.
+    pub refresh_expires_in: i64,
+}
+
 /// The authority carried by a process: which snapshot targets the process
-/// *owner* may read and under which scope, plus the directory root its
-/// filesystem access is confined to. It is sealed into the process env at
-/// start (under [`crate::utils::consts::PROC_OWNER`]) and re-checked by the
-/// scheduler at every seal, so a model deployed by anyone cannot widen its
-/// own reading scope — and, because the root travels here rather than as a
-/// start option, a caller cannot place a run outside the directory its policy
-/// names either.
+/// *owner* may read and under which scope, which workflow resources (`rn`)
+/// it may deploy and run, plus the directory root its filesystem access is
+/// confined to. It is sealed into the process env at start (under
+/// [`crate::utils::consts::PROC_OWNER`]) and re-checked by the scheduler at
+/// every seal, so a model deployed by anyone cannot widen its own reading
+/// scope — and, because the root travels here rather than as a start option,
+/// a caller cannot place a run outside the directory its policy names
+/// either.
 ///
 /// A policy comes from one place: the principal that started the run, through
 /// [`Principal::scope_policy`]. Nothing widens a run's reading by omission —
@@ -189,27 +211,41 @@ pub struct ScopePolicy {
     /// Subject the policy belongs to; substituted into `$subject` patterns.
     #[serde(default)]
     pub subject: String,
-    /// Unrestricted: every target and scope passes.
+    /// Unrestricted: every target, scope and resource passes.
     #[serde(default)]
     pub all: bool,
     /// target -> raw scope patterns (`$subject` allowed).
     #[serde(default)]
     pub scopes: HashMap<String, Vec<String>>,
+    /// Raw resource-name (`rn`) patterns. A model's `rn` must match one of
+    /// them — an empty `rn` only passes when `all`.
+    #[serde(default)]
+    pub rn: Vec<String>,
+    /// Whether the `rn` grant above decides anything at all. A policy that
+    /// came from a caller (a [`Principal`]) enforces it; the policy a run
+    /// carries when nobody sealed one — an engine-internal start, a schedule
+    /// trigger, a subflow inheriting a parent that had no caller either —
+    /// does not, because there is no user whose resources it could name. The
+    /// same asymmetry as the snapshot scopes, read the other way: an absent
+    /// *caller* cannot restrict resources without inventing a user, while an
+    /// absent *scope grant* still reads nothing. Absent in older process rows,
+    /// which is why it defaults to false.
+    #[serde(default)]
+    pub enforce_rn: bool,
     /// Filesystem root this process runs under: its own directory is
     /// `<workdir_root>/<pid>`, created at start (that directory — not this
     /// root — is what `Process::workdir` and `Context::workdir` answer, and
-    /// what `$env.WORK_DIR` names). Compiled from the policy that started the
-    /// process (see [`AclConfig::workdir`] and [`RoleConfig::workdir`]);
-    /// `None` means no directory control.
+    /// what `$env.WORK_DIR` names). Compiled from the engine config (see
+    /// [`crate::Config::workdir`]); `None` means no directory control.
     #[serde(default)]
-    pub workdir_root: Option<PathBuf>,
+    pub workdir_root: Option<std::path::PathBuf>,
 }
 
 impl Default for ScopePolicy {
-    /// Nothing readable, no workdir — what a run carries when no caller
-    /// authority was sealed into it: an engine-internal start (a schedule
-    /// trigger, or an in-process embedder calling `Runtime::start`), and
-    /// process rows written before this field existed.
+    /// Nothing readable — what a policy with no grants is. A run carries this
+    /// when no caller authority was sealed into it: an engine-internal start
+    /// (a schedule trigger, or an in-process embedder calling
+    /// `Runtime::start`), and process rows written before this field existed.
     ///
     /// An absent authority is not an unlimited one. The three alternative
     /// readings are all wrong: *unrestricted* hands every run the whole data
@@ -219,7 +255,7 @@ impl Default for ScopePolicy {
     /// task that needs no owned data, and a task that does need it fails at
     /// its seal with the subject it lacks, which is a readable error rather
     /// than a silent grant. Only a policy that came from a caller is ever
-    /// unrestricted: `[acl] enabled = false` resolves every caller to
+    /// unrestricted: a disabled ACL resolves every caller to
     /// [`Principal::unrestricted`], and that principal's
     /// [`Principal::scope_policy`] is where one comes from.
     fn default() -> Self {
@@ -228,14 +264,16 @@ impl Default for ScopePolicy {
 }
 
 impl ScopePolicy {
-    /// Every target and scope passes. Only a policy compiled from a principal
-    /// is ever this — the anonymous role is not, and neither is
+    /// Every target, scope and resource passes. Only a policy compiled from a
+    /// principal is ever this — the anonymous role is not, and neither is
     /// [`ScopePolicy::default`].
     pub fn unrestricted() -> Self {
         Self {
             subject: String::new(),
             all: true,
             scopes: HashMap::new(),
+            rn: Vec::new(),
+            enforce_rn: true,
             workdir_root: None,
         }
     }
@@ -247,6 +285,8 @@ impl ScopePolicy {
             subject: String::new(),
             all: false,
             scopes: HashMap::new(),
+            rn: Vec::new(),
+            enforce_rn: false,
             workdir_root: None,
         }
     }
@@ -263,13 +303,115 @@ impl ScopePolicy {
             None => false,
         }
     }
+
+    /// Whether the resource name `rn` a workflow declares is within this
+    /// policy. A workflow without an `rn` claims no resource, so only an
+    /// unrestricted policy may deploy or start it. A policy nobody compiled
+    /// from a caller does not decide this at all — see `enforce_rn`.
+    pub fn allows_rn(&self, rn: &str) -> bool {
+        if !self.enforce_rn || self.all {
+            return true;
+        }
+        if rn.is_empty() {
+            return false;
+        }
+        self.rn
+            .iter()
+            .any(|pattern| scope_matches(&substitute(pattern, &self.subject), rn))
+    }
 }
 
-/// An authenticated caller: identity plus the policy compiled from its role.
+/// The catalog (command group) an action belongs to — the `@category` of a
+/// user's `allow`/`deny` list. Four groups cover the action set, plus `all`:
+///
+/// - `read` — the catalogue and row reads, `acl:whoami`/`acl:getuser`/
+///   `acl:users`, and `msg:sub` (a subscription is a read of the stream)
+/// - `deploy` — putting work into the catalogues: `model:deploy`,
+///   `pack:publish`
+/// - `execute` — running and driving that work: `proc:start`,
+///   `proc:start_from_model`, `evt:start`, every `act:*`, and `msg:ack`
+/// - `write` — changing or destroying stored state: every `*:rm`,
+///   `msg:redo`/`msg:clear`, the snapshot feeds, and the user management
+/// - `all` — every action (`@all` in a list is the unrestricted grant, like
+///   `*`)
+///
+/// An action not named here is `write`: an unknown operation is never a read.
+pub fn action_catalog(action: &str) -> &'static str {
+    match action {
+        "model:ls" | "model:get" | "pack:ls" | "pack:get" | "proc:ls" | "proc:get" | "task:ls"
+        | "task:get" | "msg:ls" | "msg:get" | "evt:ls" | "evt:get" | "snap:get" | "snap:ls"
+        | ACTION_WHOAMI | ACTION_GETUSER | ACTION_USERS | ACTION_SUBSCRIBE => "read",
+        "model:deploy" | "pack:publish" => "deploy",
+        "proc:start"
+        | "proc:start_from_model"
+        | "evt:start"
+        | "act:push"
+        | "act:remove"
+        | "act:submit"
+        | "act:complete"
+        | "act:abort"
+        | "act:cancel"
+        | "act:back"
+        | "act:skip"
+        | "act:error"
+        | "msg:ack" => "execute",
+        _ => "write",
+    }
+}
+
+/// A token that grants (or denies) everything: `@all`, `@*` or `*`.
+fn is_all_token(token: &str) -> bool {
+    matches!(token.trim(), "*" | "@*" | "@all")
+}
+
+/// Split one `allow`/`deny` list into its two forms: compiled command globs,
+/// and catalog tokens (`@read`, `@deploy`, `@all`) kept as patterns over the
+/// group name.
+fn split_tokens(
+    tokens: &[String],
+    user: &str,
+    field: &str,
+) -> Result<(Vec<GlobMatcher>, Vec<String>)> {
+    let mut commands = Vec::new();
+    let mut catalogs = Vec::new();
+    for token in tokens {
+        let token = token.trim();
+        if let Some(pattern) = token.strip_prefix('@') {
+            if pattern.is_empty() {
+                return Err(ActError::Config(format!(
+                    "acl user '{user}' has an empty {field} catalog token"
+                )));
+            }
+            // a token that names no group would grant (or deny) nothing at
+            // all — the one failure mode a typo must not have
+            if !CATALOG_GROUPS
+                .iter()
+                .any(|group| scope_matches(pattern, group))
+            {
+                return Err(ActError::Config(format!(
+                    "acl user '{user}' has a {field} catalog token '@{pattern}' that names no \
+                     catalog group (read, write, deploy, execute, all)"
+                )));
+            }
+            catalogs.push(pattern.to_string());
+        } else {
+            let glob = Glob::new(token)
+                .map(|glob| glob.compile_matcher())
+                .map_err(|err| {
+                    ActError::Config(format!(
+                        "acl user '{user}' has an invalid {field} pattern '{token}': {err}"
+                    ))
+                })?;
+            commands.push(glob);
+        }
+    }
+    Ok((commands, catalogs))
+}
+
+/// An authenticated caller: identity plus the policy compiled from its user.
 #[derive(Debug, Clone)]
 pub struct Principal {
     subject: String,
-    roles: Vec<String>,
     /// Whether a token resolved to this principal. An unauthenticated
     /// principal is refused as such, not as an authorization failure, so a
     /// transport can answer "no credential" distinctly from "not allowed".
@@ -277,64 +419,136 @@ pub struct Principal {
     all: bool,
     allow: Vec<GlobMatcher>,
     deny: Vec<GlobMatcher>,
+    /// catalog tokens from the `allow`/`deny` lists, `@` stripped
+    allow_cats: Vec<String>,
+    deny_cats: Vec<String>,
     allow_pat: Vec<String>,
     deny_pat: Vec<String>,
     scopes: HashMap<String, Vec<String>>,
+    rn: Vec<String>,
     /// Filesystem root this principal's processes run under; `None` when the
     /// policy declares none (no directory control). A process's own directory
     /// is `<workdir_root>/<pid>`.
-    workdir_root: Option<PathBuf>,
+    workdir_root: Option<std::path::PathBuf>,
 }
 
 impl Principal {
     /// A principal that passes every check, under the `system` subject.
     ///
-    /// Three things reach it, and all of them say so out loud: an
-    /// `enabled = false` `[acl]` section (the explicit opt-out, and the policy
-    /// a test or a demo runs under), an `allow = ["*"]` role or the `token`
-    /// shorthand (an administrator), and the engine's own operations — the
-    /// package registrations `Engine` performs while starting up, which are
-    /// not requests from anyone.
+    /// Three things reach it, and all of them say so out loud: a disabled ACL
+    /// (the explicit opt-out, and the policy a test or a demo runs under), an
+    /// `allow = ["*"]` user (an administrator), and the engine's own
+    /// operations — the package registrations `Engine` performs while
+    /// starting up, which are not requests from anyone.
     pub fn unrestricted() -> Self {
         Self {
             subject: "system".to_string(),
-            roles: Vec::new(),
             authenticated: true,
             all: true,
             allow: Vec::new(),
             deny: Vec::new(),
+            allow_cats: Vec::new(),
+            deny_cats: Vec::new(),
             allow_pat: vec!["*".to_string()],
             deny_pat: Vec::new(),
             scopes: HashMap::new(),
+            rn: Vec::new(),
             workdir_root: None,
         }
     }
-    /// The anonymous caller under an enabled ACL: no token matched, and no
-    /// `default_role` was configured — every operation is refused.
+
+    /// The anonymous caller under an enabled ACL: no token matched — the
+    /// catalogue reads, and nothing else.
     pub fn anonymous() -> Self {
+        let allow = compile_patterns(
+            &ANONYMOUS_ALLOW
+                .iter()
+                .map(|a| a.to_string())
+                .collect::<Vec<_>>(),
+            ANONYMOUS_ROLE,
+            "allow",
+        )
+        .expect("the built-in anonymous allow list is valid");
         Self {
-            subject: "anonymous".to_string(),
-            roles: Vec::new(),
+            subject: ANONYMOUS_ROLE.to_string(),
             authenticated: false,
             all: false,
-            allow: Vec::new(),
+            allow,
             deny: Vec::new(),
-            allow_pat: Vec::new(),
+            allow_cats: Vec::new(),
+            deny_cats: Vec::new(),
+            allow_pat: ANONYMOUS_ALLOW.iter().map(|a| a.to_string()).collect(),
             deny_pat: Vec::new(),
             scopes: HashMap::new(),
+            rn: Vec::new(),
             workdir_root: None,
         }
     }
+
+    /// Compile one user's grants into a principal. Every malformed entry is an
+    /// error: a policy that cannot be enforced must be refused when the user
+    /// is written, not silently ignored on the way in.
+    pub fn from_policy(policy: &UserPolicy) -> Result<Self> {
+        let name = policy.name.trim();
+        if name.is_empty() {
+            return Err(ActError::Config(
+                "acl user name cannot be empty".to_string(),
+            ));
+        }
+        // The user name is the subject, and it prefixes the channel key of
+        // every subscription the user opens (`{subject}/{client_id}`), so a
+        // name carrying the separator could spell another subject's prefix.
+        if name.contains('/') {
+            return Err(ActError::Config(format!(
+                "acl user name '{name}' cannot contain '/'"
+            )));
+        }
+        let all = policy.allow.iter().any(|p| is_all_token(p));
+        let (allow, allow_cats) = split_tokens(&policy.allow, name, "allow")?;
+        let (deny, deny_cats) = split_tokens(&policy.deny, name, "deny")?;
+        for pattern in &policy.patterns {
+            Glob::new(pattern.trim())
+                .map(|glob| glob.compile_matcher())
+                .map_err(|err| {
+                    ActError::Config(format!(
+                        "acl user '{name}' has an invalid patterns pattern '{pattern}': {err}"
+                    ))
+                })?;
+        }
+        for (target, patterns) in &policy.snapshot {
+            if target.trim().is_empty() {
+                return Err(ActError::Config(format!(
+                    "acl user '{name}' has a snapshot rule without a target name"
+                )));
+            }
+            // Validate the patterns now; a bad one must not degrade into
+            // "matches nothing" at seal time.
+            compile_patterns(patterns, name, "snapshot")?;
+        }
+
+        Ok(Self {
+            subject: name.to_string(),
+            authenticated: true,
+            all,
+            allow,
+            deny,
+            allow_cats,
+            deny_cats,
+            allow_pat: policy.allow.clone(),
+            deny_pat: policy.deny.clone(),
+            scopes: policy.snapshot.clone(),
+            rn: policy.patterns.clone(),
+            workdir_root: None,
+        })
+    }
+
+    /// The principal's user name (its subject).
     pub fn subject(&self) -> &str {
         &self.subject
     }
 
-    pub fn roles(&self) -> &[String] {
-        &self.roles
-    }
-
-    /// Whether this principal is unrestricted (admin role, shorthand token,
-    /// or a disabled ACL).
+    /// Whether this principal is unrestricted (an `allow = ["*"]` user, or a
+    /// disabled ACL).
     pub fn is_unrestricted(&self) -> bool {
         self.all
     }
@@ -345,30 +559,47 @@ impl Principal {
     }
 
     pub fn check(&self, action: &str) -> std::result::Result<(), AclError> {
-        if !self.authenticated {
-            return Err(AclError::Unauthenticated(
-                "a valid acl token is required; see [acl] in the config".to_string(),
-            ));
-        }
-        if self.deny.iter().any(|glob| glob.is_match(action)) {
+        // a deny wins — by command pattern or by the action's catalog group
+        let catalog = action_catalog(action);
+        if self.authenticated
+            && (self.deny.iter().any(|glob| glob.is_match(action))
+                || self
+                    .deny_cats
+                    .iter()
+                    .any(|cat| cat == "all" || scope_matches(cat, catalog)))
+        {
             return Err(AclError::Denied(format!(
-                "{} denies action '{action}'",
-                self.describe()
+                "user '{}' denies action '{action}'",
+                self.subject
             )));
         }
-        if self.all || self.allow.iter().any(|glob| glob.is_match(action)) {
+        if self.all
+            || self.allow.iter().any(|glob| glob.is_match(action))
+            || self
+                .allow_cats
+                .iter()
+                .any(|cat| cat == "all" || scope_matches(cat, catalog))
+        {
             return Ok(());
         }
+        if !self.authenticated {
+            // the anonymous caller is held to its catalogue read list above;
+            // anything else needs a login, and the transport should say so
+            // with "no credential" rather than "not allowed"
+            return Err(AclError::Unauthenticated(
+                "a session token is required; login first (acl:login)".to_string(),
+            ));
+        }
         Err(AclError::Denied(format!(
-            "action '{action}' is not allowed for {}",
-            self.describe()
+            "action '{action}' is not allowed for user '{}'",
+            self.subject
         )))
     }
 
     pub fn check_scope(&self, target: &str, scope: &str) -> std::result::Result<(), AclError> {
         if !self.authenticated {
             return Err(AclError::Unauthenticated(
-                "a valid acl token is required; see [acl] in the config".to_string(),
+                "a session token is required; login first (acl:login)".to_string(),
             ));
         }
         if self.scope_policy().allows(target, scope) {
@@ -380,11 +611,21 @@ impl Principal {
         )))
     }
 
-    /// The filesystem root this principal's processes run under, or `None`
-    /// when the policy declares none. A process's own directory is
-    /// `<root>/<pid>` (see `Process::workdir`).
-    pub fn workdir_root(&self) -> Option<&Path> {
-        self.workdir_root.as_deref()
+    /// Whether the workflow resource name `rn` is within this principal's
+    /// grants (see [`ScopePolicy::allows_rn`]).
+    pub fn check_rn(&self, rn: &str) -> std::result::Result<(), AclError> {
+        if !self.authenticated {
+            return Err(AclError::Unauthenticated(
+                "a session token is required; login first (acl:login)".to_string(),
+            ));
+        }
+        if self.scope_policy().allows_rn(rn) {
+            return Ok(());
+        }
+        Err(AclError::Denied(format!(
+            "resource '{rn}' is not allowed for user '{}'",
+            self.subject
+        )))
     }
 
     /// The scope authority to seal into a process started by this principal.
@@ -393,6 +634,9 @@ impl Principal {
             subject: self.subject.clone(),
             all: self.all,
             scopes: self.scopes.clone(),
+            rn: self.rn.clone(),
+            // compiled from a caller: its resource patterns decide
+            enforce_rn: true,
             workdir_root: self.workdir_root.clone(),
         }
     }
@@ -400,317 +644,194 @@ impl Principal {
     /// What `acl:whoami` answers: the identity and the patterns in force.
     pub fn to_value(&self) -> JsonValue {
         json!({
+            "user": self.subject,
             "subject": self.subject,
-            "roles": self.roles,
+            "authenticated": self.authenticated,
             "unrestricted": self.all,
             "allow": self.allow_pat,
             "deny": self.deny_pat,
+            "patterns": self.rn,
             "scopes": self.scopes,
             "workdir_root": self.workdir_root.as_ref().map(|dir| dir.display().to_string()),
         })
     }
+}
 
-    fn describe(&self) -> String {
-        if self.roles.is_empty() {
-            format!("subject '{}'", self.subject)
-        } else {
-            format!("role(s) {}", self.roles.join(", "))
-        }
+/// The engine's access control, as the engine uses it: authenticate a request,
+/// log in and out, and manage the users behind it.
+///
+/// The implementation owns the users and the live sessions — their storage,
+/// their passwords and their expiry. `acts-acl`'s `UserAcl` is the shipped
+/// one, keeping its rows in the engine's store; [`AnonymousAcl`] is what an
+/// engine without one runs, and [`DisabledAcl`] is the opt-out.
+#[async_trait::async_trait]
+pub trait AccessControl: Send + Sync + fmt::Debug {
+    /// Bind to the engine's store and load the users and live sessions, and
+    /// bootstrap whatever an empty registry needs. Runs once at engine start,
+    /// before any transport serves.
+    async fn load(&self, store: Arc<Store>) -> Result<()>;
+
+    /// Whether enforcement is on at all. A disabled ACL passes every caller
+    /// through as [`Principal::unrestricted`].
+    fn enabled(&self) -> bool;
+
+    /// Resolve a request's token into a principal. An absent, unknown or
+    /// expired token resolves to the anonymous catalogue-only principal.
+    fn authenticate(&self, token: Option<&str>) -> std::result::Result<Principal, AclError>;
+
+    /// The principal a request without a valid token resolves to.
+    fn anonymous(&self) -> Principal {
+        self.authenticate(None)
+            .unwrap_or_else(|_| Principal::anonymous())
+    }
+
+    /// `acl:login`: verify `user`/`password` and mint a token pair.
+    async fn login(&self, user: &str, password: &str)
+    -> std::result::Result<LoginTokens, AclError>;
+
+    /// `acl:refresh`: rotate the session a refresh token belongs to.
+    async fn refresh(&self, refresh_token: &str) -> std::result::Result<LoginTokens, AclError>;
+
+    /// `acl:logout`: drop the session `token` belongs to.
+    async fn logout(&self, token: &str) -> Result<bool>;
+
+    /// `acl:setuser`: create or update one user.
+    async fn set_user(&self, spec: &UserSpec) -> Result<()>;
+
+    /// `acl:deluser`: delete one user.
+    async fn del_user(&self, name: &str) -> Result<()>;
+
+    /// `acl:users`: the user names, sorted.
+    async fn user_names(&self) -> Vec<String>;
+
+    /// `acl:getuser`: one user's policy, without the password hashes.
+    async fn get_user(&self, name: &str) -> Option<JsonValue>;
+}
+
+/// The access control of an engine without an implementation installed: no
+/// users, no sessions, no login — every caller is the anonymous
+/// catalogue-only principal. It is what a bare `Engine::builder().start()`
+/// runs, so an embedder that never configures users cannot be reached.
+#[derive(Debug, Default)]
+pub struct AnonymousAcl;
+
+#[async_trait::async_trait]
+impl AccessControl for AnonymousAcl {
+    async fn load(&self, _store: Arc<Store>) -> Result<()> {
+        Ok(())
+    }
+
+    fn enabled(&self) -> bool {
+        true
+    }
+
+    fn authenticate(&self, _token: Option<&str>) -> std::result::Result<Principal, AclError> {
+        Ok(Principal::anonymous())
+    }
+
+    async fn login(
+        &self,
+        _user: &str,
+        _password: &str,
+    ) -> std::result::Result<LoginTokens, AclError> {
+        Err(AclError::Denied(
+            "no user registry is installed in this engine".to_string(),
+        ))
+    }
+
+    async fn refresh(&self, _refresh_token: &str) -> std::result::Result<LoginTokens, AclError> {
+        Err(AclError::Denied(
+            "no user registry is installed in this engine".to_string(),
+        ))
+    }
+
+    async fn logout(&self, _token: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    async fn set_user(&self, _spec: &UserSpec) -> Result<()> {
+        Err(ActError::Config(
+            "no user registry is installed in this engine".to_string(),
+        ))
+    }
+
+    async fn del_user(&self, _name: &str) -> Result<()> {
+        Err(ActError::Config(
+            "no user registry is installed in this engine".to_string(),
+        ))
+    }
+
+    async fn user_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    async fn get_user(&self, _name: &str) -> Option<JsonValue> {
+        None
     }
 }
 
-/// One role, with its patterns compiled.
-#[derive(Debug, Clone)]
-struct CompiledRole {
-    name: String,
-    all: bool,
-    allow: Vec<GlobMatcher>,
-    deny: Vec<GlobMatcher>,
-    allow_pat: Vec<String>,
-    deny_pat: Vec<String>,
-    scopes: HashMap<String, Vec<String>>,
-    workdir_root: Option<PathBuf>,
-}
+/// An explicitly disabled ACL — no enforcement, every operation passes with
+/// [`Principal::unrestricted`]. Only reachable through
+/// [`crate::EngineBuilder::disable_acl`], spelled out at the call site.
+#[derive(Debug, Default)]
+pub struct DisabledAcl;
 
-/// The compiled ACL: a token index plus the roles it resolves to.
-#[derive(Debug, Clone)]
-pub struct Acl {
-    enabled: bool,
-    roles: Vec<CompiledRole>,
-    /// sha256 hex of an accepted token -> role index.
-    index: HashMap<String, usize>,
-    /// Role applied to an absent/unknown token (`default_role`).
-    default_role: Option<usize>,
-    /// `[acl] workdir` — the root every role without its own runs under. A
-    /// process's own directory is `<root>/<pid>`.
-    workdir_root: Option<PathBuf>,
-}
+#[async_trait::async_trait]
+impl AccessControl for DisabledAcl {
+    async fn load(&self, _store: Arc<Store>) -> Result<()> {
+        Ok(())
+    }
 
-impl Default for Acl {
-    /// The policy of an engine without an `[acl]` section: anonymous,
-    /// read-only — see [`Acl::anonymous_access`].
-    fn default() -> Self {
-        Self::anonymous_access()
+    fn enabled(&self) -> bool {
+        false
+    }
+
+    fn authenticate(&self, _token: Option<&str>) -> std::result::Result<Principal, AclError> {
+        Ok(Principal::unrestricted())
+    }
+
+    async fn login(
+        &self,
+        _user: &str,
+        _password: &str,
+    ) -> std::result::Result<LoginTokens, AclError> {
+        Err(AclError::Denied(
+            "the acl is disabled: requests need no login".to_string(),
+        ))
+    }
+
+    async fn refresh(&self, _refresh_token: &str) -> std::result::Result<LoginTokens, AclError> {
+        Err(AclError::Denied(
+            "the acl is disabled: requests need no login".to_string(),
+        ))
+    }
+
+    async fn logout(&self, _token: &str) -> Result<bool> {
+        Ok(false)
+    }
+
+    async fn set_user(&self, _spec: &UserSpec) -> Result<()> {
+        Err(ActError::Config(
+            "the acl is disabled: there is no user registry".to_string(),
+        ))
+    }
+
+    async fn del_user(&self, _name: &str) -> Result<()> {
+        Err(ActError::Config(
+            "the acl is disabled: there is no user registry".to_string(),
+        ))
+    }
+
+    async fn user_names(&self) -> Vec<String> {
+        Vec::new()
+    }
+
+    async fn get_user(&self, _name: &str) -> Option<JsonValue> {
+        None
     }
 }
 
-impl Acl {
-    /// The policy of an engine whose config carries **no `[acl]` section**:
-    /// every caller is the [`ANONYMOUS_ROLE`] subject and gets exactly
-    /// [`ANONYMOUS_ALLOW`] — reads, nothing that changes or owns state.
-    ///
-    /// A missing section is neither "no enforcement" (which would hand an
-    /// unauthenticated caller every action) nor "no access" (which would lock
-    /// an operator out of the engine they just started): it is a deployment
-    /// that has not said who may do what, so it answers to anyone with the
-    /// minimum that can be trusted to anyone. The `[acl]` section is how a
-    /// deployment raises that: a `token` shorthand is the smallest one, and
-    /// `enabled = false` (see [`Acl::disabled`]) is the explicit opt-out.
-    pub fn anonymous_access() -> Self {
-        let role = CompiledRole {
-            name: ANONYMOUS_ROLE.to_string(),
-            all: false,
-            allow: compile_patterns(
-                &ANONYMOUS_ALLOW
-                    .iter()
-                    .map(|a| a.to_string())
-                    .collect::<Vec<_>>(),
-                ANONYMOUS_ROLE,
-                "allow",
-            )
-            .expect("the built-in anonymous allow list is valid"),
-            deny: Vec::new(),
-            allow_pat: ANONYMOUS_ALLOW.iter().map(|a| a.to_string()).collect(),
-            deny_pat: Vec::new(),
-            scopes: HashMap::new(),
-            workdir_root: None,
-        };
-        Self {
-            enabled: true,
-            roles: vec![role],
-            // No token is configured, so every token — including none — is an
-            // unknown one, and all of them resolve to the anonymous subject.
-            index: HashMap::new(),
-            default_role: Some(0),
-            workdir_root: None,
-        }
-    }
-
-    /// An explicitly disabled ACL — no enforcement, every operation passes
-    /// with [`Principal::unrestricted`]. Only reachable through an `enabled =
-    /// false` in an `[acl]` section: the absence of the section is
-    /// [`Acl::anonymous_access`], never this.
-    pub fn disabled() -> Self {
-        Self {
-            enabled: false,
-            roles: Vec::new(),
-            index: HashMap::new(),
-            default_role: None,
-            workdir_root: None,
-        }
-    }
-
-    pub fn enabled(&self) -> bool {
-        self.enabled
-    }
-
-    /// Compile `[acl]`. Every malformed entry is an error: a policy that
-    /// cannot be enforced must fail startup instead of silently allowing
-    /// (or silently refusing) traffic.
-    pub fn from_config(config: &AclConfig) -> Result<Self> {
-        let enabled = config.enabled.unwrap_or(true);
-        if !enabled {
-            return Ok(Self::disabled());
-        }
-
-        let mut roles: Vec<CompiledRole> = Vec::new();
-        let mut index: HashMap<String, usize> = HashMap::new();
-        let mut seen: HashMap<String, String> = HashMap::new();
-
-        // The shorthand token is an extra, unrestricted role.
-        if let Some(token) = config.token.as_deref().filter(|t| !t.trim().is_empty()) {
-            roles.push(CompiledRole {
-                name: "admin".to_string(),
-                all: true,
-                allow: Vec::new(),
-                deny: Vec::new(),
-                allow_pat: vec!["*".to_string()],
-                deny_pat: Vec::new(),
-                scopes: HashMap::new(),
-                workdir_root: None,
-            });
-            let hash = hash_token(token)?;
-            index.insert(hash, 0);
-        }
-
-        for role in &config.role {
-            let idx = roles.len();
-            roles.push(compile_role(role)?);
-            for token in &role.tokens {
-                if token.trim().is_empty() {
-                    continue;
-                }
-                let hash = hash_token(token)?;
-                // A token that selects one of two roles would silently pick
-                // one of them; make the ambiguity a config error.
-                if let Some(previous) = seen.insert(hash.clone(), role.name.clone()) {
-                    return Err(ActError::Config(format!(
-                        "acl token is assigned to both role '{previous}' and role '{}'",
-                        role.name
-                    )));
-                }
-                index.insert(hash, idx);
-            }
-        }
-
-        if roles.is_empty() {
-            return Err(ActError::Config(
-                "acl is enabled but neither a token nor a role is configured".to_string(),
-            ));
-        }
-        if index.is_empty() {
-            return Err(ActError::Config(
-                "acl is enabled but no role declares any token".to_string(),
-            ));
-        }
-
-        let default_role = match config.default_role.as_deref() {
-            // `deny` spelled out is the same as omitting it.
-            None | Some("") | Some("deny") => None,
-            Some(name) => Some(roles.iter().position(|role| role.name == name).ok_or_else(
-                || {
-                    ActError::Config(format!(
-                        "acl default_role '{name}' is not a configured role"
-                    ))
-                },
-            )?),
-        };
-
-        Ok(Self {
-            enabled: true,
-            roles,
-            index,
-            default_role,
-            workdir_root: compile_workdir(config.workdir.as_deref(), "acl")?,
-        })
-    }
-
-    /// Resolve a request's token into a principal. An unknown or missing
-    /// token falls back to `default_role` when one is configured, and is
-    /// otherwise refused.
-    pub fn authenticate(&self, token: Option<&str>) -> std::result::Result<Principal, AclError> {
-        if !self.enabled {
-            return Ok(Principal::unrestricted());
-        }
-
-        if let Some(token) = token.map(str::trim).filter(|t| !t.is_empty()) {
-            // A malformed-but-present token is never an error here: it simply
-            // matches no role, exactly like a wrong one.
-            if let Ok(hash) = hash_token(token)
-                && let Some(&idx) = self.index.get(&hash)
-            {
-                return Ok(self.principal(idx));
-            }
-        }
-
-        match self.default_role {
-            Some(idx) => Ok(self.principal(idx)),
-            None => Err(AclError::Unauthenticated(
-                "a valid acl token is required; see [acl] in the config".to_string(),
-            )),
-        }
-    }
-
-    /// The principal a request without a valid token resolves to (used by
-    /// in-process callers that do not authenticate).
-    pub fn anonymous(&self) -> Principal {
-        if !self.enabled {
-            return Principal::unrestricted();
-        }
-        match self.default_role {
-            Some(idx) => self.principal(idx),
-            None => Principal::anonymous(),
-        }
-    }
-
-    fn principal(&self, idx: usize) -> Principal {
-        let role = &self.roles[idx];
-        Principal {
-            // The role name doubles as the subject: tokens are opaque, so
-            // there is no better name to attribute a request to.
-            subject: role.name.clone(),
-            roles: vec![role.name.clone()],
-            authenticated: true,
-            all: role.all,
-            allow: role.allow.clone(),
-            deny: role.deny.clone(),
-            allow_pat: role.allow_pat.clone(),
-            deny_pat: role.deny_pat.clone(),
-            scopes: role.scopes.clone(),
-            workdir_root: role
-                .workdir_root
-                .clone()
-                .or_else(|| self.workdir_root.clone()),
-        }
-    }
-}
-
-fn compile_role(role: &RoleConfig) -> Result<CompiledRole> {
-    if role.name.trim().is_empty() {
-        return Err(ActError::Config(
-            "acl role name cannot be empty".to_string(),
-        ));
-    }
-    // The role name is the subject, and it prefixes the channel key of every
-    // subscription the role opens (`{subject}/{client_id}`), so a name
-    // carrying the separator could spell another subject's prefix.
-    if role.name.contains('/') {
-        return Err(ActError::Config(format!(
-            "acl role name '{}' cannot contain '/'",
-            role.name
-        )));
-    }
-    let all = role.allow.iter().any(|p| p == "*");
-    let allow = compile_patterns(&role.allow, &role.name, "allow")?;
-    let deny = compile_patterns(&role.deny, &role.name, "deny")?;
-    for (target, patterns) in &role.snapshot {
-        if target.trim().is_empty() {
-            return Err(ActError::Config(format!(
-                "acl role '{}' has a snapshot rule without a target name",
-                role.name
-            )));
-        }
-        // Validate the patterns now; a bad one must not degrade into
-        // "matches nothing" at seal time.
-        compile_patterns(patterns, &role.name, "snapshot")?;
-    }
-
-    Ok(CompiledRole {
-        name: role.name.clone(),
-        all,
-        allow,
-        deny,
-        allow_pat: role.allow.clone(),
-        deny_pat: role.deny.clone(),
-        scopes: role.snapshot.clone(),
-        workdir_root: compile_workdir(role.workdir.as_deref(), &role.name)?,
-    })
-}
-
-/// Normalize a configured workdir root. An empty value is a config error
-/// rather than "no directory control": the two cannot be told apart in the
-/// result, and a typo must not silently drop the confinement.
-fn compile_workdir(workdir: Option<&str>, owner: &str) -> Result<Option<PathBuf>> {
-    match workdir {
-        None => Ok(None),
-        Some(value) if value.trim().is_empty() => Err(ActError::Config(format!(
-            "acl {owner} workdir cannot be empty; remove the key to run without directory control"
-        ))),
-        Some(value) => Ok(Some(PathBuf::from(value.trim()))),
-    }
-}
-
-fn compile_patterns(patterns: &[String], role: &str, field: &str) -> Result<Vec<GlobMatcher>> {
+fn compile_patterns(patterns: &[String], user: &str, field: &str) -> Result<Vec<GlobMatcher>> {
     patterns
         .iter()
         .map(|pattern| {
@@ -718,37 +839,11 @@ fn compile_patterns(patterns: &[String], role: &str, field: &str) -> Result<Vec<
                 .map(|glob| glob.compile_matcher())
                 .map_err(|err| {
                     ActError::Config(format!(
-                        "acl role '{role}' has an invalid {field} pattern '{pattern}': {err}"
+                        "acl user '{user}' has an invalid {field} pattern '{pattern}': {err}"
                     ))
                 })
         })
         .collect()
-}
-
-/// Normalize a configured token into its lowercase sha256 hex digest. A
-/// `sha256:` prefix means the value is already a digest; anything else is
-/// treated as plaintext (the `requirepass`-style form) and hashed.
-fn hash_token(token: &str) -> Result<String> {
-    let token = token.trim();
-    if let Some(hex) = token.strip_prefix("sha256:") {
-        let hex = hex.trim().to_ascii_lowercase();
-        if hex.len() == 64 && hex.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Ok(hex);
-        }
-        return Err(ActError::Config(
-            "acl token 'sha256:…' must carry exactly 64 hex digits".to_string(),
-        ));
-    }
-    Ok(sha256_hex(token))
-}
-
-fn sha256_hex(text: &str) -> String {
-    let digest = Sha256::digest(text.as_bytes());
-    let mut out = String::with_capacity(64);
-    for byte in digest {
-        out.push_str(&format!("{byte:02x}"));
-    }
-    out
 }
 
 /// Replace every `$subject` in a pattern with `subject`.
@@ -775,520 +870,224 @@ fn scope_matches(pattern: &str, scope: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn config(toml_text: &str) -> AclConfig {
-        toml::from_str::<AclConfig>(toml_text).unwrap()
+    fn policy(name: &str) -> UserPolicy {
+        UserPolicy {
+            name: name.to_string(),
+            enabled: true,
+            ..Default::default()
+        }
     }
 
-    fn operator_acl() -> Acl {
-        Acl::from_config(&config(
-            r#"
-            [[role]]
-            name = "operator"
-            tokens = ["op-secret"]
-            allow = ["model:ls", "model:get", "proc:*", "snap:get", "snap:ls"]
-            deny = ["proc:start_from_model"]
-            snapshot = { secrets = ["$subject"], profile = ["$subject", "$subject/*"] }
-            "#,
-        ))
+    #[test]
+    fn catalog_groups_classify_actions() {
+        assert_eq!(action_catalog("model:ls"), "read");
+        assert_eq!(action_catalog("msg:sub"), "read");
+        assert_eq!(action_catalog("acl:getuser"), "read");
+        assert_eq!(action_catalog("model:deploy"), "deploy");
+        assert_eq!(action_catalog("pack:publish"), "deploy");
+        assert_eq!(action_catalog("proc:start"), "execute");
+        assert_eq!(action_catalog("proc:start_from_model"), "execute");
+        assert_eq!(action_catalog("act:complete"), "execute");
+        assert_eq!(action_catalog("msg:ack"), "execute");
+        assert_eq!(action_catalog("model:rm"), "write");
+        assert_eq!(action_catalog("snap:upsert"), "write");
+        assert_eq!(action_catalog("acl:setuser"), "write");
+        assert_eq!(action_catalog("acl:login"), "write");
+        assert_eq!(action_catalog("msg:unsub"), "write");
+        // an unknown action is never a read
+        assert_eq!(action_catalog("future:thing"), "write");
+    }
+
+    #[test]
+    fn a_policy_compiles_its_grants() {
+        let principal = Principal::from_policy(&UserPolicy {
+            name: "operator".to_string(),
+            enabled: true,
+            allow: vec![
+                "@read".to_string(),
+                "@execute".to_string(),
+                "pack:publish".to_string(),
+            ],
+            deny: vec!["@write".to_string(), "msg:ack".to_string()],
+            patterns: vec!["orders:*".to_string()],
+            snapshot: HashMap::from([("secrets".to_string(), vec!["$subject".to_string()])]),
+        })
+        .unwrap();
+
+        assert!(!principal.is_unrestricted());
+        // @read covers the reads
+        principal.check("model:ls").unwrap();
+        principal.check("task:get").unwrap();
+        principal.check("acl:whoami").unwrap();
+        // @execute covers starting and driving runs...
+        principal.check("proc:start").unwrap();
+        principal.check("act:complete").unwrap();
+        // ...and an explicit deny wins over the group grant that covers it
+        assert!(principal.check("msg:ack").is_err());
+        // a command pattern names one action of a group not granted
+        principal.check("pack:publish").unwrap();
+        assert!(principal.check("model:deploy").is_err());
+        // @write denies every removal and feed, named or not
+        assert!(principal.check("model:rm").is_err());
+        assert!(principal.check("snap:upsert").is_err());
+        assert!(principal.check("acl:setuser").is_err());
+        // resources
+        principal.check_rn("orders:eu").unwrap();
+        assert!(principal.check_rn("billing:eu").is_err());
+        assert!(
+            principal.check_rn("").is_err(),
+            "a model that claims no resource is outside every pattern"
+        );
+        // snapshot scopes
+        let policy = principal.scope_policy();
+        assert!(policy.allows("secrets", "operator"));
+        assert!(!policy.allows("secrets", "someone-else"));
+    }
+
+    #[test]
+    fn an_all_token_is_unrestricted() {
+        let principal = Principal::from_policy(&UserPolicy {
+            allow: vec!["@all".to_string()],
+            ..policy("root")
+        })
+        .unwrap();
+        assert!(principal.is_unrestricted());
+        principal.check("model:rm").unwrap();
+        principal.check("acl:setuser").unwrap();
+        principal.check_rn("").unwrap();
+
+        // `*` and `@*` are the same grant
+        for token in ["*", "@*"] {
+            let principal = Principal::from_policy(&UserPolicy {
+                allow: vec![token.to_string()],
+                ..policy("root")
+            })
+            .unwrap();
+            assert!(principal.is_unrestricted(), "{token}");
+        }
+
+        // ...and @all in deny refuses everything
+        let principal = Principal::from_policy(&UserPolicy {
+            allow: vec!["*".to_string()],
+            deny: vec!["@all".to_string()],
+            ..policy("nobody")
+        })
+        .unwrap();
+        assert!(principal.check("model:ls").is_err());
+    }
+
+    #[test]
+    fn invalid_names_patterns_and_catalog_tokens_are_refused() {
+        // a name carrying the separator could spell another subject's prefix
+        assert!(
+            Principal::from_policy(&UserPolicy {
+                name: "a/b".to_string(),
+                enabled: true,
+                ..Default::default()
+            })
+            .is_err()
+        );
+        assert!(
+            Principal::from_policy(&UserPolicy {
+                name: String::new(),
+                ..Default::default()
+            })
+            .is_err()
+        );
+        // a malformed pattern would silently match nothing
+        assert!(
+            Principal::from_policy(&UserPolicy {
+                allow: vec!["[invalid".to_string()],
+                ..policy("x")
+            })
+            .is_err()
+        );
+        assert!(
+            Principal::from_policy(&UserPolicy {
+                patterns: vec!["[invalid".to_string()],
+                ..policy("x")
+            })
+            .is_err()
+        );
+        // a catalog token that names no group grants nothing: refuse the typo
+        let err = Principal::from_policy(&UserPolicy {
+            allow: vec!["@reed".to_string()],
+            ..policy("x")
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("names no catalog group"), "{err}");
+        // an empty snapshot target names nothing either
+        assert!(
+            Principal::from_policy(&UserPolicy {
+                snapshot: HashMap::from([(String::new(), vec!["$subject".to_string()])]),
+                ..policy("x")
+            })
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn the_anonymous_principal_reads_the_catalogue_only() {
+        let principal = Principal::anonymous();
+        assert!(!principal.is_authenticated());
+        principal.check("model:ls").unwrap();
+        principal.check("pack:get").unwrap();
+        assert!(principal.check("model:deploy").is_err());
+        assert!(principal.check("proc:start").is_err());
+        assert!(principal.check("acl:setuser").is_err());
+        assert!(principal.check_rn("orders:eu").is_err());
+        // every refusal beyond the catalogue is "log in", not "not allowed"
+        assert!(matches!(
+            principal.check("model:deploy"),
+            Err(AclError::Unauthenticated(_))
+        ));
+    }
+
+    #[test]
+    fn scope_policies_deny_by_default() {
+        let policy = ScopePolicy::default();
+        assert!(!policy.allows("secrets", "alice"));
+        // ...but an internal policy decides no resources: nobody named them
+        assert!(policy.allows_rn("orders:eu"));
+        assert!(policy.allows_rn(""));
+
+        let policy = ScopePolicy::unrestricted();
+        assert!(policy.allows("secrets", "alice"));
+        assert!(policy.allows_rn(""));
+
+        // a caller's policy decides resources, and refuses what no pattern
+        // covers (including a model that claims none)
+        let policy = Principal::from_policy(&UserPolicy {
+            name: "op".to_string(),
+            enabled: true,
+            patterns: vec!["orders:*".to_string()],
+            ..Default::default()
+        })
         .unwrap()
+        .scope_policy();
+        assert!(policy.allows_rn("orders:eu"));
+        assert!(!policy.allows_rn(""));
+        assert!(!policy.allows_rn("billing:eu"));
     }
 
     #[test]
-    fn section_present_means_enabled() {
-        let acl = operator_acl();
+    fn an_anonymous_acl_answers_no_login_and_no_users() {
+        let acl = AnonymousAcl;
         assert!(acl.enabled());
+        assert!(
+            !acl.authenticate(Some("anything"))
+                .unwrap()
+                .is_authenticated()
+        );
+        assert!(!acl.anonymous().is_authenticated());
     }
 
     #[test]
-    fn explicit_false_disables() {
-        let acl = Acl::from_config(&config(r#"enabled = false"#)).unwrap();
+    fn a_disabled_acl_passes_everything() {
+        let acl = DisabledAcl;
         assert!(!acl.enabled());
-        assert!(acl.anonymous().is_unrestricted());
-        assert!(acl.authenticate(None).unwrap().is_unrestricted());
-    }
-
-    #[test]
-    fn plaintext_and_hashed_tokens_both_authenticate() {
-        let plain = hash_token("op-secret").unwrap();
-        // "op-secret" is also a sha256: form fixture below
-        assert_eq!(plain.len(), 64);
-        assert_eq!(
-            hash_token(&format!("sha256:{plain}")).unwrap(),
-            hash_token("op-secret").unwrap()
-        );
-
-        let acl = operator_acl();
-        let principal = acl.authenticate(Some("op-secret")).unwrap();
-        assert_eq!(principal.subject(), "operator");
-        assert!(acl.authenticate(Some("wrong")).is_err());
-        assert!(acl.authenticate(None).is_err());
-    }
-
-    #[test]
-    fn unknown_token_never_falls_back_to_a_role() {
-        let acl = operator_acl();
-        let err = acl.authenticate(Some("nope")).unwrap_err();
-        assert!(matches!(err, AclError::Unauthenticated(_)));
-    }
-
-    #[test]
-    fn default_role_applies_to_absent_and_unknown_tokens() {
-        let acl = Acl::from_config(&config(
-            r#"
-            default_role = "guest"
-            [[role]]
-            name = "guest"
-            tokens = ["guest-token"]
-            allow = ["model:ls"]
-            "#,
-        ))
-        .unwrap();
-
-        let absent = acl.authenticate(None).unwrap();
-        assert_eq!(absent.subject(), "guest");
-        assert_eq!(
-            acl.authenticate(Some("unknown")).unwrap().subject(),
-            "guest"
-        );
-        assert!(absent.check("model:ls").is_ok());
-        assert!(absent.check("model:deploy").is_err());
-    }
-
-    #[test]
-    fn deny_wins_over_allow() {
-        let acl = operator_acl();
-        let principal = acl.authenticate(Some("op-secret")).unwrap();
-
-        // `proc:*` allows it, the explicit deny refuses it.
-        assert!(principal.check("proc:start").is_ok());
-        assert!(matches!(
-            principal.check("proc:start_from_model"),
-            Err(AclError::Denied(_))
-        ));
-        assert!(principal.check("act:complete").is_err());
-    }
-
-    #[test]
-    fn shorthand_token_is_unrestricted() {
-        let acl = Acl::from_config(&config(r#"token = "root-secret""#)).unwrap();
-        let principal = acl.authenticate(Some("root-secret")).unwrap();
+        let principal = acl.authenticate(None).unwrap();
         assert!(principal.is_unrestricted());
-        assert!(principal.check("model:rm").is_ok());
-        assert!(principal.check_scope("secrets", "anyone").is_ok());
-    }
-
-    #[test]
-    fn wildcard_allow_grants_every_scope() {
-        let acl = Acl::from_config(&config(
-            r#"
-            [[role]]
-            name = "root"
-            tokens = ["root-secret"]
-            allow = ["*"]
-            "#,
-        ))
-        .unwrap();
-        let principal = acl.authenticate(Some("root-secret")).unwrap();
-        assert!(principal.is_unrestricted());
-        assert!(principal.check("msg:clear").is_ok());
-        assert!(principal.check_scope("secrets", "other").is_ok());
-    }
-
-    #[test]
-    fn scope_ownership_follows_the_subject() {
-        let acl = operator_acl();
-        let principal = acl.authenticate(Some("op-secret")).unwrap();
-
-        assert!(principal.check_scope("secrets", "operator").is_ok());
-        assert!(principal.check_scope("profile", "operator").is_ok());
-        assert!(principal.check_scope("profile", "operator/proj-a").is_ok());
-        assert!(principal.check_scope("secrets", "someone-else").is_err());
-        assert!(principal.check_scope("profile", "someone-else").is_err());
-        // a target with no rule is not readable
-        assert!(principal.check_scope("audit", "operator").is_err());
-    }
-
-    #[test]
-    fn scope_substitution_reads_the_owner_subject() {
-        let policy = ScopePolicy {
-            subject: "u1".to_string(),
-            all: false,
-            scopes: HashMap::from([("secrets".to_string(), vec!["$subject".to_string()])]),
-            workdir_root: None,
-        };
-        assert!(policy.allows("secrets", "u1"));
-        assert!(!policy.allows("secrets", "u2"));
-    }
-
-    #[test]
-    fn hashing_a_malformed_digest_is_a_config_error() {
-        let err = Acl::from_config(&config(
-            r#"
-            [[role]]
-            name = "r"
-            tokens = ["sha256:nothex"]
-            allow = ["*"]
-            "#,
-        ))
-        .unwrap_err();
-        assert!(err.to_string().contains("64 hex digits"), "{err}");
-    }
-
-    #[test]
-    fn an_invalid_action_pattern_fails_startup() {
-        let err = Acl::from_config(&config(
-            r#"
-            [[role]]
-            name = "r"
-            tokens = ["t"]
-            allow = ["act:{unclosed"]
-            "#,
-        ))
-        .unwrap_err();
-        assert!(err.to_string().contains("invalid allow pattern"), "{err}");
-    }
-    #[test]
-    fn an_enabled_acl_without_any_token_is_a_config_error() {
-        let err = Acl::from_config(&config(r#"enabled = true"#)).unwrap_err();
-        assert!(
-            err.to_string().contains("neither a token nor a role"),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn a_role_without_tokens_is_a_config_error() {
-        let err = Acl::from_config(&config(
-            r#"
-            [[role]]
-            name = "r"
-            allow = ["*"]
-            "#,
-        ))
-        .unwrap_err();
-        assert!(
-            err.to_string().contains("no role declares any token"),
-            "{err}"
-        );
-    }
-
-    #[test]
-    fn an_empty_role_name_is_a_config_error() {
-        let err = Acl::from_config(&config(
-            r#"
-            [[role]]
-            name = "  "
-            tokens = ["t"]
-            allow = ["*"]
-            "#,
-        ))
-        .unwrap_err();
-        assert!(err.to_string().contains("name cannot be empty"), "{err}");
-    }
-
-    #[test]
-    fn workdir_defaults_to_none_and_role_overrides_the_section() {
-        // No workdir anywhere: no directory control.
-        let acl = operator_acl();
-        assert!(
-            acl.authenticate(Some("op-secret"))
-                .unwrap()
-                .workdir_root()
-                .is_none()
-        );
-
-        // Section-level root applies to every role...
-        let acl = Acl::from_config(&config(
-            r#"
-            workdir = "/srv/acts"
-            [[role]]
-            name = "r"
-            tokens = ["t"]
-            allow = ["*"]
-            "#,
-        ))
-        .unwrap();
-        assert_eq!(
-            acl.authenticate(Some("t")).unwrap().workdir_root().unwrap(),
-            Path::new("/srv/acts")
-        );
-
-        // ...and a role may point somewhere else.
-        let acl = Acl::from_config(&config(
-            r#"
-            workdir = "/srv/acts"
-            [[role]]
-            name = "a"
-            tokens = ["ta"]
-            allow = ["*"]
-            [[role]]
-            name = "b"
-            tokens = ["tb"]
-            allow = ["*"]
-            workdir = "/srv/tenant-b"
-            "#,
-        ))
-        .unwrap();
-        assert_eq!(
-            acl.authenticate(Some("ta"))
-                .unwrap()
-                .workdir_root()
-                .unwrap(),
-            Path::new("/srv/acts")
-        );
-        assert_eq!(
-            acl.authenticate(Some("tb"))
-                .unwrap()
-                .workdir_root()
-                .unwrap(),
-            Path::new("/srv/tenant-b")
-        );
-    }
-
-    #[test]
-    fn an_empty_workdir_is_a_config_error() {
-        // An empty value cannot be told from "no control", so a typo must not
-        // silently drop the confinement.
-        for text in [
-            r#"
-            workdir = "  "
-            [[role]]
-            name = "r"
-            tokens = ["t"]
-            allow = ["*"]
-            "#,
-            r#"
-            [[role]]
-            name = "r"
-            tokens = ["t"]
-            allow = ["*"]
-            workdir = ""
-            "#,
-        ] {
-            let err = Acl::from_config(&config(text)).unwrap_err();
-            assert!(err.to_string().contains("workdir cannot be empty"), "{err}");
-        }
-    }
-
-    #[test]
-    fn whoami_reports_the_workdir_root_without_leaking_tokens() {
-        let acl = Acl::from_config(&config(
-            r#"
-            workdir = "/srv/acts"
-            [[role]]
-            name = "r"
-            tokens = ["top-secret"]
-            allow = ["*"]
-            "#,
-        ))
-        .unwrap();
-        let value = acl.authenticate(Some("top-secret")).unwrap().to_value();
-        assert_eq!(value["workdir_root"], "/srv/acts");
-        assert!(!value.to_string().contains("top-secret"));
-    }
-
-    #[test]
-    fn a_snapshot_rule_without_a_target_is_a_config_error() {
-        let err = Acl::from_config(&config(
-            r#"
-            [[role]]
-            name = "r"
-            tokens = ["t"]
-            allow = ["*"]
-            snapshot = { "  " = ["$subject"] }
-            "#,
-        ))
-        .unwrap_err();
-        assert!(err.to_string().contains("without a target name"), "{err}");
-    }
-
-    #[test]
-    fn a_role_name_cannot_carry_the_channel_separator() {
-        let err = Acl::from_config(&config(
-            r#"
-            [[role]]
-            name = "u1/u2"
-            tokens = ["t"]
-            allow = ["*"]
-            "#,
-        ))
-        .unwrap_err();
-        assert!(err.to_string().contains("cannot contain '/'"), "{err}");
-    }
-
-    /// An engine without an `[acl]` section answers to anyone, with the
-    /// anonymous catalogue-only policy: the four reads that name no owner
-    /// pass, everything else — every read of a run included — does not.
-    #[test]
-    fn a_missing_section_is_anonymous_catalogue_only() {
-        let acl = Acl::anonymous_access();
-        assert!(acl.enabled());
-
-        let anonymous = acl.authenticate(None).unwrap();
-        assert_eq!(anonymous.subject(), ANONYMOUS_ROLE);
-        // No token is configured, so a presented one is just as unknown and
-        // lands on the same subject.
-        assert_eq!(
-            acl.authenticate(Some("anything")).unwrap().subject(),
-            ANONYMOUS_ROLE
-        );
-        // The in-process entry resolves there too.
-        assert_eq!(acl.anonymous().subject(), ANONYMOUS_ROLE);
-
-        assert_eq!(
-            ANONYMOUS_ALLOW,
-            ["model:ls", "model:get", "pack:get", "pack:ls"],
-            "the anonymous grant is the catalogue, pinned exactly"
-        );
-        for action in ANONYMOUS_ALLOW {
-            assert!(anonymous.check(action).is_ok(), "{action} should pass");
-        }
-        // Writes, control and admin are out — and so is every read that
-        // names a caller (a run, a delivery, a trigger) the engine cannot
-        // identify without an `[acl]` section.
-        for action in [
-            "model:deploy",
-            "pack:publish",
-            "snap:upsert",
-            "snap:remove",
-            "proc:start",
-            "proc:start_from_model",
-            "act:complete",
-            "evt:start",
-            "msg:ack",
-            "msg:sub",
-            "msg:rm",
-            "msg:clear",
-            "msg:redo",
-            "msg:unsub",
-            "model:rm",
-            "snap:get",
-            "snap:ls",
-            "proc:ls",
-            "proc:get",
-            "task:ls",
-            "task:get",
-            "msg:ls",
-            "msg:get",
-            "evt:ls",
-            "evt:get",
-            "ext:register_var",
-        ] {
-            assert!(
-                matches!(anonymous.check(action), Err(AclError::Denied(_))),
-                "{action} must be refused, got {:?}",
-                anonymous.check(action)
-            );
-        }
-        // Snapshot scopes have an owner only when a policy names one.
-        assert!(anonymous.check_scope("profile", "u1").is_err());
-    }
-
-    /// `enabled = false` is the explicit opt-out, and the only way a caller
-    /// resolves to an unrestricted principal.
-    #[test]
-    fn enabled_false_is_the_explicit_opt_out() {
-        let acl = Acl::from_config(&config("enabled = false")).unwrap();
-        assert!(!acl.enabled());
-        assert!(acl.authenticate(None).unwrap().is_unrestricted());
-        assert!(acl.anonymous().is_unrestricted());
-    }
-
-    /// A policy nobody sealed reads nothing — an absent authority is not an
-    /// unlimited one, and a run that has to read owned data says so at its
-    /// seal instead of being handed the whole data plane.
-    #[test]
-    fn an_unsealed_policy_reads_nothing() {
-        let default = ScopePolicy::default();
-        assert_eq!(default, ScopePolicy::deny_all());
-        assert!(!default.allows("secrets", "u1"));
-        assert!(default.workdir_root.is_none());
-
-        // Only a principal's own policy is unrestricted, and it says so.
-        assert!(Principal::unrestricted().scope_policy().all);
-        assert!(!Principal::anonymous().scope_policy().all);
-    }
-
-    /// Subscribing is an action: a role without `msg:sub` cannot open a
-    /// stream, and one with it is granted the key it registered.
-    #[test]
-    fn subscribing_needs_the_grant() {
-        let acl = Acl::from_config(&config(
-            r#"
-            [[role]]
-            name = "reader"
-            tokens = ["t1"]
-            allow = ["msg:ls"]
-            [[role]]
-            name = "listener"
-            tokens = ["t2"]
-            allow = ["msg:sub"]
-            "#,
-        ))
-        .unwrap();
-
-        let reader = acl.authenticate(Some("t1")).unwrap();
-        assert!(matches!(
-            reader.check(ACTION_SUBSCRIBE),
-            Err(AclError::Denied(_))
-        ));
-
-        let listener = acl.authenticate(Some("t2")).unwrap();
-        assert!(listener.check(ACTION_SUBSCRIBE).is_ok());
-    }
-
-    #[test]
-    fn one_token_cannot_select_two_roles() {
-        let err = Acl::from_config(&config(
-            r#"
-            [[role]]
-            name = "a"
-            tokens = ["shared"]
-            allow = ["*"]
-            [[role]]
-            name = "b"
-            tokens = ["shared"]
-            allow = ["*"]
-            "#,
-        ))
-        .unwrap_err();
-        assert!(err.to_string().contains("assigned to both"), "{err}");
-    }
-
-    #[test]
-    fn an_unknown_default_role_is_a_config_error() {
-        let err = Acl::from_config(&config(
-            r#"
-            default_role = "ghost"
-            [[role]]
-            name = "r"
-            tokens = ["t"]
-            allow = ["*"]
-            "#,
-        ))
-        .unwrap_err();
-        assert!(err.to_string().contains("not a configured role"), "{err}");
-    }
-
-    #[test]
-    fn whoami_reports_the_effective_policy() {
-        let acl = operator_acl();
-        let value = acl.authenticate(Some("op-secret")).unwrap().to_value();
-        assert_eq!(value["subject"], "operator");
-        assert_eq!(value["unrestricted"], false);
-        assert_eq!(value["deny"][0], "proc:start_from_model");
-        assert_eq!(value["scopes"]["secrets"][0], "$subject");
-        // and it never leaks the token or its digest
-        let text = value.to_string();
-        assert!(!text.contains("op-secret"));
-        assert!(!text.contains(&hash_token("op-secret").unwrap()));
-    }
-
-    #[test]
-    fn anonymous_under_an_enabled_acl_is_denied_everything() {
-        let acl = operator_acl();
-        let anon = acl.anonymous();
-        assert!(anon.check("model:ls").is_err());
-        assert!(anon.check_scope("profile", "").is_err());
+        principal.check("model:rm").unwrap();
     }
 }

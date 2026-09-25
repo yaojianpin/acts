@@ -67,6 +67,15 @@ impl ProcessExecutor {
             .await?
             .into();
         let workflow = model.workflow()?;
+        // The model's resource must be within the owner's grants — the same
+        // check a deploy runs, carried by the sealed policy so a subflow
+        // cannot widen what its parent may run.
+        if !owner.allows_rn(&workflow.rn) {
+            return Err(crate::ActError::Denied(format!(
+                "resource '{}' of model '{mid}' is not allowed",
+                workflow.rn
+            )));
+        }
         let proc = self.runtime.start(&workflow, options).await?;
         Ok(proc.id().to_string())
     }
@@ -87,6 +96,7 @@ impl ProcessExecutor {
                 "'{fmt}' is invalid, it must be one of 'yaml' and 'json'"
             ))),
         }?;
+        self.principal.check_rn(&workflow.rn)?;
         let proc = self.runtime.start(&workflow, options).await?;
         Ok(proc.id().to_string())
     }

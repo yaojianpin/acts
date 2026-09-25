@@ -11,17 +11,20 @@
 #![allow(dead_code)]
 
 use acts::{Config, Engine, KvStore, Principal, Signal, Vars, Workflow};
+use acts_acl::AclUsers;
 use acts_package_shell::ShellPackage;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-/// The token the harness's role carries. The role is an administrator, so the
-/// tests start and deploy like any caller; what they need from it is the ACL's
-/// `workdir` root, which is what gives a run the directory its script sees as
-/// `/` — a run started without one has no host directory to run in.
-const TOKEN: &str = "shell-test";
+/// User the harness logs in as, and its password. The user is unrestricted, so
+/// the tests start and deploy like any caller; what they need from the engine
+/// is the configured `workdir` root, which is what gives a run the directory
+/// its script sees as `/` — a run started without one has no host directory to
+/// run in.
+const USER: &str = "shell-test";
+const PASSWORD: &str = "shell-test-pass";
 
 pub fn config(toml_text: &str) -> Config {
     Config {
@@ -31,7 +34,7 @@ pub fn config(toml_text: &str) -> Config {
 }
 
 /// A scratch directory under the system temp dir, unique per run. It is the
-/// ACL's `workdir` root: each run's own directory is `scratch(tag)/<pid>`.
+/// engine's `workdir` root: each run's own directory is `scratch(tag)/<pid>`.
 pub fn scratch(tag: &str) -> PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -78,11 +81,12 @@ async fn engine_with(
     lanes: Option<usize>,
     store: Option<Arc<dyn KvStore>>,
 ) -> (Engine, Principal) {
-    let config = config(&format!(
-        "[acl]\ntoken = \"{TOKEN}\"\nworkdir = '{}'\n{toml_text}\n",
-        root.display()
-    ));
-    let mut builder = Engine::builder().set_config(&config);
+    let mut config = config(&format!("{toml_text}\n"));
+    config.data.workdir = Some(root.display().to_string());
+    // the store-backed registry is a separate crate: a bare engine refuses
+    // `set_user`/`login` ("no user registry is installed in this engine"), and
+    // the harness declares its own user below
+    let mut builder = Engine::builder().set_config(&config).with_user_acl();
     if let Some(lanes) = lanes {
         builder = builder.scheduler_workers(lanes);
     }
@@ -90,7 +94,22 @@ async fn engine_with(
         builder = builder.set_store(store);
     }
     let engine = builder.add_package::<ShellPackage>().start().await.unwrap();
-    let principal = engine.acl().authenticate(Some(TOKEN)).unwrap();
+
+    // the tests need an unrestricted caller: a fresh store has none but the
+    // builtin admin, whose password the harness does not know
+    engine
+        .acl()
+        .set_user(&acts::UserSpec {
+            name: USER.to_string(),
+            add_passwords: vec![PASSWORD.to_string()],
+            allow: Some(vec!["@all".to_string()]),
+            patterns: Some(vec!["*".to_string()]),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let tokens = engine.acl().login(USER, PASSWORD).await.unwrap();
+    let principal = engine.acl().authenticate(Some(&tokens.token)).unwrap();
     (engine, principal)
 }
 

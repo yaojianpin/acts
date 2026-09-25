@@ -30,16 +30,6 @@ fn db_config(dir: &Path, owner: &str) -> DbConfig {
     }
 }
 
-/// An engine config with access control off, so the test drives the engine the
-/// way a local deployment does.
-fn engine_config() -> acts::Config {
-    let table: toml::Table = toml::from_str("[acl]\nenabled = false\n").unwrap();
-    acts::Config {
-        data: Default::default(),
-        table,
-    }
-}
-
 fn model(id: &str) -> Workflow {
     Workflow::new()
         .with_id(id)
@@ -58,8 +48,10 @@ async fn taking_the_lease_over_stops_the_stale_engine() {
     let lease = opened.lease().expect("the lease is on by default").clone();
     assert_eq!(lease.fence(), 1);
 
+    // the default config: access control is on, and the test drives the engine
+    // with an unrestricted principal, as the server's own operations do
     let engine = engine_builder(
-        &engine_config(),
+        &acts::Config::default(),
         opened.store.clone(),
         &ServerPlugins::default(),
     )
@@ -147,8 +139,10 @@ async fn a_restart_takes_the_lease_the_previous_instance_released() {
     let dir = scratch("restart");
     let db = db_config(&dir, "first");
     let opened = open_store(&dir, &db).await.unwrap();
+    // the default config: access control is on, and the test drives the engine
+    // with an unrestricted principal, as the server's own operations do
     let engine = engine_builder(
-        &engine_config(),
+        &acts::Config::default(),
         opened.store.clone(),
         &ServerPlugins::default(),
     )

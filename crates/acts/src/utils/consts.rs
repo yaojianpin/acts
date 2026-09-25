@@ -41,13 +41,13 @@ pub const ACT_RUN_AS: &str = "__run_as";
 pub const PROC_OWNER: &str = "__owner";
 
 /// Process env key holding the process's own directory
-/// (`<acl workdir root>/<pid>`). Private like [`PROC_OWNER`]: the JS `$env`
+/// (`<workdir>/<pid>`). Private like [`PROC_OWNER`]: the JS `$env`
 /// proxy refuses it, and packages read it through `Context::workdir`.
 pub const PROC_WORKDIR: &str = "__workdir";
 
 /// The name a workflow reads its process directory under: `$env.WORK_DIR` is
 /// the same `<root>/<pid>` that `Context::workdir()` answers, not the root the
-/// ACL config declares. Engine-owned and read-only — `Context::get_env`
+/// engine config declares. Engine-owned and read-only — `Context::get_env`
 /// answers it from the process itself (never a stored value or an OS variable
 /// of the same name) and `Context::set_env` drops a write to it, so a script
 /// can find the directory it runs in but cannot redefine it.

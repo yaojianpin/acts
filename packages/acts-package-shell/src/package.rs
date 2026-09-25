@@ -256,7 +256,7 @@ impl ActPackage for ShellPackage {
                 .max_stderr_bytes(max_output_bytes),
         );
 
-        // Directory control: when the engine's ACL config gives this process a
+        // Directory control: when the engine config gives this process a
         // workdir, that directory *is* the interpreter's root — `/` inside the
         // script is the run's own directory, so a relative path resolves inside
         // it and a write lands there rather than anywhere else. `HOME`,

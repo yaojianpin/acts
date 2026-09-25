@@ -42,6 +42,24 @@ impl NodeTree {
     pub(crate) fn load_owned(&mut self, model: Workflow) -> Result<()> {
         let mut on_ids = HashSet::new();
 
+        // an `rn` is a literal resource name acl patterns match against, so
+        // it may not be a glob, contain spaces, or carry empty segments —
+        // a malformed one would silently match nothing
+        if !model.rn.is_empty() {
+            let rn = model.rn.trim();
+            if rn.contains(|c: char| c.is_whitespace())
+                || rn
+                    .chars()
+                    .any(|c| matches!(c, '*' | '?' | '[' | ']' | '{' | '}'))
+                || rn.split(':').any(str::is_empty)
+            {
+                return Err(ActError::Model(format!(
+                    "invalid rn '{}' in model '{}': colon-separated segments, no spaces, no glob",
+                    model.rn, model.id
+                )));
+            }
+        }
+
         for on in model.on.iter() {
             // validate trigger declarations (id/kind/config) — triggers are
             // not process nodes, so nothing is inserted into the tree

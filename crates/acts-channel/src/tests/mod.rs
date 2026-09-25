@@ -2,6 +2,7 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use acts::{Config, Engine};
+use acts_acl::AclUsers;
 use acts_plugin_grpc::GrpcPlugin;
 use futures::StreamExt;
 use tokio::sync::oneshot::{self, Receiver};
@@ -11,6 +12,7 @@ use tonic::transport::Server;
 use crate::acts_service_server::{ActsService, ActsServiceServer};
 
 mod act;
+mod auth;
 mod subscribe;
 mod vars;
 mod workflow;
@@ -87,14 +89,17 @@ async fn serve_service<S: ActsService>(service: S, rx: Receiver<()>) -> u16 {
     port
 }
 
-/// Start a real server for the client to talk to: the shipped engine with the
-/// shipped gRPC plugin, on a port picked for this test. Returns that port; the
-/// engine (and with it the listener) is closed when `rx` fires.
+/// Start the shipped engine with the shipped gRPC plugin on a port picked for
+/// this test. `disable_acl` selects the ACL the engine runs under
+/// ([`EngineBuilder::disable_acl`](acts::EngineBuilder::disable_acl) makes
+/// every caller unrestricted; otherwise the store-backed user registry is
+/// installed with `with_user_acl`, so a case can declare users); the engine is
+/// closed, and its scratch directory removed, when `rx` fires.
 ///
 /// What used to stand here was a second implementation of the gRPC service —
 /// its own action table for every `act:`/`model:`/`pack:` name, kept in step
 /// with the shipped one by hand.
-async fn start_server(rx: Receiver<()>) -> u16 {
+async fn serve(rx: Receiver<()>, disable_acl: bool) -> (Engine, u16) {
     let dir = std::env::temp_dir().join(format!(
         "acts-channel-{}-{}",
         std::process::id(),
@@ -104,34 +109,54 @@ async fn start_server(rx: Receiver<()>) -> u16 {
     let addr = server_addr();
     let port = free_port();
     let config_path = dir.join("acts.toml");
-    // `[acl] enabled = false`: these cases exercise the transport, and an
-    // engine *without* a section is anonymous and read-only (models and
-    // packages only) — the deploy/start cases need more than that.
     // `[grpc] host` follows `server_addr()`: the plugin must bind the address
     // the client dials (its own default is loopback only), or the bridge
-    // setting dials an interface nothing listens on.
+    // setting dials an interface nothing listens on. The ACL is chosen on the
+    // builder, not by a config section: `[acl]` is no longer read, and an
+    // enabled ACL refuses the deploy/start these cases exercise to an
+    // unauthenticated caller.
     std::fs::write(
         &config_path,
-        format!("[acl]\nenabled = false\n[grpc]\nhost = \"{addr}\"\nport = {port}\n"),
+        format!("[grpc]\nhost = \"{addr}\"\nport = {port}\n"),
     )
     .expect("the test server's config file");
     let config = Config::create(&config_path).expect("the test server's config");
 
-    let engine = Engine::builder()
+    let mut builder = Engine::builder()
         .set_config(&config)
-        .add_plugin(&GrpcPlugin::new())
-        .start()
-        .await
-        .expect("the test server's engine");
+        .add_plugin(&GrpcPlugin::new());
+    // The user registry is a crate of its own, installed on the builder: the
+    // enabled case gets a registry it can declare users in, and the disabled
+    // case opts the ACL out entirely.
+    if disable_acl {
+        builder = builder.disable_acl();
+    } else {
+        builder = builder.with_user_acl();
+    }
+    let engine = builder.start().await.expect("the test server's engine");
     wait_for_server(port).await;
 
+    let closing = engine.clone();
     tokio::spawn(async move {
         rx.await.ok();
-        engine.close().await;
+        closing.close().await;
         let _ = std::fs::remove_dir_all(&dir);
     });
 
-    port
+    (engine, port)
+}
+
+/// The transport cases' server: the ACL is disabled, so every caller is
+/// unrestricted and no credential is needed.
+async fn start_server(rx: Receiver<()>) -> u16 {
+    serve(rx, true).await.1
+}
+
+/// A server with the ACL *enabled* — the user model, not the disabled-ACL
+/// shortcut. The engine comes back so a case can declare users on it
+/// (`engine.acl().set_user(…)`) before it dials and logs in.
+async fn start_auth_server(rx: Receiver<()>) -> (Engine, u16) {
+    serve(rx, false).await
 }
 
 /// A port nothing is listening on: bound and released, so the gRPC plugin can

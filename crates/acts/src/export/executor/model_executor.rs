@@ -31,6 +31,10 @@ impl ModelExecutor {
     #[instrument(skip(self, model, view), fields(id = %model.id, name = %model.name))]
     pub async fn deploy(&self, model: &Workflow, view: Option<&JsonValue>) -> Result<bool> {
         self.principal.check(DEPLOY)?;
+        // The resource the model claims must be within the caller's grants:
+        // a model without an `rn` is only deployable by an unrestricted
+        // user.
+        self.principal.check_rn(&model.rn)?;
         model.valid()?;
 
         // The model row and its trigger (`events`) rows are reconciled and

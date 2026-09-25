@@ -19,4 +19,7 @@ tokio = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
+# The harness logs in as its own user, so the engine needs the store-backed
+# registry the ACL crate ships.
+acts-acl = { workspace = true }
 toml = { workspace = true }

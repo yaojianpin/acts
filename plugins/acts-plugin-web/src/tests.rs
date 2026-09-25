@@ -149,16 +149,7 @@ fn test_app_error_from_validation_errors_is_a_400() {
 /// deep page were page one.
 #[tokio::test(flavor = "multi_thread")]
 async fn pack_list_serves_pages_inside_the_bounds_and_refuses_the_rest() {
-    let table: toml::Table = toml::from_str("[acl]\nenabled = false\n").unwrap();
-    let cfg = acts::Config {
-        data: Default::default(),
-        table,
-    };
-    let engine = acts::Engine::builder()
-        .set_config(&cfg)
-        .start()
-        .await
-        .unwrap();
+    let engine = acts::Engine::builder().disable_acl().start().await.unwrap();
     let state = State(Arc::new(engine.clone()));
     let principal = Extension(engine.acl().authenticate(None).unwrap());
 

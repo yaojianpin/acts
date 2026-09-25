@@ -3,6 +3,7 @@
 //! asked for, so the REPL prints one readable line instead of panicking on a
 //! missing payload or an unreachable server.
 
+use crate::{session, util};
 use acts_channel::{ActsChannel, Vars};
 use serde_json::Value;
 
@@ -12,6 +13,74 @@ pub async fn connect(url: &str, token: Option<String>) -> anyhow::Result<ActsCha
         Ok(client) => Ok(client),
         Err(err) => Err(anyhow::anyhow!("failed to connect to {url}: {err}")),
     }
+}
+
+/// Open a connection to `url` and resolve an identity for it, using
+/// everything the caller (and the machine) has: an explicit `--token`, a
+/// stored session for this server, or the `user`/`password` to log in with.
+///
+/// The order matters:
+/// 1. an explicit token is used as given — it is the caller's, not ours to
+///    second-guess;
+/// 2. otherwise a stored session for exactly this server is reused, and an
+///    expired access token is rotated from its refresh token on the first
+///    request;
+/// 3. a session that cannot authenticate and a user that can log in falls
+///    back to `acl:login`, whose answer is stored for the next run.
+///
+/// Returns the connection and the `acl:whoami` identity it resolved.
+pub async fn connect_and_authenticate(
+    url: &str,
+    token: Option<String>,
+    user: Option<String>,
+    password: Option<String>,
+) -> anyhow::Result<(ActsChannel, Value)> {
+    let explicit = token.is_some();
+    let mut client = match token {
+        Some(token) => connect(url, Some(token)).await?,
+        None => match session::load(url) {
+            Some(stored) => ActsChannel::connect_with_session(url, stored.tokens)
+                .await
+                .map_err(|err| action_failed("connect", err))?,
+            None => connect(url, None).await?,
+        },
+    };
+
+    // Resolve the identity right away: a session that no longer authenticates
+    // is repaired by a login here, not by a surprise on the first command.
+    // `Value::Null` in the answer means "no session": the caller is anonymous.
+    match whoami(&mut client).await {
+        Ok(who) if is_authenticated(&who) => Ok((client, who)),
+        Ok(_) if explicit => Ok((client, Value::Null)),
+        Ok(_) | Err(_) => {
+            // no usable session: log in when we can, otherwise stay anonymous
+            // (the server answers the catalogue reads and refuses the rest)
+            let Some(user) = user else {
+                let who = if explicit {
+                    Value::Null
+                } else {
+                    whoami(&mut client).await.unwrap_or(Value::Null)
+                };
+                return Ok((client, who));
+            };
+            let password = match password {
+                Some(password) => password,
+                None => util::prompt_password()?,
+            };
+            let tokens = client
+                .login(&user, &password)
+                .await
+                .map_err(|err| action_failed("acl:login", err))?;
+            session::save(url, &user, &tokens)?;
+            let who = whoami(&mut client).await?;
+            Ok((client, who))
+        }
+    }
+}
+
+/// Whether a `acl:whoami` answer describes a logged-in caller.
+fn is_authenticated(who: &Value) -> bool {
+    who["authenticated"].as_bool().unwrap_or(true) && !who.is_null()
 }
 
 /// Report the identity the server resolved for this connection
@@ -30,25 +99,23 @@ pub async fn whoami(client: &mut ActsChannel) -> anyhow::Result<Value> {
 }
 
 /// The identity `acl:whoami` answered with, as the one line the startup
-/// greeting prints: `unrestricted`, the caller's roles, or its subject.
+/// greeting prints: the user, marked `(unrestricted)` for an administrator,
+/// or `anonymous` for a caller that has not logged in.
 pub fn identity(who: &Value) -> String {
-    let subject = who["subject"].as_str().unwrap_or("?");
-    let roles = who["roles"]
-        .as_array()
-        .map(|roles| {
-            roles
-                .iter()
-                .filter_map(|role| role.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
-        .unwrap_or_default();
+    if who.is_null() {
+        return "anonymous".to_string();
+    }
+    let user = who["user"]
+        .as_str()
+        .or_else(|| who["subject"].as_str())
+        .unwrap_or("?");
+    if !who["authenticated"].as_bool().unwrap_or(true) {
+        return "anonymous".to_string();
+    }
     if who["unrestricted"].as_bool().unwrap_or(false) {
-        "unrestricted".to_string()
-    } else if roles.is_empty() {
-        format!("subject {subject}")
+        format!("{user} (unrestricted)")
     } else {
-        format!("roles: {roles}")
+        user.to_string()
     }
 }
 
@@ -73,28 +140,42 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn identity_names_the_unrestricted_principal() {
-        let who = json!({"subject": "root", "roles": [], "unrestricted": true});
-        assert_eq!(identity(&who), "unrestricted");
+    fn identity_marks_the_unrestricted_principal() {
+        let who =
+            json!({"user": "root", "subject": "root", "authenticated": true, "unrestricted": true});
+        assert_eq!(identity(&who), "root (unrestricted)");
     }
 
     #[test]
-    fn identity_joins_the_roles() {
-        let who = json!({"subject": "op", "roles": ["operator", "reader"], "unrestricted": false});
-        assert_eq!(identity(&who), "roles: operator, reader");
+    fn identity_names_an_authenticated_user() {
+        let who = json!({"user": "op", "authenticated": true, "unrestricted": false});
+        assert_eq!(identity(&who), "op");
     }
 
+    /// An answer with no `user` still names the caller it arrived for.
     #[test]
     fn identity_falls_back_to_the_subject() {
-        let who = json!({"subject": "u1", "roles": []});
-        assert_eq!(identity(&who), "subject u1");
+        let who = json!({"subject": "u1", "authenticated": true});
+        assert_eq!(identity(&who), "u1");
+    }
+
+    /// A session that resolved to no user is the anonymous caller, and the
+    /// greeting says so rather than reading like a name.
+    #[test]
+    fn identity_names_the_anonymous_caller() {
+        let who = json!({"user": "anonymous", "authenticated": false, "unrestricted": false});
+        assert_eq!(identity(&who), "anonymous");
+
+        // a refusal with nothing else in it reads the same way
+        let who = json!({"authenticated": false});
+        assert_eq!(identity(&who), "anonymous");
     }
 
     /// A server that answers nothing at all must not be able to crash the
-    /// startup greeting.
+    /// startup greeting: a null answer is the anonymous caller, not a name.
     #[test]
-    fn identity_of_an_empty_answer_is_a_placeholder() {
-        assert_eq!(identity(&Value::Null), "subject ?");
+    fn identity_of_an_empty_answer_is_anonymous() {
+        assert_eq!(identity(&Value::Null), "anonymous");
     }
 
     #[test]

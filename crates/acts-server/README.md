@@ -223,17 +223,29 @@ plus snapshot operations (`snap:upsert`, `snap:remove`, `snap:get`,
 
 ### Access control
 
-Without an `[acl]` section the engine is **anonymous and catalogue-only**: every
-request is attributed to the built-in `anonymous` subject, which may list and
-get **models and packages** — no other read (a run, a delivery or a trigger is
-someone's work), no write, no control actions (`proc:start`, `act:*`,
-`evt:start`, `msg:ack`), no admin actions, no snapshot scope, no subscriptions.
-Add `[acl]` to name your callers (a single `token` is the smallest useful
-section), or write `enabled = false` inside it to lift the limits on purpose.
+Access control is always on, and it is no longer configured in the file: an
+`[acl]` section in `acts.toml` is ignored with a warning, and there is no config
+token, no role and no default role. The policy types (and the `AccessControl`
+port, `Engine::acl()`, `EngineBuilder::set_acl`) are in the `acts` crate; the
+shipped registry is `acts-acl`'s `UserAcl`, which this server installs in its
+`engine_builder` (`Engine::builder().with_user_acl()`), keeping its rows in
+the server's own database. Users live in the store and are managed at runtime
+(`acl:setuser` and friends, driven by `acts-cli auth user …`), and every server
+starts with the builtin `admin` — unrestricted, with its password from
+`ACTS_ADMIN_PASSWORD` or generated and printed to the log once on the first
+start of a fresh store.
 
-Every operation is checked — including the ones an embedder performs through
-`Engine::executor(&principal)` — and the executor seals the principal's
-snapshot scopes and workdir root into every run it starts.
+A caller logs in with `acl:login` (user + password) and receives a session: an
+access token (one hour, the `authorization: Bearer …` credential) plus a refresh
+token (seven days) that rotates the pair (`acl:refresh`; the old one dies with
+the rotation). `acl:logout` revokes it, and the store keeps only the tokens'
+sha256 digests. A request the engine cannot attribute to a user — no token, or
+an unknown/expired one — is the built-in `anonymous` subject: it may list and
+get **models and packages** and nothing else — no other read (a run, a delivery
+or a trigger is someone's work), no write, no control actions (`proc:start`,
+`act:*`, `evt:start`, `msg:ack`), no admin actions, no snapshot scope, no
+subscriptions. `Engine::builder().disable_acl()` is the explicit opt-out: every
+caller is unrestricted.
 
 | Transport | Credential |
 |-----------|------------|
@@ -241,27 +253,39 @@ snapshot scopes and workdir root into every run it starts.
 | HTTP | `authorization: Bearer <token>` header; `/health` stays open |
 | NATS | the `token` field of the action JSON body |
 
-The token selects a role; the role's `allow`/`deny` action-name globs decide,
-with `deny` winning. Tokens are compared as SHA-256 digests
-(`sha256:<hex>` keeps the clear text out of the config). Opening a message
+Grants are the Redis-ACL shape. `allow`/`deny` hold command patterns over
+action names (`model:*`, `proc:start`) and catalog groups — `@read` (the
+catalogue and row reads), `@deploy` (`model:deploy`, `pack:publish`),
+`@execute` (`proc:start`, `evt:start`, every `act:*`, `msg:ack`), `@write`
+(the removals, the snapshot feeds, the user registry) and `@all` (everything,
+also usable in `deny` to refuse everything) — with `deny` winning and the
+default deny: an action nothing claims is `write`. `patterns` are resource-name
+(`rn`) patterns over the workflow's declared resource (`orders:eu`): a user may
+only deploy and start models whose `rn` it matches, and a model with no `rn`
+claims nothing, so only an unrestricted user may run it. A per-target
+`snapshot` table narrows which scopes the subject owns (`$subject` is the user
+name), and that ownership is
+re-checked when a task seals a snapshot value — a workflow cannot read another
+subject's sealed data even when started with their `uid`. Opening a message
 stream is itself an action (`msg:sub`), and a subscription's channel is
 namespaced by the caller's subject, so one caller cannot take over another's
-channel. A `snapshot` table per role narrows which scopes of which targets the
-subject owns (`$subject` is the role name), and that ownership is re-checked
-when a task seals a snapshot value — a workflow cannot read another subject's
-sealed data even when started with their `uid`.
+channel.
 
-`workdir` (on `[acl]`, or per role) is a **root**: each run gets its own
-directory `<workdir>/<pid>` and its filesystem access is confined to that one.
-The process id becomes a path segment (so one that is not a single safe
-component is refused), acts read the directory through `Context::workdir()`,
-and a script reads the same directory as `$env.WORK_DIR` (engine-owned: a write
-to that name is dropped). The directory is removed together with the run's rows
-— once the run finished and every delivery of its messages settled — so it does
-not accumulate one directory per historical process; a run whose row is kept
-(an errored delivery awaiting a manual retry) keeps its directory too, and
-anything a run needs to outlive itself must be exported, not left in the
-workdir.
+Every operation is checked — including the ones an embedder performs through
+`Engine::executor(&principal)` — and the executor seals the principal's
+snapshot scopes into every run it starts.
+
+`workdir` is a global engine setting (top level in `acts.toml`, `Config::workdir()`)
+and a **root**: each run gets its own directory `<workdir>/<pid>` and its
+filesystem access is confined to that one. The process id becomes a path segment
+(so one that is not a single safe component is refused), acts read the directory
+through `Context::workdir()`, and a script reads the same directory as
+`$env.WORK_DIR` (engine-owned: a write to that name is dropped). The directory is
+removed together with the run's rows — once the run finished and every delivery
+of its messages settled — so it does not accumulate one directory per historical
+process; a run whose row is kept (an errored delivery awaiting a manual retry)
+keeps its directory too, and anything a run needs to outlive itself must be
+exported, not left in the workdir.
 
 `acts.app.shell` mounts that directory as the root of the script's filesystem:
 the script runs in [bashkit](https://github.com/everruns/bashkit), a virtual

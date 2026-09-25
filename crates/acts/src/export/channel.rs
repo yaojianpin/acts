@@ -15,8 +15,8 @@ type GlobSet = (
 
 #[derive(Debug, Clone)]
 pub struct ChannelOptions {
-    /// The channel key this subscription registers under. Under an `[acl]` the
-    /// transports compose it with the caller's subject
+    /// The channel key this subscription registers under. The transports
+    /// compose it with the caller's subject
     /// ([`ChannelOptions::subscription_id`]) so two callers naming the same
     /// client id cannot take over each other's channel; the filters below stay
     /// self-declared either way, and a message is delivered to every channel
@@ -61,8 +61,8 @@ impl ChannelOptions {
     /// (`Emitter::on_message`) — so it has to carry the subject. Under a bare
     /// client id a second caller subscribing with the same id would take over
     /// the first caller's channel and receive its messages, including the
-    /// redeliveries it never acked. A role name carrying the separator is
-    /// refused at config load, so the prefix is never ambiguous.
+    /// redeliveries it never acked. A user name carrying the separator is
+    /// refused when the user is written, so the prefix is never ambiguous.
     pub fn subscription_id(subject: &str, client_id: &str) -> String {
         format!("{subject}/{client_id}")
     }

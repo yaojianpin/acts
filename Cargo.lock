@@ -35,15 +35,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "acts-acl"
+version = "0.25.0"
+dependencies = [
+ "acts",
+ "async-trait",
+ "chrono",
+ "nanoid",
+ "parking_lot 0.12.5",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tokio",
+ "toml",
+ "tracing",
+]
+
+[[package]]
 name = "acts-channel"
 version = "0.25.0"
 dependencies = [
  "acts",
+ "acts-acl",
  "acts-plugin-grpc",
  "acts-proto",
  "anyhow",
  "chrono",
  "futures",
+ "parking_lot 0.12.5",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -57,6 +76,7 @@ name = "acts-cli"
 version = "0.25.0"
 dependencies = [
  "acts",
+ "acts-acl",
  "acts-channel",
  "acts-plugin-grpc",
  "anyhow",
@@ -190,6 +210,7 @@ name = "acts-package-shell"
 version = "0.25.0"
 dependencies = [
  "acts",
+ "acts-acl",
  "async-trait",
  "bashkit",
  "globset",
@@ -216,6 +237,7 @@ name = "acts-plugin-grpc"
 version = "0.25.0"
 dependencies = [
  "acts",
+ "acts-acl",
  "acts-proto",
  "async-trait",
  "serde",
@@ -232,6 +254,7 @@ name = "acts-plugin-nats"
 version = "0.25.0"
 dependencies = [
  "acts",
+ "acts-acl",
  "async-nats",
  "async-trait",
  "futures-util",
@@ -246,6 +269,7 @@ name = "acts-plugin-web"
 version = "0.25.0"
 dependencies = [
  "acts",
+ "acts-acl",
  "async-stream",
  "async-trait",
  "axum",
@@ -275,6 +299,7 @@ name = "acts-server"
 version = "0.25.0"
 dependencies = [
  "acts",
+ "acts-acl",
  "acts-package-http",
  "acts-package-javascript",
  "acts-package-nats",

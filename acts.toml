@@ -178,17 +178,24 @@ port = 10082
 # tighten this value, never widen it.
 # timeout-ms = 30000
 
-# access control — acts-server and every transport plugin.
+# Filesystem root for process directories: each process runs in its own
+# `<workdir>/<pid>`, the directory `Context::workdir()` and `$env.WORK_DIR`
+# name and `acts.app.shell` mounts as its filesystem root. Omitted means no
+# directory control.
+# workdir = "./data/work"
+
+# access control — always on, and no longer configured here: users live in the
+# store and are managed at runtime. Every engine starts with the builtin
+# `admin` user (its password comes from ACTS_ADMIN_PASSWORD, or is generated
+# and logged once on the first start). Log in with the CLI's `auth login`, or
+# over the wire with `acl:login`; the session token then rides every request
+# as `authorization: Bearer <token>` (NATS: the `token` body field). A request
+# without one is anonymous and reads the model/package catalogue only.
 #
-# Without this section the engine is anonymous and catalogue-only: callers may
-# list and get models and packages, and nothing else (no other read, no write,
-# no control actions, no admin actions, no snapshot scope, no subscriptions).
-# Add the section to name your callers, or write `enabled = false` inside it to
-# lift the limits on purpose.
-# [acl]
-# enabled = false
-# shorthand: one token with unrestricted access (the requirepass equivalent)
-# token = "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+# Grants per user: `allow`/`deny` command patterns (`model:*`, `@read`,
+# `@deploy`, `@execute`), `patterns` over a workflow's `rn` resource name, and
+# per-target `snapshot` scope patterns (`$subject` = the user). See
+# doc/src/access.md.
 
 # shell package — acts-package-shell. The script runs in bashkit's virtual bash
 # (`shell: bash` is the only accepted value) with the run's own directory as its

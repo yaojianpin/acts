@@ -62,7 +62,12 @@ pub struct PageData<T> {
 }
 
 pub trait DbCollectionIden {
-    fn iden() -> StoreIden;
+    /// The collection's key prefix — the namespace its documents and index
+    /// rows live under. It is a plain string so a crate outside this one can
+    /// define a collection of its own (the ACL's users and sessions do): the
+    /// store keeps no registry of names, so two collections must choose
+    /// different prefixes to stay apart.
+    fn iden() -> String;
     fn indexed_fields() -> &'static [&'static str] {
         &[]
     }

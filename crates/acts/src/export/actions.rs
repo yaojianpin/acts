@@ -85,13 +85,27 @@ fn deny(err: crate::AclError) -> Error {
     }
 }
 
+/// Map an engine error out of an ACL management call (`acl:setuser` and
+/// friends) onto the action protocol: a bad rule is the caller's input, a
+/// store failure is ours.
+fn acl_error(err: crate::ActError) -> Error {
+    match err {
+        crate::ActError::Config(msg)
+        | crate::ActError::Convert(msg)
+        | crate::ActError::Model(msg)
+        | crate::ActError::Action(msg) => Error::Invalid(msg),
+        crate::ActError::Unauthenticated(msg) => Error::Unauthenticated(msg),
+        crate::ActError::Denied(msg) => Error::Denied(msg),
+        other => Error::Internal(other.to_string()),
+    }
+}
+
 /// Apply a channel message action as an anonymous in-process caller.
 ///
-/// Without an `[acl]` section the caller resolves to the `anonymous` subject,
-/// which may read the model and package catalogues and nothing else. With a
-/// section it resolves to the configured `default_role`, or is refused
-/// outright when no default role is configured — so an embedder that never
-/// carries a token cannot sidestep the transport checks.
+/// The caller resolves to the `anonymous` principal, which may read the model
+/// and package catalogues and nothing else — an embedder that never carries a
+/// session token cannot sidestep the transport checks; it is held to exactly
+/// what an unauthenticated transport caller is.
 pub async fn apply(engine: &Engine, name: &str, options: Vars) -> Ret {
     let principal = engine.anonymous();
     apply_as(engine, &principal, name, options).await
@@ -118,6 +132,28 @@ pub async fn apply_as(
     if name == crate::acl::ACTION_WHOAMI {
         return Ok(principal.to_value());
     }
+    // `acl:login` and `acl:refresh` carry their own credential and are the
+    // only operations reachable without one.
+    if name == crate::acl::ACTION_LOGIN {
+        let user = options.get::<String>("user").unwrap_or_default();
+        let password = options.get::<String>("password").unwrap_or_default();
+        let tokens = engine.acl().login(&user, &password).await.map_err(deny)?;
+        return serde_json::to_value(tokens).map_err(|e| Error::Internal(e.to_string()));
+    }
+    if name == crate::acl::ACTION_REFRESH {
+        let refresh_token = options.get::<String>("refresh_token").unwrap_or_default();
+        let tokens = engine.acl().refresh(&refresh_token).await.map_err(deny)?;
+        return serde_json::to_value(tokens).map_err(|e| Error::Internal(e.to_string()));
+    }
+    // `acl:logout` revokes the session its own token belongs to: knowing the
+    // token is the credential, so it needs no separate grant.
+    if name == crate::acl::ACTION_LOGOUT {
+        let token = options.get::<String>("token").unwrap_or_default();
+        let done = engine.acl().logout(&token).await.map_err(acl_error)?;
+        return Ok(json!(done));
+    }
+    // `acl:setuser`, `acl:deluser`, `acl:getuser`, `acl:users` are admin
+    // operations like any other: the action check below decides.
     // The action check for the operations the executor does not own: the
     // snapshot data plane (checked here and by `check_scope` below) and
     // `msg:sub` (which answers a channel key rather than touching the
@@ -200,7 +236,12 @@ pub async fn apply_as(
                 model.set_id(&mid);
             }
             let view = options.get::<JsonValue>("view");
-            value(executor.model().deploy(&model, view.as_ref()).await)
+            // the model text came from this request, so a model that fails
+            // validation is the caller's input, not a server fault
+            match executor.model().deploy(&model, view.as_ref()).await {
+                Err(crate::ActError::Model(msg)) => Err(Error::Invalid(msg)),
+                other => value(other),
+            }
         }
         // package
         "pack:ls" => {
@@ -430,6 +471,28 @@ pub async fn apply_as(
                 .collect::<std::result::Result<_, Error>>()?;
             Ok(JsonValue::Array(rows))
         }
+        // access control — users and sessions are the store's, managed here
+        name if name == crate::acl::ACTION_SETUSER => {
+            let spec = options
+                .pop::<crate::UserSpec>("user")
+                .ok_or_else(|| Error::Invalid("user is required".to_string()))?;
+            engine.acl().set_user(&spec).await.map_err(acl_error)?;
+            Ok(json!(true))
+        }
+        name if name == crate::acl::ACTION_DELUSER => {
+            let user = pop(&mut options, "user")?;
+            engine.acl().del_user(&user).await.map_err(acl_error)?;
+            Ok(json!(true))
+        }
+        name if name == crate::acl::ACTION_GETUSER => {
+            let user = pop(&mut options, "user")?;
+            engine
+                .acl()
+                .get_user(&user)
+                .await
+                .ok_or_else(|| Error::NotFound(format!("user '{user}' not found")))
+        }
+        name if name == crate::acl::ACTION_USERS => Ok(json!(engine.acl().user_names().await)),
         _ => Err(Error::NotFound(name.to_string())),
     }
 }
@@ -441,15 +504,11 @@ mod tests {
 
     /// An engine with access control explicitly off. These cases exercise the
     /// dispatch table itself, so their caller must be unrestricted: the
-    /// anonymous read-only policy an unconfigured engine resolves to is
-    /// covered by `acl::tests::a_missing_section_is_anonymous_read_only`.
+    /// catalogue-only principal a normal engine resolves a tokenless caller
+    /// to is covered by `the_anonymous_caller_reads_only_the_catalogue` below.
     async fn open_engine() -> crate::Engine {
-        let config = crate::Config {
-            data: Default::default(),
-            table: toml::from_str::<toml::Table>("[acl]\nenabled = false\n").unwrap(),
-        };
         crate::Engine::builder()
-            .set_config(&config)
+            .disable_acl()
             .start()
             .await
             .unwrap()
@@ -572,52 +631,110 @@ mod tests {
 
     // ---- access control ----
 
-    const MULTI_TENANT: &str = r#"
-        [acl]
-
-        [[acl.role]]
-        name = "u1"
-        tokens = ["token-u1"]
-        allow = ["model:deploy", "proc:start", "snap:get", "snap:ls", "snap:upsert"]
-        snapshot = { secrets = ["u1"], profile = ["u1"] }
-
-        [[acl.role]]
-        name = "u2"
-        tokens = ["token-u2"]
-        allow = ["model:deploy", "proc:start", "snap:get", "snap:ls", "snap:upsert"]
-        snapshot = { secrets = ["u2"], profile = ["u2"] }
-    "#;
-
-    /// An engine whose `[acl]` section is the given toml text.
-    async fn acl_engine(text: &str) -> crate::Engine {
-        let config = crate::Config {
-            data: Default::default(),
-            table: toml::from_str::<toml::Table>(text).unwrap(),
-        };
-        crate::Engine::builder()
-            .set_config(&config)
-            .start()
-            .await
-            .unwrap()
+    /// Compile one caller's policy into a principal. These tests are about
+    /// enforcement, so the identity is built here and now: the registry that
+    /// used to hold it — and the login that used to produce it — lives in
+    /// `acts-acl`.
+    fn principal(policy: &crate::UserPolicy) -> crate::Principal {
+        crate::Principal::from_policy(policy).unwrap()
     }
 
-    #[tokio::test]
-    async fn an_enabled_acl_refuses_the_anonymous_caller() {
-        let engine = acl_engine(MULTI_TENANT).await;
+    /// One caller's policy: `allow` decides the commands, and `patterns` the
+    /// resources the user may deploy and start. Every test model carries a
+    /// single-segment `rn`, so `*` covers them all.
+    fn user(name: &str, allow: &[&str]) -> crate::UserPolicy {
+        crate::UserPolicy {
+            name: name.to_string(),
+            enabled: true,
+            allow: allow.iter().map(|action| action.to_string()).collect(),
+            patterns: vec!["*".to_string()],
+            ..Default::default()
+        }
+    }
 
-        // `apply` is the anonymous in-process entry: no token, no access.
-        let err = apply(&engine, "model:ls", Vars::new()).await.unwrap_err();
+    /// The grants the tenant users share in the snapshot tests.
+    const TENANT_ALLOW: &[&str] = &[
+        "model:deploy",
+        "proc:start",
+        "snap:get",
+        "snap:ls",
+        "snap:upsert",
+    ];
+
+    /// The snapshot scopes both tenants own: their own subject, substituted
+    /// into `$subject`.
+    fn tenant_snapshot() -> std::collections::HashMap<String, Vec<String>> {
+        ["secrets", "profile"]
+            .into_iter()
+            .map(|target| (target.to_string(), vec!["$subject".to_string()]))
+            .collect()
+    }
+
+    /// A tenant principal: the shared grants plus the snapshot scopes it
+    /// owns.
+    fn tenant(name: &str) -> crate::Principal {
+        let mut policy = user(name, TENANT_ALLOW);
+        policy.snapshot = tenant_snapshot();
+        principal(&policy)
+    }
+
+    /// The engine the enforcement tests run on: no registry is installed — the
+    /// default `AnonymousAcl` — so every caller is a principal compiled here.
+    async fn acl_engine() -> crate::Engine {
+        crate::Engine::builder().start().await.unwrap()
+    }
+
+    /// Without a credential the caller is the `anonymous` subject: the
+    /// catalogue reads and nothing else. A token that resolves to no session
+    /// is that same caller, not an error.
+    #[tokio::test]
+    async fn the_anonymous_caller_reads_only_the_catalogue() {
+        let engine = acl_engine().await;
+
+        // `apply` is the anonymous in-process entry.
+        assert!(apply(&engine, "model:ls", Vars::new()).await.is_ok());
+        let err = apply(&engine, "model:deploy", Vars::new())
+            .await
+            .unwrap_err();
         assert!(matches!(err, Error::Unauthenticated(_)), "got: {err}");
 
-        // A token that selects no role is refused the same way.
-        let err = engine.acl().authenticate(Some("bogus")).unwrap_err();
-        assert!(matches!(err, crate::AclError::Unauthenticated(_)));
+        // Exactly the catalogue reads are within the anonymous policy: the
+        // rest needs a login, and says so rather than "denied".
+        let anonymous = engine.anonymous();
+        for action in crate::acl::ANONYMOUS_ALLOW {
+            assert!(
+                anonymous.check(action).is_ok(),
+                "the anonymous caller must read '{action}'"
+            );
+        }
+        for action in [
+            "model:deploy",
+            "proc:start",
+            "snap:ls",
+            "msg:sub",
+            "acl:setuser",
+        ] {
+            assert!(
+                matches!(
+                    anonymous.check(action),
+                    Err(crate::AclError::Unauthenticated(_))
+                ),
+                "'{action}' must need a credential"
+            );
+        }
+
+        // A token that selects no session resolves to the same principal: no
+        // registry is installed, so nothing authenticates above the catalogue.
+        let bogus = engine.acl().authenticate(Some("bogus")).unwrap();
+        assert!(!bogus.is_authenticated());
+        assert_eq!(bogus.subject(), crate::acl::ANONYMOUS_ROLE);
+        assert!(bogus.check("model:deploy").is_err());
     }
 
     #[tokio::test]
-    async fn a_role_runs_only_the_actions_it_allows() {
-        let engine = acl_engine(MULTI_TENANT).await;
-        let principal = engine.acl().authenticate(Some("token-u1")).unwrap();
+    async fn a_user_runs_only_the_actions_it_allows() {
+        let engine = acl_engine().await;
+        let principal = principal(&user("u1", TENANT_ALLOW));
 
         apply_as(&engine, &principal, "model:ls", Vars::new())
             .await
@@ -633,9 +750,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_snapshot_scope_belongs_to_one_subject_only() {
-        let engine = acl_engine(MULTI_TENANT).await;
-        let u1 = engine.acl().authenticate(Some("token-u1")).unwrap();
-        let u2 = engine.acl().authenticate(Some("token-u2")).unwrap();
+        let engine = acl_engine().await;
+        let u1 = tenant("u1");
+        let u2 = tenant("u2");
 
         // Each subject may seed and read its own scope.
         for (principal, scope, val) in [(&u1, "u1", 1), (&u2, "u2", 2)] {
@@ -682,35 +799,24 @@ mod tests {
         assert_eq!(rows[0]["data"]["val"], 1);
     }
 
-    /// Two subjects that share the message actions: the delivery's owner and
-    /// the channel's namespace decide.
-    const MSG_TENANT: &str = r#"
-        [acl]
+    /// The grants the two users share in the message tests: the delivery's
+    /// owner and the channel's namespace decide the rest.
+    const MSG_ALLOW: &[&str] = &["model:deploy", "proc:start", "msg:ack", "msg:unsub"];
 
-        [[acl.role]]
-        name = "u1"
-        tokens = ["token-u1"]
-        allow = ["model:deploy", "proc:start", "msg:ack", "msg:unsub"]
-
-        [[acl.role]]
-        name = "u2"
-        tokens = ["token-u2"]
-        allow = ["model:deploy", "proc:start", "msg:ack", "msg:unsub"]
-    "#;
-
-    /// Acking is grant-based, like every other action: a role with `msg:ack`
+    /// Acking is grant-based, like every other action: a user with `msg:ack`
     /// may ack, one without it may not — the delivery's process owner plays no
     /// part.
     #[tokio::test(flavor = "multi_thread")]
     #[serial_test::serial]
     async fn an_ack_follows_the_grant_not_the_process_owner() {
-        let engine = acl_engine(MSG_TENANT).await;
-        let u1 = engine.acl().authenticate(Some("token-u1")).unwrap();
-        let u2 = engine.acl().authenticate(Some("token-u2")).unwrap();
+        let engine = acl_engine().await;
+        let u1 = principal(&user("u1", MSG_ALLOW));
+        let u2 = principal(&user("u2", MSG_ALLOW));
 
         let workflow = crate::Workflow::from_yml(
             r#"
             id: ack_owner
+            rn: ack_owner
             ver: 0.1.0
             steps:
                 - id: step1
@@ -781,23 +887,13 @@ mod tests {
         );
     }
 
-    /// ...and a role without the grant cannot ack, however the delivery
+    /// ...and a user without the grant cannot ack, however the delivery
     /// belongs.
     #[tokio::test(flavor = "multi_thread")]
     #[serial_test::serial]
     async fn an_ack_without_the_grant_is_refused() {
-        let engine = acl_engine(
-            r#"
-            [acl]
-
-            [[acl.role]]
-            name = "starter"
-            tokens = ["token-starter"]
-            allow = ["model:deploy", "proc:start", "msg:ls"]
-        "#,
-        )
-        .await;
-        let starter = engine.acl().authenticate(Some("token-starter")).unwrap();
+        let engine = acl_engine().await;
+        let starter = principal(&user("starter", &["model:deploy", "proc:start", "msg:ls"]));
 
         // An ack channel is what stores a delivery row, and the row's id is
         // what the action names. The channel is engine-side, so it needs no
@@ -822,6 +918,7 @@ mod tests {
         let workflow = crate::Workflow::from_yml(
             r#"
             id: ack_grant
+            rn: ack_grant
             ver: 0.1.0
             steps:
                 - id: step1
@@ -865,13 +962,14 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     #[serial_test::serial]
     async fn an_unsub_reaches_only_the_callers_own_namespace() {
-        let engine = acl_engine(MSG_TENANT).await;
-        let u1 = engine.acl().authenticate(Some("token-u1")).unwrap();
-        let u2 = engine.acl().authenticate(Some("token-u2")).unwrap();
+        let engine = acl_engine().await;
+        let u1 = principal(&user("u1", MSG_ALLOW));
+        let u2 = principal(&user("u2", MSG_ALLOW));
 
         let workflow = crate::Workflow::from_yml(
             r#"
             id: unsub_scope
+            rn: unsub_scope
             ver: 0.1.0
             steps:
                 - id: step1
@@ -982,7 +1080,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     #[serial_test::serial]
     async fn a_run_cannot_seal_another_subjects_scope() {
-        let engine = acl_engine(MULTI_TENANT).await;
+        let engine = acl_engine().await;
         engine
             .add_snapshot(
                 "secrets",
@@ -993,8 +1091,8 @@ mod tests {
             )
             .unwrap();
 
-        let u1 = engine.acl().authenticate(Some("token-u1")).unwrap();
-        let u2 = engine.acl().authenticate(Some("token-u2")).unwrap();
+        let u1 = tenant("u1");
+        let u2 = tenant("u2");
 
         // u2's secret exists, and only u2 may read or write it.
         apply_as(
@@ -1013,6 +1111,7 @@ mod tests {
         let workflow = crate::Workflow::from_yml(
             r#"
             id: acl_seal
+            rn: acl_seal
             ver: 0.1.0
             exposes:
               - name: leaked
@@ -1115,27 +1214,26 @@ mod tests {
     #[serial_test::serial]
     async fn a_run_is_confined_to_its_own_workdir() {
         let root = std::env::temp_dir().join(format!("acts_workdir_{}", crate::utils::longid()));
-        let engine = acl_engine(&format!(
-            r#"
-            [acl]
-            workdir = '{}'
+        // The directory root is the engine's now, not a user's: it comes from
+        // `ConfigData.workdir` and every run is made under it.
+        let mut config = crate::Config::default();
+        config.data.workdir = Some(root.display().to_string());
+        let engine = crate::Engine::builder()
+            .set_config(&config)
+            .start()
+            .await
+            .unwrap();
+        assert_eq!(engine.config().workdir(), Some(root.clone()));
+        let u1 = principal(&user("u1", &["model:deploy", "proc:start"]));
 
-            [[acl.role]]
-            name = "u1"
-            tokens = ["token-u1"]
-            allow = ["model:deploy", "proc:start"]
-            "#,
-            root.display()
-        ))
-        .await;
-
-        // The root itself is not created up front: a policy may name one that
-        // does not exist yet, and the first run materializes its own directory.
+        // The root itself is not created up front: it may name a directory
+        // that does not exist yet, and the first run materializes its own.
         assert!(!root.exists());
 
         let workflow = crate::Workflow::from_yml(
             r#"
             id: workdir_run
+            rn: workdir_run
             ver: 0.1.0
             steps:
               - name: finish
@@ -1145,8 +1243,6 @@ mod tests {
             "#,
         )
         .unwrap();
-        let u1 = engine.acl().authenticate(Some("token-u1")).unwrap();
-        assert_eq!(u1.workdir_root(), Some(root.as_path()));
 
         // the run's completion, so its script's reading below is in hand
         let sig = engine.signal(());
@@ -1224,22 +1320,19 @@ mod tests {
     #[serial_test::serial]
     async fn a_workdir_refuses_a_pid_that_is_not_one_directory() {
         let root = std::env::temp_dir().join(format!("acts_workdir_{}", crate::utils::longid()));
-        let engine = acl_engine(&format!(
-            r#"
-            [acl]
-            workdir = '{}'
-
-            [[acl.role]]
-            name = "u1"
-            tokens = ["token-u1"]
-            allow = ["proc:start_from_model"]
-            "#,
-            root.display()
-        ))
-        .await;
-        let u1 = engine.acl().authenticate(Some("token-u1")).unwrap();
+        let mut config = crate::Config::default();
+        config.data.workdir = Some(root.display().to_string());
+        let engine = crate::Engine::builder()
+            .set_config(&config)
+            .start()
+            .await
+            .unwrap();
+        let u1 = principal(&user("u1", &["proc:start_from_model"]));
         let model = Vars::new()
-            .with("model", "id: w\nver: 0.1.0\nsteps:\n  - name: s\n")
+            .with(
+                "model",
+                "id: w\nver: 0.1.0\nrn: probe\nsteps:\n  - name: s\n",
+            )
             .with("fmt", "yml");
 
         for pid in ["..", ".", "a/b", "a\\b", "a:b"] {

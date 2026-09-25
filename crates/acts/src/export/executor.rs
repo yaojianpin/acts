@@ -134,29 +134,22 @@ mod tests {
     };
     use serde_json::json;
 
-    /// A role that may read the model catalogue and nothing else.
-    fn reader_config() -> Config {
-        Config {
-            data: Default::default(),
-            table: toml::from_str(
-                r#"
-                [acl]
-                [[acl.role]]
-                name = "reader"
-                tokens = ["reader-token"]
-                allow = ["model:ls", "model:get"]
-                "#,
-            )
-            .unwrap(),
-        }
+    /// Compile one caller's policy into a principal: these tests are about
+    /// enforcement, so the identity is built here and now — the registry that
+    /// used to hold it (and the login that used to produce it) lives in
+    /// `acts-acl`.
+    fn principal(policy: &crate::UserPolicy) -> crate::Principal {
+        crate::Principal::from_policy(policy).unwrap()
     }
 
-    async fn engine() -> Engine {
-        Engine::builder()
-            .set_config(&reader_config())
-            .start()
-            .await
-            .unwrap()
+    /// A caller that may read the model catalogue and nothing else.
+    fn reader() -> crate::Principal {
+        principal(&crate::UserPolicy {
+            name: "reader".to_string(),
+            enabled: true,
+            allow: vec!["model:ls".to_string(), "model:get".to_string()],
+            ..Default::default()
+        })
     }
 
     fn package() -> Package {
@@ -176,8 +169,8 @@ mod tests {
     /// without any check at all.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_limited_principal_is_refused_every_ungranted_operation() {
-        let engine = engine().await;
-        let reader = engine.acl().authenticate(Some("reader-token")).unwrap();
+        let engine = Engine::builder().start().await.unwrap();
+        let reader = reader();
         let executor = engine.executor(&reader);
 
         let model = Workflow::new()
@@ -236,15 +229,16 @@ mod tests {
     /// the policy and not a blanket failure.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_granted_operation_still_runs() {
-        let engine = engine().await;
-        let reader = engine.acl().authenticate(Some("reader-token")).unwrap();
+        let engine = Engine::builder().start().await.unwrap();
+        let reader = reader();
         let executor = engine.executor(&reader);
 
         assert!(executor.model().list(&Query::new()).await.is_ok());
     }
 
-    /// An engine with no `[acl]` section: the tokenless caller reads the
-    /// catalogue and nothing else, through the same executor.
+    /// The tokenless caller is the catalogue-only `anonymous` subject: the
+    /// reads pass, everything else is refused as "no credential" through the
+    /// same executor.
     #[tokio::test(flavor = "multi_thread")]
     async fn the_anonymous_callers_executor_reads_only_the_catalogue() {
         let engine = Engine::builder().start().await.unwrap();
@@ -257,11 +251,11 @@ mod tests {
                 .model()
                 .deploy(&Workflow::new().with_id("m1"), None)
                 .await,
-            Err(ActError::Denied(_))
+            Err(ActError::Unauthenticated(_))
         ));
         assert!(matches!(
             executor.proc().list(&Query::new()).await,
-            Err(ActError::Denied(_))
+            Err(ActError::Unauthenticated(_))
         ));
     }
 
@@ -270,27 +264,30 @@ mod tests {
     /// different authority cannot override them.
     #[tokio::test(flavor = "multi_thread")]
     async fn a_started_run_carries_the_callers_authority() {
-        let config = Config {
-            data: Default::default(),
-            table: toml::from_str(
-                r#"
-                [acl]
-                [[acl.role]]
-                name = "u1"
-                tokens = ["t1"]
-                allow = ["proc:start", "proc:get", "model:deploy"]
-                snapshot = { secrets = ["$subject"] }
-                "#,
-            )
-            .unwrap(),
-        };
-        let engine = Engine::builder().set_config(&config).start().await.unwrap();
-        let u1 = engine.acl().authenticate(Some("t1")).unwrap();
-        let executor = engine.executor(&u1);
-        let model = Workflow::new().with_id("m1").with_step(|step| {
-            step.with_id("step1")
-                .with_uses(crate::utils::test::USES_SET, Vars::new().with("k", 1))
+        let engine = Engine::builder().start().await.unwrap();
+        let u1 = principal(&crate::UserPolicy {
+            name: "u1".to_string(),
+            enabled: true,
+            allow: vec![
+                "model:deploy".to_string(),
+                "proc:start".to_string(),
+                "proc:get".to_string(),
+            ],
+            patterns: vec!["*".to_string()],
+            snapshot: std::collections::HashMap::from([(
+                "secrets".to_string(),
+                vec!["$subject".to_string()],
+            )]),
+            ..Default::default()
         });
+        let executor = engine.executor(&u1);
+        let model = Workflow::new()
+            .with_id("m1")
+            .with_rn("m1")
+            .with_step(|step| {
+                step.with_id("step1")
+                    .with_uses(crate::utils::test::USES_SET, Vars::new().with("k", 1))
+            });
         executor.model().deploy(&model, None).await.unwrap();
         let (send, done) = engine.signal::<bool>(false).double();
         engine.channel().on_complete(move |_| {

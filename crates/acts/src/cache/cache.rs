@@ -457,7 +457,7 @@ impl Cache {
     /// retained claim would reject every later start of that externally
     /// supplied pid with a misleading "duplicated in running process list".
     ///
-    /// The directory the failed start created (`<acl workdir root>/<pid>`)
+    /// The directory the failed start created (`<workdir>/<pid>`)
     /// goes the same way for the same reason: with no row, no sweep will ever
     /// find it.
     ///
@@ -1121,7 +1121,7 @@ impl Cache {
 }
 
 /// Delete the directory a process's filesystem access was confined to —
-/// `<acl workdir root>/<pid>`, as carried in the process's env — when the
+/// `<workdir>/<pid>`, as carried in the process's env — when the
 /// process named `pid` has one.
 ///
 /// The shape is checked: only a directory whose last component is the pid

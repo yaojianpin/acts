@@ -26,8 +26,8 @@ pub struct Proc {
 }
 
 impl DbCollectionIden for Proc {
-    fn iden() -> StoreIden {
-        StoreIden::Procs
+    fn iden() -> String {
+        StoreIden::Procs.as_ref().to_string()
     }
     fn indexed_fields() -> &'static [&'static str] {
         &["state", "mid", "timestamp", "start_time", "end_time"]

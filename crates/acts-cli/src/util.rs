@@ -72,6 +72,50 @@ pub fn parse_sort(s: &str) -> Result<OrderBy, anyhow::Error> {
     Ok(s.parse()?)
 }
 
+/// Parse one `TARGET=GLOB[,GLOB]` snapshot grant for `auth user set`:
+/// `secrets=$subject` owns the caller's own `secrets` scope, `profile=*`
+/// every scope of `profile`, `a=u1,b=*` two of them.
+pub fn parse_snapshot(s: &str) -> Result<(String, Vec<String>), anyhow::Error> {
+    let (target, modes) = s
+        .split_once('=')
+        .ok_or_else(|| anyhow::anyhow!("'{s}' is not TARGET=GLOB[,GLOB]"))?;
+    let target = target.trim();
+    if target.is_empty() {
+        return Err(anyhow::anyhow!("a snapshot grant needs a target name"));
+    }
+    let modes: Vec<String> = modes
+        .split(',')
+        .map(str::trim)
+        .filter(|mode| !mode.is_empty())
+        .map(str::to_string)
+        .collect();
+    if modes.is_empty() {
+        return Err(anyhow::anyhow!(
+            "snapshot grant '{s}' names no scope pattern"
+        ));
+    }
+    Ok((target.to_string(), modes))
+}
+
+/// Read a password from the terminal, without echo when the platform allows
+/// it. The prompt and the read are one line of stderr so a password never
+/// ends up in the transcript.
+pub fn prompt_password() -> anyhow::Result<String> {
+    use std::io::Write;
+    write!(std::io::stderr(), "password: ")
+        .map_err(|err| anyhow::anyhow!("failed to write the prompt: {err}"))?;
+    std::io::stderr().flush().ok();
+    let mut buffer = String::new();
+    std::io::stdin()
+        .read_line(&mut buffer)
+        .map_err(|err| anyhow::anyhow!("failed to read the password: {err}"))?;
+    let password = buffer.trim_end_matches(['\r', '\n']).to_string();
+    if password.is_empty() {
+        return Err(anyhow::anyhow!("no password given"));
+    }
+    Ok(password)
+}
+
 pub fn parse_key_value(s: &str) -> Result<Expr, anyhow::Error> {
     let pos = s
         .find(['=', '~', '>', '<'])

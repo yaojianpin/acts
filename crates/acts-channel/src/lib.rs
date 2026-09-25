@@ -14,7 +14,9 @@ mod vars;
 
 pub mod model;
 pub use action_result::ActionResult;
-pub use channel::{ActsChannel, ActsOptions, Auth, AuthChannel, Subscription, SubscriptionError};
+pub use channel::{
+    ActsChannel, ActsOptions, Auth, AuthChannel, SessionTokens, Subscription, SubscriptionError,
+};
 pub use vars::Vars;
 
 // The wire protocol is generated in `acts-proto`, which both this client and

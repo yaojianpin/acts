@@ -96,7 +96,8 @@ async fn main() {
 
     // The executor acts for a caller: this one is the engine's own, which is
     // what an embedder that drives the engine itself passes. `Principal` is
-    // also what the ACL in an `[acl]` config section decides.
+    // also what a logged-in user's session token resolves to (see the
+    // access-control chapter).
     let executor = engine.executor(&Principal::unrestricted());
     executor
         .model()
@@ -139,6 +140,32 @@ async fn main() {
     });
 }
 ```
+
+## Access control
+
+The executor answers for a caller, and every operation is decided through that
+principal. The policy types live in this crate: `Principal` is the compiled
+answer, `AccessControl` is the port the engine talks through (`Engine::acl()`
+hands back the installed one), and `UserPolicy` — compiled by
+`Principal::from_policy` — is the plain-data form of a user's grants.
+
+The shipped user registry is a crate of its own, `acts-acl`: `UserAcl` keeps its
+users and its login sessions in the engine's store, and installing it is one
+call on the builder, through the `AclUsers` trait it adds:
+
+```text
+use acts::Engine;
+use acts_acl::AclUsers;
+
+let engine = Engine::builder().with_user_acl().start().await?;
+```
+
+(`acts` does not depend on `acts-acl` — not even for tests — so that snippet is
+not a doctest here.) A bare `Engine::builder().start()` runs `AnonymousAcl`: no
+users, no login, and the anonymous catalogue-only policy for every caller.
+`EngineBuilder::disable_acl()` is the explicit opt-out, where every caller is
+unrestricted. See the access-control chapter of the book for the actions, the
+grant groups, the sessions and the CLI that drives the registry.
 
 ## Examples
 

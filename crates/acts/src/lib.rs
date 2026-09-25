@@ -32,7 +32,11 @@ mod tests;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
-pub use acl::{ACTION_SUBSCRIBE, Acl, AclConfig, AclError, Principal, RoleConfig, ScopePolicy};
+pub use acl::{
+    ACTION_LOGIN, ACTION_LOGOUT, ACTION_REFRESH, ACTION_SETUSER, ACTION_SUBSCRIBE, ACTION_WHOAMI,
+    ANONYMOUS_ALLOW, ANONYMOUS_ROLE, AccessControl, AclError, AnonymousAcl, CATALOG_GROUPS,
+    DisabledAcl, LoginTokens, Principal, ScopePolicy, UserPolicy, UserSpec, action_catalog,
+};
 pub use builder::EngineBuilder;
 pub use config::{Config, ConfigLog, DEFAULT_LOG_MAX_FILES, MissingParamAction};
 pub use engine::Engine;

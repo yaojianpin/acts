@@ -36,8 +36,8 @@ pub struct Event {
 }
 
 impl DbCollectionIden for Event {
-    fn iden() -> StoreIden {
-        StoreIden::Events
+    fn iden() -> String {
+        StoreIden::Events.as_ref().to_string()
     }
     fn indexed_fields() -> &'static [&'static str] {
         &["kind", "next_run", "mid"]

@@ -114,8 +114,8 @@ impl Context {
     }
 
     /// The directory this process's filesystem access is confined to
-    /// (`<acl workdir root>/<pid>`), or `None` when the engine's ACL config
-    /// declares no workdir root. Packages that touch the filesystem (shell,
+    /// (`<workdir>/<pid>`), or `None` when the engine config declares no
+    /// workdir root. Packages that touch the filesystem (shell,
     /// and any custom one) read it here and refuse to leave it; a workflow
     /// script reads the same directory as `$env.WORK_DIR` (see
     /// [`crate::utils::consts::ENV_WORK_DIR`]).

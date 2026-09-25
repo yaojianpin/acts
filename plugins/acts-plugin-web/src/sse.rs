@@ -165,48 +165,64 @@ mod tests {
     use super::*;
     use acts::query::Query as StoreQuery;
     use acts::{Workflow, actions};
+    use acts_acl::AclUsers;
     use axum::body::Bytes;
     use axum::response::IntoResponse;
     use futures_util::StreamExt;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    /// Two tenants, both allowed to start runs, subscribe and ack.
-    const SUB_ACL: &str = r#"
-[acl]
+    /// The grants both tenants have: deploy and start runs, subscribe and ack.
+    const SUB_ALLOW: &[&str] = &["model:deploy", "proc:start", "msg:ack", "msg:sub"];
 
-[[acl.role]]
-name = "u1"
-tokens = ["token-u1"]
-allow = ["model:deploy", "proc:start", "msg:ack", "msg:sub"]
-
-[[acl.role]]
-name = "u2"
-tokens = ["token-u2"]
-allow = ["model:deploy", "proc:start", "msg:ack", "msg:sub"]
-"#;
-
-    async fn engine_with_acl(text: &str) -> Engine {
-        let table: toml::Table = toml::from_str(text).unwrap();
-        let config = acts::Config {
-            data: Default::default(),
-            table,
-        };
-        Engine::builder().set_config(&config).start().await.unwrap()
+    /// An engine with access control on — the default — and one user per
+    /// `(name, password, allow)` entry. Credentials live in the store, not in
+    /// the config file, so a principal carries the session token `login`
+    /// answers. The store-backed registry is a separate crate: without it a
+    /// bare engine refuses every `acl:*` action, `acl:login` and `set_user`
+    /// included.
+    async fn engine_with_users(users: &[(&str, &str, &[&str])]) -> Engine {
+        let engine = Engine::builder().with_user_acl().start().await.unwrap();
+        for (name, password, allow) in users {
+            engine
+                .acl()
+                .set_user(&acts::UserSpec {
+                    name: (*name).to_string(),
+                    add_passwords: vec![(*password).to_string()],
+                    allow: Some(allow.iter().map(|a| (*a).to_string()).collect()),
+                    // both tenants deploy and start a model, so they own the
+                    // `*` resource — the model's own `rn` must still be set
+                    patterns: Some(vec!["*".to_string()]),
+                    ..Default::default()
+                })
+                .await
+                .unwrap();
+        }
+        engine
     }
 
-    /// `engine_with_acl` with the engine's retry tick pinned to a second, the
-    /// way a config file would fill it (`tick_interval_secs` is read from
-    /// `ConfigData`, not from the raw table these cases build). The redelivery
-    /// case needs a re-sent delivery rather than the 15-second default.
-    async fn engine_with_acl_and_retry_tick(text: &str) -> Engine {
-        let table: toml::Table = toml::from_str(text).unwrap();
+    /// Log `user` in and answer the session token its requests carry.
+    async fn login(engine: &Engine, user: &str, password: &str) -> String {
+        engine.acl().login(user, password).await.unwrap().token
+    }
+
+    /// An unrestricted engine (`disable_acl`) with a two-message subscription
+    /// queue and its retry tick pinned to a second: the redelivery case needs
+    /// a queue one run can fill and a re-sent delivery rather than the
+    /// 15-second default.
+    async fn engine_for_redelivery() -> Engine {
+        let table: toml::Table = toml::from_str("[web]\nqueue_size = 2\n").unwrap();
         let mut config = acts::Config {
             data: Default::default(),
             table,
         };
         config.data.tick_interval_secs = Some(1);
-        Engine::builder().set_config(&config).start().await.unwrap()
+        Engine::builder()
+            .set_config(&config)
+            .disable_acl()
+            .start()
+            .await
+            .unwrap()
     }
 
     /// Open the SSE body for one subscriber and answer its event stream.
@@ -323,9 +339,9 @@ allow = ["model:deploy", "proc:start", "msg:ack", "msg:sub"]
     /// deliveries, so the stored message count is the leak detector).
     #[tokio::test(flavor = "multi_thread")]
     async fn sse_stream_drop_deregisters_channel_handler() {
-        // the SSE transport surface, not the policy: open the engine explicitly
-        // (an unconfigured one is anonymous and read-only)
-        let engine = engine_with_acl("[acl]\nenabled = false\n").await;
+        // the SSE transport surface, not the policy: these cases need an
+        // unrestricted caller, so the engine runs with `disable_acl`
+        let engine = Engine::builder().disable_acl().start().await.unwrap();
 
         // spy channel: counts every dispatched workflow message without
         // storing anything (ack = false)
@@ -398,14 +414,22 @@ allow = ["model:deploy", "proc:start", "msg:ack", "msg:sub"]
     /// starter.
     #[tokio::test(flavor = "multi_thread")]
     async fn sse_subscriptions_are_namespaced_by_subject() {
-        let engine = engine_with_acl(SUB_ACL).await;
-        let u1 = engine.acl().authenticate(Some("token-u1")).unwrap();
-        let u2 = engine.acl().authenticate(Some("token-u2")).unwrap();
+        let engine =
+            engine_with_users(&[("u1", "u1-pass", SUB_ALLOW), ("u2", "u2-pass", SUB_ALLOW)]).await;
+        let u1_token = login(&engine, "u1", "u1-pass").await;
+        let u2_token = login(&engine, "u2", "u2-pass").await;
+        let u1 = engine.acl().authenticate(Some(&u1_token)).unwrap();
+        let u2 = engine.acl().authenticate(Some(&u2_token)).unwrap();
 
-        let model = Workflow::new().with_id("sse-scope").with_step(|step| {
-            step.with_id("step1")
-                .with_uses("acts.core.irq", Vars::new().with("key", "scope-test"))
-        });
+        // the model names a resource both users own (`patterns = ["*"]`): a
+        // model without an `rn` may only be deployed by an unrestricted user
+        let model = Workflow::new()
+            .with_id("sse-scope")
+            .with_rn("sse:scope")
+            .with_step(|step| {
+                step.with_id("step1")
+                    .with_uses("acts.core.irq", Vars::new().with("key", "scope-test"))
+            });
         for principal in [&u1, &u2] {
             actions::apply_as(
                 &engine,
@@ -417,7 +441,7 @@ allow = ["model:deploy", "proc:start", "msg:ack", "msg:sub"]
             .unwrap();
         }
 
-        // the same client id on both sides, a different token each
+        // the same client id on both sides, a different session each
         let mut u1_stream = subscribe(&engine, &u1, "shared-client").await;
         let mut u2_stream = subscribe(&engine, &u2, "shared-client").await;
 
@@ -445,25 +469,17 @@ allow = ["model:deploy", "proc:start", "msg:ack", "msg:sub"]
         engine.close().await;
     }
 
-    /// A subscription is an action: a role without `msg:sub` gets a `403`
+    /// A subscription is an action: a user without `msg:sub` gets a `403`
     /// instead of a stream, and one with it is granted a channel.
     #[tokio::test(flavor = "multi_thread")]
     async fn sse_subscription_needs_the_grant() {
-        let engine = engine_with_acl(
-            r#"
-[acl]
-[[acl.role]]
-name = "reader"
-tokens = ["reader-token"]
-allow = ["msg:ls"]
-[[acl.role]]
-name = "listener"
-tokens = ["listener-token"]
-allow = ["msg:sub"]
-"#,
-        )
+        let engine = engine_with_users(&[
+            ("reader", "reader-pass", &["msg:ls"]),
+            ("listener", "listener-pass", &["msg:sub"]),
+        ])
         .await;
-        let reader = engine.acl().authenticate(Some("reader-token")).unwrap();
+        let reader_token = login(&engine, "reader", "reader-pass").await;
+        let reader = engine.acl().authenticate(Some(&reader_token)).unwrap();
 
         let err = sse(
             State(Arc::new(engine.clone())),
@@ -478,13 +494,14 @@ allow = ["msg:sub"]
             }),
         )
         .await
-        .expect_err("a role without msg:sub must not open a stream");
+        .expect_err("a user without msg:sub must not open a stream");
         assert_eq!(
             err.into_response().status(),
             axum::http::StatusCode::FORBIDDEN
         );
 
-        let granted = engine.acl().authenticate(Some("listener-token")).unwrap();
+        let listener_token = login(&engine, "listener", "listener-pass").await;
+        let granted = engine.acl().authenticate(Some(&listener_token)).unwrap();
         let response = sse(
             State(Arc::new(engine.clone())),
             Extension(granted),
@@ -514,8 +531,7 @@ allow = ["msg:sub"]
     #[tokio::test(flavor = "multi_thread")]
     async fn sse_slow_subscriber_is_disconnected_instead_of_queueing() {
         // a two-message queue: one run already emits past the bound
-        let engine =
-            engine_with_acl_and_retry_tick("[acl]\nenabled = false\n[web]\nqueue_size = 2\n").await;
+        let engine = engine_for_redelivery().await;
 
         // spy channel: counts every dispatched workflow message without
         // storing anything (ack = false), so the emissions are observable
@@ -596,8 +612,8 @@ allow = ["msg:sub"]
         // the disconnect loses nothing: the deliveries it left unacked are
         // re-sent by the retry timer to the channel this client occupies again
         // (the same client id composes the same channel key)
-        let anonymous = engine.anonymous();
-        let mut second = subscribe(&engine, &anonymous, "slow-reader").await;
+        let unrestricted = engine.anonymous();
+        let mut second = subscribe(&engine, &unrestricted, "slow-reader").await;
         let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
         let mut redelivered = Vec::new();
         while redelivered.is_empty() && tokio::time::Instant::now() < deadline {

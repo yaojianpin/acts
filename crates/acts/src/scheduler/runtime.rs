@@ -426,18 +426,17 @@ impl Runtime {
 
         let proc = Process::new(&proc_id, self);
         proc.load_with_vars(model, &options)?;
+        // The process directory root comes from the engine config, never from
+        // the request: a caller can neither name the directory nor place a
+        // run outside it. The directory lives exactly as long as the
+        // process's durable rows — the sweeper removes it with them, and a
+        // start that never became durable removes it itself (see
+        // `Cache::abandon`).
+        if let Some(root) = self.config.workdir() {
+            let dir = prepare_workdir(&root, &proc_id)?;
+            proc.set_workdir(&dir);
+        }
         if let Some(owner) = owner {
-            // The workdir root travels with the owner authority, never as a
-            // start option: it is compiled from the config's ACL, so a caller
-            // can neither name the directory nor place a run outside the one
-            // its policy confines it to. The directory lives exactly as long
-            // as the process's durable rows — the sweeper removes it with
-            // them, and a start that never became durable removes it itself
-            // (see `Cache::abandon`).
-            if let Some(root) = owner.workdir_root.as_deref() {
-                let dir = prepare_workdir(root, &proc_id)?;
-                proc.set_workdir(&dir);
-            }
             proc.set_owner_scope(&owner);
         }
 

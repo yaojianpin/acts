@@ -1,0 +1,27 @@
+[package]
+authors.workspace = true
+description = "store-backed users, passwords and login sessions for the acts workflow engine"
+keywords = ["workflow", "acl", "auth"]
+edition.workspace = true
+license.workspace = true
+name = "acts-acl"
+repository.workspace = true
+homepage = "https://github.com/yaojianpin/acts"
+version.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+acts = { workspace = true }
+async-trait = { workspace = true }
+chrono = { workspace = true }
+nanoid = { workspace = true }
+parking_lot = { workspace = true }
+serde = { features = ["derive"], workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.11"
+tracing = { workspace = true }
+
+[dev-dependencies]
+acts = { workspace = true }
+tokio = { features = ["macros", "rt-multi-thread"], workspace = true }
+toml = { workspace = true }

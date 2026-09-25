@@ -145,8 +145,8 @@ pub struct Op {
 }
 
 impl DbCollectionIden for Op {
-    fn iden() -> StoreIden {
-        StoreIden::Ops
+    fn iden() -> String {
+        StoreIden::Ops.as_ref().to_string()
     }
     fn indexed_fields() -> &'static [&'static str] {
         &["pid", "tid", "status"]

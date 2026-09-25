@@ -58,6 +58,8 @@ jobs:
         run: cargo build --verbose --locked
       - name: Run tests acts
         run: cargo test -p acts --verbose
+      - name: Run tests acl
+        run: cargo test -p acts-acl --verbose
       - name: Run tests expr
         run: cargo test -p acts-expr --verbose --all-features
       - name: Run tests channel

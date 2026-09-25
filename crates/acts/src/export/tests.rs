@@ -2380,37 +2380,27 @@ async fn export_emitter_type_not_match() {
     assert_eq!(ret.len(), 0);
 }
 
-/// An engine with two callers, `u1` and `u2`, each granted exactly the
-/// operations this test performs: the models are deployed as the engine
-/// itself, and each run is started by the caller that owns it.
-async fn two_caller_engine() -> Engine {
-    let config = crate::Config {
-        data: Default::default(),
-        table: toml::from_str(
-            r#"
-            [acl]
-            [[acl.role]]
-            name = "u1"
-            tokens = ["t1"]
-            allow = ["proc:start", "msg:ls"]
-            [[acl.role]]
-            name = "u2"
-            tokens = ["t2"]
-            allow = ["proc:start", "msg:ls"]
-            "#,
-        )
-        .unwrap(),
-    };
-    Engine::builder().set_config(&config).start().await.unwrap()
+/// A caller granted exactly the operations this test performs: the model is
+/// deployed as the engine itself, and each run is started by the caller that
+/// owns it. The policy is compiled directly — the registry that used to hold
+/// such a user (and the login that produced it) lives in `acts-acl`.
+fn caller(name: &str) -> crate::Principal {
+    crate::Principal::from_policy(&crate::UserPolicy {
+        name: name.to_string(),
+        enabled: true,
+        allow: vec!["proc:start".to_string(), "msg:ls".to_string()],
+        patterns: vec!["*".to_string()],
+        ..Default::default()
+    })
+    .unwrap()
 }
 
-/// Start a deployed model as the caller `token` authenticates to. The run
-/// carries that caller's authority because the executor sealed it — the
-/// subject is the token's role, not something the start options said.
-async fn start_owned(engine: &Engine, mid: &str, token: &str) -> String {
-    let principal = engine.acl().authenticate(Some(token)).unwrap();
+/// Start a deployed model as `caller`. The run carries that caller's
+/// authority because the executor sealed it — the subject is the principal's,
+/// not something the start options said.
+async fn start_owned(engine: &Engine, mid: &str, caller: &crate::Principal) -> String {
     engine
-        .executor(&principal)
+        .executor(caller)
         .proc()
         .start(mid, Vars::new())
         .await
@@ -2425,11 +2415,18 @@ async fn start_owned(engine: &Engine, mid: &str, token: &str) -> String {
 #[tokio::test(flavor = "multi_thread")]
 #[serial]
 async fn export_channel_namespace_keeps_subscribers_apart() {
-    let engine = two_caller_engine().await;
-    let model = Workflow::new().with_id(&utils::longid()).with_step(|step| {
-        step.with_id("step1")
-            .with_uses(USES_IRQ, Vars::new().with("key", "scope-test"))
-    });
+    let engine = Engine::builder().start().await.unwrap();
+    let u1 = caller("u1");
+    let u2 = caller("u2");
+    // The model claims a resource name: a restricted caller may only start
+    // what its `patterns` grant covers.
+    let model = Workflow::new()
+        .with_id(&utils::longid())
+        .with_rn("channels")
+        .with_step(|step| {
+            step.with_id("step1")
+                .with_uses(USES_IRQ, Vars::new().with("key", "scope-test"))
+        });
     // Deployment is the engine's own act here, not a caller's.
     engine
         .executor(&crate::Principal::unrestricted())
@@ -2460,8 +2457,8 @@ async fn export_channel_namespace_keeps_subscribers_apart() {
         seen.push((subject, collected, notified));
     }
 
-    let u1_pid = start_owned(&engine, &model.id, "t1").await;
-    let u2_pid = start_owned(&engine, &model.id, "t2").await;
+    let u1_pid = start_owned(&engine, &model.id, &u1).await;
+    let u2_pid = start_owned(&engine, &model.id, &u2).await;
 
     // Both subscribers are alive — the later registration did not take over
     // the earlier one's channel.

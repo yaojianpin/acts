@@ -25,6 +25,14 @@ pub struct Workflow {
     #[serde(default)]
     pub vars: Vec<Variant>,
 
+    /// resource name the workflow operates on (`rn`), a colon-separated
+    /// path such as `orders:eu` or `app:billing:invoices`. It is the name an
+    /// acl user's `patterns` match: a user may deploy and start only the
+    /// workflows whose `rn` falls within its grants. Empty means the model
+    /// claims no resource, and only an unrestricted user may deploy or run
+    /// it.
+    #[serde(default)]
+    pub rn: String,
     /// input json schema
     #[serde(default)]
     pub inputs: ActSchema,
@@ -190,6 +198,11 @@ impl Workflow {
         self
     }
 
+    /// Set the resource name (`rn`) — see [`Workflow::rn`].
+    pub fn with_rn(mut self, rn: &str) -> Self {
+        self.rn = rn.to_string();
+        self
+    }
     pub fn with_option<T>(mut self, name: &str, value: T) -> Self
     where
         T: Serialize + Clone,

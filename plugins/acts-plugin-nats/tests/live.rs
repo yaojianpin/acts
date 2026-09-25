@@ -6,6 +6,7 @@
 //! service container.
 
 use acts::{Config, Engine, Vars, Workflow};
+use acts_acl::AclUsers;
 use acts_plugin_nats::NatsPlugin;
 use async_nats::Client;
 use futures_util::StreamExt;
@@ -55,9 +56,26 @@ fn temp_config(nats_section: &str) -> (PathBuf, Config) {
     (path, config)
 }
 
+/// The engine with access control on — the default — and the store-backed
+/// registry installed: it is a separate crate, so without it a bare engine
+/// refuses every `acl:*` action, `acl:login` and `set_user` included. The
+/// anonymous caller behaves the same either way: catalogue-only.
 async fn engine_with_nats(config: &Config) -> Engine {
     Engine::builder()
         .set_config(config)
+        .with_user_acl()
+        .add_plugin(&NatsPlugin::new())
+        .start()
+        .await
+        .unwrap()
+}
+
+/// The same engine with access control explicitly off: the cases that use it
+/// exercise the NATS action surface, so their caller must be unrestricted.
+async fn engine_with_nats_unrestricted(config: &Config) -> Engine {
+    Engine::builder()
+        .set_config(config)
+        .disable_acl()
         .add_plugin(&NatsPlugin::new())
         .start()
         .await
@@ -92,12 +110,10 @@ async fn snapshot_actions_over_nats() {
     };
 
     // This case exercises the NATS action surface, so the caller must be
-    // unrestricted: an engine without `[acl]` is anonymous and read-only.
-    let (path, config) = temp_config(
-        "[acl]\nenabled = false\n\n\
-         [nats]\nurl = \"nats://127.0.0.1:4222\"\nsubject = \"acts-snapshot-test\"\n",
-    );
-    let engine = engine_with_nats(&config).await;
+    // unrestricted (the default acl would answer it as anonymous, read-only).
+    let (path, config) =
+        temp_config("[nats]\nurl = \"nats://127.0.0.1:4222\"\nsubject = \"acts-snapshot-test\"\n");
+    let engine = engine_with_nats_unrestricted(&config).await;
 
     // upsert
     let reply = request_action(
@@ -213,11 +229,9 @@ async fn malformed_action_data_rejected() {
         return;
     };
 
-    let (path, config) = temp_config(
-        "[acl]\nenabled = false\n\n\
-         [nats]\nurl = \"nats://127.0.0.1:4222\"\nsubject = \"acts-malformed-test\"\n",
-    );
-    let engine = engine_with_nats(&config).await;
+    let (path, config) =
+        temp_config("[nats]\nurl = \"nats://127.0.0.1:4222\"\nsubject = \"acts-malformed-test\"\n");
+    let engine = engine_with_nats_unrestricted(&config).await;
 
     for data in [json!([]), json!("msg:clear"), json!(7)] {
         let reply = request_action(
@@ -255,7 +269,9 @@ async fn malformed_action_data_rejected() {
 
 /// The action payload's `token` is the credential over NATS (the broker
 /// authenticates a connection, not a request): a payload without one is
-/// refused, and a role only gets the actions it was granted.
+/// refused, and a user only gets the actions it was granted. Credentials live
+/// in the store, not in the config file, so the token is what `acl:login`
+/// answers over this same subject.
 ///
 /// The test uses its own subject prefix: several live tests run in parallel
 /// against one broker, and two engines subscribing to the same `<subject>.cmd`
@@ -271,16 +287,35 @@ async fn acl_enforced_over_nats() {
         [nats]
         url = "nats://127.0.0.1:4222"
         subject = "acts-acl-test"
-
-        [acl]
-
-        [[acl.role]]
-        name = "operator"
-        tokens = ["op-token"]
-        allow = ["msg:clear"]
         "#,
     );
     let engine = engine_with_nats(&config).await;
+    engine
+        .acl()
+        .set_user(&acts::UserSpec {
+            name: "operator".to_string(),
+            add_passwords: vec!["op-pass".to_string()],
+            allow: Some(vec!["msg:clear".to_string()]),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+
+    // login over the wire: the reply's token is what the actions below carry
+    let reply = request_action(
+        &client,
+        "acts-acl-test.cmd".to_string(),
+        json!({
+            "name": "acl:login",
+            "seq": "req-login",
+            "data": { "user": "operator", "password": "op-pass" }
+        }),
+    )
+    .await;
+    let token = reply["data"]["token"]
+        .as_str()
+        .unwrap_or_else(|| panic!("acl:login must answer a token: {reply}"))
+        .to_string();
 
     let reply = request_action(
         &client,
@@ -299,7 +334,7 @@ async fn acl_enforced_over_nats() {
     let reply = request_action(
         &client,
         "acts-acl-test.cmd".to_string(),
-        json!({ "name": "model:rm", "seq": "req-denied", "data": { "id": "x" }, "token": "op-token" }),
+        json!({ "name": "model:rm", "seq": "req-denied", "data": { "id": "x" }, "token": token }),
     )
     .await;
     assert!(
@@ -307,13 +342,13 @@ async fn acl_enforced_over_nats() {
             .as_str()
             .unwrap_or_default()
             .contains("permission denied"),
-        "an action outside the role must be denied: {reply}"
+        "an action outside the user's grants must be denied: {reply}"
     );
 
     let reply = request_action(
         &client,
         "acts-acl-test.cmd".to_string(),
-        json!({ "name": "msg:clear", "seq": "req-ok", "data": {}, "token": "op-token" }),
+        json!({ "name": "msg:clear", "seq": "req-ok", "data": {}, "token": token }),
     )
     .await;
     assert!(
@@ -342,10 +377,9 @@ async fn actions_beyond_the_in_flight_bound_are_refused() {
 
     let subject = "acts-inflight-test.cmd".to_string();
     let (path, config) = temp_config(
-        "[acl]\nenabled = false\n\n\
-         [nats]\nurl = \"nats://127.0.0.1:4222\"\nsubject = \"acts-inflight-test\"\nmax_in_flight = 1\n",
+        "[nats]\nurl = \"nats://127.0.0.1:4222\"\nsubject = \"acts-inflight-test\"\nmax_in_flight = 1\n",
     );
-    let engine = engine_with_nats(&config).await;
+    let engine = engine_with_nats_unrestricted(&config).await;
 
     // wait for the actions subscription to be live: its reply must be a run,
     // not a refusal

@@ -119,13 +119,13 @@ filesystem (below).
 
 ## Directory control
 
-When the engine's ACL config gives the process a workdir (see the
-access-control chapter of the book), that directory is the **root of the
-script's filesystem**: the configured root plus the process id,
-`<workdir>/<pid>`, is `/` inside the script. `pwd` is `/`, a relative path
-resolves inside it, and `/` is the only directory tree the script can name — the
-rest of the host filesystem is not part of the filesystem it was given, so no
-textual check is needed to keep it out.
+When the engine's `workdir` config key gives a process a directory (a global
+setting, not a per-user one — see the access-control chapter of the book), that
+directory is the **root of the script's filesystem**: the configured root plus
+the process id, `<workdir>/<pid>`, is `/` inside the script. `pwd` is `/`, a
+relative path resolves inside it, and `/` is the only directory tree the script
+can name — the rest of the host filesystem is not part of the filesystem it was
+given, so no textual check is needed to keep it out.
 
 The two names are one file, not a copy: a file the host puts in
 `<workdir>/<pid>` is readable by the script at the same relative path, and a

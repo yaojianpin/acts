@@ -142,7 +142,12 @@ impl EventExecutor {
             .find(&event.mid)
             .await?;
         let model: crate::ModelInfo = model.into();
-        model.workflow()
+        let workflow = model.workflow()?;
+        // Firing a trigger starts the model's run, so the model's resource
+        // must be within the firing caller's grants — the same check a
+        // deploy and a proc:start run.
+        self.principal.check_rn(&workflow.rn)?;
+        Ok(workflow)
     }
 
     /// custom kinds — a registered package that exposes the non-context

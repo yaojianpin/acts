@@ -30,12 +30,15 @@ impl Store {
         Self { kv }
     }
 
-    fn collection<DATA>(&self) -> Arc<dyn DbCollection<Item = DATA>>
+    /// One collection of documents, keyed by the type's [`DbCollectionIden`]
+    /// prefix. Public so a crate outside this one can keep its own documents
+    /// in the same store: the ACL's users and sessions are stored this way.
+    pub fn collection<DATA>(&self) -> Arc<dyn DbCollection<Item = DATA>>
     where
         DATA:
             DbCollectionIden + Serialize + DeserializeOwned + Send + Sync + Clone + Debug + 'static,
     {
-        let prefix = DATA::iden().as_ref().to_string();
+        let prefix = DATA::iden();
         Arc::new(KvCollection::new(&prefix, self.kv.clone()))
     }
 
@@ -73,12 +76,23 @@ impl Store {
         self.collection()
     }
 
+    /// Rebuild the index rows of one collection from its stored documents.
+    /// The maintenance path for a crate outside this one whose documents the
+    /// built-in [`Store::rebuild_indexes`] does not know about.
+    pub async fn rebuild_collection<DATA>(&self) -> Result<usize>
+    where
+        DATA:
+            DbCollectionIden + Serialize + DeserializeOwned + Send + Sync + Clone + Debug + 'static,
+    {
+        self.rebuild_one::<DATA>().await
+    }
+
     async fn rebuild_one<DATA>(&self) -> Result<usize>
     where
         DATA:
             DbCollectionIden + Serialize + DeserializeOwned + Send + Sync + Clone + Debug + 'static,
     {
-        let prefix = DATA::iden().as_ref().to_string();
+        let prefix = DATA::iden();
         KvCollection::<DATA>::new(&prefix, self.kv.clone())
             .rebuild_index()
             .await
@@ -97,8 +111,6 @@ impl Store {
         total += Self::rebuild_one::<data::Model>(self).await?;
         total += Self::rebuild_one::<data::Message>(self).await?;
         total += Self::rebuild_one::<data::Delivery>(self).await?;
-        total += Self::rebuild_one::<data::Event>(self).await?;
-        total += Self::rebuild_one::<data::Op>(self).await?;
         Ok(total)
     }
 

@@ -11,6 +11,7 @@ version.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+acts-acl = { workspace = true }
 anyhow = { workspace = true }
 acts = { workspace = true }
 serde = { workspace = true }

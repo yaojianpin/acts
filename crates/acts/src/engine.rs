@@ -1,5 +1,5 @@
 use crate::{
-    Acl, AclConfig, ActPlugin, ChannelOptions, Config, Principal, Signal,
+    AccessControl, ActPlugin, ChannelOptions, Config, Principal, Signal,
     builder::EngineBuilder,
     export::{Channel, Executor},
     package::{self, ActPackageRegister},
@@ -9,7 +9,6 @@ use crate::{
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
-use serde::Deserialize;
 /// A started workflow engine.
 ///
 /// An `Engine` is created only by [`EngineBuilder::start`]. Its runtime is
@@ -18,7 +17,7 @@ use serde::Deserialize;
 pub struct Engine {
     config: Arc<Config>,
     runtime: Arc<Runtime>,
-    acl: Arc<Acl>,
+    acl: Arc<dyn AccessControl>,
 }
 
 impl Engine {
@@ -30,18 +29,19 @@ impl Engine {
         self.config.clone()
     }
 
-    /// The compiled access control policy. Without an `[acl]` section this is
-    /// a disabled ACL and every check passes.
-    pub fn acl(&self) -> Arc<Acl> {
+    /// The engine's access control. A bare engine runs [`AnonymousAcl`]: no
+    /// users, no sessions, the anonymous catalogue-only policy for every
+    /// caller — install `acts-acl`'s `UserAcl` (see
+    /// [`EngineBuilder::set_acl`]) for users, login and sessions.
+    pub fn acl(&self) -> Arc<dyn AccessControl> {
         self.acl.clone()
     }
 
     /// The principal a caller that presents no token resolves to — the
     /// identity to hand [`Engine::executor`] on behalf of such a request.
     ///
-    /// Without an `[acl]` section this is the read-only `anonymous` subject;
-    /// with one it is the configured `default_role`, or a principal that is
-    /// refused everything when no default role exists.
+    /// It is the anonymous principal: the catalogue reads, and nothing else
+    /// (a disabled ACL resolves it to [`Principal::unrestricted`] instead).
     pub fn anonymous(&self) -> Principal {
         self.acl.anonymous()
     }
@@ -111,28 +111,25 @@ impl Engine {
         Signal::new(init)
     }
 
-    pub(crate) fn with_runtime(config: Arc<Config>, runtime: Arc<Runtime>) -> crate::Result<Self> {
-        let acl = match config.table.get("acl") {
-            Some(value) => {
-                let acl_config = AclConfig::deserialize(value.clone()).map_err(|err| {
-                    crate::ActError::Config(format!("failed to parse the 'acl' config: {err}"))
-                })?;
-                Acl::from_config(&acl_config)?
-            }
-            // No section is a deployment that has not said who may do what:
-            // it answers to anyone, with the anonymous read-only policy.
-            None => {
-                tracing::warn!(
-                    "no [acl] section in the config: callers are anonymous and read-only. Add [acl] with a token to grant more, or set enabled = false to lift the limits."
-                );
-                Acl::anonymous_access()
-            }
-        };
+    pub(crate) fn with_runtime(
+        config: Arc<Config>,
+        runtime: Arc<Runtime>,
+        acl: Arc<dyn AccessControl>,
+    ) -> crate::Result<Self> {
+        // Access control is no longer configured in the file: a stale `[acl]`
+        // section is a leftover from the token era and is ignored — loudly,
+        // because an operator who still writes one believes it is doing
+        // something.
+        if config.table.contains_key("acl") {
+            tracing::warn!(
+                "the config file still has an '[acl]' section: it is no longer read. Users are managed at runtime with acl:setuser / acl:login"
+            );
+        }
 
         Ok(Self {
             config,
             runtime,
-            acl: Arc::new(acl),
+            acl,
         })
     }
 
@@ -142,20 +139,17 @@ impl Engine {
         plugins: Vec<Arc<dyn ActPlugin>>,
         packages: Vec<ActPackageRegister>,
     ) -> crate::Result<()> {
+        // The access control loads before any plugin starts a transport: its
+        // users (and the builtin admin, if it has one) exist by the time the
+        // first request arrives.
+        self.acl.load(self.runtime.cache().store()).await?;
+
         self.prepare(snapshots, plugins, packages).await?;
 
         // Start the event loop only after plugins and packages have registered
         // their channels and handlers.
         self.runtime.event_loop();
 
-        // Resume in-flight processes (durable Ready/Running/Pending rows) and
-        // start parked ones first: the replay below must meet the resident
-        // set the boot decided on. `cache.proc` answers a cache miss with a
-        // loaded instance even when the resident set is full, and a replay
-        // that ran before the resume would dispatch that work onto such an
-        // uncached instance — its durable effects land, but the process the
-        // resume loads as *the* resident never owns the scheduling the replay
-        // did, and the run strands on tasks only the store knows about.
         self.runtime.resume().await?;
 
         // Outbox replay: every task that has a durable pending record is
@@ -172,7 +166,6 @@ impl Engine {
 
         Ok(())
     }
-
     async fn prepare(
         &self,
         snapshots: Vec<(String, SnapshotOptions)>,

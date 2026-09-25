@@ -37,9 +37,13 @@ if let Err(err) = sub.wait().await {
 
 The id is a namespace component of the caller's subject on the server
 (`{subject}/{client_id}`): two subscribers of different subjects can both
-subscribe as `client-1` without colliding, and under `[acl]` a subscription
-carries the messages of the processes that subject started, not every
-tenant's. See [access control](../access.md).
+subscribe as `client-1` without colliding, because the subject prefixes the
+channel key and a registration under a key that is already taken replaces that
+handler. The subject only namespaces that key — which messages arrive is
+decided by the channel's own filters (`type`/`state`/`uses`/`options`), not by
+who started the emitting process — and what the caller may do with them is
+decided by its grants (`msg:sub` is what opens the stream at all). See
+[access control](../access.md).
 
 
 ## Message Types

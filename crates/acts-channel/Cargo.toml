@@ -12,6 +12,7 @@ repository.workspace = true
 edition.workspace = true
 
 [dependencies]
+parking_lot = { workspace = true }
 acts-proto = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
@@ -26,6 +27,10 @@ tokio-stream = { features = ["net"], workspace = true }
 
 [dev-dependencies]
 acts = { workspace = true }
+# The user registry lives in its own crate now: a case that logs in (or reads
+# `engine.acl()`'s user registry) installs it on the builder with
+# `with_user_acl()`.
+acts-acl = { workspace = true }
 futures = { workspace = true }
 # The tests boot the server the way `acts-server` boots it — the shipped engine
 # with the shipped gRPC plugin — so the client is exercised against the server

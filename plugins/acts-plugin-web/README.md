@@ -54,16 +54,22 @@ the engine's retry timer re-sends them to the channel the client registers again
 ## Authentication
 
 Every endpoint except `/health` runs its operation through the shared action
-table (`acts::actions::apply_as`) as the request's principal, so the same role
-rules cover HTTP, gRPC and NATS. The principal is the bearer token's role; with
-no token — or no `[acl]` section at all — it is the `anonymous` subject, which
-may read only the catalogue (`model:ls`/`model:get`/`pack:ls`/`pack:get`).
-A refusal answers `401` (no/unknown token) or `403` (authenticated but not
-allowed); an endpoint outside the catalogue therefore answers `401` until an
-`[acl]` section names its caller (`/api/msg/sse` additionally needs the
-`msg:sub` grant).
+table (`acts::actions::apply_as`) as the request's principal, so the same user
+rules cover HTTP, gRPC and NATS. The principal is what the
+`authorization: Bearer <token>` header resolves to, through whatever
+`acts::AccessControl` the engine was built with (`acts-acl`'s store-backed
+registry is the shipped one): a session token from `acl:login` becomes that
+user, and a request with no header — or with an unknown or expired token —
+becomes the `anonymous` subject, which may read only the catalogue
+(`model:ls`/`model:get`/`pack:ls`/`pack:get`).
 
-See the access-control chapter of the book for the config format.
+A refusal answers `401` when the caller has no usable session token
+(`unauthenticated`, which is what tells a client to log in) and `403` when it is
+authenticated but not allowed. An endpoint outside the catalogue therefore
+answers `401` to an anonymous request until its caller logs in; `/api/msg/sse`
+additionally needs the `msg:sub` grant.
+
+See the access-control chapter of the book for the user model and the grants.
 
 ## Endpoints
 

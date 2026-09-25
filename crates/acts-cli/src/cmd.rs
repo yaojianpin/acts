@@ -1,6 +1,7 @@
 // The command modules are public so a test can drive `model get` and read the
 // text the REPL would print, not just whether the command succeeded.
 pub mod act;
+pub mod auth;
 pub mod evt;
 pub mod model;
 pub mod msg;
@@ -12,6 +13,7 @@ pub mod task;
 use crate::client;
 use act::ActArgs;
 use acts_channel::{ActionResult, ActsChannel, Vars, model::Package};
+use auth::AuthArgs;
 use clap::{Parser, Subcommand};
 use evt::EventArgs;
 use model::ModelArgs;
@@ -33,6 +35,8 @@ pub struct ActsRootCommand {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    #[command(about = "log in, log out, and manage users")]
+    Auth(AuthArgs),
     #[command(about = "execute model commands")]
     Model(ModelArgs),
     #[command(about = "execute package commands")]
@@ -109,6 +113,17 @@ impl<'a> CommandRunner<'a> {
         }
     }
 
+    /// The connection the commands speak over.
+    pub fn client(&self) -> &ActsChannel {
+        self.client
+    }
+
+    /// The connection, for the commands that change the session itself
+    /// (`auth login` swaps the credential, `auth logout` drops it).
+    pub fn client_mut(&mut self) -> &mut ActsChannel {
+        self.client
+    }
+
     /// Send one action to the server. A failed round trip is reported as the
     /// action the user typed (`model:ls`, `proc:start`, …) plus what the
     /// server answered.
@@ -168,6 +183,9 @@ impl<'a> CommandRunner<'a> {
         match cli.command {
             Commands::Exit => {
                 return Ok(true);
+            }
+            Commands::Auth(args) => {
+                auth::process(self, &args.command).await?;
             }
             Commands::Model(args) => {
                 model::process(self, &args.command).await?;

@@ -15,4 +15,14 @@ pub struct Cli {
     /// argument is visible to every process on the machine.
     #[arg(long, env = "ACTS_TOKEN", hide_env_values = true)]
     pub token: Option<String>,
+
+    /// Log in as this user before entering the REPL. The password comes from
+    /// --password / ACTS_PASSWORD, or is prompted for. A stored session
+    /// (`auth login`) is reused first, and refreshed when its token expired.
+    #[arg(short, long, env = "ACTS_USER")]
+    pub user: Option<String>,
+
+    /// Password for --user. ACTS_PASSWORD is the safer place for it.
+    #[arg(long, env = "ACTS_PASSWORD", hide_env_values = true)]
+    pub password: Option<String>,
 }
