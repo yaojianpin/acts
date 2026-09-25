@@ -93,15 +93,14 @@ validator = { version = "0.21.0", features = ["derive"] }
 # `realfs` feature is what lets the interpreter's root be the run's own
 # directory; the default features (the LLM tool contract, tz data) are not used
 # here.
-bashkit = { version = "0.18", default-features = false, features = [
-    "realfs",
-] }
+bashkit = { version = "0.18", default-features = false, features = ["realfs"] }
 # message brokers / stores
 async-nats = "0.50"
 redis = { version = "1.7", default-features = false, features = [
     "aio",
     "tokio-comp",
 ] }
+sha2 = "0.11"
 # dev
 serial_test = { version = "3", features = ["async"] }
 acts = { path = "./crates/acts", version = "0.25.0" }
