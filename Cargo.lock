@@ -166,7 +166,7 @@ version = "0.25.0"
 dependencies = [
  "acts",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "encoding_rs",
  "futures-util",
  "reqwest",
