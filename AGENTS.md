@@ -40,8 +40,29 @@ cargo fmt
 
 ## Tests
 
-`cargo test --workspace` must pass before delivery. Prefer extending an
-existing test near the changed code over creating new test files.
+Run the same per-crate suites CI runs (`.github/workflows/test.yml`) — every
+`-p` invocation below must pass before delivery; do not substitute a single
+`--workspace` run:
+
+```sh
+cargo test -p acts
+cargo test -p acts-acl
+cargo test -p acts-expr --all-features
+cargo test -p acts-channel
+cargo test -p acts-plugin-*
+cargo test -p acts-package-*
+cargo test -p acts-store --features sled,sqlite,postgres
+cargo test -p acts-cli
+cargo test -p acts-server
+```
+
+- `acts-store`'s postgres suite (`tests/postgres.rs`) needs a Postgres 16 on
+  `localhost:5433` (password `yao`, db `tests`); the broker-backed suites of
+  `acts-channel`/`acts-plugin-nats`/`acts-server` need NATS with JetStream on
+  `127.0.0.1:4222`. Without these services the run is not green — CI starts
+  both, so mirror that locally or say plainly which suites you could not run.
+- Prefer extending an existing test near the changed code over creating new
+  test files.
 
 ## Commits
 
