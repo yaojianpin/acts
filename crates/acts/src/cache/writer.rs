@@ -181,6 +181,7 @@ impl Backlog {
     }
 
     fn record_released(&self) {
+        #[allow(deprecated)]
         let previous = self
             .depth
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |depth| {

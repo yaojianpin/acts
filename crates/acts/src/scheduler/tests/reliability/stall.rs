@@ -101,6 +101,7 @@ impl CutKv {
         if !self.armed.load(Ordering::SeqCst) {
             return true;
         }
+        #[allow(deprecated)]
         if self
             .budget
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
