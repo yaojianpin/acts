@@ -15,10 +15,20 @@ mod engine;
 mod env;
 mod error;
 mod event;
+// Self-contained deterministic execution core under incremental wiring (P1+
+// of the kernel migration): its items are exercised by its internal test
+// suite today and consumed module by module afterwards, so `dead_code` and
+// `unused_imports` cannot judge reachability from the crate root yet.
+#[allow(dead_code, unused_imports)]
+mod kernel;
+// `OperationIdentity` accessors are consumed by the recovery orchestrator in
+// P2; the type is constructed by `kernel::RecoveryCandidate` today.
 mod export;
 mod model;
 mod package;
 mod plugin;
+#[allow(dead_code)]
+mod runtime_state;
 mod scheduler;
 mod signal;
 mod snapshot;

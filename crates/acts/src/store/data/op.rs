@@ -23,6 +23,20 @@ pub enum OpType {
     Abort,
 }
 
+impl OpType {
+    /// Inverse of the snake_case `AsRefStr` serialization used by storage.
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "exec" => Self::Exec,
+            "next" => Self::Next,
+            "action" => Self::Action,
+            "error" => Self::Error,
+            "abort" => Self::Abort,
+            _ => return None,
+        })
+    }
+}
+
 /// Durable outbox record lifecycle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, AsRefStr)]
 #[strum(serialize_all = "snake_case")]
@@ -37,6 +51,19 @@ pub enum OpStatus {
     Overflow,
     /// the operation completed and its effects are durable
     Done,
+}
+
+impl OpStatus {
+    /// Inverse of the snake_case `AsRefStr` serialization used by storage.
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "pending" => Self::Pending,
+            "dispatched" => Self::Dispatched,
+            "overflow" => Self::Overflow,
+            "done" => Self::Done,
+            _ => return None,
+        })
+    }
 }
 
 /// The six externally meaningful lifecycle phases of one operation.
@@ -94,6 +121,19 @@ impl OpPhase {
 
     pub fn from_task_value(value: &str) -> Self {
         serde_json::from_value(JsonValue::String(value.to_string())).unwrap_or(Self::DurablePending)
+    }
+
+    /// Inverse of the snake_case `AsRefStr` serialization used by storage.
+    pub fn parse(value: &str) -> Option<Self> {
+        Some(match value {
+            "created" => Self::Created,
+            "durable_pending" => Self::DurablePending,
+            "dispatched" => Self::Dispatched,
+            "effect_in_flight" => Self::EffectInFlight,
+            "effect_durable" => Self::EffectDurable,
+            "completed" => Self::Completed,
+            _ => return None,
+        })
     }
 }
 /// Durable outbox record for a task operation (`next` propagation or a client
