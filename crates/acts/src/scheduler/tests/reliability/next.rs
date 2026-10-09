@@ -595,7 +595,7 @@ async fn sch_action_recover_pending_inner() {
     // outbox record was written, but before the queued `next` ran: persist the
     // task state and the `Pending` record (bypassing the in-memory queue).
     let task = proc.task(&tid).unwrap();
-    task.set_state(TaskState::Completed);
+    task.set_state(&proc, TaskState::Completed);
     rt.cache().store().upsert_task(&task).await.unwrap();
     rt.cache()
         .store()
@@ -814,9 +814,9 @@ async fn sch_action_recover_partial_next_no_duplicate_inner() {
             .unwrap();
         (root, s1, s2)
     };
-    root.set_state(TaskState::Running);
-    s1.set_state(TaskState::Completed);
-    s2.set_state(TaskState::Running);
+    root.set_state(&proc, TaskState::Running);
+    s1.set_state(&proc, TaskState::Completed);
+    s2.set_state(&proc, TaskState::Running);
     let store_ops = rt.cache().store();
     store_ops.upsert_proc(&proc).await.unwrap();
     store_ops.upsert_task(&root).await.unwrap();

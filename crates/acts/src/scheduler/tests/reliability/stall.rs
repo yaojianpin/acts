@@ -610,12 +610,12 @@ async fn strand_completed_act(rt: &Arc<Runtime>, pid: &str) {
         .into_iter()
         .find(|t| t.is_kind(NodeKind::Act) && t.state().is_interrupted())
         .expect("the IRQ act is waiting");
-    let step = act.parent().expect("the act has its step");
+    let step = act.parent(&proc).expect("the act has its step");
     let root = proc.root().expect("the process has its root");
 
     // the act's propagation ran to completion before the crash: terminal state
     // and applied marker durable, outbox record closed
-    act.set_state(TaskState::Completed);
+    act.set_state(&proc, TaskState::Completed);
     act.set_propagation_phase(PropagationPhase::Applied);
     let store = rt.cache().store();
     store.upsert_task(&act).await.unwrap();
@@ -683,7 +683,7 @@ async fn boot_replay_defers_non_resident_inner() {
             let tree = proc.tree();
             proc.create_task(tree.root.as_ref().unwrap(), None).unwrap()
         };
-        root.set_state(TaskState::Running);
+        root.set_state(&proc, TaskState::Running);
         let store = rt.cache().store();
         store.upsert_proc(&proc).await.unwrap();
         store.upsert_task(&root).await.unwrap();

@@ -514,7 +514,7 @@ async fn sch_step_timeout_fires_each_branch_once_across_ticks_and_restart_inner(
     let proc = rt.create_proc(&pid, &workflow);
     let step1 = proc.tree().node("step1").unwrap();
     let task = proc.create_task(&step1, None).unwrap();
-    task.set_state(TaskState::Running);
+    task.set_state(&proc, TaskState::Running);
     rt.cache().store().upsert_proc(&proc).await.unwrap();
     rt.cache().store().persist_task_rows(&task).await.unwrap();
 
@@ -559,7 +559,7 @@ async fn sch_step_timeout_fires_each_branch_once_across_ticks_and_restart_inner(
     // thing that can keep the tick from firing them again is the restored
     // marker
     let step = restored.task_by_nid("step1").first().unwrap().clone();
-    step.set_state(TaskState::Running);
+    step.set_state(&restored, TaskState::Running);
     for _ in 0..3 {
         restored.do_tick().await;
     }
@@ -603,7 +603,7 @@ async fn sch_step_timeout_does_not_repeat_a_fired_branch_inner() {
 
     let step1 = proc.tree().node("step1").unwrap();
     let task = proc.create_task(&step1, None).unwrap();
-    task.set_state(TaskState::Running);
+    task.set_state(&proc, TaskState::Running);
     for _ in 0..5 {
         proc.do_tick().await;
     }
@@ -646,7 +646,7 @@ async fn sch_proc_do_tick_skips_terminal_states_inner() {
         let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
         let s1 = proc.tree().node("s1").unwrap();
         let task = proc.create_task(&s1, None).unwrap();
-        task.set_state(state.clone());
+        task.set_state(&proc, state.clone());
         proc.do_tick().await;
         assert!(
             proc.task_by_nid("t1").is_empty(),
@@ -659,7 +659,7 @@ async fn sch_proc_do_tick_skips_terminal_states_inner() {
     let (engine, proc) = create_proc(&workflow, &utils::longid()).await;
     let s1 = proc.tree().node("s1").unwrap();
     let task = proc.create_task(&s1, None).unwrap();
-    task.set_state(TaskState::Running);
+    task.set_state(&proc, TaskState::Running);
     proc.do_tick().await;
     assert_eq!(proc.task_by_nid("t1").len(), 1);
     drop(engine);

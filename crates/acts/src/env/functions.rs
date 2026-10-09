@@ -58,7 +58,7 @@ fn resolve(env: &super::Environment, name: &str) -> Option<Value> {
 
 /// A sealed `$name` of this task or of an ancestor (child overrides parent).
 fn sealed_data(name: &str) -> Option<Value> {
-    Context::try_with_current(|ctx| ctx.task().sealed(name))
+    Context::try_with_current(|ctx| ctx.task().sealed(&ctx.proc, name))
         .ok()
         .flatten()
         .map(|data| from_json(JsonValue::from(data)))
@@ -66,7 +66,7 @@ fn sealed_data(name: &str) -> Option<Value> {
 
 /// A task var of this task or of an ancestor, merged the way `find` reads.
 fn task_var(name: &str) -> Option<JsonValue> {
-    Context::try_with_current(|ctx| ctx.task().find::<JsonValue>(name))
+    Context::try_with_current(|ctx| ctx.task().find::<JsonValue>(&ctx.proc, name))
         .ok()
         .flatten()
 }
@@ -95,7 +95,7 @@ fn builtin(name: &str) -> Option<Value> {
         "$get" => Value::function(|args| {
             arity("$get", args, 1, 1)?;
             let name = str_arg("$get", args, 0)?;
-            let value = Context::with(|ctx| ctx.task().find::<JsonValue>(&name));
+            let value = Context::with(|ctx| ctx.task().find::<JsonValue>(&ctx.proc, &name));
 
             Ok(from_json(value.unwrap_or(JsonValue::Null)))
         }),
@@ -126,7 +126,7 @@ fn builtin(name: &str) -> Option<Value> {
             arity("$inputs", args, 0, 0)?;
 
             Ok(from_json(JsonValue::from(Context::with(|ctx| {
-                ctx.task().inputs()
+                ctx.task().inputs(ctx)
             }))))
         }),
         "$data" => Value::function(|args| {
@@ -188,7 +188,7 @@ fn builtin(name: &str) -> Option<Value> {
                 ctx.proc
                     .find_tasks(|task| task.node().id() == nid.as_str())
                     .last()
-                    .map(|task| task.inputs())
+                    .map(|task| task.inputs(ctx))
             });
 
             Ok(match inputs {
@@ -333,12 +333,16 @@ fn current_cost(task: &crate::scheduler::Task) -> i64 {
     if let Some(cost) = task.data().get::<i64>(consts::TASK_COST) {
         return cost;
     }
-    let mut parent = task.parent();
+    let mut parent = Context::try_with_current(|ctx| ctx.task().parent(&ctx.proc))
+        .ok()
+        .flatten();
     while let Some(task) = parent {
         if let Some(cost) = task.data().get::<i64>(consts::TASK_COST) {
             return cost;
         }
-        parent = task.parent();
+        parent = Context::try_with_current(|ctx| task.parent(&ctx.proc))
+            .ok()
+            .flatten();
     }
     task.cost()
 }

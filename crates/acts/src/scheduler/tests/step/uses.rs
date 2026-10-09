@@ -327,7 +327,7 @@ async fn sch_step_uses_waits_for_child_next_before_complete() {
 
     // the action's state write: the child is terminal, but its `next` (which
     // propagates its outputs) has not run yet
-    child.set_state(TaskState::Submitted);
+    child.set_state(&proc, TaskState::Submitted);
     for _ in 0..3 {
         ActTask::next(&step, &ctx).await.unwrap();
     }

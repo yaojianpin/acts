@@ -2,7 +2,7 @@ use crate::{
     Event, Result, ShareLock,
     event::Message,
     scheduler::{Process, Task},
-    utils::pid_lane,
+    utils::{LaneRouter, shared},
 };
 use parking_lot::RwLock;
 use std::collections::HashMap;
@@ -64,28 +64,40 @@ type Workers = Arc<RwLock<HashMap<String, UnboundedSender<KeyEvent>>>>;
 #[derive(Clone, Debug)]
 pub(crate) struct ProcessGate {
     locks: Arc<Vec<Arc<Mutex<()>>>>,
+    router: Arc<LaneRouter>,
 }
 
 impl ProcessGate {
+    /// A gate with its own router — tests and standalone emitters.
     pub(crate) fn new(count: usize) -> Self {
+        Self::with_router(shared(count))
+    }
+
+    /// A gate routed by `router`. The lock pool is sized by the router, so
+    /// `lane_index` always addresses a real lane and the scheduler queue (built
+    /// on this same gate) matches the pool to it.
+    pub(crate) fn with_router(router: Arc<LaneRouter>) -> Self {
         Self {
             locks: Arc::new(
-                (0..count.max(1))
+                (0..router.lanes())
                     .map(|_| Arc::new(Mutex::new(())))
                     .collect(),
             ),
+            router,
         }
     }
+
     /// Number of lanes. The scheduler's queue pool is sized by this, so the
     /// routing below always addresses a real lane.
     pub(crate) fn lanes(&self) -> usize {
         self.locks.len()
     }
 
-    /// This intentionally uses the same lane mapping as the scheduler ([`pid_lane`]),
-    /// so a process's event handlers serialize against that process's lane.
+    /// This intentionally uses the same lane mapping as the scheduler (the
+    /// shared [`LaneRouter`]), so a process's event handlers serialize against
+    /// that process's lane.
     pub(crate) fn lane_index(&self, pid: &str) -> usize {
-        pid_lane(pid, self.locks.len())
+        self.router.lane_of(pid)
     }
 
     pub(crate) async fn lock(&self, pid: &str) -> tokio::sync::OwnedMutexGuard<()> {
@@ -457,13 +469,14 @@ impl Emitter {
         }
     }
 
-    pub async fn emit_task_event(&self, task: &Arc<Task>) -> Result<()> {
-        self.emit_task_event_with_extra(task, true).await
+    pub async fn emit_task_event(&self, proc: &Arc<Process>, task: &Arc<Task>) -> Result<()> {
+        self.emit_task_event_with_extra(proc, task, true).await
     }
 
-    #[instrument(skip(self, task), fields(pid = %task.pid, tid = %task.id))]
+    #[instrument(skip(self, proc, task), fields(pid = %task.pid, tid = %task.id))]
     pub async fn emit_task_event_with_extra(
         &self,
+        proc: &Arc<Process>,
         task: &Arc<Task>,
         emit_message: bool,
     ) -> Result<()> {
@@ -471,7 +484,10 @@ impl Emitter {
         let handlers: Vec<TaskHandle> = self.tasks.read().clone();
         let task = task.clone();
         for handle in handlers {
-            let extra = TaskExtra { emit_message };
+            let extra = TaskExtra {
+                emit_message,
+                proc: Some(proc.clone()),
+            };
             run_task_handle(handle, Event::new_with_extra(&task, &extra)).await;
         }
         Ok(())

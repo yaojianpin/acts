@@ -10,7 +10,7 @@ impl ActTask for Act {
         if let Some(expr) = &self.r#if {
             let cond = ctx.eval::<bool>(expr)?;
             if !cond {
-                task.set_state(TaskState::Skipped);
+                task.set_state(&ctx.proc, TaskState::Skipped);
                 return Ok(());
             }
         }
@@ -31,12 +31,12 @@ impl ActTask for Act {
         task.set_emit(true);
         let package = ctx.runtime.package_definition(&self.uses).await?;
         task.set_data_with(|data| data.set(consts::ACT_RUN_AS, package.run_as()));
-        package.validate(&task.params())?;
+        package.validate(&task.params(ctx))?;
         match package.run_as() {
             ActRunAs::Irq => {
                 // interrupt the state
                 // irq act will complete by client action
-                task.set_state(TaskState::Interrupt);
+                task.set_state(&ctx.proc, TaskState::Interrupt);
             }
             ActRunAs::Msg => {}
             ActRunAs::Func => {
@@ -44,7 +44,7 @@ impl ActTask for Act {
                     .runtime
                     .package()
                     .create(package.id(), ctx.runtime.config())?;
-                if let Some(vars) = package.execute(ctx, &ctx.task().params()).await? {
+                if let Some(vars) = package.execute(ctx, &ctx.task().params(ctx)).await? {
                     task.update_data(&vars);
                 };
             }

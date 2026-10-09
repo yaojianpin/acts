@@ -11,7 +11,7 @@ use crate::{
     event::{Emitter, EventAction, ProcessGate},
     scheduler::queue::{Queue, QueueData},
     store::{KvStore, Store},
-    utils::{self, consts},
+    utils::{self, LaneRouter, consts},
 };
 use parking_lot::RwLock;
 use std::{
@@ -487,13 +487,13 @@ impl Runtime {
         proc
     }
 
-    #[instrument(skip(self, task), fields(pid = %task.pid, tid = %task.id))]
-    pub fn push(&self, task: &Arc<Task>) -> Result<()> {
+    #[instrument(skip(self, proc, task), fields(pid = %task.pid, tid = %task.id))]
+    pub fn push(&self, proc: &Arc<Process>, task: &Arc<Task>) -> Result<()> {
         debug!("task pushed");
         let cache = self.cache.clone();
         let task_clone = task.clone();
         cache.try_upsert_async(&task_clone)?;
-        match self.queue.send(&task_clone) {
+        match self.queue.send(proc, &task_clone) {
             Ok(()) => Ok(()),
             // The task row is queued first; the `Exec` outbox record becomes
             // the disk queue. Keep it pending for the retry timer.
@@ -509,10 +509,10 @@ impl Runtime {
     /// write — used for the root task of a freshly started process, whose
     /// proc row + root task row were already persisted atomically by
     /// `Cache::start_proc`.
-    #[instrument(skip(self, task), fields(pid = %task.pid, tid = %task.id))]
-    pub(crate) fn dispatch_root(&self, task: &Arc<Task>) -> Result<()> {
+    #[instrument(skip(self, proc, task), fields(pid = %task.pid, tid = %task.id))]
+    pub(crate) fn dispatch_root(&self, proc: &Arc<Process>, task: &Arc<Task>) -> Result<()> {
         debug!("root task dispatched");
-        match self.queue.send(task) {
+        match self.queue.send(proc, task) {
             Ok(()) => Ok(()),
             // The root row is durable before dispatch; overflow is a descriptor.
             Err(ActError::QueueFull) => {
@@ -559,9 +559,9 @@ impl Runtime {
     /// consistent (nothing to replay); a crash after it lands is recovered by
     /// [`Self::recover_actions`]; a crash after the operation ran is a no-op
     /// thanks to the durably persisted applied propagation phase.
-    pub(crate) async fn enqueue_next(&self, task: &Arc<Task>) -> Result<()> {
+    pub(crate) async fn enqueue_next(&self, proc: &Arc<Process>, task: &Arc<Task>) -> Result<()> {
         self.cache.enqueue_next(task).await?;
-        match self.queue.send_next(task) {
+        match self.queue.send_next(proc, task) {
             Ok(()) => Ok(()),
             // Convert the existing normal `Next` record into the disk queue's
             // overflow state. The periodic recovery consumer owns it until it
@@ -688,7 +688,7 @@ impl Runtime {
                 if task.state().is_completed() {
                     self.cache.store().complete_ops(&pid, &tid, &r#type).await?;
                 } else {
-                    match self.queue.send(&task) {
+                    match self.queue.send(&proc, &task) {
                         Ok(()) => {
                             if let Err(err) = self.cache.mark_op_dispatched(&op).await {
                                 error!(error = %err, pid = %pid, tid = %tid, "failed to mark replayed exec dispatched");
@@ -701,7 +701,7 @@ impl Runtime {
                     }
                 }
             } else if r#type == data::OpType::Error.as_ref() {
-                match self.queue.send_error(&task) {
+                match self.queue.send_error(&proc, &task) {
                     Ok(()) => {
                         if let Err(err) = self.cache.mark_op_dispatched(&op).await {
                             error!(error = %err, pid = %pid, tid = %tid, "failed to mark replayed error dispatched");
@@ -711,7 +711,7 @@ impl Runtime {
                     Err(err) => return Err(err),
                 }
             } else if r#type == data::OpType::Abort.as_ref() {
-                match self.queue.send_abort(&task) {
+                match self.queue.send_abort(&proc, &task) {
                     Ok(()) => {
                         if let Err(err) = self.cache.mark_op_dispatched(&op).await {
                             error!(error = %err, pid = %pid, tid = %tid, "failed to mark replayed abort dispatched");
@@ -731,7 +731,7 @@ impl Runtime {
                 self.cache.store().close_deliveries(&pid, &tid).await?;
                 continue;
             } else {
-                match self.queue.send_next(&task) {
+                match self.queue.send_next(&proc, &task) {
                     Ok(()) => {
                         if let Err(err) = self.cache.mark_op_dispatched(&op).await {
                             error!(error = %err, pid = %pid, tid = %tid, "failed to mark replayed next dispatched");
@@ -845,7 +845,7 @@ impl Runtime {
                 // outside world (a client action, a sibling branch, its first
                 // run, a subflow's child process) owns an open record by
                 // design, so neither is a re-drive target
-                if has_live_descendant(&task) || !task.next_is_drivable() {
+                if has_live_descendant(&proc, &task) || !task.next_is_drivable() {
                     continue;
                 }
                 if !self.op_claims.may_retry(&key, now) {
@@ -858,7 +858,7 @@ impl Runtime {
                     store.complete_ops(&pid, &tid, &r#type).await?;
                     continue;
                 }
-                match self.queue.send_next(&task) {
+                match self.queue.send_next(&proc, &task) {
                     Ok(()) => {
                         if let Err(err) = self.cache.mark_op_dispatched(&op).await {
                             error!(error = %err, pid = %pid, tid = %tid, "failed to mark re-driven next dispatched");
@@ -904,11 +904,11 @@ impl Runtime {
             }
 
             let queued = if r#type == data::OpType::Error.as_ref() {
-                self.queue.send_error(&task)
+                self.queue.send_error(&proc, &task)
             } else if r#type == data::OpType::Abort.as_ref() {
-                self.queue.send_abort(&task)
+                self.queue.send_abort(&proc, &task)
             } else {
-                self.queue.send(&task)
+                self.queue.send(&proc, &task)
             };
             match queued {
                 Ok(()) => {
@@ -1017,14 +1017,14 @@ impl Runtime {
                 let state = task.state();
                 let redispatched_task = match state {
                     TaskState::None | TaskState::Ready => Some(task),
-                    TaskState::Running if task.children().is_empty() => {
+                    TaskState::Running if task.children(proc).is_empty() => {
                         task.set_pure_state(TaskState::Ready);
                         Some(task)
                     }
                     _ => None,
                 };
                 if let Some(task) = redispatched_task {
-                    self.push(&task)?;
+                    self.push(proc, &task)?;
                     redispatched += 1;
                 }
             }
@@ -1141,7 +1141,7 @@ impl Runtime {
         {
             error!(error = %err, "failed to mark operation effect-in-flight");
         }
-        let Some(ctx) = Self::isolate_context(task.clone(), proc).await else {
+        let Some(ctx) = Self::isolate_context(task.clone(), proc.clone()).await else {
             return;
         };
         let reporting_task = task.clone();
@@ -1152,7 +1152,7 @@ impl Runtime {
                     // never execute work for a process that is already over:
                     // a terminal walk can race a queued dispatch, and running
                     // it would grow the tree under a dead run
-                    if task.proc().is_some_and(|p| p.state().is_completed()) {
+                    if proc.state().is_completed() {
                         return true;
                     }
                     Self::run_exec_job(task, ctx).await;
@@ -1209,7 +1209,7 @@ impl Runtime {
                 return;
             }
             error!(error = %err, "task.exec failed");
-            task.set_err(&err.clone().into());
+            task.set_err(&ctx.proc, &err.clone().into());
             ctx.set_task(&task);
             ctx.emit_error().await.ok();
         }
@@ -1235,7 +1235,7 @@ impl Runtime {
                 return false;
             }
             error!(error = %err, "task.next failed");
-            task.set_err(&err.clone().into());
+            task.set_err(&ctx.proc, &err.clone().into());
             ctx.set_task(&task);
             ctx.emit_error().await.ok();
             // the propagation ended in error (terminal):
@@ -1290,9 +1290,7 @@ impl Runtime {
     }
 
     async fn isolate_context(task: Arc<Task>, proc: Arc<Process>) -> Option<Context> {
-        // Keep the queue item's process lease alive through context setup.
-        let _proc = proc;
-        match catch_unwind(AssertUnwindSafe(|| task.create_context())) {
+        match catch_unwind(AssertUnwindSafe(|| proc.create_context(&task))) {
             Ok(ctx) => Some(ctx),
             Err(payload) => {
                 error!(
@@ -1324,7 +1322,7 @@ impl Runtime {
         let err = Self::panic_payload_error(payload);
         error!(operation, error = %err, "scheduler operation panicked");
         let report_result = CatchPanic::new(async move {
-            task.set_err(&err.clone().into());
+            task.set_err(&ctx.proc, &err.clone().into());
             ctx.set_task(&task);
             ctx.emit_error().await.ok();
         })
@@ -1351,12 +1349,17 @@ impl Runtime {
         config.validate()?;
         // let scher = Scheduler::new();
         let env = Arc::new(Environment::new());
-        let cache = Arc::new(Cache::new(config, store)?);
-        let process_gate = ProcessGate::new(config.scheduler_workers());
+        // One pid → lane mapping for the scheduler family: the cache (to
+        // release assignments on removal), the event gate and the queue all
+        // route through it, so a process's jobs and handlers can never
+        // disagree about its lane.
+        let router = Arc::new(LaneRouter::new(config.scheduler_workers()));
+        let cache = Arc::new(Cache::new(config, store, router.clone())?);
+        let process_gate = ProcessGate::with_router(router);
         let emitter = Arc::new(Emitter::with_process_gate(process_gate.clone()));
         let package = Arc::new(Package::new());
-        // The same gate routes jobs: a lane is the pid hash both the queue and
-        // the event handlers use, so the two can never disagree.
+        // The same gate routes jobs: a lane is the pid mapping both the queue
+        // and the event handlers use, so the two can never disagree.
         let queue = Queue::new(config.scheduler_queue_cap(), process_gate);
         let shutdown = CancellationToken::new();
         let schema_cache = Arc::new(SchemaCache::new());
@@ -1394,7 +1397,7 @@ impl Runtime {
                 debug!(pid = %proc.id(), "proc event");
                 if let Some(root) = proc.root() {
                     let state = proc.state();
-                    let mut message = root.create_message();
+                    let mut message = root.create_message(&proc);
                     if state.is_running() || state.is_pending() {
                         let emitter = rt.emitter().clone();
                         emitter.emit_start_event(&message);
@@ -1489,7 +1492,14 @@ impl Runtime {
 
                     // check task is allowed to emit message to client
                     if !e.state().is_pending() && !e.state().is_running() && e.is_emit() {
-                        let msg = e.create_message();
+                        // the engine always pairs a task event with its process;
+                        // without it the message (which needs the workflow model)
+                        // cannot be built
+                        let Some(proc) = e.extra().proc.clone() else {
+                            error!(pid = %e.pid, tid = %e.id, "task event without a process; message skipped");
+                            return;
+                        };
+                        let msg = e.inner().create_message(&proc);
                         debug!(pid = %msg.pid, tid = %msg.tid, name = %msg.name, "emit message");
                         let emitter = rt.emitter().clone();
                         emitter.emit_message(&msg);
@@ -1628,7 +1638,7 @@ impl Runtime {
         Ok(())
     }
 
-    async fn return_to_act(self: &Arc<Self>, pid: &str, tid: &str, proc: &Process) {
+    async fn return_to_act(self: &Arc<Self>, pid: &str, tid: &str, proc: &Arc<Process>) {
         debug!(pid = %pid, tid = %tid, "return to act");
         let state = proc.state();
         // process.print();

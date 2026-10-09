@@ -195,7 +195,7 @@ async fn sch_vars_get_with_script() {
         proc.task_by_nid("step1")
             .first()
             .unwrap()
-            .inputs()
+            .inputs(&proc.create_context(&proc.task_by_nid("step1").first().unwrap().clone()))
             .get_value("var2")
             .unwrap(),
         &json!(10)
@@ -231,7 +231,7 @@ async fn sch_vars_get_with_not_exists() {
         proc.task_by_nid("step1")
             .first()
             .unwrap()
-            .inputs()
+            .inputs(&proc.create_context(&proc.task_by_nid("step1").first().unwrap().clone()))
             .get_value("var2")
             .unwrap(),
         &json!(null)
@@ -270,7 +270,7 @@ async fn sch_vars_output_only_key_name() {
         proc.task_by_nid("step1")
             .first()
             .unwrap()
-            .outputs()
+            .outputs(&proc.create_context(&proc.task_by_nid("step1").first().unwrap().clone()))
             .get_value("var1")
             .unwrap(),
         &json!(10)
@@ -344,7 +344,7 @@ async fn sch_vars_one_step_outputs() {
         proc.task_by_nid("step1")
             .first()
             .unwrap()
-            .outputs()
+            .outputs(&proc.create_context(&proc.task_by_nid("step1").first().unwrap().clone()))
             .get::<i64>("var1")
             .unwrap(),
         10
@@ -380,7 +380,7 @@ async fn sch_vars_step_default_expose() {
         proc.task_by_nid("step1")
             .first()
             .unwrap()
-            .outputs()
+            .outputs(&proc.create_context(&proc.task_by_nid("step1").first().unwrap().clone()))
             .get::<i64>("var1")
             .unwrap(),
         10
@@ -421,7 +421,7 @@ async fn sch_vars_step_expose_options() {
         proc.task_by_nid("step1")
             .first()
             .unwrap()
-            .outputs()
+            .outputs(&proc.create_context(&proc.task_by_nid("step1").first().unwrap().clone()))
             .get::<i64>("var1")
             .unwrap(),
         10
@@ -430,7 +430,7 @@ async fn sch_vars_step_expose_options() {
         proc.task_by_nid("step1")
             .first()
             .unwrap()
-            .outputs()
+            .outputs(&proc.create_context(&proc.task_by_nid("step1").first().unwrap().clone()))
             .get::<i64>("var2"),
         None
     );
@@ -474,7 +474,7 @@ async fn sch_vars_two_steps_outputs() {
         proc.task_by_nid("step1")
             .first()
             .unwrap()
-            .outputs()
+            .outputs(&proc.create_context(&proc.task_by_nid("step1").first().unwrap().clone()))
             .get::<i64>("var1")
             .unwrap(),
         10
@@ -483,7 +483,7 @@ async fn sch_vars_two_steps_outputs() {
         proc.task_by_nid("step2")
             .first()
             .unwrap()
-            .outputs()
+            .outputs(&proc.create_context(&proc.task_by_nid("step2").first().unwrap().clone()))
             .get::<i64>("var1")
             .unwrap(),
         20
@@ -564,7 +564,7 @@ async fn sch_vars_branch_outputs() {
         proc.task_by_nid("b1")
             .first()
             .unwrap()
-            .outputs()
+            .outputs(&proc.create_context(&proc.task_by_nid("b1").first().unwrap().clone()))
             .get::<i64>("var1")
             .unwrap(),
         10
@@ -603,7 +603,7 @@ async fn sch_vars_branch_default_expose() {
         proc.task_by_nid("b1")
             .first()
             .unwrap()
-            .outputs()
+            .outputs(&proc.create_context(&proc.task_by_nid("b1").first().unwrap().clone()))
             .get::<i64>("var1")
             .unwrap(),
         10
@@ -647,7 +647,7 @@ async fn sch_vars_branch_expose_options() {
         proc.task_by_nid("b1")
             .first()
             .unwrap()
-            .outputs()
+            .outputs(&proc.create_context(&proc.task_by_nid("b1").first().unwrap().clone()))
             .get::<i64>("var1")
             .unwrap(),
         10
@@ -656,7 +656,7 @@ async fn sch_vars_branch_expose_options() {
         proc.task_by_nid("b1")
             .first()
             .unwrap()
-            .outputs()
+            .outputs(&proc.create_context(&proc.task_by_nid("b1").first().unwrap().clone()))
             .get::<i64>("var2"),
         None
     );
@@ -701,7 +701,7 @@ async fn sch_vars_branch_one_step_outputs() {
         proc.task_by_nid("step1")
             .first()
             .unwrap()
-            .outputs()
+            .outputs(&proc.create_context(&proc.task_by_nid("step1").first().unwrap().clone()))
             .get::<i64>("var1")
             .unwrap(),
         100
@@ -751,7 +751,7 @@ async fn sch_vars_branch_two_steps_outputs() {
         proc.task_by_nid("step1")
             .first()
             .unwrap()
-            .outputs()
+            .outputs(&proc.create_context(&proc.task_by_nid("step1").first().unwrap().clone()))
             .get::<i64>("var1")
             .unwrap(),
         100
@@ -760,7 +760,7 @@ async fn sch_vars_branch_two_steps_outputs() {
         proc.task_by_nid("step2")
             .first()
             .unwrap()
-            .outputs()
+            .outputs(&proc.create_context(&proc.task_by_nid("step2").first().unwrap().clone()))
             .get::<i64>("var1")
             .unwrap(),
         200
@@ -910,7 +910,9 @@ async fn sch_vars_act_default_expose() {
         proc.task_by_params("key", "act1")
             .first()
             .unwrap()
-            .outputs()
+            .outputs(
+                &proc.create_context(&proc.task_by_params("key", "act1").first().unwrap().clone())
+            )
             .get::<i64>("var1")
             .unwrap(),
         10
@@ -951,7 +953,9 @@ async fn sch_vars_act_expose() {
         proc.task_by_params("key", "act1")
             .first()
             .unwrap()
-            .outputs()
+            .outputs(
+                &proc.create_context(&proc.task_by_params("key", "act1").first().unwrap().clone())
+            )
             .get::<i64>("var1")
             .unwrap(),
         10
@@ -960,7 +964,9 @@ async fn sch_vars_act_expose() {
         proc.task_by_params("key", "act1")
             .first()
             .unwrap()
-            .outputs()
+            .outputs(
+                &proc.create_context(&proc.task_by_params("key", "act1").first().unwrap().clone())
+            )
             .get::<i64>("var2")
             .unwrap(),
         20
@@ -1069,7 +1075,7 @@ async fn sch_vars_get_global_vars() {
         proc.task_by_nid("step1")
             .first()
             .unwrap()
-            .find::<String>("a")
+            .find::<String>(&proc, "a")
             .unwrap(),
         "abc"
     );
@@ -1103,7 +1109,9 @@ async fn sch_vars_act_inputs_from_step() {
         proc.task_by_params("key", "act1")
             .first()
             .unwrap()
-            .inputs()
+            .inputs(
+                &proc.create_context(&proc.task_by_params("key", "act1").first().unwrap().clone())
+            )
             .get::<String>("a")
             .unwrap(),
         "abc"
@@ -1161,11 +1169,11 @@ async fn sch_vars_override_global_vars() {
     // paths are unchanged and agree, because all of them read from the current
     // scope outwards.
     assert_eq!(step1.data().get::<i32>("a").unwrap(), json!(10));
-    assert_eq!(step1.find::<i32>("a").unwrap(), json!(10));
-    assert_eq!(step1.vars().get::<i32>("a").unwrap(), json!(10));
+    assert_eq!(step1.find::<i32>(&proc, "a").unwrap(), json!(10));
+    assert_eq!(step1.vars(&proc).get::<i32>("a").unwrap(), json!(10));
     assert_eq!(proc.data().get::<String>("a").unwrap(), json!("abc"));
     assert_eq!(
-        proc.root().unwrap().find::<String>("a").unwrap(),
+        proc.root().unwrap().find::<String>(&proc, "a").unwrap(),
         json!("abc")
     );
 }
@@ -1219,8 +1227,8 @@ async fn sch_vars_override_step_vars() {
     // it — the IRQ act is still waiting, so nothing propagates. The act's own
     // reads agree with each other (they start from the act's scope).
     assert_eq!(act1.data().get::<i32>("a").unwrap(), json!(10));
-    assert_eq!(act1.find::<i32>("a").unwrap(), json!(10));
-    assert_eq!(act1.vars().get::<i32>("a").unwrap(), json!(10));
+    assert_eq!(act1.find::<i32>(&proc, "a").unwrap(), json!(10));
+    assert_eq!(act1.vars(&proc).get::<i32>("a").unwrap(), json!(10));
     assert_eq!(
         proc.task_by_nid("step1")
             .first()
@@ -1267,7 +1275,7 @@ async fn sch_vars_private_vars() {
         proc.task_by_nid("step1")
             .first()
             .unwrap()
-            .find::<String>("__a")
+            .find::<String>(&proc, "__a")
             .unwrap(),
         "abc"
     );
@@ -1328,7 +1336,7 @@ async fn sch_vars_error_refreshes_scope_from_inputs() {
     step2.update_data(&Vars::new().with("a", json!("local")).with("b", json!(1)));
     assert_eq!(step2.data().get::<String>("a").unwrap(), "local");
 
-    step2.set_err(&Error::new("boom", "err1"));
+    step2.set_err(&proc, &Error::new("boom", "err1"));
 
     assert!(step2.state().is_error());
     assert_eq!(

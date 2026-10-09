@@ -18,7 +18,10 @@
 //! claim only says whether doing it again would race a live job — so a record
 //! left behind by a dead engine is still recovered by the boot replay.
 
-use crate::{data::OpType, scheduler::Task};
+use crate::{
+    data::OpType,
+    scheduler::{Process, Task},
+};
 use parking_lot::Mutex;
 use std::{
     collections::HashMap,
@@ -264,13 +267,13 @@ impl Drop for OpClaim {
 /// `next`, which is what closes their open outbox records. A task whose
 /// subtree is entirely terminal has no such path left, so an open record of it
 /// is only finished by the liveness pass.
-pub(crate) fn has_live_descendant(task: &Arc<Task>) -> bool {
-    let mut stack = task.children();
+pub(crate) fn has_live_descendant(proc: &Arc<Process>, task: &Arc<Task>) -> bool {
+    let mut stack = task.children(proc);
     while let Some(t) = stack.pop() {
         if !t.state().is_completed() {
             return true;
         }
-        stack.extend(t.children());
+        stack.extend(t.children(proc));
     }
     false
 }
@@ -415,13 +418,13 @@ mod tests {
                 .unwrap();
             (root, step)
         };
-        root.set_state(crate::TaskState::Running);
-        step.set_state(crate::TaskState::Running);
-        assert!(has_live_descendant(&root));
-        assert!(!has_live_descendant(&step));
+        root.set_state(&proc, crate::TaskState::Running);
+        step.set_state(&proc, crate::TaskState::Running);
+        assert!(has_live_descendant(&proc, &root));
+        assert!(!has_live_descendant(&proc, &step));
 
-        step.set_state(crate::TaskState::Skipped);
-        assert!(!has_live_descendant(&root));
+        step.set_state(&proc, crate::TaskState::Skipped);
+        assert!(!has_live_descendant(&proc, &root));
     }
 
     /// Which task states leave a `next` pass work to do: the re-drive
@@ -449,14 +452,14 @@ mod tests {
             TaskState::Pending,
             TaskState::Interrupt,
         ] {
-            step.set_state(waiting.clone());
+            step.set_state(&proc, waiting.clone());
             assert!(
                 !step.next_is_drivable(),
                 "a task in {waiting} waits on the outside world"
             );
         }
 
-        step.set_state(TaskState::Running);
+        step.set_state(&proc, TaskState::Running);
         assert!(
             step.next_is_drivable(),
             "a running task can complete itself"
@@ -472,7 +475,7 @@ mod tests {
             TaskState::Removed,
             TaskState::Aborted,
         ] {
-            step.set_state(terminal.clone());
+            step.set_state(&proc, terminal.clone());
             step.set_propagation_phase(crate::scheduler::PropagationPhase::None);
             assert!(
                 !step.next_is_drivable(),

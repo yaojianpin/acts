@@ -10,4 +10,4 @@ pub mod test;
 
 pub use convert::*;
 pub use id::*;
-pub(crate) use lane::pid_lane;
+pub(crate) use lane::{LaneRouter, shared};

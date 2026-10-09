@@ -648,7 +648,7 @@ async fn snapshot_injects_sealed_data() {
 
     // config should be in root task sealed_data
     let root = proc.root().unwrap();
-    let profile = root.sealed("profile").unwrap();
+    let profile = root.sealed(&proc, "profile").unwrap();
     let secrets = profile.get::<Vars>("secrets").unwrap();
     assert_eq!(secrets.get::<String>("TOKEN").unwrap(), "abc123");
     let vars = profile.get::<Vars>("vars").unwrap();
@@ -698,7 +698,7 @@ async fn sealed_data_js_dollar_profile_access() {
     sig.recv().await;
 
     let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
-    let context = task.create_context();
+    let context = task.create_context(&proc);
     Context::scope(&context, || {
         // test $profile.permissions (array access)
         let result = env.eval::<Vec<String>>("$profile.permissions").unwrap();
@@ -800,12 +800,12 @@ async fn snapshot_sealed_data_inherits_from_parent() {
 
     // root task has sealed data
     let root = proc.root().unwrap();
-    let root_profile = root.sealed("profile").unwrap();
+    let root_profile = root.sealed(&proc, "profile").unwrap();
     assert_eq!(root_profile.get::<String>("scope").unwrap(), "workflow");
 
     // child task inherits sealed data from parent
     let child = proc.task_by_params("key", "act1").last().cloned().unwrap();
-    let child_profile = child.sealed("profile").unwrap();
+    let child_profile = child.sealed(&proc, "profile").unwrap();
     assert_eq!(child_profile.get::<String>("scope").unwrap(), "workflow");
 }
 #[serial]
@@ -1040,14 +1040,21 @@ async fn snapshot_per_proc_pins_value_until_process_ends() {
 
     // root sealed the value once at process start
     assert_eq!(
-        root.sealed("profile").unwrap().get::<i32>("val").unwrap(),
+        root.sealed(&proc, "profile")
+            .unwrap()
+            .get::<i32>("val")
+            .unwrap(),
         1
     );
     // the descendant did NOT re-resolve after the mid-run refresh — it
     // inherited the pinned value from its lineage
     assert!(!step2.has_sealed_local("profile"));
     assert_eq!(
-        step2.sealed("profile").unwrap().get::<i32>("val").unwrap(),
+        step2
+            .sealed(&proc, "profile")
+            .unwrap()
+            .get::<i32>("val")
+            .unwrap(),
         1
     );
     // the cache itself moved on; the next process will see rev 2
@@ -1130,12 +1137,19 @@ async fn snapshot_per_task_reads_latest_value() {
 
     // every new task re-reads the cache: step2 sees the refreshed v2
     assert_eq!(
-        root.sealed("profile").unwrap().get::<i32>("val").unwrap(),
+        root.sealed(&proc, "profile")
+            .unwrap()
+            .get::<i32>("val")
+            .unwrap(),
         1
     );
     assert!(step2.has_sealed_local("profile"));
     assert_eq!(
-        step2.sealed("profile").unwrap().get::<i32>("val").unwrap(),
+        step2
+            .sealed(&proc, "profile")
+            .unwrap()
+            .get::<i32>("val")
+            .unwrap(),
         2
     );
 }
@@ -1223,7 +1237,7 @@ async fn snapshot_scope_keyed_by_task_params() {
     // each task seals the snapshot of ITS scope (unit param)
     assert_eq!(
         step1
-            .sealed("profile")
+            .sealed(&proc, "profile")
             .unwrap()
             .get::<String>("val")
             .unwrap(),
@@ -1231,7 +1245,7 @@ async fn snapshot_scope_keyed_by_task_params() {
     );
     assert_eq!(
         step2
-            .sealed("profile")
+            .sealed(&proc, "profile")
             .unwrap()
             .get::<String>("val")
             .unwrap(),
@@ -1285,7 +1299,7 @@ async fn snapshot_per_proc_js_access_inherits_on_child() {
     let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
     // the child itself must not carry sealed data — it inherits from root
     assert!(!task.has_sealed_local("profile"));
-    let context = task.create_context();
+    let context = task.create_context(&proc);
     Context::scope(&context, || {
         let result = env.eval::<Vec<String>>("$profile.permissions").unwrap();
         assert_eq!(result, vec!["deploy".to_string(), "read_logs".to_string()]);
@@ -1341,7 +1355,7 @@ async fn an_unclaimed_run_reads_no_snapshot_scope() {
     // the cache still holds the value; it was the run's authority that did not
     assert_eq!(engine.snapshot().read("profile", "").unwrap().rev, 1);
     let root = proc.root().unwrap();
-    assert!(root.sealed("profile").is_none());
+    assert!(root.sealed(&proc, "profile").is_none());
     assert_eq!(proc.owner_scope(), crate::ScopePolicy::deny_all());
 }
 

@@ -94,7 +94,9 @@ impl Environment {
             var.default_data().unwrap_or_default()
         };
 
-        if let Ok(Some(vars)) = Context::try_with_current(|ctx| ctx.task().find::<Vars>(name)) {
+        if let Ok(Some(vars)) =
+            Context::try_with_current(|ctx| ctx.task().find::<Vars>(&ctx.proc, name))
+        {
             for (k, v) in vars.iter() {
                 data.set(k, v);
             }

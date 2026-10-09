@@ -15,7 +15,7 @@ impl ActTask for Step {
         if let Some(expr) = &self.r#if {
             let cond = ctx.eval::<bool>(expr)?;
             if !cond {
-                task.set_state(TaskState::Skipped);
+                task.set_state(&ctx.proc, TaskState::Skipped);
                 return Ok(());
             }
         }
@@ -26,7 +26,7 @@ impl ActTask for Step {
         if let Some(expr) = &self.r#while {
             let cond = ctx.eval::<bool>(expr)?;
             if !cond {
-                task.set_state(TaskState::Skipped);
+                task.set_state(&ctx.proc, TaskState::Skipped);
                 return Ok(());
             }
         }
@@ -38,10 +38,10 @@ impl ActTask for Step {
         // branch nor a restored process can repeat it. A branch that already
         // fired skips instead, which keeps the chain fall-through reaching the
         // branches that have not fired.
-        if let Some(owner) = task.timeout_owner() {
+        if let Some(owner) = task.timeout_owner(&ctx.proc) {
             let node_id = task.node().id();
             if !owner.claim_timeout(node_id) {
-                task.set_state(TaskState::Skipped);
+                task.set_state(&ctx.proc, TaskState::Skipped);
                 return Ok(());
             }
             if let Err(err) = ctx.runtime.cache().upsert_async(&owner).await {
@@ -60,7 +60,7 @@ impl ActTask for Step {
                 &Act {
                     name: self.name.clone(),
                     uses: uses.to_string(),
-                    params: task.params(),
+                    params: task.params(ctx),
                     options: self.options.clone(),
                     ..Default::default()
                 },
@@ -80,7 +80,7 @@ impl ActTask for Step {
         // uses, never through a raw `next`/`chain` jump: that path ignores the
         // markers, so a sibling that already fired (or is still in flight) would
         // gain a second task, once per tick.
-        if let Some(owner) = task.timeout_owner() {
+        if let Some(owner) = task.timeout_owner(&ctx.proc) {
             let state = task.state();
             if !state.is_skip() && !state.is_biz_success() {
                 return Ok(NextAction::Parent);
@@ -138,7 +138,7 @@ impl ActTask for Step {
         let children = task.node().children_in(NodeOutputKind::Catch);
         if task.sign().is_none() && !children.is_empty() {
             task.set_sign(Sign::ERROR);
-            task.set_state(TaskState::Running);
+            task.set_state(&ctx.proc, TaskState::Running);
             for child in &children {
                 ctx.sched_task_with_vars(
                     child,

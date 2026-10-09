@@ -1200,7 +1200,7 @@ mod tests {
         assert_eq!(
             proc.root()
                 .unwrap()
-                .sealed("secrets")
+                .sealed(&proc, "secrets")
                 .unwrap()
                 .get::<String>("TOKEN")
                 .unwrap(),
@@ -1288,7 +1288,15 @@ mod tests {
             proc.task_by_uses(crate::utils::test::USES_SET)
                 .first()
                 .unwrap()
-                .outputs()
+                .outputs(
+                    &proc.create_context(
+                        &proc
+                            .task_by_uses(crate::utils::test::USES_SET)
+                            .first()
+                            .unwrap()
+                            .clone()
+                    )
+                )
                 .get::<String>("dir")
                 .unwrap(),
             dir.display().to_string()

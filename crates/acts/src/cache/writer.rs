@@ -12,7 +12,7 @@ use crate::{
     ActError, Result,
     scheduler::Task,
     store::Store,
-    utils::{consts, pid_lane},
+    utils::{LaneRouter, consts},
 };
 
 pub(crate) enum WriteOp {
@@ -246,21 +246,32 @@ impl Backlog {
 /// room, instead of being admitted into a writer that is clearly behind.
 #[derive(Clone)]
 pub(crate) struct StoreWriter {
-    /// One sender per shard, indexed by the pid hash. `None` once `close` took
-    /// them, which is what makes later `send`/`flush` calls fail.
+    /// One sender per shard, indexed by the writer's [`LaneRouter`]. `None`
+    /// once `close` took them, which is what makes later `send`/`flush` calls
+    /// fail.
     ///
     /// Each queue is bounded by `capacity / shards` ops (at least one).
     senders: Arc<Mutex<Option<Vec<mpsc::Sender<WriteOp>>>>>,
     /// One consumer per shard; `close` joins them all.
     tasks: Arc<Mutex<Vec<JoinHandle<()>>>>,
+    /// The pid → shard mapping. Owned by the writer (its own router instance,
+    /// sized to the shard count) so shard skew stays balanced independently of
+    /// the scheduler lanes.
+    router: Arc<LaneRouter>,
     backlog: Arc<Backlog>,
 }
 
 impl StoreWriter {
     /// Spawn `shards` consumers (at least one), each with its own queue bounded
     /// by `capacity / shards` ops (at least one). They run on the ambient
-    /// tokio runtime.
-    pub(crate) fn spawn(store: Arc<Store>, shards: usize, capacity: usize) -> Self {
+    /// tokio runtime. Routing goes through `router`: pass the writer's own
+    /// router to keep its assignments stable and balanced.
+    pub(crate) fn spawn(
+        store: Arc<Store>,
+        shards: usize,
+        capacity: usize,
+        router: Arc<LaneRouter>,
+    ) -> Self {
         let shards = shards.max(1);
         let lane_capacity = (capacity.max(1) / shards).max(1);
         let backlog = Arc::new(Backlog::new(lane_capacity * shards));
@@ -270,6 +281,7 @@ impl StoreWriter {
             let (tx, mut rx) = mpsc::channel::<WriteOp>(lane_capacity);
             let store = store.clone();
             let backlog = backlog.clone();
+            let router = router.clone();
             tasks.push(tokio::spawn(async move {
                 // A consumer applies its shard's ops in FIFO order. Ordering is
                 // preserved across the whole writer: every op of a process is
@@ -292,7 +304,7 @@ impl StoreWriter {
                             let _ = ack.send(failed.take().map_or(Ok(()), Err));
                             Ok(())
                         }
-                        op => Self::apply(&store, op).await,
+                        op => Self::apply(&store, &router, op).await,
                     };
                     if let Err(err) = res {
                         error!("store writer error: {}", err);
@@ -308,6 +320,7 @@ impl StoreWriter {
         Self {
             senders: Arc::new(Mutex::new(Some(senders))),
             tasks: Arc::new(Mutex::new(tasks)),
+            router,
             backlog,
         }
     }
@@ -362,14 +375,14 @@ impl StoreWriter {
         Ok(())
     }
 
-    /// The sender of the shard `op` belongs to: a process always hashes to the
-    /// same shard (the mapping the scheduler lanes and the event gate use), so
-    /// its ops stay FIFO. The barrier hashes to shard 0, but `flush` is its
-    /// only producer and queues it on every shard.
+    /// The sender of the shard `op` belongs to: a process always maps to the
+    /// same shard (the writer's [`LaneRouter`]), so its ops stay FIFO. The
+    /// barrier maps to shard 0, but `flush` is its only producer and queues it
+    /// on every shard.
     fn route(&self, op: &WriteOp) -> Result<mpsc::Sender<WriteOp>> {
         let senders = self.senders.lock();
         let senders = senders.as_ref().ok_or_else(Self::closed)?;
-        let shard = op.pid().map_or(0, |pid| pid_lane(pid, senders.len()));
+        let shard = op.pid().map_or(0, |pid| self.router.lane_of(pid));
         Ok(senders[shard].clone())
     }
 
@@ -435,7 +448,7 @@ impl StoreWriter {
     }
 
     /// Block until every write previously queued for `pid` has been applied:
-    /// a barrier on the one shard the pid hashes to, where all of the pid's
+    /// a barrier on the one shard the pid maps to, where all of the pid's
     /// ops are FIFO. A pid-scoped read — a cache-miss load of the process —
     /// needs exactly this visibility (never a row older than the pid's
     /// pending writes) without paying [`Self::flush`]'s wait for the backlog
@@ -448,7 +461,7 @@ impl StoreWriter {
         let (tx, rx) = oneshot::channel();
         // Room first, then the count — a cancelled barrier must not stay in a
         // backlog it never queued (same discipline as `flush`).
-        let permit = senders[pid_lane(pid, senders.len())]
+        let permit = senders[self.router.lane_of(pid)]
             .reserve()
             .await
             .map_err(|_| Self::closed())?;
@@ -465,7 +478,7 @@ impl StoreWriter {
         self.senders.lock().clone()
     }
 
-    async fn apply(store: &Store, op: WriteOp) -> Result<()> {
+    async fn apply(store: &Store, router: &LaneRouter, op: WriteOp) -> Result<()> {
         match op {
             WriteOp::Task(task) => Self::apply_task(store, &task).await,
             WriteOp::CloseDeliveries { pid, tid } => {
@@ -525,6 +538,10 @@ impl StoreWriter {
             }
             WriteOp::RemoveProc { pid } => {
                 store.remove_proc(&pid).await?;
+                // The removal is durable: release the pid's shard assignment.
+                // Any late write for it is a dead write and may re-register on
+                // the next shard in turn.
+                router.forget(&pid);
                 Ok(())
             }
             WriteOp::StoreDelivery {
@@ -563,17 +580,10 @@ impl StoreWriter {
         // scope vars (e.g. the applied propagation phase) durable before any
         // outbox record queued after this write.
         store.persist_task_rows(task).await?;
-        if let Some(p) = task.proc() {
-            if p.state().is_completed() {
-                store
-                    .mark_proc_complete(&task.pid, p.end_time(), p.state())
-                    .await?;
-            }
-        } else if task.id == consts::TASK_ROOT_TID && task.state().is_completed() {
-            // The process instance is already gone (evicted and deallocated
-            // while this write was queued) — the root task's own state is the
-            // faithful terminal stamp, so the proc row still settles and the
-            // sweeper can remove it
+        // The root task's terminal state is what the proc state mirrors (see
+        // `Task::set_state`): its own lifecycle row settles the proc row when
+        // the run finishes.
+        if task.id == consts::TASK_ROOT_TID && task.state().is_completed() {
             store
                 .mark_proc_complete(&task.pid, task.end_time(), task.state())
                 .await?;
@@ -618,6 +628,7 @@ impl StoreWriter {
 mod tests {
     use super::*;
     use crate::store::{KvStore, MemoryStore, ScanOptions};
+    use crate::utils::shared;
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
@@ -780,20 +791,16 @@ mod tests {
     fn test_writer() -> (Arc<Store>, Arc<TestKv>, StoreWriter) {
         let kv = Arc::new(TestKv::new());
         let store = Arc::new(Store::new(kv.clone()));
-        let writer = StoreWriter::spawn(store.clone(), SHARDS, CAPACITY);
+        let writer = StoreWriter::spawn(store.clone(), SHARDS, CAPACITY, shared(SHARDS));
         (store, kv, writer)
     }
 
-    /// Two pids the writer routes to different shards, so their writes can be
-    /// in flight at the same time.
+    /// Two pids a fresh `shards`-shard writer assigns to distinct shards: the
+    /// round-robin router gives the first two registered pids shards 0 and 1,
+    /// so the callers must enqueue these before any other pid.
     fn pids_on_distinct_shards(shards: usize) -> (String, String) {
-        let a = "pids-a".to_string();
-        let lane = pid_lane(&a, shards);
-        let b = (0..shards)
-            .map(|i| format!("pids-b{i}"))
-            .find(|b| pid_lane(b, shards) != lane)
-            .expect("a pool of more shards than one pid cannot use has a free shard");
-        (a, b)
+        assert!(shards > 1, "distinct shards need more than one shard");
+        ("pids-a".to_string(), "pids-b".to_string())
     }
 
     async fn enqueue(writer: &StoreWriter, pid: &str) {
@@ -999,7 +1006,7 @@ mod tests {
     async fn writer_tracks_backlog_watermark() {
         let kv = Arc::new(TestKv::new());
         let store = Arc::new(Store::new(kv.clone()));
-        let writer = StoreWriter::spawn(store.clone(), SHARDS, CAPACITY);
+        let writer = StoreWriter::spawn(store.clone(), SHARDS, CAPACITY, shared(SHARDS));
 
         kv.arm_gate();
         enqueue(&writer, "p1").await;
@@ -1025,7 +1032,7 @@ mod tests {
         let kv = Arc::new(TestKv::new());
         let store = Arc::new(Store::new(kv.clone()));
         // one shard with one op of room, so the bound is observable
-        let writer = StoreWriter::spawn(store.clone(), 1, 1);
+        let writer = StoreWriter::spawn(store.clone(), 1, 1, shared(1));
         let op = |tid: &str| WriteOp::EnqueueNext {
             pid: "p1".to_string(),
             tid: tid.to_string(),
@@ -1065,7 +1072,7 @@ mod tests {
         let kv = Arc::new(TestKv::new());
         let store = Arc::new(Store::new(kv.clone()));
         // two shards with one op of room each
-        let writer = StoreWriter::spawn(store.clone(), 2, 2);
+        let writer = StoreWriter::spawn(store.clone(), 2, 2, shared(2));
         let (busy, idle) = pids_on_distinct_shards(2);
         let op = |pid: &str, tid: &str| WriteOp::EnqueueNext {
             pid: pid.to_string(),

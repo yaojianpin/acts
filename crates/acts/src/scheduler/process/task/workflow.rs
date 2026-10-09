@@ -20,10 +20,14 @@ impl ActTask for Workflow {
     async fn next(&self, ctx: &Context) -> Result<NextAction> {
         let task = ctx.task();
 
-        if task.children().iter().all(|t| t.state().is_completed()) {
+        if task
+            .children(&ctx.proc)
+            .iter()
+            .all(|t| t.state().is_completed())
+        {
             // only complete a workflow that is still running: a client abort
             // that landed while the children settled must stick
-            task.set_state_if_running(TaskState::Completed);
+            task.set_state_if_running(&ctx.proc, TaskState::Completed);
         }
         Ok(NextAction::Parent)
     }

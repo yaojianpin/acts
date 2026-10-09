@@ -4,6 +4,7 @@ use crate::scheduler::Runtime;
 use crate::utils::test::{USES_IRQ, auto_complete};
 use crate::{Action, Config, Engine, MessageState, Variant, Vars, Workflow, utils};
 use serde_json::json;
+use std::sync::Arc;
 
 use serial_test::serial;
 #[serial]
@@ -11,7 +12,12 @@ use serial_test::serial;
 async fn sch_scher_next() {
     let config = Config::default();
     let runtime = Runtime::new(&config, None).unwrap();
-    let cache = Cache::new(&config, None).unwrap();
+    let cache = Cache::new(
+        &config,
+        None,
+        Arc::new(utils::LaneRouter::new(config.scheduler_workers())),
+    )
+    .unwrap();
     let store = cache.store();
     let workflow = Workflow::new().with_id(&utils::longid());
 

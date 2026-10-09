@@ -165,11 +165,11 @@ async fn event_on_task() {
     let task = proc
         .create_task(proc.tree().root.as_ref().unwrap(), None)
         .unwrap();
-    task.set_state(TaskState::Running);
+    task.set_state(&proc, TaskState::Running);
     engine
         .runtime()
         .emitter()
-        .emit_task_event(&task)
+        .emit_task_event(&proc, &task)
         .await
         .unwrap();
 }
@@ -191,7 +191,7 @@ async fn event_start() {
     });
     proc.start().await.unwrap();
     if let Some(root) = proc.root() {
-        let message = root.create_message();
+        let message = root.create_message(&proc);
         evt.emit_start_event(&message);
     }
 }
@@ -213,7 +213,7 @@ async fn event_finished() {
 
     proc.start().await.unwrap();
     if let Some(root) = proc.root() {
-        let message = root.create_message();
+        let message = root.create_message(&proc);
         evt.emit_complete_event(&message);
     }
 }
@@ -236,7 +236,7 @@ async fn event_error() {
 
     proc.start().await.unwrap();
     if let Some(root) = proc.root() {
-        let message = root.create_message();
+        let message = root.create_message(&proc);
         evt.emit_error(&message);
     }
 }
@@ -261,7 +261,7 @@ async fn event_message_default() {
 
     proc.start().await.unwrap();
     if let Some(root) = proc.root() {
-        let message = root.create_message();
+        let message = root.create_message(&proc);
         evt.emit_message(&message);
     }
     let ret = s2.recv().await;
@@ -289,7 +289,7 @@ async fn event_message_dup_key() {
 
     proc.start().await.unwrap();
     if let Some(root) = proc.root() {
-        let message = root.create_message();
+        let message = root.create_message(&proc);
         evt.emit_message(&message);
     }
     let ret = s2.recv().await;
@@ -365,10 +365,10 @@ async fn event_terminal_exit_rehomes_queued_event() {
 
     proc.start().await.unwrap();
     let root = proc.root().unwrap();
-    evt.emit_error(&root.create_message());
+    evt.emit_error(&root.create_message(&proc));
     // the terminal handler is now running; queue a follow-up for the same pid
     entered.notified().await;
-    evt.emit_message(&root.create_message());
+    evt.emit_message(&root.create_message(&proc));
     release.notify_one();
 
     let received = tokio::time::timeout(std::time::Duration::from_secs(5), s2.recv())
@@ -433,11 +433,11 @@ async fn event_terminal_exit_rehomes_queued_delivery() {
     }
 
     // terminal event first: its handler holds the worker inside the loop
-    evt.emit_error(&root.create_message());
+    evt.emit_error(&root.create_message(&proc));
     entered.notified().await;
     // the retry timer re-sends a delivery of the same process; it is queued
     // behind the terminal event and the worker breaks right after it
-    evt.emit_delivery("client-1", &root.create_message());
+    evt.emit_delivery("client-1", &root.create_message(&proc));
     release.notify_one();
 
     tokio::time::timeout(std::time::Duration::from_secs(5), delivered.notified())
@@ -479,14 +479,14 @@ async fn event_route_replaces_an_abandoned_worker() {
     proc.start().await.unwrap();
     let root = proc.root().unwrap();
     // creates the process's worker; nothing is registered on the start key
-    evt.emit_start_event(&root.create_message());
+    evt.emit_start_event(&root.create_message(&proc));
     // the worker task is gone without the exit path that would have replaced
     // its entry — the sender now outlives its receiver
     evt.abandon_worker(proc.id());
 
     let msg = crate::Message {
         mid: "mid-1".to_string(),
-        ..root.create_message()
+        ..root.create_message(&proc)
     };
     evt.emit_message(&msg);
 

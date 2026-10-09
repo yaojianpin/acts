@@ -115,7 +115,7 @@ pub fn fill_outputs(outputs: &Vars, ctx: &Context) -> Vars {
         // rule 2
         if v.is_null() {
             // the env value
-            match ctx.task().find(k) {
+            match ctx.task().find(&ctx.proc, k) {
                 Some(v) => ret.insert(k.clone(), v),
                 None => ret.insert(k.clone(), v.clone()),
             };
@@ -144,7 +144,7 @@ pub fn fill_proc_vars(task: &Arc<Task>, values: &Vars, ctx: &Context) -> Vars {
         }
 
         // rule 2
-        match task.find::<JsonValue>(k) {
+        match task.find::<JsonValue>(&ctx.proc, k) {
             Some(v) => ret.insert(k.clone(), v.clone()),
             None => ret.insert(k.clone(), v.clone()),
         };

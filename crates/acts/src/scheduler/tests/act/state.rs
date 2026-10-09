@@ -385,7 +385,7 @@ async fn sch_act_state_set_process_var() {
         proc.task_by_params("key", "act1")
             .first()
             .unwrap()
-            .vars()
+            .vars(&proc)
             .get::<i32>("var1")
             .unwrap(),
         1

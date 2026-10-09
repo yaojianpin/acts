@@ -195,17 +195,18 @@ impl Process {
         self.with_env(|env| env.get::<std::path::PathBuf>(consts::PROC_WORKDIR))
     }
 
-    pub fn outputs(&self) -> Vars {
+    pub fn outputs(self: &Arc<Self>) -> Vars {
         if let Some(root) = self.root() {
-            return root.outputs();
+            let ctx = self.create_context(&root);
+            return root.outputs(&ctx);
         }
 
         Vars::new()
     }
 
-    pub fn inputs(&self) -> Vars {
+    pub fn inputs(self: &Arc<Self>) -> Vars {
         if let Some(task) = self.root() {
-            let ctx = task.create_context();
+            let ctx = task.create_context(self);
             return self.with_model(|model| utils::fill_proc_vars(&task, &model.vars(), &ctx));
         }
         Vars::new()
@@ -350,7 +351,7 @@ impl Process {
     /// one branch at one task. The tick itself is not a lane job (it runs on
     /// the process's timer and, in tests, directly), so the gate, not the lane,
     /// is what orders it.
-    pub(crate) async fn do_tick(&self) {
+    pub(crate) async fn do_tick(self: &Arc<Self>) {
         let _gate = self.runtime.emitter().process_gate().lock(&self.id).await;
         // only run the timeout check for tasks that are running or interrupted, since
         // tasks that are completed or skipped will not be timed out
@@ -358,7 +359,7 @@ impl Process {
             t.is_timeouts() && (t.state().is_running() || t.state().is_interrupted())
         });
         for t in tasks.iter() {
-            let ctx = t.create_context();
+            let ctx = t.create_context(self);
             if let Err(err) = t.on_timeout(&ctx).await {
                 error!(error = %err, "tick failed");
             }
@@ -408,7 +409,7 @@ impl Process {
             action.options = options;
         }
 
-        let ctx = task.create_context();
+        let ctx = task.create_context(self);
         ctx.set_action(&action)?;
         task.update(&ctx).await?;
         Ok(())
@@ -454,7 +455,7 @@ impl Process {
         self.init_tick();
 
         if let Some(task) = root {
-            self.runtime.dispatch_root(&task)?;
+            self.runtime.dispatch_root(self, &task)?;
         }
 
         Ok(())
@@ -483,7 +484,7 @@ impl Process {
 
             if task.node().level > prev.node().level {
                 task.set_parent(&prev.id);
-            } else if let Some(parent) = prev.parent() {
+            } else if let Some(parent) = prev.parent(self) {
                 task.set_parent(&parent.id);
             }
         }
@@ -600,7 +601,7 @@ impl Process {
         })
     }
 
-    fn init_tick(&self) {
+    fn init_tick(self: &Arc<Self>) {
         // Start per-process tick loop
         #[cfg(not(test))]
         let interval_ms = {

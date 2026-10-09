@@ -54,7 +54,7 @@ impl std::fmt::Debug for Context {
 
 impl Context {
     fn init_vars(&self, task: &Arc<Task>) {
-        let inputs = task.inputs();
+        let inputs = task.inputs(self);
         debug!(inputs = %inputs, "init vars");
 
         // set the inputs to task's data
@@ -175,14 +175,15 @@ impl Context {
             // per-proc: freeze on the first lineage seal; every descendant
             // inherits the pinned value (sealed() walks the parent chain,
             // so a resumed/retried task also keeps its first value)
-            if options.policy == SnapshotPolicy::PerProc && task.sealed(&name).is_some() {
+            if options.policy == SnapshotPolicy::PerProc && task.sealed(&self.proc, &name).is_some()
+            {
                 continue;
             }
             // retry determinism: this task row already carries a value
             if task.has_sealed_local(&name) {
                 continue;
             }
-            let values = match resolve_scope_params(&task, options) {
+            let values = match resolve_scope_params(&task, &self.proc, options) {
                 Ok(values) => values,
                 Err(missing) => match options.on_missing {
                     MissingParamAction::Skip => continue,
@@ -318,7 +319,7 @@ impl Context {
         }
         debug!(nid = %node.id(), kind = %node.kind(), name = %node.name(), "task scheduled");
         let task = self.proc.create_task(node, Some(prev))?;
-        self.runtime.push(&task)?;
+        self.runtime.push(&self.proc, &task)?;
         Ok(())
     }
 
@@ -339,7 +340,7 @@ impl Context {
         debug!(nid = %node.id(), kind = %node.kind(), name = %node.name(), "task scheduled");
         let task = self.proc.create_task(node, Some(parent))?;
         task.set_data(&vars);
-        self.runtime.push(&task)?;
+        self.runtime.push(&self.proc, &task)?;
         Ok(())
     }
 
@@ -366,7 +367,7 @@ impl Context {
             && !existing.state().is_completed()
         {
             if existing.state().is_none() {
-                self.runtime.push(&existing)?;
+                self.runtime.push(&self.proc, &existing)?;
             }
             return Ok(());
         }
@@ -397,7 +398,7 @@ impl Context {
     pub fn schedule_visited(&self, node: &Arc<Node>, prev: Arc<Task>) -> Result<bool> {
         if let Some(existing) = self.proc.task_for_node_prev(node.id(), &prev.id) {
             if existing.state().is_none() {
-                self.runtime.push(&existing)?;
+                self.runtime.push(&self.proc, &existing)?;
                 return Ok(true);
             }
             return Ok(false);
@@ -432,7 +433,7 @@ impl Context {
             )?;
             let task = self.proc.create_task(&node, Some(task))?;
             task.set_data(&vars);
-            self.runtime.push(&task)?;
+            self.runtime.push(&self.proc, &task)?;
         }
 
         Ok(())
@@ -486,31 +487,31 @@ impl Context {
                 return Ok(());
             }
             let task = self.proc.create_task(task.node(), Some(prev_task))?;
-            self.runtime.push(&task)?;
+            self.runtime.push(&self.proc, &task)?;
         }
 
         Ok(())
     }
 
     pub async fn back_task(&self, task: &Arc<Task>, paths: &Vec<Arc<Task>>) -> Result<()> {
-        for task in task.siblings().iter() {
+        for task in task.siblings(&self.proc).iter() {
             if task.state().is_completed() {
                 continue;
             }
-            task.set_state(TaskState::Skipped);
+            task.set_state(&self.proc, TaskState::Skipped);
             self.emit_task(task).await?;
         }
 
-        task.set_state(TaskState::Backed);
+        task.set_state(&self.proc, TaskState::Backed);
         self.emit_task(task).await?;
 
         // marks the state in the paths
         for p in paths {
             if p.state().is_running() {
-                p.set_state(TaskState::Completed);
+                p.set_state(&self.proc, TaskState::Completed);
                 self.emit_task(p).await?;
             } else if p.state().is_pending() {
-                p.set_state(TaskState::Skipped);
+                p.set_state(&self.proc, TaskState::Skipped);
                 self.emit_task(p).await?;
             }
         }
@@ -520,46 +521,48 @@ impl Context {
 
     pub async fn abort_task(&self, task: &Arc<Task>) -> Result<()> {
         // abort all task's acts
-        for task in task.siblings().iter() {
+        for task in task.siblings(&self.proc).iter() {
             if task.state().is_completed() {
                 continue;
             }
-            task.set_state(TaskState::Skipped);
+            task.set_state(&self.proc, TaskState::Skipped);
             self.emit_task(task).await?;
         }
 
-        task.set_state(TaskState::Aborted);
+        task.set_state(&self.proc, TaskState::Aborted);
         task.set_data(&self.vars());
         task.set_propagation_phase(crate::scheduler::PropagationPhase::Applied);
         self.emit_task(task).await?;
 
         // abort all running task
         let ctx = self;
-        let mut parent = task.parent();
+        let mut parent = task.parent(&self.proc);
         let mut prev = task.clone();
         while let Some(task) = parent {
-            task.set_state(TaskState::Aborted);
+            task.set_state(&self.proc, TaskState::Aborted);
             ctx.set_task(&task);
             if prev.is_kind(NodeKind::Act) {
                 // the act's outputs fold into its parent — one hop; the
-                // parent's own walk carries them further up
-                task.update_data(&prev.outputs());
+                // parent's own walk carries them further up. The outputs are
+                // read in the act's own scope (its context, not `ctx`).
+                let prev_ctx = self.proc.create_context(&prev);
+                task.update_data(&prev.outputs(&prev_ctx));
             }
             task.set_propagation_phase(crate::scheduler::PropagationPhase::Applied);
             ctx.emit_task(&ctx.task()).await?;
 
-            for t in task.children() {
+            for t in task.children(&self.proc) {
                 if t.state().is_pending() {
-                    t.set_state(TaskState::Skipped);
+                    t.set_state(&self.proc, TaskState::Skipped);
                     ctx.emit_task(&t).await?;
                 } else if t.state().is_running() {
-                    t.set_state(TaskState::Aborted);
+                    t.set_state(&self.proc, TaskState::Aborted);
                     ctx.emit_task(&t).await?;
                 }
             }
 
             prev = task.clone();
-            parent = task.parent();
+            parent = task.parent(&self.proc);
         }
         Ok(())
     }
@@ -599,22 +602,22 @@ impl Context {
         }
 
         // cancel all of the task's children
-        let mut children = task.children();
+        let mut children = task.children(&self.proc);
         while !children.is_empty() {
             let mut nexts = Vec::new();
             for t in &children {
                 if t.state().is_completed() {
                     continue;
                 }
-                t.set_state(TaskState::Cancelled);
+                t.set_state(&self.proc, TaskState::Cancelled);
                 self.emit_task(t).await?;
                 self.close_decided_propagation(t).await;
-                nexts.extend_from_slice(&t.children());
+                nexts.extend_from_slice(&t.children(&self.proc));
             }
 
             children = nexts;
         }
-        task.set_state(TaskState::Completed);
+        task.set_state(&self.proc, TaskState::Completed);
         self.emit_task(task).await?;
         self.close_decided_propagation(task).await;
 
@@ -630,13 +633,13 @@ impl Context {
             // after emitting, re-check the task state
             if task.state().is_error()
                 && let Some(err) = task.err()
-                && let Some(parent) = task.parent()
+                && let Some(parent) = task.parent(&self.proc)
             {
-                parent.set_err(&err);
+                parent.set_err(&self.proc, &err);
                 if task.is_kind(NodeKind::Act) {
                     // the errored act's outputs fold into its parent — one
                     // hop; the error walk carries the outcome further up
-                    parent.update_data(&task.outputs());
+                    parent.update_data(&task.outputs(self));
                 }
                 parent.set_propagation_phase(crate::scheduler::PropagationPhase::Applied);
                 // boxed: the parent chain can recurse back into `emit_error`
@@ -661,7 +664,10 @@ impl Context {
             self.runtime.emitter().emit_proc_event(&self.proc).await;
         }
 
-        self.runtime.emitter().emit_task_event(task).await?;
+        self.runtime
+            .emitter()
+            .emit_task_event(&self.proc, task)
+            .await?;
 
         // on workflow complete
         if let NodeContent::Workflow(_) = &task.node().content
@@ -727,6 +733,6 @@ impl Context {
     /// the task state is flushed and a `Pending` outbox record is written
     /// before the in-memory queue dispatch.
     pub async fn push_next(&self) -> Result<()> {
-        self.runtime.enqueue_next(&self.task()).await
+        self.runtime.enqueue_next(&self.proc, &self.task()).await
     }
 }

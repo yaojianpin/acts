@@ -21,10 +21,7 @@ use parking_lot::RwLock;
 use serde::de::DeserializeOwned;
 use serde_json::json;
 use std::sync::Arc;
-use std::sync::{
-    Weak,
-    atomic::{AtomicBool, AtomicU64, Ordering},
-};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, instrument};
 
@@ -78,12 +75,6 @@ pub struct Task {
     // parent tid
     parent: ShareLock<Option<String>>,
 
-    /// The owning process — held `Weak` so the process owns its task tree
-    /// without a `Process → Task → Process` reference cycle: an evicted
-    /// finished process is freed even though its tasks still reference it
-    /// (see [`Self::proc`])
-    proc: Weak<Process>,
-
     node: Arc<Node>,
 
     /// Serializes one task's action applications (see [`Self::enter_action`]):
@@ -116,7 +107,6 @@ impl Task {
             next: Arc::new(RwLock::new(Vec::new())),
             parent: Arc::new(RwLock::new(None)),
             timestamp: utils::time::timestamp(),
-            proc: Arc::downgrade(proc),
             action_lock: Arc::new(tokio::sync::Mutex::new(())),
             runtime: rt.clone(),
         }
@@ -124,26 +114,6 @@ impl Task {
 
     pub fn unique_id(&self) -> String {
         format!("{}:{}", self.pid, self.id)
-    }
-
-    /// The process this task belongs to, if it is still alive. The task holds
-    /// its process only `Weak`ly (the process owns the task tree), so this is
-    /// `None` only for a task clone that outlived its evicted, finished
-    /// process — engine-driven paths always run against a live process.
-    pub fn proc(&self) -> Option<Arc<Process>> {
-        self.proc.upgrade()
-    }
-
-    /// The process for execution-time paths, which structurally require it to
-    /// be alive (a context, message or the process itself cannot be built for
-    /// a deallocated process).
-    fn expect_proc(&self) -> Arc<Process> {
-        self.proc.upgrade().unwrap_or_else(|| {
-            panic!(
-                "task '{}:{}' is used after its process was deallocated (evicted)",
-                self.pid, self.id
-            )
-        })
     }
 
     pub(crate) fn runtime(&self) -> &Arc<Runtime> {
@@ -328,17 +298,18 @@ impl Task {
             self.set_sign(Sign::NO_AUTO_COMPLETE);
         }
     }
-    pub fn create_context(self: &Arc<Self>) -> Context {
-        self.expect_proc().create_context(self)
+    pub fn create_context(self: &Arc<Self>, proc: &Arc<Process>) -> Context {
+        proc.create_context(self)
     }
 
-    pub fn create_message(self: &Arc<Self>) -> Message {
-        let workflow = self.expect_proc().model();
+    pub fn create_message(self: &Arc<Self>, proc: &Arc<Process>) -> Message {
+        let ctx = self.create_context(proc);
+        let workflow = proc.model();
         // if it is act, insert the step_node_id and step_task_id to the inputs
         // it is necessary to find the relation between the step and it's children acts
-        let mut inputs = self.inputs();
+        let mut inputs = self.inputs(&ctx);
         if self.node.kind() == NodeKind::Act {
-            let mut parent = self.parent();
+            let mut parent = self.parent(proc);
             while let Some(task) = parent {
                 if task.is_kind(NodeKind::Step) {
                     inputs.insert(
@@ -351,11 +322,11 @@ impl Task {
                     );
                     break;
                 }
-                parent = task.parent();
+                parent = task.parent(proc);
             }
 
             // append act.params to inputs
-            inputs.set(consts::ACT_PARAMS_KEY, self.params());
+            inputs.set(consts::ACT_PARAMS_KEY, self.params(&ctx));
         }
 
         // append act.optins to inputs
@@ -389,7 +360,7 @@ impl Task {
             mid: workflow.id.clone(),
             uses: self.node.uses(),
             inputs,
-            outputs: self.outputs(),
+            outputs: self.outputs(&ctx),
             start_time: self.start_time(),
             end_time: self.end_time(),
             retry_times: 0,
@@ -412,21 +383,16 @@ impl Task {
         ret.clone()
     }
 
-    pub fn parent(&self) -> Option<Arc<Task>> {
+    pub fn parent(&self, proc: &Arc<Process>) -> Option<Arc<Task>> {
         let parent = self.parent.read().clone()?;
-        self.proc()?.task(&parent)
+        proc.task(&parent)
     }
 
-    pub fn children(&self) -> Vec<Arc<Self>> {
-        self.proc()
-            .map(|proc| proc.children(&self.id))
-            .unwrap_or_default()
+    pub fn children(&self, proc: &Arc<Process>) -> Vec<Arc<Self>> {
+        proc.children(&self.id)
     }
 
-    pub fn next(&self) -> Vec<Arc<Self>> {
-        let Some(proc) = self.proc() else {
-            return Vec::new();
-        };
+    pub fn next(&self, proc: &Arc<Process>) -> Vec<Arc<Self>> {
         let mut ret = Vec::new();
         let nexts = self.next_ids();
         for tid in &nexts {
@@ -437,34 +403,35 @@ impl Task {
         ret
     }
 
-    pub fn siblings(&self) -> Vec<Arc<Self>> {
+    pub fn siblings(&self, proc: &Arc<Process>) -> Vec<Arc<Self>> {
         let mut ret = Vec::new();
-        if let Some(parent) = self.parent() {
-            let children = parent.children();
+        if let Some(parent) = self.parent(proc) {
+            let children = parent.children(proc);
             ret.extend(children.iter().filter(|iter| iter.id != self.id).cloned());
         }
 
         ret
     }
 
-    pub fn inputs(self: &Arc<Self>) -> Vars {
-        let ctx = self.create_context();
+    pub fn inputs(self: &Arc<Self>, ctx: &Context) -> Vars {
         let mut inputs = Vars::new();
         if let Some(prev) = self.prev_id()
-            && let Some(prev_task) = self.proc().and_then(|proc| proc.task(&prev))
+            && let Some(prev_task) = ctx.proc.task(&prev)
         {
-            // set the prev task's outputs as current inputs
-            for (ref k, v) in &prev_task.outputs() {
+            // set the prev task's outputs as current inputs. The outputs are
+            // read in the prev task's own scope (its context, not `ctx`): the
+            // exposes/expressions it fills are its own.
+            let prev_ctx = ctx.proc.create_context(&prev_task);
+            for (k, v) in prev_task.outputs(&prev_ctx).iter() {
                 inputs.set(k, v.clone());
             }
         }
         // merge the node vars
-        let vars = utils::fill_inputs(&self.node.content.vars(), &ctx);
+        let vars = utils::fill_inputs(&self.node.content.vars(), ctx);
         inputs.extend(vars)
     }
 
-    pub fn outputs(self: &Arc<Self>) -> Vars {
-        let ctx = self.create_context();
+    pub fn outputs(self: &Arc<Self>, ctx: &Context) -> Vars {
         let mut outputs = Vars::new();
         let mut exposes = self.node.content.exposes().clone();
         if exposes.is_empty() {
@@ -479,23 +446,22 @@ impl Task {
             }
         } else {
             // export all data except the private ones
-            for (key, _) in ctx.task().data().iter() {
+            for (key, _) in self.data().iter() {
                 if !consts::is_private_key(key) {
                     outputs.set(key, json!(null))
                 }
             }
         }
 
-        utils::fill_outputs(&outputs, &ctx)
+        utils::fill_outputs(&outputs, ctx)
     }
 
     pub fn options(self: &Arc<Self>) -> Vars {
         self.node.content.options()
     }
 
-    pub fn params(self: &Arc<Self>) -> serde_json::Value {
-        let ctx = self.create_context();
-        utils::fill_params(&self.node.content.params(), &ctx)
+    pub fn params(self: &Arc<Self>, ctx: &Context) -> serde_json::Value {
+        utils::fill_params(&self.node.content.params(), ctx)
     }
 
     pub fn set_prev(&self, prev: &str) {
@@ -510,8 +476,8 @@ impl Task {
         self.next.write().push(next.to_string());
     }
 
-    pub fn set_state(&self, state: TaskState) {
-        self.set_state_impl(state, false);
+    pub fn set_state(&self, proc: &Arc<Process>, state: TaskState) {
+        self.set_state_impl(proc, state, false);
     }
 
     /// Move the task to `state` only while it is still `Running`, as one
@@ -519,11 +485,11 @@ impl Task {
     /// error, or the terminal walk of the task's own subtree — must stick
     /// instead of being overwritten by a completion pass that read the state
     /// before it changed. Returns whether the transition happened.
-    pub fn set_state_if_running(&self, state: TaskState) -> bool {
-        self.set_state_impl(state, true)
+    pub fn set_state_if_running(&self, proc: &Arc<Process>, state: TaskState) -> bool {
+        self.set_state_impl(proc, state, true)
     }
 
-    fn set_state_impl(&self, state: TaskState, only_if_running: bool) -> bool {
+    fn set_state_impl(&self, proc: &Arc<Process>, state: TaskState, only_if_running: bool) -> bool {
         // The check and the write share one lock: a `is_running()` read
         // followed by a write is exactly the window a racing decision slips
         // through.
@@ -548,9 +514,7 @@ impl Task {
         if state.is_completed() {
             self.set_end_time(utils::time::time_millis());
 
-            if self.id == TASK_ROOT_TID
-                && let Some(proc) = self.proc()
-            {
+            if self.id == TASK_ROOT_TID {
                 proc.set_state(state.clone());
             }
         } else {
@@ -570,7 +534,7 @@ impl Task {
         true
     }
 
-    pub fn set_err(self: &Arc<Self>, err: &Error) {
+    pub fn set_err(self: &Arc<Self>, proc: &Arc<Process>, err: &Error) {
         *self.err.write() = Some(err.clone());
 
         // An errored scope carries its own data only (see [`Self::update_data`]),
@@ -580,22 +544,23 @@ impl Task {
         // fields land. The parent scope is one level above this task and is not
         // what seeded it, so it is not the source here; the input values are
         // written onto this scope's data.
-        self.set_data(&self.inputs());
+        let ctx = proc.create_context(self);
+        self.set_data(&self.inputs(&ctx));
 
         self.set_data_with(|data| {
             data.set(consts::ACT_ERR_CODE, &err.ecode);
             data.set(consts::ACT_ERR_MESSAGE, &err.message)
         });
-        self.set_state(TaskState::Error);
+        self.set_state(proc, TaskState::Error);
     }
 
-    pub fn clear_err_with(&self, new_state: TaskState) {
+    pub fn clear_err_with(&self, proc: &Arc<Process>, new_state: TaskState) {
         *self.err.write() = None;
         self.set_data_with(|data| {
             data.remove(consts::ACT_ERR_CODE);
             data.remove(consts::ACT_ERR_MESSAGE);
         });
-        self.set_state(new_state);
+        self.set_state(proc, new_state);
     }
 
     pub(crate) fn set_pure_err(&self, err: &Error) {
@@ -640,8 +605,8 @@ impl Task {
     /// [`Self::claim_timeout`]), and it is also the key the tick dispatches a
     /// branch under ([`Self::on_timeout`](crate::ActTask::on_timeout) in
     /// `Step`), because a branch is a partial projection of that declaration.
-    pub fn timeout_owner(&self) -> Option<Arc<Task>> {
-        let parent = self.parent()?;
+    pub fn timeout_owner(&self, proc: &Arc<Process>) -> Option<Arc<Task>> {
+        let parent = self.parent(proc)?;
         match &parent.node().content {
             NodeContent::Step(step) => step
                 .timeouts
@@ -794,13 +759,13 @@ impl Task {
                     ctx.dispatch_act(&act, Vars::new())?;
                 }
                 EventAction::Remove => {
-                    self.set_state(TaskState::Removed);
+                    self.set_state(&ctx.proc, TaskState::Removed);
                     ctx.emit_task(self).await?;
                     ctx.push_next().await?;
                 }
                 EventAction::Submit => {
                     self.update_data(&ctx.vars());
-                    self.set_state(TaskState::Submitted);
+                    self.set_state(&ctx.proc, TaskState::Submitted);
                     ctx.emit_task(self).await?;
                     ctx.push_next().await?;
                 }
@@ -812,7 +777,7 @@ impl Task {
                         )));
                     }
                     self.update_data(&ctx.vars());
-                    self.set_state(TaskState::Completed);
+                    self.set_state(&ctx.proc, TaskState::Completed);
                     ctx.emit_task(self).await?;
                     ctx.push_next().await?;
                 }
@@ -831,6 +796,7 @@ impl Task {
 
                     let mut path_tasks = Vec::new();
                     let task = self.backs(
+                        &ctx.proc,
                         &|t| t.node.kind() == NodeKind::Step && t.node.id() == nid,
                         &mut path_tasks,
                     );
@@ -853,12 +819,12 @@ impl Task {
                 }
                 EventAction::Cancel => {
                     // find the parent step task
-                    let mut step = ctx.task().parent();
+                    let mut step = ctx.task().parent(&ctx.proc);
                     while let Some(task) = &step {
                         if task.is_kind(NodeKind::Step) {
                             break;
                         }
-                        step = task.parent();
+                        step = task.parent(&ctx.proc);
                     }
 
                     let task = step.ok_or(ActError::Action(format!(
@@ -875,7 +841,8 @@ impl Task {
                     // get the neartest next step tasks
                     let mut path_tasks = Vec::new();
                     let nexts = task.follows(
-                        &|t| t.is_kind(NodeKind::Step) && t.is_acts(),
+                        &ctx.proc,
+                        &|t| t.is_kind(NodeKind::Step) && t.is_acts(&ctx.proc),
                         &mut path_tasks,
                     );
                     if nexts.is_empty() {
@@ -907,11 +874,11 @@ impl Task {
                     // mark the path tasks as completed
                     for p in path_tasks {
                         if p.state().is_running() {
-                            p.set_state(TaskState::Completed);
+                            p.set_state(&ctx.proc, TaskState::Completed);
                             ctx.emit_task(&p).await?;
                             ctx.close_decided_propagation(&p).await;
                         } else if p.state().is_pending() {
-                            p.set_state(TaskState::Skipped);
+                            p.set_state(&ctx.proc, TaskState::Skipped);
                             ctx.emit_task(&p).await?;
                             ctx.close_decided_propagation(&p).await;
                         }
@@ -938,17 +905,17 @@ impl Task {
                         )));
                     }
 
-                    for task in self.siblings() {
+                    for task in self.siblings(&ctx.proc) {
                         if task.state().is_completed() {
                             continue;
                         }
-                        task.set_state(TaskState::Skipped);
+                        task.set_state(&ctx.proc, TaskState::Skipped);
                         ctx.emit_task(&task).await?;
                         ctx.close_decided_propagation(&task).await;
                     }
 
                     // set both current act and parent step to skip
-                    self.set_state(TaskState::Skipped);
+                    self.set_state(&ctx.proc, TaskState::Skipped);
                     ctx.emit_task(self).await?;
                     ctx.push_next().await?;
                 }
@@ -973,20 +940,20 @@ impl Task {
                             task.pid, task.id
                         )));
                     }
-                    let parent = task.parent().ok_or(ActError::Action(format!(
+                    let parent = task.parent(&ctx.proc).ok_or(ActError::Action(format!(
                         "cannot find task parent by tid '{}'",
                         task.id
                     )))?;
 
-                    for sub in parent.siblings().iter() {
+                    for sub in parent.siblings(&ctx.proc).iter() {
                         if sub.state().is_completed() {
                             continue;
                         }
-                        sub.set_state(TaskState::Skipped);
+                        sub.set_state(&ctx.proc, TaskState::Skipped);
                         ctx.emit_task(sub).await?;
                         ctx.close_decided_propagation(sub).await;
                     }
-                    task.set_err(&err);
+                    task.set_err(&ctx.proc, &err);
                     task.set_data(&ctx.vars());
                     task.on_error(ctx).await?;
                     // The error walk queued this act's state write; a transient
@@ -1006,15 +973,14 @@ impl Task {
                         )));
                     }
 
-                    let proc = self.expect_proc();
-                    proc.set_data(&ctx.vars());
+                    ctx.proc.set_data(&ctx.vars());
                     // The root scope's row is written by the root's own persist
                     // (no descendant's persist walks up to it any more), so
                     // queue it here: FIFO keeps the vars row durable before the
                     // action's outbox record closes, so an acknowledged
                     // `set_process_var` survives a cut that lands before the
                     // root's next event.
-                    if let Some(root) = proc.root() {
+                    if let Some(root) = ctx.proc.root() {
                         ctx.runtime.cache().upsert_async(&root).await?;
                     }
                     // emit the task change (issue #)
@@ -1047,10 +1013,10 @@ impl Task {
         result
     }
 
-    pub fn is_ready(&self) -> bool {
+    pub fn is_ready(&self, proc: &Arc<Process>) -> bool {
         match &self.node.content {
             NodeContent::Branch(n) => {
-                let siblings = self.siblings();
+                let siblings = self.siblings(proc);
                 if !n.needs.is_empty() {
                     if siblings
                         .iter()
@@ -1077,7 +1043,7 @@ impl Task {
                             || iter.state().is_biz_success()
                             || iter.state().is_abort()
                     }) {
-                        self.set_state(TaskState::Skipped);
+                        self.set_state(proc, TaskState::Skipped);
                     }
                 }
 
@@ -1088,9 +1054,12 @@ impl Task {
     }
 
     pub async fn resume(self: &Arc<Self>, ctx: &Context) -> Result<()> {
-        if self.is_ready() {
-            self.set_state(TaskState::Running);
-            ctx.runtime.emitter().emit_task_event(self).await?;
+        if self.is_ready(&ctx.proc) {
+            self.set_state(&ctx.proc, TaskState::Running);
+            ctx.runtime
+                .emitter()
+                .emit_task_event(&ctx.proc, self)
+                .await?;
             self.exec(ctx).await?;
         }
 
@@ -1133,14 +1102,15 @@ impl Task {
     }
 
     /// check if the task includes act
-    fn is_acts(&self) -> bool {
-        self.children()
+    fn is_acts(&self, proc: &Arc<Process>) -> bool {
+        self.children(proc)
             .iter()
             .any(|iter| iter.is_kind(NodeKind::Act))
     }
 
     fn backs<F: Fn(&Arc<Self>) -> bool + Clone>(
         &self,
+        proc: &Arc<Process>,
         predicate: &F,
         path: &mut Vec<Arc<Self>>,
     ) -> Option<Arc<Self>> {
@@ -1148,7 +1118,7 @@ impl Task {
 
         let mut prev = self.prev_id();
         while let Some(tid) = &prev {
-            if let Some(task) = self.proc().and_then(|proc| proc.task(tid)) {
+            if let Some(task) = proc.task(tid) {
                 if predicate(&task) {
                     ret = Some(task.clone());
                     break;
@@ -1170,11 +1140,12 @@ impl Task {
 
     fn follows<F: Fn(&Arc<Self>) -> bool + Clone>(
         &self,
+        proc: &Arc<Process>,
         predicate: &F,
         path: &mut Vec<Arc<Self>>,
     ) -> Vec<Arc<Self>> {
         let mut ret = Vec::new();
-        let nexts = self.next();
+        let nexts = self.next(proc);
         if !nexts.is_empty() {
             for task in &nexts {
                 if predicate(task) {
@@ -1186,7 +1157,7 @@ impl Task {
                     }
 
                     // find the next follows
-                    ret.extend(task.follows(predicate, path));
+                    ret.extend(task.follows(proc, predicate, path));
                 }
             }
         }
@@ -1207,17 +1178,20 @@ impl Task {
             && !self.is_sign(Sign::USES_COMPLETE)
         {
             let mut count = 0;
-            let task_children = self.children();
+            let task_children = self.children(&ctx.proc);
             let task_children = task_children
                 .iter()
                 .filter(|t| t.node().kind() == NodeKind::Act)
                 .collect::<Vec<_>>();
 
             for task in task_children.iter() {
-                if task.state().is_pending() && task.is_ready() {
+                if task.state().is_pending() && task.is_ready(&ctx.proc) {
                     // resume task
-                    task.set_state(TaskState::Ready);
-                    self.runtime.emitter().emit_task_event(task).await?;
+                    task.set_state(&ctx.proc, TaskState::Ready);
+                    self.runtime
+                        .emitter()
+                        .emit_task_event(&ctx.proc, task)
+                        .await?;
                     task.exec(ctx).await?;
                 }
                 // A child only counts once its own `next` has run
@@ -1286,7 +1260,7 @@ impl Task {
         let state = self.state();
 
         if state.is_running() {
-            let task_children = self.children();
+            let task_children = self.children(&ctx.proc);
             let mut count = 0;
 
             // for msg act, the client can only receive 'completed' message
@@ -1296,14 +1270,17 @@ impl Task {
                     .with_data(|data| data.get::<ActRunAs>(consts::ACT_RUN_AS))
                 && run_as == ActRunAs::Msg
             {
-                self.set_state(TaskState::Completed);
+                self.set_state(&ctx.proc, TaskState::Completed);
             }
 
             for task in task_children.iter() {
-                if task.state().is_pending() && task.is_ready() {
+                if task.state().is_pending() && task.is_ready(&ctx.proc) {
                     // resume task
-                    task.set_state(TaskState::Ready);
-                    self.runtime.emitter().emit_task_event(task).await?;
+                    task.set_state(&ctx.proc, TaskState::Ready);
+                    self.runtime
+                        .emitter()
+                        .emit_task_event(&ctx.proc, task)
+                        .await?;
                     task.exec(ctx).await?;
                 }
                 if task.state().is_completed() {
@@ -1349,13 +1326,13 @@ impl Task {
                             &data.get::<String>(consts::ACT_ERR_CODE).unwrap_or_default(),
                         )
                     });
-                    self.set_err(&err);
+                    self.set_err(&ctx.proc, &err);
                     ctx.emit_error().await?;
                     return Ok(NextAction::Stop);
                 } else {
                     // only complete a task that is still running: a decision
                     // that landed meanwhile (abort/error) must stick
-                    self.set_state_if_running(TaskState::Completed);
+                    self.set_state_if_running(&ctx.proc, TaskState::Completed);
                 }
             }
 
@@ -1376,7 +1353,7 @@ impl ActTask for Arc<Task> {
         ctx.set_task(self);
         if ctx.task().state().is_none() {
             ctx.prepare().await?;
-            ctx.task().set_state(TaskState::Ready);
+            ctx.task().set_state(&ctx.proc, TaskState::Ready);
             match &self.node.content {
                 NodeContent::Workflow(workflow) => workflow.init(ctx).await?,
                 NodeContent::Branch(branch) => branch.init(ctx).await?,
@@ -1394,7 +1371,7 @@ impl ActTask for Arc<Task> {
         debug!("task running");
         let task = ctx.task();
         if task.state().is_ready() {
-            task.set_state(TaskState::Running);
+            task.set_state(&ctx.proc, TaskState::Running);
             match &self.node.content {
                 NodeContent::Workflow(workflow) => workflow.run(ctx).await,
                 NodeContent::Branch(branch) => branch.run(ctx).await,
@@ -1462,9 +1439,9 @@ impl ActTask for Arc<Task> {
 
         // 5. move to parent and continue
         if next_action.is_parent() {
-            let parent = task.parent();
+            let parent = task.parent(&ctx.proc);
             if let Some(p) = &parent.clone() {
-                let outputs = task.outputs();
+                let outputs = task.outputs(ctx);
                 // the finished task's outputs fold into its parent — one hop;
                 // the parent's own `next` carries them further up in turn
                 p.update_data(&outputs);
@@ -1524,7 +1501,7 @@ impl Task {
         self.data.read().clone()
     }
 
-    pub fn vars(&self) -> Vars {
+    pub fn vars(&self, proc: &Arc<Process>) -> Vars {
         // Build a lineage chain once and merge each scope exactly once. The
         // previous recursive merge cloned intermediate maps at every level,
         // making deep task chains quadratic in the number of merged vars.
@@ -1535,9 +1512,9 @@ impl Task {
         // [`Self::update_data`]), so the two paths agree by merge order, not
         // by mirroring the value into the declaring ancestor.
         let mut chain = Vec::new();
-        let mut cursor = self.parent();
+        let mut cursor = self.parent(proc);
         while let Some(task) = cursor {
-            cursor = task.parent();
+            cursor = task.parent(proc);
             chain.push(task.data());
         }
 
@@ -1621,18 +1598,18 @@ impl Task {
 
     /// Get sealed data by resolver name. Walks the parent chain
     /// if not found locally (child overrides parent).
-    pub fn sealed(&self, name: &str) -> Option<Vars> {
+    pub fn sealed(&self, proc: &Arc<Process>, name: &str) -> Option<Vars> {
         // check local first
         if let Some(v) = self.sealed_data.read().get::<Vars>(name) {
             return Some(v);
         }
         // walk up parent chain
-        let mut parent = self.parent();
+        let mut parent = self.parent(proc);
         while let Some(task) = parent {
             if let Some(v) = task.sealed_data.read().get::<Vars>(name) {
                 return Some(v);
             }
-            parent = task.parent();
+            parent = task.parent(proc);
         }
         None
     }
@@ -1650,7 +1627,7 @@ impl Task {
         self.sealed_data.read().keys().cloned().collect()
     }
 
-    pub fn find<T>(&self, name: &str) -> Option<T>
+    pub fn find<T>(&self, proc: &Arc<Process>, name: &str) -> Option<T>
     where
         T: DeserializeOwned + std::fmt::Debug + Clone,
     {
@@ -1659,13 +1636,13 @@ impl Task {
             return result;
         }
 
-        let mut parent = self.parent();
+        let mut parent = self.parent(proc);
         while let Some(task) = parent {
             let result = task.with_data(|data| data.get::<T>(name));
             if result.is_some() {
                 return result;
             }
-            parent = task.parent();
+            parent = task.parent(proc);
         }
         None
     }

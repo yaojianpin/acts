@@ -4,7 +4,7 @@ use crate::{
     query::{Expr, Filter, Query},
     scheduler::{Process, Runtime, Task, TaskState},
     store::{KvStore, MemoryStore, Store, query::Sort},
-    utils::consts,
+    utils::{LaneRouter, consts, shared},
 };
 use parking_lot::{Mutex, RwLock};
 use std::{
@@ -198,6 +198,10 @@ pub struct Cache {
     pending_resume: Arc<RwLock<PendingResume>>,
     store: Arc<Store>,
     writer: StoreWriter,
+    /// The pid → lane mapping shared with the scheduler queue and the event
+    /// gate. The cache holds it only to release assignments when a process is
+    /// removed (see [`LaneRouter::forget`]); routing itself lives in the gate.
+    router: Arc<LaneRouter>,
     /// Capacity bookkeeping: resident slots committed to loads that are still
     /// reading rows (see [`Admission`]). Terminal proc events of different
     /// processes run concurrently, so admission (`admit`) and whole restore
@@ -217,7 +221,13 @@ impl std::fmt::Debug for Cache {
 }
 
 impl Cache {
-    pub fn new(config: &Config, store: Option<Arc<dyn KvStore>>) -> crate::Result<Self> {
+    /// `router` is the scheduler-family pid → lane mapping shared with the
+    /// process gate and the queue; the store writer spawns its own router.
+    pub(crate) fn new(
+        config: &Config,
+        store: Option<Arc<dyn KvStore>>,
+        router: Arc<LaneRouter>,
+    ) -> crate::Result<Self> {
         let store = Arc::new(Store::new(
             store.unwrap_or_else(|| Arc::new(MemoryStore::new())),
         ));
@@ -233,7 +243,9 @@ impl Cache {
                 store,
                 config.store_writer_workers(),
                 config.store_writer_queue_cap(),
+                shared(config.store_writer_workers()),
             ),
+            router,
             admission: Arc::new(Mutex::new(Admission::default())),
         })
     }
@@ -387,6 +399,9 @@ impl Cache {
         // When this returns, the removal is durable and no pending write can
         // resurrect the rows afterwards.
         self.writer.flush().await?;
+        // The writer released its own shard assignment when it applied the
+        // removal; release the scheduler-lane assignment too.
+        self.router.forget(pid);
         Ok(true)
     }
 
@@ -437,6 +452,11 @@ impl Cache {
         // not pay one all-shard wait per process.
         if !pids.is_empty() {
             self.writer.flush().await?;
+            // Removals are durable: release the scheduler-lane assignments
+            // (the writer forgot its own shard assignments during apply).
+            for pid in &pids {
+                self.router.forget(pid);
+            }
         }
         Ok(pids.len())
     }
@@ -1085,7 +1105,10 @@ impl Cache {
     /// row terminal when the process finished.
     async fn persist_task(&self, task: &Arc<Task>) -> Result<()> {
         self.store.persist_task_rows(task).await?;
-        if let Some(p) = task.proc() {
+        // Clone out of the map first: the read guard must not be held across
+        // the store await below.
+        let resident = self.procs.read().get(&task.pid).cloned();
+        if let Some(p) = resident {
             if p.state().is_completed() {
                 self.store
                     .mark_proc_complete(&task.pid, p.end_time(), p.state())
@@ -1107,12 +1130,7 @@ impl Cache {
     }
 
     fn push_task_mem(&self, task: &Arc<Task>) -> Result<()> {
-        let Some(p) = task.proc() else {
-            return Ok(());
-        };
         if let Some(proc) = self.procs.read().get(&task.pid).cloned() {
-            proc.set_pure_state(p.state());
-            proc.set_end_time(p.end_time());
             proc.push_task(task.clone())?;
         }
 

@@ -65,7 +65,7 @@ async fn env_eval_array() {
         .with_step(|step| step.with_id("step1"));
     let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
 
-    let context = proc.root().unwrap().create_context();
+    let context = proc.root().unwrap().create_context(&proc);
     Context::scope(&context, || {
         assert_eq!(env.eval::<Vec<String>>("list").unwrap(), ["u1", "u2"]);
         assert_eq!(env.eval::<String>("list[1]").unwrap(), "u2");
@@ -87,7 +87,7 @@ async fn env_eval_object() {
         .with_step(|step| step.with_id("step1"));
     let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
 
-    let context = proc.root().unwrap().create_context();
+    let context = proc.root().unwrap().create_context(&proc);
     Context::scope(&context, || {
         let result = env.eval::<Obj>("obj").unwrap();
         assert_eq!(
@@ -218,7 +218,7 @@ async fn env_eval_sys_env() {
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
     let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
 
-    let context = proc.root().unwrap().create_context();
+    let context = proc.root().unwrap().create_context(&proc);
     Context::scope(&context, || {
         assert_eq!(env.eval::<String>("$env.TOKEN").unwrap(), "abc");
     });
@@ -233,7 +233,7 @@ async fn env_task_get_value() {
         .with_step(|step| step.with_id("step1"));
     let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
 
-    let context = proc.root().unwrap().create_context();
+    let context = proc.root().unwrap().create_context(&proc);
     Context::scope(&context, || {
         assert_eq!(env.eval::<i64>("a").unwrap(), 10);
     });
@@ -246,7 +246,7 @@ async fn env_task_get_var_not_exists() {
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
     let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
 
-    let context = proc.root().unwrap().create_context();
+    let context = proc.root().unwrap().create_context(&proc);
     Context::scope(&context, || {
         assert!(env.eval::<serde_json::Value>("not_exists").is_err());
     });
@@ -259,7 +259,7 @@ async fn env_task_get_fn_not_exists() {
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
     let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
 
-    let context = proc.root().unwrap().create_context();
+    let context = proc.root().unwrap().create_context(&proc);
     Context::scope(&context, || {
         assert_eq!(
             env.eval::<serde_json::Value>("$get('not_exists')").unwrap(),
@@ -282,7 +282,7 @@ async fn env_get_a_name_the_expression_builds() {
         .with_step(|step| step.with_id("step1").with_var("total", 8));
     let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
 
-    let context = proc.root().unwrap().create_context();
+    let context = proc.root().unwrap().create_context(&proc);
     Context::scope(&context, || {
         // Two vars by name: the condition a workflow is written as.
         assert!(env.eval::<bool>("var_b > var_a").unwrap());
@@ -307,7 +307,7 @@ async fn env_task_set() {
         .with_step(|step| step.with_id("step1"));
     let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
 
-    let context = proc.root().unwrap().create_context();
+    let context = proc.root().unwrap().create_context(&proc);
     Context::scope(&context, || {
         env.eval::<()>("$set('a', 100)").unwrap();
         assert_eq!(proc.data().get::<i64>("a"), Some(100));
@@ -321,7 +321,7 @@ async fn env_task_multi_eval() {
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
     let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
 
-    let context = proc.root().unwrap().create_context();
+    let context = proc.root().unwrap().create_context(&proc);
     Context::scope(&context, || {
         env.eval::<()>("$set('a', 100)").unwrap();
         env.eval::<()>("$set('b', 200)").unwrap();
@@ -338,7 +338,7 @@ async fn env_env_get_local() {
         .with_step(|step| step.with_id("step1"));
     let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
 
-    let context = proc.root().unwrap().create_context();
+    let context = proc.root().unwrap().create_context(&proc);
     Context::scope(&context, || {
         assert_eq!(env.eval::<i64>("$env.a").unwrap(), 10);
     });
@@ -354,7 +354,7 @@ async fn env_private_keys_are_engine_only() {
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
     let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
 
-    let context = proc.root().unwrap().create_context();
+    let context = proc.root().unwrap().create_context(&proc);
     context.set_env(crate::utils::consts::PROC_OWNER, "forged");
 
     Context::scope(&context, || {
@@ -373,7 +373,7 @@ async fn env_work_dir_names_the_process_directory() {
     let workflow = Workflow::new().with_step(|step| step.with_id("step1"));
     let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
 
-    let context = proc.root().unwrap().create_context();
+    let context = proc.root().unwrap().create_context(&proc);
     let dir = std::env::temp_dir().join(format!("acts_workdir_{}", crate::utils::longid()));
     proc.set_workdir(&dir);
 
@@ -428,7 +428,7 @@ async fn env_user_var_get_from_context() {
         .unwrap();
     sig.recv().await;
 
-    let context = proc.root().unwrap().create_context();
+    let context = proc.root().unwrap().create_context(&proc);
     Context::scope(&context, || {
         assert_eq!(env.eval::<i32>("test.var1").unwrap(), 10);
     });
@@ -473,7 +473,7 @@ async fn env_user_var_get_default() {
         .unwrap();
     sig.recv().await;
 
-    let context = proc.root().unwrap().create_context();
+    let context = proc.root().unwrap().create_context(&proc);
     Context::scope(&context, || {
         assert_eq!(env.eval::<i32>("test.var1").unwrap(), 5);
     });
@@ -490,7 +490,7 @@ async fn env_user_var_secrets_get() {
     )
     .await;
 
-    let context = proc.root().unwrap().create_context();
+    let context = proc.root().unwrap().create_context(&proc);
     Context::scope(&context, || {
         assert_eq!(env.eval::<String>("secrets.TOKEN").unwrap(), "my_token");
     });
@@ -516,12 +516,12 @@ async fn env_eval_scopes_do_not_leak_vars() {
         .with_var("a", 1)
         .with_step(|step| step.with_id("step1"));
     let (_e1, p1) = start_completed(&w1, Vars::new()).await;
-    let c1 = p1.root().unwrap().create_context();
+    let c1 = p1.root().unwrap().create_context(&p1);
     Context::scope(&c1, || assert_eq!(env.eval::<i64>("a").unwrap(), 1));
 
     let w2 = Workflow::new().with_step(|step| step.with_id("step1"));
     let (_e2, p2) = start_completed(&w2, Vars::new()).await;
-    let c2 = p2.root().unwrap().create_context();
+    let c2 = p2.root().unwrap().create_context(&p2);
     Context::scope(&c2, || assert!(env.eval::<i64>("a").is_err()));
 }
 
@@ -536,7 +536,7 @@ async fn env_step_get_data_by_id() {
         .with_step(|step| step.with_id("step2").with_var("b", "abc"));
     let (_engine, proc) = start_completed(&workflow, Vars::new()).await;
 
-    let context = proc.root().unwrap().create_context();
+    let context = proc.root().unwrap().create_context(&proc);
     Context::scope(&context, || {
         assert_eq!(env.eval::<i32>("step1.a").unwrap(), 10);
         assert_eq!(env.eval::<String>("step2.b").unwrap(), "abc");
@@ -570,7 +570,7 @@ async fn env_step_get_data() {
         .unwrap();
     sig.recv().await;
 
-    let context = proc.root().unwrap().create_context();
+    let context = proc.root().unwrap().create_context(&proc);
     Context::scope(&context, || {
         let result = env.eval::<Vars>("$step_data('step1')").unwrap();
         assert_eq!(result.get::<String>("b").unwrap(), "abc");
@@ -604,7 +604,7 @@ async fn env_step_get_inputs() {
         .unwrap();
     sig.recv().await;
 
-    let context = proc.root().unwrap().create_context();
+    let context = proc.root().unwrap().create_context(&proc);
     Context::scope(&context, || {
         let result = env.eval::<Vars>("$step_inputs('step1')").unwrap();
         assert_eq!(result.get::<i32>("a").unwrap(), 10);
@@ -641,7 +641,7 @@ async fn env_act_get_inputs() {
     sig.recv().await;
     let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
 
-    let context = task.create_context();
+    let context = task.create_context(&proc);
     Context::scope(&context, || {
         let result = env.eval::<Vars>("$inputs()").unwrap();
         assert_eq!(result.get::<i32>("a").unwrap(), 10);
@@ -675,7 +675,7 @@ async fn env_act_get_data() {
     sig.recv().await;
     let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
 
-    let context = task.create_context();
+    let context = task.create_context(&proc);
     Context::scope(&context, || {
         env.eval::<()>("$set('my_value', 20)").unwrap();
         let result = env.eval::<Vars>("$data()").unwrap();
@@ -714,7 +714,7 @@ async fn env_act_cost_get() {
     // has to happen in a later millisecond than the start to be non-zero.
     tokio::time::sleep(Duration::from_millis(5)).await;
 
-    let context = task.create_context();
+    let context = task.create_context(&proc);
     Context::scope(&context, || {
         assert!(env.eval::<i64>("$cost()").unwrap() > 0);
     });
@@ -750,7 +750,7 @@ async fn env_act_cost_in_get() {
     sig.recv().await;
     let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
 
-    let context = task.create_context();
+    let context = task.create_context(&proc);
     Context::scope(&context, || {
         assert!(env.eval::<bool>("$cost_in('1s')").unwrap());
     });
@@ -794,7 +794,7 @@ async fn env_act_ecode_get() {
     sig.recv().await;
     let task = proc.task_by_params("key", "act1").last().cloned().unwrap();
 
-    let context = task.create_context();
+    let context = task.create_context(&proc);
     Context::scope(&context, || {
         assert_eq!(env.eval::<String>("$ecode()").unwrap(), "err1");
     });

@@ -137,75 +137,57 @@ impl Queue {
         self.receivers.lock().take().unwrap_or_default()
     }
 
-    /// Queue a task for execution. Fails when the queue consumer is gone or the
-    /// task's process was deallocated: a refused dispatch must be visible to
-    /// the caller, which may hold a durable outbox record for the task.
-    pub(crate) fn send(&self, task: &Arc<Task>) -> Result<()> {
+    /// Queue a task for execution. Fails when the queue consumer is gone: a
+    /// refused dispatch must be visible to the caller, which may hold a
+    /// durable outbox record for the task.
+    pub(crate) fn send(&self, proc: &Arc<Process>, task: &Arc<Task>) -> Result<()> {
         self.check_alive()?;
-        let proc = Self::item_proc(task)?;
         self.try_push(
             self.gate.lane_index(&task.pid),
             QueueData::Task {
                 task: task.clone(),
-                proc,
+                proc: proc.clone(),
             },
         )
     }
 
     /// Queue a task's `next` propagation. Same failure contract as
     /// [`Self::send`].
-    pub(crate) fn send_next(&self, task: &Arc<Task>) -> Result<()> {
+    pub(crate) fn send_next(&self, proc: &Arc<Process>, task: &Arc<Task>) -> Result<()> {
         self.check_alive()?;
-        let proc = Self::item_proc(task)?;
         self.try_push(
             self.gate.lane_index(&task.pid),
             QueueData::Next {
                 task: task.clone(),
-                proc,
+                proc: proc.clone(),
             },
         )
     }
 
     /// Queue one-hop error propagation. Same failure contract as
     /// [`Self::send`].
-    pub(crate) fn send_error(&self, task: &Arc<Task>) -> Result<()> {
+    pub(crate) fn send_error(&self, proc: &Arc<Process>, task: &Arc<Task>) -> Result<()> {
         self.check_alive()?;
-        let proc = Self::item_proc(task)?;
         self.try_push(
             self.gate.lane_index(&task.pid),
             QueueData::Error {
                 task: task.clone(),
-                proc,
+                proc: proc.clone(),
             },
         )
     }
 
     /// Queue one-hop abort propagation. Same failure contract as
     /// [`Self::send`].
-    pub(crate) fn send_abort(&self, task: &Arc<Task>) -> Result<()> {
+    pub(crate) fn send_abort(&self, proc: &Arc<Process>, task: &Arc<Task>) -> Result<()> {
         self.check_alive()?;
-        let proc = Self::item_proc(task)?;
         self.try_push(
             self.gate.lane_index(&task.pid),
             QueueData::AbortPropagation {
                 task: task.clone(),
-                proc,
+                proc: proc.clone(),
             },
         )
-    }
-
-    /// The process lease a queued item carries. A task holds its process only
-    /// `Weak`ly (see [`Task::proc`]), so a task clone that outlived an evicted
-    /// process has nothing left to run it: refusing the item keeps the caller
-    /// from reading `Ok` as "queued" — a recovery pass marks a durable outbox
-    /// record `Dispatched` on `Ok`, which would stall work that never ran.
-    fn item_proc(task: &Arc<Task>) -> Result<Arc<Process>> {
-        task.proc().ok_or_else(|| {
-            ActError::Runtime(format!(
-                "cannot dispatch task '{}:{}': its process was deallocated",
-                task.pid, task.id
-            ))
-        })
     }
 
     fn check_alive(&self) -> Result<()> {
