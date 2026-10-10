@@ -184,6 +184,19 @@ impl From<OutboxRepositoryError> for DispatchBatchError {
         Self::Repository(value)
     }
 }
+impl std::fmt::Display for DispatchBatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::InvalidOwner => write!(f, "invalid dispatch owner"),
+            Self::InvalidLease => write!(f, "invalid dispatch lease"),
+            Self::InvalidPageSize => write!(f, "invalid dispatch page size"),
+            Self::InvalidScanBudget => write!(f, "invalid dispatch scan budget"),
+            Self::LeaseOverflow => write!(f, "dispatch lease overflow"),
+            Self::Repository(error) => write!(f, "outbox repository: {error}"),
+        }
+    }
+}
+impl std::error::Error for DispatchBatchError {}
 
 #[cfg(test)]
 mod tests {

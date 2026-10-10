@@ -49,12 +49,23 @@ mod replay_policy;
 mod snapshot_codec;
 mod transition_plan;
 
+pub(crate) use application::{OperationWakeSink, WakeError};
 pub(crate) use async_document_store::{
     AsyncAggregateRepository, AsyncDocumentStore, AsyncRecoveryRepository, KvDocumentStore,
     RecoveryMigrationBatch, RecoveryMigrationState,
 };
-pub(crate) use clock::{Clock, SystemClock};
+pub(crate) use clock::{Clock, FixedClock, SystemClock};
+pub(crate) use commit::{
+    AggregateRepository, CommitError, CommitReceipt, OperationRepository, RecoveryRepository,
+};
+pub(crate) use document_store::{
+    AggregateDocumentRepository, AtomicDocumentStore, LoadedAggregate, MemoryDocumentStore,
+};
 pub(crate) use failure_recovery::FailureRecovery;
+pub(crate) use outbox_dispatch::{DeliveryOutcome, OutboxTransport};
+pub(crate) use outbox_worker::{DispatchBatchConfig, DispatchBatchReport, dispatch_batch};
+pub(crate) use propagation::{JoinPolicy, PropagateCommand, PropagationPlanner};
+pub(crate) use recovery::{RecoveryPlanner, RecoveryReport, RecoveryService};
 
 #[allow(unused_imports)]
 pub(crate) use outbox::{
@@ -79,7 +90,9 @@ pub(crate) use operation::{
     OperationState,
 };
 
-pub(crate) use model_graph::{ChildRole, ModelGraphBuilder, NodeDefinition, NodeId, NodeKind};
+pub(crate) use model_graph::{
+    ChildRole, ModelGraph, ModelGraphBuilder, NodeDefinition, NodeId, NodeKind,
+};
 
 pub(crate) use execution_admission::{
     AdmissionDecision, AdmissionIntent, ExecutionSlotKind, ExistingGeneration,

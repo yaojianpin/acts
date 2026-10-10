@@ -21,6 +21,11 @@ mod event;
 // `unused_imports` cannot judge reachability from the crate root yet.
 #[allow(dead_code, unused_imports)]
 mod kernel;
+// The kernel host is the P1 shell: standalone-driven today, wired into the
+// engine entry points in P2, so reachability cannot yet be judged from the
+// crate root.
+#[allow(dead_code)]
+mod kernel_host;
 // `OperationIdentity` accessors are consumed by the recovery orchestrator in
 // P2; the type is constructed by `kernel::RecoveryCandidate` today.
 mod export;
