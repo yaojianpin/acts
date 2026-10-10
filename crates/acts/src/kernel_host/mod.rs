@@ -206,6 +206,193 @@ impl KernelHost {
         Ok(report)
     }
 
+    /// Apply a client action to one execution: the durable intent (an
+    /// `ApplyAction` operation) is created first, then owned, re-planned
+    /// against the authoritative snapshot, committed, and completed — the
+    /// same sequence [`crate::kernel::ActionApplicationService`] uses. A
+    /// semantically invalid action is rejected before anything durable
+    /// happens.
+    pub(crate) async fn apply_action(
+        &self,
+        process_id: &str,
+        task_id: &str,
+        action: crate::kernel::ActionKind,
+        inputs: Vec<(String, String)>,
+    ) -> Result<()> {
+        let snapshot = self
+            .load(process_id)
+            .await?
+            .ok_or_else(|| ActError::Runtime(format!("aggregate {process_id} not found")))?
+            .snapshot;
+        let execution_id = snapshot
+            .executions
+            .keys()
+            .filter(|id| id.task_id == task_id)
+            .max_by_key(|id| id.generation)
+            .cloned()
+            .ok_or_else(|| ActError::Runtime(format!("execution {task_id} not found")))?;
+        let next_sequence = snapshot
+            .operations
+            .keys()
+            .filter(|id| {
+                id.process_id == process_id
+                    && id.task_id == task_id
+                    && id.generation == execution_id.generation
+            })
+            .map(|id| id.sequence)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let operation_id = OperationId {
+            process_id: process_id.into(),
+            task_id: task_id.into(),
+            generation: execution_id.generation,
+            sequence: next_sequence,
+        };
+        let now = SystemClock.now_ms();
+        let claim = crate::kernel::ClaimToken {
+            owner: OWNER.into(),
+            fence: 1,
+            lease_until_ms: now + LEASE_MS,
+            heartbeat_revision: 0,
+        };
+        let command = crate::kernel::ApplyActionCommand {
+            process_id: process_id.into(),
+            execution: execution_id.clone(),
+            action,
+            inputs,
+            source_operation: OperationCommit {
+                id: operation_id.clone(),
+                claim: claim.clone(),
+            },
+        };
+
+        // Preflight against the current snapshot: a caller-correctable
+        // rejection (terminal task, unknown execution) consumes nothing.
+        crate::kernel::ActionPlanner::plan(&snapshot, &command).map_err(runtime)?;
+
+        // Durable intent.
+        let intent = TransitionPlan {
+            process_id: process_id.into(),
+            expected: snapshot.version.clone(),
+            execution_creates: Vec::new(),
+            state_changes: Vec::new(),
+            variable_writes: Vec::new(),
+            source_operation: None,
+            operations: vec![OperationIntent {
+                id: operation_id.clone(),
+                kind: OperationKind::ApplyAction,
+            }],
+            outbox: Vec::new(),
+        };
+        match self
+            .aggregates
+            .commit_transition(&intent)
+            .await
+            .map_err(runtime)?
+        {
+            crate::kernel::TransitionCommitOutcome::Committed { .. }
+            | crate::kernel::TransitionCommitOutcome::AlreadyCommitted { .. } => {}
+            crate::kernel::TransitionCommitOutcome::Conflict { .. } => {
+                return Err(ActError::Runtime(format!(
+                    "action intent conflict on {process_id}/{task_id}"
+                )));
+            }
+        }
+
+        // Ownership, authoritative re-plan, commit, complete — the standard
+        // hop, but planned by ActionPlanner instead of the host's own arms.
+        let revision = self
+            .load(process_id)
+            .await?
+            .ok_or_else(|| ActError::Runtime("aggregate lost during action".into()))?
+            .snapshot
+            .operations
+            .get(&operation_id)
+            .map(|record| record.revision)
+            .ok_or_else(|| ActError::Runtime("action operation lost".into()))?;
+        let claimed = self
+            .operation_event(
+                &operation_id,
+                revision,
+                OperationEvent::Claim(claim.clone()),
+            )
+            .await?;
+        let prepared = self
+            .operation_event(
+                &operation_id,
+                claimed.revision,
+                OperationEvent::PrepareCommit {
+                    claim: claim.clone(),
+                },
+            )
+            .await?;
+        let snapshot = self
+            .load(process_id)
+            .await?
+            .ok_or_else(|| ActError::Runtime("aggregate lost during action".into()))?
+            .snapshot;
+        match crate::kernel::ActionPlanner::plan(&snapshot, &command) {
+            Ok(plan) => {
+                let receipt = match self
+                    .aggregates
+                    .commit_transition(&plan)
+                    .await
+                    .map_err(runtime)?
+                {
+                    crate::kernel::TransitionCommitOutcome::Committed { receipt, .. }
+                    | crate::kernel::TransitionCommitOutcome::AlreadyCommitted {
+                        receipt, ..
+                    } => receipt,
+                    crate::kernel::TransitionCommitOutcome::Conflict { .. } => {
+                        return Err(ActError::Runtime(format!(
+                            "action commit conflict on {process_id}/{task_id}"
+                        )));
+                    }
+                };
+                let committed = self
+                    .load(process_id)
+                    .await?
+                    .ok_or_else(|| ActError::Runtime("aggregate lost after action".into()))?
+                    .snapshot
+                    .operations
+                    .get(&operation_id)
+                    .cloned()
+                    .ok_or_else(|| ActError::Runtime("action operation lost".into()))?;
+                self.operation_event(
+                    &operation_id,
+                    committed.revision,
+                    OperationEvent::Complete {
+                        commit: receipt.token.clone(),
+                    },
+                )
+                .await?;
+                let wake = QueueWake {
+                    tx: self.wake_tx.clone(),
+                };
+                for operation in &receipt.new_operations {
+                    wake.wake(operation);
+                }
+                Ok(())
+            }
+            Err(error) => {
+                // The state moved between intent and ownership: park the
+                // operation for recovery instead of consuming it.
+                let _ = self
+                    .operation_event(
+                        &operation_id,
+                        prepared.revision,
+                        OperationEvent::ScheduleRetry {
+                            claim: claim.clone(),
+                            attempt: 1,
+                        },
+                    )
+                    .await;
+                Err(ActError::Runtime(format!("action re-plan failed: {error}")))
+            }
+        }
+    }
+
     /// One durable hop. Returns `Ok(false)` when the operation needed nothing
     /// (a wake redelivered for an already-terminal operation).
     async fn execute_one(&self, id: &OperationId) -> Result<bool> {
@@ -276,6 +463,13 @@ impl KernelHost {
                     sequence: id.sequence + 1,
                 };
                 let action_exists = snapshot.operations.contains_key(&action_id);
+                // Auto tasks seed their own completion action; waiting tasks
+                // stay Running until a client action arrives.
+                let auto = snapshot
+                    .variables
+                    .get(&(execution_id.clone(), "auto".into()))
+                    .map(String::as_str)
+                    != Some("0");
                 let mut plan = self.task_hop_plan(
                     &snapshot,
                     id,
@@ -285,7 +479,7 @@ impl KernelHost {
                     "started",
                     "task.started",
                 )?;
-                if !action_exists {
+                if !action_exists && auto {
                     plan.operations.push(OperationIntent {
                         id: action_id,
                         kind: OperationKind::ApplyAction,
@@ -661,7 +855,7 @@ impl KernelHost {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::kernel::{DeliveryOutcome, OutboxRecord, OutboxState};
+    use crate::kernel::{ActionKind, DeliveryOutcome, OutboxRecord, OutboxState};
 
     struct RecordingTransport {
         delivered: usize,
@@ -787,7 +981,7 @@ mod tests {
 
         // Kernel host: same model, same expectation.
         let (host, mut wake_rx) = KernelHost::in_memory();
-        let spec = ProcessSpec::from_workflow("k-parity", &workflow).unwrap();
+        let spec = ProcessSpec::from_workflow("k-parity", &workflow, &|_| None).unwrap();
         host.start_process(&spec).await.unwrap();
         host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
         assert!(host.process_completed("k-parity").await.unwrap());
@@ -873,5 +1067,174 @@ mod tests {
                 "s2".into()
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn manual_task_waits_for_the_client_action() {
+        let (host, mut wake_rx) = KernelHost::in_memory();
+        let mut spec = ProcessSpec::linear("p4", "root", &["wait", "after"]);
+        // `wait` has no entry in the auto set: it is a waiting task.
+        spec.auto.remove("wait");
+        host.start_process(&spec).await.unwrap();
+        host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
+
+        // `wait` ran and is Running; `after` must not have started.
+        let snapshot = host.snapshot("p4").await.unwrap().unwrap();
+        let state_of = |task: &str| {
+            snapshot
+                .executions
+                .iter()
+                .find(|(id, _)| id.task_id == task)
+                .map(|(_, e)| e.state)
+                .unwrap()
+        };
+        assert_eq!(state_of("wait"), crate::kernel::ExecutionState::Running);
+        assert_eq!(state_of("after"), crate::kernel::ExecutionState::Created);
+
+        // The client completes the waiting task; the flow moves on.
+        host.apply_action("p4", "wait", ActionKind::Complete, Vec::new())
+            .await
+            .unwrap();
+        host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
+        assert!(host.process_completed("p4").await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn completing_a_terminal_task_is_rejected_without_consuming_state() {
+        let (host, mut wake_rx) = KernelHost::in_memory();
+        let spec = ProcessSpec::linear("p5", "root", &[]);
+        host.start_process(&spec).await.unwrap();
+        host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
+        assert!(host.process_completed("p5").await.unwrap());
+        let err = host
+            .apply_action("p5", "$", ActionKind::Complete, Vec::new())
+            .await
+            .unwrap_err();
+        let before = host.snapshot("p5").await.unwrap().unwrap();
+        // The rejection text is the planner's; the contract is the refusal
+        // plus a frozen aggregate.
+        assert!(!format!("{err}").is_empty());
+        let after = host.snapshot("p5").await.unwrap().unwrap();
+        assert_eq!(
+            before.version, after.version,
+            "a rejected action must not move the aggregate"
+        );
+    }
+
+    /// Action parity floor: an IRQ workflow waits on both engines, the client
+    /// completes each act, and both engines settle with the same terminal
+    /// task set. The legacy side drives `Runtime::do_action`; the kernel
+    /// shadow mirrors it through the hook.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn kernel_shadow_mirrors_client_actions_on_irq_workflow() {
+        use crate::event::EventAction;
+
+        let mut config = crate::Config::default();
+        config.data.kernel_engine = true;
+        config.data.tick_interval_secs = Some(1);
+        let engine = crate::Engine::builder()
+            .set_config(&config)
+            .start()
+            .await
+            .unwrap();
+        let workflow = {
+            let mut workflow = crate::model::Workflow::new().with_id("wf-irq");
+            workflow = workflow.with_step(|step| {
+                step.with_id("s1").with_uses(
+                    crate::utils::test::USES_IRQ,
+                    crate::Vars::new().with("key", "act1"),
+                )
+            });
+            workflow = workflow.with_step(|step| {
+                step.with_id("s2").with_uses(
+                    crate::utils::test::USES_IRQ,
+                    crate::Vars::new().with("key", "act2"),
+                )
+            });
+            workflow
+        };
+        let runtime = engine.runtime();
+        let host = runtime.kernel().expect("kernel shadow host must be wired");
+
+        // Subscribers attach BEFORE the start: the IRQ act's Created message
+        // fires the moment the act runs, and a late subscriber misses it.
+        let wait_for_created = |engine: &crate::Engine, key: &'static str| {
+            let sig = engine.signal((String::new(), String::new()));
+            let (done, done_rx) = (sig.clone(), sig.clone());
+            let channel = engine.channel();
+            channel.on_message(move |e| {
+                let done = done_rx.clone();
+                let key = key.to_string();
+                async move {
+                    if e.is_params_key(&key) && e.is_state(crate::MessageState::Created) {
+                        done.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+                        done.close();
+                    }
+                }
+            });
+            done
+        };
+        let created1 = wait_for_created(&engine, "act1");
+        let created2 = wait_for_created(&engine, "act2");
+
+        let proc = runtime.start(&workflow, crate::Vars::new()).await.unwrap();
+        let pid = proc.id().to_string();
+
+        // Each waiting act completes exactly when its client action arrives.
+        for created in [created1, created2] {
+            let (pid, tid) =
+                tokio::time::timeout(std::time::Duration::from_secs(30), created.recv())
+                    .await
+                    .expect("waiting act never created")
+                    .clone();
+            runtime
+                .do_action(&crate::event::Action::new(
+                    &pid,
+                    &tid,
+                    EventAction::Next,
+                    crate::Vars::new(),
+                ))
+                .await
+                .unwrap();
+        }
+
+        // Both sides settle on the same terminal task set.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let shadow_done = host.process_completed(&pid).await.unwrap_or(false);
+            let legacy_done = legacy_completed(&engine, &pid).await;
+            if shadow_done && legacy_done {
+                break;
+            }
+            let shadow_states = host.snapshot(&pid).await.unwrap().map(|snapshot| {
+                snapshot
+                    .executions
+                    .iter()
+                    .map(|(id, execution)| format!("{}:{:?}", id.task_id, execution.state))
+                    .collect::<Vec<_>>()
+            });
+            let legacy_state = engine
+                .runtime()
+                .proc(&pid)
+                .await
+                .unwrap()
+                .map(|proc| proc.state());
+            assert!(
+                std::time::Instant::now() < deadline,
+                "shadow_done={shadow_done} legacy_done={legacy_done} legacy_state={legacy_state:?} shadow={shadow_states:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    async fn legacy_completed(engine: &crate::Engine, pid: &str) -> bool {
+        engine
+            .runtime()
+            .proc(pid)
+            .await
+            .unwrap()
+            .map(|proc| proc.state().is_completed())
+            .unwrap_or(false)
     }
 }

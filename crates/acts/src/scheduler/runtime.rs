@@ -451,7 +451,9 @@ impl Runtime {
             info!(pid = %proc_id, mid = %model.id, name = %model.name, "process started");
         }
         if let Some(host) = &self.kernel {
-            match crate::kernel_host::ProcessSpec::from_workflow(&proc_id, model) {
+            let package = self.package.clone();
+            let run_as = move |id: &str| package.get(id).map(|register| (register.meta)().run_as);
+            match crate::kernel_host::ProcessSpec::from_workflow(&proc_id, model, &run_as) {
                 Ok(spec) => {
                     if let Err(error) = host.start_process(&spec).await {
                         warn!(pid = %proc_id, error = %error, "kernel shadow start failed");
@@ -473,7 +475,6 @@ impl Runtime {
     pub(crate) fn kernel(&self) -> Option<&Arc<crate::kernel_host::KernelHost>> {
         self.kernel.as_ref()
     }
-
     pub async fn proc(self: &Arc<Self>, pid: &str) -> Result<Option<Arc<Process>>> {
         self.cache.proc(pid, self).await
     }
@@ -562,7 +563,11 @@ impl Runtime {
         let resident = self.cache.resident(&action.pid);
         match proc {
             Some(proc) if resident.is_some_and(|r| Arc::ptr_eq(&r, &proc)) => {
-                proc.do_action(action).await
+                let result = proc.do_action(action).await;
+                if result.is_ok() {
+                    self.shadow_action(action);
+                }
+                result
             }
             Some(_) => Err(ActError::Runtime(format!(
                 "process '{}' is in flight but not resident; retry the action",
@@ -573,6 +578,116 @@ impl Runtime {
                 action.pid, action
             ))),
         }
+    }
+
+    /// Mirror one applied client action into the kernel shadow host. The
+    /// shadow never blocks or fails the served action: a divergence is a
+    /// warning, which is exactly the signal the parity harness collects.
+    /// Legacy actions name the running act (a random task id); the kernel
+    /// execution is keyed by the model node id of the act's step, so the
+    /// hook resolves the act up to its step first.
+    fn shadow_action(self: &Arc<Self>, action: &Action) {
+        let Some(host) = self.kernel.clone() else {
+            return;
+        };
+        let Some(kind) = Self::shadow_kind(action) else {
+            tracing::debug!(
+                pid = %action.pid,
+                tid = %action.tid,
+                event = ?action.event,
+                "action has no kernel equivalent yet; shadow skipped"
+            );
+            return;
+        };
+        let inputs: Vec<(String, String)> = action
+            .options
+            .iter()
+            .map(|(key, value)| match value {
+                serde_json::Value::String(text) => (key.clone(), text.clone()),
+                other => (key.clone(), other.to_string()),
+            })
+            .collect();
+        let pid = action.pid.clone();
+        let tid = action.tid.clone();
+        let runtime = self.clone();
+        tokio::spawn(async move {
+            let resolve_step = async {
+                let proc = runtime.proc(&pid).await.ok()??;
+                let task = proc.task(&tid)?;
+                // The kernel execution is keyed by the MODEL node id; legacy
+                // task ids are minted at runtime, so walk to the owning step
+                // and take its node id.
+                if task.node().kind() == crate::NodeKind::Act {
+                    let parent = task.parent(&proc)?;
+                    Some(parent.node().id().to_string())
+                } else {
+                    Some(task.node().id().to_string())
+                }
+            };
+            match resolve_step.await {
+                Some(step_tid) => {
+                    // The served action may land while the shadow is still
+                    // propagating (the target execution is still `Created`).
+                    // The shadow never drops that: it retries until the state
+                    // catches up or the budget runs out.
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                    loop {
+                        match host
+                            .apply_action(&pid, &step_tid, kind.clone(), inputs.clone())
+                            .await
+                        {
+                            Ok(()) => break,
+                            Err(error) => {
+                                let retryable = format!("{error}").contains("ActionNotAllowed")
+                                    && std::time::Instant::now() < deadline;
+                                if !retryable {
+                                    #[cfg(test)]
+                                    eprintln!(
+                                        "kernel shadow action diverged pid={pid} tid={step_tid}: {error}"
+                                    );
+                                    warn!(pid = %pid, tid = %step_tid, error = %error, "kernel shadow action diverged");
+                                    break;
+                                }
+                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                            }
+                        }
+                    }
+                }
+                None => {
+                    #[cfg(test)]
+                    eprintln!(
+                        "kernel shadow could not resolve the action's step pid={pid} tid={tid}"
+                    );
+                    warn!(pid = %pid, tid = %tid, "kernel shadow could not resolve the action's step");
+                }
+            }
+        });
+    }
+
+    /// Map a legacy wire event to its kernel action. `Next` is the wire name of
+    /// "complete"; `Push`/`Remove`/`SetProcessVars` have no kernel equivalent yet.
+    fn shadow_kind(action: &Action) -> Option<crate::kernel::ActionKind> {
+        use crate::event::EventAction as E;
+        use crate::kernel::ActionKind as K;
+        Some(match action.event {
+            E::Next => K::Complete,
+            E::Submit => K::Submit,
+            E::Back => K::Back,
+            E::Cancel => K::Cancel,
+            E::Abort => K::Abort,
+            E::Skip => K::Skip,
+            E::Error => K::Fail {
+                code: action
+                    .options
+                    .get::<String>("code")
+                    .unwrap_or_else(|| "error".into()),
+                message: action
+                    .options
+                    .get::<String>("message")
+                    .unwrap_or_else(|| "shadow error".into()),
+            },
+            E::Push | E::Remove | E::SetProcessVars => return None,
+        })
     }
 
     /// Durable outbox enqueue for a `next` operation: a `Pending` outbox record

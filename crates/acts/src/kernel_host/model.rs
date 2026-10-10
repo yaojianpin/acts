@@ -23,12 +23,34 @@ fn node_id(name: &str) -> Result<NodeId> {
 /// A flat process: `root` with `children` in declaration order (implicit
 /// successor chain) plus optional explicit edges, e.g. a join that both
 /// branches point at. Every node becomes one execution at generation 0.
+///
+/// `auto` names the tasks whose execution self-completes (no waiting
+/// package); every other task stays `Running` until
+/// [`KernelHost::apply_action`] applies a client action. The set is seeded
+/// into the aggregate as the per-execution `auto` variable, so recovery
+/// replays never need the declaring spec.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct ProcessSpec {
     pub(crate) process_id: String,
     pub(crate) root: String,
     pub(crate) children: Vec<String>,
     pub(crate) explicit_next: Vec<(String, String)>,
+    pub(crate) auto: std::collections::BTreeSet<String>,
+}
+
+/// Whether a step self-completes once its act ran. The answer is the
+/// package's own `ActRunAs`: `Func` and `Msg` runs come to an end inside the
+/// execution, an `Irq` waits for a client response. A step without a package
+/// self-completes; an unregistered package defaults to the `ActRunAs`
+/// default (`Irq`) and waits.
+fn is_auto(uses: Option<&str>, run_as: &dyn Fn(&str) -> Option<crate::ActRunAs>) -> bool {
+    match uses {
+        None => true,
+        Some(id) => match run_as(id) {
+            Some(crate::ActRunAs::Func | crate::ActRunAs::Msg) => true,
+            Some(crate::ActRunAs::Irq) | None => false,
+        },
+    }
 }
 
 impl ProcessSpec {
@@ -38,6 +60,7 @@ impl ProcessSpec {
             root: root.to_string(),
             children: children.iter().map(|name| name.to_string()).collect(),
             explicit_next: Vec::new(),
+            auto: children.iter().map(|name| name.to_string()).collect(),
         }
     }
 
@@ -48,6 +71,7 @@ impl ProcessSpec {
     pub(crate) fn from_workflow(
         process_id: impl Into<String>,
         workflow: &crate::model::Workflow,
+        run_as: &dyn Fn(&str) -> Option<crate::ActRunAs>,
     ) -> Result<Self> {
         for step in &workflow.steps {
             if !step.branches.is_empty() {
@@ -57,11 +81,18 @@ impl ProcessSpec {
                 )));
             }
         }
+        let auto = workflow
+            .steps
+            .iter()
+            .filter(|step| is_auto(step.uses.as_deref(), run_as))
+            .map(|step| step.id.clone())
+            .collect();
         Ok(Self {
             process_id: process_id.into(),
             root: crate::utils::consts::TASK_ROOT_TID.to_string(),
             children: workflow.steps.iter().map(|step| step.id.clone()).collect(),
             explicit_next: Vec::new(),
+            auto,
         })
     }
 
@@ -145,6 +176,15 @@ impl ProcessSpec {
             );
         }
         snapshot.executions = executions;
+        // The auto/waiting decision is durable state, not spec state: the
+        // aggregate replays without the model.
+        for id in snapshot.executions.keys() {
+            let auto = id.task_id == self.root || self.auto.contains(&id.task_id);
+            snapshot.variables.insert(
+                (id.clone(), "auto".to_string()),
+                if auto { "1" } else { "0" }.into(),
+            );
+        }
         // At creation the MODEL is the edge authority: every node's successor
         // becomes an execution edge, and the predecessor lists are its mirror.
         // From then on the snapshot itself is the graph of record.

@@ -117,6 +117,6 @@ pub(crate) use transition_plan::{
 pub(crate) use commit::MemoryAggregateRepository;
 pub(crate) use commit::{AggregateSnapshot, ExecutionSnapshot};
 
-pub(crate) use command::ActionKind;
+pub(crate) use command::{ActionKind, ActionPlanner, ApplyActionCommand, CommandError};
 
 pub(crate) use branch::PredicateValue;
