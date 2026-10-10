@@ -453,6 +453,7 @@ fn operation_kind_tag(kind: OperationKind) -> u8 {
         DeliverMessage => 3,
         FireTrigger => 4,
         RunPostCommit => 5,
+        SkipTask => 6,
     }
 }
 fn decode_operation_kind(tag: u8) -> Result<OperationKind, SnapshotCodecError> {
@@ -464,6 +465,7 @@ fn decode_operation_kind(tag: u8) -> Result<OperationKind, SnapshotCodecError> {
         3 => Ok(DeliverMessage),
         4 => Ok(FireTrigger),
         5 => Ok(RunPostCommit),
+        6 => Ok(SkipTask),
         value => Err(SnapshotCodecError::InvalidTag(value)),
     }
 }

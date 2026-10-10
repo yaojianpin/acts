@@ -76,12 +76,32 @@ impl PropagationPlanner {
                     });
                 }
                 JoinReadiness::Waiting => {}
-                JoinReadiness::Blocked { predecessor, state } => {
-                    return Err(PropagationError::JoinBlocked {
-                        successor: successor.clone(),
-                        predecessor,
-                        state,
+                // A dead predecessor (cancelled/failed/aborted) never blocks
+                // the run: the successor is admitted and immediately handed a
+                // skip cascade, which flows the deadness past it one hop per
+                // operation.
+                JoinReadiness::SkipCascade { predecessor, state } => {
+                    state_changes.push(StateChange {
+                        execution: successor.clone(),
+                        expected_revision: target.revision,
+                        from: ExecutionState::Created,
+                        to: ExecutionState::Ready,
                     });
+                    operations.push(OperationIntent {
+                        id: OperationId {
+                            process_id: command.process_id.clone(),
+                            task_id: successor.task_id.clone(),
+                            generation: successor.generation,
+                            sequence: 0,
+                        },
+                        kind: OperationKind::SkipTask,
+                    });
+                    tracing::debug!(
+                        successor = ?successor,
+                        predecessor = ?predecessor,
+                        predecessor_state = ?state,
+                        "join predecessor is dead; successor enters the skip cascade"
+                    );
                 }
             }
         }
@@ -119,7 +139,7 @@ impl PropagationPlanner {
 enum JoinReadiness {
     Ready,
     Waiting,
-    Blocked {
+    SkipCascade {
         predecessor: ExecutionId,
         state: ExecutionState,
     },
@@ -147,7 +167,11 @@ fn readiness(
             continue;
         }
         if policy == JoinPolicy::AllSucceeded && !is_success(state) {
-            return Ok(JoinReadiness::Blocked {
+            // A dead terminal predecessor (cancelled/failed/aborted/skipped)
+            // is decisive: the successor is skipped even if other
+            // predecessors are still in flight — the flow is already over on
+            // this path.
+            return Ok(JoinReadiness::SkipCascade {
                 predecessor: predecessor.clone(),
                 state,
             });
@@ -160,11 +184,12 @@ fn readiness(
     })
 }
 
+/// The terminal states a join accepts as "this predecessor is done and the
+/// flow may continue". `Skipped` is deliberately absent: a skipped
+/// predecessor means the path is dead (a cancellation cascade flowed through
+/// it), so its successors are skipped too instead of running.
 fn is_success(state: ExecutionState) -> bool {
-    matches!(
-        state,
-        ExecutionState::Completed | ExecutionState::Submitted | ExecutionState::Skipped
-    )
+    matches!(state, ExecutionState::Completed | ExecutionState::Submitted)
 }
 
 fn validate_envelope(
@@ -208,11 +233,6 @@ pub(crate) enum PropagationError {
     ExecutionNotFound(ExecutionId),
     SourceNotTerminal {
         execution: ExecutionId,
-        state: ExecutionState,
-    },
-    JoinBlocked {
-        successor: ExecutionId,
-        predecessor: ExecutionId,
         state: ExecutionState,
     },
     InvalidPlan(String),
@@ -360,14 +380,21 @@ mod tests {
     }
 
     #[test]
-    fn failed_predecessor_blocks_success_join_explicitly() {
-        let error = PropagationPlanner::plan(
+    fn dead_predecessor_puts_success_join_into_the_skip_cascade() {
+        let plan = PropagationPlanner::plan(
             &graph(),
             &snapshot(ExecutionState::Failed, ExecutionState::Completed),
             &command("b", JoinPolicy::AllSucceeded),
         )
-        .unwrap_err();
-        assert!(matches!(error, PropagationError::JoinBlocked { .. }));
+        .unwrap();
+        // The join is admitted and handed a skip cascade: its one operation
+        // is a SkipTask, not an execution.
+        assert_eq!(plan.state_changes.len(), 1);
+        assert_eq!(plan.state_changes[0].execution, id("join"));
+        assert_eq!(plan.state_changes[0].to, ExecutionState::Ready);
+        assert_eq!(plan.operations.len(), 1);
+        assert_eq!(plan.operations[0].kind, OperationKind::SkipTask);
+        assert_eq!(plan.operations[0].id.task_id, "join");
     }
 
     #[test]

@@ -753,6 +753,7 @@ fn operation_kind_tag(kind: super::OperationKind) -> &'static str {
         super::OperationKind::ExecuteTask => "ExecuteTask",
         super::OperationKind::PropagateTask => "PropagateTask",
         super::OperationKind::ApplyAction => "ApplyAction",
+        super::OperationKind::SkipTask => "SkipTask",
         super::OperationKind::DeliverMessage => "DeliverMessage",
         super::OperationKind::FireTrigger => "FireTrigger",
         super::OperationKind::RunPostCommit => "RunPostCommit",

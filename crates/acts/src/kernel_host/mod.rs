@@ -489,11 +489,18 @@ impl KernelHost {
                     .as_ref()
                     .filter(|ready| ready.state == crate::kernel::ExecutionState::Ready)
                 {
+                    // Waiting packages park in `Waiting` (the legacy
+                    // `Interrupt`); everything else runs to completion.
+                    let target = if auto {
+                        crate::kernel::ExecutionState::Running
+                    } else {
+                        crate::kernel::ExecutionState::Waiting
+                    };
                     plan.state_changes.push(StateChange {
                         execution: execution_id.clone(),
                         expected_revision: ready.revision,
                         from: crate::kernel::ExecutionState::Ready,
-                        to: crate::kernel::ExecutionState::Running,
+                        to: target,
                     });
                 }
                 plan
@@ -502,9 +509,12 @@ impl KernelHost {
                 let execution = execution.ok_or_else(|| {
                     ActError::Runtime(format!("execution {execution_id:?} not found"))
                 })?;
-                if execution.state != crate::kernel::ExecutionState::Running {
+                if !matches!(
+                    execution.state,
+                    crate::kernel::ExecutionState::Running | crate::kernel::ExecutionState::Waiting
+                ) {
                     return Err(ActError::Runtime(format!(
-                        "execution {execution_id:?} is {:?}, expected Running",
+                        "execution {execution_id:?} is {:?}, expected Running or Waiting",
                         execution.state
                     )));
                 }
@@ -526,8 +536,53 @@ impl KernelHost {
                 plan.state_changes.push(StateChange {
                     execution: execution_id.clone(),
                     expected_revision: execution.revision,
-                    from: crate::kernel::ExecutionState::Running,
+                    from: execution.state,
                     to: crate::kernel::ExecutionState::Completed,
+                });
+                if !snapshot.operations.contains_key(&propagate_id) {
+                    plan.operations.push(OperationIntent {
+                        id: propagate_id,
+                        kind: OperationKind::PropagateTask,
+                    });
+                }
+                plan
+            }
+            OperationKind::SkipTask => {
+                // The cascade hop: admit-and-skip already committed
+                // `Created → Ready`; this hop marks the execution `Skipped`
+                // and hands propagation to a `PropagateTask`, whose readiness
+                // treats the skipped source as dead and continues the
+                // cascade. Like every hop it is one atomic commit sourced by
+                // this operation.
+                let execution = execution.ok_or_else(|| {
+                    ActError::Runtime(format!("execution {execution_id:?} not found"))
+                })?;
+                if execution.state != crate::kernel::ExecutionState::Ready {
+                    return Err(ActError::Runtime(format!(
+                        "execution {execution_id:?} is {:?}, expected Ready",
+                        execution.state
+                    )));
+                }
+                let propagate_id = OperationId {
+                    process_id: id.process_id.clone(),
+                    task_id: id.task_id.clone(),
+                    generation: id.generation,
+                    sequence: id.sequence + 1,
+                };
+                let mut plan = self.task_hop_plan(
+                    &snapshot,
+                    id,
+                    &execution_id,
+                    Some(&execution),
+                    &commit_claim,
+                    "skipped",
+                    "task.skipped",
+                )?;
+                plan.state_changes.push(StateChange {
+                    execution: execution_id.clone(),
+                    expected_revision: execution.revision,
+                    from: crate::kernel::ExecutionState::Ready,
+                    to: crate::kernel::ExecutionState::Skipped,
                 });
                 if !snapshot.operations.contains_key(&propagate_id) {
                     plan.operations.push(OperationIntent {
@@ -1088,7 +1143,7 @@ mod tests {
                 .map(|(_, e)| e.state)
                 .unwrap()
         };
-        assert_eq!(state_of("wait"), crate::kernel::ExecutionState::Running);
+        assert_eq!(state_of("wait"), crate::kernel::ExecutionState::Waiting);
         assert_eq!(state_of("after"), crate::kernel::ExecutionState::Created);
 
         // The client completes the waiting task; the flow moves on.
@@ -1236,5 +1291,36 @@ mod tests {
             .unwrap()
             .map(|proc| proc.state().is_completed())
             .unwrap_or(false)
+    }
+
+    /// The skip cascade: cancelling the waiting head of a chain skips the
+    /// rest instead of erroring the propagation. Every execution ends
+    /// terminal, and the skipped task is identifiable by its state.
+    #[tokio::test]
+    async fn cancelled_head_cascades_skip_through_the_chain() {
+        let (host, mut wake_rx) = KernelHost::in_memory();
+        let mut spec = ProcessSpec::linear("p6", "root", &["head", "mid", "tail"]);
+        spec.auto.remove("head"); // the head waits for a client action
+        host.start_process(&spec).await.unwrap();
+        host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
+
+        host.apply_action("p6", "head", ActionKind::Cancel, Vec::new())
+            .await
+            .unwrap();
+        host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+
+        assert!(host.process_completed("p6").await.unwrap());
+        let snapshot = host.snapshot("p6").await.unwrap().unwrap();
+        let state_of = |task: &str| {
+            snapshot
+                .executions
+                .iter()
+                .find(|(id, _)| id.task_id == task)
+                .map(|(_, execution)| execution.state)
+                .unwrap()
+        };
+        assert_eq!(state_of("head"), crate::kernel::ExecutionState::Cancelled);
+        assert_eq!(state_of("mid"), crate::kernel::ExecutionState::Skipped);
+        assert_eq!(state_of("tail"), crate::kernel::ExecutionState::Skipped);
     }
 }

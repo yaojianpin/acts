@@ -174,6 +174,10 @@ fn validate_state_change(change: &StateChange) -> Result<(), PlanError> {
         (change.from, change.to),
         (S::Created, S::Ready)
             | (S::Ready, S::Running)
+            // A waiting package parks the act right after it was scheduled:
+            // the act ran into an external wait (an `Interrupt` in the legacy
+            // task vocabulary) without ever being `Running`.
+            | (S::Ready, S::Waiting)
             | (S::Running, S::Waiting)
             | (S::Waiting, S::Running)
             | (

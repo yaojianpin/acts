@@ -14,6 +14,10 @@ pub(crate) enum OperationKind {
     ExecuteTask,
     PropagateTask,
     ApplyAction,
+    /// Cascade a cancellation/failure past a created execution: the hop
+    /// commits `Ready → Skipped` and hands propagation to a `PropagateTask`
+    /// operation, whose readiness then treats the skipped source as dead.
+    SkipTask,
     DeliverMessage,
     FireTrigger,
     RunPostCommit,
