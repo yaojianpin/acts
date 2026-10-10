@@ -60,6 +60,9 @@ pub struct Runtime {
     /// registry holds a stalled operation, and at least every
     /// [`OUTBOX_SWEEP_EVERY`] ticks as a safety net.
     outbox_dirty: Arc<AtomicBool>,
+    /// The deterministic kernel host shadow-running every new process when
+    /// `Config::kernel_engine` is set. Never serves: mismatches are logged.
+    kernel: Option<Arc<crate::kernel_host::KernelHost>>,
 }
 
 /// Tick the periodic timers run on under test — short enough that a test can
@@ -447,7 +450,28 @@ impl Runtime {
         } else {
             info!(pid = %proc_id, mid = %model.id, name = %model.name, "process started");
         }
+        if let Some(host) = &self.kernel {
+            match crate::kernel_host::ProcessSpec::from_workflow(&proc_id, model) {
+                Ok(spec) => {
+                    if let Err(error) = host.start_process(&spec).await {
+                        warn!(pid = %proc_id, error = %error, "kernel shadow start failed");
+                    }
+                }
+                Err(error) => {
+                    tracing::debug!(pid = %proc_id, error = %error, "kernel shadow skipped");
+                }
+            }
+        }
         Ok(proc)
+    }
+
+    /// The kernel shadow host, when `Config::kernel_engine` is on. Consumed
+    /// by the shadow-wiring test today; the executor cutover slice (P2) is
+    /// what reads it from the serving paths, so `dead_code` cannot yet see
+    /// the future caller.
+    #[allow(dead_code)]
+    pub(crate) fn kernel(&self) -> Option<&Arc<crate::kernel_host::KernelHost>> {
+        self.kernel.as_ref()
     }
 
     pub async fn proc(self: &Arc<Self>, pid: &str) -> Result<Option<Arc<Process>>> {
@@ -1364,6 +1388,21 @@ impl Runtime {
         let shutdown = CancellationToken::new();
         let schema_cache = Arc::new(SchemaCache::new());
         let snapshots = Arc::new(SnapshotRegistry::new());
+        // The deterministic kernel shadow-host: owns its own driver task over
+        // the same key-value store, woken per hop, ticked for recovery and
+        // outbox delivery. Shadow only — its results are never served.
+        let kernel = if config.kernel_engine() {
+            let (host, wake_rx) = crate::kernel_host::KernelHost::new(cache.store().kv());
+            let driver = host.clone();
+            let driver_shutdown = shutdown.clone();
+            let tick = std::time::Duration::from_secs(config.tick_interval_secs().max(1) as u64);
+            tokio::spawn(async move {
+                driver.serve(wake_rx, driver_shutdown, tick).await;
+            });
+            Some(host)
+        } else {
+            None
+        };
         let runtime = Arc::new(Runtime {
             config: Arc::new(config.clone()),
             emitter,
@@ -1380,6 +1419,7 @@ impl Runtime {
             op_claims: Arc::new(OpClaims::new()),
             stall_backoff: Self::tick_interval(config),
             outbox_dirty: Arc::new(AtomicBool::new(false)),
+            kernel,
         });
 
         runtime.initialize()?;

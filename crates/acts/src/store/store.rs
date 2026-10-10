@@ -30,6 +30,12 @@ impl Store {
         Self { kv }
     }
 
+    /// The raw key-value backend. The kernel host's aggregate documents live
+    /// beside the engine's rows in the same store.
+    pub(crate) fn kv(&self) -> Arc<dyn KvStore> {
+        self.kv.clone()
+    }
+
     /// One collection of documents, keyed by the type's [`DbCollectionIden`]
     /// prefix. Public so a crate outside this one can keep its own documents
     /// in the same store: the ACL's users and sessions are stored this way.

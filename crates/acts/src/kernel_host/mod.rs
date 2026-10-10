@@ -37,7 +37,8 @@ use tokio::sync::mpsc::{Receiver, Sender, channel};
 
 mod model;
 
-use self::model::{ProcessSpec, execution_graph};
+use self::model::execution_graph;
+pub(crate) use model::ProcessSpec;
 
 const OWNER: &str = "kernel-host";
 const LEASE_MS: i64 = 60_000;
@@ -71,32 +72,93 @@ pub(crate) struct RunReport {
     pub(crate) ignored: usize,
 }
 
+/// The engine-facing kernel host: a cloneable handle over the aggregate
+/// documents. The wake channel's receiving end is returned by [`KernelHost::new`]
+/// and belongs to exactly one driver task ([`KernelHost::serve`]).
+#[derive(Clone)]
 pub(crate) struct KernelHost {
     aggregates: Arc<AsyncAggregateRepository>,
     recovery: Arc<AsyncRecoveryRepository>,
     wake_tx: Sender<OperationId>,
-    wake_rx: Receiver<OperationId>,
+}
+
+/// Delivers shadow-mode outbox records: they are engine-internal lifecycle
+/// notes (`task.started`/`task.completed`/`task.propagated`), logged and
+/// confirmed. Channel delivery for the kernel path arrives with the executor
+/// wiring.
+struct ShadowTransport;
+
+impl crate::kernel::OutboxTransport for ShadowTransport {
+    fn deliver(&mut self, record: &crate::kernel::OutboxRecord) -> crate::kernel::DeliveryOutcome {
+        tracing::debug!(
+            pid = %record.id.process_id,
+            key = %record.id.key,
+            topic = %record.topic,
+            "kernel outbox delivered (shadow)"
+        );
+        crate::kernel::DeliveryOutcome::Delivered {
+            receipt: "shadow".into(),
+        }
+    }
 }
 
 impl KernelHost {
-    /// A host over the engine's key-value store. Tests pass
-    /// `Arc::new(MemoryStore::new())`.
-    pub(crate) fn new(kv: Arc<dyn KvStore>) -> Self {
+    /// A host over the engine's key-value store, plus the wake receiver its
+    /// driver task must own. Tests pass `Arc::new(MemoryStore::new())`.
+    pub(crate) fn new(kv: Arc<dyn KvStore>) -> (Arc<Self>, Receiver<OperationId>) {
         let store = Arc::new(KvDocumentStore::new(kv));
         let aggregates = Arc::new(AsyncAggregateRepository::new(store));
         let recovery = Arc::new(AsyncRecoveryRepository::new(aggregates.clone()));
         let (wake_tx, wake_rx) = channel(PAGE_SIZE * 8);
-        Self {
-            aggregates,
-            recovery,
-            wake_tx,
+        (
+            Arc::new(Self {
+                aggregates,
+                recovery,
+                wake_tx,
+            }),
             wake_rx,
-        }
+        )
     }
 
     /// A host over an in-memory store for tests and the P2 parity harness.
-    pub(crate) fn in_memory() -> Self {
+    pub(crate) fn in_memory() -> (Arc<Self>, Receiver<OperationId>) {
         Self::new(Arc::new(MemoryStore::new()))
+    }
+
+    /// The background driver: executes woken hops as they arrive, and on every
+    /// tick re-derives recovery work (the durable net) and runs one outbox
+    /// delivery pass. Exits when `shutdown` fires.
+    pub(crate) async fn serve(
+        self: Arc<Self>,
+        mut wake_rx: Receiver<OperationId>,
+        shutdown: tokio_util::sync::CancellationToken,
+        tick: std::time::Duration,
+    ) {
+        let mut ticker = tokio::time::interval(tick);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut transport = ShadowTransport;
+        loop {
+            tokio::select! {
+                _ = shutdown.cancelled() => break,
+                _ = ticker.tick() => {
+                    let now = SystemClock.now_ms();
+                    if let Err(error) = self.recover(now).await {
+                        tracing::warn!(error = %error, "kernel recovery scan failed");
+                    }
+                    if let Err(error) = self.dispatch_outbox(&mut transport).await {
+                        tracing::warn!(error = %error, "kernel outbox pass failed");
+                    }
+                }
+                id = wake_rx.recv() => {
+                    let Some(id) = id else { break };
+                    if let Err(error) = self.execute_one(&id).await {
+                        // The operation stays open; the next recovery tick
+                        // re-derives it.
+                        tracing::debug!(operation = ?id, error = %error, "kernel hop failed; left open for recovery");
+                    }
+                }
+            }
+        }
     }
 
     /// Create the process atomically and wake its root operation.
@@ -117,10 +179,16 @@ impl KernelHost {
     }
 
     /// Drive woken operations until the queue drains or `max_steps` hops ran.
-    pub(crate) async fn run_until_quiescent(&mut self, max_steps: usize) -> Result<RunReport> {
+    /// Test-side twin of [`Self::serve`]: same hop execution, deterministic
+    /// drain instead of a select loop.
+    pub(crate) async fn run_until_quiescent(
+        &self,
+        wake_rx: &mut Receiver<OperationId>,
+        max_steps: usize,
+    ) -> Result<RunReport> {
         let mut report = RunReport::default();
         for _ in 0..max_steps {
-            let id = match self.wake_rx.try_recv() {
+            let id = match wake_rx.try_recv() {
                 Ok(id) => id,
                 Err(_) => break,
             };
@@ -629,10 +697,10 @@ mod tests {
 
     #[tokio::test]
     async fn linear_process_runs_to_completion_and_delivers_outbox() {
-        let mut host = KernelHost::in_memory();
+        let (host, mut wake_rx) = KernelHost::in_memory();
         let spec = ProcessSpec::linear("p1", "root", &["a", "b"]);
         host.start_process(&spec).await.unwrap();
-        let report = host.run_until_quiescent(100).await.unwrap();
+        let report = host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
         // 3 nodes x (execute + action + propagate) hops, root included.
         assert_eq!(report.executed, 9, "nine hops expected: {report:?}");
         assert_eq!(report.retried, 0);
@@ -657,7 +725,7 @@ mod tests {
 
     #[tokio::test]
     async fn wake_loss_is_recovered_by_the_scan() {
-        let host = KernelHost::in_memory();
+        let (host, mut wake_rx) = KernelHost::in_memory();
         let spec = ProcessSpec::linear("p2", "root", &["only"]);
         // Create without waking: everything now rides on the recovery scan,
         // exactly like after a crash that lost the in-memory queue.
@@ -673,8 +741,7 @@ mod tests {
             !report.woken.is_empty(),
             "the pending root operation must be re-derived: {report:?}"
         );
-        let mut host = host;
-        host.run_until_quiescent(100).await.unwrap();
+        host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
         assert!(host.process_completed("p2").await.unwrap());
     }
 
@@ -719,10 +786,10 @@ mod tests {
         legacy_tasks.sort();
 
         // Kernel host: same model, same expectation.
-        let mut host = KernelHost::in_memory();
+        let (host, mut wake_rx) = KernelHost::in_memory();
         let spec = ProcessSpec::from_workflow("k-parity", &workflow).unwrap();
         host.start_process(&spec).await.unwrap();
-        host.run_until_quiescent(100).await.unwrap();
+        host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
         assert!(host.process_completed("k-parity").await.unwrap());
         let snapshot = host.snapshot("k-parity").await.unwrap().unwrap();
         let kernel_tasks: Vec<String> = snapshot
@@ -737,5 +804,74 @@ mod tests {
         assert_eq!(legacy_tasks.len(), kernel_tasks.len());
         assert_eq!(legacy_tasks.len(), expected_tasks.len());
         assert!(snapshot.executions.values().all(|e| e.state.is_terminal()));
+    }
+
+    /// The wiring slice: with `kernel_engine` on, every engine start
+    /// shadow-runs the same process through the kernel host over the same
+    /// store, and the shadow settles exactly when the engine settles.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn kernel_shadow_follows_engine_start() {
+        let mut config = crate::Config::default();
+        config.data.kernel_engine = true;
+        config.data.tick_interval_secs = Some(1);
+        let engine = crate::Engine::builder()
+            .set_config(&config)
+            .start()
+            .await
+            .unwrap();
+        let sig = engine.signal(());
+        let done = sig.clone();
+        engine.channel().on_complete(move |_| {
+            let done = done.clone();
+            async move { done.close() }
+        });
+
+        let workflow = {
+            let mut workflow = crate::model::Workflow::new().with_id("wf-shadow");
+            workflow = workflow.with_step(|step| step.with_id("s1"));
+            workflow = workflow.with_step(|step| step.with_id("s2"));
+            workflow
+        };
+        let legacy = engine
+            .runtime()
+            .start(&workflow, crate::Vars::new())
+            .await
+            .unwrap();
+        let pid = legacy.id().to_string();
+        tokio::time::timeout(std::time::Duration::from_secs(30), sig.recv())
+            .await
+            .expect("engine never finished");
+
+        let runtime = engine.runtime();
+        let host = runtime.kernel().expect("kernel shadow host must be wired");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let shadow = loop {
+            match host.process_completed(&pid).await.unwrap() {
+                true => break true,
+                false if std::time::Instant::now() > deadline => break false,
+                false => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+            }
+        };
+        assert!(shadow, "kernel shadow never completed pid {pid}");
+        let snapshot = host
+            .snapshot(&pid)
+            .await
+            .unwrap()
+            .expect("shadow aggregate");
+        let mut shadow_tasks: Vec<String> = snapshot
+            .executions
+            .keys()
+            .map(|id| id.task_id.clone())
+            .collect();
+        shadow_tasks.sort();
+        assert_eq!(
+            shadow_tasks,
+            vec![
+                crate::utils::consts::TASK_ROOT_TID.to_string(),
+                "s1".into(),
+                "s2".into()
+            ]
+        );
     }
 }

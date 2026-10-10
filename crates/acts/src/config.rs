@@ -83,6 +83,12 @@ pub struct ConfigData {
     /// control, and a process may touch whatever the server's own account
     /// can.
     pub workdir: Option<String>,
+    /// Shadow-run every new process through the deterministic kernel host in
+    /// addition to the regular engine. The kernel path never serves yet: a
+    /// mismatch or failure is logged, never propagated. Flat workflow models
+    /// only; nested models skip the shadow silently.
+    #[serde(default)]
+    pub kernel_engine: bool,
     // log config
     pub log: Option<ConfigLog>,
 }
@@ -275,6 +281,12 @@ impl Config {
             .map(str::trim)
             .filter(|dir| !dir.is_empty())
             .map(std::path::PathBuf::from)
+    }
+
+    /// Whether the deterministic kernel host shadow-runs every new process
+    /// (see [`ConfigData::kernel_engine`]).
+    pub fn kernel_engine(&self) -> bool {
+        self.data.kernel_engine
     }
 
     pub fn log(&self) -> ConfigLog {
