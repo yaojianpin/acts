@@ -27,8 +27,8 @@
 use crate::kernel::{
     AsyncAggregateRepository, AsyncRecoveryRepository, Clock, DeliveryClaim, KvDocumentStore,
     OperationCommit, OperationEvent, OperationId, OperationIntent, OperationKind, OperationState,
-    OutboxEvent, PropagateCommand, PropagationPlanner, RecoveryDisposition,
-    RecoveryPlanner, RecoveryReport, StateChange, SystemClock, TransitionPlan,
+    OutboxEvent, PropagateCommand, PropagationPlanner, RecoveryDisposition, RecoveryPlanner,
+    RecoveryReport, StateChange, SystemClock, TransitionPlan,
 };
 use crate::store::{KvStore, MemoryStore};
 use crate::{ActError, Result};
@@ -676,5 +676,66 @@ mod tests {
         let mut host = host;
         host.run_until_quiescent(100).await.unwrap();
         assert!(host.process_completed("p2").await.unwrap());
+    }
+
+    /// The parity floor: the same flat workflow driven by the legacy engine
+    /// and by the kernel host must reach the same terminal task set. Every
+    /// P2 cutover slice extends this harness instead of asserting in isolation.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn kernel_path_matches_legacy_for_flat_chain() {
+        let workflow = {
+            let mut workflow = crate::model::Workflow::new().with_id("wf-parity");
+            workflow = workflow.with_step(|step| step.with_id("s1"));
+            workflow = workflow.with_step(|step| step.with_id("s2"));
+            workflow
+        };
+        let expected_tasks: Vec<String> = vec![
+            crate::utils::consts::TASK_ROOT_TID.to_string(),
+            "s1".into(),
+            "s2".into(),
+        ];
+
+        // Legacy engine: start and wait for the process to settle.
+        let engine = crate::Engine::builder().start().await.unwrap();
+        let sig = engine.signal(());
+        let done = sig.clone();
+        engine.channel().on_complete(move |_| {
+            let done = done.clone();
+            async move { done.close() }
+        });
+        let legacy_proc = engine
+            .runtime()
+            .start(&workflow, crate::Vars::new())
+            .await
+            .unwrap();
+        let pid = legacy_proc.id().to_string();
+        tokio::time::timeout(std::time::Duration::from_secs(30), sig.recv())
+            .await
+            .expect("legacy engine never finished");
+        let legacy = engine.runtime().proc(&pid).await.unwrap().unwrap();
+        let mut legacy_tasks: Vec<String> =
+            legacy.tasks().iter().map(|task| task.id.clone()).collect();
+        legacy_tasks.sort();
+
+        // Kernel host: same model, same expectation.
+        let mut host = KernelHost::in_memory();
+        let spec = ProcessSpec::from_workflow("k-parity", &workflow).unwrap();
+        host.start_process(&spec).await.unwrap();
+        host.run_until_quiescent(100).await.unwrap();
+        assert!(host.process_completed("k-parity").await.unwrap());
+        let snapshot = host.snapshot("k-parity").await.unwrap().unwrap();
+        let kernel_tasks: Vec<String> = snapshot
+            .executions
+            .keys()
+            .map(|id| id.task_id.clone())
+            .collect();
+
+        // The kernel derives execution identity from model node ids; the
+        // legacy engine mints random task ids for the acts it runs. Parity
+        // here is the terminal task set size and completion, not id equality.
+        assert_eq!(legacy_tasks.len(), kernel_tasks.len());
+        assert_eq!(legacy_tasks.len(), expected_tasks.len());
+        assert!(snapshot.executions.values().all(|e| e.state.is_terminal()));
     }
 }

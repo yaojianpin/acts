@@ -41,6 +41,30 @@ impl ProcessSpec {
         }
     }
 
+    /// Import a flat workflow: the legacy root task id (`$`) as root and the
+    /// workflow's top-level steps as one chain. Nesting (branches) needs P2's
+    /// `ExecutionCreate` import and is rejected here instead of being
+    /// silently flattened into wrong semantics.
+    pub(crate) fn from_workflow(
+        process_id: impl Into<String>,
+        workflow: &crate::model::Workflow,
+    ) -> Result<Self> {
+        for step in &workflow.steps {
+            if !step.branches.is_empty() {
+                return Err(ActError::Runtime(format!(
+                    "step '{}' has branches; nested models are not imported yet",
+                    step.id
+                )));
+            }
+        }
+        Ok(Self {
+            process_id: process_id.into(),
+            root: crate::utils::consts::TASK_ROOT_TID.to_string(),
+            children: workflow.steps.iter().map(|step| step.id.clone()).collect(),
+            explicit_next: Vec::new(),
+        })
+    }
+
     pub(crate) fn model_graph(&self) -> Result<ModelGraph> {
         let root = node_id(&self.root)?;
         let mut builder = ModelGraphBuilder::default();
