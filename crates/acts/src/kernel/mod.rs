@@ -52,7 +52,8 @@ mod transition_plan;
 pub(crate) use application::{OperationWakeSink, WakeError};
 pub(crate) use async_document_store::{
     AsyncAggregateRepository, AsyncDocumentStore, AsyncRecoveryRepository, KvDocumentStore,
-    RecoveryMigrationBatch, RecoveryMigrationState,
+    OperationCommitOutcome, RecoveryMigrationBatch, RecoveryMigrationState,
+    TransitionCommitOutcome,
 };
 pub(crate) use clock::{Clock, FixedClock, SystemClock};
 pub(crate) use commit::{
@@ -65,12 +66,14 @@ pub(crate) use failure_recovery::FailureRecovery;
 pub(crate) use outbox_dispatch::{DeliveryOutcome, OutboxTransport};
 pub(crate) use outbox_worker::{DispatchBatchConfig, DispatchBatchReport, dispatch_batch};
 pub(crate) use propagation::{JoinPolicy, PropagateCommand, PropagationPlanner};
-pub(crate) use recovery::{RecoveryPlanner, RecoveryReport, RecoveryService};
+pub(crate) use recovery::{RecoveryDisposition, RecoveryPlanner, RecoveryReport, RecoveryService};
 
 #[allow(unused_imports)]
 pub(crate) use outbox::{
     DeliveryClaim, OutboxError, OutboxEvent, OutboxId, OutboxRecord, OutboxState,
 };
+pub(crate) use outbox_index::{OutboxIndexCodec, OutboxIndexEntry, OutboxIndexState};
+pub(crate) use outbox_repository::{OutboxCursor, OutboxPage};
 
 pub(crate) use process_recovery::{
     DurableProcessState, ProcessRecoveryDisposition, ProcessRecoveryPolicy,

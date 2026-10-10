@@ -11,9 +11,13 @@ use super::commit::{
 };
 use super::document_store::{
     DocumentGuard, DocumentMutation, DocumentRepositoryError, LoadedAggregate,
-    RECOVERY_INDEX_KEY_PREFIX, aggregate_key, build_create_transaction, build_replace_transaction,
-    decode_loaded_aggregate, loaded_after_write, outbox_index_key, recovery_index_key,
+    OUTBOX_INDEX_KEY_PREFIX, RECOVERY_INDEX_KEY_PREFIX, aggregate_key, build_create_transaction,
+    build_replace_transaction, decode_loaded_aggregate, loaded_after_write, outbox_index_key,
+    recovery_index_key,
 };
+use super::outbox::{OutboxEvent, OutboxId, OutboxRecord};
+use super::outbox_index::{OutboxIndexCodec, OutboxIndexState};
+use super::outbox_repository::{OutboxCursor, OutboxPage, OutboxRepositoryError};
 use super::recovery_entry::{
     RECOVERY_ENTRY_KEY_PREFIX, RecoveryEntryDocument, recovery_entry_after_key,
 };
@@ -447,6 +451,120 @@ impl AsyncAggregateRepository {
             ReplaceOutcome::Conflict(authoritative) => {
                 Ok(TransitionCommitOutcome::Conflict { authoritative })
             }
+        }
+    }
+
+    /// Mirror of the synchronous repository's outbox paging: scan the derived
+    /// per-process index documents, keep due records in canonical
+    /// [`OutboxId`] order, and verify every entry against its authoritative
+    /// aggregate before handing it out.
+    pub(crate) async fn dispatchable_outbox_page(
+        &self,
+        now_ms: i64,
+        after: Option<&OutboxCursor>,
+        limit: usize,
+    ) -> Result<OutboxPage, OutboxRepositoryError> {
+        if limit == 0 {
+            return Err(OutboxRepositoryError::InvalidPageLimit);
+        }
+        let documents = self
+            .store
+            .scan_prefix(OUTBOX_INDEX_KEY_PREFIX)
+            .await
+            .map_err(|error| OutboxRepositoryError::Unavailable(error.to_string()))?;
+        let mut entries = Vec::new();
+        for (key, document) in documents {
+            let index = OutboxIndexCodec::decode(&document).map_err(|error| {
+                OutboxRepositoryError::CorruptData(format!("outbox index {key:?}: {error}"))
+            })?;
+            entries.extend(index.entries.into_iter().filter(|entry| {
+                matches!(entry.state, OutboxIndexState::Pending { available_at_ms } if now_ms >= available_at_ms)
+            }));
+        }
+        entries.sort_by(|left, right| left.id.cmp(&right.id));
+        if let Some(cursor) = after {
+            entries.retain(|entry| entry.id > cursor.0);
+        }
+        let has_more = entries.len() > limit;
+        entries.truncate(limit);
+        let mut aggregates: HashMap<String, super::AggregateSnapshot> = HashMap::new();
+        let mut records = Vec::with_capacity(entries.len());
+        for entry in entries {
+            let process_id = entry.id.process_id.clone();
+            let snapshot = match aggregates.get(&process_id) {
+                Some(snapshot) => snapshot.clone(),
+                None => {
+                    let loaded = self
+                        .load(&process_id)
+                        .await
+                        .map_err(|error| OutboxRepositoryError::Unavailable(error.to_string()))?
+                        .ok_or_else(|| {
+                            OutboxRepositoryError::CorruptData(format!(
+                                "outbox index references missing aggregate {process_id:?}"
+                            ))
+                        })?;
+                    aggregates.insert(process_id.clone(), loaded.snapshot.clone());
+                    loaded.snapshot
+                }
+            };
+            let record = snapshot.outbox.get(&entry.id).ok_or_else(|| {
+                OutboxRepositoryError::CorruptData(format!(
+                    "outbox index references missing record {:?}",
+                    entry.id
+                ))
+            })?;
+            if record.revision != entry.revision || !record.state.is_dispatchable(now_ms) {
+                return Err(OutboxRepositoryError::CorruptData(format!(
+                    "stale outbox index entry for {:?}",
+                    entry.id
+                )));
+            }
+            records.push(record.clone());
+        }
+        let next = if has_more {
+            records.last().map(|last| OutboxCursor(last.id.clone()))
+        } else {
+            None
+        };
+        Ok(OutboxPage { records, next })
+    }
+
+    /// Apply one outbox lifecycle event and persist the aggregate plus both
+    /// derived indexes through one guarded transaction.
+    pub(crate) async fn evolve_outbox(
+        &self,
+        id: &OutboxId,
+        expected_revision: u64,
+        event: OutboxEvent,
+    ) -> Result<OutboxRecord, OutboxRepositoryError> {
+        let loaded = self
+            .load(&id.process_id)
+            .await
+            .map_err(|error| OutboxRepositoryError::Unavailable(error.to_string()))?
+            .ok_or_else(|| OutboxRepositoryError::NotFound(id.clone()))?;
+        let current = loaded
+            .snapshot
+            .outbox
+            .get(id)
+            .ok_or_else(|| OutboxRepositoryError::NotFound(id.clone()))?;
+        if current.revision != expected_revision {
+            return Err(OutboxRepositoryError::RevisionConflict {
+                id: id.clone(),
+                expected: expected_revision,
+                actual: current.revision,
+            });
+        }
+        let evolved = current
+            .evolve(event)
+            .map_err(OutboxRepositoryError::InvalidRecord)?;
+        let mut replacement = loaded.snapshot.clone();
+        replacement.outbox.insert(id.clone(), evolved.clone());
+        match self.replace(&loaded, &replacement).await {
+            Ok(ReplaceOutcome::Committed(_) | ReplaceOutcome::AlreadyCommitted(_)) => Ok(evolved),
+            Ok(ReplaceOutcome::Conflict(_)) => {
+                Err(OutboxRepositoryError::ConcurrentModification(id.clone()))
+            }
+            Err(error) => Err(OutboxRepositoryError::Unavailable(error.to_string())),
         }
     }
 

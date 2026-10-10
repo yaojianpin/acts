@@ -14,7 +14,7 @@ use std::fmt;
 
 const AGGREGATE_KEY_PREFIX: &str = "kernel/aggregates/";
 pub(super) const RECOVERY_INDEX_KEY_PREFIX: &str = "kernel/indexes/recovery/";
-const OUTBOX_INDEX_KEY_PREFIX: &str = "kernel/indexes/outbox/";
+pub(super) const OUTBOX_INDEX_KEY_PREFIX: &str = "kernel/indexes/outbox/";
 
 /// A loaded aggregate and the exact bytes observed from storage. The raw bytes
 /// are the CAS token. Re-encoding the snapshot is forbidden because a future
