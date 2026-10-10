@@ -373,6 +373,12 @@ impl KernelHost {
                 for operation in &receipt.new_operations {
                     wake.wake(operation);
                 }
+                // A Cancel ends this path AND re-runs it: the cancelled
+                // execution is re-entered with a fresh generation (the
+                // legacy rewind), its downstream recreated by the planner.
+                if matches!(command.action, crate::kernel::ActionKind::Cancel) {
+                    self.run_reentry(process_id, &execution_id, task_id).await?;
+                }
                 Ok(())
             }
             Err(error) => {
@@ -391,6 +397,148 @@ impl KernelHost {
                 Err(ActError::Runtime(format!("action re-plan failed: {error}")))
             }
         }
+    }
+
+    /// Re-enter one cancelled execution with a fresh generation through
+    /// [`crate::kernel::GenerationPlanner`]: a carrier operation on the same
+    /// execution is created, owned, and committed with the planner's
+    /// re-entry plan (new generations for the forward closure).
+    async fn run_reentry(
+        &self,
+        process_id: &str,
+        execution_id: &crate::kernel::ExecutionId,
+        task_id: &str,
+    ) -> Result<()> {
+        let snapshot = self
+            .load(process_id)
+            .await?
+            .ok_or_else(|| ActError::Runtime("aggregate lost before reentry".into()))?
+            .snapshot;
+        let next_sequence = snapshot
+            .operations
+            .keys()
+            .filter(|id| {
+                id.process_id == process_id
+                    && id.task_id == execution_id.task_id
+                    && id.generation == execution_id.generation
+            })
+            .map(|id| id.sequence)
+            .max()
+            .unwrap_or(0)
+            + 1;
+        let carrier_id = OperationId {
+            process_id: process_id.into(),
+            task_id: execution_id.task_id.clone(),
+            generation: execution_id.generation,
+            sequence: next_sequence,
+        };
+        let intent = TransitionPlan {
+            process_id: process_id.into(),
+            expected: snapshot.version.clone(),
+            execution_creates: Vec::new(),
+            state_changes: Vec::new(),
+            variable_writes: Vec::new(),
+            source_operation: None,
+            operations: vec![OperationIntent {
+                id: carrier_id.clone(),
+                kind: OperationKind::ApplyAction,
+            }],
+            outbox: Vec::new(),
+        };
+        match self
+            .aggregates
+            .commit_transition(&intent)
+            .await
+            .map_err(runtime)?
+        {
+            crate::kernel::TransitionCommitOutcome::Committed { .. }
+            | crate::kernel::TransitionCommitOutcome::AlreadyCommitted { .. } => {}
+            crate::kernel::TransitionCommitOutcome::Conflict { .. } => {
+                return Err(ActError::Runtime("reentry intent conflict".into()));
+            }
+        }
+        let now = SystemClock.now_ms();
+        let claim = crate::kernel::ClaimToken {
+            owner: OWNER.into(),
+            fence: 1,
+            lease_until_ms: now + LEASE_MS,
+            heartbeat_revision: 0,
+        };
+        let revision = self
+            .load(process_id)
+            .await?
+            .ok_or_else(|| ActError::Runtime("aggregate lost during reentry".into()))?
+            .snapshot
+            .operations
+            .get(&carrier_id)
+            .map(|record| record.revision)
+            .ok_or_else(|| ActError::Runtime("reentry carrier lost".into()))?;
+        let claimed = self
+            .operation_event(&carrier_id, revision, OperationEvent::Claim(claim.clone()))
+            .await?;
+        let prepared = self
+            .operation_event(
+                &carrier_id,
+                claimed.revision,
+                OperationEvent::PrepareCommit {
+                    claim: claim.clone(),
+                },
+            )
+            .await?;
+        let snapshot = self
+            .load(process_id)
+            .await?
+            .ok_or_else(|| ActError::Runtime("aggregate lost during reentry".into()))?
+            .snapshot;
+        let graph = execution_graph(&snapshot)?;
+        let command = crate::kernel::ReenterCommand {
+            process_id: process_id.into(),
+            source: execution_id.clone(),
+            target_task_id: task_id.into(),
+            source_operation: OperationCommit {
+                id: carrier_id.clone(),
+                claim: claim.clone(),
+            },
+        };
+        let plan = crate::kernel::GenerationPlanner::plan_reentry(&graph, &snapshot, &command)
+            .map_err(runtime)?;
+        let receipt = match self
+            .aggregates
+            .commit_transition(&plan)
+            .await
+            .map_err(runtime)?
+        {
+            crate::kernel::TransitionCommitOutcome::Committed { receipt, .. }
+            | crate::kernel::TransitionCommitOutcome::AlreadyCommitted { receipt, .. } => receipt,
+            crate::kernel::TransitionCommitOutcome::Conflict { .. } => {
+                return Err(ActError::Runtime("reentry commit conflict".into()));
+            }
+        };
+        let committed = self
+            .load(process_id)
+            .await?
+            .ok_or_else(|| ActError::Runtime("aggregate lost after reentry".into()))?
+            .snapshot
+            .operations
+            .get(&carrier_id)
+            .cloned()
+            .ok_or_else(|| ActError::Runtime("carrier lost after reentry".into()))?;
+        let _ = prepared;
+        self.operation_event(
+            &carrier_id,
+            committed.revision,
+            OperationEvent::Complete {
+                commit: receipt.token.clone(),
+            },
+        )
+        .await?;
+        let wake = QueueWake {
+            tx: self.wake_tx.clone(),
+        };
+        for operation in &receipt.new_operations {
+            wake.wake(operation);
+        }
+        Ok(())
     }
 
     /// One durable hop. Returns `Ok(false)` when the operation needed nothing
@@ -1309,18 +1457,37 @@ mod tests {
             .unwrap();
         host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
 
-        assert!(host.process_completed("p6").await.unwrap());
+        // The rewind: head gen0 is Cancelled, the downstream is Skipped, and
+        // a fresh head generation is already parked waiting again.
         let snapshot = host.snapshot("p6").await.unwrap().unwrap();
-        let state_of = |task: &str| {
+        let state_of = |task: &str, generation: u64| {
             snapshot
                 .executions
-                .iter()
-                .find(|(id, _)| id.task_id == task)
-                .map(|(_, execution)| execution.state)
+                .get(&crate::kernel::ExecutionId::new(task, generation).unwrap())
+                .map(|execution| execution.state)
                 .unwrap()
         };
-        assert_eq!(state_of("head"), crate::kernel::ExecutionState::Cancelled);
-        assert_eq!(state_of("mid"), crate::kernel::ExecutionState::Skipped);
-        assert_eq!(state_of("tail"), crate::kernel::ExecutionState::Skipped);
+        assert_eq!(
+            state_of("head", 0),
+            crate::kernel::ExecutionState::Cancelled
+        );
+        assert_eq!(state_of("mid", 0), crate::kernel::ExecutionState::Skipped);
+        assert_eq!(state_of("tail", 0), crate::kernel::ExecutionState::Skipped);
+        assert_eq!(state_of("head", 1), crate::kernel::ExecutionState::Waiting);
+
+        // The re-run answers its own action; the recreated downstream runs.
+        host.apply_action("p6", "head", ActionKind::Complete, Vec::new())
+            .await
+            .unwrap();
+        host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+        assert!(host.process_completed("p6").await.unwrap());
+        let snapshot = host.snapshot("p6").await.unwrap().unwrap();
+        assert_eq!(
+            snapshot
+                .executions
+                .get(&crate::kernel::ExecutionId::new("head", 1).unwrap())
+                .map(|execution| execution.state),
+            Some(crate::kernel::ExecutionState::Completed)
+        );
     }
 }

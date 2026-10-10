@@ -693,7 +693,9 @@ fn validate_preconditions(
         }
     }
     for write in &plan.variable_writes {
-        if !snapshot.executions.contains_key(&write.scope) {
+        // A recreated generation is created and seeded with variables in the
+        // same plan: the scope exists once the creates install.
+        if !snapshot.executions.contains_key(&write.scope) && !created.contains(&write.scope) {
             return Err(CommitError::ExecutionNotFound(write.scope.clone()));
         }
     }

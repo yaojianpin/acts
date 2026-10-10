@@ -102,6 +102,7 @@ pub(crate) use execution_admission::{
     GenerationAdmissionPolicy, SlotObservation,
 };
 
+pub(crate) use generation::{GenerationError, GenerationPlanner, ReenterCommand};
 pub(crate) use generation_reference::{GenerationReference, HandoffIdentity, RecoveryGeneration};
 
 pub(crate) use execution_graph::{
