@@ -1099,6 +1099,15 @@ impl Cache {
         self.writer.flush().await
     }
 
+    /// Barrier on one pid's writer shard: when this returns, every write
+    /// queued for that process before the call is durable. The row projector
+    /// uses it to decide a run's `removable` flag against what the delivery
+    /// path already queued (a delivery row created this instant must be seen,
+    /// or the sweeper deletes an un-acked message behind it).
+    pub(crate) async fn flush_pid(&self, pid: &str) -> Result<()> {
+        self.writer.flush_pid(pid).await
+    }
+
     /// Persist one task: its lifecycle row plus its own vars row when its
     /// scope diverged (scope vars are decoupled from task state writes, so a
     /// pure state transition persists a single small row), then mark the proc

@@ -452,7 +452,7 @@ impl Store {
     /// exhausted; only a manual resend/clear resolves it, the process must
     /// stay until then) all block it. A process with no delivery rows at all
     /// is deletable.
-    async fn has_unsettled_deliveries(&self, pid: &str) -> Result<bool> {
+    pub(crate) async fn has_unsettled_deliveries(&self, pid: &str) -> Result<bool> {
         use super::query::{Expr, Filter, Query};
         // Exhaustive: a delivery past a page limit would be invisible to a
         // page read, and an unsettled row that is invisible lets the sweeper

@@ -137,6 +137,45 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
   与 Irq 的包执行未接(消息 parity 片);进程目录 `<workdir>/<pid>` 由 legacy
   sweeper(随行)清理,行投影前驱动档下不会回收。
 
+- executor 移植第 6 片(本片):驱动档读模型 + 重启判别 + 包上下文写回 + act 消息保真。
+  (a) 行投影(`kernel_host/projection.rs`):宿主每笔提交后从新快照把 **proc/task/vars 行**
+  物化进既有集合 —— 只投影该计划触及的执行 + proc 行(outbox 结算后再刷一次 proc 行以置
+  `removable`)。proc 行:根状态、mid/name、model JSON、`__owner`/`__workdir`/`__env`、
+  err、removable;task 行:模型节点自身的 NodeData(根行 tid=`$`、node_data 是模型节点,与
+  legacy 同形)、kind/名字/边、状态映射(Created→Pending、Waiting→Interrupt、Failed→Error,
+  其余一一对应)与时间(首次投影打点,读改写保留;重入代清 end_time);vars 行:该执行 scope
+  的 data JSON(私有键与 `auto` 不入行)。**每节点只投影最新一代**(store 以 pid+tid 为键,
+  重入节点只留存活实例,与「每节点一个终态任务」的 parity 口径一致)。`removable` = 全终态
+  + outbox 全部 Delivered + 该 pid 无未结算 delivery(先 barrier 该 pid 写分片,再看
+  `has_unsettled_deliveries`);任务转为终态时同步 `close_deliveries`(legacy writer 的
+  close),ack 通道的投递行因此不会永久挡住 sweeper。命中后既有 sweeper 删除行 +
+  `<workdir>/<pid>` 目录。驱动档 `proc:get`/`task:get`/`msg:ls`/`Runtime::proc` 由此可读。
+  (b) 重启判别:驱动档 `Runtime::start` 先问 `KernelHost::exists`(=
+  `AsyncAggregateRepository::load`)再退回 proc 行 —— 汇总文档优先于行;行已被 sweeper 回收的
+  终态 run 仍拒绝同 pid 重启(聚合还在)。启动期恢复仍由 serve 首个 tick 的 `recover()` 承担
+  (恢复索引重推未结操作),未新增 pass。
+  (c) 包上下文写回:效果结束由 runner 返回增量 —— 返回的 outputs、headless task 自身新增/
+  改动的 data(delta,避免把父作用域变量复制成局部遮蔽)、`Context::set_env` 的进程 env(并入
+  根 scope 私有 `__env`;后续效果再灌进 headless proc env,`$env.X` 与 legacy 进程 env 同义)。
+  全部并入完成那一笔原子提交;proc 行的 env 亦投影 `__env`(headless workdir 机制不变)。
+  (d) act 消息保真:每个 `uses` step 的**起点** hop 先按 legacy `run()` 语义 resolve(定义 +
+  `definition.validate(params)`,Irq/Msg 同样),解析后的 params/options 落私有 `__params`/
+  `__options`;起点/完成/失败/跳过四种记录复用同一组事实,不重跑 headless scope(其 snapshot
+  seal 只准在起点失败)。记录 payload 补齐 legacy `Task::create_message` 的 inputs(params、
+  options、`step` 链接、`model`、前驱作用域 outputs、error.*);客户端动作决定的终态
+  (complete/submit/skip/cancel/abort/fail)在 ActionPlanner 的记录上附 act 载荷,message 侧
+  补齐 task.submitted/backed/cancelled/aborted/removed 主题映射。resolve 失败按 legacy 序列
+  处理:起点只能 Ready→Running,失败由效果 hop 定 Running→Failed。
+  对跑实测(`kernel_host::tests::kernel_act_messages_match_the_legacy_run`,同 workflow 双引擎):
+  legacy 逐消息为 `workflow created / step s1 created / act completed / step s1 completed /
+  step s2 created / act created / act completed / step s2 completed / workflow completed`;
+  折叠到(节点, 状态, 有无包)后与 kernel **逐项相等**;两侧读模型行(act 折到所属 step 节点)
+  折叠后**逐项相等**;根节点消息由 lifecycle 通道(on_start/on_complete)承担,两侧一致。
+  已知边界(明确记录,未静默降级):纯 step(无 `uses`)与 workflow 根的 **task 级消息** 目前
+  不进 `on_message` 流(legacy 会发 type=step/workflow 的 task 消息);多前驱 join 在行投影里
+  收敛为一个节点一行(单个 prev);vars 行 `sealed` 为空(聚合不存 sealed 快照);时间戳是投影
+  时打点(聚合无时钟)。
+
 ## 已对齐(无需动)
 
 - Complete/Submit/Skip/Fail on Running/Waiting:ActionPlanner 与 legacy 守卫一致
@@ -146,19 +185,16 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
 
 ## 剩余工作(按序)
 
-1. **executor 移植(行投影+重启判别的真前置,拆多片)**:已落效果接缝
-   (effects.rs)、act 消息记录、transport 接线与 Message 映射、效果参数对聚合
-   变量求值、效果参数 sealed/快照对齐(owner + legacy `ctx.prepare()` 路径)、
-   运行时接线(驱动档:kernel 自持 start/动作/效果/消息/进程事件,legacy 不启动)。
-   后续片:**行投影 + 重启判别**(下一片):proc/task/vars 行改为 CommitReceipt
-   投影(驱动档的读 API proc/task/msg 依赖它),以及包上下文写回($set/set_env/
-   task data 折回聚合)、Msg 出站消息与 Irq 包执行(消息 parity);重启判别按
-   `kernel/aggregates/<pid>` 存在性(`AsyncAggregateRepository::load`)优先于 proc 行。
-2. **谓词求值失败的失败路径**:legacy 分支 `if` 求值出错→任务 Error;阴影当前
+1. **谓词求值失败的失败路径**:legacy 分支 `if` 求值出错→任务 Error;阴影当前
    InvalidDecision 留存重试(可见但无 catch)。与 Error×catch parity 一并处理
    (catch 分支同样未导入)。
-3. **Back 的 legacy 折叠对照**:重入流里 legacy 同节点多任务多状态,折叠规则
-   依赖行投影的 receipt 语义,随第 1 项一并收口。
+2. **Back 的 legacy 折叠对照**:重入流里 legacy 同节点多任务多状态。行投影已落地
+   (见上),折叠口径可定为「该节点最新代 = 存活实例」:legacy 按 (node, prev) 取最后
+   一个实例(旧 Backed 行仍在),与 kernel 的最新代行逐项比对;之前卡在行投影,现可收口。
+3. (登记,未排期)**无 `uses` 的 task 级消息**:纯 step 与 workflow 根在 legacy 也发
+   task 消息(见「语义结论」);driver 档目前只发 act 消息,根走 lifecycle 通道。若客户端
+   按 type=step/workflow 订阅,需给无包执行也写消息记录、并把节点种类带进
+   `message_from_record`(其 type 目前恒为 "act")。
 
 ## 语义结论(已核实,勿再猜测)
 
@@ -188,6 +224,20 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
   每模型节点一个终态任务,不比 id。决策步(abort/error)的 parity 比对:
   legacy 折叠(acts 入 step、根→$、Interrupt→Waiting、Error→Failed)后逐节点
   相等,kernel 多出的预建链节点须全部终态。
+- legacy 任务消息流(实测 type=step/act/workflow):step 任务与 workflow 根也发 task
+  消息(emit 默认开、非 pending/running 即发);act 的 Created 只在 Irq 出现
+  (Func/Msg 的 run 返回时状态仍是 Running,被 handler 跳过),act 的 Completed 与
+  对应的 step Completed 都发。kernel 把 act 折进 step、只发 act 消息;折叠到
+  (节点, 状态, 有无包)后与 legacy 逐项相等(见本片实测),根节点消息走 lifecycle
+  通道 on_start/on_complete。
+- 行投影口径:一行 = 一个模型节点(最新代);task 行 id = pid+tid(无分隔符),根行
+  tid=`$`、node_data.id = 模型节点 id(与 legacy 同形);legacy 的 step/act tid 都是
+  随机 id、act 行的 `parent` 指向 step 的 tid,跨引擎比较须用 node_data.id(act 折到
+  其 parent 行的 node_data.id)。legacy 行滞后于完成信号(写分片队列),对跑前要先
+  `cache.flush()`。
+- 任务状态字符串:`TaskState` 经 `From<TaskState> for String` 落小写(`Interrupt` →
+  "interrupted");行投影出的 proc 状态在根 Ready/Running/Waiting 时是 "running"、
+  根 Created 时 "none"、终态取根自己的终态。
 
 ## 环境注意
 

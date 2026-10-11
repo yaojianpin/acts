@@ -403,8 +403,29 @@ impl Runtime {
                 )));
             }
         }
-        let proc = self.cache.proc(&proc_id, self).await?;
-        if proc.is_some() {
+        // Restart discrimination. The pid must be free: an existing pid is
+        // refused with the legacy duplicate message. What counts as existing
+        // depends on which engine serves — with the kernel the durable record
+        // is the aggregate document (the proc/task rows are its projection of
+        // the moment, and a settled run's rows are swept while its aggregate
+        // stays), without it the legacy rows are. Either way the check runs
+        // before anything durable: a refusal consumes nothing.
+        let occupied = match &self.kernel {
+            Some(host) => {
+                host.exists(&proc_id).await?
+                    || self
+                        .cache
+                        .store()
+                        .procs()
+                        .find_opt(&proc_id)
+                        .await?
+                        .is_some()
+            }
+            // The resident load also serves the legacy duplicate rule: a row
+            // of any state blocks a same-pid restart.
+            None => self.cache.proc(&proc_id, self).await?.is_some(),
+        };
+        if occupied {
             return Err(ActError::Action(format!(
                 "proc_id({proc_id}) is duplicated in running process list"
             )));
@@ -1518,6 +1539,15 @@ impl Runtime {
                 crate::kernel_host::ProcessEvent::Completed => emitter.emit_complete_event(msg),
                 crate::kernel_host::ProcessEvent::Errored => emitter.emit_error(msg),
             }));
+            // The read model: every commit re-materializes the legacy
+            // proc/task/vars rows from the aggregate, so the row-reading APIs
+            // (`proc:get`/`task:get`/`msg:ls`, `Runtime::proc`) and the
+            // sweeper (which reclaims a settled run's rows and directory) see
+            // the kernel's runs exactly like the legacy engine's.
+            host.attach_row_projector(Arc::new(crate::kernel_host::RowProjector::new(
+                runtime.cache().clone(),
+                runtime.config().workdir(),
+            )));
         }
         Ok(runtime)
     }

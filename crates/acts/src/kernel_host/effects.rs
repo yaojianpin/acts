@@ -17,7 +17,11 @@
 //! scope touches is durably written: outputs come back as values and land
 //! in the aggregate through the hop's own plan.
 
-use crate::{ActRunAs, Result, Vars, model::Workflow, scheduler::Process, scheduler::Runtime};
+use crate::{
+    ActRunAs, Result, Vars,
+    model::Workflow,
+    scheduler::{Context, Process, Runtime, Task},
+};
 use std::sync::Arc;
 
 /// One package effect request: everything the runner needs besides the
@@ -36,10 +40,45 @@ pub(crate) struct EffectRequest {
     /// The acting execution's scope chain (nearest wins), seeded into the
     /// headless task so `$`-expressions in params resolve.
     pub(crate) vars: Vec<(String, String)>,
+    /// The run's durable env map (`__env`), seeded into the headless process
+    /// env so `$env.X` answers what an earlier package wrote through
+    /// `Context::set_env` — the legacy process env, which every task of the
+    /// run shares.
+    pub(crate) env: Vec<(String, serde_json::Value)>,
     /// The run's caller authority: the legacy process's `PROC_OWNER`. The
     /// headless scope seals snapshot data under it (a run nobody sealed
     /// carries `deny_all`, so it reads nothing).
     pub(crate) owner: crate::ScopePolicy,
+}
+
+/// The act facts one `uses` step resolves to before it runs — the legacy
+/// act's `run()` up to (not including) the package's own execution. The
+/// message hop needs them for every `run_as` (the legacy act's Created
+/// message carries the resolved params and its options); the effect hop needs
+/// them for the package it executes (Func).
+pub(crate) struct ResolvedEffect {
+    pub(crate) run_as: crate::ActRunAs,
+    /// The step's resolved params (`task.params(ctx)`), the message's
+    /// `params` input.
+    pub(crate) params: serde_json::Value,
+    /// The step's declared options, the message's `options` input.
+    pub(crate) options: serde_json::Value,
+}
+
+/// What one package effect left behind: the values the host folds into the
+/// same atomic commit that completes the execution.
+pub(crate) struct EffectOutcome {
+    /// The package's returned outputs — the legacy
+    /// `task.update_data(&vars)`, written to the acting scope.
+    pub(crate) outputs: Option<Vars>,
+    /// The headless task's own data *beyond what the seam seeded* — a package
+    /// that wrote task data directly. Only the delta: echoing the seeded
+    /// scope back would shadow an ancestor's variable with a local copy.
+    pub(crate) data: Vec<(String, serde_json::Value)>,
+    /// The process env the package wrote through `Context::set_env`. Folds
+    /// into the run's durable env map, so every later task of the run reads
+    /// it as `$env.X`.
+    pub(crate) env: Vec<(String, serde_json::Value)>,
 }
 
 /// Runs one package effect. Attach with
@@ -47,11 +86,21 @@ pub(crate) struct EffectRequest {
 /// without one the host auto-completes (the shadow contract).
 #[async_trait::async_trait]
 pub(crate) trait EffectRunner: Send + Sync {
-    /// The package's outputs as scope vars, or `None` when it produced none.
-    /// An error fails the hop: the execution is decided `Failed` with the
-    /// error variables, and the error walk takes over — the legacy
-    /// package-error path.
-    async fn run(&self, request: EffectRequest) -> Result<Option<Vars>>;
+    /// Resolve the step's package and validate its params — the legacy act's
+    /// `run()` before the `run_as` match. Every `run_as` goes through here at
+    /// task start, exactly like the legacy engine: a schema violation fails
+    /// the act whether it runs a package or waits for a client.
+    async fn resolve(&self, request: &EffectRequest) -> Result<ResolvedEffect>;
+
+    /// The package's work: a Func package executes (an Irq/Msg package has
+    /// none). The outcome carries the values to fold into the hop's commit.
+    async fn run(&self, request: EffectRequest) -> Result<EffectOutcome>;
+
+    /// Whether the step's package runs inside the run at all — the legacy
+    /// `run_as` gate (`Func`), used by the effect hop's own re-plan.
+    async fn execute_on_effect(&self, request: &EffectRequest) -> Result<bool> {
+        Ok(self.resolve(request).await?.run_as == crate::ActRunAs::Func)
+    }
 }
 
 /// Runs real packages through the engine's registry and a headless scope.
@@ -63,34 +112,29 @@ impl PackageEffectRunner {
     pub(crate) fn new(runtime: Arc<Runtime>) -> Self {
         Self { runtime }
     }
-}
 
-#[async_trait::async_trait]
-impl EffectRunner for PackageEffectRunner {
-    async fn run(&self, request: EffectRequest) -> Result<Option<Vars>> {
-        // The same gate the legacy act run applies: only Func packages
-        // execute inside the run; Irq waits for the client and Msg only
-        // emits.
-        let definition = self.runtime.package_definition(&request.package).await?;
-        if definition.run_as() != ActRunAs::Func {
-            return Ok(None);
-        }
-
-        // The headless scope: a bare process over the declaring model with
-        // one task on the acting node. Never admitted, never persisted —
-        // packages see the context shape they always saw. The run's caller
-        // authority travels with it, so the seal below reads the scopes its
-        // starter owns and no others.
+    /// The headless scope: a bare in-memory [`Process`] over the declaring
+    /// model with one task on the acting node. Never admitted, never
+    /// persisted — packages see the context shape they always saw. The run's
+    /// caller authority travels with it, so the seal below reads the scopes
+    /// its starter owns and no others; the run's own directory
+    /// (`<workdir>/<pid>`) and the durable env map are seeded, so
+    /// `$env.WORK_DIR` and `$env.X` answer exactly what the legacy process
+    /// env answered.
+    fn headless(&self, request: &EffectRequest) -> Result<(Arc<Process>, Arc<Task>, Context)> {
         let process = Process::new(&request.process_id, &self.runtime);
         process.load(&request.model)?;
         process.set_owner_scope(&request.owner);
-        // The run's own directory (`<workdir>/<pid>`), named exactly as the
-        // legacy start named it: `Context::workdir` and `$env.WORK_DIR` answer
-        // it, so a filesystem package is confined to the same directory it
-        // would be under the legacy engine.
         if let Some(root) = self.runtime.config().workdir() {
             let dir = crate::scheduler::prepare_workdir(&root, &request.process_id)?;
             process.set_workdir(&dir);
+        }
+        if !request.env.is_empty() {
+            process.with_env_mut(|env| {
+                for (name, value) in &request.env {
+                    env.set(name, value.clone());
+                }
+            });
         }
         let node = process
             .tree()
@@ -112,13 +156,41 @@ impl EffectRunner for PackageEffectRunner {
             task.update_data(&vars);
         }
         let ctx = process.create_context(&task);
+        Ok((process, task, ctx))
+    }
+}
+
+#[async_trait::async_trait]
+impl EffectRunner for PackageEffectRunner {
+    async fn resolve(&self, request: &EffectRequest) -> Result<ResolvedEffect> {
+        let definition = self.runtime.package_definition(&request.package).await?;
         // The legacy task init path: seed the task's own vars and seal the
         // snapshot data its target declares, under the owner's authority. A
         // seal error — a denied scope, a missing required param under
         // `on_missing = error` — fails the effect, exactly where the legacy
         // run would fail the task.
+        let (_, task, ctx) = self.headless(request)?;
         ctx.prepare().await?;
+        let params = task.params(&ctx);
+        definition.validate(&params)?;
+        Ok(ResolvedEffect {
+            run_as: definition.run_as(),
+            params,
+            options: serde_json::to_value(task.options()).unwrap_or(serde_json::Value::Null),
+        })
+    }
 
+    async fn run(&self, request: EffectRequest) -> Result<EffectOutcome> {
+        // The same gate the legacy act run applies: only Func packages
+        // execute inside the run; Irq waits for the client and Msg only
+        // emits.
+        let definition = self.runtime.package_definition(&request.package).await?;
+        if definition.run_as() != ActRunAs::Func {
+            return Ok(EffectOutcome::empty());
+        }
+
+        let (process, task, ctx) = self.headless(&request)?;
+        ctx.prepare().await?;
         // Params resolve through the same fill path the legacy run uses.
         let params = task.params(&ctx);
         definition.validate(&params)?;
@@ -127,8 +199,55 @@ impl EffectRunner for PackageEffectRunner {
             .runtime
             .package()
             .create(definition.id(), self.runtime.config())?;
-        package.execute(&ctx, &params).await
+        let outputs = package.execute(&ctx, &params).await?;
+
+        // The write-back: what the package left in the headless scope beyond
+        // what the seam seeded — its own task data and the process env — and
+        // the outputs it returned. All of it folds into the hop's atomic
+        // commit, so a crash before the commit re-runs the package with the
+        // same pre-state (the legacy `exec` → persist ordering).
+        let env = non_private(process.env());
+        Ok(EffectOutcome {
+            outputs,
+            data: data_delta(&task, &request.vars),
+            env,
+        })
     }
+}
+
+impl EffectOutcome {
+    pub(crate) fn empty() -> Self {
+        Self {
+            outputs: None,
+            data: Vec::new(),
+            env: Vec::new(),
+        }
+    }
+}
+
+/// The non-private entries of one var map, in iteration order.
+fn non_private(vars: Vars) -> Vec<(String, serde_json::Value)> {
+    vars.iter()
+        .filter(|(name, _)| !crate::utils::consts::is_private_key(name))
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
+}
+
+/// The headless task data beyond the seeded scope: a key the seam did not
+/// seed, or one whose value the package changed. Echoing an unchanged seeded
+/// value back would shadow an ancestor's variable with a local copy.
+fn data_delta(task: &Arc<Task>, seeded: &[(String, String)]) -> Vec<(String, serde_json::Value)> {
+    task.data()
+        .iter()
+        .filter(|(name, _)| !crate::utils::consts::is_private_key(name))
+        .filter(|(name, value)| {
+            !seeded.iter().any(|(seeded_name, raw)| {
+                seeded_name.as_str() == name.as_str()
+                    && serde_json::from_str::<serde_json::Value>(raw).ok().as_ref() == Some(value)
+            })
+        })
+        .map(|(name, value)| (name.clone(), value.clone()))
+        .collect()
 }
 
 /// Turns package outputs into aggregate variable writes (the aggregate's

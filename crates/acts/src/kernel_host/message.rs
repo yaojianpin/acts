@@ -17,8 +17,13 @@ pub(crate) fn message_from_record(record: &OutboxRecord) -> Option<Message> {
     let state = match record.topic.as_str() {
         "message.created" => MessageState::Created,
         "task.completed" => MessageState::Completed,
+        "task.submitted" => MessageState::Submitted,
+        "task.backed" => MessageState::Backed,
+        "task.cancelled" => MessageState::Cancelled,
         "task.failed" => MessageState::Error,
+        "task.aborted" => MessageState::Aborted,
         "task.skipped" => MessageState::Skipped,
+        "task.removed" => MessageState::Removed,
         _ => return None,
     };
     // Only records carrying the act payload are act messages.
@@ -36,9 +41,13 @@ pub(crate) fn message_from_record(record: &OutboxRecord) -> Option<Message> {
         .unwrap_or_default()
         .to_string();
 
+    // The act's inputs: the scope inputs the hop recorded, plus the resolved
+    // params/options the message carries (the legacy `Task::create_message`).
     let mut inputs = Vars::new();
-    if let Some(params) = payload.get("params") {
-        inputs.set(consts::ACT_PARAMS_KEY, params.clone());
+    if let Some(bag) = payload.get("inputs").and_then(|value| value.as_object()) {
+        for (key, value) in bag {
+            inputs.set(key, value.clone());
+        }
     }
     if let Some(error) = payload.get("error").and_then(|value| value.as_object()) {
         if let Some(code) = error.get("code") {
@@ -139,7 +148,7 @@ mod tests {
             "nid": "s2",
             "name": "approve",
             "uses": "acts.core.irq",
-            "params": {"key": "act1"},
+            "inputs": {"params": {"key": "act1"}, "options": {"ui": true}},
             "mid": "wf1",
         })
         .to_string();
@@ -159,6 +168,9 @@ mod tests {
                 .unwrap()["key"],
             "act1"
         );
+        // The act's options ride the message: a channel subscribed with an
+        // option filter matches on them.
+        assert_eq!(message.options().unwrap().get::<bool>("ui"), Some(true));
     }
 
     #[test]
@@ -167,7 +179,7 @@ mod tests {
             "nid": "s1",
             "name": "s1",
             "uses": "test.func",
-            "params": {},
+            "inputs": {"params": {}},
             "mid": "wf1",
             "outputs": {"n": 5},
         })
@@ -180,7 +192,7 @@ mod tests {
             "nid": "s1",
             "name": "s1",
             "uses": "test.fail",
-            "params": {},
+            "inputs": {"params": {}},
             "mid": "wf1",
             "error": {"code": "EPACKAGE", "message": "boom"},
         })
@@ -194,11 +206,36 @@ mod tests {
 
         let skipped = message_from_record(&record(
             "task.skipped",
-            &serde_json::json!({"nid": "s", "name": "s", "uses": "test.irq", "params": {}, "mid": "wf1"})
+            &serde_json::json!({"nid": "s", "name": "s", "uses": "test.irq", "inputs": {"params": {}}, "mid": "wf1"})
                 .to_string(),
         ))
         .unwrap();
         assert_eq!(skipped.state, MessageState::Skipped);
+    }
+
+    /// Every decided state announces itself on its own topic — the act
+    /// message the legacy engine emitted for that transition.
+    #[test]
+    fn decided_state_topics_map_onto_message_states() {
+        let payload = serde_json::json!({
+            "nid": "s1",
+            "name": "s1",
+            "uses": "test.irq",
+            "inputs": {"params": {}},
+            "mid": "wf1",
+        })
+        .to_string();
+        for (topic, state) in [
+            ("task.submitted", MessageState::Submitted),
+            ("task.backed", MessageState::Backed),
+            ("task.cancelled", MessageState::Cancelled),
+            ("task.aborted", MessageState::Aborted),
+            ("task.removed", MessageState::Removed),
+        ] {
+            let message = message_from_record(&record(topic, &payload))
+                .unwrap_or_else(|| panic!("{topic} must map onto an act message"));
+            assert_eq!(message.state, state, "{topic}");
+        }
     }
 
     #[test]

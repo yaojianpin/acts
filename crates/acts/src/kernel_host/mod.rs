@@ -41,11 +41,13 @@ use tokio::sync::mpsc::{Receiver, Sender, channel};
 mod effects;
 mod message;
 mod model;
+mod projection;
 
 use self::model::execution_graph;
 pub(crate) use effects::PackageEffectRunner;
 pub(crate) use message::MessageForwarder;
 pub(crate) use model::ProcessSpec;
+pub(crate) use projection::RowProjector;
 
 const OWNER: &str = "kernel-host";
 const LEASE_MS: i64 = 60_000;
@@ -67,19 +69,27 @@ fn model_of(snapshot: &crate::kernel::AggregateSnapshot) -> Result<Option<crate:
         .map_err(runtime)
 }
 
+/// The root execution of an aggregate: the `$` node's earliest generation —
+/// the generation a re-entry never removes.
+fn root_execution(
+    snapshot: &crate::kernel::AggregateSnapshot,
+) -> Option<crate::kernel::ExecutionId> {
+    snapshot
+        .executions
+        .keys()
+        .filter(|id| id.task_id == crate::utils::consts::TASK_ROOT_TID)
+        .min_by_key(|id| id.generation)
+        .cloned()
+}
+
 /// One root-scope variable (root = the `$` execution, earliest generation —
 /// the generation a re-entry never removes).
 fn root_variable(
     snapshot: &crate::kernel::AggregateSnapshot,
     name: &str,
 ) -> Result<Option<String>> {
-    let root = snapshot
-        .executions
-        .keys()
-        .filter(|id| id.task_id == crate::utils::consts::TASK_ROOT_TID)
-        .min_by_key(|id| id.generation)
-        .cloned();
-    Ok(root.and_then(|root| snapshot.variables.get(&(root, name.to_string())).cloned()))
+    Ok(root_execution(snapshot)
+        .and_then(|root| snapshot.variables.get(&(root, name.to_string())).cloned()))
 }
 
 /// The durable auto/waiting decision of one model node, from the import-time
@@ -220,6 +230,92 @@ fn root_error(
             .unwrap_or_default()
     };
     (read("error.code"), read("error.message"))
+}
+
+/// The private execution variables the start hop pins on a `uses` step: its
+/// resolved params and its declared options. Every later message record
+/// (completion, failure, skip) carries the facts the *start* hop resolved
+/// instead of re-running the headless scope, whose snapshot seal may fail
+/// (and must fail the act at start, never a later hop).
+const PARAMS_VAR: &str = "__params";
+const OPTIONS_VAR: &str = "__options";
+
+/// The resolved act facts of one `uses` execution.
+#[derive(Clone)]
+struct ActFacts {
+    params: serde_json::Value,
+    options: serde_json::Value,
+}
+
+/// The act facts the start hop pinned on `execution`, when a runner resolved
+/// them at start.
+fn act_facts(
+    snapshot: &crate::kernel::AggregateSnapshot,
+    execution: &crate::kernel::ExecutionId,
+) -> Option<ActFacts> {
+    let read = |name: &str| {
+        snapshot
+            .variables
+            .get(&(execution.clone(), name.to_string()))
+            .map(|raw| {
+                serde_json::from_str::<serde_json::Value>(raw).unwrap_or(serde_json::Value::Null)
+            })
+    };
+    Some(ActFacts {
+        params: read(PARAMS_VAR)?,
+        options: read(OPTIONS_VAR).unwrap_or(serde_json::Value::Null),
+    })
+}
+
+/// One variable value that holds a JSON string, decoded (`raw` when it is not
+/// a JSON string).
+fn json_text(raw: &str) -> String {
+    serde_json::from_str::<String>(raw).unwrap_or_else(|_| raw.to_string())
+}
+
+/// The outbox topic that announces one decided execution state — the act
+/// message the legacy engine emitted for that transition.
+fn message_topic(state: crate::kernel::ExecutionState) -> Option<&'static str> {
+    use crate::kernel::ExecutionState as S;
+    match state {
+        S::Completed => Some("task.completed"),
+        S::Submitted => Some("task.submitted"),
+        S::Backed => Some("task.backed"),
+        S::Cancelled => Some("task.cancelled"),
+        S::Failed => Some("task.failed"),
+        S::Aborted => Some("task.aborted"),
+        S::Skipped => Some("task.skipped"),
+        S::Removed => Some("task.removed"),
+        S::Created | S::Ready | S::Running | S::Waiting => None,
+    }
+}
+
+/// The scope variables a legacy act message carries as `inputs`: the
+/// predecessor's own (its outputs) first, the acting execution's own on top —
+/// the legacy `Task::inputs` merges the node's vars last, so they win.
+fn input_vars(
+    snapshot: &crate::kernel::AggregateSnapshot,
+    execution: &crate::kernel::ExecutionId,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut inputs = serde_json::Map::new();
+    let mut merge = |scope: &crate::kernel::ExecutionId| {
+        for ((key_scope, name), raw) in &snapshot.variables {
+            if key_scope != scope || crate::utils::consts::is_private_key(name) || name == "auto" {
+                continue;
+            }
+            inputs.insert(
+                name.clone(),
+                serde_json::from_str(raw).unwrap_or(serde_json::Value::String(raw.clone())),
+            );
+        }
+    };
+    if let Some(execution) = snapshot.executions.get(execution) {
+        for predecessor in &execution.predecessors {
+            merge(predecessor);
+        }
+    }
+    merge(execution);
+    inputs
 }
 
 /// Validate the run's `exposes` against the message's outputs, like the legacy
@@ -411,6 +507,11 @@ pub(crate) struct KernelHost {
     /// `on_proc` emission. The host builds the `Message` from the aggregate,
     /// its only source.
     lifecycle: Arc<parking_lot::RwLock<Option<LifecycleSink>>>,
+    /// The read-model seam: when attached, every commit re-materializes the
+    /// legacy rows (`procs`/`tasks`/`vars`) from the committed snapshot, so
+    /// the row-reading APIs and the sweeper see the run (see `projection`).
+    /// Without one the host keeps no read model — the kernel's own tests.
+    projection: Arc<parking_lot::RwLock<Option<Arc<projection::RowProjector>>>>,
     /// Which runs were already reported: a start once, a terminal once.
     reported: Arc<parking_lot::Mutex<ReportedRuns>>,
 }
@@ -471,6 +572,7 @@ impl KernelHost {
                 effect: Arc::new(parking_lot::RwLock::new(None)),
                 transport: Arc::new(parking_lot::RwLock::new(Box::new(ShadowTransport))),
                 lifecycle: Arc::new(parking_lot::RwLock::new(None)),
+                projection: Arc::new(parking_lot::RwLock::new(None)),
                 reported: Arc::new(parking_lot::Mutex::new(ReportedRuns::default())),
             }),
             wake_rx,
@@ -504,6 +606,95 @@ impl KernelHost {
     /// settled — the driver's `on_proc`. Attach before driving hops.
     pub(crate) fn attach_lifecycle_sink(&self, sink: LifecycleSink) {
         *self.lifecycle.write() = Some(sink);
+    }
+
+    /// Attach the read-model projector: from then on every commit
+    /// re-materializes the legacy rows from the committed snapshot (see
+    /// [`projection`]). Attach before driving hops.
+    pub(crate) fn attach_row_projector(&self, projector: Arc<projection::RowProjector>) {
+        *self.projection.write() = Some(projector);
+    }
+
+    /// Project one committed snapshot into the legacy rows, when a projector
+    /// is attached. The rows are a derived read model: a store failure is
+    /// reported and dropped, never propagated into the hop — the next commit
+    /// re-derives them from the aggregate.
+    async fn project(&self, snapshot: &crate::kernel::AggregateSnapshot) {
+        let projector = self.projection.read().clone();
+        let Some(projector) = projector else {
+            return;
+        };
+        if let Err(error) = projector.project(snapshot).await {
+            tracing::warn!(
+                pid = %snapshot.process_id,
+                error = %error,
+                "row projection failed; the next commit re-derives the rows"
+            );
+        }
+    }
+
+    /// Project only the executions one commit touched (plus the proc row): the
+    /// read model's rows for the rest of the run cannot have changed.
+    async fn project_touched(
+        &self,
+        snapshot: &crate::kernel::AggregateSnapshot,
+        touched: &std::collections::BTreeSet<String>,
+    ) {
+        let projector = self.projection.read().clone();
+        let Some(projector) = projector else {
+            return;
+        };
+        if let Err(error) = projector.project_nodes(snapshot, Some(touched)).await {
+            tracing::warn!(
+                pid = %snapshot.process_id,
+                error = %error,
+                "row projection failed; the next commit re-derives the rows"
+            );
+        }
+    }
+
+    /// Re-project one process from its durable aggregate (the action path, and
+    /// the outbox settling pass: a run whose last hop committed before its
+    /// records were delivered only becomes `removable` once they are).
+    pub(crate) async fn refresh_projection(&self, process_id: &str) {
+        if self.projection.read().is_none() {
+            return;
+        }
+        match self.load(process_id).await {
+            Ok(Some(loaded)) => self.project(&loaded.snapshot).await,
+            Ok(None) => {}
+            Err(error) => tracing::warn!(
+                pid = %process_id,
+                error = %error,
+                "row projection refresh failed; the next commit re-derives the rows"
+            ),
+        }
+    }
+
+    /// Re-project one process's row only: the deliveries just settled, so the
+    /// sole fact that can have changed is the sweeper's `removable` flag.
+    async fn refresh_proc_row(&self, process_id: &str) {
+        let projector = self.projection.read().clone();
+        let Some(projector) = projector else {
+            return;
+        };
+        match self.load(process_id).await {
+            Ok(Some(loaded)) => {
+                if let Err(error) = projector.project_proc_row(&loaded.snapshot).await {
+                    tracing::warn!(
+                        pid = %process_id,
+                        error = %error,
+                        "proc row projection failed; the next commit re-derives it"
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(error) => tracing::warn!(
+                pid = %process_id,
+                error = %error,
+                "proc row projection refresh failed"
+            ),
+        }
     }
 
     /// Report one run's lifecycle from a fresh snapshot, at most once per
@@ -590,6 +781,8 @@ impl KernelHost {
                     if let Err(error) = self.execute_one(&id).await {
                         // The operation stays open; the next recovery tick
                         // re-derives it.
+                        #[cfg(test)]
+                        eprintln!("hop {id:?} failed: {error}");
                         tracing::debug!(operation = ?id, error = %error, "kernel hop failed; left open for recovery");
                     }
                 }
@@ -601,6 +794,10 @@ impl KernelHost {
     pub(crate) async fn start_process(&self, spec: &ProcessSpec) -> Result<String> {
         let snapshot = spec.seed_snapshot()?;
         self.aggregates.create(&snapshot).await.map_err(runtime)?;
+        // The read model from the first durable fact: the proc row and the
+        // seeded task rows exist before the root hop runs, so an immediately
+        // following read sees the run.
+        self.project(&snapshot).await;
         let root = OperationId {
             process_id: spec.process_id.clone(),
             task_id: spec.root.clone(),
@@ -844,6 +1041,9 @@ impl KernelHost {
                         })?;
                     self.run_reentry(process_id, &execution_id, &to).await?;
                 }
+                // The read model follows the action's commits (the re-entry
+                // included).
+                self.refresh_projection(process_id).await;
                 Ok(())
             }
             Err(error) => {
@@ -1083,64 +1283,17 @@ impl KernelHost {
                     .get(&(execution_id.clone(), "auto".into()))
                     .map(String::as_str)
                     != Some("0");
-                let mut plan = self.task_hop_plan(
+                self.execute_task_plan(
                     &snapshot,
                     id,
                     &execution_id,
                     execution.as_ref(),
                     &commit_claim,
-                    "started",
-                    "task.started",
-                )?;
-                // The act message: every `uses` step announces itself to the
-                // client when it starts (the legacy act's `Created` message —
-                // Irq waits on it, Msg informs, Func pairs it with the later
-                // completion). The durable record rides the outbox; the
-                // attached transport turns it into the engine's message.
-                if let Some(execution) = execution.as_ref()
-                    && self.step_uses(&snapshot, &execution.model_node)?.is_some()
-                {
-                    let key = format!(
-                        "message.created:{}:{}:{}",
-                        id.process_id, id.task_id, id.generation
-                    );
-                    let exists = snapshot.outbox.keys().any(|outbox_id| outbox_id.key == key);
-                    if !exists
-                        && let Some(payload) =
-                            self.act_message_payload(&snapshot, &id.task_id, None)?
-                    {
-                        plan.outbox.push(crate::kernel::OutboxIntent {
-                            key,
-                            topic: "message.created".into(),
-                            payload,
-                        });
-                    }
-                }
-                if !action_exists && auto {
-                    plan.operations.push(OperationIntent {
-                        id: action_id,
-                        kind: OperationKind::ApplyAction,
-                    });
-                }
-                if let Some(ready) = execution
-                    .as_ref()
-                    .filter(|ready| ready.state == crate::kernel::ExecutionState::Ready)
-                {
-                    // Waiting packages park in `Waiting` (the legacy
-                    // `Interrupt`); everything else runs to completion.
-                    let target = if auto {
-                        crate::kernel::ExecutionState::Running
-                    } else {
-                        crate::kernel::ExecutionState::Waiting
-                    };
-                    plan.state_changes.push(StateChange {
-                        execution: execution_id.clone(),
-                        expected_revision: ready.revision,
-                        from: crate::kernel::ExecutionState::Ready,
-                        to: target,
-                    });
-                }
-                plan
+                    &action_id,
+                    action_exists,
+                    auto,
+                )
+                .await?
             }
             OperationKind::ApplyAction => {
                 let execution = execution.ok_or_else(|| {
@@ -1215,8 +1368,15 @@ impl KernelHost {
                 )?;
                 // A skipped act emits its Skipped message (the legacy act
                 // row's own message).
-                if let Some(payload) = self.act_message_payload(&snapshot, &id.task_id, None)? {
-                    plan.outbox[0].payload = payload;
+                if let Some(payload) = self.act_message_payload(
+                    &snapshot,
+                    &execution_id,
+                    &id.task_id,
+                    act_facts(&snapshot, &execution_id).as_ref(),
+                    None,
+                    None,
+                )? {
+                    plan.outbox[0].payload = payload.to_string();
                 }
                 plan.state_changes.push(StateChange {
                     execution: execution_id.clone(),
@@ -1390,7 +1550,175 @@ impl KernelHost {
         // it is alive, one terminal event once every execution settled. A
         // closed sink or an absent one makes this a no-op.
         self.report_lifecycle(&loaded.snapshot);
+        // The read model follows the same commit — only the executions the
+        // plan touched (their rows are the only ones that can have changed).
+        let touched: std::collections::BTreeSet<String> = plan
+            .state_changes
+            .iter()
+            .map(|change| change.execution.task_id.clone())
+            .chain(
+                plan.execution_creates
+                    .iter()
+                    .map(|create| create.execution.task_id.clone()),
+            )
+            .chain(
+                plan.variable_writes
+                    .iter()
+                    .map(|write| write.scope.task_id.clone()),
+            )
+            .collect();
+        self.project_touched(&loaded.snapshot, &touched).await;
         Ok(true)
+    }
+
+    /// The `ExecuteTask` hop: `Ready → Running` (auto) or `Ready → Waiting` (a
+    /// waiting package), the act's start-time package resolution — the legacy
+    /// act's `run()` validates params before it either waits or executes — the
+    /// `Created` message record and, for an auto step, the `ApplyAction`
+    /// operation. A resolution failure returns the failure plan instead (the
+    /// execution decided `Failed`, the error walk taking over).
+    #[allow(clippy::too_many_arguments)]
+    async fn execute_task_plan(
+        &self,
+        snapshot: &crate::kernel::AggregateSnapshot,
+        id: &OperationId,
+        execution_id: &crate::kernel::ExecutionId,
+        execution: Option<&crate::kernel::ExecutionSnapshot>,
+        claim: &OperationCommit,
+        action_id: &OperationId,
+        action_exists: bool,
+        auto: bool,
+    ) -> Result<TransitionPlan> {
+        let mut plan = self.task_hop_plan(
+            snapshot,
+            id,
+            execution_id,
+            execution,
+            claim,
+            "started",
+            "task.started",
+        )?;
+        // The act's package facts and its own gate: every `uses` step resolves
+        // its package at start, and the pinned facts ride every later message
+        // record — so no later hop re-runs the headless scope, whose snapshot
+        // seal must fail the act at start, never a completion.
+        let created_key = format!(
+            "message.created:{}:{}:{}",
+            id.process_id, id.task_id, id.generation
+        );
+        let created_exists = snapshot
+            .outbox
+            .keys()
+            .any(|outbox_id| outbox_id.key == created_key);
+        // Whether the acting node is a `uses` step at all: the message record
+        // exists for every package step, with or without a runner attached
+        // (the payload then carries the raw declared params).
+        let has_package = match execution {
+            Some(execution) => self.step_uses(snapshot, &execution.model_node)?.is_some(),
+            None => false,
+        };
+        let (facts, fresh) = if !has_package || created_exists {
+            (act_facts(snapshot, execution_id), false)
+        } else if let Some(execution) = execution {
+            match self
+                .resolve_step(snapshot, execution_id, &execution.model_node)
+                .await
+            {
+                Ok(facts) => (facts, true),
+                Err(error) => {
+                    // The act cannot start with these params (the legacy act's
+                    // `run()` fails it before it waits or executes). The state
+                    // table, like the legacy sequence, only decides a failure
+                    // from a started act: this hop marks it started and hands
+                    // the decision to the effect hop, which resolves again and
+                    // fails it — the same error walk, one hop later.
+                    tracing::debug!(
+                        pid = %snapshot.process_id,
+                        node = %execution_id.task_id,
+                        error = %error,
+                        "act resolution failed at start; failing it on its effect hop"
+                    );
+                    if execution.state == crate::kernel::ExecutionState::Ready {
+                        plan.state_changes.push(StateChange {
+                            execution: execution_id.clone(),
+                            expected_revision: execution.revision,
+                            from: crate::kernel::ExecutionState::Ready,
+                            to: crate::kernel::ExecutionState::Running,
+                        });
+                        if !action_exists {
+                            plan.operations.push(OperationIntent {
+                                id: action_id.clone(),
+                                kind: OperationKind::ApplyAction,
+                            });
+                        }
+                    }
+                    return Ok(plan);
+                }
+            }
+        } else {
+            (None, false)
+        };
+        // The act message: every `uses` step announces itself to the client
+        // when it starts (the legacy act's `Created` message — Irq waits on
+        // it, Msg informs, Func pairs it with the later completion). The
+        // durable record rides the outbox; the attached transport turns it
+        // into the engine's message.
+        if has_package {
+            if let Some(facts) = &facts
+                && fresh
+            {
+                plan.variable_writes.push(VariableWrite {
+                    scope: execution_id.clone(),
+                    name: PARAMS_VAR.to_string(),
+                    value: facts.params.to_string(),
+                });
+                plan.variable_writes.push(VariableWrite {
+                    scope: execution_id.clone(),
+                    name: OPTIONS_VAR.to_string(),
+                    value: facts.options.to_string(),
+                });
+            }
+            if !created_exists
+                && let Some(payload) = self.act_message_payload(
+                    snapshot,
+                    execution_id,
+                    &id.task_id,
+                    facts.as_ref(),
+                    None,
+                    None,
+                )?
+            {
+                plan.outbox.push(crate::kernel::OutboxIntent {
+                    key: created_key,
+                    topic: "message.created".into(),
+                    payload: payload.to_string(),
+                });
+            }
+        }
+        if !action_exists && auto {
+            plan.operations.push(OperationIntent {
+                id: action_id.clone(),
+                kind: OperationKind::ApplyAction,
+            });
+        }
+        if let Some(ready) =
+            execution.filter(|ready| ready.state == crate::kernel::ExecutionState::Ready)
+        {
+            // Waiting packages park in `Waiting` (the legacy `Interrupt`);
+            // everything else runs to completion.
+            let target = if auto {
+                crate::kernel::ExecutionState::Running
+            } else {
+                crate::kernel::ExecutionState::Waiting
+            };
+            plan.state_changes.push(StateChange {
+                execution: execution_id.clone(),
+                expected_revision: ready.revision,
+                from: crate::kernel::ExecutionState::Ready,
+                to: target,
+            });
+        }
+        Ok(plan)
     }
 
     /// The bare hop plan: the operation's own commit plus its outbox note.
@@ -1482,73 +1810,38 @@ impl KernelHost {
                     "task.completed",
                 )?;
                 // The effect seam: only an auto (Func/Msg) execution runs its
-                // package here; an Irq execution waits for its client action
-                // and its message emission arrives with the message slice.
+                // package here; an Irq execution waits for its client action.
+                // The act facts the start hop pinned ride the message record.
+                let facts = act_facts(snapshot, execution_id);
                 if let Some((runner, request)) =
-                    self.auto_effect(snapshot, execution_id, &execution.model_node)?
+                    self.step_effect(snapshot, execution_id, &execution.model_node)?
                 {
                     match runner.run(request).await {
-                        Ok(outputs) => {
-                            if let Some(outputs) = outputs {
-                                for (name, value) in effects::outputs_as_writes(&outputs) {
-                                    plan.variable_writes.push(VariableWrite {
-                                        scope: execution_id.clone(),
-                                        name,
-                                        value,
-                                    });
-                                }
-                            }
+                        Ok(outcome) => {
+                            self.fold_effect_outcome(snapshot, execution_id, &outcome, &mut plan)
                         }
                         Err(error) => {
-                            // The package failed: decide `Failed` with the
-                            // error variables and let the propagation's
-                            // error walk take over.
-                            plan.outbox[0] = crate::kernel::OutboxIntent {
-                                key: format!(
-                                    "failed:{}:{}:{}",
-                                    id.process_id, id.task_id, id.generation
-                                ),
-                                topic: "task.failed".into(),
-                                payload: String::new(),
-                            };
-                            plan.state_changes.push(StateChange {
-                                execution: execution_id.clone(),
-                                expected_revision: execution.revision,
-                                from: execution.state,
-                                to: crate::kernel::ExecutionState::Failed,
-                            });
-                            for (name, value) in [
-                                ("error.code", "EPACKAGE".to_string()),
-                                ("error.message", format!("{error}")),
-                            ] {
-                                plan.variable_writes.push(VariableWrite {
-                                    scope: execution_id.clone(),
-                                    name: name.to_string(),
-                                    value,
-                                });
-                            }
-                            if !snapshot.operations.contains_key(&propagate_id) {
-                                plan.operations.push(OperationIntent {
-                                    id: propagate_id,
-                                    kind: OperationKind::PropagateTask,
-                                });
-                            }
-                            if let Some(payload) = self.act_message_payload(
+                            return self.package_failure_plan(
                                 snapshot,
-                                &id.task_id,
-                                Some(&plan.variable_writes),
-                            )? {
-                                plan.outbox[0].payload = payload;
-                            }
-                            return Ok(plan);
+                                id,
+                                execution_id,
+                                execution,
+                                claim,
+                                &error,
+                            );
                         }
                     }
                 }
                 // The act's Completed message rides the completion record.
-                if let Some(payload) =
-                    self.act_message_payload(snapshot, &id.task_id, Some(&plan.variable_writes))?
-                {
-                    plan.outbox[0].payload = payload;
+                if let Some(payload) = self.act_message_payload(
+                    snapshot,
+                    execution_id,
+                    &id.task_id,
+                    facts.as_ref(),
+                    Some(&plan.variable_writes),
+                    None,
+                )? {
+                    plan.outbox[0].payload = payload.to_string();
                 }
                 plan.state_changes.push(StateChange {
                     execution: execution_id.clone(),
@@ -1572,7 +1865,12 @@ impl KernelHost {
                     inputs,
                     source_operation: claim.clone(),
                 };
-                crate::kernel::ActionPlanner::plan(snapshot, &command).map_err(runtime)
+                let mut plan =
+                    crate::kernel::ActionPlanner::plan(snapshot, &command).map_err(runtime)?;
+                // A client action that decides a `uses` execution announces it
+                // on the act's own message, exactly like the legacy act.
+                self.attach_act_message(snapshot, execution_id, &mut plan)?;
+                Ok(plan)
             }
         }
     }
@@ -1602,30 +1900,77 @@ impl KernelHost {
         )))
     }
 
-    /// The act message payload of one uses step: the fact set the driver's
-    /// transport maps onto the engine's `Message`. `outputs` are the hop's
-    /// own scope writes (an error decision's variables excluded).
+    /// The act message payload of one `uses` step: the fact set the driver's
+    /// transport maps onto the engine's `Message`, faithful to the legacy
+    /// `Task::create_message` — the resolved params and options, the step and
+    /// model inputs, the scope inputs the message carries, then the hop's own
+    /// outputs or its error. `facts` are the start hop's pinned resolution
+    /// (absent for a host without a runner or an aggregate seeded before it);
+    /// `outputs` are the hop's own scope writes (`__`-private facts and the
+    /// error variables excluded); `error` is the failure the hop decided.
+    #[allow(clippy::too_many_arguments)]
     fn act_message_payload(
         &self,
         snapshot: &crate::kernel::AggregateSnapshot,
+        execution_id: &crate::kernel::ExecutionId,
         task_id: &str,
+        facts: Option<&ActFacts>,
         outputs: Option<&[VariableWrite]>,
-    ) -> Result<Option<String>> {
+        error: Option<(&str, &str)>,
+    ) -> Result<Option<serde_json::Value>> {
         let node = crate::kernel::NodeId::parse(task_id).map_err(runtime)?;
-        let Some((uses, params, name, mid)) = self.step_uses(snapshot, &node)? else {
+        let Some((uses, raw_params, name, mid)) = self.step_uses(snapshot, &node)? else {
             return Ok(None);
         };
+        // The resolved facts when the start hop pinned them, the raw
+        // declaration otherwise (`params` before a runner ever saw the step).
+        let params = facts
+            .map(|facts| facts.params.clone())
+            .unwrap_or(raw_params);
+        let options = facts
+            .map(|facts| facts.options.clone())
+            .unwrap_or(serde_json::Value::Null);
+
+        let mut inputs = input_vars(snapshot, execution_id);
+        // The act folds into its step node in the kernel, so the step the
+        // legacy message pointed at is the node itself.
+        inputs.insert(
+            crate::utils::consts::STEP_KEY.to_string(),
+            serde_json::json!({
+                crate::utils::consts::STEP_NODE_ID: task_id,
+                crate::utils::consts::STEP_NODE_NAME: name,
+                crate::utils::consts::STEP_TASK_ID: task_id,
+            }),
+        );
+        if let Some(model) = model_of(snapshot)? {
+            inputs.insert(
+                crate::utils::consts::WORKFLOW_MODEL_KEY.to_string(),
+                serde_json::json!({
+                    "id": model.id,
+                    "name": model.name,
+                    "options": model.options,
+                }),
+            );
+        }
+        inputs.insert(crate::utils::consts::ACT_PARAMS_KEY.to_string(), params);
+        inputs.insert(crate::utils::consts::ACT_OPTIONS_KEY.to_string(), options);
+
         let mut payload = serde_json::json!({
             "nid": task_id,
             "name": name,
             "uses": uses,
-            "params": params,
             "mid": mid,
+            "inputs": serde_json::Value::Object(inputs),
         });
-        if let Some(outputs) = outputs {
+        if let Some((code, message)) = error {
+            payload["error"] = serde_json::json!({ "code": code, "message": message });
+        } else if let Some(outputs) = outputs {
             let vars: serde_json::Map<String, serde_json::Value> = outputs
                 .iter()
-                .filter(|write| !write.name.starts_with("error."))
+                .filter(|write| {
+                    !crate::utils::consts::is_private_key(&write.name)
+                        && !write.name.starts_with("error.")
+                })
                 .map(|write| {
                     (
                         write.name.clone(),
@@ -1635,13 +1980,12 @@ impl KernelHost {
                 .collect();
             payload["outputs"] = serde_json::Value::Object(vars);
         }
-        Ok(Some(payload.to_string()))
+        Ok(Some(payload))
     }
 
-    /// The effect request for an auto `uses` step, when a runner is attached:
-    /// `None` for leaves without a package, waiting executions, or a host
-    /// running without the seam.
-    fn auto_effect(
+    /// The effect request for a `uses` step, when a runner is attached:
+    /// `None` for a leaf without a package or a host running without the seam.
+    fn step_effect(
         &self,
         snapshot: &crate::kernel::AggregateSnapshot,
         execution_id: &crate::kernel::ExecutionId,
@@ -1650,14 +1994,6 @@ impl KernelHost {
         let Some(runner) = self.effect.read().clone() else {
             return Ok(None);
         };
-        let auto = snapshot
-            .variables
-            .get(&(execution_id.clone(), "auto".into()))
-            .map(String::as_str)
-            != Some("0");
-        if !auto {
-            return Ok(None);
-        }
         let Some(model) = model_of(snapshot)? else {
             return Ok(None);
         };
@@ -1675,9 +2011,211 @@ impl KernelHost {
                 package,
                 model,
                 vars: scope_vars(snapshot, execution_id),
+                env: projection::env_map(snapshot)?,
                 owner: owner_of(snapshot)?,
             },
         )))
+    }
+
+    /// Resolve one `uses` step's package at start (the legacy act's `run()`
+    /// gate): the package's `run_as` and its validated params. A resolution
+    /// error is the legacy act's start error.
+    async fn resolve_step(
+        &self,
+        snapshot: &crate::kernel::AggregateSnapshot,
+        execution_id: &crate::kernel::ExecutionId,
+        model_node: &crate::kernel::NodeId,
+    ) -> Result<Option<ActFacts>> {
+        let Some((runner, request)) = self.step_effect(snapshot, execution_id, model_node)? else {
+            return Ok(None);
+        };
+        let resolved = runner.resolve(&request).await?;
+        Ok(Some(ActFacts {
+            params: resolved.params,
+            options: resolved.options,
+        }))
+    }
+
+    /// Fold one package outcome into the hop's plan: the returned outputs and
+    /// the headless task's own data become the acting scope's writes, and the
+    /// process env the package set merges into the run's durable env map on
+    /// the root scope. All of it commits with the completion, so a crash
+    /// before the commit re-runs the package against the same pre-state.
+    fn fold_effect_outcome(
+        &self,
+        snapshot: &crate::kernel::AggregateSnapshot,
+        execution_id: &crate::kernel::ExecutionId,
+        outcome: &effects::EffectOutcome,
+        plan: &mut TransitionPlan,
+    ) {
+        if let Some(outputs) = &outcome.outputs {
+            for (name, value) in effects::outputs_as_writes(outputs) {
+                plan.variable_writes.push(VariableWrite {
+                    scope: execution_id.clone(),
+                    name,
+                    value,
+                });
+            }
+        }
+        for (name, value) in &outcome.data {
+            plan.variable_writes.push(VariableWrite {
+                scope: execution_id.clone(),
+                name: name.clone(),
+                value: value.to_string(),
+            });
+        }
+        if !outcome.env.is_empty() {
+            let Some(root) = root_execution(snapshot) else {
+                return;
+            };
+            let mut map: serde_json::Map<String, serde_json::Value> = projection::env_map(snapshot)
+                .unwrap_or_default()
+                .into_iter()
+                .collect();
+            for (name, value) in &outcome.env {
+                map.insert(name.clone(), value.clone());
+            }
+            plan.variable_writes.push(VariableWrite {
+                scope: root,
+                name: projection::ENV_MAP_VAR.to_string(),
+                value: serde_json::Value::Object(map).to_string(),
+            });
+        }
+    }
+
+    /// The plan of a package/params failure: the execution decided `Failed`
+    /// with the error variables, the act's failed message on its own record,
+    /// and the propagation that carries the error walk upward (the legacy
+    /// `emit_error` path). An execution that already left the running states
+    /// keeps its state — the bare hop remainder completes the operation.
+    fn package_failure_plan(
+        &self,
+        snapshot: &crate::kernel::AggregateSnapshot,
+        id: &OperationId,
+        execution_id: &crate::kernel::ExecutionId,
+        execution: &crate::kernel::ExecutionSnapshot,
+        claim: &OperationCommit,
+        error: &ActError,
+    ) -> Result<TransitionPlan> {
+        let propagate_id = OperationId {
+            process_id: id.process_id.clone(),
+            task_id: id.task_id.clone(),
+            generation: id.generation,
+            sequence: id.sequence + 1,
+        };
+        let mut plan = self.task_hop_plan(
+            snapshot,
+            id,
+            execution_id,
+            Some(execution),
+            claim,
+            "failed",
+            "task.failed",
+        )?;
+        if execution.state.is_terminal() {
+            return Ok(plan);
+        }
+        plan.state_changes.push(StateChange {
+            execution: execution_id.clone(),
+            expected_revision: execution.revision,
+            from: execution.state,
+            to: crate::kernel::ExecutionState::Failed,
+        });
+        let code = "EPACKAGE";
+        let message = format!("{error}");
+        for (name, value) in [
+            ("error.code", code.to_string()),
+            ("error.message", message.clone()),
+        ] {
+            plan.variable_writes.push(VariableWrite {
+                scope: execution_id.clone(),
+                name: name.to_string(),
+                value,
+            });
+        }
+        if !snapshot.operations.contains_key(&propagate_id) {
+            plan.operations.push(OperationIntent {
+                id: propagate_id,
+                kind: OperationKind::PropagateTask,
+            });
+        }
+        if let Some(payload) = self.act_message_payload(
+            snapshot,
+            execution_id,
+            &id.task_id,
+            act_facts(snapshot, execution_id).as_ref(),
+            None,
+            Some((code, &message)),
+        )? {
+            plan.outbox[0].payload = payload.to_string();
+        }
+        Ok(plan)
+    }
+
+    /// Announce a `uses` execution's decided state on the planner's own outbox
+    /// record: the legacy act emitted one message per state transition, so a
+    /// client action that decides the act (complete/submit/skip/cancel/abort/
+    /// fail) must speak the same message. The record's topic already names the
+    /// state; its opaque lifecycle payload becomes the act payload.
+    fn attach_act_message(
+        &self,
+        snapshot: &crate::kernel::AggregateSnapshot,
+        execution_id: &crate::kernel::ExecutionId,
+        plan: &mut TransitionPlan,
+    ) -> Result<()> {
+        let Some(change) = plan
+            .state_changes
+            .iter()
+            .find(|change| &change.execution == execution_id)
+        else {
+            return Ok(());
+        };
+        let Some(execution) = snapshot.executions.get(execution_id) else {
+            return Ok(());
+        };
+        let Some(topic) = message_topic(change.to) else {
+            return Ok(());
+        };
+        if self.step_uses(snapshot, &execution.model_node)?.is_none() {
+            return Ok(());
+        }
+        // The action's own writes carry the error variables a `Fail` action
+        // supplies; later writes win, like the commit's own order.
+        let read = |name: &str| {
+            plan.variable_writes
+                .iter()
+                .rev()
+                .find(|write| write.name == name)
+                .map(|write| json_text(&write.value))
+                .unwrap_or_default()
+        };
+        let error = (change.to == crate::kernel::ExecutionState::Failed)
+            .then(|| (read("error.code"), read("error.message")));
+        let error = error
+            .as_ref()
+            .map(|(code, message)| (code.as_str(), message.as_str()));
+        let facts = act_facts(snapshot, execution_id);
+        if let Some(payload) = self.act_message_payload(
+            snapshot,
+            execution_id,
+            &execution_id.task_id,
+            facts.as_ref(),
+            Some(&plan.variable_writes),
+            error,
+        )? {
+            match plan.outbox.first_mut() {
+                Some(record) => record.payload = payload.to_string(),
+                None => plan.outbox.push(crate::kernel::OutboxIntent {
+                    key: format!(
+                        "act:{}:{}:{}",
+                        plan.process_id, execution_id.task_id, execution_id.generation
+                    ),
+                    topic: topic.to_string(),
+                    payload: payload.to_string(),
+                }),
+            }
+        }
+        Ok(())
     }
 
     /// The fan-out command for a container execution, or `None` when the
@@ -1851,6 +2389,15 @@ impl KernelHost {
         Ok(self.load(process_id).await?.map(|loaded| loaded.snapshot))
     }
 
+    /// Whether the aggregate of `process_id` exists — the durable record of a
+    /// pid. A start consults this before anything else so a restart of an
+    /// existing run is refused (the legacy duplicate-pid rule), independently
+    /// of the projected rows, which a swept run loses while its aggregate
+    /// stays.
+    pub(crate) async fn exists(&self, process_id: &str) -> Result<bool> {
+        Ok(self.load(process_id).await?.is_some())
+    }
+
     /// Whether every execution of the process reached a terminal state.
     pub(crate) async fn process_completed(&self, process_id: &str) -> Result<bool> {
         let Some(snapshot) = self.snapshot(process_id).await? else {
@@ -1959,6 +2506,7 @@ impl KernelHost {
     pub(crate) async fn dispatch_outbox(&self) -> Result<usize> {
         let now = SystemClock.now_ms();
         let mut delivered = 0usize;
+        let mut settled: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let mut cursor = None;
         loop {
             let page = self
@@ -2001,6 +2549,7 @@ impl KernelHost {
                     match outcome {
                         crate::kernel::DeliveryOutcome::Delivered { receipt } => {
                             delivered += 1;
+                            settled.insert(claimed.id.process_id.clone());
                             OutboxEvent::ConfirmDelivered {
                                 claim: claim.clone(),
                                 receipt,
@@ -2037,6 +2586,12 @@ impl KernelHost {
             if cursor.is_none() {
                 break;
             }
+        }
+        // The deliveries that settled decide the read model's `removable`
+        // flag: a run that finished before its records were delivered only
+        // hands its rows (and directory) to the sweeper once they are.
+        for process_id in &settled {
+            self.refresh_proc_row(process_id).await;
         }
         Ok(delivered)
     }
@@ -2231,14 +2786,14 @@ mod tests {
             .await
             .expect("engine never finished");
 
-        // The legacy read model is not written in driver mode (the row
-        // projection slice owns it), so the run is inspected through the
-        // aggregate.
-        assert!(
-            engine.runtime().proc(&pid).await.unwrap().is_none(),
-            "driver mode must not launch a legacy process"
-        );
+        // No legacy scheduler was launched: the run's durable record is the
+        // aggregate, and the legacy rows are its projection (the read model
+        // this driver serves).
         let runtime = engine.runtime();
+        assert!(
+            runtime.cache().resident(&pid).is_none(),
+            "driver mode must not hold a resident legacy process"
+        );
         let host = runtime.kernel().expect("the kernel host must be wired");
         assert!(host.process_completed(&pid).await.unwrap());
         let snapshot = host.snapshot(&pid).await.unwrap().expect("aggregate");
@@ -2255,6 +2810,10 @@ mod tests {
                 "s1".into(),
                 "s2".into()
             ]
+        );
+        assert!(
+            runtime.proc(&pid).await.unwrap().is_some(),
+            "the projected rows serve the read API"
         );
     }
 
@@ -2414,6 +2973,578 @@ mod tests {
 
         std::fs::remove_dir_all(&root).ok();
         engine.close().await;
+    }
+
+    /// The read model in driver mode: the kernel's rows land in the legacy
+    /// collections, so `proc:get`/`task:get`/`Runtime::proc` answer from them,
+    /// and once the run settled the sweeper reclaims its rows and its
+    /// directory.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn kernel_engine_projects_the_legacy_read_model() {
+        let root =
+            std::env::temp_dir().join(format!("acts-kernel-rows-{}", crate::utils::longid()));
+        let mut config = crate::Config::default();
+        config.data.kernel_engine = true;
+        config.data.tick_interval_secs = Some(1);
+        config.data.workdir = Some(root.display().to_string());
+        let engine = crate::Engine::builder()
+            .set_config(&config)
+            .start()
+            .await
+            .unwrap();
+        let sig = engine.signal(());
+        let done = sig.clone();
+        // An ack channel: its delivery rows only persist when the process's row
+        // exists, so they are a direct probe of the projection (and of the
+        // delivery close that lets a finished run be swept).
+        let channel = engine.channel_with_options(&crate::ChannelOptions {
+            ack: true,
+            ..Default::default()
+        });
+        channel.on_complete(move |_| {
+            let done = done.clone();
+            async move { done.close() }
+        });
+        // The act messages only reach an ack channel that subscribes to them.
+        channel.on_message(|_| async move {});
+
+        let workflow = crate::model::Workflow::new()
+            .with_id("wf-rows")
+            .with_step(|step| {
+                step.with_id("s1").with_uses(
+                    crate::utils::test::USES_SET,
+                    crate::Vars::new().with("k1", "v1"),
+                )
+            });
+        let runtime = engine.runtime();
+        let proc = runtime.start(&workflow, crate::Vars::new()).await.unwrap();
+        let pid = proc.id().to_string();
+        tokio::time::timeout(std::time::Duration::from_secs(30), sig.recv())
+            .await
+            .expect("the run never finished");
+
+        let executor = engine.executor(&crate::Principal::unrestricted());
+        let info = executor.proc().get(&pid).await.expect("the proc row");
+        assert_eq!(info.state, "completed");
+        assert_eq!(info.mid, "wf-rows");
+        let mut tasks: Vec<String> = info.tasks.iter().map(|task| task.id.clone()).collect();
+        tasks.sort();
+        assert_eq!(
+            tasks,
+            vec![crate::utils::consts::TASK_ROOT_TID.to_string(), "s1".into()]
+        );
+        // The effect's output is the task scope's projected data.
+        let s1 = executor.task().get(&pid, "s1").await.expect("the task row");
+        assert_eq!(s1.state, "completed");
+        assert_eq!(s1.r#type, "step");
+        assert!(
+            s1.data.contains("\"k1\":\"v1\""),
+            "the task data must carry the effect output: {}",
+            s1.data
+        );
+        // `Runtime::proc` rebuilds the process from the rows: the durable read
+        // model, not a resident instance.
+        let live = runtime
+            .proc(&pid)
+            .await
+            .unwrap()
+            .expect("the projected process must load");
+        assert_eq!(live.tasks().len(), 2);
+
+        // The run's own directory is what the effect used; it goes with the
+        // rows once the deliveries settled (the outbox pass projects that) and
+        // the sweeper runs.
+        let dir = root.join(&pid);
+        assert!(dir.is_dir(), "the run's directory must exist");
+        let host = runtime.kernel().expect("the kernel host").clone();
+        host.dispatch_outbox().await.unwrap();
+        // The act message reached the engine's durable message rows (the ack
+        // channel's delivery could only be stored once the process's row
+        // existed), and the finished task settled it…
+        let messages = executor
+            .msg()
+            .list(
+                &crate::store::query::Query::new().filter(
+                    crate::store::query::Filter::and()
+                        .expr(crate::store::query::Expr::eq("pid", pid.clone())),
+                ),
+            )
+            .await
+            .expect("the message rows");
+        let mut act_states: Vec<String> = messages
+            .rows
+            .iter()
+            .filter(|row| row.tid == "s1")
+            .map(|row| row.state.to_string())
+            .collect();
+        act_states.sort();
+        assert_eq!(
+            act_states,
+            vec!["completed".to_string(), "created".to_string()],
+            "the act's Created and Completed messages must both have rows: {:?}",
+            messages.rows
+        );
+        // The finished task settled every delivery of its messages, so the
+        // run is sweepable.
+        for row in &messages.rows {
+            assert_eq!(
+                row.status, "completed",
+                "every delivery of a finished run must be settled: {:?}",
+                messages.rows
+            );
+        }
+        runtime.cache().sweep_removable().await.unwrap();
+        assert!(!dir.exists(), "the sweeper reclaims the run's directory");
+        assert!(
+            runtime
+                .cache()
+                .store()
+                .procs()
+                .find_opt(&pid)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(runtime.proc(&pid).await.unwrap().is_none());
+
+        std::fs::remove_dir_all(&root).ok();
+        engine.close().await;
+    }
+
+    /// Restart discrimination: a pid's durable record is the aggregate, so a
+    /// same-pid start is refused both while the projected rows exist and after
+    /// the sweeper reclaimed them — the aggregate outlives the rows.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn kernel_engine_refuses_a_started_pid_via_the_aggregate() {
+        let mut config = crate::Config::default();
+        config.data.kernel_engine = true;
+        config.data.tick_interval_secs = Some(1);
+        let engine = crate::Engine::builder()
+            .set_config(&config)
+            .start()
+            .await
+            .unwrap();
+        let sig = engine.signal(());
+        let done = sig.clone();
+        engine.channel().on_complete(move |_| {
+            let done = done.clone();
+            async move { done.close() }
+        });
+
+        let workflow = crate::model::Workflow::new()
+            .with_id("wf-dup")
+            .with_step(|step| step.with_id("s1"));
+        let runtime = engine.runtime();
+        let pid = "duppid";
+        let options = crate::Vars::new().with(crate::utils::consts::PROCESS_ID, pid);
+        runtime.start(&workflow, options.clone()).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(30), sig.recv())
+            .await
+            .expect("the run never finished");
+
+        let duplicated = runtime.start(&workflow, options.clone()).await;
+        assert!(
+            duplicated.is_err_and(|err| err.to_string().contains("duplicated")),
+            "an existing pid must be refused while its rows are there"
+        );
+
+        // Settle and sweep the rows: the aggregate is what still answers.
+        let host = runtime.kernel().expect("the kernel host").clone();
+        host.dispatch_outbox().await.unwrap();
+        runtime.cache().sweep_removable().await.unwrap();
+        assert!(
+            runtime
+                .cache()
+                .store()
+                .procs()
+                .find_opt(pid)
+                .await
+                .unwrap()
+                .is_none(),
+            "the settled run's rows must be swept"
+        );
+        assert!(host.exists(pid).await.unwrap(), "the aggregate stays");
+        let duplicated = runtime.start(&workflow, options).await;
+        assert!(
+            duplicated.is_err_and(|err| err.to_string().contains("duplicated")),
+            "the aggregate must refuse a restart the swept rows no longer show"
+        );
+
+        engine.close().await;
+    }
+
+    /// The package write-back: what a Func package leaves in its context —
+    /// the returned outputs, the task data it wrote, and the process env it
+    /// set — commits with the completion, the env on the run's root scope,
+    /// where a later task's `$env` reads it and the projected proc row carries
+    /// it.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn effect_write_back_folds_into_the_aggregate() {
+        struct WriteBack;
+        #[async_trait::async_trait]
+        impl crate::package::ActPackage for WriteBack {
+            fn new(_: &crate::Config) -> crate::Result<Self> {
+                Ok(Self)
+            }
+            fn definition() -> crate::package::ActPackageDefinition {
+                crate::package::ActPackageDefinition {
+                    id: "test.writeback",
+                    name: "WriteBack",
+                    desc: "",
+                    icon: "",
+                    doc: "",
+                    version: "0.1.0",
+                    schema: serde_json::json!({}),
+                    options: None,
+                    run_as: crate::package::ActRunAs::Func,
+                    resources: Vec::new(),
+                    catalog: crate::package::ActPackageCatalog::App,
+                }
+            }
+            async fn execute(
+                &self,
+                ctx: &crate::Context,
+                _params: &serde_json::Value,
+            ) -> crate::Result<Option<crate::Vars>> {
+                ctx.set_env("GREETING", "hi");
+                ctx.task()
+                    .update_data(&crate::Vars::new().with("written", 7));
+                Ok(Some(crate::Vars::new().with("output", 1)))
+            }
+        }
+        struct ReadEnv;
+        #[async_trait::async_trait]
+        impl crate::package::ActPackage for ReadEnv {
+            fn new(_: &crate::Config) -> crate::Result<Self> {
+                Ok(Self)
+            }
+            fn definition() -> crate::package::ActPackageDefinition {
+                crate::package::ActPackageDefinition {
+                    id: "test.readenv",
+                    name: "ReadEnv",
+                    desc: "",
+                    icon: "",
+                    doc: "",
+                    version: "0.1.0",
+                    schema: serde_json::json!({}),
+                    options: None,
+                    run_as: crate::package::ActRunAs::Func,
+                    resources: Vec::new(),
+                    catalog: crate::package::ActPackageCatalog::App,
+                }
+            }
+            async fn execute(
+                &self,
+                ctx: &crate::Context,
+                _params: &serde_json::Value,
+            ) -> crate::Result<Option<crate::Vars>> {
+                Ok(Some(
+                    crate::Vars::new().with("seen", ctx.get_env::<String>("GREETING")),
+                ))
+            }
+        }
+
+        let mut config = crate::Config::default();
+        config.data.kernel_engine = true;
+        config.data.tick_interval_secs = Some(1);
+        let engine = crate::Engine::builder()
+            .set_config(&config)
+            .start()
+            .await
+            .unwrap();
+        let runtime = engine.runtime();
+        let package = runtime.package().clone();
+        // The production path: the durable metadata row (what the effect
+        // runner resolves `run_as`/params against) plus the instance factory.
+        let executor = engine.executor(&crate::Principal::unrestricted());
+        executor
+            .ext()
+            .register_package(&<WriteBack as crate::package::ActPackage>::definition())
+            .await
+            .unwrap();
+        executor
+            .ext()
+            .register_package(&<ReadEnv as crate::package::ActPackage>::definition())
+            .await
+            .unwrap();
+        package.register(
+            "test.writeback",
+            &crate::package::ActPackageRegister::new::<WriteBack>(),
+        );
+        package.register(
+            "test.readenv",
+            &crate::package::ActPackageRegister::new::<ReadEnv>(),
+        );
+        let sig = engine.signal(());
+        let done = sig.clone();
+        engine.channel().on_complete(move |_| {
+            let done = done.clone();
+            async move { done.close() }
+        });
+
+        let workflow = crate::model::Workflow::new()
+            .with_id("wf-writeback")
+            .with_step(|step| {
+                step.with_id("s1")
+                    .with_uses("test.writeback", crate::Vars::new())
+            })
+            .with_step(|step| {
+                step.with_id("s2")
+                    .with_uses("test.readenv", crate::Vars::new())
+            });
+        let proc = runtime.start(&workflow, crate::Vars::new()).await.unwrap();
+        let pid = proc.id().to_string();
+        tokio::time::timeout(std::time::Duration::from_secs(30), sig.recv())
+            .await
+            .expect("the run never finished");
+
+        let host = runtime.kernel().expect("the kernel host").clone();
+        let snapshot = host.snapshot(&pid).await.unwrap().unwrap();
+        let var = |task: &str, name: &str| {
+            snapshot
+                .variables
+                .get(&(
+                    crate::kernel::ExecutionId::new(task, 0).unwrap(),
+                    name.to_string(),
+                ))
+                .cloned()
+        };
+        assert_eq!(var("s1", "output").as_deref(), Some("1"));
+        assert_eq!(var("s1", "written").as_deref(), Some("7"));
+        // The env the package set is the run's, read back by the next task.
+        assert_eq!(var("s2", "seen").as_deref(), Some("\"hi\""));
+        // …and it is projected into the run's row, exactly like the legacy
+        // process env.
+        let row = runtime
+            .cache()
+            .store()
+            .procs()
+            .find(&pid)
+            .await
+            .expect("the proc row");
+        assert!(
+            row.env.contains("\"GREETING\":\"hi\""),
+            "the proc env must carry the package env: {}",
+            row.env
+        );
+
+        engine.close().await;
+    }
+
+    /// The act message stream of one workflow, on both engines: the legacy
+    /// engine's per-task messages folded onto their owning node (an act folds
+    /// into its step; the workflow root is `$`) and the kernel driver's
+    /// forwarded messages must agree per (node, state, uses).
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn kernel_act_messages_match_the_legacy_run() {
+        use crate::event::EventAction;
+
+        // One run, ONE engine flavour, per call: both sides speak the same
+        // engine-channel API, so the collection and the act completion are
+        // shared. Returns (folded act messages, lifecycle events seen, folded
+        // read-model rows) — the lifecycle is the process-level channel
+        // (`on_start`/`on_complete`), which is where the kernel reports the
+        // workflow root the legacy engine also announced as a task message,
+        // and the rows are what `proc:get`/`task:get` read, folded the same
+        // way on both engines (an act row folds to its owning step's node;
+        // only its states are compared).
+        async fn run(kernel_engine: bool) -> (Vec<String>, bool, bool, Vec<String>) {
+            let workflow = crate::model::Workflow::new()
+                .with_id("wf-msg-parity")
+                .with_step(|step| {
+                    step.with_id("s1").with_uses(
+                        crate::utils::test::USES_SET,
+                        crate::Vars::new().with("k1", "v1"),
+                    )
+                })
+                .with_step(|step| {
+                    step.with_id("s2").with_uses(
+                        crate::utils::test::USES_IRQ,
+                        crate::Vars::new().with("key", "irq-1"),
+                    )
+                });
+            let mut config = crate::Config::default();
+            config.data.kernel_engine = kernel_engine;
+            config.data.tick_interval_secs = Some(1);
+            let engine = crate::Engine::builder()
+                .set_config(&config)
+                .start()
+                .await
+                .unwrap();
+            let started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let completed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let sig = engine.signal(());
+            let done = sig.clone();
+            {
+                let completed = completed.clone();
+                engine.channel().on_complete(move |_| {
+                    let completed = completed.clone();
+                    let done = done.clone();
+                    async move {
+                        completed.store(true, std::sync::atomic::Ordering::SeqCst);
+                        done.close();
+                    }
+                });
+            }
+            {
+                let started = started.clone();
+                engine.channel().on_start(move |_| {
+                    let started = started.clone();
+                    async move {
+                        started.store(true, std::sync::atomic::Ordering::SeqCst);
+                    }
+                });
+            }
+            let folded: Arc<parking_lot::Mutex<Vec<String>>> =
+                Arc::new(parking_lot::Mutex::new(Vec::new()));
+            let runtime = engine.runtime();
+            {
+                let folded = folded.clone();
+                engine.channel().on_message(move |e| {
+                    let folded = folded.clone();
+                    async move {
+                        let uses = e.uses.clone().unwrap_or_default();
+                        // The workflow root's task messages are the process
+                        // lifecycle, which the kernel reports on the lifecycle
+                        // channel (asserted below) — not act messages.
+                        if e.r#type == "workflow" {
+                            return;
+                        }
+                        // Fold onto the owning node: an act belongs to its step
+                        // (the kernel's node identity), everything else is its
+                        // own node.
+                        let node = if e.r#type == "act" {
+                            e.inputs
+                                .get::<crate::Vars>(crate::utils::consts::STEP_KEY)
+                                .and_then(|step| {
+                                    step.get::<String>(crate::utils::consts::STEP_NODE_ID)
+                                })
+                                .unwrap_or_else(|| e.nid.clone())
+                        } else {
+                            e.nid.clone()
+                        };
+                        let state = e.state.to_string();
+                        folded
+                            .lock()
+                            .push(format!("{node}|{state}|{}", !uses.is_empty()));
+                    }
+                });
+            }
+            let created = engine.signal((String::new(), String::new()));
+            {
+                let created = created.clone();
+                engine.channel().on_message(move |e| {
+                    let created = created.clone();
+                    async move {
+                        if e.r#type == "act"
+                            && e.is_params_key("irq-1")
+                            && e.state == crate::MessageState::Created
+                        {
+                            created.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+                            created.close();
+                        }
+                    }
+                });
+            }
+
+            let proc = runtime.start(&workflow, crate::Vars::new()).await.unwrap();
+            let _ = proc.id();
+            // The client's action completes the waiting act, on the tid its
+            // own Created message named (the legacy act's random task id, the
+            // kernel's node id).
+            let (pid, tid) =
+                tokio::time::timeout(std::time::Duration::from_secs(30), created.recv())
+                    .await
+                    .expect("the waiting act was never created")
+                    .clone();
+            runtime
+                .do_action(&crate::event::Action::new(
+                    &pid,
+                    &tid,
+                    EventAction::Next,
+                    crate::Vars::new(),
+                ))
+                .await
+                .expect("the waiting act must complete");
+            tokio::time::timeout(std::time::Duration::from_secs(30), sig.recv())
+                .await
+                .expect("the run never finished");
+            // The driver delivers records on its tick; drain them so the
+            // comparison sees the same settled stream the legacy engine
+            // emitted synchronously.
+            if let Some(host) = runtime.kernel() {
+                host.dispatch_outbox().await.unwrap();
+            }
+            // The durable read model of this run, folded: a row's node is its
+            // own `node_data` id (the workflow root is `$`, as in the kernel),
+            // and an act row folds to the node of its parent row. The legacy
+            // writer is drained first: its rows lag the completion signal.
+            runtime.cache().flush().await.unwrap();
+            let rows_raw = runtime
+                .cache()
+                .store()
+                .tasks()
+                .query_all(
+                    &crate::store::query::Query::new().filter(
+                        crate::store::query::Filter::and()
+                            .expr(crate::store::query::Expr::eq("pid", pid.clone())),
+                    ),
+                )
+                .await
+                .unwrap();
+            let node_id_of = |tid: &str| {
+                rows_raw
+                    .iter()
+                    .find(|row| row.tid == tid)
+                    .and_then(|row| {
+                        serde_json::from_str::<crate::scheduler::NodeData>(&row.node_data).ok()
+                    })
+                    .map(|data| data.id)
+            };
+            let mut rows: Vec<String> = Vec::new();
+            for row in &rows_raw {
+                let node = if row.kind == "workflow" {
+                    crate::utils::consts::TASK_ROOT_TID.to_string()
+                } else if row.kind == "act" {
+                    row.parent
+                        .as_deref()
+                        .and_then(node_id_of)
+                        .unwrap_or_else(|| row.tid.clone())
+                } else {
+                    node_id_of(&row.tid).unwrap_or_else(|| row.tid.clone())
+                };
+                rows.push(format!("{node}|{}", row.state));
+            }
+            rows.sort();
+            rows.dedup();
+            let mut folded = folded.lock().clone();
+            folded.sort();
+            folded.dedup();
+            engine.close().await;
+            (
+                folded,
+                started.load(std::sync::atomic::Ordering::SeqCst),
+                completed.load(std::sync::atomic::Ordering::SeqCst),
+                rows,
+            )
+        }
+
+        let (legacy, legacy_started, legacy_completed, legacy_rows) = run(false).await;
+        let (kernel, kernel_started, kernel_completed, kernel_rows) = run(true).await;
+        assert_eq!(legacy, kernel, "the folded act message sets must match");
+        assert_eq!(
+            legacy_rows, kernel_rows,
+            "the folded read-model rows must match"
+        );
+        // The workflow root's messages are the process lifecycle on both
+        // engines: one start and one completion.
+        assert!(legacy_started && legacy_completed);
+        assert_eq!(kernel_started, legacy_started);
+        assert_eq!(kernel_completed, legacy_completed);
     }
 
     #[tokio::test]
@@ -3632,11 +4763,11 @@ mod tests {
         let s1_message = message_of("s1");
         let s1_payload: serde_json::Value = serde_json::from_str(&s1_message.payload).unwrap();
         assert_eq!(s1_payload["uses"], "test.func");
-        assert_eq!(s1_payload["params"]["k1"], "v1");
+        assert_eq!(s1_payload["inputs"]["params"]["k1"], "v1");
         let s2_message = message_of("s2");
         let s2_payload: serde_json::Value = serde_json::from_str(&s2_message.payload).unwrap();
         assert_eq!(s2_payload["uses"], "test.irq");
-        assert_eq!(s2_payload["params"]["key"], "irq-1");
+        assert_eq!(s2_payload["inputs"]["params"]["key"], "irq-1");
 
         // The Irq execution is parked on its message; the plain leaf behind
         // it waits for the client.
@@ -3909,6 +5040,15 @@ mod tests {
             "test.fail",
             &crate::package::ActPackageRegister::new::<FailingPackage>(),
         );
+        // The effect runner resolves the package through its durable metadata
+        // row (like the legacy engine's `package_definition`), so the failure
+        // under test is the package's own.
+        engine
+            .executor(&crate::Principal::unrestricted())
+            .ext()
+            .register_package(&<FailingPackage as crate::package::ActPackage>::definition())
+            .await
+            .unwrap();
         let (host, mut wake_rx) = KernelHost::in_memory();
         host.attach_effect_runner(Arc::new(effects::PackageEffectRunner::new(
             engine.runtime().clone(),
