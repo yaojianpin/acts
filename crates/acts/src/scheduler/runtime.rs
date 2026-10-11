@@ -1548,6 +1548,12 @@ impl Runtime {
                 runtime.cache().clone(),
                 runtime.config().workdir(),
             )));
+            // Branch predicates are decided on the engine's own environment
+            // (the legacy `ctx.eval`: engine functions included) on a
+            // headless task of the declaring model.
+            host.attach_predicate_runner(Arc::new(crate::kernel_host::EnginePredicateRunner::new(
+                runtime.clone(),
+            )));
         }
         Ok(runtime)
     }

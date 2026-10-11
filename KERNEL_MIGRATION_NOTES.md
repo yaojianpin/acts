@@ -192,11 +192,22 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
   - 导入期**拒绝** `step.catches`/`step.timeouts`(legacy 的 tree 真会建 Catch/Timeout
     子节点、`Step::on_error`/`on_timeout` 真会分派,静默丢弃等于换掉错误路径);新单测
     `catch_and_timeout_declarations_are_rejected_not_silently_dropped`。
-  - 已知边界:kernel 的谓词求值器是自带的变量/方法子集(acts_expr,没有 legacy 环境函数
-    `$ecode()`/`$cost()`/`$env`),这类谓词现在会判定该分支 Failed(legacy 会求值);catch 恰好
-    用 `$ecode()` 选分支(`examples/catches/model.yml`),故与 catch 一并收口。
+  - 谓词求值的后端:驱动档已接到引擎表达式环境(见下一条),自备子集求值器(acts_expr,无环境
+    函数)只是没有 runner 时的回落。
   - 顺带:`folded_legacy_states` 跳过 `state=None` 的 legacy 任务(legacy 会留下从未启动的
     分支内部步骤,如未进入分支的 `s11`/`s21`;kernel 根本不建它们)。
+
+- 分支谓词接到引擎环境(catch 的前置):`kernel_host/predicate.rs` 的 predicate seam —— 驱动档
+  把每个分支 `if` 放到**引擎自己的表达式环境**上求值:一个 headless task 上的
+  `ctx.eval::<bool>`(legacy `Branch::init` 同一条路径),所以 `$env`/`$ecode()`/`$cost()`
+  等环境函数按 legacy 语义参与判定;完成动作的 inputs 作为覆盖层叠在 scope 变量之上(legacy 先
+  把 action vars 写进 task scope 再调度分支)。求值失败(=引擎环境判不了:未设变量、非布尔、
+  编译错)转成 `PredicateValue::Invalid` → 该分支 Failed(即上面的谓词失败路径),**不是** hop
+  失败(否则 hop 会一直重试)。没有 runner 的 host(内核自带测试、无 Runtime 的嵌入式)回落原先
+  自备子集求值器(变量/运算符/值方法),行为不变。headless scope 抽到 `kernel_host/scope.rs`,
+  效果与谓词两个 seam 共用。
+  对跑实测(`kernel_env_function_predicate_matches_the_legacy_run`):`$env.WORK_DIR != 'x'`
+  的分支两侧都 Completed、`== 'x'` 的都 Skipped,逐节点一致。
 
 ## 已对齐(无需动)
 
@@ -210,9 +221,9 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
 1. **catch/timeout 的导入与错误路由**(本片只拒绝、未导入):legacy 的语义 = `Step::on_error`
    把 Catch 子节点按 `TASK_SIGN = CATCH` 调度、该 step 回到 Running,`auto_complete` 再判:
    全部 CATCH 子 skip → 错误继续上浮,有 CATCH 子完成 → 该 step 完成(错误被接住);
-   `timeouts` 同形(`Step::on_timeout`,先落 `$cost()`)。**前置**:kernel 的谓词求值器要接到
-   引擎的表达式环境(legacy 环境函数 `$ecode()`/`$cost()` 等),因为 catch 分支正是用
-   `$ecode()` 选(`examples/catches/model.yml`)。
+   `timeouts` 同形(`Step::on_timeout`,先落 `$cost()`)。**前置已就绪**:谓词求值已在引擎表达式
+   环境上(见上),catch 分支用 `$ecode()` 选错误码(`examples/catches/model.yml`)可判;接入时
+   只需把容器的错误码/信息以 legacy 的 `ecode`/`message` 名字喂进 headless task 的 data。
 2. **Back 的 legacy 折叠对照**:重入流里 legacy 同节点多任务多状态。行投影已落地(见上),
    折叠口径可定为「该节点最新代 = 存活实例」:legacy 按 (node, prev) 取最后一个实例
    (旧 Backed 行仍在),与 kernel 的最新代行逐项比对。
@@ -277,3 +288,8 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
 本机 Defender(TQDefender)在并行构建窗口锁 rlib 元文件 → examples 全量构建偶发
 E0786/E0463。规避:串行构建;测试收口用 `cargo test -p acts --lib --tests`;
 examples 链接验证用 `cargo build -p acts --example <name>`(单跑均成功)。
+
+全量 `--lib` 跑时 legacy reliability 套件对负载敏感:除上面点名的
+`scheduler::tests::reliability::stall::sch_next_cut_sweep_recovers_every_write_boundary`,
+`...::error::sch_error_duplicate_delivery_is_terminal_noop` 也在全量负载下偶发失败
+(单独跑 3/3 通过)。判定回归时以「单测复跑 + 与本次改动是否同路径」为准。

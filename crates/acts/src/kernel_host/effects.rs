@@ -19,7 +19,6 @@
 
 use crate::{
     ActRunAs, Result, Vars,
-    model::Workflow,
     scheduler::{Context, Process, Runtime, Task},
 };
 use std::sync::Arc;
@@ -27,28 +26,11 @@ use std::sync::Arc;
 /// One package effect request: everything the runner needs besides the
 /// engine handles it was built with.
 pub(crate) struct EffectRequest {
-    pub(crate) process_id: String,
-    /// The acting node id (the kernel execution's task id).
-    pub(crate) task_id: String,
+    /// The variable space the headless scope sees (the acting execution's
+    /// scope, the run's env and authority).
+    pub(crate) scope: super::scope::ScopeSpec,
     /// The step's `uses` package id.
     pub(crate) package: String,
-    /// The declaring model, for the headless scope's tree. Params resolve on
-    /// the headless scope exactly like the legacy run: `task.params` reads
-    /// the model node's own declaration through the same fill path, against
-    /// the acting execution's scope variables (`vars`).
-    pub(crate) model: Workflow,
-    /// The acting execution's scope chain (nearest wins), seeded into the
-    /// headless task so `$`-expressions in params resolve.
-    pub(crate) vars: Vec<(String, String)>,
-    /// The run's durable env map (`__env`), seeded into the headless process
-    /// env so `$env.X` answers what an earlier package wrote through
-    /// `Context::set_env` — the legacy process env, which every task of the
-    /// run shares.
-    pub(crate) env: Vec<(String, serde_json::Value)>,
-    /// The run's caller authority: the legacy process's `PROC_OWNER`. The
-    /// headless scope seals snapshot data under it (a run nobody sealed
-    /// carries `deny_all`, so it reads nothing).
-    pub(crate) owner: crate::ScopePolicy,
 }
 
 /// The act facts one `uses` step resolves to before it runs — the legacy
@@ -113,50 +95,15 @@ impl PackageEffectRunner {
         Self { runtime }
     }
 
-    /// The headless scope: a bare in-memory [`Process`] over the declaring
-    /// model with one task on the acting node. Never admitted, never
-    /// persisted — packages see the context shape they always saw. The run's
-    /// caller authority travels with it, so the seal below reads the scopes
-    /// its starter owns and no others; the run's own directory
-    /// (`<workdir>/<pid>`) and the durable env map are seeded, so
-    /// `$env.WORK_DIR` and `$env.X` answer exactly what the legacy process
+    /// The headless scope the legacy run evaluated in: a bare in-memory
+    /// process over the declaring model with one task on the acting node (see
+    /// [`super::scope`]). The run's caller authority travels with it, so the
+    /// seal below reads the scopes its starter owns and no others; the run's
+    /// own directory (`<workdir>/<pid>`) and the durable env map are seeded,
+    /// so `$env.WORK_DIR` and `$env.X` answer exactly what the legacy process
     /// env answered.
     fn headless(&self, request: &EffectRequest) -> Result<(Arc<Process>, Arc<Task>, Context)> {
-        let process = Process::new(&request.process_id, &self.runtime);
-        process.load(&request.model)?;
-        process.set_owner_scope(&request.owner);
-        if let Some(root) = self.runtime.config().workdir() {
-            let dir = crate::scheduler::prepare_workdir(&root, &request.process_id)?;
-            process.set_workdir(&dir);
-        }
-        if !request.env.is_empty() {
-            process.with_env_mut(|env| {
-                for (name, value) in &request.env {
-                    env.set(name, value.clone());
-                }
-            });
-        }
-        let node = process
-            .tree()
-            .node(&request.task_id)
-            .ok_or_else(|| {
-                crate::ActError::Runtime(format!("effect: model has no node '{}'", request.task_id))
-            })?
-            .clone();
-        let task = process.create_task(&node, None)?;
-        // Seed the acting execution's scope variables so params expressions
-        // resolve against the same variable space a legacy task would see.
-        if !request.vars.is_empty() {
-            let mut vars = Vars::new();
-            for (name, raw) in &request.vars {
-                if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
-                    vars.set(name, value.clone());
-                }
-            }
-            task.update_data(&vars);
-        }
-        let ctx = process.create_context(&task);
-        Ok((process, task, ctx))
+        super::scope::headless_scope(&self.runtime, &request.scope)
     }
 }
 
@@ -209,7 +156,7 @@ impl EffectRunner for PackageEffectRunner {
         let env = non_private(process.env());
         Ok(EffectOutcome {
             outputs,
-            data: data_delta(&task, &request.vars),
+            data: data_delta(&task, &request.scope.vars),
             env,
         })
     }

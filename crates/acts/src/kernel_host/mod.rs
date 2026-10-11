@@ -41,12 +41,15 @@ use tokio::sync::mpsc::{Receiver, Sender, channel};
 mod effects;
 mod message;
 mod model;
+mod predicate;
 mod projection;
+mod scope;
 
 use self::model::execution_graph;
 pub(crate) use effects::PackageEffectRunner;
 pub(crate) use message::MessageForwarder;
 pub(crate) use model::ProcessSpec;
+pub(crate) use predicate::EnginePredicateRunner;
 pub(crate) use projection::RowProjector;
 
 const OWNER: &str = "kernel-host";
@@ -547,6 +550,11 @@ pub(crate) struct KernelHost {
     /// the row-reading APIs and the sweeper see the run (see `projection`).
     /// Without one the host keeps no read model — the kernel's own tests.
     projection: Arc<parking_lot::RwLock<Option<Arc<projection::RowProjector>>>>,
+    /// The predicate seam: when attached, a branch `if` is decided on the
+    /// engine's own environment (`ctx.eval`, engine functions included) on a
+    /// headless task, exactly like the legacy branch task; without one the
+    /// built-in subset evaluator decides (see `predicate`).
+    predicate: Arc<parking_lot::RwLock<Option<Arc<dyn predicate::PredicateRunner>>>>,
     /// Which runs were already reported: a start once, a terminal once.
     reported: Arc<parking_lot::Mutex<ReportedRuns>>,
 }
@@ -608,6 +616,7 @@ impl KernelHost {
                 transport: Arc::new(parking_lot::RwLock::new(Box::new(ShadowTransport))),
                 lifecycle: Arc::new(parking_lot::RwLock::new(None)),
                 projection: Arc::new(parking_lot::RwLock::new(None)),
+                predicate: Arc::new(parking_lot::RwLock::new(None)),
                 reported: Arc::new(parking_lot::Mutex::new(ReportedRuns::default())),
             }),
             wake_rx,
@@ -648,6 +657,47 @@ impl KernelHost {
     /// [`projection`]). Attach before driving hops.
     pub(crate) fn attach_row_projector(&self, projector: Arc<projection::RowProjector>) {
         *self.projection.write() = Some(projector);
+    }
+
+    /// Attach the predicate runner: from then on a branch `if` is decided on
+    /// the engine's own environment on a headless task (see [`predicate`]);
+    /// without one the built-in subset evaluator decides. Attach before
+    /// driving hops.
+    pub(crate) fn attach_predicate_runner(&self, runner: Arc<dyn predicate::PredicateRunner>) {
+        *self.predicate.write() = Some(runner);
+    }
+
+    /// Decide one branch `if`: on the engine's environment when a predicate
+    /// runner is attached — a compile/eval failure of a *usable* expression
+    /// included — otherwise on the built-in subset evaluator, which knows
+    /// variables, operators and value methods but no engine function.
+    async fn evaluate_branch_predicate(
+        &self,
+        snapshot: &crate::kernel::AggregateSnapshot,
+        execution_id: &crate::kernel::ExecutionId,
+        expr: &str,
+        inputs: &[(String, String)],
+    ) -> Result<PredicateValue> {
+        let runner = self.predicate.read().clone();
+        let (Some(runner), Some(model)) = (runner, model_of(snapshot)?) else {
+            return Ok(evaluate_predicate(snapshot, execution_id, expr, inputs));
+        };
+        match runner
+            .evaluate(predicate::PredicateRequest {
+                scope: self.scope_spec(snapshot, execution_id, model)?,
+                expr: expr.to_string(),
+                overlay: inputs.to_vec(),
+            })
+            .await
+        {
+            Ok(value) => Ok(value),
+            // A predicate the engine's environment cannot decide — an unset
+            // variable, a non-boolean, a compile error — is the legacy branch
+            // task's `init` error: the branch fails, the hop does not.
+            Err(error) => Ok(PredicateValue::Invalid {
+                message: format!("{error}"),
+            }),
+        }
     }
 
     /// Project one committed snapshot into the legacy rows, when a projector
@@ -1831,13 +1881,15 @@ impl KernelHost {
         inputs: Vec<(String, String)>,
     ) -> Result<TransitionPlan> {
         if matches!(action, None | Some(crate::kernel::ActionKind::Complete))
-            && let Some(command) = self.fanout_command(
-                snapshot,
-                execution_id,
-                claim,
-                &execution.model_node,
-                &inputs,
-            )?
+            && let Some(command) = self
+                .fanout_command(
+                    snapshot,
+                    execution_id,
+                    claim,
+                    &execution.model_node,
+                    &inputs,
+                )
+                .await?
         {
             return crate::kernel::ContainerPlanner::plan_fanout(snapshot, &command)
                 .map_err(runtime);
@@ -2033,6 +2085,25 @@ impl KernelHost {
         Ok(Some(payload))
     }
 
+    /// The variable space the evaluation seams see for one execution: its
+    /// scope chain (nearest wins), the run's durable env and its caller
+    /// authority, on the acting node of the declaring model.
+    fn scope_spec(
+        &self,
+        snapshot: &crate::kernel::AggregateSnapshot,
+        execution_id: &crate::kernel::ExecutionId,
+        model: crate::model::Workflow,
+    ) -> Result<scope::ScopeSpec> {
+        Ok(scope::ScopeSpec {
+            process_id: snapshot.process_id.clone(),
+            task_id: execution_id.task_id.clone(),
+            model,
+            vars: scope_vars(snapshot, execution_id),
+            env: projection::env_map(snapshot)?,
+            owner: owner_of(snapshot)?,
+        })
+    }
+
     /// The effect request for a `uses` step, when a runner is attached:
     /// `None` for a leaf without a package or a host running without the seam.
     fn step_effect(
@@ -2056,13 +2127,8 @@ impl KernelHost {
         Ok(Some((
             runner,
             effects::EffectRequest {
-                process_id: snapshot.process_id.clone(),
-                task_id: execution_id.task_id.clone(),
+                scope: self.scope_spec(snapshot, execution_id, model)?,
                 package,
-                model,
-                vars: scope_vars(snapshot, execution_id),
-                env: projection::env_map(snapshot)?,
-                owner: owner_of(snapshot)?,
             },
         )))
     }
@@ -2294,7 +2360,7 @@ impl KernelHost {
     /// model node is a plain leaf. Branch selection goes through the kernel's
     /// own `BranchPlanner::decide`; the inner chain of a branch is queued
     /// behind its first step.
-    fn fanout_command(
+    async fn fanout_command(
         &self,
         snapshot: &crate::kernel::AggregateSnapshot,
         execution_id: &crate::kernel::ExecutionId,
@@ -2321,28 +2387,27 @@ impl KernelHost {
         }
         let children = match shape {
             ContainerShape::Branches(branches) => {
-                let candidates = branches
-                    .iter()
-                    .map(|branch| {
-                        Ok(BranchCandidate {
-                            task_id: branch.id.clone(),
-                            model_node: node_id(&branch.id)?,
-                            predicate: match &branch.r#if {
-                                Some(expr) => {
-                                    evaluate_predicate(snapshot, execution_id, expr, inputs)
+                let mut candidates = Vec::with_capacity(branches.len());
+                for branch in branches {
+                    candidates.push(BranchCandidate {
+                        task_id: branch.id.clone(),
+                        model_node: node_id(&branch.id)?,
+                        predicate: match &branch.r#if {
+                            Some(expr) => {
+                                self.evaluate_branch_predicate(snapshot, execution_id, expr, inputs)
+                                    .await?
+                            }
+                            None => {
+                                if branch.r#else {
+                                    PredicateValue::True
+                                } else {
+                                    PredicateValue::False
                                 }
-                                None => {
-                                    if branch.r#else {
-                                        PredicateValue::True
-                                    } else {
-                                        PredicateValue::False
-                                    }
-                                }
-                            },
-                            is_else: branch.r#else && branch.r#if.is_none(),
-                        })
-                    })
-                    .collect::<Result<Vec<_>>>()?;
+                            }
+                        },
+                        is_else: branch.r#else && branch.r#if.is_none(),
+                    });
+                }
                 // A predicate that cannot be evaluated fails its branch — the
                 // legacy branch task errors in its `init` — instead of wedging
                 // the hop. Such a branch is never selected and never decides
@@ -3661,6 +3726,111 @@ mod tests {
         assert!(legacy_started && legacy_completed);
         assert_eq!(kernel_started, legacy_started);
         assert_eq!(kernel_completed, legacy_completed);
+    }
+
+    /// A branch predicate that calls an engine function (`$env.WORK_DIR`,
+    /// which the legacy branch task read from its process env) must decide the
+    /// same branches on both engines — the built-in subset evaluator alone
+    /// cannot answer it.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn kernel_env_function_predicate_matches_the_legacy_run() {
+        let root =
+            std::env::temp_dir().join(format!("acts-kernel-pred-{}", crate::utils::longid()));
+        let workflow = || {
+            crate::model::Workflow::new()
+                .with_id("wf-env-pred")
+                .with_step(|step| {
+                    step.with_id("step1")
+                        .with_branch(|branch| {
+                            branch
+                                .with_id("b_true")
+                                .with_if("$env.WORK_DIR != 'x'")
+                                .with_step(|step| step.with_id("s11"))
+                        })
+                        .with_branch(|branch| {
+                            branch
+                                .with_id("b_false")
+                                .with_if("$env.WORK_DIR == 'x'")
+                                .with_step(|step| step.with_id("s21"))
+                        })
+                })
+        };
+        let pid = "p_env_pred";
+        let mut config = crate::Config::default();
+        config.data.tick_interval_secs = Some(1);
+        config.data.workdir = Some(root.display().to_string());
+
+        // Legacy: the branch task evaluates `$env.WORK_DIR` in its own env.
+        let engine = crate::Engine::builder()
+            .set_config(&config)
+            .start()
+            .await
+            .unwrap();
+        let settled = engine.signal(());
+        let done = settled.clone();
+        engine.channel().on_complete(move |_| {
+            let done = done.clone();
+            async move { done.close() }
+        });
+        engine
+            .runtime()
+            .start(
+                &workflow(),
+                crate::Vars::new().with(crate::utils::consts::PROCESS_ID, pid),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(30), settled.recv())
+            .await
+            .expect("the legacy run never settled");
+        engine.runtime().cache().flush().await.unwrap();
+        let legacy = folded_legacy_states(&engine, pid).await;
+        engine.close().await;
+
+        // Kernel driver: the same predicate on a headless task of the engine.
+        config.data.kernel_engine = true;
+        let engine = crate::Engine::builder()
+            .set_config(&config)
+            .start()
+            .await
+            .unwrap();
+        let settled = engine.signal(());
+        let done = settled.clone();
+        engine.channel().on_complete(move |_| {
+            let done = done.clone();
+            async move { done.close() }
+        });
+        let runtime = engine.runtime();
+        runtime
+            .start(
+                &workflow(),
+                crate::Vars::new().with(crate::utils::consts::PROCESS_ID, pid),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(30), settled.recv())
+            .await
+            .expect("the kernel run never settled");
+        let host = runtime.kernel().expect("the kernel host").clone();
+        let snapshot = host.snapshot(pid).await.unwrap().unwrap();
+        assert_parity(&legacy, &snapshot);
+        assert_eq!(
+            state_of(&snapshot, "b_true"),
+            crate::kernel::ExecutionState::Completed
+        );
+        assert_eq!(
+            state_of(&snapshot, "s11"),
+            crate::kernel::ExecutionState::Completed
+        );
+        assert_eq!(
+            state_of(&snapshot, "b_false"),
+            crate::kernel::ExecutionState::Skipped
+        );
+        assert!(!has_task(&snapshot, "s21"));
+
+        std::fs::remove_dir_all(&root).ok();
+        engine.close().await;
     }
 
     /// A branch predicate that cannot be evaluated fails its branch (the
