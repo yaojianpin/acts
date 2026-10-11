@@ -64,6 +64,15 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
   Interrupt→Waiting/Error→Failed 映射);**Back 的 legacy 折叠对照未做**——重入流
   里 legacy 同节点多任务多状态(旧 Backed + 新 Waiting),折叠规则要等行投影
   (legacy 行变成 receipt 投影)才有干净语义,当前以 kernel 机制测试收口。
+- executor 移植第 1 片(kernel_host/effects.rs):效果接缝。宿主可附
+  `EffectRunner`;AutoAction hop 对 auto( Func/Msg)且带 `uses` 的 step 执行其
+  包(`PackageEffectRunner`:engine 注册表 + headless Process/Task 上下文,参数走
+  legacy 同一 `fill_params` 路径),outputs 以变量写并入**同一原子提交**;包错误 =
+  该执行 Failed + error.code/message,由传播的错误行走接管(legacy 包错误路径)。
+  契约与 legacy 相同:效果先于提交(at-least-once,崩溃重放会重跑包)。Irq 的
+  消息发射与 Msg 出站消息不在本片(消息 parity 另拆)。宿主不附 runner 时行为
+  不变(阴影自动完成);运行时接线与 cutover 翻转是后续片(阴影期先跑真实效果
+  会有双执行,IO 类包必须等驱动切换)。
 
 ## 已对齐(无需动)
 
@@ -74,12 +83,12 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
 
 ## 剩余工作(按序)
 
-1. **行投影 + 重启判别(cutover)**:kernel 聚合为真相源后,proc/task/vars 行改为
-   CommitReceipt 投影;重启判别按 `kernel/aggregates/<pid>` 存在性
-   (`AsyncAggregateRepository::load`)优先于 proc 行。**前置:executor 移植**——
-   kernel host 目前不执行包效果(Func/Msg 自动完成、Irq 等待),尚无资格做真相源;
-   直接投影行会与 legacy 写路径双写冲突。executor 移植(Func/Msg/Irq 三态驱动、
-   params/outputs 写回聚合、消息投递)是本项的真第一步,需拆多笔提交。
+1. **executor 移植(行投影+重启判别的真前置,拆多片)**:已落效果接缝
+   (effects.rs)。后续片:Irq 的消息发射 + Msg 出站(消息 parity)、params 的
+   sealed/快照解析对齐、然后运行时接线(`Config.kernel_engine` 驱动档:legacy 不
+   启动,kernel 驱动,IO 类包此时才接真效果)——之后才轮到 行投影 + 重启判别:
+   proc/task/vars 行改为 CommitReceipt 投影,重启判别按 `kernel/aggregates/<pid>`
+   存在性(`AsyncAggregateRepository::load`)优先于 proc 行。
 2. **谓词求值失败的失败路径**:legacy 分支 `if` 求值出错→任务 Error;阴影当前
    InvalidDecision 留存重试(可见但无 catch)。与 Error×catch parity 一并处理
    (catch 分支同样未导入)。

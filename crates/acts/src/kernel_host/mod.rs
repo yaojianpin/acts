@@ -30,13 +30,14 @@ use crate::kernel::{
     ContainerFanoutCommand, ContainerPredecessor, DeliveryClaim, KvDocumentStore, OperationCommit,
     OperationEvent, OperationId, OperationIntent, OperationKind, OperationState, OutboxEvent,
     PredicateBasis, PredicateValue, PropagateCommand, PropagationPlanner, RecoveryDisposition,
-    RecoveryPlanner, RecoveryReport, StateChange, SystemClock, TransitionPlan,
+    RecoveryPlanner, RecoveryReport, StateChange, SystemClock, TransitionPlan, VariableWrite,
 };
 use crate::store::{KvStore, MemoryStore};
 use crate::{ActError, Result};
 use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 
+mod effects;
 mod model;
 
 use self::model::execution_graph;
@@ -214,6 +215,29 @@ fn node_id(name: &str) -> Result<crate::kernel::NodeId> {
     crate::kernel::NodeId::parse(name).map_err(runtime)
 }
 
+/// The step node with this id anywhere in the model (top level and inside
+/// branches) — the effect seam's lookup for a `uses` step.
+fn find_step_in_model<'a>(
+    model: &'a crate::model::Workflow,
+    target: &str,
+) -> Option<&'a crate::model::Step> {
+    model.steps.iter().find_map(|step| find_step(step, target))
+}
+
+fn find_step<'a>(step: &'a crate::model::Step, target: &str) -> Option<&'a crate::model::Step> {
+    if step.id == target {
+        return Some(step);
+    }
+    for branch in model::step_branches(step).unwrap_or_default() {
+        for inner in &branch.steps {
+            if let Some(found) = find_step(inner, target) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
 /// Best-effort wake delivery into the host's queue. Losing a wake is safe:
 /// the recovery scan re-derives the same pending operations.
 #[derive(Clone)]
@@ -245,6 +269,10 @@ pub(crate) struct KernelHost {
     aggregates: Arc<AsyncAggregateRepository>,
     recovery: Arc<AsyncRecoveryRepository>,
     wake_tx: Sender<OperationId>,
+    /// The effect seam: when attached, a Func package's work runs inside the
+    /// ApplyAction hop and its outputs commit with the completion. Without
+    /// one the host auto-completes (the shadow contract).
+    effect: Arc<parking_lot::RwLock<Option<Arc<dyn effects::EffectRunner>>>>,
 }
 
 /// Delivers shadow-mode outbox records: they are engine-internal lifecycle
@@ -280,6 +308,7 @@ impl KernelHost {
                 aggregates,
                 recovery,
                 wake_tx,
+                effect: Arc::new(parking_lot::RwLock::new(None)),
             }),
             wake_rx,
         )
@@ -288,6 +317,13 @@ impl KernelHost {
     /// A host over an in-memory store for tests and the P2 parity harness.
     pub(crate) fn in_memory() -> (Arc<Self>, Receiver<OperationId>) {
         Self::new(Arc::new(MemoryStore::new()))
+    }
+
+    /// Attach the effect runner: from then on a Func package's work runs
+    /// inside the ApplyAction hop (see [`effects`]). Idempotent — the last
+    /// attach wins; attach before driving hops.
+    pub(crate) fn attach_effect_runner(&self, runner: Arc<dyn effects::EffectRunner>) {
+        *self.effect.write() = Some(runner);
     }
 
     /// The background driver: executes woken hops as they arrive, and on every
@@ -500,17 +536,19 @@ impl KernelHost {
         // The authoritative effect: a container completion fans out instead
         // of completing (see `effect_plan`); every other action is the
         // ActionPlanner's own plan.
-        let effect = self.effect_plan(
-            &snapshot,
-            &operation_id,
-            &execution_id,
-            snapshot.executions.get(&execution_id).ok_or_else(|| {
-                ActError::Runtime(format!("execution {execution_id:?} lost during action"))
-            })?,
-            &command.source_operation,
-            Some(command.action.clone()),
-            command.inputs.clone(),
-        );
+        let effect = self
+            .effect_plan(
+                &snapshot,
+                &operation_id,
+                &execution_id,
+                snapshot.executions.get(&execution_id).ok_or_else(|| {
+                    ActError::Runtime(format!("execution {execution_id:?} lost during action"))
+                })?,
+                &command.source_operation,
+                Some(command.action.clone()),
+                command.inputs.clone(),
+            )
+            .await;
         match effect {
             Ok(plan) => {
                 let receipt = match self
@@ -876,7 +914,8 @@ impl KernelHost {
                         &commit_claim,
                         None,
                         Vec::new(),
-                    )?
+                    )
+                    .await?
                 }
             }
             OperationKind::SkipTask => {
@@ -1124,11 +1163,17 @@ impl KernelHost {
     /// Skip / Cancel / Abort / Fail) is terminal for the container and its
     /// unborn children, exactly like the legacy engine, where a step that is
     /// no longer running never schedules its branches.
+    ///
+    /// On the auto-completion hop an attached effect runner runs the step's
+    /// Func package (the legacy `ActRunAs::Func` run): outputs commit as
+    /// scope variables with the same atomic completion, and a package error
+    /// decides the execution `Failed` with the error variables — the legacy
+    /// package-error path, whose error walk the propagation then carries.
     // Like `task_hop_plan`, the planner mirrors the aggregate's own facts
     // (operation, execution, claim) as separate parameters; bundling them
     // into a struct would only rename the same eight fields.
     #[allow(clippy::too_many_arguments)]
-    fn effect_plan(
+    async fn effect_plan(
         &self,
         snapshot: &crate::kernel::AggregateSnapshot,
         id: &OperationId,
@@ -1167,6 +1212,62 @@ impl KernelHost {
                     "completed",
                     "task.completed",
                 )?;
+                // The effect seam: only an auto (Func/Msg) execution runs its
+                // package here; an Irq execution waits for its client action
+                // and its message emission arrives with the message slice.
+                if let Some((runner, request)) =
+                    self.auto_effect(snapshot, execution_id, &execution.model_node)?
+                {
+                    match runner.run(request).await {
+                        Ok(outputs) => {
+                            if let Some(outputs) = outputs {
+                                for (name, value) in effects::outputs_as_writes(&outputs) {
+                                    plan.variable_writes.push(VariableWrite {
+                                        scope: execution_id.clone(),
+                                        name,
+                                        value,
+                                    });
+                                }
+                            }
+                        }
+                        Err(error) => {
+                            // The package failed: decide `Failed` with the
+                            // error variables and let the propagation's
+                            // error walk take over.
+                            plan.outbox[0] = crate::kernel::OutboxIntent {
+                                key: format!(
+                                    "failed:{}:{}:{}",
+                                    id.process_id, id.task_id, id.generation
+                                ),
+                                topic: "task.failed".into(),
+                                payload: String::new(),
+                            };
+                            plan.state_changes.push(StateChange {
+                                execution: execution_id.clone(),
+                                expected_revision: execution.revision,
+                                from: execution.state,
+                                to: crate::kernel::ExecutionState::Failed,
+                            });
+                            for (name, value) in [
+                                ("error.code", "EPACKAGE".to_string()),
+                                ("error.message", format!("{error}")),
+                            ] {
+                                plan.variable_writes.push(VariableWrite {
+                                    scope: execution_id.clone(),
+                                    name: name.to_string(),
+                                    value,
+                                });
+                            }
+                            if !snapshot.operations.contains_key(&propagate_id) {
+                                plan.operations.push(OperationIntent {
+                                    id: propagate_id,
+                                    kind: OperationKind::PropagateTask,
+                                });
+                            }
+                            return Ok(plan);
+                        }
+                    }
+                }
                 plan.state_changes.push(StateChange {
                     execution: execution_id.clone(),
                     expected_revision: execution.revision,
@@ -1192,6 +1293,46 @@ impl KernelHost {
                 crate::kernel::ActionPlanner::plan(snapshot, &command).map_err(runtime)
             }
         }
+    }
+
+    /// The effect request for an auto `uses` step, when a runner is attached:
+    /// `None` for leaves without a package, waiting executions, or a host
+    /// running without the seam.
+    fn auto_effect(
+        &self,
+        snapshot: &crate::kernel::AggregateSnapshot,
+        execution_id: &crate::kernel::ExecutionId,
+        model_node: &crate::kernel::NodeId,
+    ) -> Result<Option<(Arc<dyn effects::EffectRunner>, effects::EffectRequest)>> {
+        let Some(runner) = self.effect.read().clone() else {
+            return Ok(None);
+        };
+        let auto = snapshot
+            .variables
+            .get(&(execution_id.clone(), "auto".into()))
+            .map(String::as_str)
+            != Some("0");
+        if !auto {
+            return Ok(None);
+        }
+        let Some(model) = model_of(snapshot)? else {
+            return Ok(None);
+        };
+        let Some(step) = find_step_in_model(&model, model_node.as_str()) else {
+            return Ok(None);
+        };
+        let Some(package) = step.uses.clone().filter(|uses| !uses.trim().is_empty()) else {
+            return Ok(None);
+        };
+        Ok(Some((
+            runner,
+            effects::EffectRequest {
+                process_id: snapshot.process_id.clone(),
+                task_id: execution_id.task_id.clone(),
+                package,
+                model,
+            },
+        )))
     }
 
     /// The fan-out command for a container execution, or `None` when the
@@ -3003,6 +3144,8 @@ mod tests {
         folded
     }
 
+    // ---- the effect seam: Func packages run inside the ApplyAction hop ----
+
     /// The parity contract for decision walks: every node legacy decided
     /// carries exactly the kernel's state, and the kernel's extra nodes (the
     /// pre-created chain legacy never reached) are all terminal.
@@ -3022,5 +3165,141 @@ mod tests {
                 execution.state
             );
         }
+    }
+
+    /// A failing Func package, registered per-test.
+    struct FailingPackage;
+
+    #[async_trait::async_trait]
+    impl crate::package::ActPackage for FailingPackage {
+        fn new(_: &crate::Config) -> crate::Result<Self> {
+            Ok(Self)
+        }
+        fn definition() -> crate::package::ActPackageDefinition {
+            crate::package::ActPackageDefinition {
+                id: "test.fail",
+                name: "Fail",
+                desc: "always errors",
+                icon: "",
+                doc: "",
+                version: "0.1.0",
+                schema: serde_json::json!({}),
+                options: None,
+                run_as: crate::package::ActRunAs::Func,
+                resources: Vec::new(),
+                catalog: crate::package::ActPackageCatalog::App,
+            }
+        }
+        async fn execute(
+            &self,
+            _ctx: &crate::Context,
+            _params: &serde_json::Value,
+        ) -> crate::Result<Option<crate::Vars>> {
+            Err(crate::ActError::Package("boom".into()))
+        }
+    }
+
+    /// A Func step's package runs inside its completion hop: the outputs land
+    /// on the acting execution's scope in the same atomic commit.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn func_package_runs_inside_the_completion_hop() {
+        let engine = crate::Engine::builder().start().await.unwrap();
+        let (host, mut wake_rx) = KernelHost::in_memory();
+        host.attach_effect_runner(Arc::new(effects::PackageEffectRunner::new(
+            engine.runtime().clone(),
+        )));
+        // The auto/waiting decision reads the same registry the engine does.
+        let package = engine.runtime().package().clone();
+        let run_as = move |id: &str| package.get(id).map(|register| (register.meta)().run_as);
+
+        let workflow = crate::model::Workflow::new()
+            .with_step(|step| {
+                step.with_id("s1").with_uses(
+                    crate::utils::test::USES_SET,
+                    crate::Vars::new().with("k1", "v1").with("n", 2),
+                )
+            })
+            .with_step(|step| step.with_id("s2"));
+        let spec = ProcessSpec::from_workflow("p-effect", &workflow, &run_as).unwrap();
+        host.start_process(&spec).await.unwrap();
+        let report = host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+        assert_eq!(report.retried, 0, "the effect must land: {report:?}");
+        assert!(host.process_completed("p-effect").await.unwrap());
+
+        let snapshot = host.snapshot("p-effect").await.unwrap().unwrap();
+        let s1 = crate::kernel::ExecutionId::new("s1", 0).unwrap();
+        assert_eq!(
+            snapshot
+                .variables
+                .get(&(s1.clone(), "k1".to_string()))
+                .map(String::as_str),
+            Some("\"v1\""),
+            "the package outputs are scope variables of the acting execution"
+        );
+        assert_eq!(
+            snapshot
+                .variables
+                .get(&(s1.clone(), "n".to_string()))
+                .map(String::as_str),
+            Some("2")
+        );
+        let state = |task: &str| state_of(&snapshot, task);
+        assert_eq!(state("s1"), crate::kernel::ExecutionState::Completed);
+        assert_eq!(state("s2"), crate::kernel::ExecutionState::Completed);
+        engine.close().await;
+    }
+
+    /// A package error decides the execution Failed with the error variables
+    /// and the error walk takes over (upstream Failed, downstream Skipped).
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn package_error_fails_the_execution_and_walks_up() {
+        let engine = crate::Engine::builder().start().await.unwrap();
+        engine.runtime().package().register(
+            "test.fail",
+            &crate::package::ActPackageRegister::new::<FailingPackage>(),
+        );
+        let (host, mut wake_rx) = KernelHost::in_memory();
+        host.attach_effect_runner(Arc::new(effects::PackageEffectRunner::new(
+            engine.runtime().clone(),
+        )));
+        let package = engine.runtime().package().clone();
+        let run_as = move |id: &str| package.get(id).map(|register| (register.meta)().run_as);
+
+        let workflow = crate::model::Workflow::new()
+            .with_step(|step| step.with_id("s0"))
+            .with_step(|step| {
+                step.with_id("s1")
+                    .with_uses("test.fail", crate::Vars::new())
+            })
+            .with_step(|step| step.with_id("s2"));
+        let spec = ProcessSpec::from_workflow("p-effect-fail", &workflow, &run_as).unwrap();
+        host.start_process(&spec).await.unwrap();
+        host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
+
+        assert!(host.process_completed("p-effect-fail").await.unwrap());
+        let snapshot = host.snapshot("p-effect-fail").await.unwrap().unwrap();
+        let s1 = crate::kernel::ExecutionId::new("s1", 0).unwrap();
+        assert_eq!(
+            snapshot
+                .variables
+                .get(&(s1.clone(), "error.code".to_string()))
+                .map(String::as_str),
+            Some("EPACKAGE")
+        );
+        assert!(
+            snapshot
+                .variables
+                .contains_key(&(s1.clone(), "error.message".to_string()))
+        );
+        let state = |task: &str| state_of(&snapshot, task);
+        assert_eq!(state("s1"), crate::kernel::ExecutionState::Failed);
+        // The error walk: the ancestor chain ends Failed, the untouched
+        // downstream skips.
+        assert_eq!(state("$"), crate::kernel::ExecutionState::Failed);
+        assert_eq!(state("s0"), crate::kernel::ExecutionState::Completed);
+        assert_eq!(state("s2"), crate::kernel::ExecutionState::Skipped);
+        engine.close().await;
     }
 }
