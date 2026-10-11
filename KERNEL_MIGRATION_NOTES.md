@@ -209,6 +209,22 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
   对跑实测(`kernel_env_function_predicate_matches_the_legacy_run`):`$env.WORK_DIR != 'x'`
   的分支两侧都 Completed、`== 'x'` 的都 Skipped,逐节点一致。
 
+- Back/重入的读模型对跑(旧队列「Back 的 legacy 折叠对照」项收口)+ 驱动档动作的 CAS 重试:
+  - `kernel_back_read_model_serves_the_redone_generation`:同一 Back 流(irq 步 `act:back` 带
+    `to=s1`)在两引擎各跑一次,取「redo 后、重做 act 再次 Created」时点的 task 行:legacy 行是
+    per-instance(同一节点上旧 step `completed` + 旧 act `backed` + 新 step `running` + 新 act
+    `interrupted`),kernel 行是 per-node-survivor(一节点一行 = 最新代:s1 `completed`、
+    s2 `interrupted`,没有 backed/running 历史行)。两引擎只能在「存活实例」这层比对;kernel 的
+    「一行 = 最新一代」就是行投影的契约,legacy 的「一行 = 一实例」是历史。按 timestamp 逐实例
+    折叠不可靠(重入在同一毫秒内完成),所以不再做时间折叠。
+  - 顺带修掉 e2e 暴露的驱动档真 bug:客户端动作在并发提交下会把 CAS 竞争(serve 循环同时在提交
+    同一 aggregate 的 hop)抛给调用方。现在 `apply_action` 对 conflict 类失败有界重试(8 次,
+    重读快照重新规划;**拒绝类**错误照旧立即返回),`run_reentry` 在自己内部重试(重入是
+    cancel/back 的实质,丢了即 run 卡死;失败尝试留下的 carrier op 是惰性的 —— 其执行已决,hop
+    提交空余量)。repository 失败按类型归一:`CommitError::VersionConflict`(stale plan)与 CAS
+    `Conflict` 变体都归为 ECONFLICT 类(新增 `repository_error`,kernel 侧导出
+    `AsyncRepositoryError`),执行 hop 的冲突语义不变(仍是留给 recovery 重推)。
+
 ## 已对齐(无需动)
 
 - Complete/Submit/Skip/Fail on Running/Waiting:ActionPlanner 与 legacy 守卫一致
@@ -231,9 +247,12 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
    父 Failed + 向上错误行走;有 CATCH 子 Completed → 父 Completed(错误被接住)。(iv) 先量
    legacy 一个最小 catch 场景(irq 步收 `act:error` 带 ecode → catch 分支 `$ecode()=='err1'`
    跑 msg 步)的折叠终态,再照抄。
-2. **Back 的 legacy 折叠对照**:重入流里 legacy 同节点多任务多状态。行投影已落地(见上),
-   折叠口径可定为「该节点最新代 = 存活实例」:legacy 按 (node, prev) 取最后一个实例
-   (旧 Backed 行仍在),与 kernel 的最新代行逐项比对。
+2. **workflow 根的完成语义与 legacy 不一致(本片 e2e 发现,登记)**:kernel 在根自己的 hop 就把它
+   判 `Completed`(根不是 fan-out 容器,`container_shape(root)` 返回 None),legacy 的根要等它
+   **全部子实例**结算(Back/重入后根仍是 Running)。后果:驱动档下重入在飞时,`proc:get` 的
+   proc 行状态(投影取根的态)显示 completed,与 legacy 的 running 不符。修法方向:让种子出来的
+   根按容器/join 语义结算(根 park 等子结算,或 join 覆盖根),单独一片 + 对跑;`kernel_back_read_model_serves_the_redone_generation`
+   里已留了「不再往前断言根」的注释位。
 3. (登记,未排期)**无 `uses` 的 task 级消息**:纯 step 与 workflow 根在 legacy 也发 task
    消息(见「语义结论」);driver 档目前只发 act 消息,根走 lifecycle 通道。若客户端按
    type=step/workflow 订阅,需给无包执行也写消息记录、并把节点种类带进

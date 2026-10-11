@@ -54,11 +54,45 @@ pub(crate) use projection::RowProjector;
 
 const OWNER: &str = "kernel-host";
 const LEASE_MS: i64 = 60_000;
+/// How many times a client action re-plans after losing a compare-and-swap:
+/// the serving loop commits hops of the same aggregate concurrently, so a
+/// client's plan can go stale before its commit. A retry re-reads the
+/// snapshot; the action then either applies or is legitimately refused.
+const ACTION_ATTEMPTS: usize = 8;
+/// The error code a lost compare-and-swap carries, so a retryable race is
+/// distinguishable from a caller-correctable refusal.
+const CONFLICT_ECODE: &str = "ECONFLICT";
 const DELIVERY_LEASE_MS: i64 = 30_000;
 const PAGE_SIZE: usize = 128;
 
 fn runtime(error: impl std::fmt::Display) -> ActError {
     ActError::Runtime(error.to_string())
+}
+
+/// A lost compare-and-swap: retryable, unlike a caller-correctable refusal.
+fn conflict(message: impl Into<String>) -> ActError {
+    ActError::Exception {
+        ecode: CONFLICT_ECODE.to_string(),
+        message: message.into(),
+    }
+}
+
+/// Whether an error is a lost compare-and-swap (see [`conflict`]).
+fn is_conflict(error: &ActError) -> bool {
+    matches!(error, ActError::Exception { ecode, .. } if ecode == CONFLICT_ECODE)
+}
+
+/// Map a repository failure: a *stale plan* — the aggregate moved between the
+/// load a plan was formed from and its commit — is the same retryable race as
+/// a lost compare-and-swap, so a caller can re-plan against the fresh
+/// snapshot. Everything else is an error.
+fn repository_error(error: crate::kernel::AsyncRepositoryError) -> ActError {
+    match &error {
+        crate::kernel::AsyncRepositoryError::Domain(
+            crate::kernel::CommitError::VersionConflict { .. },
+        ) => conflict(format!("stale plan: {error}")),
+        _ => runtime(error),
+    }
 }
 
 /// The declaring model of a snapshot, read from the durable root-scope
@@ -937,6 +971,43 @@ impl KernelHost {
         action: crate::kernel::ActionKind,
         inputs: Vec<(String, String)>,
     ) -> Result<()> {
+        // The serving loop commits hops of the same aggregate concurrently, so
+        // a client's plan can go stale before its commit. A retry re-plans
+        // against the fresh snapshot: the action either applies or is
+        // legitimately refused, and a refusal is never retried.
+        let mut attempt = 0;
+        loop {
+            match self
+                .apply_action_once(process_id, task_id, action.clone(), inputs.clone())
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    if !is_conflict(&error) || attempt + 1 >= ACTION_ATTEMPTS {
+                        return Err(error);
+                    }
+                    tracing::debug!(
+                        pid = %process_id,
+                        tid = %task_id,
+                        attempt,
+                        "action lost a compare-and-swap; re-planning"
+                    );
+                    attempt += 1;
+                }
+            }
+        }
+    }
+
+    /// One action application: the durable intent, ownership, the re-plan
+    /// against the authoritative snapshot, the commit and the completion (see
+    /// [`Self::apply_action`] for the retry around it).
+    async fn apply_action_once(
+        &self,
+        process_id: &str,
+        task_id: &str,
+        action: crate::kernel::ActionKind,
+        inputs: Vec<(String, String)>,
+    ) -> Result<()> {
         let snapshot = self
             .load(process_id)
             .await?
@@ -1007,12 +1078,12 @@ impl KernelHost {
             .aggregates
             .commit_transition(&intent)
             .await
-            .map_err(runtime)?
+            .map_err(repository_error)?
         {
             crate::kernel::TransitionCommitOutcome::Committed { .. }
             | crate::kernel::TransitionCommitOutcome::AlreadyCommitted { .. } => {}
             crate::kernel::TransitionCommitOutcome::Conflict { .. } => {
-                return Err(ActError::Runtime(format!(
+                return Err(conflict(format!(
                     "action intent conflict on {process_id}/{task_id}"
                 )));
             }
@@ -1072,14 +1143,14 @@ impl KernelHost {
                     .aggregates
                     .commit_transition(&plan)
                     .await
-                    .map_err(runtime)?
+                    .map_err(repository_error)?
                 {
                     crate::kernel::TransitionCommitOutcome::Committed { receipt, .. }
                     | crate::kernel::TransitionCommitOutcome::AlreadyCommitted {
                         receipt, ..
                     } => receipt,
                     crate::kernel::TransitionCommitOutcome::Conflict { .. } => {
-                        return Err(ActError::Runtime(format!(
+                        return Err(conflict(format!(
                             "action commit conflict on {process_id}/{task_id}"
                         )));
                     }
@@ -1151,9 +1222,46 @@ impl KernelHost {
 
     /// Re-enter one cancelled execution with a fresh generation through
     /// [`crate::kernel::GenerationPlanner`]: a carrier operation on the same
-    /// execution is created, owned, and committed with the planner's
-    /// re-entry plan (new generations for the forward closure).
+    /// execution is created, owned, and committed with the planner's re-entry
+    /// plan (new generations for the forward closure).
+    ///
+    /// The retry is *inside* this method, not around the action: the re-entry
+    /// is the substance of a cancel/back, so a lost compare-and-swap must not
+    /// leave the source terminal with no successor. Each attempt recomputes
+    /// the carrier against the fresh snapshot — a stranded carrier from a
+    /// failed attempt is inert (its execution is already decided, so the hop
+    /// commits the empty remainder).
     async fn run_reentry(
+        &self,
+        process_id: &str,
+        execution_id: &crate::kernel::ExecutionId,
+        task_id: &str,
+    ) -> Result<()> {
+        let mut attempt = 0;
+        loop {
+            match self
+                .run_reentry_once(process_id, execution_id, task_id)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    if !is_conflict(&error) || attempt + 1 >= ACTION_ATTEMPTS {
+                        return Err(error);
+                    }
+                    tracing::debug!(
+                        pid = %process_id,
+                        task = %execution_id.task_id,
+                        attempt,
+                        "reentry lost a compare-and-swap; re-planning"
+                    );
+                    attempt += 1;
+                }
+            }
+        }
+    }
+
+    /// One re-entry attempt (see [`Self::run_reentry`]).
+    async fn run_reentry_once(
         &self,
         process_id: &str,
         execution_id: &crate::kernel::ExecutionId,
@@ -1199,12 +1307,12 @@ impl KernelHost {
             .aggregates
             .commit_transition(&intent)
             .await
-            .map_err(runtime)?
+            .map_err(repository_error)?
         {
             crate::kernel::TransitionCommitOutcome::Committed { .. }
             | crate::kernel::TransitionCommitOutcome::AlreadyCommitted { .. } => {}
             crate::kernel::TransitionCommitOutcome::Conflict { .. } => {
-                return Err(ActError::Runtime("reentry intent conflict".into()));
+                return Err(conflict("reentry intent conflict"));
             }
         }
         let now = SystemClock.now_ms();
@@ -1256,12 +1364,12 @@ impl KernelHost {
             .aggregates
             .commit_transition(&plan)
             .await
-            .map_err(runtime)?
+            .map_err(repository_error)?
         {
             crate::kernel::TransitionCommitOutcome::Committed { receipt, .. }
             | crate::kernel::TransitionCommitOutcome::AlreadyCommitted { receipt, .. } => receipt,
             crate::kernel::TransitionCommitOutcome::Conflict { .. } => {
-                return Err(ActError::Runtime("reentry commit conflict".into()));
+                return Err(conflict("reentry commit conflict"));
             }
         };
         let committed = self
@@ -1601,7 +1709,7 @@ impl KernelHost {
             .aggregates
             .commit_transition(&plan)
             .await
-            .map_err(runtime)?
+            .map_err(repository_error)?
         {
             crate::kernel::TransitionCommitOutcome::Committed { receipt, .. }
             | crate::kernel::TransitionCommitOutcome::AlreadyCommitted { receipt, .. } => receipt,
@@ -2553,9 +2661,9 @@ impl KernelHost {
             | crate::kernel::OperationCommitOutcome::AlreadyCommitted { operation, .. } => {
                 Ok(operation)
             }
-            crate::kernel::OperationCommitOutcome::Conflict { .. } => Err(ActError::Runtime(
-                format!("claim conflict on operation {id:?}"),
-            )),
+            crate::kernel::OperationCommitOutcome::Conflict { .. } => {
+                Err(conflict(format!("claim conflict on operation {id:?}")))
+            }
         }
     }
 
@@ -3726,6 +3834,179 @@ mod tests {
         assert!(legacy_started && legacy_completed);
         assert_eq!(kernel_started, legacy_started);
         assert_eq!(kernel_completed, legacy_completed);
+    }
+
+    /// The read model across a Back/redo: the kernel projects the *newest*
+    /// generation of every node (one row per node), while the legacy rows keep
+    /// the redo's history — the backed instance next to the redone one. Both
+    /// agree on the surviving instance's state.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn kernel_back_read_model_serves_the_redone_generation() {
+        use crate::event::EventAction;
+
+        /// Drive one engine through: start, Back to `s1` when the act is
+        /// created, wait for the redone act, then hand back the process's rows.
+        async fn run_back(kernel_engine: bool) -> Vec<crate::store::data::Task> {
+            const PID: &str = "p_back_rows";
+            let workflow = crate::model::Workflow::new()
+                .with_id("wf-back-rows")
+                .with_step(|step| step.with_id("s1"))
+                .with_step(|step| {
+                    step.with_id("s2").with_uses(
+                        crate::utils::test::USES_IRQ,
+                        crate::Vars::new().with("key", "back-act"),
+                    )
+                });
+            let mut config = crate::Config::default();
+            config.data.kernel_engine = kernel_engine;
+            config.data.tick_interval_secs = Some(1);
+            let engine = crate::Engine::builder()
+                .set_config(&config)
+                .start()
+                .await
+                .unwrap();
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
+            engine.channel().on_message(move |e| {
+                let tx = tx.clone();
+                async move {
+                    if e.r#type == "act"
+                        && e.is_params_key("back-act")
+                        && e.state == crate::MessageState::Created
+                    {
+                        let _ = tx.send((e.pid.clone(), e.tid.clone()));
+                    }
+                }
+            });
+            let runtime = engine.runtime();
+            runtime
+                .start(
+                    &workflow,
+                    crate::Vars::new().with(crate::utils::consts::PROCESS_ID, PID),
+                )
+                .await
+                .unwrap();
+            let (pid_now, tid) =
+                tokio::time::timeout(std::time::Duration::from_secs(30), rx.recv())
+                    .await
+                    .expect("the act was never created")
+                    .expect("the event channel closed");
+            runtime
+                .do_action(&crate::event::Action::new(
+                    &pid_now,
+                    &tid,
+                    EventAction::Back,
+                    crate::Vars::new().with(crate::utils::consts::ACT_TO, "s1"),
+                ))
+                .await
+                .expect("the act must back");
+            // The redo re-runs s1 and parks a *new* s2 instance: its Created
+            // message is the point where both engines' rows are settled.
+            tokio::time::timeout(std::time::Duration::from_secs(30), rx.recv())
+                .await
+                .expect("the redone act was never created");
+            runtime.cache().flush().await.unwrap();
+            let rows = runtime
+                .cache()
+                .store()
+                .tasks()
+                .query_all(
+                    &crate::store::query::Query::new().filter(
+                        crate::store::query::Filter::and()
+                            .expr(crate::store::query::Expr::eq("pid", PID.to_string())),
+                    ),
+                )
+                .await
+                .unwrap();
+            engine.close().await;
+            rows
+        }
+
+        /// The states the rows name for one *node*: an act row folds to its
+        /// owning step, the workflow root is `$` (the legacy `tid`s are random
+        /// — only `node_data` names the model node).
+        fn states_of(rows: &[crate::store::data::Task], node: &str) -> Vec<String> {
+            let node_id = |tid: &str| {
+                rows.iter()
+                    .find(|row| row.tid == tid)
+                    .and_then(|row| {
+                        serde_json::from_str::<crate::scheduler::NodeData>(&row.node_data).ok()
+                    })
+                    .map(|data| data.id)
+            };
+            let mut states: Vec<String> = rows
+                .iter()
+                .filter_map(|row| {
+                    let row_node = if row.kind == "workflow" {
+                        crate::utils::consts::TASK_ROOT_TID.to_string()
+                    } else if row.kind == "act" {
+                        row.parent
+                            .as_deref()
+                            .and_then(node_id)
+                            .unwrap_or_else(|| row.tid.clone())
+                    } else {
+                        node_id(&row.tid).unwrap_or_else(|| row.tid.clone())
+                    };
+                    (row_node == node).then(|| row.state.clone())
+                })
+                .collect();
+            states.sort();
+            states.dedup();
+            states
+        }
+
+        let legacy = run_back(false).await;
+        // The legacy rows are one per *instance*, so the redo's history is all
+        // there: the replaced step (`completed` — the Back path completes it),
+        // its act (`backed`), and the redone pair, whose step runs (`running`)
+        // while its act waits (`interrupted`).
+        assert_eq!(
+            states_of(&legacy, "s2"),
+            vec![
+                "backed".to_string(),
+                "completed".to_string(),
+                "interrupted".to_string(),
+                "running".to_string()
+            ],
+            "the legacy rows keep every instance of the node"
+        );
+        assert_eq!(states_of(&legacy, "s1"), vec!["completed".to_string()]);
+
+        let kernel = run_back(true).await;
+        // The kernel's read model is the surviving generation per node: the
+        // redone s1 completed, the redone s2 waits again (the act's state, the
+        // one the legacy *act* row also shows), and no backed/completed
+        // history — the row is the instance the read API addresses.
+        assert_eq!(
+            states_of(&kernel, "s2"),
+            vec!["interrupted".to_string()],
+            "the row is the surviving generation, not the history"
+        );
+        assert_eq!(states_of(&kernel, "s1"), vec!["completed".to_string()]);
+        // The root diverges and is registered in the migration notes: the
+        // kernel completes the workflow root at its own hop, so a redo leaves
+        // it (and the projected process row) `completed` while the run is still
+        // in flight, where the legacy root waits for every child instance.
+        // Asserting it here would pin that divergence, so this test stops at
+        // the nodes both engines agree on.
+        assert_eq!(
+            kernel
+                .iter()
+                .filter(|row| row.tid == crate::utils::consts::TASK_ROOT_TID)
+                .count(),
+            1,
+            "one row per node: the root"
+        );
+        assert_eq!(
+            kernel.iter().filter(|row| row.tid == "s1").count(),
+            1,
+            "one row per node: the redone s1"
+        );
+        assert_eq!(
+            kernel.iter().filter(|row| row.tid == "s2").count(),
+            1,
+            "one row per node: the redone s2"
+        );
     }
 
     /// A branch predicate that calls an engine function (`$env.WORK_DIR`,

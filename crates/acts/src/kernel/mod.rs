@@ -52,6 +52,7 @@ mod transition_plan;
 mod upward;
 
 pub(crate) use application::{OperationWakeSink, WakeError};
+pub(crate) use async_document_store::AsyncRepositoryError;
 pub(crate) use async_document_store::{
     AsyncAggregateRepository, AsyncDocumentStore, AsyncRecoveryRepository, KvDocumentStore,
     OperationCommitOutcome, RecoveryMigrationBatch, RecoveryMigrationState,
