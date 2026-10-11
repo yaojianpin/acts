@@ -196,6 +196,15 @@ fn validate_state_change(change: &StateChange) -> Result<(), PlanError> {
                     | S::Removed
             )
             | (S::Ready, S::Cancelled | S::Skipped | S::Removed)
+            // The abort cascade's upward walk decides EVERY ancestor of an
+            // aborted execution `Aborted` — including already-terminal ones —
+            // exactly like the legacy ancestor walk that terminates the run
+            // from the acting act up through its ancestors. The error walk
+            // does the same with `Failed` (`emit_error` → `parent.set_err`).
+            | (
+                S::Completed | S::Submitted | S::Backed | S::Cancelled | S::Failed | S::Skipped | S::Removed,
+                S::Aborted | S::Failed,
+            )
     );
     if allowed {
         Ok(())

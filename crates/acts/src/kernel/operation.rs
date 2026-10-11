@@ -18,6 +18,11 @@ pub(crate) enum OperationKind {
     /// commits `Ready → Skipped` and hands propagation to a `PropagateTask`
     /// operation, whose readiness then treats the skipped source as dead.
     SkipTask,
+    /// The abort cascade's hop for a `Running` successor of an aborted
+    /// execution: the legacy ancestor walk marks running children `Aborted`
+    /// (pending ones skip). Like `SkipTask` it is one atomic
+    /// `Running → Aborted` commit plus a `PropagateTask` hand-off.
+    AbortTask,
     DeliverMessage,
     FireTrigger,
     RunPostCommit,

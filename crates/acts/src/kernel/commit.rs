@@ -26,6 +26,19 @@ pub(crate) struct AggregateSnapshot {
 }
 
 impl AggregateSnapshot {
+    /// The next free operation sequence for one execution: operation ids are
+    /// unique per (task, generation), and an execution that already ran hops
+    /// (a fan-out child, a rewound generation) owns earlier sequences, so
+    /// every newly seeded operation takes the one after the highest known.
+    pub(crate) fn next_operation_sequence(&self, task_id: &str, generation: u64) -> u64 {
+        self.operations
+            .keys()
+            .filter(|id| id.task_id == task_id && id.generation == generation)
+            .map(|id| id.sequence)
+            .max()
+            .map_or(0, |sequence| sequence + 1)
+    }
+
     pub(crate) fn empty(process_id: impl Into<String>) -> Result<Self, CommitError> {
         let process_id = process_id.into();
         if process_id.trim().is_empty() {
@@ -756,6 +769,7 @@ fn operation_kind_tag(kind: super::OperationKind) -> &'static str {
         super::OperationKind::PropagateTask => "PropagateTask",
         super::OperationKind::ApplyAction => "ApplyAction",
         super::OperationKind::SkipTask => "SkipTask",
+        super::OperationKind::AbortTask => "AbortTask",
         super::OperationKind::DeliverMessage => "DeliverMessage",
         super::OperationKind::FireTrigger => "FireTrigger",
         super::OperationKind::RunPostCommit => "RunPostCommit",

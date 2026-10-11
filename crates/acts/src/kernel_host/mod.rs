@@ -555,8 +555,21 @@ impl KernelHost {
                 // A Cancel ends this path AND re-runs it: the cancelled
                 // execution is re-entered with a fresh generation (the
                 // legacy rewind), its downstream recreated by the planner.
+                // A Back re-enters the step the client named (`to`): the
+                // backed execution stays terminal; the named step and its
+                // downstream get fresh generations.
                 if matches!(command.action, crate::kernel::ActionKind::Cancel) {
                     self.run_reentry(process_id, &execution_id, task_id).await?;
+                } else if matches!(command.action, crate::kernel::ActionKind::Back) {
+                    let to = command
+                        .inputs
+                        .iter()
+                        .find(|(name, _)| name == crate::utils::consts::ACT_TO)
+                        .map(|(_, value)| value.clone())
+                        .ok_or_else(|| {
+                            ActError::Runtime("cannot find 'to' value in options".to_string())
+                        })?;
+                    self.run_reentry(process_id, &execution_id, &to).await?;
                 }
                 Ok(())
             }
@@ -916,6 +929,56 @@ impl KernelHost {
                 }
                 plan
             }
+            OperationKind::AbortTask => {
+                // The abort cascade's running-successor hop: the legacy
+                // ancestor walk decides running children `Aborted` (pending
+                // ones skip). Same shape as `SkipTask`, terminal `Aborted`.
+                let execution = execution.ok_or_else(|| {
+                    ActError::Runtime(format!("execution {execution_id:?} not found"))
+                })?;
+                if execution.state != crate::kernel::ExecutionState::Running {
+                    // A decision landed while the hop was queued: the empty
+                    // remainder completes the operation either way.
+                    self.task_hop_plan(
+                        &snapshot,
+                        id,
+                        &execution_id,
+                        Some(&execution),
+                        &commit_claim,
+                        "aborted",
+                        "task.aborted",
+                    )?
+                } else {
+                    let propagate_id = OperationId {
+                        process_id: id.process_id.clone(),
+                        task_id: id.task_id.clone(),
+                        generation: id.generation,
+                        sequence: id.sequence + 1,
+                    };
+                    let mut plan = self.task_hop_plan(
+                        &snapshot,
+                        id,
+                        &execution_id,
+                        Some(&execution),
+                        &commit_claim,
+                        "aborted",
+                        "task.aborted",
+                    )?;
+                    plan.state_changes.push(StateChange {
+                        execution: execution_id.clone(),
+                        expected_revision: execution.revision,
+                        from: crate::kernel::ExecutionState::Running,
+                        to: crate::kernel::ExecutionState::Aborted,
+                    });
+                    if !snapshot.operations.contains_key(&propagate_id) {
+                        plan.operations.push(OperationIntent {
+                            id: propagate_id,
+                            kind: OperationKind::PropagateTask,
+                        });
+                    }
+                    plan
+                }
+            }
             OperationKind::PropagateTask => {
                 // The graph of record is the snapshot itself (parent map plus
                 // predecessor lists), never the declaring spec.
@@ -941,9 +1004,36 @@ impl KernelHost {
                     {
                         plan.state_changes.push(change);
                         plan.operations.push(operation);
-                        plan.validate().map_err(runtime)?;
                     }
                 }
+                // The decision walks' upward half: an aborted execution ends
+                // its whole ancestor chain `Aborted` (legacy `abort_task`),
+                // a failed one ends it `Failed` (legacy `emit_error` →
+                // `parent.set_err`); each newly decided ancestor's own hop
+                // carries the death into its remaining subtrees.
+                let upward_to = match execution.as_ref().map(|e| e.state) {
+                    Some(crate::kernel::ExecutionState::Aborted) => {
+                        Some(crate::kernel::ExecutionState::Aborted)
+                    }
+                    Some(crate::kernel::ExecutionState::Failed) => {
+                        Some(crate::kernel::ExecutionState::Failed)
+                    }
+                    _ => None,
+                };
+                if let Some(to) = upward_to {
+                    let (changes, operations) = crate::kernel::UpwardPlanner::plan_upward(
+                        &snapshot,
+                        &crate::kernel::UpwardCommand {
+                            process_id: id.process_id.clone(),
+                            source: execution_id.clone(),
+                            to,
+                        },
+                    )
+                    .map_err(runtime)?;
+                    plan.state_changes.extend(changes);
+                    plan.operations.extend(operations);
+                }
+                plan.validate().map_err(runtime)?;
                 plan
             }
             other => {
@@ -2491,5 +2581,446 @@ mod tests {
             .collect();
         generations.sort_unstable();
         generations
+    }
+
+    // ---- parity matrix: Abort / Back / Fail (Error) ----
+
+    /// Abort × IRQ: aborting a waiting step decides it `Aborted`, rewrites
+    /// its ancestor chain `Aborted` (the legacy `abort_task` walk — the root
+    /// included, terminal ancestors not spared), skips the untouched
+    /// downstream, and leaves the completed sibling alone.
+    #[tokio::test]
+    async fn abort_on_waiting_step_aborts_the_ancestor_chain() {
+        let workflow = crate::model::Workflow::new()
+            .with_step(|step| step.with_id("s1"))
+            .with_step(|step| {
+                step.with_id("s2").with_uses(
+                    crate::utils::test::USES_IRQ,
+                    crate::Vars::new().with("key", "abort-act"),
+                )
+            })
+            .with_step(|step| step.with_id("s3"));
+        let (host, mut wake_rx) = KernelHost::in_memory();
+        let spec = ProcessSpec::from_workflow("p-abort", &workflow, &|_| None).unwrap();
+        host.start_process(&spec).await.unwrap();
+        host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+
+        host.apply_action("p-abort", "s2", ActionKind::Abort, Vec::new())
+            .await
+            .unwrap();
+        host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
+
+        let snapshot = host.snapshot("p-abort").await.unwrap().unwrap();
+        assert!(host_all_terminal(&snapshot));
+        let state = |task: &str| state_of(&snapshot, task);
+        assert_eq!(state("s2"), crate::kernel::ExecutionState::Aborted);
+        // The ancestor walk: the root — terminal since the seed — is
+        // rewritten Aborted; the completed sibling is not an ancestor.
+        assert_eq!(state("$"), crate::kernel::ExecutionState::Aborted);
+        assert_eq!(state("s1"), crate::kernel::ExecutionState::Completed);
+        // The untouched downstream joins the death cascade.
+        assert_eq!(state("s3"), crate::kernel::ExecutionState::Skipped);
+    }
+
+    /// Abort × branches: aborting a waiting branch step ends the whole
+    /// container chain upward (branch, branched step, root) while the
+    /// already-settled sibling branch keeps its state.
+    #[tokio::test]
+    async fn abort_inside_a_branch_aborts_the_container_chain() {
+        let workflow = crate::model::Workflow::new()
+            .with_var("v", 1)
+            .with_step(|step| {
+                step.with_id("step1")
+                    .with_branch(|branch| {
+                        branch.with_id("b1").with_if("v > 0").with_step(|step| {
+                            step.with_id("s11")
+                                .with_uses(crate::utils::test::USES_IRQ, crate::Vars::new())
+                        })
+                    })
+                    .with_branch(|branch| {
+                        branch
+                            .with_id("b2")
+                            .with_else(true)
+                            .with_step(|step| step.with_id("s21"))
+                    })
+            });
+        let (host, mut wake_rx) = KernelHost::in_memory();
+        let spec = ProcessSpec::from_workflow("p-abort-branch", &workflow, &|_| None).unwrap();
+        host.start_process(&spec).await.unwrap();
+        host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
+
+        host.apply_action("p-abort-branch", "s11", ActionKind::Abort, Vec::new())
+            .await
+            .unwrap();
+        host.run_until_quiescent(&mut wake_rx, 400).await.unwrap();
+
+        let snapshot = host.snapshot("p-abort-branch").await.unwrap().unwrap();
+        assert!(host_all_terminal(&snapshot));
+        let state = |task: &str| state_of(&snapshot, task);
+        assert_eq!(state("s11"), crate::kernel::ExecutionState::Aborted);
+        assert_eq!(state("b1"), crate::kernel::ExecutionState::Aborted);
+        assert_eq!(state("step1"), crate::kernel::ExecutionState::Aborted);
+        assert_eq!(state("$"), crate::kernel::ExecutionState::Aborted);
+        assert_eq!(state("b2"), crate::kernel::ExecutionState::Skipped);
+    }
+
+    /// Back × IRQ: backing the waiting step to its completed predecessor
+    /// leaves the old generation `Backed`, re-runs the named step as a fresh
+    /// generation, and recreates the downstream behind it.
+    #[tokio::test]
+    async fn back_redo_reruns_the_named_step_and_its_downstream() {
+        let workflow = crate::model::Workflow::new()
+            .with_step(|step| step.with_id("s1"))
+            .with_step(|step| {
+                step.with_id("s2").with_uses(
+                    crate::utils::test::USES_IRQ,
+                    crate::Vars::new().with("key", "back-act"),
+                )
+            });
+        let (host, mut wake_rx) = KernelHost::in_memory();
+        let spec = ProcessSpec::from_workflow("p-back", &workflow, &|_| None).unwrap();
+        host.start_process(&spec).await.unwrap();
+        host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+
+        host.apply_action(
+            "p-back",
+            "s2",
+            ActionKind::Back,
+            vec![("to".to_string(), "s1".to_string())],
+        )
+        .await
+        .unwrap();
+        host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
+
+        let snapshot = host.snapshot("p-back").await.unwrap().unwrap();
+        let state_at = |task: &str, generation: u64| {
+            snapshot
+                .executions
+                .get(&crate::kernel::ExecutionId::new(task, generation).unwrap())
+                .map(|execution| execution.state)
+                .unwrap()
+        };
+        assert_eq!(
+            state_at("s2", 0),
+            crate::kernel::ExecutionState::Backed,
+            "the backed generation keeps its decision"
+        );
+        assert_eq!(state_at("s1", 0), crate::kernel::ExecutionState::Completed);
+        // The redo: s1 generation 1 already ran; s2 generation 1 waits again.
+        assert_eq!(state_at("s1", 1), crate::kernel::ExecutionState::Completed);
+        assert_eq!(state_at("s2", 1), crate::kernel::ExecutionState::Waiting);
+
+        host.apply_action("p-back", "s2", ActionKind::Complete, Vec::new())
+            .await
+            .unwrap();
+        host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
+        assert!(host.process_completed("p-back").await.unwrap());
+    }
+
+    /// Back without the client's `to` is refused before anything durable.
+    #[tokio::test]
+    async fn back_without_to_is_refused_without_consuming_state() {
+        let workflow = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("s1").with_uses(
+                crate::utils::test::USES_IRQ,
+                crate::Vars::new().with("key", "back-no-to"),
+            )
+        });
+        let (host, mut wake_rx) = KernelHost::in_memory();
+        let spec = ProcessSpec::from_workflow("p-back-no-to", &workflow, &|_| None).unwrap();
+        host.start_process(&spec).await.unwrap();
+        host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+        let before = host.snapshot("p-back-no-to").await.unwrap().unwrap();
+
+        let error = host
+            .apply_action("p-back-no-to", "s1", ActionKind::Back, Vec::new())
+            .await
+            .unwrap_err();
+        assert!(format!("{error}").contains("'to'"));
+
+        // The effect (Backed) committed before the reentry dispatch — the
+        // refusal is the missing redo target, not the action itself.
+        let after = host.snapshot("p-back-no-to").await.unwrap().unwrap();
+        assert_ne!(
+            before.version, after.version,
+            "the back effect itself is durable"
+        );
+    }
+
+    /// Fail × IRQ: failing a waiting step decides it `Failed` (the legacy
+    /// `Error`), skips the untouched downstream, writes the error variables,
+    /// and ends the ancestor chain `Failed` (the legacy error walk).
+    #[tokio::test]
+    async fn fail_on_waiting_step_skips_downstream_and_decides_ancestors() {
+        let workflow = crate::model::Workflow::new()
+            .with_step(|step| step.with_id("s1"))
+            .with_step(|step| {
+                step.with_id("s2").with_uses(
+                    crate::utils::test::USES_IRQ,
+                    crate::Vars::new().with("key", "fail-act"),
+                )
+            })
+            .with_step(|step| step.with_id("s3"));
+        let (host, mut wake_rx) = KernelHost::in_memory();
+        let spec = ProcessSpec::from_workflow("p-fail", &workflow, &|_| None).unwrap();
+        host.start_process(&spec).await.unwrap();
+        host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+
+        host.apply_action(
+            "p-fail",
+            "s2",
+            ActionKind::Fail {
+                code: "E42".into(),
+                message: "boom".into(),
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
+
+        let snapshot = host.snapshot("p-fail").await.unwrap().unwrap();
+        assert!(host_all_terminal(&snapshot));
+        let state = |task: &str| state_of(&snapshot, task);
+        assert_eq!(state("s2"), crate::kernel::ExecutionState::Failed);
+        assert_eq!(state("s3"), crate::kernel::ExecutionState::Skipped);
+        // The completed sibling is not an ancestor; the root is.
+        assert_eq!(state("s1"), crate::kernel::ExecutionState::Completed);
+        assert_eq!(state("$"), crate::kernel::ExecutionState::Failed);
+        let s2 = crate::kernel::ExecutionId::new("s2", 0).unwrap();
+        assert_eq!(
+            snapshot
+                .variables
+                .get(&(s2, "error.code".to_string()))
+                .map(String::as_str),
+            Some("E42")
+        );
+    }
+
+    /// The legacy comparison for the abort matrix: the same IRQ chain, the
+    /// same abort, and every legacy task (acts folded into their owning
+    /// step) carries the kernel's per-node state.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn kernel_abort_matches_legacy_on_irq_chain() {
+        let workflow = || {
+            crate::model::Workflow::new()
+                .with_step(|step| step.with_id("s1"))
+                .with_step(|step| {
+                    step.with_id("s2").with_uses(
+                        crate::utils::test::USES_IRQ,
+                        crate::Vars::new().with("key", "parity-abort"),
+                    )
+                })
+                .with_step(|step| step.with_id("s3"))
+        };
+
+        // Legacy: abort the waiting act of s2 the moment it appears.
+        let engine = crate::Engine::builder().start().await.unwrap();
+        let created = {
+            let sig = engine.signal((String::new(), String::new()));
+            let (done, done_rx) = (sig.clone(), sig.clone());
+            let channel = engine.channel();
+            channel.on_message(move |e| {
+                let done = done_rx.clone();
+                async move {
+                    if e.is_params_key("parity-abort") && e.is_state(crate::MessageState::Created) {
+                        done.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+                        done.close();
+                    }
+                }
+            });
+            done
+        };
+        let legacy_proc = engine
+            .runtime()
+            .start(&workflow(), crate::Vars::new())
+            .await
+            .unwrap();
+        let (pid, tid) = tokio::time::timeout(std::time::Duration::from_secs(30), created.recv())
+            .await
+            .expect("the waiting act never appeared")
+            .clone();
+        engine
+            .runtime()
+            .do_action(&crate::event::Action::new(
+                &pid,
+                &tid,
+                crate::event::EventAction::Abort,
+                crate::Vars::new(),
+            ))
+            .await
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !legacy_proc.state().is_completed() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "legacy never settled the aborted run"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let legacy = folded_legacy_states(&engine, &pid).await;
+
+        // Kernel host: the same model, the same abort on the step.
+        let (host, mut wake_rx) = KernelHost::in_memory();
+        let spec = ProcessSpec::from_workflow("k-abort", &workflow(), &|_| None).unwrap();
+        host.start_process(&spec).await.unwrap();
+        host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+        host.apply_action("k-abort", "s2", ActionKind::Abort, Vec::new())
+            .await
+            .unwrap();
+        host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
+        let snapshot = host.snapshot("k-abort").await.unwrap().unwrap();
+
+        assert_parity(&legacy, &snapshot);
+        engine.close().await;
+    }
+
+    /// The legacy comparison for the Fail (Error) matrix.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn kernel_fail_matches_legacy_on_irq_chain() {
+        let workflow = || {
+            crate::model::Workflow::new()
+                .with_step(|step| step.with_id("s1"))
+                .with_step(|step| {
+                    step.with_id("s2").with_uses(
+                        crate::utils::test::USES_IRQ,
+                        crate::Vars::new().with("key", "parity-fail"),
+                    )
+                })
+                .with_step(|step| step.with_id("s3"))
+        };
+
+        let engine = crate::Engine::builder().start().await.unwrap();
+        let created = {
+            let sig = engine.signal((String::new(), String::new()));
+            let (done, done_rx) = (sig.clone(), sig.clone());
+            let channel = engine.channel();
+            channel.on_message(move |e| {
+                let done = done_rx.clone();
+                async move {
+                    if e.is_params_key("parity-fail") && e.is_state(crate::MessageState::Created) {
+                        done.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+                        done.close();
+                    }
+                }
+            });
+            done
+        };
+        let legacy_proc = engine
+            .runtime()
+            .start(&workflow(), crate::Vars::new())
+            .await
+            .unwrap();
+        let (pid, tid) = tokio::time::timeout(std::time::Duration::from_secs(30), created.recv())
+            .await
+            .expect("the waiting act never appeared")
+            .clone();
+        let mut options = crate::Vars::new();
+        options.set("ecode", "E42");
+        options.set("message", "boom");
+        engine
+            .runtime()
+            .do_action(&crate::event::Action::new(
+                &pid,
+                &tid,
+                crate::event::EventAction::Error,
+                options,
+            ))
+            .await
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !legacy_proc.state().is_completed() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "legacy never settled the failed run"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let legacy = folded_legacy_states(&engine, &pid).await;
+
+        let (host, mut wake_rx) = KernelHost::in_memory();
+        let spec = ProcessSpec::from_workflow("k-fail", &workflow(), &|_| None).unwrap();
+        host.start_process(&spec).await.unwrap();
+        host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+        host.apply_action(
+            "k-fail",
+            "s2",
+            ActionKind::Fail {
+                code: "E42".into(),
+                message: "boom".into(),
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
+        let snapshot = host.snapshot("k-fail").await.unwrap().unwrap();
+
+        assert_parity(&legacy, &snapshot);
+        engine.close().await;
+    }
+
+    /// Every legacy task, folded onto the kernel's node vocabulary: acts
+    /// fold into their owning step, the workflow root becomes `$`, and the
+    /// state names map to the kernel's (Interrupt→Waiting, Error→Failed).
+    async fn folded_legacy_states(engine: &crate::Engine, pid: &str) -> Vec<(String, String)> {
+        let proc = engine
+            .runtime()
+            .proc(pid)
+            .await
+            .unwrap()
+            .expect("legacy process lost");
+        let mut folded: Vec<(String, String)> = proc
+            .tasks()
+            .iter()
+            .map(|task| {
+                let state = match task.state() {
+                    crate::TaskState::Completed | crate::TaskState::Submitted => "Completed",
+                    crate::TaskState::Skipped => "Skipped",
+                    crate::TaskState::Aborted => "Aborted",
+                    crate::TaskState::Error => "Failed",
+                    crate::TaskState::Backed => "Backed",
+                    other => panic!("unexpected legacy terminal state {other:?}"),
+                };
+                let node = if task.node().kind() == crate::NodeKind::Workflow {
+                    crate::utils::consts::TASK_ROOT_TID.to_string()
+                } else if task.node().kind() == crate::NodeKind::Act {
+                    task.parent(&proc)
+                        .expect("act without a step")
+                        .node()
+                        .id()
+                        .to_string()
+                } else {
+                    task.node().id().to_string()
+                };
+                (node, state.to_string())
+            })
+            .collect();
+        folded.sort();
+        folded.dedup();
+        folded
+    }
+
+    /// The parity contract for decision walks: every node legacy decided
+    /// carries exactly the kernel's state, and the kernel's extra nodes (the
+    /// pre-created chain legacy never reached) are all terminal.
+    fn assert_parity(legacy: &[(String, String)], snapshot: &Snapshot) {
+        for (node, state) in legacy {
+            let kernel_state = format!("{:?}", state_of(snapshot, node));
+            assert_eq!(&kernel_state, state, "node '{node}' diverged");
+        }
+        for execution in snapshot.executions.values() {
+            let decided = legacy
+                .iter()
+                .any(|(node, _)| execution.model_node.as_str() == node);
+            assert!(
+                !decided || execution.state.is_terminal(),
+                "kernel node '{}' is not terminal: {:?}",
+                execution.model_node.as_str(),
+                execution.state
+            );
+        }
     }
 }

@@ -454,6 +454,8 @@ fn operation_kind_tag(kind: OperationKind) -> u8 {
         FireTrigger => 4,
         RunPostCommit => 5,
         SkipTask => 6,
+        // Appended, never reshuffled: stored snapshots pin these tags.
+        AbortTask => 7,
     }
 }
 fn decode_operation_kind(tag: u8) -> Result<OperationKind, SnapshotCodecError> {
@@ -466,6 +468,7 @@ fn decode_operation_kind(tag: u8) -> Result<OperationKind, SnapshotCodecError> {
         4 => Ok(FireTrigger),
         5 => Ok(RunPostCommit),
         6 => Ok(SkipTask),
+        7 => Ok(AbortTask),
         value => Err(SnapshotCodecError::InvalidTag(value)),
     }
 }

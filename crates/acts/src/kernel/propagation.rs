@@ -45,22 +45,6 @@ impl PropagationPlanner {
 
         let mut state_changes = Vec::new();
         let mut operations = Vec::new();
-        // Operation ids are unique per (task, generation): a successor that
-        // already ran hops (a fan-out child, a rewound generation) owns
-        // earlier sequences, so every seeded operation takes the next one.
-        let next_sequence = |task_id: &str, generation: u64| {
-            snapshot
-                .operations
-                .keys()
-                .filter(|id| {
-                    id.process_id == command.process_id
-                        && id.task_id == task_id
-                        && id.generation == generation
-                })
-                .map(|id| id.sequence)
-                .max()
-                .map_or(0, |sequence| sequence + 1)
-        };
         for successor in graph.successors(&command.execution) {
             let target = snapshot
                 .executions
@@ -82,20 +66,32 @@ impl PropagationPlanner {
                     )
                 {
                     // The hop owns the state change (it re-reads the
-                    // authoritative state); the plan only schedules it.
+                    // authoritative state); the plan only schedules it. An
+                    // aborted source's `Running` successor is `Aborted` (the
+                    // legacy ancestor walk aborts running children); every
+                    // other death skips its successors.
+                    let kind = if source.state == ExecutionState::Aborted
+                        && target.state == ExecutionState::Running
+                    {
+                        OperationKind::AbortTask
+                    } else {
+                        OperationKind::SkipTask
+                    };
                     operations.push(OperationIntent {
                         id: OperationId {
                             process_id: command.process_id.clone(),
                             task_id: successor.task_id.clone(),
                             generation: successor.generation,
-                            sequence: next_sequence(&successor.task_id, successor.generation),
+                            sequence: snapshot
+                                .next_operation_sequence(&successor.task_id, successor.generation),
                         },
-                        kind: OperationKind::SkipTask,
+                        kind,
                     });
                     tracing::debug!(
                         successor = ?successor,
                         source_state = ?source.state,
-                        "dead source; admitted successor joins the skip cascade"
+                        kind = ?kind,
+                        "dead source; admitted successor joins the cascade"
                     );
                 }
                 continue;
@@ -114,7 +110,8 @@ impl PropagationPlanner {
                             process_id: command.process_id.clone(),
                             task_id: successor.task_id.clone(),
                             generation: successor.generation,
-                            sequence: next_sequence(&successor.task_id, successor.generation),
+                            sequence: snapshot
+                                .next_operation_sequence(&successor.task_id, successor.generation),
                         },
                         kind: OperationKind::ExecuteTask,
                     });
@@ -136,7 +133,8 @@ impl PropagationPlanner {
                             process_id: command.process_id.clone(),
                             task_id: successor.task_id.clone(),
                             generation: successor.generation,
-                            sequence: next_sequence(&successor.task_id, successor.generation),
+                            sequence: snapshot
+                                .next_operation_sequence(&successor.task_id, successor.generation),
                         },
                         kind: OperationKind::SkipTask,
                     });

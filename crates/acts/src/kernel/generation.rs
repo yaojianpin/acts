@@ -21,12 +21,14 @@ pub(crate) struct GenerationPlanner;
 impl GenerationPlanner {
     /// Re-enter one task with a fresh generation. The re-entered execution's
     /// whole forward closure is recreated alongside it (new generations in
-    /// breadth-first order, predecessor edges remapped to the new
+    /// breadth-first order, predecessor and parent edges remapped to the new
     /// generations), because the old forward executions are dead on this
-    /// path: the cancelled/backed source already ended the flow through them.
-    /// Only the re-entered task itself receives an `ExecuteTask` operation -
-    /// its completion propagates into the recreated chain. `graph` is the
-    /// snapshot's execution graph (rebuilt by the caller).
+    /// path. A Cancel re-enters the terminal source itself; a Back re-enters
+    /// the step the client named (`target_task_id` earlier on the path — the
+    /// backed source must lie inside the redo closure). Only the re-entered
+    /// root receives an `ExecuteTask` operation - its completion propagates
+    /// into the recreated chain. `graph` is the snapshot's execution graph
+    /// (rebuilt by the caller).
     pub(crate) fn plan_reentry(
         graph: &ExecutionGraph,
         snapshot: &AggregateSnapshot,
@@ -58,16 +60,35 @@ impl GenerationPlanner {
         if command.target_task_id.trim().is_empty() {
             return Err(GenerationError::EmptyTargetTaskId);
         }
+        // The closure roots at the re-entered task: a Cancel re-enters the
+        // terminal source itself; a Back re-enters an EARLIER step named by
+        // the client (`to`), so the root is that task's latest generation
+        // and the backed source must lie inside the closure it spawns (the
+        // redo re-runs everything downstream of the target, the source
+        // included).
+        let root = if command.target_task_id == command.source.task_id {
+            command.source.clone()
+        } else {
+            snapshot
+                .executions
+                .keys()
+                .filter(|id| id.task_id == command.target_task_id)
+                .max_by_key(|id| id.generation)
+                .cloned()
+                .ok_or_else(|| {
+                    GenerationError::TargetNeverInstantiated(command.target_task_id.clone())
+                })?
+        };
         // Forward closure of the re-entered source in breadth-first order
         // (edges always point forward, so BFS is a topological order): the
-        // source and every execution downstream of it are dead on this path
-        // and must be recreated as fresh generations.
+        // source and every execution downstream of it are dead on this
+        // path and must be recreated as fresh generations.
         let mut order: Vec<ExecutionId> = Vec::new();
         let mut seen: HashMap<ExecutionId, ()> = HashMap::new();
         let mut queue = VecDeque::new();
-        seen.insert(command.source.clone(), ());
-        order.push(command.source.clone());
-        queue.push_back(command.source.clone());
+        seen.insert(root.clone(), ());
+        order.push(root.clone());
+        queue.push_back(root.clone());
         while let Some(current) = queue.pop_front() {
             for successor in graph.successors(&current) {
                 if seen.insert(successor.clone(), ()).is_some() {
@@ -76,6 +97,12 @@ impl GenerationPlanner {
                 order.push(successor.clone());
                 queue.push_back(successor.clone());
             }
+        }
+        if !seen.contains_key(&command.source) {
+            return Err(GenerationError::SourceOutsideRedoClosure {
+                source: command.source.clone(),
+                target: command.target_task_id.clone(),
+            });
         }
 
         // One fresh generation per closed-over task, remapping every
@@ -101,13 +128,14 @@ impl GenerationPlanner {
             remap.insert(old_id.clone(), new_id.clone());
             closure.push((old_id.clone(), old, new_id));
         }
-        // The re-entered source generation is admitted immediately (`Ready`,
+        // The re-entered root generation is admitted immediately (`Ready`,
         // carried by its `ExecuteTask` operation); the recreated downstream
         // starts `Created`, so ordinary propagation admits each of them in
         // turn as their predecessors settle.
-        let next = remap.get(&command.source).cloned().ok_or_else(|| {
-            GenerationError::TargetNeverInstantiated(command.source.task_id.clone())
-        })?;
+        let next = remap
+            .get(&root)
+            .cloned()
+            .ok_or_else(|| GenerationError::TargetNeverInstantiated(root.task_id.clone()))?;
         let execution_creates: Vec<ExecutionCreate> = closure
             .iter()
             .map(|(old_id, old, new_id)| ExecutionCreate {
@@ -203,6 +231,12 @@ pub(crate) enum GenerationError {
     SourceOperationTargetsDifferentExecution,
     EmptyTargetTaskId,
     TargetNeverInstantiated(String),
+    /// A Back named a `to` step that is not on the source's path: the redo
+    /// closure from that step would not carry the backed source.
+    SourceOutsideRedoClosure {
+        source: ExecutionId,
+        target: String,
+    },
     GenerationOverflow,
     InvalidPlan(String),
 }
@@ -297,7 +331,9 @@ mod tests {
         ReenterCommand {
             process_id: "p1".into(),
             source: id("source", 1),
-            target_task_id: "target".into(),
+            // Cancel re-enters the source itself; the target names the
+            // re-entered task.
+            target_task_id: "source".into(),
             source_operation: OperationCommit {
                 id: OperationId {
                     process_id: "p1".into(),
@@ -380,5 +416,179 @@ mod tests {
             .find(|create| create.execution == id("target", 2))
             .unwrap();
         assert_eq!(target.predecessors, vec![id("source", 2)]);
+    }
+
+    #[test]
+    fn back_reenters_the_named_step_and_carries_the_backed_source() {
+        // The source is the Backed downstream execution; the client named
+        // `target` as the redo point. The closure roots at the target's
+        // latest generation and must carry the source with it.
+        let snapshot = AggregateSnapshot {
+            process_id: "p1".into(),
+            version: AggregateVersion {
+                graph: 3,
+                process: 8,
+                operations: 6,
+            },
+            executions: HashMap::from([
+                (
+                    id("target", 1),
+                    ExecutionSnapshot {
+                        model_node: NodeId::parse("target-node").unwrap(),
+                        parent: None,
+                        predecessors: vec![],
+                        state: ExecutionState::Completed,
+                        revision: 3,
+                    },
+                ),
+                (
+                    id("source", 1),
+                    ExecutionSnapshot {
+                        model_node: NodeId::parse("source").unwrap(),
+                        parent: None,
+                        predecessors: vec![id("target", 1)],
+                        state: ExecutionState::Backed,
+                        revision: 4,
+                    },
+                ),
+            ]),
+            variables: BTreeMap::new(),
+            operations: HashMap::new(),
+            outbox: HashMap::new(),
+        };
+        let graph = {
+            let mut builder = crate::kernel::ExecutionGraphBuilder::new("p1", 3).unwrap();
+            for (exec_id, execution) in &snapshot.executions {
+                builder
+                    .add_node(crate::kernel::ExecutionNode {
+                        id: exec_id.clone(),
+                        model_node: execution.model_node.clone(),
+                        state: execution.state,
+                        revision: execution.revision,
+                    })
+                    .unwrap();
+            }
+            builder.set_root(id("target", 1)).unwrap();
+            builder.add_child(id("target", 1), id("source", 1)).unwrap();
+            builder
+                .add_successor(id("target", 1), id("source", 1))
+                .unwrap();
+            builder.build().unwrap()
+        };
+        let mut command = command();
+        command.target_task_id = "target".into();
+        let plan = GenerationPlanner::plan_reentry(&graph, &snapshot, &command).unwrap();
+        let created: Vec<ExecutionId> = plan
+            .execution_creates
+            .iter()
+            .map(|create| create.execution.clone())
+            .collect();
+        // The redo starts at the target's next generation; the backed source
+        // is recreated behind it (the redo re-runs everything downstream).
+        assert_eq!(created, vec![id("target", 2), id("source", 2)]);
+        assert_eq!(
+            plan.execution_creates[0].initial_state,
+            ExecutionState::Ready,
+            "the named redo step runs again immediately"
+        );
+        assert_eq!(plan.operations[0].id.task_id, "target");
+        assert_eq!(plan.operations[0].id.generation, 2);
+        let source = plan
+            .execution_creates
+            .iter()
+            .find(|create| create.execution == id("source", 2))
+            .unwrap();
+        assert_eq!(source.initial_state, ExecutionState::Created);
+        assert_eq!(source.predecessors, vec![id("target", 2)]);
+    }
+
+    #[test]
+    fn back_to_a_step_outside_the_redo_closure_is_refused() {
+        // A source with no path from the named step cannot be a redo. The
+        // graph stays connected: one root with two children, and the named
+        // `target` spawns a closure that misses the backed `stray`.
+        let snapshot = AggregateSnapshot {
+            process_id: "p1".into(),
+            version: AggregateVersion {
+                graph: 4,
+                process: 9,
+                operations: 7,
+            },
+            executions: HashMap::from([
+                (
+                    id("root", 0),
+                    ExecutionSnapshot {
+                        model_node: NodeId::parse("root").unwrap(),
+                        parent: None,
+                        predecessors: vec![],
+                        state: ExecutionState::Completed,
+                        revision: 1,
+                    },
+                ),
+                (
+                    id("target", 1),
+                    ExecutionSnapshot {
+                        model_node: NodeId::parse("target-node").unwrap(),
+                        parent: Some(id("root", 0)),
+                        predecessors: vec![],
+                        state: ExecutionState::Completed,
+                        revision: 3,
+                    },
+                ),
+                (
+                    id("stray", 0),
+                    ExecutionSnapshot {
+                        model_node: NodeId::parse("stray").unwrap(),
+                        parent: Some(id("root", 0)),
+                        predecessors: vec![],
+                        state: ExecutionState::Backed,
+                        revision: 1,
+                    },
+                ),
+            ]),
+            variables: BTreeMap::new(),
+            operations: HashMap::new(),
+            outbox: HashMap::new(),
+        };
+        let graph = {
+            let mut builder = crate::kernel::ExecutionGraphBuilder::new("p1", 4).unwrap();
+            for (exec_id, execution) in &snapshot.executions {
+                builder
+                    .add_node(crate::kernel::ExecutionNode {
+                        id: exec_id.clone(),
+                        model_node: execution.model_node.clone(),
+                        state: execution.state,
+                        revision: execution.revision,
+                    })
+                    .unwrap();
+            }
+            builder.set_root(id("root", 0)).unwrap();
+            builder.add_child(id("root", 0), id("target", 1)).unwrap();
+            builder.add_child(id("root", 0), id("stray", 0)).unwrap();
+            builder.build().unwrap()
+        };
+        let command = ReenterCommand {
+            process_id: "p1".into(),
+            source: id("stray", 0),
+            target_task_id: "target".into(),
+            source_operation: OperationCommit {
+                id: OperationId {
+                    process_id: "p1".into(),
+                    task_id: "stray".into(),
+                    generation: 0,
+                    sequence: 1,
+                },
+                claim: ClaimToken {
+                    owner: "runtime-a".into(),
+                    fence: 7,
+                    lease_until_ms: i64::MAX,
+                    heartbeat_revision: 0,
+                },
+            },
+        };
+        assert!(matches!(
+            GenerationPlanner::plan_reentry(&graph, &snapshot, &command),
+            Err(GenerationError::SourceOutsideRedoClosure { .. })
+        ));
     }
 }

@@ -49,6 +49,7 @@ mod recovery_index;
 mod replay_policy;
 mod snapshot_codec;
 mod transition_plan;
+mod upward;
 
 pub(crate) use application::{OperationWakeSink, WakeError};
 pub(crate) use async_document_store::{
@@ -68,6 +69,7 @@ pub(crate) use outbox_dispatch::{DeliveryOutcome, OutboxTransport};
 pub(crate) use outbox_worker::{DispatchBatchConfig, DispatchBatchReport, dispatch_batch};
 pub(crate) use propagation::{JoinPolicy, PropagateCommand, PropagationPlanner};
 pub(crate) use recovery::{RecoveryDisposition, RecoveryPlanner, RecoveryReport, RecoveryService};
+pub(crate) use upward::{UpwardCommand, UpwardError, UpwardPlanner};
 
 #[allow(unused_imports)]
 pub(crate) use outbox::{

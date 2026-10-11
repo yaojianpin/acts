@@ -48,6 +48,22 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
   step 同时带 next+branches 沿 legacy 视 branches 为死配置。谓词求值失败 =
   InvalidDecision(hop 留存重试,阴影内可见;legacy 对应任务错误路径,Error parity
   属剩余工作 3)。
+- parity 矩阵 Abort/Error/Back(kernel/upward.rs + generation.rs + host):
+  Abort = 向上级联(`UpwardPlanner::plan_upward`,祖先全链 Aborted,**终态祖先也
+  重写**——状态表新增 终态→Aborted/Failed,对齐 legacy abort_task 的无条件改写;
+  已 Aborted 祖先让位)+ 向下死源级联,其中 Aborted 源的 Running 后继走新
+  `AbortTask` hop(Running→Aborted,legacy 祖先行对 running 子的处置;codec tag
+  追加 7 不重排);Completed 兄弟非祖先、保持原状。
+  Error/Fail = 同一 upward 机制 → Failed(legacy emit_error→parent.set_err 把
+  祖先链改写为 Error,parity 测试对 legacy 实测确认)+ SkipTask 下游级联;
+  **catch 分支仍未导入**——带 catch 的错误路径不在 parity 内(cutover 前)。
+  Back = `plan_reentry` 闭包根改在 `to` 命名步的最新代(Backed 源必须在闭包内,
+  否则 SourceOutsideRedoClosure 拒绝;redo 重跑 to 下游全部,Backed 旧代保持),
+  宿主对 Back 依 inputs 的 `to`(ACT_TO)派发重入;缺 `to` 拒绝(对齐 legacy 文案)。
+  legacy 对照实测:Abort/Fail 与 legacy 逐步骤终态一致(acts 折叠进所属 step,
+  Interrupt→Waiting/Error→Failed 映射);**Back 的 legacy 折叠对照未做**——重入流
+  里 legacy 同节点多任务多状态(旧 Backed + 新 Waiting),折叠规则要等行投影
+  (legacy 行变成 receipt 投影)才有干净语义,当前以 kernel 机制测试收口。
 
 ## 已对齐(无需动)
 
@@ -58,16 +74,17 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
 
 ## 剩余工作(按序)
 
-1. **行投影 + 重启判别**:kernel 聚合为真相源后,proc/task/vars 行改为
+1. **行投影 + 重启判别(cutover)**:kernel 聚合为真相源后,proc/task/vars 行改为
    CommitReceipt 投影;重启判别按 `kernel/aggregates/<pid>` 存在性
-   (`AsyncAggregateRepository::load`)优先于 proc 行。
-2. **parity 矩阵扩展**:Cancel(已有)/Abort/Error/Back × (IRQ/普通)。
-   Abort 映射:`ctx.abort_task` 递归祖先 Aborted + 子孙 Skipped(context.rs:537-563)
-   ——内核需等价级联(与 SkipTask 同机制,方向向上);join 已让位 Aborted 子
-   (container.rs `plan_join`)。
-   Back:Waiting→Backed + GenerationPlanner 重入(机制已通,补宿主分派 + parity)。
-3. **谓词求值失败的失败路径**:legacy 分支 `if` 求值出错→任务 Error;阴影当前
-   InvalidDecision 留存重试(可见但无 catch)。与 Error parity 一并处理。
+   (`AsyncAggregateRepository::load`)优先于 proc 行。**前置:executor 移植**——
+   kernel host 目前不执行包效果(Func/Msg 自动完成、Irq 等待),尚无资格做真相源;
+   直接投影行会与 legacy 写路径双写冲突。executor 移植(Func/Msg/Irq 三态驱动、
+   params/outputs 写回聚合、消息投递)是本项的真第一步,需拆多笔提交。
+2. **谓词求值失败的失败路径**:legacy 分支 `if` 求值出错→任务 Error;阴影当前
+   InvalidDecision 留存重试(可见但无 catch)。与 Error×catch parity 一并处理
+   (catch 分支同样未导入)。
+3. **Back 的 legacy 折叠对照**:重入流里 legacy 同节点多任务多状态,折叠规则
+   依赖行投影的 receipt 语义,随第 1 项一并收口。
 
 ## 语义结论(已核实,勿再猜测)
 
@@ -84,8 +101,19 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
   同语义:全 True 入选,无 True 才落 else,全不中 = NoMatch)。
 - branch 谓词的可见变量:legacy = 任务 scope 链 + 已写的 action vars;kernel =
   聚合 scope 链(近者胜)+ fan-out 动作 inputs 覆盖层。
+- legacy Abort:`abort_task` 祖先全链无条件改写 Aborted(终态不豁免,根含),
+  首层兄弟 Skipped,祖先的 running 子 Aborted、pending 子 Skipped;kernel 对应
+  upward→Aborted + AbortTask hop。
+- legacy Error(no catch):`set_err` 把 act、step、根的整条祖先链改写 Error;
+  step 的兄弟(下游链)Skipped;kernel 对应 upward→Failed + SkipTask 级联。
+- legacy Back:`to` 命中 prev 链上的历史 step;redo 该步(每 (node,prev) 一个
+  存活 redo),current→Backed、兄弟 Skipped、path running→Completed/pending→
+  Skipped,redo 的传播为下游 step 建新实例(重跑);kernel 对应闭包根=to 最新代
+  + Backed 源必须在闭包内 + 下游新代由传播重接纳。
 - 内核动作身份 = 模型节点 id;legacy 任务 id 运行时随机——parity 比完成态与
-  每模型节点一个终态任务,不比 id。
+  每模型节点一个终态任务,不比 id。决策步(abort/error)的 parity 比对:
+  legacy 折叠(acts 入 step、根→$、Interrupt→Waiting、Error→Failed)后逐节点
+  相等,kernel 多出的预建链节点须全部终态。
 
 ## 环境注意
 
