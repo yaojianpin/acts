@@ -19,6 +19,7 @@ mod branch_application;
 mod clock;
 mod command;
 mod commit;
+mod container;
 #[cfg(test)]
 mod coverage;
 mod document;
@@ -120,4 +121,10 @@ pub(crate) use commit::{AggregateSnapshot, ExecutionSnapshot};
 
 pub(crate) use command::{ActionKind, ActionPlanner, ApplyActionCommand, CommandError};
 
-pub(crate) use branch::PredicateValue;
+pub(crate) use branch::{
+    BranchCandidate, BranchCommand, BranchDecision, BranchPlanner, PredicateBasis, PredicateValue,
+};
+pub(crate) use container::{
+    ContainerChild, ContainerChildPlan, ContainerError, ContainerFanoutCommand,
+    ContainerJoinCommand, ContainerPlanner, ContainerPredecessor,
+};

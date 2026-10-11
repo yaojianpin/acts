@@ -113,7 +113,14 @@ impl GenerationPlanner {
             .map(|(old_id, old, new_id)| ExecutionCreate {
                 execution: new_id.clone(),
                 model_node: old.model_node.clone(),
-                parent: old.parent.clone(),
+                // A nested closure's children belong to the re-entered
+                // generation, not the dead one: the parent edge remaps like
+                // the predecessor edges (outside the closure - the root -
+                // the old parent stays).
+                parent: old
+                    .parent
+                    .as_ref()
+                    .map(|parent| remap.get(parent).cloned().unwrap_or_else(|| parent.clone())),
                 predecessors: snapshot.executions[old_id]
                     .predecessors
                     .iter()

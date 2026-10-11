@@ -108,15 +108,26 @@ impl BranchPlanner {
                 message: error.to_string(),
             };
         }
-        if !command.unresolved_dependencies.is_empty() {
-            let mut dependencies = command.unresolved_dependencies.clone();
+        Self::select(&command.candidates, &command.unresolved_dependencies)
+    }
+
+    /// The pure selection over already-validated candidates: every `true`
+    /// predicate runs, the `else` candidate runs only when no `if` matched,
+    /// and an unmatched set without `else` is an explicit `NoMatch`.
+    /// Dependency deferral is layered on top by the caller.
+    pub(crate) fn select(
+        candidates: &[BranchCandidate],
+        unresolved_dependencies: &[String],
+    ) -> BranchDecision {
+        if !unresolved_dependencies.is_empty() {
+            let mut dependencies = unresolved_dependencies.to_vec();
             dependencies.sort();
             dependencies.dedup();
             return BranchDecision::Waiting { dependencies };
         }
         let mut selected = Vec::new();
         let mut fallback = None;
-        for candidate in &command.candidates {
+        for candidate in candidates {
             if candidate.is_else {
                 fallback = Some(candidate.clone());
             } else if matches!(candidate.predicate, PredicateValue::True) {

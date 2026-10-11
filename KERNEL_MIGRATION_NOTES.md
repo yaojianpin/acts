@@ -24,8 +24,30 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
   对齐 legacy Interrupt);apply_action 的 ApplyAction arm 接受 Running|Waiting
 - Cancel→GenerationPlanner 重入:`plan_reentry` 接受 Backed|Cancelled,重建 source 的
   前向闭包(source 新代 Ready + ExecuteTask,下游新代 Created 由传播逐个接纳,
-  前驱边重映射,auto 变量随代继承);`validate_preconditions` 变量写 scope 允许指向
+  前驱边重映射,**父边同闭包重映射**(嵌套闭包的父必须指向新代,join 依赖它),
+  auto 变量随代继承);`validate_preconditions` 变量写 scope 允许指向
   本计划 creates 的新执行;宿主 Cancel 分派在级联 settle 后发 ReenterCommand
+- 嵌套模型导入(kernel/container.rs + kernel_host):`from_workflow` 接受 branches。
+  机制:模型事实(`__model` JSON、`__auto` 每步节点判定、workflow vars、各 step 声明
+  vars)全部落成根 scope 变量,聚合自回放不依赖 spec;容器(branch step / branch)在
+  自己的 ApplyAction hop 做 fan-out(`ContainerPlanner::plan_fanout`:未选中分支
+  建 Ready+SkipTask(每模型节点一个终态执行,Skipped 分支的内部步骤不建),选中分支
+  Ready+ExecuteTask,branch 内部链首步 Entry 其余 Created 排队),源执行 Waiting 停靠;
+  每个 hop 的 PropagateTask 附带 `plan_join`(父 Waiting + 全子终态且无 Aborted →
+  父 Completed + PropagateTask,对齐 legacy auto_complete 的 abort 让位);
+  子接纳走 `GenerationAdmissionPolicy`(Absent/已完代→分配新代, rewind 重建的
+  Created→Readmit 不重复分配, 活跃→Ignore);branch if 选择复用 kernel
+  `BranchPlanner::decide/select`,谓词求值 = acts_expr 对聚合 scope 链(近者胜)+
+  动作 inputs 覆盖层(legacy 先写 action vars 再调度分支);"已 fan-out 的容器"
+  以"存在非 Created 子"判定,其上的 Complete 是强停(对齐 legacy 对 Running step
+  的 Next)。级联扩展:死源 + Ready/Running/Waiting 后继 → SkipTask op(状态变更
+  归 hop;传播 op 序列改按快照 next-sequence,避免与既有 hop 撞 id);
+  终态执行上的 ApplyAction hop 落空 plan 而非报错。
+  导入仍拒绝(不静默降级):branch `needs`;branch 内 step 的 `if`/`while`
+  (kernel Skipped=死路,legacy step guard=穿行,一个状态不能两义);
+  step 同时带 next+branches 沿 legacy 视 branches 为死配置。谓词求值失败 =
+  InvalidDecision(hop 留存重试,阴影内可见;legacy 对应任务错误路径,Error parity
+  属剩余工作 3)。
 
 ## 已对齐(无需动)
 
@@ -36,17 +58,16 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
 
 ## 剩余工作(按序)
 
-1. **嵌套模型导入**:`ProcessSpec::from_workflow` 目前拒绝 branches;需
-   branches → `ExecutionCreate`(branch if 选择语义:未选中分支不建或 Skipped)+
-   `GenerationAdmissionPolicy`。重入的前向闭包重建(generation.rs)已验证
-   creates+变量继承机制可复用。
-2. **行投影 + 重启判别**:kernel 聚合为真相源后,proc/task/vars 行改为
+1. **行投影 + 重启判别**:kernel 聚合为真相源后,proc/task/vars 行改为
    CommitReceipt 投影;重启判别按 `kernel/aggregates/<pid>` 存在性
    (`AsyncAggregateRepository::load`)优先于 proc 行。
-3. **parity 矩阵扩展**:Cancel(已有)/Abort/Error/Back × (IRQ/普通)。
+2. **parity 矩阵扩展**:Cancel(已有)/Abort/Error/Back × (IRQ/普通)。
    Abort 映射:`ctx.abort_task` 递归祖先 Aborted + 子孙 Skipped(context.rs:537-563)
-   ——内核需等价级联(与 SkipTask 同机制,方向向上)。
+   ——内核需等价级联(与 SkipTask 同机制,方向向上);join 已让位 Aborted 子
+   (container.rs `plan_join`)。
    Back:Waiting→Backed + GenerationPlanner 重入(机制已通,补宿主分派 + parity)。
+3. **谓词求值失败的失败路径**:legacy 分支 `if` 求值出错→任务 Error;阴影当前
+   InvalidDecision 留存重试(可见但无 catch)。与 Error parity 一并处理。
 
 ## 语义结论(已核实,勿再猜测)
 
@@ -55,6 +76,14 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
 - legacy Cancel = 回退重做(task.rs:820-883):redos step 新一代 + 前向 undo/skip;
   已由重入实现。legacy Abort = 终止链路(祖先 Aborted + 子孙 Skipped)。
 - join:Skipped 不算 success(死路传播);Backed 等待;JoinBlocked 错误已删除。
+- 容器 join(branch/分支步)与链 join 不同:legacy `auto_complete` 数**全终态**子
+  (Skipped 算已结算)且任一子 Aborted 时让位;kernel `plan_join` 同——Skipped 分支
+  不会杀死父容器。
+- legacy 分支节点:全部兄弟分支都建任务(init 时按 if 跳掉),未选中分支的内部
+  步骤不建任务;else 仅当所有 if 兄弟皆 skip 才运行(kernel `BranchPlanner::select`
+  同语义:全 True 入选,无 True 才落 else,全不中 = NoMatch)。
+- branch 谓词的可见变量:legacy = 任务 scope 链 + 已写的 action vars;kernel =
+  聚合 scope 链(近者胜)+ fan-out 动作 inputs 覆盖层。
 - 内核动作身份 = 模型节点 id;legacy 任务 id 运行时随机——parity 比完成态与
   每模型节点一个终态任务,不比 id。
 

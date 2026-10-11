@@ -1,9 +1,13 @@
 //! Declarative process specification for the kernel host.
 //!
-//! P1 seeds a flat workflow: one root and a declared child chain with optional
-//! explicit join edges. The same two builders (model graph, execution graph)
-//! carry the real model import in P2, so the vocabulary here stays exactly
-//! `kernel::ModelGraph`/`kernel::ExecutionGraph` — no side structures.
+//! P1 seeded a flat workflow: one root and a declared child chain with
+//! optional explicit join edges. The nested import (P2) keeps the same
+//! vocabulary — `kernel::ModelGraph`/`kernel::ExecutionGraph` — for the
+//! seeded top chain, and carries the nested structure (branch subtrees) as
+//! durable aggregate variables (`__model`, `__auto`): the fan-out hop reads
+//! them from the snapshot, so recovery replays never need the declaring
+//! spec. Branch executions and their inner chains come alive through
+//! `kernel::ContainerPlanner` fan-outs, never at seed time.
 
 use crate::kernel::{
     AggregateSnapshot, ChildRole, ExecutionGraph, ExecutionGraphBuilder, ExecutionId,
@@ -19,6 +23,16 @@ fn runtime(error: impl std::fmt::Display) -> ActError {
 fn node_id(name: &str) -> Result<NodeId> {
     NodeId::parse(name).map_err(runtime)
 }
+
+/// The root-scope variable holding the declaring workflow (JSON). The
+/// aggregate is the graph of record, so the nested model — which branches and
+/// inner chains a fan-out must admit — replays from here without the spec.
+pub(crate) const MODEL_VAR: &str = "__model";
+
+/// The root-scope variable mapping every step node id to its durable
+/// auto/waiting decision (`is_auto` at import time). Dynamic fan-outs seed a
+/// created execution's `auto` variable from it.
+pub(crate) const AUTO_MAP_VAR: &str = "__auto";
 
 /// A flat process: `root` with `children` in declaration order (implicit
 /// successor chain) plus optional explicit edges, e.g. a join that both
@@ -36,6 +50,11 @@ pub(crate) struct ProcessSpec {
     pub(crate) children: Vec<String>,
     pub(crate) explicit_next: Vec<(String, String)>,
     pub(crate) auto: std::collections::BTreeSet<String>,
+    /// Extra seed variables: `(scope, name, json-value)` where `None` scope
+    /// is the root generation 0 and `Some(node)` a seeded step's generation 0.
+    /// Root carries the workflow vars, the model itself and the auto map; a
+    /// step carries its declared vars.
+    pub(crate) seed_variables: Vec<(Option<String>, String, String)>,
 }
 
 /// Whether a step self-completes once its act ran. The answer is the
@@ -53,6 +72,61 @@ fn is_auto(uses: Option<&str>, run_as: &dyn Fn(&str) -> Option<crate::ActRunAs>)
     }
 }
 
+/// The branches a step actually runs, mirroring the legacy tree build: a
+/// step that declares an explicit `next` ignores its branches.
+pub(crate) fn step_branches(step: &crate::model::Step) -> Option<&[crate::model::Branch]> {
+    match (step.next.as_ref(), step.branches.as_slice()) {
+        (None, []) => None,
+        (None, branches) => Some(branches),
+        (Some(_), _) => None,
+    }
+}
+
+/// One step of the nested import walk: pin the step's auto decision and
+/// declared vars, reject what the shadow cannot mean faithfully, and descend
+/// into its branches. `top_level` steps keep the P1 contract (their `if` /
+/// `while` guards were already ignored there); guards inside a branch would
+/// silently change meaning, so they are refused.
+fn import_step(
+    step: &crate::model::Step,
+    run_as: &dyn Fn(&str) -> Option<crate::ActRunAs>,
+    top_level: bool,
+    auto: &mut std::collections::BTreeSet<String>,
+    auto_map: &mut serde_json::Map<String, serde_json::Value>,
+    seed_variables: &mut Vec<(Option<String>, String, String)>,
+) -> Result<()> {
+    let step_auto = is_auto(step.uses.as_deref(), run_as);
+    auto_map.insert(step.id.clone(), serde_json::Value::Bool(step_auto));
+    if top_level && step_auto {
+        auto.insert(step.id.clone());
+    }
+    for var in &step.vars {
+        seed_variables.push((
+            Some(step.id.clone()),
+            var.name.clone(),
+            var.value.to_string(),
+        ));
+    }
+    if !top_level && (step.r#if.is_some() || step.r#while.is_some()) {
+        return Err(ActError::Runtime(format!(
+            "step '{}' carries an 'if'/'while' guard inside a branch; guarded nested steps are not imported yet",
+            step.id
+        )));
+    }
+    for branch in step_branches(step).unwrap_or_default() {
+        if !branch.needs.is_empty() {
+            return Err(ActError::Runtime(format!(
+                "branch '{}' declares 'needs'; branch dependencies are not imported yet",
+                branch.id
+            )));
+        }
+        for inner in &branch.steps {
+            import_step(inner, run_as, false, auto, auto_map, seed_variables)?;
+        }
+    }
+    Ok(())
+}
+
 impl ProcessSpec {
     pub(crate) fn linear(process_id: impl Into<String>, root: &str, children: &[&str]) -> Self {
         Self {
@@ -61,38 +135,66 @@ impl ProcessSpec {
             children: children.iter().map(|name| name.to_string()).collect(),
             explicit_next: Vec::new(),
             auto: children.iter().map(|name| name.to_string()).collect(),
+            seed_variables: Vec::new(),
         }
     }
 
-    /// Import a flat workflow: the legacy root task id (`$`) as root and the
-    /// workflow's top-level steps as one chain. Nesting (branches) needs P2's
-    /// `ExecutionCreate` import and is rejected here instead of being
-    /// silently flattened into wrong semantics.
+    /// Import a workflow. The legacy root task id (`$`) is the root and the
+    /// workflow's top-level steps seed one chain; a step's branches (legacy
+    /// rule: only when the step declares no `next`) and their inner steps do
+    /// NOT seed executions — they come alive when the branched step's effect
+    /// hop fans out, selected by their `if` predicates. The nested structure,
+    /// the workflow vars and the per-node auto decision all become durable
+    /// root-scope variables, so the aggregate replays without the spec.
+    ///
+    /// Not imported (rejected instead of silently flattened into wrong
+    /// semantics): branch `needs` (a dependency deferral the shadow has no
+    /// re-evaluation driver for yet) and `if`/`while` guards on steps inside
+    /// a branch (the kernel join treats `Skipped` as a dead path, while a
+    /// legacy step guard falls through to the chain — one state cannot mean
+    /// both).
     pub(crate) fn from_workflow(
         process_id: impl Into<String>,
         workflow: &crate::model::Workflow,
         run_as: &dyn Fn(&str) -> Option<crate::ActRunAs>,
     ) -> Result<Self> {
-        for step in &workflow.steps {
-            if !step.branches.is_empty() {
-                return Err(ActError::Runtime(format!(
-                    "step '{}' has branches; nested models are not imported yet",
-                    step.id
-                )));
-            }
+        let mut seed_variables: Vec<(Option<String>, String, String)> = Vec::new();
+        for var in &workflow.vars {
+            seed_variables.push((None, var.name.clone(), var.value.to_string()));
         }
-        let auto = workflow
-            .steps
-            .iter()
-            .filter(|step| is_auto(step.uses.as_deref(), run_as))
-            .map(|step| step.id.clone())
-            .collect();
+        // The model itself is part of the aggregate: the fan-out hop reads
+        // the nested structure from the snapshot.
+        seed_variables.push((
+            None,
+            MODEL_VAR.to_string(),
+            serde_json::to_string(workflow).map_err(runtime)?,
+        ));
+
+        let mut auto_map = serde_json::Map::new();
+        let mut auto = std::collections::BTreeSet::new();
+        for step in &workflow.steps {
+            import_step(
+                step,
+                run_as,
+                true,
+                &mut auto,
+                &mut auto_map,
+                &mut seed_variables,
+            )?;
+        }
+        seed_variables.push((
+            None,
+            AUTO_MAP_VAR.to_string(),
+            serde_json::Value::Object(auto_map).to_string(),
+        ));
+
         Ok(Self {
             process_id: process_id.into(),
             root: crate::utils::consts::TASK_ROOT_TID.to_string(),
             children: workflow.steps.iter().map(|step| step.id.clone()).collect(),
             explicit_next: Vec::new(),
             auto,
+            seed_variables,
         })
     }
 
@@ -185,6 +287,18 @@ impl ProcessSpec {
                 if auto { "1" } else { "0" }.into(),
             );
         }
+        // The declared model facts: workflow vars, the model itself, the auto
+        // map on the root scope; each seeded step's declared vars on its own
+        // scope. Dynamic fan-outs read them from here.
+        for (scope, name, value) in &self.seed_variables {
+            let key = match scope {
+                None => root.clone(),
+                Some(node) => ExecutionId::new(node, 0).map_err(runtime)?,
+            };
+            snapshot
+                .variables
+                .insert((key, name.clone()), value.clone());
+        }
         // At creation the MODEL is the edge authority: every node's successor
         // becomes an execution edge, and the predecessor lists are its mirror.
         // From then on the snapshot itself is the graph of record.
@@ -262,4 +376,118 @@ pub(crate) fn execution_graph(snapshot: &AggregateSnapshot) -> Result<ExecutionG
         }
     }
     builder.build().map_err(runtime)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn spec(workflow: &crate::model::Workflow) -> Result<ProcessSpec> {
+        ProcessSpec::from_workflow("p1", workflow, &|_| None)
+    }
+
+    fn branched() -> crate::model::Workflow {
+        crate::model::Workflow::new()
+            .with_var("v", 1)
+            .with_step(|step| {
+                step.with_id("step1")
+                    .with_branch(|branch| {
+                        branch
+                            .with_id("b1")
+                            .with_if("v > 0")
+                            .with_step(|step| step.with_id("s11"))
+                    })
+                    .with_branch(|branch| {
+                        branch
+                            .with_id("b2")
+                            .with_else(true)
+                            .with_step(|step| step.with_id("s21"))
+                    })
+            })
+    }
+
+    #[test]
+    fn nested_models_import_with_durable_model_facts() {
+        let workflow = branched();
+        let spec = spec(&workflow).unwrap();
+        // Branches and their steps do not seed executions; the top chain does.
+        assert_eq!(spec.children, vec!["step1".to_string()]);
+        let snapshot = spec.seed_snapshot().unwrap();
+        assert_eq!(snapshot.executions.len(), 2, "root + step1 only");
+        // The root scope carries the workflow vars, the model and the auto
+        // map — the fan-out's durable inputs.
+        let root = ExecutionId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap();
+        let variable = |name: &str| {
+            snapshot
+                .variables
+                .get(&(root.clone(), name.to_string()))
+                .unwrap()
+                .clone()
+        };
+        assert_eq!(variable("v"), "1");
+        let model: crate::model::Workflow = serde_json::from_str(&variable(MODEL_VAR)).unwrap();
+        assert_eq!(model.steps[0].branches.len(), 2);
+        let auto: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(&variable(AUTO_MAP_VAR)).unwrap();
+        assert_eq!(auto["step1"], serde_json::Value::Bool(true));
+        assert_eq!(auto["s11"], serde_json::Value::Bool(true));
+    }
+
+    #[test]
+    fn branch_needs_are_rejected_not_silently_flattened() {
+        let workflow = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("step1").with_branch(|branch| {
+                branch
+                    .with_id("b1")
+                    .with_need("b0")
+                    .with_step(|step| step.with_id("s11"))
+            })
+        });
+        let error = spec(&workflow).unwrap_err();
+        assert!(format!("{error}").contains("'b1' declares 'needs'"));
+    }
+
+    #[test]
+    fn guarded_steps_inside_branches_are_rejected() {
+        let workflow = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("step1").with_branch(|branch| {
+                branch
+                    .with_id("b1")
+                    .with_if("true")
+                    .with_step(|step| step.with_id("s11").with_if("v > 0"))
+            })
+        });
+        let error = spec(&workflow).unwrap_err();
+        assert!(format!("{error}").contains("'if'/'while' guard inside a branch"));
+    }
+
+    #[test]
+    fn top_level_guards_keep_the_flat_contract() {
+        let workflow =
+            crate::model::Workflow::new().with_step(|step| step.with_id("step1").with_if("v > 0"));
+        let spec = spec(&workflow).unwrap();
+        assert!(spec.auto.contains("step1"));
+    }
+
+    #[test]
+    fn branches_beside_an_explicit_next_are_dead_config_like_legacy() {
+        // legacy build: a step with `next` ignores its branches; so does the
+        // import.
+        let workflow = crate::model::Workflow::new()
+            .with_step(|step| {
+                step.with_id("step1")
+                    .with_next("step2")
+                    .with_branch(|branch| {
+                        branch
+                            .with_id("b1")
+                            .with_if("v > 0")
+                            .with_step(|step| step.with_id("s11"))
+                    })
+            })
+            .with_step(|step| step.with_id("step2"));
+        let spec = spec(&workflow).unwrap();
+        assert_eq!(spec.children.len(), 2);
+        let snapshot = spec.seed_snapshot().unwrap();
+        assert_eq!(snapshot.executions.len(), 3);
+    }
 }
