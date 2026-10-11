@@ -38,6 +38,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc::{Receiver, Sender, channel};
 
 mod effects;
+mod message;
 mod model;
 
 use self::model::execution_graph;
@@ -96,6 +97,36 @@ fn auto_decision(snapshot: &crate::kernel::AggregateSnapshot, node: &str) -> Res
     }
 }
 
+/// The scope chain of one execution (nearest → root) merged nearest-wins
+/// into name→json-string pairs: the variable space an effect's params and a
+/// branch predicate resolve against.
+pub(crate) fn scope_vars(
+    snapshot: &crate::kernel::AggregateSnapshot,
+    scope: &crate::kernel::ExecutionId,
+) -> Vec<(String, String)> {
+    let mut chain = vec![scope.clone()];
+    let mut cursor = snapshot
+        .executions
+        .get(scope)
+        .and_then(|execution| execution.parent.clone());
+    while let Some(parent) = cursor {
+        cursor = snapshot
+            .executions
+            .get(&parent)
+            .and_then(|execution| execution.parent.clone());
+        chain.push(parent);
+    }
+    let mut merged: Vec<(String, String)> = Vec::new();
+    for scope in &chain {
+        for ((key_scope, name), value) in &snapshot.variables {
+            if key_scope == scope && !merged.iter().any(|(existing, _)| existing == name) {
+                merged.push((name.clone(), value.clone()));
+            }
+        }
+    }
+    merged
+}
+
 /// One branch predicate, evaluated against the aggregate's variables the way
 /// the legacy `ctx.eval` resolves them: the scope chain of the fanning-out
 /// execution, nearest scope wins, with the completing action's inputs on top
@@ -117,32 +148,19 @@ fn evaluate_predicate(
             };
         }
     };
-    let mut chain = vec![scope.clone()];
-    let mut cursor = snapshot
-        .executions
-        .get(scope)
-        .and_then(|execution| execution.parent.clone());
-    while let Some(parent) = cursor {
-        cursor = snapshot
-            .executions
-            .get(&parent)
-            .and_then(|execution| execution.parent.clone());
-        chain.push(parent);
-    }
+    // The variable space: the execution's scope chain, nearest wins, with
+    // the completing action's inputs on top.
+    let merged = scope_vars(snapshot, scope);
     let resolve = |name: &str| -> Option<serde_json::Value> {
         if let Some((_, raw)) = overlay.iter().find(|(key, _)| key == name)
             && let Ok(value) = serde_json::from_str::<serde_json::Value>(raw)
         {
             return Some(value);
         }
-        for scope in &chain {
-            if let Some(raw) = snapshot.variables.get(&(scope.clone(), name.to_string()))
-                && let Ok(value) = serde_json::from_str::<serde_json::Value>(raw)
-            {
-                return Some(value);
-            }
-        }
-        None
+        merged
+            .iter()
+            .find(|(key, _)| key == name)
+            .and_then(|(_, raw)| serde_json::from_str::<serde_json::Value>(raw).ok())
     };
     let mut context = acts_expr::Context::new();
     for name in program.references() {
@@ -273,6 +291,9 @@ pub(crate) struct KernelHost {
     /// ApplyAction hop and its outputs commit with the completion. Without
     /// one the host auto-completes (the shadow contract).
     effect: Arc<parking_lot::RwLock<Option<Arc<dyn effects::EffectRunner>>>>,
+    /// The outbox delivery seam: the shadow logs; the driver's transport
+    /// maps records onto engine messages (see `message::message_from_record`).
+    transport: Arc<parking_lot::RwLock<Box<dyn crate::kernel::OutboxTransport>>>,
 }
 
 /// Delivers shadow-mode outbox records: they are engine-internal lifecycle
@@ -309,6 +330,7 @@ impl KernelHost {
                 recovery,
                 wake_tx,
                 effect: Arc::new(parking_lot::RwLock::new(None)),
+                transport: Arc::new(parking_lot::RwLock::new(Box::new(ShadowTransport))),
             }),
             wake_rx,
         )
@@ -326,6 +348,16 @@ impl KernelHost {
         *self.effect.write() = Some(runner);
     }
 
+    /// Replace the outbox transport: the shadow's logs records; the driver's
+    /// transport maps them onto engine messages (see [`message`]). Attach
+    /// before driving hops.
+    pub(crate) fn attach_outbox_transport(
+        &self,
+        transport: Box<dyn crate::kernel::OutboxTransport>,
+    ) {
+        *self.transport.write() = transport;
+    }
+
     /// The background driver: executes woken hops as they arrive, and on every
     /// tick re-derives recovery work (the durable net) and runs one outbox
     /// delivery pass. Exits when `shutdown` fires.
@@ -337,7 +369,6 @@ impl KernelHost {
     ) {
         let mut ticker = tokio::time::interval(tick);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut transport = ShadowTransport;
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => break,
@@ -346,7 +377,7 @@ impl KernelHost {
                     if let Err(error) = self.recover(now).await {
                         tracing::warn!(error = %error, "kernel recovery scan failed");
                     }
-                    if let Err(error) = self.dispatch_outbox(&mut transport).await {
+                    if let Err(error) = self.dispatch_outbox().await {
                         tracing::warn!(error = %error, "kernel outbox pass failed");
                     }
                 }
@@ -863,24 +894,21 @@ impl KernelHost {
                 // completion). The durable record rides the outbox; the
                 // attached transport turns it into the engine's message.
                 if let Some(execution) = execution.as_ref()
-                    && let Some((uses, params)) =
-                        self.step_uses(&snapshot, &execution.model_node)?
+                    && self.step_uses(&snapshot, &execution.model_node)?.is_some()
                 {
                     let key = format!(
                         "message.created:{}:{}:{}",
                         id.process_id, id.task_id, id.generation
                     );
                     let exists = snapshot.outbox.keys().any(|outbox_id| outbox_id.key == key);
-                    if !exists {
+                    if !exists
+                        && let Some(payload) =
+                            self.act_message_payload(&snapshot, &id.task_id, None)?
+                    {
                         plan.outbox.push(crate::kernel::OutboxIntent {
                             key,
                             topic: "message.created".into(),
-                            payload: serde_json::json!({
-                                "nid": id.task_id,
-                                "uses": uses,
-                                "params": params,
-                            })
-                            .to_string(),
+                            payload,
                         });
                     }
                 }
@@ -981,6 +1009,11 @@ impl KernelHost {
                     "skipped",
                     "task.skipped",
                 )?;
+                // A skipped act emits its Skipped message (the legacy act
+                // row's own message).
+                if let Some(payload) = self.act_message_payload(&snapshot, &id.task_id, None)? {
+                    plan.outbox[0].payload = payload;
+                }
                 plan.state_changes.push(StateChange {
                     execution: execution_id.clone(),
                     expected_revision: execution.revision,
@@ -1291,9 +1324,22 @@ impl KernelHost {
                                     kind: OperationKind::PropagateTask,
                                 });
                             }
+                            if let Some(payload) = self.act_message_payload(
+                                snapshot,
+                                &id.task_id,
+                                Some(&plan.variable_writes),
+                            )? {
+                                plan.outbox[0].payload = payload;
+                            }
                             return Ok(plan);
                         }
                     }
+                }
+                // The act's Completed message rides the completion record.
+                if let Some(payload) =
+                    self.act_message_payload(snapshot, &id.task_id, Some(&plan.variable_writes))?
+                {
+                    plan.outbox[0].payload = payload;
                 }
                 plan.state_changes.push(StateChange {
                     execution: execution_id.clone(),
@@ -1322,13 +1368,14 @@ impl KernelHost {
         }
     }
 
-    /// The `(uses, raw params)` of a `uses` step node, from the durable
-    /// model — the act message's and the effect seam's package facts.
+    /// The `(uses, raw params, node name, model id)` of a `uses` step node,
+    /// from the durable model — the act message's and the effect seam's
+    /// package facts.
     fn step_uses(
         &self,
         snapshot: &crate::kernel::AggregateSnapshot,
         model_node: &crate::kernel::NodeId,
-    ) -> Result<Option<(String, serde_json::Value)>> {
+    ) -> Result<Option<(String, serde_json::Value, String, String)>> {
         let Some(model) = model_of(snapshot)? else {
             return Ok(None);
         };
@@ -1338,7 +1385,48 @@ impl KernelHost {
         let Some(uses) = step.uses.clone().filter(|uses| !uses.trim().is_empty()) else {
             return Ok(None);
         };
-        Ok(Some((uses, step.params.clone())))
+        Ok(Some((
+            uses,
+            step.params.clone(),
+            step.name.clone(),
+            model.id.clone(),
+        )))
+    }
+
+    /// The act message payload of one uses step: the fact set the driver's
+    /// transport maps onto the engine's `Message`. `outputs` are the hop's
+    /// own scope writes (an error decision's variables excluded).
+    fn act_message_payload(
+        &self,
+        snapshot: &crate::kernel::AggregateSnapshot,
+        task_id: &str,
+        outputs: Option<&[VariableWrite]>,
+    ) -> Result<Option<String>> {
+        let node = crate::kernel::NodeId::parse(task_id).map_err(runtime)?;
+        let Some((uses, params, name, mid)) = self.step_uses(snapshot, &node)? else {
+            return Ok(None);
+        };
+        let mut payload = serde_json::json!({
+            "nid": task_id,
+            "name": name,
+            "uses": uses,
+            "params": params,
+            "mid": mid,
+        });
+        if let Some(outputs) = outputs {
+            let vars: serde_json::Map<String, serde_json::Value> = outputs
+                .iter()
+                .filter(|write| !write.name.starts_with("error."))
+                .map(|write| {
+                    (
+                        write.name.clone(),
+                        serde_json::from_str(&write.value).unwrap_or(serde_json::Value::Null),
+                    )
+                })
+                .collect();
+            payload["outputs"] = serde_json::Value::Object(vars);
+        }
+        Ok(Some(payload.to_string()))
     }
 
     /// The effect request for an auto `uses` step, when a runner is attached:
@@ -1377,6 +1465,7 @@ impl KernelHost {
                 task_id: execution_id.task_id.clone(),
                 package,
                 model,
+                vars: scope_vars(snapshot, execution_id),
             },
         )))
     }
@@ -1651,14 +1740,13 @@ impl KernelHost {
         Ok(report)
     }
 
-    /// One outbox delivery pass: claim every due record with a fenced claim,
-    /// hand it to the transport, then persist the reported outcome. After the
-    /// transport ran, only its explicit `RetryAt` proves no external effect —
-    /// everything else the transport cannot classify stays `DeliveryUnknown`.
-    pub(crate) async fn dispatch_outbox(
-        &self,
-        transport: &mut impl crate::kernel::OutboxTransport,
-    ) -> Result<usize> {
+    /// One outbox delivery pass over the attached transport: claim every due
+    /// record with a fenced claim, hand it to the transport, then persist the
+    /// reported outcome. After the transport ran, only its explicit `RetryAt`
+    /// proves no external effect — everything else the transport cannot
+    /// classify stays `DeliveryUnknown`. The transport lock is taken only for
+    /// the synchronous `deliver` call, never across an await.
+    pub(crate) async fn dispatch_outbox(&self) -> Result<usize> {
         let now = SystemClock.now_ms();
         let mut delivered = 0usize;
         let mut cursor = None;
@@ -1698,33 +1786,36 @@ impl KernelHost {
                         continue;
                     }
                 };
-                let event = match transport.deliver(&claimed) {
-                    crate::kernel::DeliveryOutcome::Delivered { receipt } => {
-                        delivered += 1;
-                        OutboxEvent::ConfirmDelivered {
-                            claim: claim.clone(),
-                            receipt,
-                            now_ms: now,
+                let event = {
+                    let outcome = self.transport.write().deliver(&claimed);
+                    match outcome {
+                        crate::kernel::DeliveryOutcome::Delivered { receipt } => {
+                            delivered += 1;
+                            OutboxEvent::ConfirmDelivered {
+                                claim: claim.clone(),
+                                receipt,
+                                now_ms: now,
+                            }
                         }
-                    }
-                    crate::kernel::DeliveryOutcome::RetryAt {
-                        available_at_ms,
-                        error,
-                    } => OutboxEvent::Reschedule {
-                        claim: claim.clone(),
-                        available_at_ms,
-                        error,
-                        now_ms: now,
-                    },
-                    crate::kernel::DeliveryOutcome::OutcomeUnknown { reason } => {
-                        OutboxEvent::MarkDeliveryUnknown {
+                        crate::kernel::DeliveryOutcome::RetryAt {
+                            available_at_ms,
+                            error,
+                        } => OutboxEvent::Reschedule {
                             claim: claim.clone(),
-                            reason,
+                            available_at_ms,
+                            error,
                             now_ms: now,
+                        },
+                        crate::kernel::DeliveryOutcome::OutcomeUnknown { reason } => {
+                            OutboxEvent::MarkDeliveryUnknown {
+                                claim: claim.clone(),
+                                reason,
+                                now_ms: now,
+                            }
                         }
-                    }
-                    crate::kernel::DeliveryOutcome::Quarantine { reason } => {
-                        OutboxEvent::Quarantine { reason }
+                        crate::kernel::DeliveryOutcome::Quarantine { reason } => {
+                            OutboxEvent::Quarantine { reason }
+                        }
                     }
                 };
                 self.aggregates
@@ -1746,13 +1837,13 @@ mod tests {
     use super::*;
     use crate::kernel::{ActionKind, DeliveryOutcome, OutboxRecord, OutboxState};
 
-    struct RecordingTransport {
-        delivered: usize,
+    struct CountingTransport {
+        delivered: Arc<parking_lot::Mutex<usize>>,
     }
 
-    impl crate::kernel::OutboxTransport for RecordingTransport {
+    impl crate::kernel::OutboxTransport for CountingTransport {
         fn deliver(&mut self, _record: &OutboxRecord) -> DeliveryOutcome {
-            self.delivered += 1;
+            *self.delivered.lock() += 1;
             DeliveryOutcome::Delivered {
                 receipt: "ok".into(),
             }
@@ -1793,10 +1884,13 @@ mod tests {
         // started x3 + completed x3 + propagated x3.
         assert_eq!(snapshot.outbox.len(), 9);
 
-        let mut transport = RecordingTransport { delivered: 0 };
-        let delivered = host.dispatch_outbox(&mut transport).await.unwrap();
+        let counter = Arc::new(parking_lot::Mutex::new(0));
+        host.attach_outbox_transport(Box::new(CountingTransport {
+            delivered: counter.clone(),
+        }));
+        let delivered = host.dispatch_outbox().await.unwrap();
         assert_eq!(delivered, 9);
-        assert_eq!(transport.delivered, 9);
+        assert_eq!(*counter.lock(), 9);
         let snapshot = host.snapshot("p1").await.unwrap().unwrap();
         assert!(
             snapshot
@@ -3305,10 +3399,10 @@ mod tests {
 
         // The records are deliverable: a transport sees them like any other
         // outbox record.
-        struct RecordingTransport {
-            topics: parking_lot::Mutex<Vec<String>>,
+        struct TopicTransport {
+            topics: Arc<parking_lot::Mutex<Vec<String>>>,
         }
-        impl crate::kernel::OutboxTransport for RecordingTransport {
+        impl crate::kernel::OutboxTransport for TopicTransport {
             fn deliver(&mut self, record: &OutboxRecord) -> DeliveryOutcome {
                 self.topics.lock().push(record.topic.clone());
                 DeliveryOutcome::Delivered {
@@ -3316,11 +3410,12 @@ mod tests {
                 }
             }
         }
-        let mut transport = RecordingTransport {
-            topics: parking_lot::Mutex::new(Vec::new()),
-        };
-        host.dispatch_outbox(&mut transport).await.unwrap();
-        let delivered = transport.topics.into_inner();
+        let topics = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        host.attach_outbox_transport(Box::new(TopicTransport {
+            topics: topics.clone(),
+        }));
+        host.dispatch_outbox().await.unwrap();
+        let delivered = topics.lock().clone();
         assert_eq!(
             delivered
                 .iter()
@@ -3330,11 +3425,127 @@ mod tests {
             "both uses steps announced themselves: {delivered:?}"
         );
         // A second pass delivers nothing: every record was confirmed.
-        let mut again = RecordingTransport {
-            topics: parking_lot::Mutex::new(Vec::new()),
-        };
-        let redelivered = host.dispatch_outbox(&mut again).await.unwrap();
+        let redelivered = host.dispatch_outbox().await.unwrap();
         assert_eq!(redelivered, 0, "delivered records are not redelivered");
+    }
+
+    /// Effect params resolve `$`-expressions against the acting execution's
+    /// scope variables, exactly like a legacy task's params.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn effect_params_resolve_scope_variables() {
+        let engine = crate::Engine::builder().start().await.unwrap();
+        let (host, mut wake_rx) = KernelHost::in_memory();
+        host.attach_effect_runner(Arc::new(effects::PackageEffectRunner::new(
+            engine.runtime().clone(),
+        )));
+        let package = engine.runtime().package().clone();
+        let run_as = move |id: &str| package.get(id).map(|register| (register.meta)().run_as);
+
+        let workflow = crate::model::Workflow::new()
+            .with_var("v", 5)
+            .with_step(|step| {
+                step.with_id("s1").with_uses(
+                    crate::utils::test::USES_SET,
+                    crate::Vars::new().with("n", "${{ v }}"),
+                )
+            });
+        let spec = ProcessSpec::from_workflow("p-params", &workflow, &run_as).unwrap();
+        host.start_process(&spec).await.unwrap();
+        host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+
+        let snapshot = host.snapshot("p-params").await.unwrap().unwrap();
+        let s1 = crate::kernel::ExecutionId::new("s1", 0).unwrap();
+        assert_eq!(
+            snapshot
+                .variables
+                .get(&(s1.clone(), "n".to_string()))
+                .map(String::as_str),
+            Some("5"),
+            "the params expression must resolve the workflow variable"
+        );
+        engine.close().await;
+    }
+
+    /// The whole message path: a Func step's package runs, its completion
+    /// record and the Irq step's Created record both forward through
+    /// [`message::MessageForwarder`] as engine messages.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn outbox_records_forward_as_engine_messages() {
+        let engine = crate::Engine::builder().start().await.unwrap();
+        let (host, mut wake_rx) = KernelHost::in_memory();
+        host.attach_effect_runner(Arc::new(effects::PackageEffectRunner::new(
+            engine.runtime().clone(),
+        )));
+        let collected: Arc<parking_lot::Mutex<Vec<crate::Message>>> =
+            Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let sink = collected.clone();
+        host.attach_outbox_transport(Box::new(message::MessageForwarder::new(
+            move |msg: &crate::Message| sink.lock().push(msg.clone()),
+        )));
+        let package = engine.runtime().package().clone();
+        let run_as = move |id: &str| package.get(id).map(|register| (register.meta)().run_as);
+
+        let workflow = crate::model::Workflow::new()
+            .with_id("wf-msg-e2e")
+            .with_step(|step| {
+                step.with_id("s1").with_uses(
+                    crate::utils::test::USES_SET,
+                    crate::Vars::new().with("k1", "v1").with("n", 2),
+                )
+            })
+            .with_step(|step| {
+                step.with_id("s2").with_uses(
+                    crate::utils::test::USES_IRQ,
+                    crate::Vars::new().with("key", "irq-1"),
+                )
+            });
+        let spec = ProcessSpec::from_workflow("p-msg-e2e", &workflow, &run_as).unwrap();
+        host.start_process(&spec).await.unwrap();
+        host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+        host.dispatch_outbox().await.unwrap();
+
+        let messages = collected.lock().clone();
+        let created = messages
+            .iter()
+            .find(|msg| msg.is_irq() && msg.state == crate::MessageState::Created)
+            .expect("the Irq step's Created message must be forwarded");
+        assert_eq!(created.pid, "p-msg-e2e");
+        assert_eq!(created.tid, "s2");
+        assert_eq!(created.mid, "wf-msg-e2e");
+        assert_eq!(
+            created.inputs.get::<serde_json::Value>("params").unwrap()["key"],
+            "irq-1"
+        );
+        let completed = messages
+            .iter()
+            .find(|msg| msg.state == crate::MessageState::Completed && msg.nid == "s1")
+            .expect("the Func step's Completed message must be forwarded");
+        assert_eq!(completed.outputs.get::<i32>("n"), Some(2));
+        // The event channels key on the act's params key, exactly like the
+        // legacy Created message.
+        assert!(collect_subscriber_sees(&messages, "irq-1"));
+        engine.close().await;
+    }
+
+    /// The forwarded messages are what a channel subscriber would filter on:
+    /// `is_params_key` reads the params on the act's Created message.
+    fn collect_subscriber_sees(messages: &[crate::Message], params_key: &str) -> bool {
+        messages.iter().any(|msg| {
+            msg.state == crate::MessageState::Created
+                && msg
+                    .inputs
+                    .get::<serde_json::Value>("params")
+                    .and_then(|params| {
+                        params
+                            .get("key")
+                            .and_then(|value| value.as_str())
+                            .map(String::from)
+                    })
+                    .as_deref()
+                    == Some(params_key)
+        })
     }
 
     /// The parity contract for decision walks: every node legacy decided

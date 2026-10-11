@@ -11,7 +11,7 @@ pub(crate) enum DeliveryOutcome {
     Quarantine { reason: String },
 }
 
-pub(crate) trait OutboxTransport {
+pub(crate) trait OutboxTransport: Send + Sync {
     fn deliver(&mut self, record: &OutboxRecord) -> DeliveryOutcome;
 }
 

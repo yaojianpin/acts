@@ -28,8 +28,12 @@ pub(crate) struct EffectRequest {
     pub(crate) package: String,
     /// The declaring model, for the headless scope's tree. Params resolve on
     /// the headless scope exactly like the legacy run: `task.params` reads
-    /// the model node's own declaration through the same fill path.
+    /// the model node's own declaration through the same fill path, against
+    /// the acting execution's scope variables (`vars`).
     pub(crate) model: Workflow,
+    /// The acting execution's scope chain (nearest wins), seeded into the
+    /// headless task so `$`-expressions in params resolve.
+    pub(crate) vars: Vec<(String, String)>,
 }
 
 /// Runs one package effect. Attach with
@@ -79,6 +83,17 @@ impl EffectRunner for PackageEffectRunner {
             })?
             .clone();
         let task = process.create_task(&node, None)?;
+        // Seed the acting execution's scope variables so params expressions
+        // resolve against the same variable space a legacy task would see.
+        if !request.vars.is_empty() {
+            let mut vars = Vars::new();
+            for (name, raw) in &request.vars {
+                if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
+                    vars.set(name, value.clone());
+                }
+            }
+            task.update_data(&vars);
+        }
         let ctx = process.create_context(&task);
 
         // Params resolve through the same fill path the legacy run uses.
