@@ -93,6 +93,22 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
   skipped hop 现在把 {nid,name,uses,params,mid,outputs} 写进记录 payload,非 uses
   记录 payload 为空、不成消息。`OutboxTransport` 加 Send+Sync(宿主跨任务 clone)。
   驱动翻转时接 emitter;阴影期不接(否则与 legacy 双投)。
+- executor 移植第 4 片:效果参数的 sealed/快照对齐(本片)。
+  `ProcessSpec` 携带运行属主 `ScopePolicy`(runtime::start 从 start options 取出
+  的 owner 随 spec 落成根 scope 的 `__owner`,与 legacy proc env 同键;
+  `linear()`/无 owner = deny_all,即 legacy 无 env 键时的默认)以及**启动 inputs**
+  (owner pop 后的 options 落根 scope,排在 workflow vars 之后 → 同名 input 覆盖
+  声明 var,与 legacy `load_with_vars` 的 append 同序;这是 scope 键来自
+  `proc:start` 的 `uid` 时的关键,否则聚合缺该键 → `on_missing=Skip` 不 seal);
+  `EffectRequest` 把 owner 交给 headless proc,并由 runner 走 **legacy 同一 task
+  init 路径** `ctx.prepare()`(`init_vars` + `resolve_sealed`):快照 scope 键从
+  聚合 scope 链解析、按 owner `allows` 校验后 `set_sealed`,params 再 `fill_params`
+  解析 —— `${{ $profile.x }}` 与 `${{ v }}` 与 legacy 同源(`$profile` 带 `$`,
+  与 legacy 表达式一致)。`scope_vars` 过滤 `__` 私有键(引擎事实
+  `__model`/`__auto`/`__owner` 不进表达式变量空间,legacy 任务也读不到)。host 级
+  对跑 legacy 实测(同一 engine/owner/快照,scope 键来自启动 inputs):kernel 效果
+  输出 = legacy 包收到的 params(kernel 聚合变量是值的 JSON 编码);属主缺 scope
+  授权 → 效果 `Failed`(Denied),无 token 输出泄漏。
 
 ## 已对齐(无需动)
 
@@ -105,10 +121,10 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
 
 1. **executor 移植(行投影+重启判别的真前置,拆多片)**:已落效果接缝
    (effects.rs)、act 消息记录、transport 接线与 Message 映射、效果参数对聚合
-   变量求值。后续片:sealed/快照参数对齐(headless proc 无 owner/scoped 快照)、
-   然后运行时接线(`Config.kernel_engine` 驱动档:legacy 不启动,kernel 驱动,
-   emitter/IO 包此时才接)——之后才轮到 行投影 + 重启判别:proc/task/vars 行改为
-   CommitReceipt 投影,重启判别按 `kernel/aggregates/<pid>` 存在性
+   变量求值、效果参数 sealed/快照对齐(owner + legacy `ctx.prepare()` 路径)。
+   后续片:运行时接线(`Config.kernel_engine` 驱动档:legacy 不启动,kernel
+   驱动,emitter/IO 包此时才接)——之后才轮到 行投影 + 重启判别:proc/task/vars
+   行改为 CommitReceipt 投影,重启判别按 `kernel/aggregates/<pid>` 存在性
    (`AsyncAggregateRepository::load`)优先于 proc 行。
 2. **谓词求值失败的失败路径**:legacy 分支 `if` 求值出错→任务 Error;阴影当前
    InvalidDecision 留存重试(可见但无 catch)。与 Error×catch parity 一并处理

@@ -439,8 +439,8 @@ impl Runtime {
             let dir = prepare_workdir(&root, &proc_id)?;
             proc.set_workdir(&dir);
         }
-        if let Some(owner) = owner {
-            proc.set_owner_scope(&owner);
+        if let Some(owner) = &owner {
+            proc.set_owner_scope(owner);
         }
 
         self.launch(&proc).await?;
@@ -455,6 +455,9 @@ impl Runtime {
             let run_as = move |id: &str| package.get(id).map(|register| (register.meta)().run_as);
             match crate::kernel_host::ProcessSpec::from_workflow(&proc_id, model, &run_as) {
                 Ok(spec) => {
+                    let spec = spec
+                        .with_owner(owner.clone().unwrap_or_default())
+                        .with_vars(&options);
                     if let Err(error) = host.start_process(&spec).await {
                         warn!(pid = %proc_id, error = %error, "kernel shadow start failed");
                     }

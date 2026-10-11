@@ -34,6 +34,10 @@ pub(crate) struct EffectRequest {
     /// The acting execution's scope chain (nearest wins), seeded into the
     /// headless task so `$`-expressions in params resolve.
     pub(crate) vars: Vec<(String, String)>,
+    /// The run's caller authority: the legacy process's `PROC_OWNER`. The
+    /// headless scope seals snapshot data under it (a run nobody sealed
+    /// carries `deny_all`, so it reads nothing).
+    pub(crate) owner: crate::ScopePolicy,
 }
 
 /// Runs one package effect. Attach with
@@ -72,9 +76,12 @@ impl EffectRunner for PackageEffectRunner {
 
         // The headless scope: a bare process over the declaring model with
         // one task on the acting node. Never admitted, never persisted —
-        // packages see the context shape they always saw.
+        // packages see the context shape they always saw. The run's caller
+        // authority travels with it, so the seal below reads the scopes its
+        // starter owns and no others.
         let process = Process::new(&request.process_id, &self.runtime);
         process.load(&request.model)?;
+        process.set_owner_scope(&request.owner);
         let node = process
             .tree()
             .node(&request.task_id)
@@ -95,6 +102,12 @@ impl EffectRunner for PackageEffectRunner {
             task.update_data(&vars);
         }
         let ctx = process.create_context(&task);
+        // The legacy task init path: seed the task's own vars and seal the
+        // snapshot data its target declares, under the owner's authority. A
+        // seal error — a denied scope, a missing required param under
+        // `on_missing = error` — fails the effect, exactly where the legacy
+        // run would fail the task.
+        ctx.prepare().await?;
 
         // Params resolve through the same fill path the legacy run uses.
         let params = task.params(&ctx);

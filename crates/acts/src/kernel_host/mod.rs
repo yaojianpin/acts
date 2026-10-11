@@ -100,6 +100,11 @@ fn auto_decision(snapshot: &crate::kernel::AggregateSnapshot, node: &str) -> Res
 /// The scope chain of one execution (nearest → root) merged nearest-wins
 /// into name→json-string pairs: the variable space an effect's params and a
 /// branch predicate resolve against.
+///
+/// Private (`__`-prefixed) variables are the engine's own aggregate facts —
+/// the declaring model, the auto map, the run's owner — not the variable space
+/// a legacy task ever reads, so they are left out (a `${{ __model }}` in a
+/// step's params must not resolve where the legacy run would fail it).
 pub(crate) fn scope_vars(
     snapshot: &crate::kernel::AggregateSnapshot,
     scope: &crate::kernel::ExecutionId,
@@ -119,12 +124,26 @@ pub(crate) fn scope_vars(
     let mut merged: Vec<(String, String)> = Vec::new();
     for scope in &chain {
         for ((key_scope, name), value) in &snapshot.variables {
-            if key_scope == scope && !merged.iter().any(|(existing, _)| existing == name) {
+            if key_scope == scope
+                && !crate::utils::consts::is_private_key(name)
+                && !merged.iter().any(|(existing, _)| existing == name)
+            {
                 merged.push((name.clone(), value.clone()));
             }
         }
     }
     merged
+}
+
+/// The run's caller authority, from the durable root-scope variable the
+/// import seeded — the legacy process env's `PROC_OWNER`. An aggregate that
+/// predates the seed reads nothing, exactly like a process nobody sealed
+/// ([`crate::ScopePolicy::default`] is `deny_all`).
+fn owner_of(snapshot: &crate::kernel::AggregateSnapshot) -> Result<crate::ScopePolicy> {
+    match root_variable(snapshot, crate::utils::consts::PROC_OWNER)? {
+        Some(raw) => serde_json::from_str(&raw).map_err(runtime),
+        None => Ok(crate::ScopePolicy::default()),
+    }
 }
 
 /// One branch predicate, evaluated against the aggregate's variables the way
@@ -1466,6 +1485,7 @@ impl KernelHost {
                 package,
                 model,
                 vars: scope_vars(snapshot, execution_id),
+                owner: owner_of(snapshot)?,
             },
         )))
     }
@@ -3702,6 +3722,223 @@ mod tests {
         assert_eq!(state("$"), crate::kernel::ExecutionState::Failed);
         assert_eq!(state("s0"), crate::kernel::ExecutionState::Completed);
         assert_eq!(state("s2"), crate::kernel::ExecutionState::Skipped);
+        engine.close().await;
+    }
+
+    /// `scope_vars` is the variable space an effect's params resolve against:
+    /// the chain of the acting execution, with the engine's own aggregate
+    /// facts (`__model`, `__auto`, `__owner`) left out — a legacy task never
+    /// reads them.
+    #[test]
+    fn scope_vars_carry_the_run_variables_without_the_engine_facts() {
+        let workflow = crate::model::Workflow::new()
+            .with_var("v", 5)
+            .with_step(|step| step.with_id("s1"));
+        let spec = ProcessSpec::from_workflow("p-vars", &workflow, &|_| None).unwrap();
+        let snapshot = spec.seed_snapshot().unwrap();
+        let s1 = crate::kernel::ExecutionId::new("s1", 0).unwrap();
+        let names: Vec<String> = scope_vars(&snapshot, &s1)
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        assert!(names.contains(&"v".to_string()), "{names:?}");
+        assert!(
+            !names.iter().any(|name| name.starts_with("__")),
+            "engine facts must not be variables: {names:?}"
+        );
+    }
+
+    /// Effect params seal snapshot data through the legacy task-init path: the
+    /// headless scope carries the run's owner, derives the target's scope key
+    /// from the acting execution's variables, seals under the owner's
+    /// authority, and only then fills `${{ }}`. The legacy engine, run on the
+    /// same store with the same owner and snapshot, hands its package the same
+    /// params — the parity the shadow exists to prove.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn effect_seals_snapshot_params_like_the_legacy_run() {
+        let engine = crate::Engine::builder().start().await.unwrap();
+        engine
+            .add_snapshot(
+                "profile",
+                crate::SnapshotOptions {
+                    scope: vec!["uid".to_string()],
+                    ..crate::SnapshotOptions::per_task()
+                },
+            )
+            .unwrap();
+        engine
+            .snapshot()
+            .upsert(
+                "profile",
+                "u1",
+                1,
+                crate::Vars::new().with("secrets", crate::Vars::new().with("TOKEN", "sk-1")),
+            )
+            .unwrap();
+        let owner = crate::ScopePolicy {
+            subject: "u1".to_string(),
+            scopes: std::collections::HashMap::from([(
+                "profile".to_string(),
+                vec!["$subject".to_string()],
+            )]),
+            ..crate::ScopePolicy::deny_all()
+        };
+
+        // The scope key comes from the run's start inputs, the way a real
+        // `proc:start` hands its `uid` in — not from a declared workflow var.
+        let start_vars = crate::Vars::new().with("uid", "u1");
+        let workflow = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("s1").with_uses(
+                crate::utils::test::USES_SET,
+                crate::Vars::new()
+                    .with("token", "${{ $profile.secrets.TOKEN }}")
+                    .with("uid", "${{ uid }}"),
+            )
+        });
+
+        // The kernel side: the effect runs the package inside the completion
+        // hop, and its outputs (the resolved params) land on the execution.
+        let (host, mut wake_rx) = KernelHost::in_memory();
+        host.attach_effect_runner(Arc::new(effects::PackageEffectRunner::new(
+            engine.runtime().clone(),
+        )));
+        let package = engine.runtime().package().clone();
+        let run_as = move |id: &str| package.get(id).map(|register| (register.meta)().run_as);
+        let spec = ProcessSpec::from_workflow("p-seal", &workflow, &run_as)
+            .unwrap()
+            .with_owner(owner.clone())
+            .with_vars(&start_vars);
+        host.start_process(&spec).await.unwrap();
+        let report = host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+        assert_eq!(report.retried, 0, "the seal must land: {report:?}");
+        assert!(host.process_completed("p-seal").await.unwrap());
+        let snapshot = host.snapshot("p-seal").await.unwrap().unwrap();
+        let s1 = crate::kernel::ExecutionId::new("s1", 0).unwrap();
+        let kernel = |name: &str| {
+            snapshot
+                .variables
+                .get(&(s1.clone(), name.to_string()))
+                .unwrap_or_else(|| panic!("effect output '{name}' missing"))
+                .clone()
+        };
+        let kernel_token = kernel("token");
+        let kernel_uid = kernel("uid");
+
+        // The legacy side: the same workflow, owner and snapshot on the same
+        // engine. Its step dispatches the act with the resolved params.
+        let (sig, rx) = engine.signal(()).double();
+        crate::utils::test::auto_complete(&engine, &rx);
+        let proc = engine
+            .runtime()
+            .start(
+                &workflow,
+                start_vars
+                    .clone()
+                    .with(crate::utils::consts::PROC_OWNER, owner.clone()),
+            )
+            .await
+            .unwrap();
+        sig.recv().await;
+        let legacy = proc
+            .task_by_uses(crate::utils::test::USES_SET)
+            .last()
+            .cloned()
+            .expect("the legacy act task ran");
+
+        // The aggregate stores the JSON encoding of what the legacy package
+        // was handed.
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&kernel_token).unwrap(),
+            legacy.data().get::<serde_json::Value>("token").unwrap()
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&kernel_uid).unwrap(),
+            legacy.data().get::<serde_json::Value>("uid").unwrap()
+        );
+        assert_eq!(
+            legacy.data().get::<serde_json::Value>("token").unwrap(),
+            serde_json::json!("sk-1"),
+            "the sealed snapshot value must be what the package received"
+        );
+        engine.close().await;
+    }
+
+    /// The seal is the owner's: a run whose authority does not own the scope
+    /// reads nothing and its effect fails where the legacy task would, rather
+    /// than leaking another subject's data.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn effect_denies_a_snapshot_scope_the_owner_lacks() {
+        let engine = crate::Engine::builder().start().await.unwrap();
+        engine
+            .add_snapshot(
+                "profile",
+                crate::SnapshotOptions {
+                    scope: vec!["uid".to_string()],
+                    ..crate::SnapshotOptions::per_task()
+                },
+            )
+            .unwrap();
+        engine
+            .snapshot()
+            .upsert(
+                "profile",
+                "u1",
+                1,
+                crate::Vars::new().with("secrets", crate::Vars::new().with("TOKEN", "sk-1")),
+            )
+            .unwrap();
+        // The pattern names its own subject, which is not the scope key.
+        let intruder = crate::ScopePolicy {
+            subject: "intruder".to_string(),
+            scopes: std::collections::HashMap::from([(
+                "profile".to_string(),
+                vec!["$subject".to_string()],
+            )]),
+            ..crate::ScopePolicy::deny_all()
+        };
+
+        // The scope key resolves from the run's start inputs (see the parity
+        // test), so the seal is what the authority fails on — not a missing
+        // key.
+        let workflow = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("s1").with_uses(
+                crate::utils::test::USES_SET,
+                crate::Vars::new().with("token", "${{ $profile.secrets.TOKEN }}"),
+            )
+        });
+
+        let (host, mut wake_rx) = KernelHost::in_memory();
+        host.attach_effect_runner(Arc::new(effects::PackageEffectRunner::new(
+            engine.runtime().clone(),
+        )));
+        let package = engine.runtime().package().clone();
+        let run_as = move |id: &str| package.get(id).map(|register| (register.meta)().run_as);
+        let spec = ProcessSpec::from_workflow("p-denied", &workflow, &run_as)
+            .unwrap()
+            .with_owner(intruder)
+            .with_vars(&crate::Vars::new().with("uid", "u1"));
+        host.start_process(&spec).await.unwrap();
+        host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+
+        assert!(host.process_completed("p-denied").await.unwrap());
+        let snapshot = host.snapshot("p-denied").await.unwrap().unwrap();
+        let s1 = crate::kernel::ExecutionId::new("s1", 0).unwrap();
+        assert_eq!(
+            state_of(&snapshot, "s1"),
+            crate::kernel::ExecutionState::Failed
+        );
+        let error = snapshot
+            .variables
+            .get(&(s1.clone(), "error.message".to_string()))
+            .expect("the denied seal fails the effect")
+            .clone();
+        assert!(error.contains("not owned"), "unexpected error: {error}");
+        assert!(
+            !snapshot.variables.contains_key(&(s1, "token".to_string())),
+            "a denied seal must not produce outputs"
+        );
         engine.close().await;
     }
 }

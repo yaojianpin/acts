@@ -43,7 +43,7 @@ pub(crate) const AUTO_MAP_VAR: &str = "__auto";
 /// [`KernelHost::apply_action`] applies a client action. The set is seeded
 /// into the aggregate as the per-execution `auto` variable, so recovery
 /// replays never need the declaring spec.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ProcessSpec {
     pub(crate) process_id: String,
     pub(crate) root: String,
@@ -55,6 +55,13 @@ pub(crate) struct ProcessSpec {
     /// Root carries the workflow vars, the model itself and the auto map; a
     /// step carries its declared vars.
     pub(crate) seed_variables: Vec<(Option<String>, String, String)>,
+    /// The caller authority the run carries — the legacy process env's
+    /// `PROC_OWNER` value. The effect seam's headless scope re-seals snapshot
+    /// data under it, so a run reads only the scopes its starter owns.
+    /// [`crate::ScopePolicy::default`] (deny_all) is what a run nobody
+    /// authenticated carries, exactly like the legacy process without the env
+    /// key.
+    pub(crate) owner: crate::ScopePolicy,
 }
 
 /// Whether a step self-completes once its act ran. The answer is the
@@ -136,7 +143,29 @@ impl ProcessSpec {
             explicit_next: Vec::new(),
             auto: children.iter().map(|name| name.to_string()).collect(),
             seed_variables: Vec::new(),
+            owner: crate::ScopePolicy::default(),
         }
+    }
+
+    /// Carry the run's caller authority (the legacy process env's
+    /// `PROC_OWNER`): the effect seam seals snapshot data under it, so a run
+    /// started by a restricted caller reads only that caller's scopes.
+    pub(crate) fn with_owner(mut self, owner: crate::ScopePolicy) -> Self {
+        self.owner = owner;
+        self
+    }
+
+    /// Carry the run's start inputs (what the legacy start hands
+    /// `Process::load_with_vars`): they seed the root scope *after* the
+    /// workflow's own vars, so an input of the same name wins — exactly the
+    /// order legacy appends them in. Without this a snapshot scope key that
+    /// arrives as a start input (`uid` from `proc:start`) would be absent from
+    /// the shadow and its target would never seal.
+    pub(crate) fn with_vars(mut self, vars: &crate::Vars) -> Self {
+        for (name, value) in vars {
+            self.seed_variables.push((None, name, value.to_string()));
+        }
+        self
     }
 
     /// Import a workflow. The legacy root task id (`$`) is the root and the
@@ -195,6 +224,7 @@ impl ProcessSpec {
             explicit_next: Vec::new(),
             auto,
             seed_variables,
+            owner: crate::ScopePolicy::default(),
         })
     }
 
@@ -299,6 +329,13 @@ impl ProcessSpec {
                 .variables
                 .insert((key, name.clone()), value.clone());
         }
+        // The run's caller authority, on the root scope like the legacy
+        // process env's `PROC_OWNER`: the effect seam's headless scope re-seals
+        // snapshot data under it (and a run nobody sealed carries deny_all).
+        snapshot.variables.insert(
+            (root.clone(), crate::utils::consts::PROC_OWNER.to_string()),
+            serde_json::to_string(&self.owner).map_err(runtime)?,
+        );
         // At creation the MODEL is the edge authority: every node's successor
         // becomes an execution edge, and the predecessor lists are its mirror.
         // From then on the snapshot itself is the graph of record.
@@ -404,6 +441,50 @@ mod tests {
                             .with_step(|step| step.with_id("s21"))
                     })
             })
+    }
+
+    #[test]
+    fn the_run_owner_is_a_durable_root_fact() {
+        let workflow = crate::model::Workflow::new().with_step(|step| step.with_id("step1"));
+        let owner = crate::ScopePolicy {
+            subject: "u1".to_string(),
+            scopes: std::collections::HashMap::from([(
+                "profile".to_string(),
+                vec!["$subject".to_string()],
+            )]),
+            ..crate::ScopePolicy::deny_all()
+        };
+        let spec = spec(&workflow).unwrap().with_owner(owner.clone());
+        let snapshot = spec.seed_snapshot().unwrap();
+        let root = ExecutionId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap();
+        let raw = snapshot
+            .variables
+            .get(&(root, crate::utils::consts::PROC_OWNER.to_string()))
+            .expect("the owner is seeded on the root scope");
+        assert_eq!(
+            serde_json::from_str::<crate::ScopePolicy>(raw).unwrap(),
+            owner
+        );
+    }
+
+    #[test]
+    fn start_inputs_seed_the_root_scope_after_the_workflow_vars() {
+        let workflow = crate::model::Workflow::new()
+            .with_var("uid", "declared")
+            .with_step(|step| step.with_id("step1"));
+        let spec = spec(&workflow)
+            .unwrap()
+            .with_vars(&crate::Vars::new().with("uid", "input").with("extra", 7));
+        let snapshot = spec.seed_snapshot().unwrap();
+        let root = ExecutionId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap();
+        let var = |name: &str| {
+            snapshot
+                .variables
+                .get(&(root.clone(), name.to_string()))
+                .cloned()
+        };
+        assert_eq!(var("uid").as_deref(), Some("\"input\""), "an input wins");
+        assert_eq!(var("extra").as_deref(), Some("7"));
     }
 
     #[test]
