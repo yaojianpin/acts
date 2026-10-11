@@ -1,12 +1,18 @@
 //! Container fan-out and join planning.
 //!
-//! A *container* execution holds model children: a step with `branches`, or a
-//! branch with its own `steps`. Instead of completing at its effect point, a
-//! container fans out — every child becomes an execution in one atomic plan —
-//! and parks in `Waiting` until all of its children are terminal (the join).
-//! This mirrors the legacy engine, where `check_in_children` schedules the
-//! children of a running step and `auto_complete` finishes the step once they
-//! all settled.
+//! A *container* execution holds model children: a step with `branches`, a
+//! step with `catches`, or a branch with its own `steps`. Instead of
+//! completing at its effect point, a container fans out — every child becomes
+//! an execution in one atomic plan — and parks in `Waiting` until all of its
+//! children are terminal (the join). This mirrors the legacy engine, where
+//! `check_in_children` schedules the children of a running step and
+//! `auto_complete` finishes the step once they all settled.
+//!
+//! A failed step fans its `catches` out through the same plan but parks in
+//! `Running`, and its join is the *catch* join ([`ContainerPlanner::plan_catch_join`]):
+//! the legacy `Step::on_error` keeps the failed step running while the CATCH
+//! children decide whether the error was caught, and `auto_complete` decides
+//! it from their states.
 //!
 //! The planner is pure: it receives the snapshot, the already-evaluated
 //! selection (branch predicates are the host's job, selection semantics are
@@ -24,6 +30,28 @@ use super::{
 };
 use std::collections::HashMap;
 use std::fmt;
+
+/// The private variable an execution carries while it decides a caught error
+/// (legacy `Sign::ERROR` on the failed step) and its CATCH children carry
+/// (legacy `TASK_SIGN = CATCH`). Both roles share one key and two values: the
+/// sign is durable plan state, so a replay — or the catch join — reads the
+/// decision from the aggregate instead of from the declaring spec.
+pub(crate) const SIGN_VAR: &str = "__sign";
+/// The step that failed and is deciding whether its `catches` caught it.
+pub(crate) const SIGN_ERROR: &str = "error";
+/// A child the failed step dispatched as a CATCH handler.
+pub(crate) const SIGN_CATCH: &str = "catch";
+
+/// The sign fact ([`SIGN_VAR`]) of one execution, if any.
+pub(crate) fn execution_sign<'a>(
+    snapshot: &'a AggregateSnapshot,
+    execution: &ExecutionId,
+) -> Option<&'a str> {
+    snapshot
+        .variables
+        .get(&(execution.clone(), SIGN_VAR.to_string()))
+        .map(String::as_str)
+}
 
 /// What a fan-out child is admitted as.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -72,6 +100,13 @@ pub(crate) struct ContainerFanoutCommand {
     /// none). They land on the container's own scope, exactly like the
     /// action-variable writes of a plain completion.
     pub(crate) inputs: Vec<(String, String)>,
+    /// Where the source parks while its children run. A container that fanned
+    /// out on its own completion parks in `Waiting` (the legacy step stays
+    /// `Running` and `auto_complete` finishes it once the children settled).
+    /// A step fanning out the CATCH children of its failure stays `Running`:
+    /// the legacy `Step::on_error` keeps the failed step running, and only
+    /// the catch join — not a plain container join — may decide it.
+    pub(crate) source_park: ExecutionState,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -80,18 +115,51 @@ pub(crate) struct ContainerJoinCommand {
     pub(crate) parent: ExecutionId,
 }
 
+/// The join of a step that is deciding a caught error: its CATCH children
+/// have settled, and [`ContainerPlanner::plan_catch_join`] decides the step.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct CatchJoinCommand {
+    pub(crate) process_id: String,
+    /// The failed step whose CATCH children are settling.
+    pub(crate) parent: ExecutionId,
+    /// The CATCH child whose settlement triggered this join.
+    pub(crate) source: ExecutionId,
+}
+
+/// What a settled CATCH child set decided.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum CatchJoinOutcome {
+    /// Every CATCH child skipped: no handler matched, so the error resumes
+    /// (the legacy `auto_complete` re-derives it and calls `emit_error`). The
+    /// step is decided `Failed` and propagates, which is what carries the
+    /// error walk up.
+    Resumed(StateChange, OperationIntent),
+    /// At least one CATCH child did not skip: the error was caught, and the
+    /// step completes (the legacy `set_state_if_running(Completed)`).
+    Caught(StateChange, OperationIntent),
+}
+
 pub(crate) struct ContainerPlanner;
 
 impl ContainerPlanner {
     /// Fan the container's children out in one atomic plan. The source parks
-    /// in `Waiting`; the join (see [`Self::plan_join`]) completes it once
-    /// every child is terminal. An empty container completes immediately.
+    /// in `command.source_park` (`Waiting` for a container that fanned out on
+    /// its own completion, `Running` for a failed step dispatching its CATCH
+    /// children); the join (see [`Self::plan_join`] /
+    /// [`Self::plan_catch_join`]) decides it once every child is terminal. An
+    /// empty container completes immediately.
     pub(crate) fn plan_fanout(
         snapshot: &AggregateSnapshot,
         command: &ContainerFanoutCommand,
     ) -> Result<TransitionPlan, ContainerError> {
         if snapshot.process_id != command.process_id {
             return Err(ContainerError::WrongAggregate);
+        }
+        if !matches!(
+            command.source_park,
+            ExecutionState::Running | ExecutionState::Waiting
+        ) {
+            return Err(ContainerError::InvalidSourcePark(command.source_park));
         }
         let source = snapshot
             .executions
@@ -120,15 +188,16 @@ impl ContainerPlanner {
         }
 
         let mut creates = Vec::new();
-        // The source parks in `Waiting` — unless a client completion found it
-        // already waiting, in which case the state is already the parked one.
+        // The source parks in `command.source_park` — unless a client
+        // completion found it already parked, in which case the state is
+        // already the parked one.
         let mut state_changes = Vec::new();
-        if source.state != ExecutionState::Waiting {
+        if source.state != command.source_park {
             state_changes.push(StateChange {
                 execution: command.source.clone(),
                 expected_revision: source.revision,
                 from: source.state,
-                to: ExecutionState::Waiting,
+                to: command.source_park,
             });
         }
         let mut variable_writes: Vec<VariableWrite> = command
@@ -344,6 +413,108 @@ impl ContainerPlanner {
             },
         )))
     }
+
+    /// The join of a step that is deciding a caught error: every CATCH child
+    /// has settled and the step itself decides it, exactly like the legacy
+    /// `auto_complete` pass that counted the children of a failed step.
+    ///
+    /// The legacy rule is `is_empty_catched`: the step's `Sign::ERROR` was
+    /// pinned by its failure hop, and
+    ///
+    /// - every CATCH child skipped ⇒ no handler matched, so the error is
+    ///   re-derived and `emit_error` walks it up: the step is decided
+    ///   `Failed` (`CatchJoinOutcome::Resumed`);
+    /// - any CATCH child that did not skip ⇒ a handler ran, so the step
+    ///   completes and the error is caught (`CatchJoinOutcome::Caught`).
+    ///
+    /// The join is `None` — "not yet, or not mine" — while a child is still
+    /// in flight, when the step does not carry the ERROR sign, when the
+    /// triggering execution is not a CATCH child, and when a child was
+    /// aborted (the abort walk owns that outcome, like the plain join).
+    pub(crate) fn plan_catch_join(
+        graph: &ExecutionGraph,
+        snapshot: &AggregateSnapshot,
+        command: &CatchJoinCommand,
+    ) -> Result<Option<CatchJoinOutcome>, ContainerError> {
+        if snapshot.process_id != command.process_id || graph.process_id != command.process_id {
+            return Err(ContainerError::WrongAggregate);
+        }
+        if graph.revision != snapshot.version.graph {
+            return Err(ContainerError::GraphVersionConflict {
+                graph: graph.revision,
+                snapshot: snapshot.version.graph,
+            });
+        }
+        // Only the settlement of a CATCH child triggers the catch join, and
+        // only a step whose failure hop pinned the ERROR sign decides one.
+        if execution_sign(snapshot, &command.source) != Some(SIGN_CATCH) {
+            return Ok(None);
+        }
+        if execution_sign(snapshot, &command.parent) != Some(SIGN_ERROR) {
+            return Ok(None);
+        }
+        let parent = snapshot
+            .executions
+            .get(&command.parent)
+            .ok_or_else(|| ContainerError::ExecutionNotFound(command.parent.clone()))?;
+        // The failed step stays `Running` while its CATCH children run (the
+        // legacy `Step::on_error`); a decision that landed meanwhile owns it.
+        if parent.state != ExecutionState::Running {
+            return Ok(None);
+        }
+        let children = graph.children(&command.parent);
+        if children.is_empty() {
+            return Ok(None);
+        }
+        let mut resumed = true;
+        for child in children {
+            let state = snapshot
+                .executions
+                .get(child)
+                .ok_or_else(|| ContainerError::ExecutionNotFound(child.clone()))?
+                .state;
+            if !state.is_terminal() {
+                return Ok(None);
+            }
+            if state == ExecutionState::Aborted {
+                // The abort walk owns this step's outcome (legacy
+                // `auto_complete` refuses to decide an aborted child set).
+                return Ok(None);
+            }
+            // Legacy filters the CATCH children by their sign; every child of
+            // a failed step is one. A child without the sign means the
+            // aggregate was not produced by the failure fan-out — refuse to
+            // decide rather than guess a catch outcome for it.
+            if execution_sign(snapshot, child) != Some(SIGN_CATCH) {
+                return Ok(None);
+            }
+            if state != ExecutionState::Skipped {
+                resumed = false;
+            }
+        }
+        let sequence =
+            snapshot.next_operation_sequence(&command.parent.task_id, command.parent.generation);
+        let operation = OperationIntent {
+            id: OperationId {
+                process_id: command.process_id.clone(),
+                task_id: command.parent.task_id.clone(),
+                generation: command.parent.generation,
+                sequence,
+            },
+            kind: OperationKind::PropagateTask,
+        };
+        let change = |to: ExecutionState| StateChange {
+            execution: command.parent.clone(),
+            expected_revision: parent.revision,
+            from: ExecutionState::Running,
+            to,
+        };
+        Ok(Some(if resumed {
+            CatchJoinOutcome::Resumed(change(ExecutionState::Failed), operation)
+        } else {
+            CatchJoinOutcome::Caught(change(ExecutionState::Completed), operation)
+        }))
+    }
 }
 
 /// The existing-generation observation for one task's admission slot: the
@@ -495,6 +666,7 @@ pub(crate) enum ContainerError {
         state: ExecutionState,
     },
     SourceOperationTargetsDifferentExecution,
+    InvalidSourcePark(ExecutionState),
     EmptyChildTaskId,
     ForwardSibling(usize),
     ReadmitNotCreated {
@@ -606,6 +778,7 @@ mod tests {
             source_operation: commit(source, 4),
             children,
             inputs: Vec::new(),
+            source_park: ExecutionState::Waiting,
         };
         (snapshot, command)
     }
@@ -740,6 +913,7 @@ mod tests {
                 vec![ContainerPredecessor::Source],
             )],
             inputs: Vec::new(),
+            source_park: ExecutionState::Waiting,
         };
         let plan = ContainerPlanner::plan_fanout(&snapshot, &command).unwrap();
         assert!(plan.execution_creates.is_empty(), "no duplicate generation");
@@ -783,6 +957,7 @@ mod tests {
                 vec![ContainerPredecessor::Source],
             )],
             inputs: Vec::new(),
+            source_park: ExecutionState::Waiting,
         };
         let plan = ContainerPlanner::plan_fanout(&snapshot, &command).unwrap();
         assert!(plan.execution_creates.is_empty());
@@ -813,6 +988,7 @@ mod tests {
                 vec![ContainerPredecessor::Source],
             )],
             inputs: Vec::new(),
+            source_park: ExecutionState::Waiting,
         };
         let plan = ContainerPlanner::plan_fanout(&snapshot, &command).unwrap();
         let create = &plan.execution_creates[0];
@@ -971,6 +1147,221 @@ mod tests {
             )
             .unwrap()
             .is_none()
+        );
+    }
+
+    #[test]
+    fn a_failure_fanout_keeps_the_step_running() {
+        let (snapshot, mut command) = fanout_command(
+            "step1",
+            ExecutionState::Waiting,
+            vec![child(
+                "c1",
+                ContainerChildPlan::Entry,
+                vec![ContainerPredecessor::Source],
+            )],
+        );
+        command.source_park = ExecutionState::Running;
+        let plan = ContainerPlanner::plan_fanout(&snapshot, &command).unwrap();
+        let change = plan
+            .state_changes
+            .iter()
+            .find(|change| change.execution == id("step1", 0))
+            .expect("the waiting step moves to Running");
+        assert_eq!(change.from, ExecutionState::Waiting);
+        assert_eq!(change.to, ExecutionState::Running);
+        assert!(plan.state_changes.iter().all(|change| {
+            change.to != ExecutionState::Waiting && change.to != ExecutionState::Completed
+        }));
+
+        // An already-running step keeps its state: the fan-out adds no change.
+        let (snapshot, mut command) = fanout_command(
+            "step1",
+            ExecutionState::Running,
+            vec![child(
+                "c1",
+                ContainerChildPlan::Entry,
+                vec![ContainerPredecessor::Source],
+            )],
+        );
+        command.source_park = ExecutionState::Running;
+        let plan = ContainerPlanner::plan_fanout(&snapshot, &command).unwrap();
+        assert!(
+            plan.state_changes
+                .iter()
+                .all(|change| change.execution != id("step1", 0)),
+            "a running source has no state change to park it"
+        );
+    }
+
+    fn catch_graph() -> ExecutionGraph {
+        let mut b = super::super::ExecutionGraphBuilder::new("p1", 1).unwrap();
+        for task in ["step1", "c1", "c2"] {
+            b.add_node(super::super::ExecutionNode {
+                id: id(task, 0),
+                model_node: node(task),
+                state: ExecutionState::Created,
+                revision: 0,
+            })
+            .unwrap();
+        }
+        b.set_root(id("step1", 0)).unwrap();
+        b.add_child(id("step1", 0), id("c1", 0)).unwrap();
+        b.add_child(id("step1", 0), id("c2", 0)).unwrap();
+        b.build().unwrap()
+    }
+
+    /// A failed step deciding its caught error: the step carries the ERROR
+    /// sign, its CATCH children carry theirs, and the children's states are
+    /// the argument.
+    fn catch_snapshot(c1: ExecutionState, c2: ExecutionState) -> AggregateSnapshot {
+        let mut snapshot = snapshot(vec![
+            (
+                id("step1", 0),
+                ExecutionSnapshot {
+                    model_node: node("step1"),
+                    parent: None,
+                    predecessors: vec![],
+                    state: ExecutionState::Running,
+                    revision: 3,
+                },
+            ),
+            (
+                id("c1", 0),
+                ExecutionSnapshot {
+                    model_node: node("c1"),
+                    parent: Some(id("step1", 0)),
+                    predecessors: vec![id("step1", 0)],
+                    state: c1,
+                    revision: 1,
+                },
+            ),
+            (
+                id("c2", 0),
+                ExecutionSnapshot {
+                    model_node: node("c2"),
+                    parent: Some(id("step1", 0)),
+                    predecessors: vec![id("step1", 0)],
+                    state: c2,
+                    revision: 1,
+                },
+            ),
+        ]);
+        for task in ["step1", "c1", "c2"] {
+            let sign = if task == "step1" {
+                SIGN_ERROR
+            } else {
+                SIGN_CATCH
+            };
+            snapshot
+                .variables
+                .insert((id(task, 0), SIGN_VAR.to_string()), sign.to_string());
+        }
+        snapshot
+    }
+
+    fn catch_command() -> CatchJoinCommand {
+        CatchJoinCommand {
+            process_id: "p1".into(),
+            parent: id("step1", 0),
+            source: id("c1", 0),
+        }
+    }
+
+    #[test]
+    fn catch_join_resumes_the_error_when_every_catcher_skipped() {
+        let graph = catch_graph();
+        let snapshot = catch_snapshot(ExecutionState::Skipped, ExecutionState::Skipped);
+        let outcome =
+            ContainerPlanner::plan_catch_join(&graph, &snapshot, &catch_command()).unwrap();
+        let Some(CatchJoinOutcome::Resumed(change, operation)) = outcome else {
+            panic!("every skipped catcher resumes the error");
+        };
+        assert_eq!(change.execution, id("step1", 0));
+        assert_eq!(change.from, ExecutionState::Running);
+        assert_eq!(change.to, ExecutionState::Failed);
+        assert_eq!(operation.kind, OperationKind::PropagateTask);
+        assert_eq!(operation.id.task_id, "step1");
+        assert_eq!(operation.id.sequence, 0);
+    }
+
+    #[test]
+    fn catch_join_catches_when_a_catcher_did_not_skip() {
+        let graph = catch_graph();
+        for (c1, c2) in [
+            (ExecutionState::Completed, ExecutionState::Skipped),
+            (ExecutionState::Completed, ExecutionState::Completed),
+            // The legacy `is_empty_catched` only counts skips, so a failed
+            // handler also leaves the error caught.
+            (ExecutionState::Failed, ExecutionState::Skipped),
+        ] {
+            let snapshot = catch_snapshot(c1, c2);
+            let outcome =
+                ContainerPlanner::plan_catch_join(&graph, &snapshot, &catch_command()).unwrap();
+            let Some(CatchJoinOutcome::Caught(change, operation)) = outcome else {
+                panic!("a non-skipped catcher catches the error ({c1:?}/{c2:?})");
+            };
+            assert_eq!(change.from, ExecutionState::Running);
+            assert_eq!(change.to, ExecutionState::Completed);
+            assert_eq!(operation.kind, OperationKind::PropagateTask);
+        }
+    }
+
+    #[test]
+    fn catch_join_waits_for_an_in_flight_catcher_and_yields_to_the_abort_walk() {
+        let graph = catch_graph();
+        for (c1, c2) in [
+            (ExecutionState::Running, ExecutionState::Completed),
+            (ExecutionState::Created, ExecutionState::Skipped),
+            (ExecutionState::Completed, ExecutionState::Aborted),
+        ] {
+            let snapshot = catch_snapshot(c1, c2);
+            assert!(
+                ContainerPlanner::plan_catch_join(&graph, &snapshot, &catch_command())
+                    .unwrap()
+                    .is_none(),
+                "{c1:?}/{c2:?} must not decide the step"
+            );
+        }
+    }
+
+    #[test]
+    fn catch_join_only_fires_for_a_sign_decided_step_and_its_catcher() {
+        let graph = catch_graph();
+        let settled = || catch_snapshot(ExecutionState::Skipped, ExecutionState::Skipped);
+
+        // A step that never failed (no ERROR sign) is not deciding anything.
+        let mut snapshot = settled();
+        snapshot
+            .variables
+            .remove(&(id("step1", 0), SIGN_VAR.to_string()));
+        assert!(
+            ContainerPlanner::plan_catch_join(&graph, &snapshot, &catch_command())
+                .unwrap()
+                .is_none()
+        );
+
+        // The settling execution must be a CATCH child, not any child.
+        let mut snapshot = settled();
+        snapshot
+            .variables
+            .remove(&(id("c1", 0), SIGN_VAR.to_string()));
+        assert!(
+            ContainerPlanner::plan_catch_join(&graph, &snapshot, &catch_command())
+                .unwrap()
+                .is_none()
+        );
+
+        // Every child of a failed step is a catcher; one without the sign
+        // means the aggregate was not produced by the failure fan-out.
+        let mut snapshot = settled();
+        snapshot
+            .variables
+            .remove(&(id("c2", 0), SIGN_VAR.to_string()));
+        assert!(
+            ContainerPlanner::plan_catch_join(&graph, &snapshot, &catch_command())
+                .unwrap()
+                .is_none()
         );
     }
 }

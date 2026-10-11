@@ -283,10 +283,77 @@ const OPTIONS_VAR: &str = "__options";
 /// its `init`.
 const BRANCH_ERROR_VAR: &str = "__branch_error";
 
-/// One decided execution failure: the error variables a failure hop commits.
+/// One decided execution failure: the error variables a failure hop commits,
+/// plus the legacy task-data name a catch predicate reads.
 struct Failure {
+    /// The kernel's error code (`error.code`).
     code: String,
     message: String,
+    /// The legacy `ecode` the failed act's data carried — what `$ecode()`
+    /// answers inside a catch branch, which is the only thing that selects a
+    /// handler. Equal to [`Self::code`] for a client error and for a branch
+    /// predicate failure; a package error keeps the kernel's `EPACKAGE` code
+    /// in `code` and the originating `ActError`'s own ecode here (`""` for
+    /// everything but an `Exception`).
+    ecode: String,
+}
+
+impl Failure {
+    /// A failure whose legacy `ecode` is the kernel's own code (client
+    /// actions and branch predicate failures carry the same value in both
+    /// vocabularies).
+    fn new(code: impl Into<String>, message: impl Into<String>) -> Self {
+        let code = code.into();
+        Self {
+            ecode: code.clone(),
+            code,
+            message: message.into(),
+        }
+    }
+}
+
+/// One variable value in the aggregate's representation: JSON text. A raw
+/// string would not decode into the headless scope a predicate evaluates on.
+fn json_var(value: &str) -> String {
+    serde_json::Value::String(value.to_string()).to_string()
+}
+
+/// One variable of one execution scope, raw (the aggregate's own text).
+fn execution_variable<'a>(
+    snapshot: &'a crate::kernel::AggregateSnapshot,
+    execution: &crate::kernel::ExecutionId,
+    name: &str,
+) -> Option<&'a str> {
+    snapshot
+        .variables
+        .get(&(execution.clone(), name.to_string()))
+        .map(String::as_str)
+}
+
+/// Whether this execution is a step deciding a caught error: its failure hop
+/// pinned the ERROR sign (the legacy `Step::sign() == Sign::ERROR`), which the
+/// catch join answers and no later hop may override.
+fn is_catch_decider(
+    snapshot: &crate::kernel::AggregateSnapshot,
+    execution: &crate::kernel::ExecutionId,
+) -> bool {
+    crate::kernel::execution_sign(snapshot, execution) == Some(crate::kernel::SIGN_ERROR)
+}
+
+/// The failure one package error reports: the kernel's own code and the
+/// legacy `ecode` the failed act's data carried. The legacy engine wrote
+/// `Error::from(ActError)` into the task data (`Task::set_err`), so only an
+/// `Exception` carries a code and every other package error reads empty
+/// through `$ecode()`.
+fn package_failure(error: &crate::ActError) -> Failure {
+    Failure {
+        code: "EPACKAGE".to_string(),
+        message: format!("{error}"),
+        ecode: match error {
+            crate::ActError::Exception { ecode, .. } => ecode.clone(),
+            _ => String::new(),
+        },
+    }
 }
 
 /// The branch predicate failure a fan-out pinned on `execution`, if any.
@@ -298,18 +365,18 @@ fn branch_error(
         .variables
         .get(&(execution.clone(), BRANCH_ERROR_VAR.to_string()))?;
     let value: serde_json::Value = serde_json::from_str(raw).ok()?;
-    Some(Failure {
-        code: value
+    Some(Failure::new(
+        value
             .get("code")
             .and_then(|code| code.as_str())
             .unwrap_or_default()
             .to_string(),
-        message: value
+        value
             .get("message")
             .and_then(|message| message.as_str())
             .unwrap_or_default()
             .to_string(),
-    })
+    ))
 }
 
 /// The resolved act facts of one `uses` execution.
@@ -471,15 +538,23 @@ fn evaluate_predicate(
 }
 
 /// The model children of one container node, borrowed from the declaring
-/// model. `Branches` is a branched step's selection; `Steps` a branch's own
-/// chain.
+/// model. `Branches` is a branched step's selection, `Catches` a failed
+/// step's handlers, `Steps` a branch's own chain.
 enum ContainerShape<'a> {
     Branches(&'a [crate::model::Branch]),
+    Catches(&'a [crate::model::Step]),
     Steps(&'a [crate::model::Step]),
 }
 
 fn walk_step<'a>(step: &'a crate::model::Step, target: &str) -> Option<ContainerShape<'a>> {
     if step.id == target {
+        // A step with `catches` is a container over them: the legacy
+        // `check_in_children` schedules every child the step declares (the
+        // catch steps included), so a success also runs into them — their
+        // guards decide what a handler does without an error to answer.
+        if !step.catches.is_empty() {
+            return Some(ContainerShape::Catches(&step.catches));
+        }
         return model::step_branches(step).map(ContainerShape::Branches);
     }
     for branch in model::step_branches(step).unwrap_or_default() {
@@ -490,6 +565,11 @@ fn walk_step<'a>(step: &'a crate::model::Step, target: &str) -> Option<Container
             if let Some(found) = walk_step(inner, target) {
                 return Some(found);
             }
+        }
+    }
+    for catch in &step.catches {
+        if let Some(found) = walk_step(catch, target) {
+            return Some(found);
         }
     }
     None
@@ -531,6 +611,11 @@ fn find_step<'a>(step: &'a crate::model::Step, target: &str) -> Option<&'a crate
             if let Some(found) = find_step(inner, target) {
                 return Some(found);
             }
+        }
+    }
+    for catch in &step.catches {
+        if let Some(found) = find_step(catch, target) {
+            return Some(found);
         }
     }
     None
@@ -1059,6 +1144,29 @@ impl KernelHost {
         // Preflight against the current snapshot: a caller-correctable
         // rejection (terminal task, unknown execution) consumes nothing.
         crate::kernel::ActionPlanner::plan(&snapshot, &command).map_err(runtime)?;
+        // A step declaring `catches` is not a client target once it is
+        // deciding — or has dispatched — its caught error: the legacy act it
+        // folds is already terminal, and the legacy `do_action` refuses every
+        // action on it. The refusal is part of the preflight, so it consumes
+        // no operation.
+        if let Some(model) = model_of(&snapshot)?
+            && let Some(node) = snapshot
+                .executions
+                .get(&execution_id)
+                .map(|execution| execution.model_node.as_str())
+            && let Some(step) = find_step_in_model(&model, node)
+            && !step.catches.is_empty()
+            && (is_catch_decider(&snapshot, &execution_id)
+                || snapshot
+                    .executions
+                    .values()
+                    .any(|child| child.parent.as_ref() == Some(&execution_id)))
+        {
+            return Err(ActError::Action(format!(
+                "step '{}' is deciding (or already dispatched) its catches; the act it folds is decided",
+                execution_id.task_id
+            )));
+        }
 
         // Durable intent.
         let intent = TransitionPlan {
@@ -1662,24 +1770,82 @@ impl KernelHost {
                     _ => None,
                 };
                 // The container join: a parent parked by a fan-out completes
-                // in the same atomic commit that settles its last child. A
-                // decision walk already decides that parent itself (legacy
-                // calls `parent.set_err` before the auto-complete pass sees
-                // the children settled), so the join yields to it — the same
-                // change twice is not a plan.
+                // in the same atomic commit that settles its last child; a
+                // failed step's CATCH child runs the catch join instead, which
+                // either catches the error or resumes it. A decision walk
+                // already decides the parent itself (legacy calls
+                // `parent.set_err` before the auto-complete pass sees the
+                // children settled), so both yield to it — the same change
+                // twice is not a plan.
                 if upward_to.is_none()
                     && let Some(parent) = execution.as_ref().and_then(|e| e.parent.clone())
                 {
-                    let join = crate::kernel::ContainerJoinCommand {
-                        process_id: id.process_id.clone(),
-                        parent,
-                    };
-                    if let Some((change, operation)) =
-                        crate::kernel::ContainerPlanner::plan_join(&graph, &snapshot, &join)
-                            .map_err(runtime)?
-                    {
-                        plan.state_changes.push(change);
-                        plan.operations.push(operation);
+                    let catch_join = crate::kernel::ContainerPlanner::plan_catch_join(
+                        &graph,
+                        &snapshot,
+                        &crate::kernel::CatchJoinCommand {
+                            process_id: id.process_id.clone(),
+                            parent: parent.clone(),
+                            source: execution_id.clone(),
+                        },
+                    )
+                    .map_err(runtime)?;
+                    match catch_join {
+                        Some(crate::kernel::CatchJoinOutcome::Resumed(change, operation)) => {
+                            // The record is keyed by the operation that decides
+                            // the step — the durable-fact identity the commit
+                            // requires (`failed:` keys never repeat).
+                            let record_key = format!(
+                                "failed:{}:{}:{}:{}",
+                                snapshot.process_id,
+                                parent.task_id,
+                                parent.generation,
+                                operation.id.sequence
+                            );
+                            plan.state_changes.push(change);
+                            plan.operations.push(operation);
+                            // The step's own failure message: the legacy walk
+                            // re-derived the error and emitted the step's task
+                            // event (`emit_error`), which is what tells the
+                            // client the handlers caught nothing.
+                            let code = execution_variable(&snapshot, &parent, "error.code")
+                                .map(json_text)
+                                .unwrap_or_default();
+                            let text = execution_variable(&snapshot, &parent, "error.message")
+                                .map(json_text)
+                                .unwrap_or_default();
+                            if let Some(payload) = self.act_message_payload(
+                                &snapshot,
+                                &parent,
+                                &parent.task_id,
+                                act_facts(&snapshot, &parent).as_ref(),
+                                None,
+                                Some((&code, &text)),
+                            )? {
+                                plan.outbox.push(crate::kernel::OutboxIntent {
+                                    key: record_key,
+                                    topic: "task.failed".into(),
+                                    payload: payload.to_string(),
+                                });
+                            }
+                        }
+                        Some(crate::kernel::CatchJoinOutcome::Caught(change, operation)) => {
+                            plan.state_changes.push(change);
+                            plan.operations.push(operation);
+                        }
+                        None => {
+                            let join = crate::kernel::ContainerJoinCommand {
+                                process_id: id.process_id.clone(),
+                                parent,
+                            };
+                            if let Some((change, operation)) =
+                                crate::kernel::ContainerPlanner::plan_join(&graph, &snapshot, &join)
+                                    .map_err(runtime)?
+                            {
+                                plan.state_changes.push(change);
+                                plan.operations.push(operation);
+                            }
+                        }
                     }
                 }
                 if let Some(to) = upward_to {
@@ -1804,7 +1970,9 @@ impl KernelHost {
         if let Some(execution) = execution
             && let Some(failure) = branch_error(snapshot, execution_id)
         {
-            return self.failure_plan(snapshot, id, execution_id, execution, claim, &failure);
+            return self
+                .failure_plan(snapshot, id, execution_id, execution, claim, &failure)
+                .await;
         }
         // The act's package facts and its own gate: every `uses` step resolves
         // its package at start, and the pinned facts ride every later message
@@ -1988,19 +2156,23 @@ impl KernelHost {
         action: Option<crate::kernel::ActionKind>,
         inputs: Vec<(String, String)>,
     ) -> Result<TransitionPlan> {
-        if matches!(action, None | Some(crate::kernel::ActionKind::Complete))
-            && let Some(command) = self
-                .fanout_command(
-                    snapshot,
-                    execution_id,
-                    claim,
-                    &execution.model_node,
-                    &inputs,
-                )
-                .await?
-        {
-            return crate::kernel::ContainerPlanner::plan_fanout(snapshot, &command)
-                .map_err(runtime);
+        // The step is already deciding a caught error (the sign its failure
+        // hop pinned): no later hop may complete, fail or fan it out — the
+        // catch join decides it. The client path refuses such an action at the
+        // preflight; what reaches here is the stale auto hop a failure raced,
+        // which keeps the operation's own commit as its bare remainder (the
+        // same treatment the `ApplyAction` arm gives a decision that landed
+        // mid-hop).
+        if is_catch_decider(snapshot, execution_id) {
+            return self.task_hop_plan(
+                snapshot,
+                id,
+                execution_id,
+                Some(execution),
+                claim,
+                "completed",
+                "task.completed",
+            );
         }
         match action {
             None => {
@@ -2010,6 +2182,68 @@ impl KernelHost {
                     generation: id.generation,
                     sequence: id.sequence + 1,
                 };
+                // The act's own effect runs *before* its children are
+                // dispatched: the legacy act completes (or fails) first, and
+                // a `catches` handler answers the act's failure — never a
+                // failure of the children it already dispatched.
+                let facts = act_facts(snapshot, execution_id);
+                let mut effect: Option<effects::EffectOutcome> = None;
+                if let Some((runner, request)) =
+                    self.step_effect(snapshot, execution_id, &execution.model_node)?
+                {
+                    match runner.run(request).await {
+                        Ok(outcome) => effect = Some(outcome),
+                        Err(error) => {
+                            // A package error takes the failure path, where a
+                            // step declaring `catches` keeps running and
+                            // dispatches them (the legacy `Step::on_error`).
+                            if let Some(plan) = self
+                                .catch_fanout(
+                                    snapshot,
+                                    claim,
+                                    execution_id,
+                                    execution,
+                                    &package_failure(&error),
+                                    &inputs,
+                                )
+                                .await?
+                            {
+                                return Ok(plan);
+                            }
+                            return self
+                                .package_failure_plan(
+                                    snapshot,
+                                    id,
+                                    execution_id,
+                                    execution,
+                                    claim,
+                                    &error,
+                                )
+                                .await;
+                        }
+                    }
+                }
+                // A container dispatches its children instead of completing —
+                // with the act's own outcome folded into the same atomic
+                // commit. A leaf completes and propagates.
+                if let Some(command) = self
+                    .fanout_command(
+                        snapshot,
+                        execution_id,
+                        claim,
+                        &execution.model_node,
+                        &inputs,
+                    )
+                    .await?
+                {
+                    let mut plan = crate::kernel::ContainerPlanner::plan_fanout(snapshot, &command)
+                        .map_err(runtime)?;
+                    if let Some(outcome) = &effect {
+                        self.fold_effect_outcome(snapshot, execution_id, outcome, &mut plan);
+                        plan.validate().map_err(runtime)?;
+                    }
+                    return Ok(plan);
+                }
                 let mut plan = self.task_hop_plan(
                     snapshot,
                     id,
@@ -2019,28 +2253,8 @@ impl KernelHost {
                     "completed",
                     "task.completed",
                 )?;
-                // The effect seam: only an auto (Func/Msg) execution runs its
-                // package here; an Irq execution waits for its client action.
-                // The act facts the start hop pinned ride the message record.
-                let facts = act_facts(snapshot, execution_id);
-                if let Some((runner, request)) =
-                    self.step_effect(snapshot, execution_id, &execution.model_node)?
-                {
-                    match runner.run(request).await {
-                        Ok(outcome) => {
-                            self.fold_effect_outcome(snapshot, execution_id, &outcome, &mut plan)
-                        }
-                        Err(error) => {
-                            return self.package_failure_plan(
-                                snapshot,
-                                id,
-                                execution_id,
-                                execution,
-                                claim,
-                                &error,
-                            );
-                        }
-                    }
+                if let Some(outcome) = &effect {
+                    self.fold_effect_outcome(snapshot, execution_id, outcome, &mut plan);
                 }
                 // The act's Completed message rides the completion record.
                 if let Some(payload) = self.act_message_payload(
@@ -2068,6 +2282,41 @@ impl KernelHost {
                 Ok(plan)
             }
             Some(kind) => {
+                // A client completion of a container dispatches its children
+                // instead of completing it (the legacy `Next` on a running
+                // step) — the step declaring `catches` included: the completion
+                // is its *act* completing, which then runs into its handlers.
+                if matches!(kind, crate::kernel::ActionKind::Complete)
+                    && let Some(command) = self
+                        .fanout_command(
+                            snapshot,
+                            execution_id,
+                            claim,
+                            &execution.model_node,
+                            &inputs,
+                        )
+                        .await?
+                {
+                    return crate::kernel::ContainerPlanner::plan_fanout(snapshot, &command)
+                        .map_err(runtime);
+                }
+                // A client's error on a step declaring `catches` is the legacy
+                // `Step::on_error`: the step stays running and dispatches its
+                // handlers instead of being decided `Failed` here.
+                if let crate::kernel::ActionKind::Fail { code, message } = &kind
+                    && let Some(plan) = self
+                        .catch_fanout(
+                            snapshot,
+                            claim,
+                            execution_id,
+                            execution,
+                            &Failure::new(code.clone(), message.clone()),
+                            &inputs,
+                        )
+                        .await?
+                {
+                    return Ok(plan);
+                }
                 let command = crate::kernel::ApplyActionCommand {
                     process_id: id.process_id.clone(),
                     execution: execution_id.clone(),
@@ -2311,8 +2560,11 @@ impl KernelHost {
     /// the error variables, its message on its own record, and the propagation
     /// that carries the error walk upward (the legacy `emit_error` path). An
     /// execution that already left the running states keeps its state — the
-    /// bare hop remainder completes the operation.
-    fn failure_plan(
+    /// bare hop remainder completes the operation. A step declaring `catches`
+    /// never reaches the `Failed` decision: [`Self::catch_fanout`] keeps it
+    /// running and dispatches its handlers instead.
+    #[allow(clippy::too_many_arguments)]
+    async fn failure_plan(
         &self,
         snapshot: &crate::kernel::AggregateSnapshot,
         id: &OperationId,
@@ -2321,6 +2573,12 @@ impl KernelHost {
         claim: &OperationCommit,
         failure: &Failure,
     ) -> Result<TransitionPlan> {
+        if let Some(plan) = self
+            .catch_fanout(snapshot, claim, execution_id, execution, failure, &[])
+            .await?
+        {
+            return Ok(plan);
+        }
         let propagate_id = OperationId {
             process_id: id.process_id.clone(),
             task_id: id.task_id.clone(),
@@ -2376,14 +2634,14 @@ impl KernelHost {
 
     /// The plan of a package/params failure: the error the effect seam
     /// reports, under the kernel's package error code.
-    fn package_failure_plan(
+    async fn package_failure_plan(
         &self,
         snapshot: &crate::kernel::AggregateSnapshot,
         id: &OperationId,
         execution_id: &crate::kernel::ExecutionId,
         execution: &crate::kernel::ExecutionSnapshot,
         claim: &OperationCommit,
-        error: &ActError,
+        error: &crate::ActError,
     ) -> Result<TransitionPlan> {
         self.failure_plan(
             snapshot,
@@ -2391,11 +2649,183 @@ impl KernelHost {
             execution_id,
             execution,
             claim,
-            &Failure {
-                code: "EPACKAGE".to_string(),
-                message: format!("{error}"),
-            },
+            &package_failure(error),
         )
+        .await
+    }
+
+    /// The plan of a caught failure: the legacy `Step::on_error`, which keeps
+    /// a failed step `Running`, pins the error variables its CATCH predicates
+    /// read (`$ecode()` answers the legacy `ecode`; the ERROR sign marks the
+    /// step as deciding), and dispatches every `catches` child as a container
+    /// child. The step's own join ([`crate::kernel::ContainerPlanner::plan_catch_join`])
+    /// decides it once they settled: every handler skipped resumes the error,
+    /// anything else catches it.
+    ///
+    /// `None` when the decision is not a catchable one — the model node
+    /// declares no `catches`, the execution is not running, or the step is
+    /// already deciding a caught error (the legacy guard on
+    /// `task.sign().is_none()`: a second failure skips the dispatch and walks
+    /// the error up instead).
+    #[allow(clippy::too_many_arguments)]
+    async fn catch_fanout(
+        &self,
+        snapshot: &crate::kernel::AggregateSnapshot,
+        claim: &OperationCommit,
+        execution_id: &crate::kernel::ExecutionId,
+        execution: &crate::kernel::ExecutionSnapshot,
+        failure: &Failure,
+        inputs: &[(String, String)],
+    ) -> Result<Option<TransitionPlan>> {
+        if !matches!(
+            execution.state,
+            crate::kernel::ExecutionState::Running | crate::kernel::ExecutionState::Waiting
+        ) {
+            return Ok(None);
+        }
+        let Some(model) = model_of(snapshot)? else {
+            return Ok(None);
+        };
+        let Some(step) = find_step_in_model(&model, execution.model_node.as_str()) else {
+            return Ok(None);
+        };
+        if step.catches.is_empty() || is_catch_decider(snapshot, execution_id) {
+            return Ok(None);
+        }
+        // The error facts of the failed act, as the legacy task data carried
+        // them: the handler's scope inherits them, so its guard and its params
+        // select on `$ecode()` / `message` exactly like the legacy run. The
+        // aggregate's variable representation is JSON text (a raw string would
+        // not decode into the headless scope a predicate evaluates on), and
+        // the failure — never the caller's copy — is what the act's data held.
+        let mut overlay: Vec<(String, String)> = inputs
+            .iter()
+            .filter(|(name, _)| {
+                !matches!(
+                    name.as_str(),
+                    "ecode" | "message" | "error.code" | "error.message"
+                )
+            })
+            .cloned()
+            .collect();
+        overlay.push(("ecode".to_string(), json_var(&failure.ecode)));
+        overlay.push(("message".to_string(), json_var(&failure.message)));
+        let mut children = Vec::with_capacity(step.catches.len());
+        for catch in &step.catches {
+            let mut vars: Vec<(String, String)> = catch
+                .vars
+                .iter()
+                .map(|var| (var.name.clone(), var.value.to_string()))
+                .collect();
+            // The legacy `TASK_SIGN = CATCH` the dispatch seeds into the
+            // handler task: the catch join reads it back from the aggregate.
+            vars.push((
+                crate::kernel::SIGN_VAR.to_string(),
+                crate::kernel::SIGN_CATCH.to_string(),
+            ));
+            let mut plan = crate::kernel::ContainerChildPlan::Entry;
+            if let Some(expr) = &catch.r#if {
+                // The handler's own selection (the legacy `Step::init`
+                // guard), evaluated with the error the step is deciding.
+                match self
+                    .evaluate_branch_predicate(snapshot, execution_id, expr, &overlay)
+                    .await?
+                {
+                    PredicateValue::True => {}
+                    PredicateValue::False => plan = crate::kernel::ContainerChildPlan::Skip,
+                    PredicateValue::Null => vars.push((
+                        BRANCH_ERROR_VAR.to_string(),
+                        serde_json::json!({
+                            "code": "",
+                            "message": format!("catch step '{}' guard evaluated to null", catch.id)
+                        })
+                        .to_string(),
+                    )),
+                    PredicateValue::Invalid { message } => vars.push((
+                        BRANCH_ERROR_VAR.to_string(),
+                        serde_json::json!({ "code": "", "message": message }).to_string(),
+                    )),
+                }
+            }
+            children.push(crate::kernel::ContainerChild {
+                task_id: catch.id.clone(),
+                model_node: node_id(&catch.id)?,
+                plan,
+                predecessors: vec![crate::kernel::ContainerPredecessor::Source],
+                vars,
+                auto: auto_decision(snapshot, &catch.id)?,
+            });
+        }
+        // The step keeps running while its handlers work; the client's own
+        // inputs land on its scope like any completion's — minus the error
+        // names written explicitly below.
+        let reserved = ["ecode", "message", "error.code", "error.message"];
+        let inputs: Vec<(String, String)> = inputs
+            .iter()
+            .filter(|(name, _)| !reserved.contains(&name.as_str()))
+            .cloned()
+            .collect();
+        let command = crate::kernel::ContainerFanoutCommand {
+            process_id: snapshot.process_id.clone(),
+            source: execution_id.clone(),
+            source_operation: claim.clone(),
+            children,
+            inputs,
+            source_park: crate::kernel::ExecutionState::Running,
+        };
+        let mut plan =
+            crate::kernel::ContainerPlanner::plan_fanout(snapshot, &command).map_err(runtime)?;
+        // The error facts of the failed act: the legacy task-data names a
+        // catch predicate selects with (`$ecode()` / `message`) and the
+        // kernel's own error variables, which the resumed error keeps
+        // carrying up. Values are JSON text, the aggregate's representation.
+        for (name, value) in [
+            ("ecode".to_string(), json_var(&failure.ecode)),
+            ("message".to_string(), json_var(&failure.message)),
+            ("error.code".to_string(), json_var(&failure.code)),
+            ("error.message".to_string(), json_var(&failure.message)),
+            (
+                crate::kernel::SIGN_VAR.to_string(),
+                // The sign is an engine fact (`__`-private, never part of a
+                // predicate's scope), so it is stored raw — the same form the
+                // fan-out writes on the handler children, which the catch join
+                // compares it against.
+                crate::kernel::SIGN_ERROR.to_string(),
+            ),
+        ] {
+            plan.variable_writes.push(VariableWrite {
+                scope: execution_id.clone(),
+                name,
+                value,
+            });
+        }
+        plan.validate().map_err(runtime)?;
+        // The failed act's own message: the legacy act emitted `Error` before
+        // the step recovered, so the client sees the failure the handler is
+        // answering. Sequence-qualified, so the step's own later decision (a
+        // resumed error) carries a record of its own.
+        if let Some(payload) = self.act_message_payload(
+            snapshot,
+            execution_id,
+            &execution_id.task_id,
+            act_facts(snapshot, execution_id).as_ref(),
+            None,
+            Some((&failure.code, &failure.message)),
+        )? {
+            plan.outbox.push(crate::kernel::OutboxIntent {
+                key: format!(
+                    "failed:{}:{}:{}:{}",
+                    snapshot.process_id,
+                    execution_id.task_id,
+                    execution_id.generation,
+                    claim.id.sequence
+                ),
+                topic: "task.failed".into(),
+                payload: payload.to_string(),
+            });
+            plan.validate().map_err(runtime)?;
+        }
+        Ok(Some(plan))
     }
 
     /// Announce a `uses` execution's decided state on the planner's own outbox
@@ -2634,6 +3064,61 @@ impl KernelHost {
                     })
                 })
                 .collect::<Result<Vec<_>>>()?,
+            // The step's catch handlers, dispatched because the step ran into
+            // its children — not because it failed: their own guards decide
+            // what they do without an error to answer (`$ecode()` is null).
+            // The failure path fans the same children out with the CATCH sign
+            // (see `KernelHost::catch_fanout`).
+            ContainerShape::Catches(catches) => {
+                let mut children = Vec::with_capacity(catches.len());
+                for catch in catches {
+                    let mut vars: Vec<(String, String)> = catch
+                        .vars
+                        .iter()
+                        .map(|var| (var.name.clone(), var.value.to_string()))
+                        .collect();
+                    let mut plan = crate::kernel::ContainerChildPlan::Entry;
+                    if let Some(expr) = &catch.r#if {
+                        // The handler's own selection: the legacy `Step::init`
+                        // evaluates it on the dispatched task and skips the
+                        // handler when it does not hold.
+                        match self
+                            .evaluate_branch_predicate(snapshot, execution_id, expr, inputs)
+                            .await?
+                        {
+                            PredicateValue::True => {}
+                            PredicateValue::False => plan = crate::kernel::ContainerChildPlan::Skip,
+                            // A handler whose guard cannot be evaluated fails
+                            // in its `init` (the legacy `ctx.eval` error): it
+                            // is admitted and fails on its first hop.
+                            PredicateValue::Null => vars.push((
+                                BRANCH_ERROR_VAR.to_string(),
+                                serde_json::json!({
+                                    "code": "",
+                                    "message": format!(
+                                        "catch step '{}' guard evaluated to null",
+                                        catch.id
+                                    )
+                                })
+                                .to_string(),
+                            )),
+                            PredicateValue::Invalid { message } => vars.push((
+                                BRANCH_ERROR_VAR.to_string(),
+                                serde_json::json!({ "code": "", "message": message }).to_string(),
+                            )),
+                        }
+                    }
+                    children.push(crate::kernel::ContainerChild {
+                        task_id: catch.id.clone(),
+                        model_node: node_id(&catch.id)?,
+                        plan,
+                        predecessors: vec![crate::kernel::ContainerPredecessor::Source],
+                        vars,
+                        auto: auto_decision(snapshot, &catch.id)?,
+                    });
+                }
+                children
+            }
         };
         Ok(Some(ContainerFanoutCommand {
             process_id: snapshot.process_id.clone(),
@@ -2641,6 +3126,10 @@ impl KernelHost {
             source_operation: claim.clone(),
             children,
             inputs: inputs.to_vec(),
+            // A container that fanned out on its own completion parks: the
+            // legacy step stays running until its children settled and the
+            // join finishes it.
+            source_park: crate::kernel::ExecutionState::Waiting,
         }))
     }
 
@@ -4161,7 +4650,7 @@ mod tests {
             let done = done.clone();
             async move { done.close() }
         });
-        engine
+        let legacy_proc = engine
             .runtime()
             .start(
                 &workflow(),
@@ -4172,8 +4661,7 @@ mod tests {
         tokio::time::timeout(std::time::Duration::from_secs(30), settled.recv())
             .await
             .expect("the legacy run never settled");
-        engine.runtime().cache().flush().await.unwrap();
-        let legacy = folded_legacy_states(&engine, pid).await;
+        let legacy = folded_legacy_states(&legacy_proc);
         engine.close().await;
 
         // Kernel driver: the same predicate on a headless task of the engine.
@@ -4265,7 +4753,7 @@ mod tests {
             let done = done.clone();
             async move { done.close() }
         });
-        engine
+        let legacy_proc = engine
             .runtime()
             .start(
                 &workflow(),
@@ -4286,8 +4774,7 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        engine.runtime().cache().flush().await.unwrap();
-        let legacy = folded_legacy_states(&engine, pid).await;
+        let legacy = folded_legacy_states(&legacy_proc);
         engine.close().await;
 
         // Kernel driver: the same fold must come out of the aggregate.
@@ -4340,6 +4827,442 @@ mod tests {
                 .contains_key(&(b1, "error.message".to_string()))
         );
         engine.close().await;
+    }
+
+    /// Drive one engine through a `catches` workflow: complete the `init` act,
+    /// then either error the `act1` act with `ecode` or complete it (which is
+    /// what dispatches the step's `catches` without an error to answer). The
+    /// engine is handed back alive (the caller waits for the nodes it
+    /// compares) together with the process the run returned.
+    ///
+    /// The legacy engine is measurably *wedged* by a caught act error: the
+    /// failed act never runs its own `next`, so its propagation phase stays
+    /// unapplied and the step's `check_uses_action` gate stops the step's
+    /// `next` before it can ever reach `auto_complete`. The handler subtree
+    /// still runs (that dispatch is `Step::on_error`'s), which is what the
+    /// error tests compare against — the step's own outcome is not, and the
+    /// kernel implements the `auto_complete` semantics the legacy code
+    /// documents but cannot reach. A successful completion has no such
+    /// defect, so that path is compared end to end.
+    async fn run_catch_engine(
+        kernel_engine: bool,
+        pid: &str,
+        ecode: Option<&str>,
+        workflow: &crate::model::Workflow,
+    ) -> (crate::Engine, Arc<crate::scheduler::Process>) {
+        let mut config = crate::Config::default();
+        config.data.kernel_engine = kernel_engine;
+        config.data.tick_interval_secs = Some(1);
+        let engine = crate::Engine::builder()
+            .set_config(&config)
+            .start()
+            .await
+            .unwrap();
+        let runtime = engine.runtime().clone();
+        // Subscribe before the start: the act's Created message fires the
+        // moment the act runs, and a late subscriber misses it.
+        let wait_for_created = |key: &'static str| {
+            let sig = engine.signal((String::new(), String::new()));
+            let (done, done_rx) = (sig.clone(), sig.clone());
+            engine.channel().on_message(move |e| {
+                let done = done_rx.clone();
+                let key = key.to_string();
+                async move {
+                    if e.is_params_key(&key) && e.is_state(crate::MessageState::Created) {
+                        done.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+                        done.close();
+                    }
+                }
+            });
+            done
+        };
+        let init_created = wait_for_created("init");
+        let act1_created = wait_for_created("act1");
+        let ran = runtime
+            .start(
+                workflow,
+                crate::Vars::new().with(crate::utils::consts::PROCESS_ID, pid),
+            )
+            .await
+            .unwrap();
+        let (pid_now, tid) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), init_created.recv())
+                .await
+                .expect("the init act never appeared")
+                .clone();
+        runtime
+            .do_action(&crate::event::Action::new(
+                &pid_now,
+                &tid,
+                crate::event::EventAction::Next,
+                crate::Vars::new(),
+            ))
+            .await
+            .expect("the init act must complete");
+        let (pid_now, tid) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), act1_created.recv())
+                .await
+                .expect("the act1 act never appeared")
+                .clone();
+        match ecode {
+            Some(ecode) => runtime
+                .do_action(&crate::event::Action::new(
+                    &pid_now,
+                    &tid,
+                    crate::event::EventAction::Error,
+                    crate::Vars::new()
+                        .with(crate::utils::consts::ACT_ERR_CODE, ecode)
+                        .with(crate::utils::consts::ACT_ERR_MESSAGE, "boom"),
+                ))
+                .await
+                .expect("the act1 act must error"),
+            None => runtime
+                .do_action(&crate::event::Action::new(
+                    &pid_now,
+                    &tid,
+                    crate::event::EventAction::Next,
+                    crate::Vars::new(),
+                ))
+                .await
+                .expect("the act1 act must complete"),
+        };
+        (engine, ran)
+    }
+
+    /// Wait until every named legacy node has a decided own task (an act's
+    /// task lives on its own node id, so this reads the node's own state).
+    async fn wait_legacy_nodes(proc: &Arc<crate::scheduler::Process>, nodes: &[&str]) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let decided = nodes.iter().all(|node| {
+                let states = legacy_node_states(proc, node);
+                !states.is_empty()
+                    && states
+                        .iter()
+                        .all(|state| state != "running" && state != "ready" && state != "pending")
+            });
+            if decided {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "legacy nodes {nodes:?} never decided: {:?}",
+                proc.tasks()
+                    .iter()
+                    .map(|task| format!("{}:{}", task.node().id(), task.state()))
+                    .collect::<Vec<_>>()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    /// The states of one legacy node's own task instances, sorted.
+    fn legacy_node_states(proc: &Arc<crate::scheduler::Process>, node: &str) -> Vec<String> {
+        let mut states: Vec<String> = proc
+            .tasks()
+            .iter()
+            .filter(|task| task.node().id() == node)
+            .map(|task| task.state().to_string())
+            .collect();
+        states.sort();
+        states
+    }
+
+    /// Wait until the kernel aggregate settled (its own completeness
+    /// predicate, read from one snapshot so the returned state is the one the
+    /// predicate saw), reporting the states when it never does.
+    async fn wait_kernel_settled(host: &Arc<KernelHost>, pid: &str) -> Snapshot {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let snapshot = host.snapshot(pid).await.unwrap().expect("aggregate exists");
+            if snapshot
+                .executions
+                .values()
+                .all(|execution| execution.state.is_terminal())
+            {
+                return snapshot;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the kernel run never settled: {:?}",
+                snapshot
+                    .executions
+                    .iter()
+                    .map(|(id, execution)| format!("{}:{:?}", id.task_id, execution.state))
+                    .collect::<Vec<_>>()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    }
+
+    /// The `$ecode()`-selected handler answers the error: the handler's branch
+    /// runs a msg step. Both engines must route the same way — the legacy one
+    /// runs the handler subtree and then wedges at the failed step, which the
+    /// kernel completes with the caught error.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn kernel_catch_matches_legacy_when_the_error_is_caught() {
+        const PID: &str = "p_catch_caught";
+        let workflow = || {
+            crate::model::Workflow::new()
+                .with_id("wf-catch-caught")
+                .with_step(|step| {
+                    step.with_id("s0").with_uses(
+                        crate::utils::test::USES_IRQ,
+                        crate::Vars::new().with("key", "init"),
+                    )
+                })
+                .with_step(|step| {
+                    step.with_id("s1")
+                        .with_uses(
+                            crate::utils::test::USES_IRQ,
+                            crate::Vars::new().with("key", "act1"),
+                        )
+                        .with_catch(|catch| {
+                            catch.with_id("c1").with_branch(|branch| {
+                                branch
+                                    .with_id("b1")
+                                    .with_if("$ecode() == 'err1'")
+                                    .with_step(|step| {
+                                        step.with_id("h1").with_uses(
+                                            crate::utils::test::USES_MSG,
+                                            crate::Vars::new().with("key", "caught"),
+                                        )
+                                    })
+                            })
+                        })
+                })
+        };
+        let (legacy_engine, legacy) = run_catch_engine(false, PID, Some("err1"), &workflow()).await;
+        wait_legacy_nodes(&legacy, &["c1", "b1", "h1"]).await;
+        // The handler subtree ran the selected branch's msg step; the
+        // unselected branch does not exist in this workflow.
+        assert_eq!(legacy_node_states(&legacy, "c1"), vec!["completed"]);
+        assert_eq!(legacy_node_states(&legacy, "b1"), vec!["completed"]);
+        assert_eq!(legacy_node_states(&legacy, "h1"), vec!["completed"]);
+        // The catch child carries the legacy `TASK_SIGN = CATCH` the kernel's
+        // CATCH mark mirrors.
+        assert!(
+            legacy
+                .task_by_nid("c1")
+                .iter()
+                .any(|task| task.is_sign(crate::scheduler::Sign::CATCH)),
+            "the dispatch pins TASK_SIGN = CATCH on the handler"
+        );
+        // The measured legacy wedge: the failed act never applied its
+        // propagation, so the step's `check_uses_action` gate stops it before
+        // `auto_complete` — the step and the run stay running.
+        assert_eq!(legacy_node_states(&legacy, "s1"), vec!["running"]);
+        assert_eq!(legacy.state().to_string(), "running");
+
+        let (kernel_engine, _ran) = run_catch_engine(true, PID, Some("err1"), &workflow()).await;
+        let host = kernel_engine
+            .runtime()
+            .kernel()
+            .expect("the kernel host")
+            .clone();
+        let snapshot = wait_kernel_settled(&host, PID).await;
+
+        // The parity claim: the handler subtree both engines ran agrees.
+        for node in ["c1", "b1", "h1"] {
+            assert_eq!(
+                legacy_node_states(&legacy, node)
+                    .first()
+                    .expect("the handler ran")
+                    .to_lowercase(),
+                format!("{:?}", state_of(&snapshot, node)).to_lowercase(),
+                "handler node '{node}' diverged"
+            );
+        }
+        // The kernel's half of the divergence: the caught error completes the
+        // step (the legacy `auto_complete` rule the legacy run cannot reach).
+        for (node, state) in [
+            ("s1", crate::kernel::ExecutionState::Completed),
+            (
+                crate::utils::consts::TASK_ROOT_TID,
+                crate::kernel::ExecutionState::Completed,
+            ),
+        ] {
+            assert_eq!(state_of(&snapshot, node), state, "node '{node}'");
+        }
+        kernel_engine.close().await;
+        legacy_engine.close().await;
+    }
+
+    /// A successful completion dispatches the step's `catches` too (the legacy
+    /// `check_in_children` schedules every child of a running step, the catch
+    /// children included). With no error to answer, `$ecode()` is null: the
+    /// `if` handler declines and the `else` handler runs — the legacy branch
+    /// selection, and the one catch path both engines reach a terminal state
+    /// on, so it is compared end to end.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn kernel_catch_matches_legacy_when_the_step_completes_without_error() {
+        const PID: &str = "p_catch_success";
+        let workflow = || {
+            crate::model::Workflow::new()
+                .with_id("wf-catch-success")
+                .with_step(|step| {
+                    step.with_id("s0").with_uses(
+                        crate::utils::test::USES_IRQ,
+                        crate::Vars::new().with("key", "init"),
+                    )
+                })
+                .with_step(|step| {
+                    step.with_id("s1")
+                        .with_uses(
+                            crate::utils::test::USES_IRQ,
+                            crate::Vars::new().with("key", "act1"),
+                        )
+                        .with_catch(|catch| {
+                            catch
+                                .with_id("c1")
+                                .with_var("declared", 7)
+                                .with_branch(|branch| {
+                                    branch
+                                        .with_id("b1")
+                                        .with_if("$ecode() == 'err1'")
+                                        .with_step(|step| {
+                                            step.with_id("h1").with_uses(
+                                                crate::utils::test::USES_MSG,
+                                                crate::Vars::new().with("key", "caught"),
+                                            )
+                                        })
+                                })
+                                .with_branch(|branch| {
+                                    branch.with_id("b2").with_else(true).with_step(|step| {
+                                        step.with_id("h2").with_uses(
+                                            crate::utils::test::USES_MSG,
+                                            crate::Vars::new().with("key", "others"),
+                                        )
+                                    })
+                                })
+                        })
+                })
+        };
+        let (legacy_engine, legacy) = run_catch_engine(false, PID, None, &workflow()).await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !legacy.state().is_completed() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the legacy run never settled: {:?}",
+                legacy
+                    .tasks()
+                    .iter()
+                    .map(|task| format!("{}:{}", task.node().id(), task.state()))
+                    .collect::<Vec<_>>()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let legacy_fold = folded_legacy_states(&legacy);
+
+        let (kernel_engine, _ran) = run_catch_engine(true, PID, None, &workflow()).await;
+        let host = kernel_engine
+            .runtime()
+            .kernel()
+            .expect("the kernel host")
+            .clone();
+        let snapshot = wait_kernel_settled(&host, PID).await;
+        assert_parity(&legacy_fold, &snapshot);
+        // The `if` handler declined and the `else` handler ran, in both
+        // engines.
+        for (node, state) in [
+            ("c1", crate::kernel::ExecutionState::Completed),
+            ("b1", crate::kernel::ExecutionState::Skipped),
+            ("b2", crate::kernel::ExecutionState::Completed),
+            ("h2", crate::kernel::ExecutionState::Completed),
+            ("s1", crate::kernel::ExecutionState::Completed),
+        ] {
+            assert_eq!(state_of(&snapshot, node), state, "node '{node}'");
+        }
+        assert!(
+            !has_task(&snapshot, "h1"),
+            "the declining handler never dispatches its act"
+        );
+        // A nested node's declared vars are seeded by the hop that admits it,
+        // not by the aggregate seed (which knows no such execution).
+        let c1 = crate::kernel::ExecutionId::new("c1", 0).unwrap();
+        assert_eq!(
+            snapshot
+                .variables
+                .get(&(c1, "declared".to_string()))
+                .map(String::as_str),
+            Some("7"),
+            "the fan-out seeds the handler's declared vars"
+        );
+        kernel_engine.close().await;
+        legacy_engine.close().await;
+    }
+
+    /// Every handler skipped: the kernel resumes the error after its handlers
+    /// settled — the failed step is decided `Failed`, the walk decides the
+    /// ancestors and the downstream chain skips. The legacy engine reaches the
+    /// skipped dispatch (the same guard) and then wedges at the step.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn kernel_catch_matches_legacy_when_every_handler_skipped() {
+        const PID: &str = "p_catch_resumed";
+        let workflow = || {
+            crate::model::Workflow::new()
+                .with_id("wf-catch-resumed")
+                .with_step(|step| {
+                    step.with_id("s0").with_uses(
+                        crate::utils::test::USES_IRQ,
+                        crate::Vars::new().with("key", "init"),
+                    )
+                })
+                .with_step(|step| {
+                    step.with_id("s1")
+                        .with_uses(
+                            crate::utils::test::USES_IRQ,
+                            crate::Vars::new().with("key", "act1"),
+                        )
+                        .with_catch(|catch| {
+                            catch.with_id("c1").with_if("$ecode() == 'err1'").with_uses(
+                                crate::utils::test::USES_MSG,
+                                crate::Vars::new().with("key", "caught"),
+                            )
+                        })
+                })
+                .with_step(|step| step.with_id("s2"))
+        };
+        let (legacy_engine, legacy) = run_catch_engine(false, PID, Some("err2"), &workflow()).await;
+        wait_legacy_nodes(&legacy, &["c1"]).await;
+        // The handler's own guard declined the error. The failed step (and
+        // with it the rest of the chain — `s2` is only scheduled once its
+        // predecessor settles) stays undecided: the measured legacy wedge.
+        assert_eq!(legacy_node_states(&legacy, "c1"), vec!["skipped"]);
+        assert_eq!(legacy_node_states(&legacy, "s1"), vec!["running"]);
+        assert!(
+            legacy_node_states(&legacy, "s2").is_empty(),
+            "legacy never schedules the successor of a step it cannot settle"
+        );
+        assert_eq!(legacy.state().to_string(), "running");
+
+        let (kernel_engine, _ran) = run_catch_engine(true, PID, Some("err2"), &workflow()).await;
+        let host = kernel_engine
+            .runtime()
+            .kernel()
+            .expect("the kernel host")
+            .clone();
+        let snapshot = wait_kernel_settled(&host, PID).await;
+        for (node, state) in [
+            ("c1", crate::kernel::ExecutionState::Skipped),
+            ("s2", crate::kernel::ExecutionState::Skipped),
+            ("s1", crate::kernel::ExecutionState::Failed),
+            (
+                crate::utils::consts::TASK_ROOT_TID,
+                crate::kernel::ExecutionState::Failed,
+            ),
+        ] {
+            assert_eq!(state_of(&snapshot, node), state, "node '{node}'");
+        }
+        assert!(
+            !has_task(&snapshot, "h1"),
+            "a skipped handler never dispatches its act"
+        );
+        kernel_engine.close().await;
+        legacy_engine.close().await;
     }
 
     #[tokio::test]
@@ -5313,7 +6236,7 @@ mod tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        let legacy = folded_legacy_states(&engine, &pid).await;
+        let legacy = folded_legacy_states(&legacy_proc);
 
         // Kernel host: the same model, the same abort on the step.
         let (host, mut wake_rx) = KernelHost::in_memory();
@@ -5392,7 +6315,7 @@ mod tests {
             );
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        let legacy = folded_legacy_states(&engine, &pid).await;
+        let legacy = folded_legacy_states(&legacy_proc);
 
         let (host, mut wake_rx) = KernelHost::in_memory();
         let spec = ProcessSpec::from_workflow("k-fail", &workflow(), &|_| None).unwrap();
@@ -5431,13 +6354,10 @@ mod tests {
     /// Every legacy task, folded onto the kernel's node vocabulary: acts
     /// fold into their owning step, the workflow root becomes `$`, and the
     /// state names map to the kernel's (Interrupt→Waiting, Error→Failed).
-    async fn folded_legacy_states(engine: &crate::Engine, pid: &str) -> Vec<(String, String)> {
-        let proc = engine
-            .runtime()
-            .proc(pid)
-            .await
-            .unwrap()
-            .expect("legacy process lost");
+    ///
+    /// The fold reads the live process the run returned, not the rows: a
+    /// settled run's rows are sweeper-owned and may already be gone.
+    fn folded_legacy_states(proc: &Arc<crate::scheduler::Process>) -> Vec<(String, String)> {
         let mut folded: Vec<(String, String)> = proc
             .tasks()
             .iter()
@@ -5459,7 +6379,7 @@ mod tests {
                 let node = if task.node().kind() == crate::NodeKind::Workflow {
                     crate::utils::consts::TASK_ROOT_TID.to_string()
                 } else if task.node().kind() == crate::NodeKind::Act {
-                    task.parent(&proc)
+                    task.parent(proc)
                         .expect("act without a step")
                         .node()
                         .id()

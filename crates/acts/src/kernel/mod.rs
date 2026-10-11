@@ -128,6 +128,7 @@ pub(crate) use branch::{
     BranchCandidate, BranchCommand, BranchDecision, BranchPlanner, PredicateBasis, PredicateValue,
 };
 pub(crate) use container::{
-    ContainerChild, ContainerChildPlan, ContainerError, ContainerFanoutCommand,
-    ContainerJoinCommand, ContainerPlanner, ContainerPredecessor,
+    CatchJoinCommand, CatchJoinOutcome, ContainerChild, ContainerChildPlan, ContainerError,
+    ContainerFanoutCommand, ContainerJoinCommand, ContainerPlanner, ContainerPredecessor,
+    SIGN_CATCH, SIGN_ERROR, SIGN_VAR, execution_sign,
 };

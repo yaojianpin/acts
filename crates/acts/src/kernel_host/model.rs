@@ -89,54 +89,122 @@ pub(crate) fn step_branches(step: &crate::model::Step) -> Option<&[crate::model:
     }
 }
 
+/// Where one step sits in the imported model — what the import derives from
+/// its position.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StepPlace {
+    /// A seeded chain step of the workflow root: its auto decision joins the
+    /// seed set, and its own `if`/`while` keeps the P1 contract (ignored).
+    TopLevel,
+    /// A `catches` handler of a step. Its `if` is the handler's own
+    /// selection — the legacy `Step::init` guard, evaluated when the failed
+    /// step dispatches its handlers — so it is imported, not refused.
+    Catch,
+    /// A step inside a branch: its guard would silently change meaning (the
+    /// kernel join treats `Skipped` as a dead path, while a legacy step guard
+    /// falls through to the chain), so it is refused.
+    Nested,
+}
+
 /// One step of the nested import walk: pin the step's auto decision and
 /// declared vars, reject what the shadow cannot mean faithfully, and descend
-/// into its branches. `top_level` steps keep the P1 contract (their `if` /
-/// `while` guards were already ignored there); guards inside a branch would
-/// silently change meaning, so they are refused.
+/// into its branches and catches.
 fn import_step(
     step: &crate::model::Step,
     run_as: &dyn Fn(&str) -> Option<crate::ActRunAs>,
-    top_level: bool,
+    place: StepPlace,
     auto: &mut std::collections::BTreeSet<String>,
     auto_map: &mut serde_json::Map<String, serde_json::Value>,
     seed_variables: &mut Vec<(Option<String>, String, String)>,
 ) -> Result<()> {
-    let step_auto = is_auto(step.uses.as_deref(), run_as);
-    auto_map.insert(step.id.clone(), serde_json::Value::Bool(step_auto));
-    if top_level && step_auto {
-        auto.insert(step.id.clone());
-    }
-    for var in &step.vars {
-        seed_variables.push((
-            Some(step.id.clone()),
-            var.name.clone(),
-            var.value.to_string(),
+    if step.id.trim().is_empty() {
+        // The legacy tree assigns a random id (`prepare_step_ids`) before it
+        // builds nodes; the driver derives every id from the model, and an
+        // unnamed nested node would only fail later, when the hop that must
+        // address it runs. Refusing is the same contract the seeded top chain
+        // already enforces.
+        return Err(ActError::Runtime(
+            "a nested step has no id; the kernel derives node ids from the model, so nested steps must be named"
+                .to_string(),
         ));
     }
-    if !top_level && (step.r#if.is_some() || step.r#while.is_some()) {
+    let step_auto = is_auto(step.uses.as_deref(), run_as);
+    auto_map.insert(step.id.clone(), serde_json::Value::Bool(step_auto));
+    if place == StepPlace::TopLevel && step_auto {
+        auto.insert(step.id.clone());
+    }
+    // A seeded chain step's declared vars land on its own scope as a durable
+    // fact. A nested node's scope does not exist until the hop that admits it,
+    // and that hop seeds them from the model (`child_variables`), so seeding
+    // them here would only create a variable on an execution the aggregate
+    // refuses to know (the seed validates every scope it writes).
+    if place == StepPlace::TopLevel {
+        for var in &step.vars {
+            seed_variables.push((
+                Some(step.id.clone()),
+                var.name.clone(),
+                var.value.to_string(),
+            ));
+        }
+    }
+    if place == StepPlace::Nested && (step.r#if.is_some() || step.r#while.is_some()) {
         return Err(ActError::Runtime(format!(
             "step '{}' carries an 'if'/'while' guard inside a branch; guarded nested steps are not imported yet",
             step.id
         )));
     }
-    // Error handlers and timeout branches are real legacy behavior (the tree
-    // builds them as Catch/Timeout children, `Step::on_error`/`on_timeout`
-    // dispatch them): importing a step while dropping them would silently run
-    // a workflow whose failure path changed, so the import refuses instead.
-    if !step.catches.is_empty() {
+    // A handler's `if` selects it (legacy `Step::init`); its `while` would
+    // loop the handler, which needs step-loop machinery the kernel has no
+    // driver for.
+    if place == StepPlace::Catch && step.r#while.is_some() {
         return Err(ActError::Runtime(format!(
-            "step '{}' declares 'catches'; error handlers are not imported yet",
+            "catch step '{}' carries a 'while' guard; looping catch handlers are not imported yet",
             step.id
         )));
     }
+    // Timeout branches are real legacy behavior (`Step::on_timeout`
+    // dispatches them from the process tick, guarded by `$cost_in`), but the
+    // aggregate carries no time fact: firing them faithfully needs a durable
+    // cost start per execution plus a tick-driven dispatcher, which the
+    // driver does not have yet. Importing them while never firing them would
+    // silently drop the model's timeout path, so the import refuses.
     if !step.timeouts.is_empty() {
         return Err(ActError::Runtime(format!(
-            "step '{}' declares 'timeouts'; timeout branches are not imported yet",
+            "step '{}' declares 'timeouts'; the kernel has no durable cost clock to fire them yet",
             step.id
         )));
     }
+    // The legacy tree builds `catches` as Catch children (`Step::on_error`
+    // dispatches them when the step fails, `auto_complete` decides whether
+    // the error was caught) and a step's branches as Branch children; it
+    // schedules *both* sets whenever the step runs into its children. One
+    // kernel fan-out shape cannot mean both, so a step declaring both is
+    // refused rather than silently reduced to one set.
+    if !step.catches.is_empty() {
+        if step_branches(step).is_some_and(|branches| !branches.is_empty()) {
+            return Err(ActError::Runtime(format!(
+                "step '{}' declares both 'branches' and 'catches'; the import has one fan-out shape per step",
+                step.id
+            )));
+        }
+        for catch in &step.catches {
+            import_step(
+                catch,
+                run_as,
+                StepPlace::Catch,
+                auto,
+                auto_map,
+                seed_variables,
+            )?;
+        }
+    }
     for branch in step_branches(step).unwrap_or_default() {
+        if branch.id.trim().is_empty() {
+            return Err(ActError::Runtime(format!(
+                "branch of step '{}' has no id; the kernel derives node ids from the model, so branches must be named",
+                step.id
+            )));
+        }
         if !branch.needs.is_empty() {
             return Err(ActError::Runtime(format!(
                 "branch '{}' declares 'needs'; branch dependencies are not imported yet",
@@ -144,7 +212,14 @@ fn import_step(
             )));
         }
         for inner in &branch.steps {
-            import_step(inner, run_as, false, auto, auto_map, seed_variables)?;
+            import_step(
+                inner,
+                run_as,
+                StepPlace::Nested,
+                auto,
+                auto_map,
+                seed_variables,
+            )?;
         }
     }
     Ok(())
@@ -221,7 +296,7 @@ impl ProcessSpec {
             import_step(
                 step,
                 run_as,
-                true,
+                StepPlace::TopLevel,
                 &mut auto,
                 &mut auto_map,
                 &mut seed_variables,
@@ -545,22 +620,103 @@ mod tests {
     }
 
     #[test]
-    fn catch_and_timeout_declarations_are_rejected_not_silently_dropped() {
-        // The legacy tree builds these as Catch/Timeout children and
-        // `Step::on_error`/`on_timeout` dispatch them: an import that dropped
-        // them would run a different failure path than the model declares.
+    fn catch_declarations_import_and_timeouts_are_still_refused() {
+        // A catch step is a nested step: its auto decision and declared vars
+        // become durable facts like a branch's, but it seeds no execution —
+        // it comes alive when the failed step fans it out, and that hop seeds
+        // the vars from the model.
         let with_catch = crate::model::Workflow::new().with_step(|step| {
             step.with_id("s1")
+                .with_var("own", 1)
                 .with_uses("acts.transform.set", crate::Vars::new())
-                .with_catch(|step| step.with_id("c1"))
+                .with_catch(|step| {
+                    step.with_id("c1").with_var("v", 1).with_branch(|branch| {
+                        branch
+                            .with_id("b1")
+                            .with_if("$ecode() == 'err1'")
+                            .with_step(|step| step.with_id("s11"))
+                    })
+                })
         });
-        let error = spec(&with_catch).unwrap_err();
-        assert!(format!("{error}").contains("'s1' declares 'catches'"));
+        let imported = spec(&with_catch).unwrap();
+        assert_eq!(imported.children, vec!["s1".to_string()]);
+        let snapshot = imported.seed_snapshot().unwrap();
+        let root = ExecutionId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap();
+        let auto: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
+            snapshot
+                .variables
+                .get(&(root, AUTO_MAP_VAR.to_string()))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(auto["c1"], serde_json::Value::Bool(true));
+        assert_eq!(auto["s11"], serde_json::Value::Bool(true));
+        // A seeded chain step's vars land on its own scope; a nested node's
+        // do not (no execution exists to carry them yet).
+        assert!(
+            snapshot
+                .variables
+                .contains_key(&(ExecutionId::new("s1", 0).unwrap(), "own".to_string())),
+            "a seeded step's declared vars are durable facts"
+        );
+        assert!(
+            !snapshot
+                .variables
+                .keys()
+                .any(|(scope, _)| scope.task_id == "c1"),
+            "a nested node's vars are seeded when its hop admits it"
+        );
 
+        // A timeout needs a durable cost start the aggregate does not carry.
         let with_timeout = crate::model::Workflow::new()
             .with_step(|step| step.with_id("s1").with_timeout(|step| step.with_id("t1")));
         let error = spec(&with_timeout).unwrap_err();
         assert!(format!("{error}").contains("'s1' declares 'timeouts'"));
+
+        // The legacy tree schedules branches and catches as one child set and
+        // the import has one fan-out shape, so declaring both is refused.
+        let mixed = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("s1")
+                .with_branch(|branch| {
+                    branch
+                        .with_id("b1")
+                        .with_if("true")
+                        .with_step(|step| step.with_id("s11"))
+                })
+                .with_catch(|step| step.with_id("c1"))
+        });
+        let error = spec(&mixed).unwrap_err();
+        assert!(format!("{error}").contains("both 'branches' and 'catches'"));
+    }
+
+    #[test]
+    fn guarded_catch_steps_import_but_looping_ones_are_refused() {
+        // A handler's `if` is its own selection (the legacy `Step::init`
+        // guard, evaluated when the failed step dispatches its handlers), so
+        // the import keeps it.
+        let guarded = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("s1")
+                .with_uses("acts.transform.set", crate::Vars::new())
+                .with_catch(|step| step.with_id("c1").with_if("$ecode() == 'err1'"))
+        });
+        let imported = spec(&guarded).unwrap();
+        let snapshot = imported.seed_snapshot().unwrap();
+        assert!(
+            snapshot
+                .executions
+                .values()
+                .all(|execution| execution.model_node.as_str() != "c1"),
+            "the handler still seeds no execution"
+        );
+
+        // A looping handler needs step-loop machinery the kernel has none of.
+        let looping = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("s1")
+                .with_uses("acts.transform.set", crate::Vars::new())
+                .with_catch(|step| step.with_id("c1").with_while("v < 3"))
+        });
+        let error = spec(&looping).unwrap_err();
+        assert!(format!("{error}").contains("'while' guard"));
     }
 
     #[test]

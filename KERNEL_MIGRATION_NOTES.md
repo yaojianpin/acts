@@ -235,6 +235,77 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
    对跑实测(`kernel_error_action_carries_the_legacy_inputs`):两侧 step 行的 `err` 字符串完全
    相等(`{"ecode":"boom","message":"boom-msg"}`)。
 
+- **catch 导入与错误路由(本片,「剩余工作 1」的前半;timeout 仍拒绝)**
+
+  (a) **导入**(`kernel_host/model.rs`):接受 `step.catches`(handler 是嵌套 Step,可带自己的
+  branches/vars/再嵌套 catches)。handler 的 `if` 是它自己的选择(legacy `Step::init` 守卫),
+  导入后在 fan-out 时(成功路径与失败路径都用)**引擎表达式环境**求值:True→Entry、False→Skip
+  (handler 落 Skipped,即 legacy 的 skip)、判不了/求值为 null→首 hop Failed(复用
+  `__branch_error` 机制);`$ecode()` 因此可判。仍拒绝:`timeouts`(见「剩余工作 1」)、同一 step
+  同时声明 `branches`+`catches`(legacy 的 child 集含两者且都调度,import 只有一种 fan-out
+  形状)、handler 的 `while`(需要 step 循环机)、branch 内 step 的 `if/while`(原样)。
+  **新增拒绝**:嵌套 step/branch 必须有 id——legacy 的 `prepare_step_ids` 会在自己的 clone 上
+  补随机 id,driver 从 model 取 id,未命名只会在 hop 里 wedge,故导入期即拒(`examples/catches/model.yml`
+  的 catch step/branch 就没 id;driver 尚未实现 id 分配,已登记)。
+
+  (b) **失败路由**(`KernelHost::catch_fanout`):包错误(`effect_plan` 的 runner `Err`)与客户端
+  `act:error`(`Failure{code,message,ecode}`;`ecode` 按 `ActError` 变体取:Package→`""`、
+  Exception→其 ecode,对齐 `Task::set_err` 写进任务数据的映射)都先问 catch:节点声明 catches 且该
+  执行未在判定中 → **保持 Running**(legacy `Step::on_error`:`set_sign(ERROR)`+回到 Running)、
+  写私有 `__sign=error`(raw——引擎事实,不进谓词空间,也不是 JSON)、写 `ecode`/`message`
+  (legacy 任务数据名,`$ecode()` 读它)与 `error.code`/`error.message`,并把每个 handler 作为容器
+  子执行准入(Entry/Skip,子带 `__sign=catch` = legacy `TASK_SIGN=CATCH`;`ContainerFanoutCommand`
+  新增 `source_park` 字段,失败路由传 `Running`、成功路径传 `Waiting`);并发一条 `task.failed`
+  记录(legacy 失败 act 自己的 Error 消息;key `failed:<pid>:<tid>:<gen>:<op-sequence>`,序数保证
+  与后续 step 记录不撞键——提交期的 `OutboxAlreadyExists` 是硬错误)。
+
+  (c) **catch join**(`ContainerPlanner::plan_catch_join`,纯函数 + 单测):CATCH 子全部结算且无
+  Aborted 时——**全部 Skipped → 父 `Running→Failed`**(错误重新上浮:父自己的 PropagateTask hop
+  走既有 upward 错误行走 + 下游 skip 级联,并补一条 step 自己的 `task.failed` 记录)、**有非
+  Skipped → 父 `Running→Completed`**(错误被接住,传播继续到链后继)。source/parent 的判定全读
+  聚合事实(`__sign`),与 spec 无关。
+
+  (d) **动作守卫**:`apply_action` 预检里,声明 catches 的 step 在「判定中(`__sign=error`)」或
+  「已派发 handler 子」时拒绝一切动作(legacy 折叠的 act 已终态,`do_action` 一律拒),不消费操作;
+  `effect_plan` 对 raced 的 auto hop 返回 bare remainder(不 wedge、不二次完成)。
+
+  (e) **顺序修正**:`effect_plan(None)` 原来「先 fan-out 后效果」,对 `uses`+容器 step 会跳过效果
+  (legacy 顺序是 act 先完成/失败、step 再 `check_in_children` 调度 children)。现在效果先跑
+  (失败即走失败路由),成功后再 fan-out,效果 writes 并入同一笔提交。
+
+  **对跑实测**(同 workflow 双引擎,`run_catch_engine` 订阅 act 的 Created 消息后从测试体发
+  `Next`/`Error`;legacy 侧读运行返回的活动进程,不读行——已结算 run 的行归 sweeper):
+   - `kernel_catch_matches_legacy_when_the_step_completes_without_error`(成功路径,**唯一能
+     与 legacy 终态全量对跑**的 catch 场景):step 的 act 成功完成 → handler 被无符号派发 →
+     `$ecode()` 为 null → `if` 分支 Skipped、`else` 分支跑 msg 步 → step/根 Completed。两侧
+     `assert_parity` 逐节点一致(kernel 侧断言 c1 Completed、b1 Skipped、b2/h2 Completed、s1
+     Completed、h1 不存在)。
+   - `kernel_catch_matches_legacy_when_the_error_is_caught`:irq step 收 `act:error(ecode=err1)`
+     → handler 分支 `$ecode()=='err1'` 选中并跑 msg 步 → **两侧 handler 子树逐节点一致**
+     (legacy c1/b1/h1 全 completed;kernel 同),且 legacy 的 c1 带 `Sign::CATCH`(与 kernel 的
+     `__sign=catch` 同源);kernel 侧 s1/根 Completed。
+   - `kernel_catch_matches_legacy_when_every_handler_skipped`:handler 带 `if $ecode()=='err1'`、
+     错误码 err2 → 两侧 handler 都 Skipped;kernel 侧 s1 Failed、根 Failed、后继 s2 Skipped。
+   - **实测到的 legacy 缺陷(重要)**:legacy 里「act 失败 + step 声明 catches」会**永久卡死**。
+     失败的 act 从不跑自己的 `next`,其 propagation phase 停在 `None`,于是 step 的
+     `check_uses_action` 门槛(`is_propagation_done`)永远 Stop,`auto_complete`——即「全部
+     CATCH 子 skip → 错误上浮 / 有 CATCH 子完成 → step 完成」——**根本不可达**。实测证据(fold
+     诊断):`s1:running sign=ERROR phase=None done=false`、act `error phase=None done=false`、
+     根 `running`;handler 子树照常跑完(dispatch 来自 `Step::on_error`),但 step/根永不结算,
+     后继永不调度(`s2` 甚至从不创建)。所以 catch 的 join 语义只能对准代码意图,不能与 legacy
+     终态对跑;上面两个错误用例的 legacy 断言即钉住这一分歧(legacy: step/根 running;kernel:
+     Completed/Failed)。
+   - 顺带实测:legacy 客户端 `act:error` 会**跳过该 act 父 step 的链兄弟**;含 catch 的 step 之后
+     成功时会重新调度那个被 skip 的后继(同节点两实例:Skip 历史 + Completed 存活)。kernel 不复制
+     这一步跳(靠错误级联/正常传播),终态一致。
+   - 聚合变量编码:谓词/效果读的变量空间要求 **JSON 文本**(`scope_vars` → `headless_scope` 用
+     `from_str` 解码,raw 字符串会被静默丢弃,例:`err1` 不合法 → 变量缺席)。`__`-私有事实
+     (`__sign`)保持 raw(不进谓词空间)。既有 `ActionPlanner` 把客户端**字符串**输入原样(raw)
+     写入:容错读方(`json_text`/`input_vars`/projection)能读,但谓词读不到——本片未改这条既有
+     路径,只在 catch 自己的写入上用 JSON 文本。
+   - 已知边界(明确登记,未静默降级):`uses`+容器(branches/catches)的 **act 完成消息**仍不在
+     fan-out 路径发(既有 fan-out 抢占 completion 所致;legacy 会发 act Completed)。
+
 ## 已对齐(无需动)
 
 - Complete/Submit/Skip/Fail on Running/Waiting:ActionPlanner 与 legacy 守卫一致
@@ -244,31 +315,37 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
 
 ## 剩余工作(按序)
 
-1. **catch/timeout 的导入与错误路由**(本片只拒绝、未导入):legacy 的语义 = `Step::on_error`
-   把 Catch 子节点按 `TASK_SIGN = CATCH` 调度、该 step 回到 Running,`auto_complete` 再判:
-   全部 CATCH 子 skip → 错误继续上浮,有 CATCH 子完成 → 该 step 完成(错误被接住);
-   `timeouts` 同形(`Step::on_timeout`,先落 `$cost()`)。**前置已就绪**:谓词求值已在引擎表达式
-   环境上(见上),catch 分支用 `$ecode()` 选错误码(`examples/catches/model.yml`)可判;错误动作的
-   `ecode`/`message` 输入名也已对齐(见上),`ecode` 作为普通 scope 变量落在失败步上,作用域链即可
-   读到 —— 接入 catch 只剩准入/路由本身。
-   接入方案(已推演,未实施):(i) 失败 hop 发现该节点声明了 catch → 不再走 `failure_plan`,
-   而是**保持该执行的 Running**、写错误变量,并把每个 catch step 作为容器子执行准入(Entry,
-   各自内部链由它自己的 fan-out 接管);(ii) headless 谓词作用域要把错误变量按 legacy 名
-   (`ecode`/`message`)喂进 headless task 的 data,`$ecode()` 才判得了(catch 的全部选择逻辑
-   都在谓词里);(iii) 容器 join 要 catch-aware:父执行带错误变量且**全部 CATCH 子 Skipped** →
-   父 Failed + 向上错误行走;有 CATCH 子 Completed → 父 Completed(错误被接住)。(iv) 先量
-   legacy 一个最小 catch 场景(irq 步收 `act:error` 带 ecode → catch 分支 `$ecode()=='err1'`
-   跑 msg 步)的折叠终态,再照抄。
-2. **workflow 根的完成语义与 legacy 不一致(本片 e2e 发现,登记)**:kernel 在根自己的 hop 就把它
-   判 `Completed`(根不是 fan-out 容器,`container_shape(root)` 返回 None),legacy 的根要等它
+1. **timeout 的导入与派发**(catch 已在上片完成;本项只剩 timeout):legacy 的语义 =
+   `Process::do_tick` 对 `is_timeouts()` 且 Running/Interrupt 的任务调 `Step::on_timeout`,
+   它先把 `cost` 落进 step 的任务数据(`$cost_in` 读它),再派发「首个未触发且不在飞」的
+   timeout 分支(声明序,每分支 one-shot 标记 `claim_timeout`)。
+   **为什么还没做(需要新事实)**:聚合(`AggregateSnapshot`/`ExecutionSnapshot`)没有任何
+   时间戳、也没有时钟;`projection` 的时间戳是*投影时刻*的墙钟,纯 planner 读不到。忠实实现
+   必须:①新增**每执行的持久 cost 起点**(动 snapshot codec/投影)或在 hop 里注入显式
+   `now` 并把 `now - started_at` 当 cost;②host 的 tick 扫出到期的 timeout 分支并派发
+   (复用 `ContainerChildPlan::Entry/Skip` 与谓词 seam 求值 `$cost_in(...)`);③每分支
+   one-shot 标记(聚合事实,防重派)。⚠️ 不要照抄 catch 的做法:timeout 不是失败路由,而是
+   时间驱动的派发。
+2. **workflow 根的完成语义与 legacy 不一致(登记)**:kernel 在根自己的 hop 就把它判
+   `Completed`(根不是 fan-out 容器,`container_shape(root)` 返回 None),legacy 的根要等它
    **全部子实例**结算(Back/重入后根仍是 Running)。后果:驱动档下重入在飞时,`proc:get` 的
    proc 行状态(投影取根的态)显示 completed,与 legacy 的 running 不符。修法方向:让种子出来的
    根按容器/join 语义结算(根 park 等子结算,或 join 覆盖根),单独一片 + 对跑;`kernel_back_read_model_serves_the_redone_generation`
    里已留了「不再往前断言根」的注释位。
+   (注:本片的 catch 场景里 legacy 的根同样卡在 running,但那是上面的 legacy catch 缺陷所致,
+   与这一条无关——成功路径的根两侧一致。)
 3. (登记,未排期)**无 `uses` 的 task 级消息**:纯 step 与 workflow 根在 legacy 也发 task
    消息(见「语义结论」);driver 档目前只发 act 消息,根走 lifecycle 通道。若客户端按
    type=step/workflow 订阅,需给无包执行也写消息记录、并把节点种类带进
    `message_from_record`(其 type 目前恒为 "act")。
+4. (登记,未排期)**driver 未实现节点 id 分配**:legacy 的 `prepare_step_ids` 会为未命名的
+   step/branch/catch 补随机 id(`tree/build.rs`);driver 从 model 取 id,所以嵌套节点必须显式
+   命名(本片改为导入期拒绝,不再在 hop 里 wedge)。要跑 `examples/catches/model.yml` 这类模型,
+   需要在 `ProcessSpec::from_workflow` 里补一条等价于 `prepare_step_ids` 的赋值(结果写进
+   `__model`,聚合即事实),属独立小片。
+5. (登记,未排期)**`uses`+容器的 act 完成消息**:step 同时有 `uses` 与 branches/catches 时,
+   完成走容器 fan-out 路径,不再发 act 的 Completed 记录(legacy 会发);leaf 的 `uses` step
+   不受影响(仍走 ActionPlanner + `attach_act_message`)。
 
 ## 语义结论(已核实,勿再猜测)
 
@@ -320,6 +397,19 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
   以 `TASK_SIGN = CATCH` 逐个调度 Catch 子节点,然后才 `emit_error` 继续上浮;`auto_complete`
   的判据是「该 step 有 ERROR sign 且全部 CATCH 子节点都 Skipped」→ 恢复错误(继续上浮),
   否则该 step 完成(错误被接住)。catch 分支用 `$ecode()`(读任务 data 的 `ecode`)选错误码。
+- **catch 的四个实测事实(本片)**:①CATCH 子节点是 handler(Step,可再带 branches),其 `if`
+  在它自己的 `Step::init` 求值,失败即 Skipped;②`$ecode()`/`$ECODE` 来自*该任务 data 的
+  `ecode`*,handler 的 data 由被失败 step 的 outputs(含 act 错误时折进去的 `ecode`/`message`)
+  经 prev 链喂入;③**handler 子树能跑,但 step 永不结算**:失败的 act 从不跑自己的 `next`,
+  其 propagation phase 停在 `None`,`check_uses_action` 的 `is_propagation_done` 门槛永远
+  Stop → `auto_complete` 不可达(实测:s1 `running`、act `error phase=None done=false`、根
+  `running`;后继 step 甚至从不创建)——所以上面那条「全部 skip → 上浮 / 有完成 → 接住」的
+  代码意图在 legacy 里**不可达**,kernel 照代码意图实现(见本片记录);④客户端 `act:error`
+  会跳过该 act 父 step 的链兄弟,step 之后成功时那个后继被重新调度(同节点多实例)。
+- catch 的 kernel 事实:`__sign=error`(判定中的 step)与 `__sign=catch`(被派发的 handler)
+  是聚合里的私有事实(handler 上的对应 legacy `TASK_SIGN=CATCH` 已实测),catch join 完全
+  读它们;判定只由 catch join 做,`Running → Completed`(接住)/`Running → Failed`(上浮)
+  都在状态表内。
 
 ## 环境注意
 
@@ -329,5 +419,6 @@ examples 链接验证用 `cargo build -p acts --example <name>`(单跑均成功)
 
 全量 `--lib` 跑时 legacy reliability 套件对负载敏感:除上面点名的
 `scheduler::tests::reliability::stall::sch_next_cut_sweep_recovers_every_write_boundary`,
-`...::error::sch_error_duplicate_delivery_is_terminal_noop` 也在全量负载下偶发失败
-(单独跑 3/3 通过)。判定回归时以「单测复跑 + 与本次改动是否同路径」为准。
+`...::error::sch_error_duplicate_delivery_is_terminal_noop` 也在全量负载下偶发失败。
+catch 片实测:该 stall 红在**改动 stash 掉的基线**上单跑同样失败(1/1 failed),所以它与内核
+改动无关;判定回归时以「stash 基线对照 + 与本次改动是否同路径」为准,不要只看单测复跑。
