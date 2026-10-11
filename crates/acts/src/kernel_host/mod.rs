@@ -7,8 +7,9 @@
 //! durable hop:
 //!
 //! - `ExecuteTask` commits `Ready → Running` (the task started) and seeds the
-//!   `ApplyAction` operation whose effect performs the task's work. The
-//!   package effect itself arrives in P2; until then the host auto-completes.
+//!   `ApplyAction` operation whose effect performs the task's work: the
+//!   attached [`effects::EffectRunner`] runs the step's package (the serving
+//!   host has [`PackageEffectRunner`]; a host without one auto-completes).
 //! - `ApplyAction` commits `Running → Completed` (the effect is durable) and
 //!   seeds the `PropagateTask` operation in the same atomic batch — a crash
 //!   between effect and propagation leaves the operation open, never the
@@ -42,6 +43,8 @@ mod message;
 mod model;
 
 use self::model::execution_graph;
+pub(crate) use effects::PackageEffectRunner;
+pub(crate) use message::MessageForwarder;
 pub(crate) use model::ProcessSpec;
 
 const OWNER: &str = "kernel-host";
@@ -144,6 +147,96 @@ fn owner_of(snapshot: &crate::kernel::AggregateSnapshot) -> Result<crate::ScopeP
         Some(raw) => serde_json::from_str(&raw).map_err(runtime),
         None => Ok(crate::ScopePolicy::default()),
     }
+}
+
+/// The engine `Message` of one run's lifecycle: the workflow-level fact the
+/// legacy `root.create_message` produced, built from the aggregate (its only
+/// source). The root scope's user variables are the run's outputs.
+fn process_message(
+    snapshot: &crate::kernel::AggregateSnapshot,
+    root: &crate::kernel::ExecutionId,
+) -> crate::Message {
+    let mut vars = crate::Vars::new();
+    for ((scope, name), raw) in &snapshot.variables {
+        if scope != root || crate::utils::consts::is_private_key(name) {
+            continue;
+        }
+        if let Ok(value) = serde_json::from_str::<serde_json::Value>(raw) {
+            vars.set(name, value);
+        }
+    }
+    let mid = model_of(snapshot)
+        .ok()
+        .flatten()
+        .map(|model| model.id)
+        .unwrap_or_default();
+    let state = snapshot
+        .executions
+        .get(root)
+        .map(|execution| lifecycle_state(execution.state))
+        .unwrap_or(crate::MessageState::None);
+    crate::Message {
+        id: crate::utils::longid(),
+        tid: crate::utils::consts::TASK_ROOT_TID.to_string(),
+        r#type: "workflow".to_string(),
+        state,
+        pid: snapshot.process_id.clone(),
+        nid: crate::utils::consts::TASK_ROOT_TID.to_string(),
+        mid,
+        inputs: vars.clone(),
+        outputs: vars,
+        timestamp: crate::utils::time::time_millis(),
+        ..Default::default()
+    }
+}
+
+/// A kernel execution state in the engine's message vocabulary.
+fn lifecycle_state(state: crate::kernel::ExecutionState) -> crate::MessageState {
+    use crate::MessageState as M;
+    use crate::kernel::ExecutionState as S;
+    match state {
+        S::Completed => M::Completed,
+        S::Submitted => M::Submitted,
+        S::Backed => M::Backed,
+        S::Cancelled => M::Cancelled,
+        S::Aborted => M::Aborted,
+        S::Skipped => M::Skipped,
+        S::Failed => M::Error,
+        S::Removed => M::Removed,
+        S::Created | S::Ready | S::Running | S::Waiting => M::None,
+    }
+}
+
+/// The failed root's error variables (`error.code` / `error.message`).
+fn root_error(
+    snapshot: &crate::kernel::AggregateSnapshot,
+    root: &crate::kernel::ExecutionId,
+) -> (String, String) {
+    let read = |name: &str| {
+        snapshot
+            .variables
+            .get(&(root.clone(), name.to_string()))
+            .and_then(|raw| serde_json::from_str::<String>(raw).ok())
+            .unwrap_or_default()
+    };
+    (read("error.code"), read("error.message"))
+}
+
+/// Validate the run's `exposes` against the message's outputs, like the legacy
+/// `on_proc` handler; `Some(text)` is the legacy error text.
+fn exposes_error(
+    snapshot: &crate::kernel::AggregateSnapshot,
+    message: &crate::Message,
+) -> Option<String> {
+    let model = model_of(snapshot).ok().flatten()?;
+    if model.exposes.is_empty() {
+        return None;
+    }
+    let schema = crate::ActSchema::Multiple(model.exposes.clone());
+    schema
+        .validate(&message.outputs.to_value())
+        .err()
+        .map(|error| format!("model({}) outputs validation error: {}", model.id, error))
 }
 
 /// One branch predicate, evaluated against the aggregate's variables the way
@@ -313,12 +406,39 @@ pub(crate) struct KernelHost {
     /// The outbox delivery seam: the shadow logs; the driver's transport
     /// maps records onto engine messages (see `message::message_from_record`).
     transport: Arc<parking_lot::RwLock<Box<dyn crate::kernel::OutboxTransport>>>,
+    /// The process-lifecycle seam: when attached, a run's start and terminal
+    /// are reported as engine events — the driver's mirror of the legacy
+    /// `on_proc` emission. The host builds the `Message` from the aggregate,
+    /// its only source.
+    lifecycle: Arc<parking_lot::RwLock<Option<LifecycleSink>>>,
+    /// Which runs were already reported: a start once, a terminal once.
+    reported: Arc<parking_lot::Mutex<ReportedRuns>>,
 }
 
-/// Delivers shadow-mode outbox records: they are engine-internal lifecycle
-/// notes (`task.started`/`task.completed`/`task.propagated`), logged and
-/// confirmed. Channel delivery for the kernel path arrives with the executor
-/// wiring.
+/// Which engine event a run's lifecycle report is: the driver's mirror of the
+/// legacy `on_proc` emission.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ProcessEvent {
+    Started,
+    Completed,
+    Errored,
+}
+
+/// The process-lifecycle sink: the engine routes it onto its channel events
+/// (`on_start`/`on_complete`/`on_error`).
+pub(crate) type LifecycleSink = Box<dyn Fn(&crate::Message, ProcessEvent) + Send + Sync>;
+
+/// Which runs were already reported: a start once, a terminal once.
+#[derive(Default)]
+struct ReportedRuns {
+    started: std::collections::HashSet<String>,
+    finished: std::collections::HashSet<String>,
+}
+
+/// The default outbox transport: it logs each record and confirms it — what a
+/// host with nothing attached (the kernel's own tests, and any embedder that
+/// only wants the durable aggregate) does. The serving host replaces it with
+/// [`message::MessageForwarder`] so records reach the engine channel.
 struct ShadowTransport;
 
 impl crate::kernel::OutboxTransport for ShadowTransport {
@@ -350,6 +470,8 @@ impl KernelHost {
                 wake_tx,
                 effect: Arc::new(parking_lot::RwLock::new(None)),
                 transport: Arc::new(parking_lot::RwLock::new(Box::new(ShadowTransport))),
+                lifecycle: Arc::new(parking_lot::RwLock::new(None)),
+                reported: Arc::new(parking_lot::Mutex::new(ReportedRuns::default())),
             }),
             wake_rx,
         )
@@ -375,6 +497,69 @@ impl KernelHost {
         transport: Box<dyn crate::kernel::OutboxTransport>,
     ) {
         *self.transport.write() = transport;
+    }
+
+    /// Attach the process-lifecycle sink: from then on a run reports one
+    /// start when it is alive and one terminal event when every execution
+    /// settled — the driver's `on_proc`. Attach before driving hops.
+    pub(crate) fn attach_lifecycle_sink(&self, sink: LifecycleSink) {
+        *self.lifecycle.write() = Some(sink);
+    }
+
+    /// Report one run's lifecycle from a fresh snapshot, at most once per
+    /// phase. Mirrors the legacy `on_proc`: a start while the run is alive
+    /// (running or pending); otherwise — every execution terminal — an error
+    /// for a failed root, a completion for any other terminal, with the
+    /// model's `exposes` validated against the run's outputs (a validation
+    /// failure is reported as an error, exactly like the legacy handler).
+    fn report_lifecycle(&self, snapshot: &crate::kernel::AggregateSnapshot) {
+        let lifecycle = self.lifecycle.read();
+        let Some(sink) = lifecycle.as_ref() else {
+            return;
+        };
+        let Some(root) = snapshot
+            .executions
+            .keys()
+            .filter(|id| id.task_id == crate::utils::consts::TASK_ROOT_TID)
+            .min_by_key(|id| id.generation)
+            .cloned()
+        else {
+            return;
+        };
+        let root_state = snapshot
+            .executions
+            .get(&root)
+            .map(|execution| execution.state);
+        let all_terminal = !snapshot.executions.is_empty()
+            && snapshot
+                .executions
+                .values()
+                .all(|execution| execution.state.is_terminal());
+        let mut reported = self.reported.lock();
+        if all_terminal {
+            if !reported.finished.insert(snapshot.process_id.clone()) {
+                return;
+            }
+            let mut message = process_message(snapshot, &root);
+            if root_state == Some(crate::kernel::ExecutionState::Failed) {
+                let (code, text) = root_error(snapshot, &root);
+                message.set_err(&code, &text);
+                sink(&message, ProcessEvent::Errored);
+                return;
+            }
+            match exposes_error(snapshot, &message) {
+                Some(error) => {
+                    message.set_err("", &error);
+                    sink(&message, ProcessEvent::Errored);
+                }
+                None => sink(&message, ProcessEvent::Completed),
+            }
+            return;
+        }
+        if reported.started.insert(snapshot.process_id.clone()) {
+            let message = process_message(snapshot, &root);
+            sink(&message, ProcessEvent::Started);
+        }
     }
 
     /// The background driver: executes woken hops as they arrive, and on every
@@ -1177,10 +1362,11 @@ impl KernelHost {
                 )));
             }
         };
-        let committed = self
+        let loaded = self
             .load(&id.process_id)
             .await?
-            .ok_or_else(|| ActError::Runtime("aggregate lost after commit".into()))?
+            .ok_or_else(|| ActError::Runtime("aggregate lost after commit".into()))?;
+        let committed = loaded
             .snapshot
             .operations
             .get(id)
@@ -1200,6 +1386,10 @@ impl KernelHost {
         for operation in &receipt.new_operations {
             wake.wake(operation);
         }
+        // The run's lifecycle, from the freshly committed state: a start while
+        // it is alive, one terminal event once every execution settled. A
+        // closed sink or an absent one makes this a no-op.
+        self.report_lifecycle(&loaded.snapshot);
         Ok(true)
     }
 
@@ -2003,12 +2193,13 @@ mod tests {
         assert!(snapshot.executions.values().all(|e| e.state.is_terminal()));
     }
 
-    /// The wiring slice: with `kernel_engine` on, every engine start
-    /// shadow-runs the same process through the kernel host over the same
-    /// store, and the shadow settles exactly when the engine settles.
+    /// The driver switch: with `kernel_engine` on the kernel host *is* the
+    /// engine. A start seeds the aggregate and no legacy process runs, yet the
+    /// engine's own completion event still fires — the host reports the run's
+    /// lifecycle — and every execution settles.
     #[tokio::test(flavor = "multi_thread")]
     #[serial_test::serial]
-    async fn kernel_shadow_follows_engine_start() {
+    async fn kernel_engine_serves_a_run_to_completion() {
         let mut config = crate::Config::default();
         config.data.kernel_engine = true;
         config.data.tick_interval_secs = Some(1);
@@ -2025,51 +2216,204 @@ mod tests {
         });
 
         let workflow = {
-            let mut workflow = crate::model::Workflow::new().with_id("wf-shadow");
+            let mut workflow = crate::model::Workflow::new().with_id("wf-driver");
             workflow = workflow.with_step(|step| step.with_id("s1"));
             workflow = workflow.with_step(|step| step.with_id("s2"));
             workflow
         };
-        let legacy = engine
+        let proc = engine
             .runtime()
             .start(&workflow, crate::Vars::new())
             .await
             .unwrap();
-        let pid = legacy.id().to_string();
+        let pid = proc.id().to_string();
         tokio::time::timeout(std::time::Duration::from_secs(30), sig.recv())
             .await
             .expect("engine never finished");
 
+        // The legacy read model is not written in driver mode (the row
+        // projection slice owns it), so the run is inspected through the
+        // aggregate.
+        assert!(
+            engine.runtime().proc(&pid).await.unwrap().is_none(),
+            "driver mode must not launch a legacy process"
+        );
         let runtime = engine.runtime();
-        let host = runtime.kernel().expect("kernel shadow host must be wired");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        let shadow = loop {
-            match host.process_completed(&pid).await.unwrap() {
-                true => break true,
-                false if std::time::Instant::now() > deadline => break false,
-                false => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
-            }
-        };
-        assert!(shadow, "kernel shadow never completed pid {pid}");
-        let snapshot = host
-            .snapshot(&pid)
-            .await
-            .unwrap()
-            .expect("shadow aggregate");
-        let mut shadow_tasks: Vec<String> = snapshot
+        let host = runtime.kernel().expect("the kernel host must be wired");
+        assert!(host.process_completed(&pid).await.unwrap());
+        let snapshot = host.snapshot(&pid).await.unwrap().expect("aggregate");
+        let mut tasks: Vec<String> = snapshot
             .executions
             .keys()
             .map(|id| id.task_id.clone())
             .collect();
-        shadow_tasks.sort();
+        tasks.sort();
         assert_eq!(
-            shadow_tasks,
+            tasks,
             vec![
                 crate::utils::consts::TASK_ROOT_TID.to_string(),
                 "s1".into(),
                 "s2".into()
             ]
         );
+    }
+
+    /// The driver switch, action half: a waiting (Irq) act's Created message
+    /// comes from the kernel's outbox through the engine channel, and the
+    /// client's `act:complete` is served by the host — no legacy engine runs
+    /// on either side.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn kernel_engine_serves_client_actions_on_an_irq_workflow() {
+        use crate::event::EventAction;
+
+        let mut config = crate::Config::default();
+        config.data.kernel_engine = true;
+        config.data.tick_interval_secs = Some(1);
+        let engine = crate::Engine::builder()
+            .set_config(&config)
+            .start()
+            .await
+            .unwrap();
+        let workflow = {
+            let mut workflow = crate::model::Workflow::new().with_id("wf-irq");
+            workflow = workflow.with_step(|step| {
+                step.with_id("s1").with_uses(
+                    crate::utils::test::USES_IRQ,
+                    crate::Vars::new().with("key", "act1"),
+                )
+            });
+            workflow = workflow.with_step(|step| {
+                step.with_id("s2").with_uses(
+                    crate::utils::test::USES_IRQ,
+                    crate::Vars::new().with("key", "act2"),
+                )
+            });
+            workflow
+        };
+        let runtime = engine.runtime();
+        let host = runtime.kernel().expect("the kernel host must be wired");
+
+        // Subscribers attach BEFORE the start: the IRQ act's Created message
+        // fires the moment the act runs, and a late subscriber misses it.
+        let wait_for_created = |engine: &crate::Engine, key: &'static str| {
+            let sig = engine.signal((String::new(), String::new()));
+            let (done, done_rx) = (sig.clone(), sig.clone());
+            let channel = engine.channel();
+            channel.on_message(move |e| {
+                let done = done_rx.clone();
+                let key = key.to_string();
+                async move {
+                    if e.is_params_key(&key) && e.is_state(crate::MessageState::Created) {
+                        done.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+                        done.close();
+                    }
+                }
+            });
+            done
+        };
+        let created1 = wait_for_created(&engine, "act1");
+        let created2 = wait_for_created(&engine, "act2");
+
+        let proc = runtime.start(&workflow, crate::Vars::new()).await.unwrap();
+        let pid = proc.id().to_string();
+
+        // Each waiting act completes exactly when its client action arrives.
+        for created in [created1, created2] {
+            let (pid, tid) =
+                tokio::time::timeout(std::time::Duration::from_secs(30), created.recv())
+                    .await
+                    .expect("waiting act never created")
+                    .clone();
+            runtime
+                .do_action(&crate::event::Action::new(
+                    &pid,
+                    &tid,
+                    EventAction::Next,
+                    crate::Vars::new(),
+                ))
+                .await
+                .unwrap_or_else(|err| panic!("the kernel must serve act:complete: {err}"));
+        }
+
+        // The run settles once both acts are completed.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if host.process_completed(&pid).await.unwrap_or(false) {
+                break;
+            }
+            let states = host.snapshot(&pid).await.unwrap().map(|snapshot| {
+                snapshot
+                    .executions
+                    .iter()
+                    .map(|(id, execution)| format!("{}:{:?}", id.task_id, execution.state))
+                    .collect::<Vec<_>>()
+            });
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the run never settled: {states:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    }
+
+    /// Driver mode, IO half: the effect's headless scope names the run's own
+    /// directory, so a filesystem package reads `$env.WORK_DIR` (and
+    /// `Context::workdir`) as `<workdir>/<pid>` — the same directory the
+    /// legacy start made.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn kernel_engine_scopes_effects_to_the_run_workdir() {
+        let root = std::env::temp_dir().join(format!("acts-kernel-wd-{}", crate::utils::longid()));
+        let mut config = crate::Config::default();
+        config.data.kernel_engine = true;
+        config.data.tick_interval_secs = Some(1);
+        config.data.workdir = Some(root.display().to_string());
+        let engine = crate::Engine::builder()
+            .set_config(&config)
+            .start()
+            .await
+            .unwrap();
+        let sig = engine.signal(());
+        let done = sig.clone();
+        engine.channel().on_complete(move |_| {
+            let done = done.clone();
+            async move { done.close() }
+        });
+
+        let workflow = crate::model::Workflow::new()
+            .with_id("wf-workdir")
+            .with_step(|step| {
+                step.with_id("s1").with_uses(
+                    crate::utils::test::USES_SET,
+                    crate::Vars::new().with("dir", "${{ $env.WORK_DIR }}"),
+                )
+            });
+        let proc = engine
+            .runtime()
+            .start(&workflow, crate::Vars::new())
+            .await
+            .unwrap();
+        let pid = proc.id().to_string();
+        tokio::time::timeout(std::time::Duration::from_secs(30), sig.recv())
+            .await
+            .expect("engine never finished");
+
+        let host = engine.runtime().kernel().expect("host").clone();
+        let snapshot = host.snapshot(&pid).await.unwrap().unwrap();
+        let s1 = crate::kernel::ExecutionId::new("s1", 0).unwrap();
+        let dir = snapshot
+            .variables
+            .get(&(s1, "dir".to_string()))
+            .expect("the effect output")
+            .clone();
+        assert_eq!(
+            serde_json::from_str::<String>(&dir).unwrap(),
+            root.join(&pid).display().to_string()
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+        engine.close().await;
     }
 
     #[tokio::test]
@@ -2122,123 +2466,6 @@ mod tests {
             before.version, after.version,
             "a rejected action must not move the aggregate"
         );
-    }
-
-    /// Action parity floor: an IRQ workflow waits on both engines, the client
-    /// completes each act, and both engines settle with the same terminal
-    /// task set. The legacy side drives `Runtime::do_action`; the kernel
-    /// shadow mirrors it through the hook.
-    #[tokio::test(flavor = "multi_thread")]
-    #[serial_test::serial]
-    async fn kernel_shadow_mirrors_client_actions_on_irq_workflow() {
-        use crate::event::EventAction;
-
-        let mut config = crate::Config::default();
-        config.data.kernel_engine = true;
-        config.data.tick_interval_secs = Some(1);
-        let engine = crate::Engine::builder()
-            .set_config(&config)
-            .start()
-            .await
-            .unwrap();
-        let workflow = {
-            let mut workflow = crate::model::Workflow::new().with_id("wf-irq");
-            workflow = workflow.with_step(|step| {
-                step.with_id("s1").with_uses(
-                    crate::utils::test::USES_IRQ,
-                    crate::Vars::new().with("key", "act1"),
-                )
-            });
-            workflow = workflow.with_step(|step| {
-                step.with_id("s2").with_uses(
-                    crate::utils::test::USES_IRQ,
-                    crate::Vars::new().with("key", "act2"),
-                )
-            });
-            workflow
-        };
-        let runtime = engine.runtime();
-        let host = runtime.kernel().expect("kernel shadow host must be wired");
-
-        // Subscribers attach BEFORE the start: the IRQ act's Created message
-        // fires the moment the act runs, and a late subscriber misses it.
-        let wait_for_created = |engine: &crate::Engine, key: &'static str| {
-            let sig = engine.signal((String::new(), String::new()));
-            let (done, done_rx) = (sig.clone(), sig.clone());
-            let channel = engine.channel();
-            channel.on_message(move |e| {
-                let done = done_rx.clone();
-                let key = key.to_string();
-                async move {
-                    if e.is_params_key(&key) && e.is_state(crate::MessageState::Created) {
-                        done.update(|d| *d = (e.pid.clone(), e.tid.clone()));
-                        done.close();
-                    }
-                }
-            });
-            done
-        };
-        let created1 = wait_for_created(&engine, "act1");
-        let created2 = wait_for_created(&engine, "act2");
-
-        let proc = runtime.start(&workflow, crate::Vars::new()).await.unwrap();
-        let pid = proc.id().to_string();
-
-        // Each waiting act completes exactly when its client action arrives.
-        for created in [created1, created2] {
-            let (pid, tid) =
-                tokio::time::timeout(std::time::Duration::from_secs(30), created.recv())
-                    .await
-                    .expect("waiting act never created")
-                    .clone();
-            runtime
-                .do_action(&crate::event::Action::new(
-                    &pid,
-                    &tid,
-                    EventAction::Next,
-                    crate::Vars::new(),
-                ))
-                .await
-                .unwrap();
-        }
-
-        // Both sides settle on the same terminal task set.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        loop {
-            let shadow_done = host.process_completed(&pid).await.unwrap_or(false);
-            let legacy_done = legacy_completed(&engine, &pid).await;
-            if shadow_done && legacy_done {
-                break;
-            }
-            let shadow_states = host.snapshot(&pid).await.unwrap().map(|snapshot| {
-                snapshot
-                    .executions
-                    .iter()
-                    .map(|(id, execution)| format!("{}:{:?}", id.task_id, execution.state))
-                    .collect::<Vec<_>>()
-            });
-            let legacy_state = engine
-                .runtime()
-                .proc(&pid)
-                .await
-                .unwrap()
-                .map(|proc| proc.state());
-            assert!(
-                std::time::Instant::now() < deadline,
-                "shadow_done={shadow_done} legacy_done={legacy_done} legacy_state={legacy_state:?} shadow={shadow_states:?}"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        }
-    }
-
-    async fn legacy_completed(engine: &crate::Engine, pid: &str) -> bool {
-        engine
-            .runtime()
-            .proc(pid)
-            .await
-            .unwrap()
-            .map(|proc| proc.state().is_completed())
-            .unwrap_or(false)
     }
 
     /// The skip cascade: cancelling the waiting head of a chain skips the

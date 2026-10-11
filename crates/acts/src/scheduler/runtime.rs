@@ -60,8 +60,10 @@ pub struct Runtime {
     /// registry holds a stalled operation, and at least every
     /// [`OUTBOX_SWEEP_EVERY`] ticks as a safety net.
     outbox_dirty: Arc<AtomicBool>,
-    /// The deterministic kernel host shadow-running every new process when
-    /// `Config::kernel_engine` is set. Never serves: mismatches are logged.
+    /// The deterministic kernel host. With `Config::kernel_engine` set the
+    /// host *is* the engine: it owns every started process (start, actions,
+    /// effects, messages) and the legacy scheduler is never launched; without
+    /// it the host is absent and the legacy engine serves.
     kernel: Option<Arc<crate::kernel_host::KernelHost>>,
 }
 
@@ -443,37 +445,44 @@ impl Runtime {
             proc.set_owner_scope(owner);
         }
 
-        self.launch(&proc).await?;
-
-        if proc.state().is_none() {
-            info!(pid = %proc_id, mid = %model.id, name = %model.name, "process parked — waiting for a free slot");
-        } else {
-            info!(pid = %proc_id, mid = %model.id, name = %model.name, "process started");
-        }
-        if let Some(host) = &self.kernel {
-            let package = self.package.clone();
-            let run_as = move |id: &str| package.get(id).map(|register| (register.meta)().run_as);
-            match crate::kernel_host::ProcessSpec::from_workflow(&proc_id, model, &run_as) {
-                Ok(spec) => {
-                    let spec = spec
+        match &self.kernel {
+            // Driver mode (`Config::kernel_engine` on): the kernel owns the
+            // run. The legacy scheduler is never launched and writes no
+            // process/task rows — so the `Process` built above exists only to
+            // answer this call's own API (its id, and any object the caller
+            // holds); the durable read model arrives with the row-projection
+            // slice. The model facts, the run's authority and its start
+            // inputs all seed the aggregate, which is the record from here on.
+            Some(host) => {
+                let package = self.package.clone();
+                let run_as =
+                    move |id: &str| package.get(id).map(|register| (register.meta)().run_as);
+                // An unimportable model is refused here, not silently
+                // skipped: in driver mode there is no legacy engine to fall
+                // back on.
+                let spec =
+                    crate::kernel_host::ProcessSpec::from_workflow(&proc_id, model, &run_as)?
                         .with_owner(owner.clone().unwrap_or_default())
                         .with_vars(&options);
-                    if let Err(error) = host.start_process(&spec).await {
-                        warn!(pid = %proc_id, error = %error, "kernel shadow start failed");
-                    }
-                }
-                Err(error) => {
-                    tracing::debug!(pid = %proc_id, error = %error, "kernel shadow skipped");
+                host.start_process(&spec).await?;
+                info!(pid = %proc_id, mid = %model.id, name = %model.name, "process started (kernel)");
+            }
+            None => {
+                self.launch(&proc).await?;
+
+                if proc.state().is_none() {
+                    info!(pid = %proc_id, mid = %model.id, name = %model.name, "process parked — waiting for a free slot");
+                } else {
+                    info!(pid = %proc_id, mid = %model.id, name = %model.name, "process started");
                 }
             }
         }
         Ok(proc)
     }
 
-    /// The kernel shadow host, when `Config::kernel_engine` is on. Consumed
-    /// by the shadow-wiring test today; the executor cutover slice (P2) is
-    /// what reads it from the serving paths, so `dead_code` cannot yet see
-    /// the future caller.
+    /// The serving kernel host, when `Config::kernel_engine` is on. The
+    /// engine-level driver tests read it to inspect an aggregate; the serving
+    /// paths hold the field directly.
     #[allow(dead_code)]
     pub(crate) fn kernel(&self) -> Option<&Arc<crate::kernel_host::KernelHost>> {
         self.kernel.as_ref()
@@ -553,6 +562,12 @@ impl Runtime {
 
     #[instrument(skip(self, action), fields(pid = %action.pid, tid = %action.tid, event = ?action.event))]
     pub async fn do_action(self: &Arc<Self>, action: &Action) -> Result<()> {
+        // Driver mode: the kernel serves every action. No resident-process
+        // dance — the aggregate is the record and `apply_action` re-plans
+        // against its authoritative snapshot.
+        if let Some(host) = self.kernel.clone() {
+            return Self::kernel_action(&host, action).await;
+        }
         debug!("action received");
         let proc = self.cache.proc(&action.pid, self).await?;
         // A full resident set makes `cache.proc` return a loaded-but-uncached
@@ -566,11 +581,7 @@ impl Runtime {
         let resident = self.cache.resident(&action.pid);
         match proc {
             Some(proc) if resident.is_some_and(|r| Arc::ptr_eq(&r, &proc)) => {
-                let result = proc.do_action(action).await;
-                if result.is_ok() {
-                    self.shadow_action(action);
-                }
-                result
+                proc.do_action(action).await
             }
             Some(_) => Err(ActError::Runtime(format!(
                 "process '{}' is in flight but not resident; retry the action",
@@ -583,24 +594,22 @@ impl Runtime {
         }
     }
 
-    /// Mirror one applied client action into the kernel shadow host. The
-    /// shadow never blocks or fails the served action: a divergence is a
-    /// warning, which is exactly the signal the parity harness collects.
-    /// Legacy actions name the running act (a random task id); the kernel
-    /// execution is keyed by the model node id of the act's step, so the
-    /// hook resolves the act up to its step first.
-    fn shadow_action(self: &Arc<Self>, action: &Action) {
-        let Some(host) = self.kernel.clone() else {
-            return;
-        };
-        let Some(kind) = Self::shadow_kind(action) else {
-            tracing::debug!(
-                pid = %action.pid,
-                tid = %action.tid,
-                event = ?action.event,
-                "action has no kernel equivalent yet; shadow skipped"
-            );
-            return;
+    /// Serve one client action through the kernel host. The kernel's messages
+    /// are keyed by model node id, so the client's `tid` is already the
+    /// execution's — no act-up-to-step resolution is involved. The action is
+    /// planned against the aggregate's authoritative snapshot: an action that
+    /// lands while the target is still propagating is refused with
+    /// `ActionNotAllowed` and the client retries, exactly as the legacy
+    /// resident check refused a non-resident process.
+    async fn kernel_action(
+        host: &Arc<crate::kernel_host::KernelHost>,
+        action: &Action,
+    ) -> Result<()> {
+        let Some(kind) = Self::kernel_kind(action) else {
+            return Err(ActError::Action(format!(
+                "action {:?} is not served by the kernel engine",
+                action.event
+            )));
         };
         let inputs: Vec<(String, String)> = action
             .options
@@ -610,66 +619,14 @@ impl Runtime {
                 other => (key.clone(), other.to_string()),
             })
             .collect();
-        let pid = action.pid.clone();
-        let tid = action.tid.clone();
-        let runtime = self.clone();
-        tokio::spawn(async move {
-            let resolve_step = async {
-                let proc = runtime.proc(&pid).await.ok()??;
-                let task = proc.task(&tid)?;
-                // The kernel execution is keyed by the MODEL node id; legacy
-                // task ids are minted at runtime, so walk to the owning step
-                // and take its node id.
-                if task.node().kind() == crate::NodeKind::Act {
-                    let parent = task.parent(&proc)?;
-                    Some(parent.node().id().to_string())
-                } else {
-                    Some(task.node().id().to_string())
-                }
-            };
-            match resolve_step.await {
-                Some(step_tid) => {
-                    // The served action may land while the shadow is still
-                    // propagating (the target execution is still `Created`).
-                    // The shadow never drops that: it retries until the state
-                    // catches up or the budget runs out.
-                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-                    loop {
-                        match host
-                            .apply_action(&pid, &step_tid, kind.clone(), inputs.clone())
-                            .await
-                        {
-                            Ok(()) => break,
-                            Err(error) => {
-                                let retryable = format!("{error}").contains("ActionNotAllowed")
-                                    && std::time::Instant::now() < deadline;
-                                if !retryable {
-                                    #[cfg(test)]
-                                    eprintln!(
-                                        "kernel shadow action diverged pid={pid} tid={step_tid}: {error}"
-                                    );
-                                    warn!(pid = %pid, tid = %step_tid, error = %error, "kernel shadow action diverged");
-                                    break;
-                                }
-                                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                            }
-                        }
-                    }
-                }
-                None => {
-                    #[cfg(test)]
-                    eprintln!(
-                        "kernel shadow could not resolve the action's step pid={pid} tid={tid}"
-                    );
-                    warn!(pid = %pid, tid = %tid, "kernel shadow could not resolve the action's step");
-                }
-            }
-        });
+        host.apply_action(&action.pid, &action.tid, kind, inputs)
+            .await
     }
 
-    /// Map a legacy wire event to its kernel action. `Next` is the wire name of
-    /// "complete"; `Push`/`Remove`/`SetProcessVars` have no kernel equivalent yet.
-    fn shadow_kind(action: &Action) -> Option<crate::kernel::ActionKind> {
+    /// Map a wire event to its kernel action. `Next` is the wire name of
+    /// "complete"; `Push`/`Remove`/`SetProcessVars` have no kernel equivalent
+    /// yet, and in driver mode there is no legacy engine to serve them.
+    fn kernel_kind(action: &Action) -> Option<crate::kernel::ActionKind> {
         use crate::event::EventAction as E;
         use crate::kernel::ActionKind as K;
         Some(match action.event {
@@ -687,7 +644,7 @@ impl Runtime {
                 message: action
                     .options
                     .get::<String>("message")
-                    .unwrap_or_else(|| "shadow error".into()),
+                    .unwrap_or_else(|| "kernel error".into()),
             },
             E::Push | E::Remove | E::SetProcessVars => return None,
         })
@@ -1506,9 +1463,10 @@ impl Runtime {
         let shutdown = CancellationToken::new();
         let schema_cache = Arc::new(SchemaCache::new());
         let snapshots = Arc::new(SnapshotRegistry::new());
-        // The deterministic kernel shadow-host: owns its own driver task over
-        // the same key-value store, woken per hop, ticked for recovery and
-        // outbox delivery. Shadow only — its results are never served.
+        // The deterministic kernel host, when `kernel_engine` is on: it owns
+        // its own driver task over the same key-value store, woken per hop,
+        // ticked for recovery and outbox delivery — and it *serves* (starts,
+        // actions, effects, messages); the legacy scheduler is never launched.
         let kernel = if config.kernel_engine() {
             let (host, wake_rx) = crate::kernel_host::KernelHost::new(cache.store().kv());
             let driver = host.clone();
@@ -1541,6 +1499,26 @@ impl Runtime {
         });
 
         runtime.initialize()?;
+        // The driver seams: with `kernel_engine` on the host serves, so the
+        // effect runner (Func packages execute for real) and the outbox
+        // transport (records become engine messages) are attached to the
+        // serving host — not the shadow's log-only transport. The
+        // process-lifecycle sink mirrors the legacy `on_proc` events.
+        if let Some(host) = &runtime.kernel {
+            host.attach_effect_runner(Arc::new(crate::kernel_host::PackageEffectRunner::new(
+                runtime.clone(),
+            )));
+            let emitter = runtime.emitter.clone();
+            host.attach_outbox_transport(Box::new(crate::kernel_host::MessageForwarder::new(
+                move |msg: &crate::Message| emitter.emit_message(msg),
+            )));
+            let emitter = runtime.emitter.clone();
+            host.attach_lifecycle_sink(Box::new(move |msg, event| match event {
+                crate::kernel_host::ProcessEvent::Started => emitter.emit_start_event(msg),
+                crate::kernel_host::ProcessEvent::Completed => emitter.emit_complete_event(msg),
+                crate::kernel_host::ProcessEvent::Errored => emitter.emit_error(msg),
+            }));
+        }
         Ok(runtime)
     }
 
@@ -1946,7 +1924,7 @@ impl Runtime {
 /// separator is rejected elsewhere, because it was previously only ever a
 /// store-key part), and a pid like `../..` would place the process outside the
 /// root it was given.
-fn prepare_workdir(root: &std::path::Path, pid: &str) -> Result<std::path::PathBuf> {
+pub(crate) fn prepare_workdir(root: &std::path::Path, pid: &str) -> Result<std::path::PathBuf> {
     if !is_workdir_segment(pid) {
         return Err(ActError::Action(format!(
             "proc id '{pid}' cannot be used as a workdir name: it must be a single path component without '.' or '..'"

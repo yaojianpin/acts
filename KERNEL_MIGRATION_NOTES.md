@@ -109,6 +109,33 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
   对跑 legacy 实测(同一 engine/owner/快照,scope 键来自启动 inputs):kernel 效果
   输出 = legacy 包收到的 params(kernel 聚合变量是值的 JSON 编码);属主缺 scope
   授权 → 效果 `Failed`(Denied),无 token 输出泄漏。
+- executor 移植第 5 片:运行时接线(驱动档)。`Config.kernel_engine` 从「影子」
+  改为「驱动」——开关打开时 kernel 就是引擎:
+  (a) `Runtime::create` 给宿主接 `PackageEffectRunner`、`MessageForwarder`
+  (outbox → `Emitter::emit_message`,act 级消息)与**进程生命周期 sink**
+  (`ProcessEvent::Started/Completed/Errored`);host 每个 hop 提交后按新快照上报:
+  存活 → Start;全终态 → root `Failed` 走 Errored(读 root 的 error.code/message)、
+  其余终态走 Completed 并按 `model.exposes` 校验 outputs(失败转 Errored)——
+  对齐 legacy `on_proc`;上报每进程一次(内存去重,同 legacy 事件语义)。
+  (b) `Runtime::do_action` 直接路由 `host.apply_action`:kernel 消息以模型节点 id
+  为 tid,客户端 tid 已是执行键,无需 act→step 上溯,也没有 resident 检查与
+  shadow 镜像(影子钩子删除);`act:push/remove/set_process_vars` 无 kernel 对应,
+  驱动档下显式报错而非静默降级。
+  (c) `Runtime::start` 驱动档只建聚合(owner + 启动 inputs)并 `start_process`,
+  **不 launch**、不写 proc/task 行;返回的 `Process` 仅供本调用 API 的 id
+  (`runtime.proc(pid)` 为 None,进程目录仍照 config.workdir 创建)。
+  (d) headless 效果作用域带进程 workdir:`<workdir>/<pid>`(复用
+  `prepare_workdir`),`$env.WORK_DIR`/`Context::workdir` 与 legacy 同名同目录,
+  IO 类包不再失去目录约束。
+  engine 级实测(kernel_engine=on,host 作为引擎驱动):Func 链经 channel
+  `on_complete` 收到完成事件、聚合全终态、`runtime.proc(pid)` 为 None;Irq 步的
+  Created 消息由 kernel outbox 经 emitter 送达 channel(订阅者按 params key 命中)、
+  `act:complete` 由 host 服务并收口;`${{ $env.WORK_DIR }}` 效果参数 =
+  `<workdir>/<pid>`。
+  已知边界(后续片):读 API(proc/task/msg 行)未投影,驱动档下为空 —— 属行投影片;
+  包上下文写回(`$set`/`set_env`/task data 等 headless 写)未折回聚合;Msg 出站消息
+  与 Irq 的包执行未接(消息 parity 片);进程目录 `<workdir>/<pid>` 由 legacy
+  sweeper(随行)清理,行投影前驱动档下不会回收。
 
 ## 已对齐(无需动)
 
@@ -121,11 +148,12 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
 
 1. **executor 移植(行投影+重启判别的真前置,拆多片)**:已落效果接缝
    (effects.rs)、act 消息记录、transport 接线与 Message 映射、效果参数对聚合
-   变量求值、效果参数 sealed/快照对齐(owner + legacy `ctx.prepare()` 路径)。
-   后续片:运行时接线(`Config.kernel_engine` 驱动档:legacy 不启动,kernel
-   驱动,emitter/IO 包此时才接)——之后才轮到 行投影 + 重启判别:proc/task/vars
-   行改为 CommitReceipt 投影,重启判别按 `kernel/aggregates/<pid>` 存在性
-   (`AsyncAggregateRepository::load`)优先于 proc 行。
+   变量求值、效果参数 sealed/快照对齐(owner + legacy `ctx.prepare()` 路径)、
+   运行时接线(驱动档:kernel 自持 start/动作/效果/消息/进程事件,legacy 不启动)。
+   后续片:**行投影 + 重启判别**(下一片):proc/task/vars 行改为 CommitReceipt
+   投影(驱动档的读 API proc/task/msg 依赖它),以及包上下文写回($set/set_env/
+   task data 折回聚合)、Msg 出站消息与 Irq 包执行(消息 parity);重启判别按
+   `kernel/aggregates/<pid>` 存在性(`AsyncAggregateRepository::load`)优先于 proc 行。
 2. **谓词求值失败的失败路径**:legacy 分支 `if` 求值出错→任务 Error;阴影当前
    InvalidDecision 留存重试(可见但无 catch)。与 Error×catch parity 一并处理
    (catch 分支同样未导入)。

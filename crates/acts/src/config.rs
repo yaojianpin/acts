@@ -83,10 +83,12 @@ pub struct ConfigData {
     /// control, and a process may touch whatever the server's own account
     /// can.
     pub workdir: Option<String>,
-    /// Shadow-run every new process through the deterministic kernel host in
-    /// addition to the regular engine. The kernel path never serves yet: a
-    /// mismatch or failure is logged, never propagated. Flat workflow models
-    /// only; nested models skip the shadow silently.
+    /// Run every process on the deterministic kernel host — the kernel *is*
+    /// the engine: it owns starts, client actions, package effects and
+    /// channel messages, and the regular scheduler is never launched. Off by
+    /// default (the legacy engine serves). The durable read model
+    /// (proc/task/msg rows) is not projected yet, so the row-reading APIs are
+    /// empty while this is on.
     #[serde(default)]
     pub kernel_engine: bool,
     // log config

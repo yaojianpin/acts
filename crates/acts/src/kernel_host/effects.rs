@@ -1,9 +1,11 @@
 //! The effect seam: running a Func package's work inside the host's
 //! `ApplyAction` hop.
 //!
-//! The shadow auto-completes; a runner attached to the host makes the hop
-//! execute the step's package for real and fold its outputs into the same
-//! atomic commit that completes the execution. The contract is the legacy
+//! A host driving without an attached runner auto-completes (the bare
+//! contract the kernel's own tests use); the serving host has
+//! [`PackageEffectRunner`] attached, which executes the step's package for
+//! real and folds its outputs into the same atomic commit that completes the
+//! execution. The contract is the legacy
 //! engine's own: the effect runs before the state commits (at-least-once —
 //! a crash between effect and commit re-runs the package on recovery,
 //! exactly like the legacy `exec` → persist ordering).
@@ -82,6 +84,14 @@ impl EffectRunner for PackageEffectRunner {
         let process = Process::new(&request.process_id, &self.runtime);
         process.load(&request.model)?;
         process.set_owner_scope(&request.owner);
+        // The run's own directory (`<workdir>/<pid>`), named exactly as the
+        // legacy start named it: `Context::workdir` and `$env.WORK_DIR` answer
+        // it, so a filesystem package is confined to the same directory it
+        // would be under the legacy engine.
+        if let Some(root) = self.runtime.config().workdir() {
+            let dir = crate::scheduler::prepare_workdir(&root, &request.process_id)?;
+            process.set_workdir(&dir);
+        }
         let node = process
             .tree()
             .node(&request.task_id)

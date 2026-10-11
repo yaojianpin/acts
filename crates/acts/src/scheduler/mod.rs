@@ -20,6 +20,7 @@ pub use crate::Result;
 pub use context::Context;
 pub use process::{Process, Task};
 pub use runtime::Runtime;
+pub(crate) use runtime::prepare_workdir;
 pub use state::{PropagationPhase, TaskState};
 
 #[allow(unused_imports)]
