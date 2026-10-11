@@ -857,6 +857,33 @@ impl KernelHost {
                     "started",
                     "task.started",
                 )?;
+                // The act message: every `uses` step announces itself to the
+                // client when it starts (the legacy act's `Created` message —
+                // Irq waits on it, Msg informs, Func pairs it with the later
+                // completion). The durable record rides the outbox; the
+                // attached transport turns it into the engine's message.
+                if let Some(execution) = execution.as_ref()
+                    && let Some((uses, params)) =
+                        self.step_uses(&snapshot, &execution.model_node)?
+                {
+                    let key = format!(
+                        "message.created:{}:{}:{}",
+                        id.process_id, id.task_id, id.generation
+                    );
+                    let exists = snapshot.outbox.keys().any(|outbox_id| outbox_id.key == key);
+                    if !exists {
+                        plan.outbox.push(crate::kernel::OutboxIntent {
+                            key,
+                            topic: "message.created".into(),
+                            payload: serde_json::json!({
+                                "nid": id.task_id,
+                                "uses": uses,
+                                "params": params,
+                            })
+                            .to_string(),
+                        });
+                    }
+                }
                 if !action_exists && auto {
                     plan.operations.push(OperationIntent {
                         id: action_id,
@@ -1293,6 +1320,25 @@ impl KernelHost {
                 crate::kernel::ActionPlanner::plan(snapshot, &command).map_err(runtime)
             }
         }
+    }
+
+    /// The `(uses, raw params)` of a `uses` step node, from the durable
+    /// model — the act message's and the effect seam's package facts.
+    fn step_uses(
+        &self,
+        snapshot: &crate::kernel::AggregateSnapshot,
+        model_node: &crate::kernel::NodeId,
+    ) -> Result<Option<(String, serde_json::Value)>> {
+        let Some(model) = model_of(snapshot)? else {
+            return Ok(None);
+        };
+        let Some(step) = find_step_in_model(&model, model_node.as_str()) else {
+            return Ok(None);
+        };
+        let Some(uses) = step.uses.clone().filter(|uses| !uses.trim().is_empty()) else {
+            return Ok(None);
+        };
+        Ok(Some((uses, step.params.clone())))
     }
 
     /// The effect request for an auto `uses` step, when a runner is attached:
@@ -3145,6 +3191,151 @@ mod tests {
     }
 
     // ---- the effect seam: Func packages run inside the ApplyAction hop ----
+
+    /// Every `uses` step writes a durable `message.created` record when it
+    /// starts — the legacy act's Created message: the Irq step waits on it
+    /// (Waiting), the Func step pairs it with its completion.
+    #[tokio::test]
+    async fn uses_steps_write_created_message_records() {
+        // A registry with one Func and one Irq package, so the run_as
+        // decisions match the shapes under test.
+        struct LocalFuncPackage;
+        #[async_trait::async_trait]
+        impl crate::package::ActPackage for LocalFuncPackage {
+            fn new(_: &crate::Config) -> crate::Result<Self> {
+                Ok(Self)
+            }
+            fn definition() -> crate::package::ActPackageDefinition {
+                crate::package::ActPackageDefinition {
+                    id: "test.func",
+                    name: "Func",
+                    desc: "",
+                    icon: "",
+                    doc: "",
+                    version: "0.1.0",
+                    schema: serde_json::json!({}),
+                    options: None,
+                    run_as: crate::package::ActRunAs::Func,
+                    resources: Vec::new(),
+                    catalog: crate::package::ActPackageCatalog::App,
+                }
+            }
+        }
+        struct LocalIrqPackage;
+        #[async_trait::async_trait]
+        impl crate::package::ActPackage for LocalIrqPackage {
+            fn new(_: &crate::Config) -> crate::Result<Self> {
+                Ok(Self)
+            }
+            fn definition() -> crate::package::ActPackageDefinition {
+                crate::package::ActPackageDefinition {
+                    id: "test.irq",
+                    name: "Irq",
+                    desc: "",
+                    icon: "",
+                    doc: "",
+                    version: "0.1.0",
+                    schema: serde_json::json!({}),
+                    options: None,
+                    run_as: crate::package::ActRunAs::Irq,
+                    resources: Vec::new(),
+                    catalog: crate::package::ActPackageCatalog::App,
+                }
+            }
+        }
+        let package = crate::package::Package::default();
+        package.register(
+            "test.func",
+            &crate::package::ActPackageRegister::new::<LocalFuncPackage>(),
+        );
+        package.register(
+            "test.irq",
+            &crate::package::ActPackageRegister::new::<LocalIrqPackage>(),
+        );
+        let run_as = move |id: &str| package.get(id).map(|register| (register.meta)().run_as);
+
+        let (host, mut wake_rx) = KernelHost::in_memory();
+        let workflow = crate::model::Workflow::new()
+            .with_step(|step| {
+                step.with_id("s1")
+                    .with_uses("test.func", crate::Vars::new().with("k1", "v1"))
+            })
+            .with_step(|step| {
+                step.with_id("s2")
+                    .with_uses("test.irq", crate::Vars::new().with("key", "irq-1"))
+            });
+        let spec = ProcessSpec::from_workflow("p-msg", &workflow, &run_as).unwrap();
+        host.start_process(&spec).await.unwrap();
+        host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+
+        let snapshot = host.snapshot("p-msg").await.unwrap().unwrap();
+        let message_of = |nid: &str| {
+            snapshot
+                .outbox
+                .values()
+                .find(|record| {
+                    record.topic == "message.created"
+                        && serde_json::from_str::<serde_json::Value>(&record.payload)
+                            .ok()
+                            .and_then(|payload| {
+                                payload
+                                    .get("nid")
+                                    .and_then(|nid| nid.as_str())
+                                    .map(String::from)
+                            })
+                            .as_deref()
+                            == Some(nid)
+                })
+                .unwrap_or_else(|| panic!("no message.created record for '{nid}'"))
+        };
+        let s1_message = message_of("s1");
+        let s1_payload: serde_json::Value = serde_json::from_str(&s1_message.payload).unwrap();
+        assert_eq!(s1_payload["uses"], "test.func");
+        assert_eq!(s1_payload["params"]["k1"], "v1");
+        let s2_message = message_of("s2");
+        let s2_payload: serde_json::Value = serde_json::from_str(&s2_message.payload).unwrap();
+        assert_eq!(s2_payload["uses"], "test.irq");
+        assert_eq!(s2_payload["params"]["key"], "irq-1");
+
+        // The Irq execution is parked on its message; the plain leaf behind
+        // it waits for the client.
+        let state = |task: &str| state_of(&snapshot, task);
+        assert_eq!(state("s2"), crate::kernel::ExecutionState::Waiting);
+        assert_eq!(state("s1"), crate::kernel::ExecutionState::Completed);
+
+        // The records are deliverable: a transport sees them like any other
+        // outbox record.
+        struct RecordingTransport {
+            topics: parking_lot::Mutex<Vec<String>>,
+        }
+        impl crate::kernel::OutboxTransport for RecordingTransport {
+            fn deliver(&mut self, record: &OutboxRecord) -> DeliveryOutcome {
+                self.topics.lock().push(record.topic.clone());
+                DeliveryOutcome::Delivered {
+                    receipt: "ok".into(),
+                }
+            }
+        }
+        let mut transport = RecordingTransport {
+            topics: parking_lot::Mutex::new(Vec::new()),
+        };
+        host.dispatch_outbox(&mut transport).await.unwrap();
+        let delivered = transport.topics.into_inner();
+        assert_eq!(
+            delivered
+                .iter()
+                .filter(|topic| *topic == "message.created")
+                .count(),
+            2,
+            "both uses steps announced themselves: {delivered:?}"
+        );
+        // A second pass delivers nothing: every record was confirmed.
+        let mut again = RecordingTransport {
+            topics: parking_lot::Mutex::new(Vec::new()),
+        };
+        let redelivered = host.dispatch_outbox(&mut again).await.unwrap();
+        assert_eq!(redelivered, 0, "delivered records are not redelivered");
+    }
 
     /// The parity contract for decision walks: every node legacy decided
     /// carries exactly the kernel's state, and the kernel's extra nodes (the

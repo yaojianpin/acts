@@ -73,6 +73,14 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
   消息发射与 Msg 出站消息不在本片(消息 parity 另拆)。宿主不附 runner 时行为
   不变(阴影自动完成);运行时接线与 cutover 翻转是后续片(阴影期先跑真实效果
   会有双执行,IO 类包必须等驱动切换)。
+- executor 移植第 2 片:act 消息。每个 `uses` step 的 ExecuteTask hop 写一条
+  **持久 outbox 记录** `message.created`(payload JSON:nid/uses/params 原始模型
+  值;key 带 pid+nid+gen,一代一条),由附接的 transport 投递——outbox 的
+  claim/confirm 给消息幂等投递与崩溃重放,对齐宿主架构;Irq 执行即 Waiting 在
+  其消息上,Func 执行随后完成(legacy Created+Completed 对)。驱动翻转时
+  transport 把记录转成引擎 Message(tid=节点 id,与动作钩子同键);阴影期
+  ShadowTransport 仍只记日志,无双投。已完成消息暂由 task.completed 记录承载,
+  事件名映射属 transport 接线片。
 
 ## 已对齐(无需动)
 
@@ -84,11 +92,13 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
 ## 剩余工作(按序)
 
 1. **executor 移植(行投影+重启判别的真前置,拆多片)**:已落效果接缝
-   (effects.rs)。后续片:Irq 的消息发射 + Msg 出站(消息 parity)、params 的
+   (effects.rs)与 act 消息记录(message.created outbox)。后续片:transport
+   接线(记录→引擎 Message 的映射,Completed 消息随 task.completed)、params 的
    sealed/快照解析对齐、然后运行时接线(`Config.kernel_engine` 驱动档:legacy 不
-   启动,kernel 驱动,IO 类包此时才接真效果)——之后才轮到 行投影 + 重启判别:
-   proc/task/vars 行改为 CommitReceipt 投影,重启判别按 `kernel/aggregates/<pid>`
-   存在性(`AsyncAggregateRepository::load`)优先于 proc 行。
+   启动,kernel 驱动,IO 类包与真消息投递此时才接)——之后才轮到 行投影 +
+   重启判别:proc/task/vars 行改为 CommitReceipt 投影,重启判别按
+   `kernel/aggregates/<pid>` 存在性(`AsyncAggregateRepository::load`)优先于
+   proc 行。
 2. **谓词求值失败的失败路径**:legacy 分支 `if` 求值出错→任务 Error;阴影当前
    InvalidDecision 留存重试(可见但无 catch)。与 Error×catch parity 一并处理
    (catch 分支同样未导入)。
