@@ -626,7 +626,7 @@ impl Runtime {
         host: &Arc<crate::kernel_host::KernelHost>,
         action: &Action,
     ) -> Result<()> {
-        let Some(kind) = Self::kernel_kind(action) else {
+        let Some(kind) = Self::kernel_kind(action)? else {
             return Err(ActError::Action(format!(
                 "action {:?} is not served by the kernel engine",
                 action.event
@@ -647,28 +647,39 @@ impl Runtime {
     /// Map a wire event to its kernel action. `Next` is the wire name of
     /// "complete"; `Push`/`Remove`/`SetProcessVars` have no kernel equivalent
     /// yet, and in driver mode there is no legacy engine to serve them.
-    fn kernel_kind(action: &Action) -> Option<crate::kernel::ActionKind> {
+    ///
+    /// The error action carries the *legacy* input names — `ecode` (required
+    /// there, and what `$ecode()` reads from the task's data) and `message` —
+    /// so a client's error means the same thing on both engines.
+    fn kernel_kind(action: &Action) -> Result<Option<crate::kernel::ActionKind>> {
         use crate::event::EventAction as E;
         use crate::kernel::ActionKind as K;
-        Some(match action.event {
+        use crate::utils::consts as names;
+        let kind = match action.event {
             E::Next => K::Complete,
             E::Submit => K::Submit,
             E::Back => K::Back,
             E::Cancel => K::Cancel,
             E::Abort => K::Abort,
             E::Skip => K::Skip,
-            E::Error => K::Fail {
-                code: action
-                    .options
-                    .get::<String>("code")
-                    .unwrap_or_else(|| "error".into()),
-                message: action
-                    .options
-                    .get::<String>("message")
-                    .unwrap_or_else(|| "kernel error".into()),
-            },
-            E::Push | E::Remove | E::SetProcessVars => return None,
-        })
+            E::Error => {
+                let Some(code) = action.options.get::<String>(names::ACT_ERR_CODE) else {
+                    return Err(ActError::Action(format!(
+                        "cannot find '{}' in options",
+                        names::ACT_ERR_CODE
+                    )));
+                };
+                K::Fail {
+                    code,
+                    message: action
+                        .options
+                        .get::<String>(names::ACT_ERR_MESSAGE)
+                        .unwrap_or_default(),
+                }
+            }
+            E::Push | E::Remove | E::SetProcessVars => return Ok(None),
+        };
+        Ok(Some(kind))
     }
 
     /// Durable outbox enqueue for a `next` operation: a `Pending` outbox record

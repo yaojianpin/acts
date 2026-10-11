@@ -222,8 +222,18 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
     重读快照重新规划;**拒绝类**错误照旧立即返回),`run_reentry` 在自己内部重试(重入是
     cancel/back 的实质,丢了即 run 卡死;失败尝试留下的 carrier op 是惰性的 —— 其执行已决,hop
     提交空余量)。repository 失败按类型归一:`CommitError::VersionConflict`(stale plan)与 CAS
-    `Conflict` 变体都归为 ECONFLICT 类(新增 `repository_error`,kernel 侧导出
+     `Conflict` 变体都归为 ECONFLICT 类(新增 `repository_error`,kernel 侧导出
     `AsyncRepositoryError`),执行 hop 的冲突语义不变(仍是留给 recovery 重推)。
+
+ - 错误动作输入名对齐(catch 的另一前置):`Runtime::kernel_kind` 原来读 `code`/`message` 并各自
+   给默认值,而 legacy 读的是 `ecode`(**必填**,缺了报 "cannot find 'ecode' in options")与
+   `message` —— 并且 `$ecode()` 读的正是任务 data 里的 `ecode`。现在驱动档按 legacy 名映射
+   (缺 `ecode` 同样报错),于是同一条 `act:error` 在两引擎落到同一节点、同一 code。注意:客户端
+   的 `ecode`/`message` 会作为普通 scope 变量写进该执行(legacy `task.set_data(&ctx.vars())`
+   同),所以 catch 分支的 `$ecode()` 从作用域链上就能读到失败步的 code —— catch 接入时不再需要
+   额外的别名映射。
+   对跑实测(`kernel_error_action_carries_the_legacy_inputs`):两侧 step 行的 `err` 字符串完全
+   相等(`{"ecode":"boom","message":"boom-msg"}`)。
 
 ## 已对齐(无需动)
 
@@ -238,7 +248,9 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
    把 Catch 子节点按 `TASK_SIGN = CATCH` 调度、该 step 回到 Running,`auto_complete` 再判:
    全部 CATCH 子 skip → 错误继续上浮,有 CATCH 子完成 → 该 step 完成(错误被接住);
    `timeouts` 同形(`Step::on_timeout`,先落 `$cost()`)。**前置已就绪**:谓词求值已在引擎表达式
-   环境上(见上),catch 分支用 `$ecode()` 选错误码(`examples/catches/model.yml`)可判。
+   环境上(见上),catch 分支用 `$ecode()` 选错误码(`examples/catches/model.yml`)可判;错误动作的
+   `ecode`/`message` 输入名也已对齐(见上),`ecode` 作为普通 scope 变量落在失败步上,作用域链即可
+   读到 —— 接入 catch 只剩准入/路由本身。
    接入方案(已推演,未实施):(i) 失败 hop 发现该节点声明了 catch → 不再走 `failure_plan`,
    而是**保持该执行的 Running**、写错误变量,并把每个 catch step 作为容器子执行准入(Entry,
    各自内部链由它自己的 fan-out 接管);(ii) headless 谓词作用域要把错误变量按 legacy 名

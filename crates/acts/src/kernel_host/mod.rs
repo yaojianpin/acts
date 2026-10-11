@@ -3836,6 +3836,113 @@ mod tests {
         assert_eq!(kernel_completed, legacy_completed);
     }
 
+    /// A client's `act:error` carries the legacy inputs (`ecode`, `message`):
+    /// the failure must land on the same node with the same code on both
+    /// engines — what `$ecode()` reads for a catch is this code.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn kernel_error_action_carries_the_legacy_inputs() {
+        use crate::event::EventAction;
+
+        /// Drive one engine: start, error the waiting act with `ecode`, then
+        /// hand back the step's durable error.
+        async fn run_error(kernel_engine: bool) -> Option<String> {
+            let workflow = crate::model::Workflow::new()
+                .with_id("wf-error-action")
+                .with_step(|step| {
+                    step.with_id("s1").with_uses(
+                        crate::utils::test::USES_IRQ,
+                        crate::Vars::new().with("key", "err-act"),
+                    )
+                });
+            let mut config = crate::Config::default();
+            config.data.kernel_engine = kernel_engine;
+            config.data.tick_interval_secs = Some(1);
+            let engine = crate::Engine::builder()
+                .set_config(&config)
+                .start()
+                .await
+                .unwrap();
+            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
+            engine.channel().on_message(move |e| {
+                let tx = tx.clone();
+                async move {
+                    if e.r#type == "act"
+                        && e.is_params_key("err-act")
+                        && e.state == crate::MessageState::Created
+                    {
+                        let _ = tx.send((e.pid.clone(), e.tid.clone()));
+                    }
+                }
+            });
+            let runtime = engine.runtime();
+            runtime
+                .start(
+                    &workflow,
+                    crate::Vars::new().with(crate::utils::consts::PROCESS_ID, "p_err_action"),
+                )
+                .await
+                .unwrap();
+            let (pid, tid) = tokio::time::timeout(std::time::Duration::from_secs(30), rx.recv())
+                .await
+                .expect("the act was never created")
+                .expect("the event channel closed");
+            runtime
+                .do_action(&crate::event::Action::new(
+                    &pid,
+                    &tid,
+                    EventAction::Error,
+                    crate::Vars::new()
+                        .with(crate::utils::consts::ACT_ERR_CODE, "boom")
+                        .with(crate::utils::consts::ACT_ERR_MESSAGE, "boom-msg"),
+                ))
+                .await
+                .expect("the act must error");
+            // Wait for the walk to settle, then read the step's durable error.
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                runtime.cache().flush().await.unwrap();
+                let rows = runtime
+                    .cache()
+                    .store()
+                    .tasks()
+                    .query_all(&crate::store::query::Query::new().filter(
+                        crate::store::query::Filter::and().expr(crate::store::query::Expr::eq(
+                            "pid",
+                            "p_err_action".to_string(),
+                        )),
+                    ))
+                    .await
+                    .unwrap();
+                let step_error = rows.iter().find_map(|row| {
+                    let node: crate::scheduler::NodeData =
+                        serde_json::from_str(&row.node_data).ok()?;
+                    (node.id == "s1").then(|| row.err.clone()).flatten()
+                });
+                if let Some(error) = step_error {
+                    engine.close().await;
+                    return Some(error);
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the step never carried an error: {rows:?}"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }
+
+        let legacy = run_error(false).await.expect("legacy error");
+        let kernel = run_error(true).await.expect("kernel error");
+        assert!(
+            legacy.contains("\"ecode\":\"boom\""),
+            "the legacy step error carries the client's ecode: {legacy}"
+        );
+        assert_eq!(
+            kernel, legacy,
+            "the kernel must record the same error as the legacy engine"
+        );
+    }
+
     /// The read model across a Back/redo: the kernel projects the *newest*
     /// generation of every node (one row per node), while the legacy rows keep
     /// the redo's history — the backed instance next to the redone one. Both
