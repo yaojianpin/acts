@@ -222,8 +222,15 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
    把 Catch 子节点按 `TASK_SIGN = CATCH` 调度、该 step 回到 Running,`auto_complete` 再判:
    全部 CATCH 子 skip → 错误继续上浮,有 CATCH 子完成 → 该 step 完成(错误被接住);
    `timeouts` 同形(`Step::on_timeout`,先落 `$cost()`)。**前置已就绪**:谓词求值已在引擎表达式
-   环境上(见上),catch 分支用 `$ecode()` 选错误码(`examples/catches/model.yml`)可判;接入时
-   只需把容器的错误码/信息以 legacy 的 `ecode`/`message` 名字喂进 headless task 的 data。
+   环境上(见上),catch 分支用 `$ecode()` 选错误码(`examples/catches/model.yml`)可判。
+   接入方案(已推演,未实施):(i) 失败 hop 发现该节点声明了 catch → 不再走 `failure_plan`,
+   而是**保持该执行的 Running**、写错误变量,并把每个 catch step 作为容器子执行准入(Entry,
+   各自内部链由它自己的 fan-out 接管);(ii) headless 谓词作用域要把错误变量按 legacy 名
+   (`ecode`/`message`)喂进 headless task 的 data,`$ecode()` 才判得了(catch 的全部选择逻辑
+   都在谓词里);(iii) 容器 join 要 catch-aware:父执行带错误变量且**全部 CATCH 子 Skipped** →
+   父 Failed + 向上错误行走;有 CATCH 子 Completed → 父 Completed(错误被接住)。(iv) 先量
+   legacy 一个最小 catch 场景(irq 步收 `act:error` 带 ecode → catch 分支 `$ecode()=='err1'`
+   跑 msg 步)的折叠终态,再照抄。
 2. **Back 的 legacy 折叠对照**:重入流里 legacy 同节点多任务多状态。行投影已落地(见上),
    折叠口径可定为「该节点最新代 = 存活实例」:legacy 按 (node, prev) 取最后一个实例
    (旧 Backed 行仍在),与 kernel 的最新代行逐项比对。
