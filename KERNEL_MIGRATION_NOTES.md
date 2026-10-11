@@ -176,6 +176,28 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
   收敛为一个节点一行(单个 prev);vars 行 `sealed` 为空(聚合不存 sealed 快照);时间戳是投影
   时打点(聚合无时钟)。
 
+- 谓词失败路径(旧队列「谓词求值失败的失败路径」项,本片收口):分支 `if` 求值失败不再
+  让 hop 无限重试。
+  - fan-out 时该分支被**准入并在其首个 hop 失败**:fan-out 给它钉私有 `__branch_error`
+    = {code,message},`execute_task_plan` 读到即走 `failure_plan`(错误变量 + Failed +
+    传播);其余分支照常按谓词选择,`else` 兄弟被挡(legacy 的 else 只在全部 if 兄弟 skip
+    之后才跑,而报错的那个没有 skip)。
+  - 状态表新增 `Ready → Failed`,附 legacy 依据:分支谓词在 `Branch::init` 求值,任务
+    还没进 Running 就报错。
+  - 传播 hop 里 **upward 判定优先于容器 join**:同一 hop 里祖先被两条路径同时决定会撞
+    `DuplicateStateChange`;legacy 的顺序是 `parent.set_err` 先于 auto-complete 看到子任务
+    结算,所以 `upward_to` 非空时不再计算 join。
+  - 对跑实测(`kernel_invalid_branch_predicate_matches_the_legacy_run`):s0 Completed、
+    step1 与根 Failed、b1 Failed、b2 与 s2 Skipped,逐节点与 legacy 折叠一致。
+  - 导入期**拒绝** `step.catches`/`step.timeouts`(legacy 的 tree 真会建 Catch/Timeout
+    子节点、`Step::on_error`/`on_timeout` 真会分派,静默丢弃等于换掉错误路径);新单测
+    `catch_and_timeout_declarations_are_rejected_not_silently_dropped`。
+  - 已知边界:kernel 的谓词求值器是自带的变量/方法子集(acts_expr,没有 legacy 环境函数
+    `$ecode()`/`$cost()`/`$env`),这类谓词现在会判定该分支 Failed(legacy 会求值);catch 恰好
+    用 `$ecode()` 选分支(`examples/catches/model.yml`),故与 catch 一并收口。
+  - 顺带:`folded_legacy_states` 跳过 `state=None` 的 legacy 任务(legacy 会留下从未启动的
+    分支内部步骤,如未进入分支的 `s11`/`s21`;kernel 根本不建它们)。
+
 ## 已对齐(无需动)
 
 - Complete/Submit/Skip/Fail on Running/Waiting:ActionPlanner 与 legacy 守卫一致
@@ -185,15 +207,18 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
 
 ## 剩余工作(按序)
 
-1. **谓词求值失败的失败路径**:legacy 分支 `if` 求值出错→任务 Error;阴影当前
-   InvalidDecision 留存重试(可见但无 catch)。与 Error×catch parity 一并处理
-   (catch 分支同样未导入)。
-2. **Back 的 legacy 折叠对照**:重入流里 legacy 同节点多任务多状态。行投影已落地
-   (见上),折叠口径可定为「该节点最新代 = 存活实例」:legacy 按 (node, prev) 取最后
-   一个实例(旧 Backed 行仍在),与 kernel 的最新代行逐项比对;之前卡在行投影,现可收口。
-3. (登记,未排期)**无 `uses` 的 task 级消息**:纯 step 与 workflow 根在 legacy 也发
-   task 消息(见「语义结论」);driver 档目前只发 act 消息,根走 lifecycle 通道。若客户端
-   按 type=step/workflow 订阅,需给无包执行也写消息记录、并把节点种类带进
+1. **catch/timeout 的导入与错误路由**(本片只拒绝、未导入):legacy 的语义 = `Step::on_error`
+   把 Catch 子节点按 `TASK_SIGN = CATCH` 调度、该 step 回到 Running,`auto_complete` 再判:
+   全部 CATCH 子 skip → 错误继续上浮,有 CATCH 子完成 → 该 step 完成(错误被接住);
+   `timeouts` 同形(`Step::on_timeout`,先落 `$cost()`)。**前置**:kernel 的谓词求值器要接到
+   引擎的表达式环境(legacy 环境函数 `$ecode()`/`$cost()` 等),因为 catch 分支正是用
+   `$ecode()` 选(`examples/catches/model.yml`)。
+2. **Back 的 legacy 折叠对照**:重入流里 legacy 同节点多任务多状态。行投影已落地(见上),
+   折叠口径可定为「该节点最新代 = 存活实例」:legacy 按 (node, prev) 取最后一个实例
+   (旧 Backed 行仍在),与 kernel 的最新代行逐项比对。
+3. (登记,未排期)**无 `uses` 的 task 级消息**:纯 step 与 workflow 根在 legacy 也发 task
+   消息(见「语义结论」);driver 档目前只发 act 消息,根走 lifecycle 通道。若客户端按
+   type=step/workflow 订阅,需给无包执行也写消息记录、并把节点种类带进
    `message_from_record`(其 type 目前恒为 "act")。
 
 ## 语义结论(已核实,勿再猜测)
@@ -238,6 +263,14 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
 - 任务状态字符串:`TaskState` 经 `From<TaskState> for String` 落小写(`Interrupt` →
   "interrupted");行投影出的 proc 状态在根 Ready/Running/Waiting 时是 "running"、
   根 Created 时 "none"、终态取根自己的终态。
+- legacy 分支谓词在 `Branch::init`(**不是** run)里求值,所以失败是 `Ready → Error`
+  (任务根本没进 Running);kernel 状态表据此新增 `Ready → Failed`。
+- legacy catch/timeout(源码 `scheduler/process/task/step.rs` + `tree/build.rs`):`Step.catches`
+  建成 `NodeOutputKind::Catch` 子节点、`Step.timeouts` 建成 Timeout 子节点;`Step::on_error`
+  在这些子节点存在且任务还没有 sign 时 `set_sign(Sign::ERROR)`、把该 step 状态改回 Running、
+  以 `TASK_SIGN = CATCH` 逐个调度 Catch 子节点,然后才 `emit_error` 继续上浮;`auto_complete`
+  的判据是「该 step 有 ERROR sign 且全部 CATCH 子节点都 Skipped」→ 恢复错误(继续上浮),
+  否则该 step 完成(错误被接住)。catch 分支用 `$ecode()`(读任务 data 的 `ecode`)选错误码。
 
 ## 环境注意
 

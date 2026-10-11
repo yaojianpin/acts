@@ -240,6 +240,41 @@ fn root_error(
 const PARAMS_VAR: &str = "__params";
 const OPTIONS_VAR: &str = "__options";
 
+/// The private execution variable a fan-out pins on a branch whose predicate
+/// could not be evaluated (`{"code":..,"message":..}`): the branch is admitted
+/// and fails on its first hop, exactly like the legacy branch task erroring in
+/// its `init`.
+const BRANCH_ERROR_VAR: &str = "__branch_error";
+
+/// One decided execution failure: the error variables a failure hop commits.
+struct Failure {
+    code: String,
+    message: String,
+}
+
+/// The branch predicate failure a fan-out pinned on `execution`, if any.
+fn branch_error(
+    snapshot: &crate::kernel::AggregateSnapshot,
+    execution: &crate::kernel::ExecutionId,
+) -> Option<Failure> {
+    let raw = snapshot
+        .variables
+        .get(&(execution.clone(), BRANCH_ERROR_VAR.to_string()))?;
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    Some(Failure {
+        code: value
+            .get("code")
+            .and_then(|code| code.as_str())
+            .unwrap_or_default()
+            .to_string(),
+        message: value
+            .get("message")
+            .and_then(|message| message.as_str())
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
 /// The resolved act facts of one `uses` execution.
 #[derive(Clone)]
 struct ActFacts {
@@ -1454,21 +1489,6 @@ impl KernelHost {
                 };
                 let mut plan =
                     PropagationPlanner::plan(&graph, &snapshot, &command).map_err(runtime)?;
-                // The container join: a parent parked by a fan-out completes
-                // in the same atomic commit that settles its last child.
-                if let Some(parent) = execution.as_ref().and_then(|e| e.parent.clone()) {
-                    let join = crate::kernel::ContainerJoinCommand {
-                        process_id: id.process_id.clone(),
-                        parent,
-                    };
-                    if let Some((change, operation)) =
-                        crate::kernel::ContainerPlanner::plan_join(&graph, &snapshot, &join)
-                            .map_err(runtime)?
-                    {
-                        plan.state_changes.push(change);
-                        plan.operations.push(operation);
-                    }
-                }
                 // The decision walks' upward half: an aborted execution ends
                 // its whole ancestor chain `Aborted` (legacy `abort_task`),
                 // a failed one ends it `Failed` (legacy `emit_error` →
@@ -1483,6 +1503,27 @@ impl KernelHost {
                     }
                     _ => None,
                 };
+                // The container join: a parent parked by a fan-out completes
+                // in the same atomic commit that settles its last child. A
+                // decision walk already decides that parent itself (legacy
+                // calls `parent.set_err` before the auto-complete pass sees
+                // the children settled), so the join yields to it — the same
+                // change twice is not a plan.
+                if upward_to.is_none()
+                    && let Some(parent) = execution.as_ref().and_then(|e| e.parent.clone())
+                {
+                    let join = crate::kernel::ContainerJoinCommand {
+                        process_id: id.process_id.clone(),
+                        parent,
+                    };
+                    if let Some((change, operation)) =
+                        crate::kernel::ContainerPlanner::plan_join(&graph, &snapshot, &join)
+                            .map_err(runtime)?
+                    {
+                        plan.state_changes.push(change);
+                        plan.operations.push(operation);
+                    }
+                }
                 if let Some(to) = upward_to {
                     let (changes, operations) = crate::kernel::UpwardPlanner::plan_upward(
                         &snapshot,
@@ -1598,6 +1639,15 @@ impl KernelHost {
             "started",
             "task.started",
         )?;
+        // A branch whose predicate could not be evaluated fails on its first
+        // hop: the fan-out admitted it with the failure pinned (see
+        // `fanout_command`), which is the legacy branch task erroring in its
+        // `init` — the container's error walk takes over from here.
+        if let Some(execution) = execution
+            && let Some(failure) = branch_error(snapshot, execution_id)
+        {
+            return self.failure_plan(snapshot, id, execution_id, execution, claim, &failure);
+        }
         // The act's package facts and its own gate: every `uses` step resolves
         // its package at start, and the pinned facts ride every later message
         // record — so no later hop re-runs the headless scope, whose snapshot
@@ -2083,19 +2133,19 @@ impl KernelHost {
         }
     }
 
-    /// The plan of a package/params failure: the execution decided `Failed`
-    /// with the error variables, the act's failed message on its own record,
-    /// and the propagation that carries the error walk upward (the legacy
-    /// `emit_error` path). An execution that already left the running states
-    /// keeps its state — the bare hop remainder completes the operation.
-    fn package_failure_plan(
+    /// The plan of an execution failure: the execution decided `Failed` with
+    /// the error variables, its message on its own record, and the propagation
+    /// that carries the error walk upward (the legacy `emit_error` path). An
+    /// execution that already left the running states keeps its state — the
+    /// bare hop remainder completes the operation.
+    fn failure_plan(
         &self,
         snapshot: &crate::kernel::AggregateSnapshot,
         id: &OperationId,
         execution_id: &crate::kernel::ExecutionId,
         execution: &crate::kernel::ExecutionSnapshot,
         claim: &OperationCommit,
-        error: &ActError,
+        failure: &Failure,
     ) -> Result<TransitionPlan> {
         let propagate_id = OperationId {
             process_id: id.process_id.clone(),
@@ -2121,11 +2171,9 @@ impl KernelHost {
             from: execution.state,
             to: crate::kernel::ExecutionState::Failed,
         });
-        let code = "EPACKAGE";
-        let message = format!("{error}");
         for (name, value) in [
-            ("error.code", code.to_string()),
-            ("error.message", message.clone()),
+            ("error.code", failure.code.clone()),
+            ("error.message", failure.message.clone()),
         ] {
             plan.variable_writes.push(VariableWrite {
                 scope: execution_id.clone(),
@@ -2145,11 +2193,35 @@ impl KernelHost {
             &id.task_id,
             act_facts(snapshot, execution_id).as_ref(),
             None,
-            Some((code, &message)),
+            Some((&failure.code, &failure.message)),
         )? {
             plan.outbox[0].payload = payload.to_string();
         }
         Ok(plan)
+    }
+
+    /// The plan of a package/params failure: the error the effect seam
+    /// reports, under the kernel's package error code.
+    fn package_failure_plan(
+        &self,
+        snapshot: &crate::kernel::AggregateSnapshot,
+        id: &OperationId,
+        execution_id: &crate::kernel::ExecutionId,
+        execution: &crate::kernel::ExecutionSnapshot,
+        claim: &OperationCommit,
+        error: &ActError,
+    ) -> Result<TransitionPlan> {
+        self.failure_plan(
+            snapshot,
+            id,
+            execution_id,
+            execution,
+            claim,
+            &Failure {
+                code: "EPACKAGE".to_string(),
+                message: format!("{error}"),
+            },
+        )
     }
 
     /// Announce a `uses` execution's decided state on the planner's own outbox
@@ -2271,15 +2343,43 @@ impl KernelHost {
                         })
                     })
                     .collect::<Result<Vec<_>>>()?;
-                let command = BranchCommand {
-                    process_id: snapshot.process_id.clone(),
-                    branch: execution_id.clone(),
-                    candidates,
-                    predicate_basis: PredicateBasis::from_snapshot(snapshot),
-                    unresolved_dependencies: Vec::new(),
-                    source_operation: claim.clone(),
+                // A predicate that cannot be evaluated fails its branch — the
+                // legacy branch task errors in its `init` — instead of wedging
+                // the hop. Such a branch is never selected and never decides
+                // anything for its siblings; in particular an `else` sibling
+                // is blocked: the legacy else runs only when every `if`
+                // sibling *skipped*, and an errored one did not.
+                let branch_error = |task_id: &str| -> Option<String> {
+                    candidates
+                        .iter()
+                        .find(|candidate| candidate.task_id == task_id)
+                        .and_then(|candidate| match &candidate.predicate {
+                            PredicateValue::Invalid { message } => Some(message.clone()),
+                            _ => None,
+                        })
                 };
-                let selected: std::collections::HashSet<String> =
+                let has_invalid = candidates
+                    .iter()
+                    .any(|candidate| branch_error(&candidate.task_id).is_some());
+                let decidable: Vec<BranchCandidate> = candidates
+                    .iter()
+                    .filter(|candidate| {
+                        branch_error(&candidate.task_id).is_none()
+                            && !(has_invalid && candidate.is_else)
+                    })
+                    .cloned()
+                    .collect();
+                let selected: std::collections::HashSet<String> = if decidable.is_empty() {
+                    Default::default()
+                } else {
+                    let command = BranchCommand {
+                        process_id: snapshot.process_id.clone(),
+                        branch: execution_id.clone(),
+                        candidates: decidable,
+                        predicate_basis: PredicateBasis::from_snapshot(snapshot),
+                        unresolved_dependencies: Vec::new(),
+                        source_operation: claim.clone(),
+                    };
                     match BranchPlanner::decide(&command) {
                         BranchDecision::Selected(selected) => selected
                             .into_iter()
@@ -2291,11 +2391,29 @@ impl KernelHost {
                                 "branch selection is waiting on unresolved {dependencies:?}"
                             )));
                         }
+                        // Every candidate left in the command is evaluable, so
+                        // an invalid decision here is a planner inconsistency.
                         BranchDecision::Invalid { message } => return Err(runtime(message)),
-                    };
+                    }
+                };
                 branches
                     .iter()
                     .map(|branch| {
+                        let mut vars: Vec<(String, String)> = branch
+                            .vars
+                            .iter()
+                            .map(|var| (var.name.clone(), var.value.to_string()))
+                            .collect();
+                        // The failing branch is admitted like a selected one:
+                        // its first hop reads the pinned failure and decides
+                        // this execution `Failed`, so the parity floor keeps
+                        // its terminal execution (the legacy branch task).
+                        if let Some(message) = branch_error(&branch.id) {
+                            vars.push((
+                                BRANCH_ERROR_VAR.to_string(),
+                                serde_json::json!({ "code": "", "message": message }).to_string(),
+                            ));
+                        }
                         Ok(ContainerChild {
                             task_id: branch.id.clone(),
                             model_node: node_id(&branch.id)?,
@@ -2303,17 +2421,15 @@ impl KernelHost {
                             // execution (Skipped) — the parity floor counts a
                             // terminal task per model node, and the legacy
                             // engine keeps the skipped branch task.
-                            plan: if selected.contains(&branch.id) {
+                            plan: if selected.contains(&branch.id)
+                                || branch_error(&branch.id).is_some()
+                            {
                                 ContainerChildPlan::Entry
                             } else {
                                 ContainerChildPlan::Skip
                             },
                             predecessors: vec![ContainerPredecessor::Source],
-                            vars: branch
-                                .vars
-                                .iter()
-                                .map(|var| (var.name.clone(), var.value.to_string()))
-                                .collect(),
+                            vars,
                             auto: true,
                         })
                     })
@@ -3547,6 +3663,127 @@ mod tests {
         assert_eq!(kernel_completed, legacy_completed);
     }
 
+    /// A branch predicate that cannot be evaluated fails its branch (the
+    /// legacy branch task's `init` error), the container and its ancestors
+    /// walk up `Failed` and the downstream chain skips — the legacy fold must
+    /// agree per node.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn kernel_invalid_branch_predicate_matches_the_legacy_run() {
+        let workflow = || {
+            crate::model::Workflow::new()
+                .with_id("wf-invalid-if")
+                .with_step(|step| step.with_id("s0"))
+                .with_step(|step| {
+                    step.with_id("step1")
+                        .with_branch(|branch| {
+                            branch
+                                .with_id("b1")
+                                .with_if("missing_name > 0")
+                                .with_step(|step| step.with_id("s11"))
+                        })
+                        .with_branch(|branch| {
+                            branch
+                                .with_id("b2")
+                                .with_else(true)
+                                .with_step(|step| step.with_id("s21"))
+                        })
+                })
+                .with_step(|step| step.with_id("s2"))
+        };
+        let pid = "p_invalid_if";
+
+        // Legacy: the branch task errors, the walk decides the rest.
+        let engine = crate::Engine::builder().start().await.unwrap();
+        let settled = engine.signal(());
+        for handle in [settled.clone(), settled.clone()] {
+            engine.channel().on_error(move |_| {
+                let handle = handle.clone();
+                async move { handle.close() }
+            });
+        }
+        let done = settled.clone();
+        engine.channel().on_complete(move |_| {
+            let done = done.clone();
+            async move { done.close() }
+        });
+        engine
+            .runtime()
+            .start(
+                &workflow(),
+                crate::Vars::new().with(crate::utils::consts::PROCESS_ID, pid),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(30), settled.recv())
+            .await
+            .expect("the legacy run never settled");
+        // The process event fires with the walk; wait until every task is
+        // decided (or never started) before folding.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let quiet = engines_quiescent(&engine, pid).await;
+            if quiet || std::time::Instant::now() > deadline {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        engine.runtime().cache().flush().await.unwrap();
+        let legacy = folded_legacy_states(&engine, pid).await;
+        engine.close().await;
+
+        // Kernel driver: the same fold must come out of the aggregate.
+        let mut config = crate::Config::default();
+        config.data.kernel_engine = true;
+        config.data.tick_interval_secs = Some(1);
+        let engine = crate::Engine::builder()
+            .set_config(&config)
+            .start()
+            .await
+            .unwrap();
+        let settled = engine.signal(());
+        for handle in [settled.clone(), settled.clone()] {
+            engine.channel().on_error(move |_| {
+                let handle = handle.clone();
+                async move { handle.close() }
+            });
+        }
+        let done = settled.clone();
+        engine.channel().on_complete(move |_| {
+            let done = done.clone();
+            async move { done.close() }
+        });
+        let runtime = engine.runtime();
+        runtime
+            .start(
+                &workflow(),
+                crate::Vars::new().with(crate::utils::consts::PROCESS_ID, pid),
+            )
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(30), settled.recv())
+            .await
+            .expect("the kernel run never settled");
+        let host = runtime.kernel().expect("the kernel host").clone();
+        let snapshot = host.snapshot(pid).await.unwrap().unwrap();
+        assert_parity(&legacy, &snapshot);
+        // The failing branch carries the predicate error as its own failure.
+        let b1 = crate::kernel::ExecutionId::new("b1", 0).unwrap();
+        assert_eq!(
+            snapshot
+                .executions
+                .get(&b1)
+                .map(|execution| execution.state),
+            Some(crate::kernel::ExecutionState::Failed)
+        );
+        assert!(
+            snapshot
+                .variables
+                .contains_key(&(b1, "error.message".to_string()))
+        );
+        engine.close().await;
+    }
+
     #[tokio::test]
     async fn manual_task_waits_for_the_client_action() {
         let (host, mut wake_rx) = KernelHost::in_memory();
@@ -4621,6 +4858,18 @@ mod tests {
         engine.close().await;
     }
 
+    /// Whether every task of a legacy run is decided (or never started): the
+    /// fold below reads a state walk that may still be in flight.
+    async fn engines_quiescent(engine: &crate::Engine, pid: &str) -> bool {
+        match engine.runtime().proc(pid).await {
+            Ok(Some(proc)) => proc.tasks().iter().all(|task| {
+                let state = task.state();
+                state.is_completed() || state.is_none()
+            }),
+            _ => true,
+        }
+    }
+
     /// Every legacy task, folded onto the kernel's node vocabulary: acts
     /// fold into their owning step, the workflow root becomes `$`, and the
     /// state names map to the kernel's (Interrupt→Waiting, Error→Failed).
@@ -4634,7 +4883,13 @@ mod tests {
         let mut folded: Vec<(String, String)> = proc
             .tasks()
             .iter()
-            .map(|task| {
+            .filter_map(|task| {
+                // A task that never started decided no node: the legacy engine
+                // leaves the inner steps of a branch it never entered behind
+                // (`None`), and the kernel never creates them at all.
+                if task.state().is_none() {
+                    return None;
+                }
                 let state = match task.state() {
                     crate::TaskState::Completed | crate::TaskState::Submitted => "Completed",
                     crate::TaskState::Skipped => "Skipped",
@@ -4654,7 +4909,7 @@ mod tests {
                 } else {
                     task.node().id().to_string()
                 };
-                (node, state.to_string())
+                Some((node, state.to_string()))
             })
             .collect();
         folded.sort();

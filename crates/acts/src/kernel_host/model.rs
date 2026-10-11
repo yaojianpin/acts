@@ -120,6 +120,22 @@ fn import_step(
             step.id
         )));
     }
+    // Error handlers and timeout branches are real legacy behavior (the tree
+    // builds them as Catch/Timeout children, `Step::on_error`/`on_timeout`
+    // dispatch them): importing a step while dropping them would silently run
+    // a workflow whose failure path changed, so the import refuses instead.
+    if !step.catches.is_empty() {
+        return Err(ActError::Runtime(format!(
+            "step '{}' declares 'catches'; error handlers are not imported yet",
+            step.id
+        )));
+    }
+    if !step.timeouts.is_empty() {
+        return Err(ActError::Runtime(format!(
+            "step '{}' declares 'timeouts'; timeout branches are not imported yet",
+            step.id
+        )));
+    }
     for branch in step_branches(step).unwrap_or_default() {
         if !branch.needs.is_empty() {
             return Err(ActError::Runtime(format!(
@@ -526,6 +542,25 @@ mod tests {
         });
         let error = spec(&workflow).unwrap_err();
         assert!(format!("{error}").contains("'b1' declares 'needs'"));
+    }
+
+    #[test]
+    fn catch_and_timeout_declarations_are_rejected_not_silently_dropped() {
+        // The legacy tree builds these as Catch/Timeout children and
+        // `Step::on_error`/`on_timeout` dispatch them: an import that dropped
+        // them would run a different failure path than the model declares.
+        let with_catch = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("s1")
+                .with_uses("acts.transform.set", crate::Vars::new())
+                .with_catch(|step| step.with_id("c1"))
+        });
+        let error = spec(&with_catch).unwrap_err();
+        assert!(format!("{error}").contains("'s1' declares 'catches'"));
+
+        let with_timeout = crate::model::Workflow::new()
+            .with_step(|step| step.with_id("s1").with_timeout(|step| step.with_id("t1")));
+        let error = spec(&with_timeout).unwrap_err();
+        assert!(format!("{error}").contains("'s1' declares 'timeouts'"));
     }
 
     #[test]

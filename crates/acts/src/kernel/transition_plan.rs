@@ -196,6 +196,11 @@ fn validate_state_change(change: &StateChange) -> Result<(), PlanError> {
                     | S::Removed
             )
             | (S::Ready, S::Cancelled | S::Skipped | S::Removed)
+            // A branch predicate is evaluated in the branch task's `init` (the
+            // legacy `Branch::init`), before the task ever runs: one that
+            // cannot be evaluated decides that branch `Error` straight from
+            // `Ready`.
+            | (S::Ready, S::Failed)
             // The abort cascade's upward walk decides EVERY ancestor of an
             // aborted execution `Aborted` — including already-terminal ones —
             // exactly like the legacy ancestor walk that terminates the run
