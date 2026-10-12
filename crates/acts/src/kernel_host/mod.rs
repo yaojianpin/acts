@@ -5504,6 +5504,161 @@ mod tests {
         engine.close().await;
     }
 
+    /// A client `Cancel`'s acceptance surface, on both engines. The legacy
+    /// handler acts on an *act*, walks up to that act's owning step, and
+    /// refuses unless the step's own work is done (`is_biz_success`) — its
+    /// cancel redoes that step and undoes the chain forward from it, which only
+    /// makes sense once the step ran. The kernel's action targets the node
+    /// itself and `ActionPlanner` accepts `Cancel` on `Ready`/`Running`/
+    /// `Waiting`, so it is the broader surface. This test pins both sides of
+    /// that divergence until it is settled.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn legacy_cancel_refuses_a_step_whose_work_is_not_done() {
+        const PID: &str = "p_cancel_guard";
+        let workflow = || {
+            crate::model::Workflow::new()
+                .with_id("wf-cancel-guard")
+                .with_step(|step| {
+                    step.with_id("s1").with_uses(
+                        crate::utils::test::USES_IRQ,
+                        crate::Vars::new().with("key", "act1"),
+                    )
+                })
+                .with_step(|step| step.with_id("s2"))
+        };
+        let workflow = workflow();
+
+        // Legacy: the client's Cancel lands on the waiting act, whose step has
+        // not finished its own work — refused.
+        let mut config = crate::Config::default();
+        config.data.tick_interval_secs = Some(1);
+        let engine = crate::Engine::builder()
+            .set_config(&config)
+            .start()
+            .await
+            .unwrap();
+        let created = {
+            let sig = engine.signal((String::new(), String::new()));
+            let (done, done_rx) = (sig.clone(), sig.clone());
+            engine.channel().on_message(move |e| {
+                let done = done_rx.clone();
+                async move {
+                    if e.is_params_key("act1") && e.is_state(crate::MessageState::Created) {
+                        done.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+                        done.close();
+                    }
+                }
+            });
+            done
+        };
+        let runtime = engine.runtime();
+        runtime
+            .start(
+                &workflow,
+                crate::Vars::new().with(crate::utils::consts::PROCESS_ID, PID),
+            )
+            .await
+            .unwrap();
+        let (pid, tid) = tokio::time::timeout(std::time::Duration::from_secs(30), created.recv())
+            .await
+            .expect("the waiting act never appeared")
+            .clone();
+        let refused = runtime
+            .do_action(&crate::event::Action::new(
+                &pid,
+                &tid,
+                crate::event::EventAction::Cancel,
+                crate::Vars::new(),
+            ))
+            .await;
+        assert!(
+            format!("{refused:?}").contains("not allowed to cancel"),
+            "the legacy guard refuses a cancel while the step's own work is not done: {refused:?}"
+        );
+        engine.close().await;
+
+        // Kernel: the same client action lands on the node and cancels it,
+        // re-entering it with a fresh generation.
+        config.data.kernel_engine = true;
+        let engine = crate::Engine::builder()
+            .set_config(&config)
+            .start()
+            .await
+            .unwrap();
+        let runtime = engine.runtime();
+        runtime
+            .start(
+                &workflow,
+                crate::Vars::new().with(crate::utils::consts::PROCESS_ID, PID),
+            )
+            .await
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if host_state(&engine.runtime(), PID, "s1").await
+                == Some(crate::kernel::ExecutionState::Waiting)
+            {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "s1 never waited");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        runtime
+            .do_action(&crate::event::Action::new(
+                &PID,
+                "s1",
+                crate::event::EventAction::Cancel,
+                crate::Vars::new(),
+            ))
+            .await
+            .expect("the kernel accepts the cancel");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let Some(snapshot) = engine
+                .runtime()
+                .kernel()
+                .expect("the kernel host")
+                .snapshot(PID)
+                .await
+                .unwrap()
+            else {
+                panic!("the aggregate exists");
+            };
+            let generations = snapshot
+                .executions
+                .keys()
+                .filter(|id| id.task_id == "s1")
+                .map(|id| id.generation)
+                .max();
+            if generations == Some(1) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the kernel re-entry never produced a fresh generation: {snapshot:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        engine.close().await;
+    }
+
+    /// One node's state in a running kernel driver, or `None` while the
+    /// aggregate is not readable yet.
+    async fn host_state(
+        runtime: &Arc<crate::scheduler::Runtime>,
+        pid: &str,
+        node: &str,
+    ) -> Option<crate::kernel::ExecutionState> {
+        let snapshot = runtime.kernel()?.snapshot(pid).await.ok()??;
+        snapshot
+            .executions
+            .iter()
+            .filter(|(id, _)| id.task_id == node)
+            .max_by_key(|(id, _)| id.generation)
+            .map(|(_, execution)| execution.state)
+    }
+
     /// A client's `act:error` carries the legacy inputs (`ecode`, `message`):
     /// the failure must land on the same node with the same code on both
     /// engines — what `$ecode()` reads for a catch is this code.
