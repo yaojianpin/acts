@@ -824,6 +824,19 @@ impl From<AggregateDocumentError> for DocumentRepositoryError {
         Self::Codec(error)
     }
 }
+
+impl DocumentRepositoryError {
+    /// Whether this error means "the read raced a writer" rather than damage:
+    /// the aggregate and its derived indexes were read at different versions
+    /// (they are read key by key), so the trio is internally inconsistent while
+    /// every document in it is intact. Re-reading resolves it.
+    pub(crate) fn is_read_race(&self) -> bool {
+        matches!(
+            self,
+            Self::RecoveryIndexMismatch { .. } | Self::OutboxIndexMismatch { .. }
+        )
+    }
+}
 impl From<DocumentStoreError> for DocumentRepositoryError {
     fn from(error: DocumentStoreError) -> Self {
         Self::Store(error)

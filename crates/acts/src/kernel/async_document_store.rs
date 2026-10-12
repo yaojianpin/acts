@@ -30,6 +30,11 @@ use std::sync::Arc;
 
 const MAX_RECOVERY_PAGE_SIZE: usize = 1_024;
 const MAX_RECOVERY_MIGRATION_BATCH_SIZE: usize = 64;
+/// How many times a load re-reads after finding an aggregate paired with its
+/// derived indexes from another version (see [`AsyncAggregateRepository::load`]).
+/// Bounded: a store that keeps serving an inconsistent triple is damage, and
+/// the caller must see it.
+const LOAD_ATTEMPTS: usize = 4;
 
 #[async_trait::async_trait]
 pub(crate) trait AsyncDocumentStore: Send + Sync {
@@ -596,6 +601,15 @@ impl AsyncAggregateRepository {
         }
     }
 
+    /// Load one aggregate with its derived indexes.
+    ///
+    /// The three documents are read in one `read_many` call, but a store
+    /// without a native batch read serves that key by key (`KvStore::many`'s
+    /// default loops `one`), so a commit landing between the reads can pair an
+    /// aggregate with its neighbours from another version. The decoder catches
+    /// exactly that — the indexes are derived from the aggregate — so the read
+    /// is retried: it is a race with the writers this repository serves, not
+    /// damage. A mismatch that survives the attempts is still surfaced.
     pub(crate) async fn load(
         &self,
         process_id: &str,
@@ -605,19 +619,27 @@ impl AsyncAggregateRepository {
             recovery_index_key(process_id)?,
             outbox_index_key(process_id)?,
         ];
-        let mut documents = self.store.read_many(&keys).await?.into_iter();
-        let aggregate = documents.next().flatten();
-        let recovery_index = documents.next().flatten();
-        let outbox_index = documents.next().flatten();
-        let Some(aggregate) = aggregate else {
-            return Ok(None);
-        };
-        Ok(Some(decode_loaded_aggregate(
-            process_id,
-            aggregate,
-            recovery_index,
-            outbox_index,
-        )?))
+        for attempt in 0..LOAD_ATTEMPTS {
+            let mut documents = self.store.read_many(&keys).await?.into_iter();
+            let aggregate = documents.next().flatten();
+            let recovery_index = documents.next().flatten();
+            let outbox_index = documents.next().flatten();
+            let Some(aggregate) = aggregate else {
+                return Ok(None);
+            };
+            match decode_loaded_aggregate(process_id, aggregate, recovery_index, outbox_index) {
+                Ok(loaded) => return Ok(Some(loaded)),
+                Err(error) if error.is_read_race() && attempt + 1 < LOAD_ATTEMPTS => {
+                    tracing::debug!(
+                        process_id,
+                        attempt,
+                        "aggregate read raced a writer; re-reading"
+                    );
+                }
+                Err(error) => return Err(error.into()),
+            }
+        }
+        unreachable!("the loop returns within LOAD_ATTEMPTS")
     }
 }
 
@@ -1016,3 +1038,159 @@ impl std::fmt::Display for AsyncRepositoryError {
 }
 
 impl std::error::Error for AsyncRepositoryError {}
+
+#[cfg(test)]
+mod tests {
+    use super::super::document::AggregateDocumentCodec;
+    use super::super::recovery_index::{RecoveryIndex, RecoveryIndexCodec};
+    use super::*;
+    use crate::kernel::{
+        AggregateSnapshot, AggregateVersion, ClaimToken, ExecutionId, ExecutionSnapshot,
+        ExecutionState, NodeId, OperationId, OperationKind, OperationRecord, OperationState,
+    };
+    use std::collections::{BTreeMap, HashMap};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// One version of an aggregate whose derived recovery index is present only
+    /// when it carries the non-terminal operation: two such snapshots are two
+    /// versions of the same aggregate as far as a load's consistency check is
+    /// concerned.
+    fn snapshot(with_operation: bool) -> AggregateSnapshot {
+        let execution = ExecutionId::new("step", 0).unwrap();
+        let operation_id = OperationId {
+            process_id: "process".into(),
+            task_id: "step".into(),
+            generation: 0,
+            sequence: 0,
+        };
+        let claim = ClaimToken {
+            owner: "runtime-a".into(),
+            fence: 1,
+            lease_until_ms: 9_000,
+            heartbeat_revision: 0,
+        };
+        AggregateSnapshot {
+            process_id: "process".into(),
+            version: AggregateVersion {
+                graph: 1,
+                process: 2,
+                operations: u64::from(with_operation),
+            },
+            executions: HashMap::from([(
+                execution.clone(),
+                ExecutionSnapshot {
+                    model_node: NodeId::parse("model-step").unwrap(),
+                    parent: None,
+                    predecessors: vec![],
+                    state: ExecutionState::Ready,
+                    revision: 1,
+                },
+            )]),
+            variables: BTreeMap::new(),
+            operations: if with_operation {
+                HashMap::from([(
+                    operation_id.clone(),
+                    OperationRecord {
+                        id: operation_id,
+                        kind: OperationKind::ExecuteTask,
+                        state: OperationState::Claimed(claim),
+                        revision: 2,
+                    },
+                )])
+            } else {
+                HashMap::new()
+            },
+            outbox: HashMap::new(),
+        }
+    }
+
+    /// Serves one aggregate document with a recovery index from another
+    /// version for the first `torn` reads — the shape a commit landing between
+    /// the three single-key reads produces — and a consistent pair after.
+    /// `torn: usize::MAX` keeps serving the torn pair.
+    struct TornIndexStore {
+        aggregate: Vec<u8>,
+        torn_index: Vec<u8>,
+        torn: usize,
+        reads: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncDocumentStore for TornIndexStore {
+        async fn read(&self, _key: &str) -> Result<Option<Vec<u8>>, ActError> {
+            unimplemented!("the load path reads through read_many")
+        }
+
+        async fn read_many(&self, keys: &[String]) -> Result<Vec<Option<Vec<u8>>>, ActError> {
+            let read = self.reads.fetch_add(1, Ordering::SeqCst);
+            let index = (read < self.torn).then(|| self.torn_index.clone());
+            assert_eq!(keys.len(), 3, "aggregate + recovery index + outbox index");
+            Ok(vec![Some(self.aggregate.clone()), index, None])
+        }
+
+        async fn scan_prefix(&self, _prefix: &str) -> Result<Vec<(String, Vec<u8>)>, ActError> {
+            unimplemented!("the load path does not scan")
+        }
+
+        async fn scan_range_page(
+            &self,
+            _prefix: &str,
+            _lower: Option<&str>,
+            _limit: usize,
+        ) -> Result<Vec<(String, Vec<u8>)>, ActError> {
+            unimplemented!("the load path does not scan")
+        }
+
+        async fn atomic_batch(
+            &self,
+            _guards: &[DocumentGuard],
+            _mutations: &[DocumentMutation],
+        ) -> Result<bool, ActError> {
+            unimplemented!("the load path does not write")
+        }
+    }
+
+    fn torn_store(torn: usize) -> (Arc<TornIndexStore>, Arc<AtomicUsize>) {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let store = Arc::new(TornIndexStore {
+            aggregate: AggregateDocumentCodec::encode(&snapshot(false)).unwrap(),
+            torn_index: RecoveryIndexCodec::encode(
+                &RecoveryIndex::project(&snapshot(true)).unwrap(),
+            )
+            .unwrap(),
+            torn,
+            reads: reads.clone(),
+        });
+        (store, reads)
+    }
+
+    /// A load that finds the aggregate paired with a recovery index from
+    /// another version re-reads instead of reporting damage — that pairing is a
+    /// race with a writer, not a corrupt document.
+    #[tokio::test]
+    async fn load_retries_a_read_that_raced_a_writer() {
+        let (store, reads) = torn_store(1);
+        let repository = AsyncAggregateRepository::new(store);
+        let loaded = repository
+            .load("process")
+            .await
+            .unwrap()
+            .expect("the aggregate loaded");
+        assert_eq!(loaded.snapshot.version, snapshot(false).version);
+        assert_eq!(reads.load(Ordering::SeqCst), 2, "the torn read was retried");
+    }
+
+    /// A store that keeps serving the mismatched pair is damage: the load
+    /// surfaces it once the bounded re-reads are spent.
+    #[tokio::test]
+    async fn load_surfaces_a_mismatch_that_never_heals() {
+        let (store, reads) = torn_store(usize::MAX);
+        let repository = AsyncAggregateRepository::new(store);
+        let error = repository.load("process").await.unwrap_err();
+        assert!(
+            format!("{error}").contains("RecoveryIndexMismatch"),
+            "damage is still surfaced: {error}"
+        );
+        assert_eq!(reads.load(Ordering::SeqCst), LOAD_ATTEMPTS);
+    }
+}

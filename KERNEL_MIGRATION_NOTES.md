@@ -574,7 +574,19 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
       事实是前向 act `Cancelled` + 它所属 step `Completed`;parity 用「每节点最新一代」口径(两引擎在
       那一层相等),旧代的差异登记在此。②被撤销节点自身:内核把该代记 `Backed`(legacy act 的事实),
       legacy 的 step 事实(Completed)折叠不进同一个节点行。③`Cancelled` 不再由客户端动作产生。
-      ④`KernelHost` 的「动作 intent op 不带动作载荷」老洞仍在:见剩余工作 2。
+      ④`KernelHost` 的「动作 intent op 不带动作载荷」老洞仍在:见剩余工作 1。
+
+- **`load()` 的多键读竞态收口(上一片登记项;本片)**:`AsyncAggregateRepository::load` 一次
+  `read_many` 读 aggregate + recovery index + outbox index,而 `KvStore::many` 的默认实现逐个
+  `one()`(`MemoryStore` 未覆写 ⇒ 三次独立加读锁):并发提交落在两次读之间时,三个文档来自不同
+  版本,`decode_loaded_aggregate` 抛 `RecoveryIndexMismatch`/`OutboxIndexMismatch` 被当成硬完整性
+  错误抛给调用方(上一片的重入重试风暴里实测过一次)。修法:`DocumentRepositoryError::is_read_race()`
+  认定这两个错误 = 「读到跨写入的混合版本」,loader 有限重读(`LOAD_ATTEMPTS = 4`);健康的读一次
+  成功,真损坏重读耗尽后照旧上抛。单测两处(脚本化 store 供第一/前 N 次混合三元组):
+  `load_retries_a_read_that_raced_a_writer`(混合 → 重读 → 一致版本,2 次读)与
+  `load_surfaces_a_mismatch_that_never_heals`(始终混合 → 抛错,读了 LOAD_ATTEMPTS 次)。
+  说明:这条只能单测钉住——e2e 触发需要「提交恰好落在两次读之间」,不可确定性复现;e2e 侧只保证
+  正常路径不受影响(全量 `-p acts --lib --tests` 绿)。
 
 ## 已对齐(无需动)
 
@@ -585,17 +597,7 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
 
 ## 剩余工作(按序)
 
-1. (登记,未排期)**`load()` 的多键读不是原子的**:`AsyncAggregateRepository::load` 用
-   `store.read_many` 一次读 aggregate + recovery index + outbox index,而 `KvStore::many` 的默认
-   实现是**逐个 `one()`**(`MemoryStore` 未覆写 ⇒ 三次独立加读锁)。并发提交落在两次读之间时,三个
-   文档来自不同版本,`decode_loaded_aggregate` 直接抛
-   `RecoveryIndexMismatch`/`OutboxIndexMismatch` —— 被当成硬完整性错误抛给调用方(实测:上一片的
-   重入重试风暴里出现过一次 `RecoveryIndexMismatch{process_id}`)。重入改持久操作后风暴消失,但
-   「客户端动作 × hop」或两个客户端动作并发时仍可能命中。修法候选:`MemoryStore` 覆写 `many`
-   (一次读锁),或让 loader 在 mismatch 时有限重试(与 store 无关、更保守)。
-   注:这次不做,是因为它属于仓库/存储层、与本项(内核 Cancel 语义)不同路径,且需要单独的设计选择。
-
-2. (登记,未排期)**动作 intent op 不携带动作载荷**:客户端动作的 durable intent 是
+1. (登记,未排期)**动作 intent op 不携带动作载荷**:客户端动作的 durable intent 是
    `OperationKind::ApplyAction`,不带动作类型与 inputs,于是崩溃/租约过期后由 recovery 驱那条 hop
    时走的是 `effect_plan(None)` = **自动完成**,而不是客户端原本的动作(Fail/Abort/Skip/Submit/
    Cancel 的「决定」本身没有 durable 载荷)。Cancel/Back 的重入已由同笔提交的 `ReenterTask` 兜住,
