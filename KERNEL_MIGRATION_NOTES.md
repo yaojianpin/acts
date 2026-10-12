@@ -487,6 +487,30 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
   join 判」;`catch_join_only_fires_for_a_flow_decided_step_and_its_catcher`(原 sign 版)改读新键并
   增补「parked 父不被 catch join 判」;宿主 catch/timeout/root/cancel/example 用例全绿。
 
+- **timeout + catches 同一 step(队列 1 收口)**
+  (a) **导入**:不再拒绝。同时修掉一条**已失效的拒绝**:`branches` + `catches` 同 step 原本被拒,
+  理由是「一个 fan-out 形状不能同时表示两套子树」—— 但那条理由依赖「成功时 `check_in_children`
+  也会派发 catch 子」这一**已被实测推翻**的前提(见「catch 成功路径的修正」)。两套子树其实分属两条
+  **互斥**路径:branches 是 `Normal` 子(step 完成时 visit),catches 是 `Catch` 子(只有
+  `Step::on_error` 派发),所以同 step 声明两者合法,现在允许 ✓。
+  (b) **catch join 面向混合子集**(`plan_catch_join`):
+  ①**触发**从「settling 的是 CATCH 子」放宽为「settling 的是本步自己的子」—— 声明了 timeouts 的
+  步,最后落定的那个子往往就是被 tick fire 的 timeout 分支,它必须能触发结算;
+  ②**门槛**仍覆盖**全部**子(任一非终态 → 不判;任一 Aborted → 让位给 abort walk);
+  ③**投票只数 `__sign=catch` 的 handler 子**(legacy `is_empty_catched` 的 sign 过滤):全部 Skipped
+  → Failed(错误上浮),有非 Skipped → Completed(接住);**无** handler 子则拒绝猜(返回 None);
+  ④`__flow=catches` 仍是「这一步在判 catch」的唯一事实,与 `__flow=children` 的普通容器互斥。
+  判定期间 timeout 子照旧由 tick 派发/等待(legacy 的 tick 判据只看 Running/Interrupt)。
+  (c) **实测**:纯 planner `catch_join_decides_a_mixed_child_set_from_its_handlers`(接住/上浮两种
+  投票 × timeout 子落定/在飞 × 外来执行结算不触发 × 无 handler 子拒绝);
+  `catch_join_only_fires_for_a_flow_decided_step_and_its_catcher` 改按新契约(角色不再卡触发、
+  无角色子不投票);导入单测覆盖两套声明同时导入(auto map 两套都在);
+  端到端(内核档、真 tick)`a_failed_step_waits_for_its_timeout_branch_before_the_catch_join`:
+  t1 先被 tick fire → act1 报错(ecode `E1`)→ handler 被选中并跑到等待 → 完成 handler 后 **step
+  仍 `Running`**(timeout 子还在飞,门槛生效)→ 完成 t1 后由 **t1 自己的结算**触发 catch join →
+  step `Completed`、run 结算。
+  与 legacy 的终态对跑仍不可能:legacy 的失败 act 不跑自己的 `next`,step 永不结算(既有登记)。
+
 ## 已对齐(无需动)
 
 - Complete/Submit/Skip/Fail on Running/Waiting:ActionPlanner 与 legacy 守卫一致
@@ -496,18 +520,14 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
 
 ## 剩余工作(按序)
 
-1. (登记,未排期)**timeout + catches 同一 step**:导入期拒绝(catch join 的判定集合与 timeout
-   子的集合在同一个 child 集里)。要做需:catch join 按 `__sign=catch` 过滤判定子、且允许由
-   timeout 子的结算触发判定,同时让 join 的「全子终态」门槛仍覆盖 timeout 子。
-2. (登记,未排期)**timer 的第一轮不等 tick**:开着的窗随 start hop 的 wake 立刻 fire,比 legacy
+1. (登记,未排期)**timer 的第一轮不等 tick**:开着的窗随 start hop 的 wake 立刻 fire,比 legacy
    早至多一个 tick;若要严格对齐可让首轮永远先 Idle 一次(代价:每个 timeout 步至少多一个 tick
    延迟),当前不认为值得,故登记。
-3. (登记,未排期)**Cancel 的 legacy 守卫差异**(A′ 暴露):legacy 的 cancel 处理器要求被撤销的
+2. (登记,未排期)**Cancel 的 legacy 守卫差异**(A′ 暴露):legacy 的 cancel 处理器要求被撤销的
    **step** 处于 biz-success(它从 act 上溯到 step),内核的动作直接指向节点、`ActionPlanner`
    允许 `Ready|Running|Waiting` 上的 Cancel。park 改 Running 后需要状态表补 `Running → Cancelled`
    才不打断既有 cancel 用例;这条接受面在 park 前后都存在(内核独有),尚未与 legacy 守卫对跑。
-   (注:流事实归一(B)已完成,见上;队列第 1 项 timeout+catches 现在直接建立在新键
-   `__flow`/`SIGN_CATCH` 上。)
+   (注:流事实归一(B)与 timeout+catches(队列 1)均已完成,见上。)
 
 ## 语义结论(已核实,勿再猜测)
 
@@ -621,3 +641,7 @@ timeout 片实测补充:`kernel_host::tests::kernel_catch_*` 这批「双引擎 
 进程并行**跑时会翻 —— 翻的是 **legacy 侧**断言(`legacy_node_states` 读到 `["none"]`,或失败 act
 的 error 竞过 auto_complete 把 legacy 判成 completed),同批单跑即绿;这类翻转与本次改动不同路径
 (legacy scheduler 未动),按上面的口径判定。
+
+流归一/item-1 片实测补充:同类翻转也在 `kernel_host::tests::kernel_error_action_carries_the_legacy_inputs`
+上出现过。同一棵树连跑三次全量:两次各带一个旋转的 dual-engine 红(单跑均绿)、一次
+**1258 passed / 只剩 stall 那条**。判定以「单跑绿 + 至少一次干净全量」为准。

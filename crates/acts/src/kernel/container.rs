@@ -520,12 +520,14 @@ impl ContainerPlanner {
         )))
     }
 
-    /// The join of a step that is deciding a caught error: every CATCH child
-    /// has settled and the step itself decides it, exactly like the legacy
-    /// `auto_complete` pass that counted the children of a failed step.
+    /// The join of a step that is deciding a caught error: every child has
+    /// settled and the step itself decides it from its CATCH children, exactly
+    /// like the legacy `auto_complete` pass that counted the children of a
+    /// failed step.
     ///
     /// The legacy rule is `is_empty_catched`: the step's `Sign::ERROR` was
-    /// pinned by its failure hop, and
+    /// pinned by its failure hop, `auto_complete` waits for *every* child that
+    /// exists (a `timeouts` branch the tick fired included), and then
     ///
     /// - every CATCH child skipped ⇒ no handler matched, so the error is
     ///   re-derived and `emit_error` walks it up: the step is decided
@@ -534,9 +536,12 @@ impl ContainerPlanner {
     ///   completes and the error is caught (`CatchJoinOutcome::Caught`).
     ///
     /// The join is `None` — "not yet, or not mine" — while a child is still
-    /// in flight, when the step does not carry the ERROR sign, when the
-    /// triggering execution is not a CATCH child, and when a child was
-    /// aborted (the abort walk owns that outcome, like the plain join).
+    /// in flight, when the parent is not deciding its catches (that flow is
+    /// what separates a failed step from a container parked for its children),
+    /// and when a child was aborted (the abort walk owns that outcome, like the
+    /// plain join). Any child's settlement may trigger it: a step that declares
+    /// both `catches` and `timeouts` has timeout branches among its children,
+    /// and the last one to settle is what completes the gate.
     pub(crate) fn plan_catch_join(
         graph: &ExecutionGraph,
         snapshot: &AggregateSnapshot,
@@ -551,12 +556,9 @@ impl ContainerPlanner {
                 snapshot: snapshot.version.graph,
             });
         }
-        // Only the settlement of a CATCH child triggers the catch join, and
-        // only an execution whose failure hop pinned the deciding flow decides
-        // one.
-        if execution_sign(snapshot, &command.source) != Some(SIGN_CATCH) {
-            return Ok(None);
-        }
+        // Only an execution whose failure hop pinned the deciding flow decides
+        // a caught error, and only one of its own children settling may trigger
+        // the decision.
         if !deciding_catches(snapshot, &command.parent) {
             return Ok(None);
         }
@@ -573,7 +575,11 @@ impl ContainerPlanner {
         if children.is_empty() {
             return Ok(None);
         }
+        if !children.contains(&command.source) {
+            return Ok(None);
+        }
         let mut resumed = true;
+        let mut handlers = 0usize;
         for child in children {
             let state = snapshot
                 .executions
@@ -588,16 +594,22 @@ impl ContainerPlanner {
                 // `auto_complete` refuses to decide an aborted child set).
                 return Ok(None);
             }
-            // Legacy filters the CATCH children by their sign; every child of
-            // a failed step is one. A child without the sign means the
-            // aggregate was not produced by the failure fan-out — refuse to
-            // decide rather than guess a catch outcome for it.
+            // Only the CATCH children decide the caught error — the legacy
+            // `is_empty_catched` filters by the sign. The step's other children
+            // (a `timeouts` branch the tick fired) gate the join above but do
+            // not vote.
             if execution_sign(snapshot, child) != Some(SIGN_CATCH) {
-                return Ok(None);
+                continue;
             }
+            handlers += 1;
             if state != ExecutionState::Skipped {
                 resumed = false;
             }
+        }
+        if handlers == 0 {
+            // A decider without handlers is an aggregate the failure fan-out
+            // did not produce: refuse to guess a catch outcome for it.
+            return Ok(None);
         }
         let sequence =
             snapshot.next_operation_sequence(&command.parent.task_id, command.parent.generation);
@@ -1560,6 +1572,133 @@ mod tests {
         }
     }
 
+    /// A step that declares both `catches` and `timeouts` has a *mixed* child
+    /// set: the handlers decide the caught error, a timeout branch the tick
+    /// fired only gates the join (the legacy `auto_complete` waits for every
+    /// child, `is_empty_catched` counts the CATCH ones), and any child's
+    /// settlement — the timeout branch's included — may trigger the decision.
+    #[test]
+    fn catch_join_decides_a_mixed_child_set_from_its_handlers() {
+        let graph = {
+            let mut b = super::super::ExecutionGraphBuilder::new("p1", 1).unwrap();
+            for task in ["step1", "c1", "t1"] {
+                b.add_node(super::super::ExecutionNode {
+                    id: id(task, 0),
+                    model_node: node(task),
+                    state: ExecutionState::Created,
+                    revision: 0,
+                })
+                .unwrap();
+            }
+            b.set_root(id("step1", 0)).unwrap();
+            b.add_child(id("step1", 0), id("c1", 0)).unwrap();
+            b.add_child(id("step1", 0), id("t1", 0)).unwrap();
+            b.build().unwrap()
+        };
+        let mixed = |handler: ExecutionState, timeout: ExecutionState| {
+            let mut snapshot = snapshot(vec![
+                (
+                    id("step1", 0),
+                    ExecutionSnapshot {
+                        model_node: node("step1"),
+                        parent: None,
+                        predecessors: vec![],
+                        state: ExecutionState::Running,
+                        revision: 3,
+                    },
+                ),
+                (
+                    id("c1", 0),
+                    ExecutionSnapshot {
+                        model_node: node("c1"),
+                        parent: Some(id("step1", 0)),
+                        predecessors: vec![id("step1", 0)],
+                        state: handler,
+                        revision: 1,
+                    },
+                ),
+                (
+                    id("t1", 0),
+                    ExecutionSnapshot {
+                        model_node: node("t1"),
+                        parent: Some(id("step1", 0)),
+                        predecessors: vec![id("step1", 0)],
+                        state: timeout,
+                        revision: 1,
+                    },
+                ),
+            ]);
+            snapshot.variables.insert(
+                (id("step1", 0), FLOW_VAR.to_string()),
+                FLOW_CATCHES.to_string(),
+            );
+            snapshot
+                .variables
+                .insert((id("c1", 0), SIGN_VAR.to_string()), SIGN_CATCH.to_string());
+            snapshot
+        };
+        // Triggered by the timeout branch's settlement, not the handler's: the
+        // handler caught the error and the branch has settled.
+        let caught = ContainerPlanner::plan_catch_join(
+            &graph,
+            &mixed(ExecutionState::Completed, ExecutionState::Completed),
+            &CatchJoinCommand {
+                process_id: "p1".into(),
+                parent: id("step1", 0),
+                source: id("t1", 0),
+            },
+        )
+        .unwrap()
+        .expect("the timeout branch's settlement completes the gate");
+        assert!(matches!(caught, CatchJoinOutcome::Caught(..)));
+        // The handler skipped instead: the error resumes, still triggered by
+        // the timeout branch.
+        let resumed = ContainerPlanner::plan_catch_join(
+            &graph,
+            &mixed(ExecutionState::Skipped, ExecutionState::Completed),
+            &CatchJoinCommand {
+                process_id: "p1".into(),
+                parent: id("step1", 0),
+                source: id("t1", 0),
+            },
+        )
+        .unwrap()
+        .expect("the timeout branch's settlement completes the gate");
+        assert!(matches!(resumed, CatchJoinOutcome::Resumed(..)));
+        // The timeout branch is still in flight: the gate holds, however the
+        // handler settled.
+        for handler in [ExecutionState::Completed, ExecutionState::Skipped] {
+            assert!(
+                ContainerPlanner::plan_catch_join(
+                    &graph,
+                    &mixed(handler, ExecutionState::Waiting),
+                    &CatchJoinCommand {
+                        process_id: "p1".into(),
+                        parent: id("step1", 0),
+                        source: id("t1", 0),
+                    },
+                )
+                .unwrap()
+                .is_none(),
+                "a live timeout branch gates the decision (handler {handler:?})"
+            );
+        }
+        // A foreign execution's settlement triggers nothing.
+        assert!(
+            ContainerPlanner::plan_catch_join(
+                &graph,
+                &mixed(ExecutionState::Completed, ExecutionState::Completed),
+                &CatchJoinCommand {
+                    process_id: "p1".into(),
+                    parent: id("step1", 0),
+                    source: id("elsewhere", 0),
+                },
+            )
+            .unwrap()
+            .is_none()
+        );
+    }
+
     #[test]
     fn catch_join_only_fires_for_a_flow_decided_step_and_its_catcher() {
         let graph = catch_graph();
@@ -1589,7 +1728,9 @@ mod tests {
                 .is_none()
         );
 
-        // The settling execution must be a CATCH child, not any child.
+        // The triggering child must belong to the deciding step, but its role
+        // no longer has to be a handler one: a step declaring `timeouts` beside
+        // its `catches` is decided by whichever child settles last.
         let mut snapshot = settled();
         snapshot
             .variables
@@ -1597,15 +1738,29 @@ mod tests {
         assert!(
             ContainerPlanner::plan_catch_join(&graph, &snapshot, &catch_command())
                 .unwrap()
-                .is_none()
+                .is_some(),
+            "the handler role must not gate the trigger"
         );
 
-        // Every child of a failed step is a catcher; one without the sign
-        // means the aggregate was not produced by the failure fan-out.
+        // A child without the role does not vote: the decision still comes from
+        // the handler (c1 skipped, so the error resumes).
         let mut snapshot = settled();
         snapshot
             .variables
             .remove(&(id("c2", 0), SIGN_VAR.to_string()));
+        let outcome = ContainerPlanner::plan_catch_join(&graph, &snapshot, &catch_command())
+            .unwrap()
+            .expect("the signed handler still decides");
+        assert!(matches!(outcome, CatchJoinOutcome::Resumed(..)));
+
+        // A decider with no handler child at all is an aggregate the failure
+        // fan-out did not produce: refuse to guess a catch outcome for it.
+        let mut snapshot = settled();
+        for task in ["c1", "c2"] {
+            snapshot
+                .variables
+                .remove(&(id(task, 0), SIGN_VAR.to_string()));
+        }
         assert!(
             ContainerPlanner::plan_catch_join(&graph, &snapshot, &catch_command())
                 .unwrap()

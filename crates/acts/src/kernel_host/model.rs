@@ -217,29 +217,11 @@ fn import_step(
     // The legacy tree builds `catches` as Catch children and `timeouts` as
     // Timeout children; `Step::on_error` dispatches the handlers of a failed
     // step while the tick dispatches the branches of a running one — two
-    // independent dispatch shapes over the same node. The catch join decides
-    // the step from its handler set and the timeout branches join the same
-    // child set, so the decision would have to filter the two apart: refused
-    // rather than silently reduced to one of them.
-    if !step.catches.is_empty() && !step.timeouts.is_empty() {
-        return Err(ActError::Runtime(format!(
-            "step '{}' declares both 'catches' and 'timeouts'; the kernel's catch join cannot tell the two child sets apart yet",
-            step.id
-        )));
-    }
-    // The legacy tree builds `catches` as Catch children (`Step::on_error`
-    // dispatches them when the step fails, `auto_complete` decides whether
-    // the error was caught) and a step's branches as Branch children; it
-    // schedules *both* sets whenever the step runs into its children. One
-    // kernel fan-out shape cannot mean both, so a step declaring both is
-    // refused rather than silently reduced to one set.
+    // independent dispatch shapes over the same node, and a step may declare
+    // both: the catch join gates on every child the step has (a timeout branch
+    // the tick fired included) and decides the caught error from its CATCH
+    // children alone (the legacy `is_empty_catched` filters by the sign).
     if !step.catches.is_empty() {
-        if step_branches(step).is_some_and(|branches| !branches.is_empty()) {
-            return Err(ActError::Runtime(format!(
-                "step '{}' declares both 'branches' and 'catches'; the import has one fan-out shape per step",
-                step.id
-            )));
-        }
         for catch in &step.catches {
             import_step(
                 catch,
@@ -754,7 +736,7 @@ mod tests {
     }
 
     #[test]
-    fn catch_and_timeout_declarations_import_and_the_contradictory_ones_are_refused() {
+    fn catch_and_timeout_declarations_import_and_loops_or_blank_ids_are_refused() {
         // A catch step is a nested step: its auto decision and declared vars
         // become durable facts like a branch's, but it seeds no execution —
         // it comes alive when the failed step fans it out, and that hop seeds
@@ -841,19 +823,33 @@ mod tests {
         let error = spec(&looping_timeout).unwrap_err();
         assert!(format!("{error}").contains("'while' guard"));
 
-        // The catch join decides a failed step from its handler set while the
-        // tick dispatches the timeout branches into that same child set: one
-        // decision cannot tell the two apart yet, so the pair is refused.
+        // A step may declare `catches` beside `timeouts`: the legacy tree
+        // builds them as Catch and Timeout children of the same node — the
+        // failure path dispatches the handlers, the tick dispatches the
+        // branches, and the step's join gates on every child it has while the
+        // caught decision reads only the CATCH ones. Both sets import.
         let mixed_timeouts = crate::model::Workflow::new().with_step(|step| {
             step.with_id("s1")
                 .with_catch(|catch| catch.with_id("c1"))
                 .with_timeout(|timeout| timeout.with_id("t1"))
         });
-        let error = spec(&mixed_timeouts).unwrap_err();
-        assert!(format!("{error}").contains("both 'catches' and 'timeouts'"));
+        let imported = spec(&mixed_timeouts).unwrap();
+        let snapshot = imported.seed_snapshot().unwrap();
+        let root = ExecutionId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap();
+        let mixed_auto: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
+            snapshot
+                .variables
+                .get(&(root, AUTO_MAP_VAR.to_string()))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(mixed_auto["c1"], serde_json::Value::Bool(true));
+        assert_eq!(mixed_auto["t1"], serde_json::Value::Bool(true));
 
-        // The legacy tree schedules branches and catches as one child set and
-        // the import has one fan-out shape, so declaring both is refused.
+        // A step may declare `catches` beside `branches` too: the tree keeps
+        // the two child sets apart — the branches are `Normal` children (they
+        // run when the step completes) and the catches are `Catch` children
+        // (only `Step::on_error` dispatches them) — so one step can carry both.
         let mixed = crate::model::Workflow::new().with_step(|step| {
             step.with_id("s1")
                 .with_branch(|branch| {
@@ -864,8 +860,14 @@ mod tests {
                 })
                 .with_catch(|step| step.with_id("c1"))
         });
-        let error = spec(&mixed).unwrap_err();
-        assert!(format!("{error}").contains("both 'branches' and 'catches'"));
+        let imported = spec(&mixed).unwrap();
+        let snapshot = imported.seed_snapshot().unwrap();
+        assert!(
+            snapshot.executions.values().all(|execution| {
+                execution.model_node.as_str() != "c1" && execution.model_node.as_str() != "b1"
+            }),
+            "neither set is seeded: the branches fan out on completion, the handlers on failure"
+        );
     }
 
     #[test]

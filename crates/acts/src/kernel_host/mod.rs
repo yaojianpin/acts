@@ -1238,11 +1238,14 @@ impl KernelHost {
         // Preflight against the current snapshot: a caller-correctable
         // rejection (terminal task, unknown execution) consumes nothing.
         crate::kernel::ActionPlanner::plan(&snapshot, &command).map_err(runtime)?;
-        // A step declaring `catches` is not a client target once it is
-        // deciding — or has dispatched — its caught error: the legacy act it
-        // folds is already terminal, and the legacy `do_action` refuses every
-        // action on it. The refusal is part of the preflight, so it consumes
-        // no operation.
+        // A step declaring `catches` is not a client target once it is deciding
+        // its caught error: the legacy act it folds is already terminal, and the
+        // legacy `do_action` refuses every action on it. The durable flow fact
+        // is exactly that state — the same hop that dispatched the handlers
+        // pinned it — so no child-proxy is needed (a timeout branch the tick
+        // fired is a child too, and the step's own act stays actionable while
+        // one runs). The refusal is part of the preflight, so it consumes no
+        // operation.
         if let Some(model) = model_of(&snapshot)?
             && let Some(node) = snapshot
                 .executions
@@ -1250,14 +1253,10 @@ impl KernelHost {
                 .map(|execution| execution.model_node.as_str())
             && let Some(step) = find_step_in_model(&model, node)
             && !step.catches.is_empty()
-            && (is_catch_decider(&snapshot, &execution_id)
-                || snapshot
-                    .executions
-                    .values()
-                    .any(|child| child.parent.as_ref() == Some(&execution_id)))
+            && is_catch_decider(&snapshot, &execution_id)
         {
             return Err(ActError::Action(format!(
-                "step '{}' is deciding (or already dispatched) its catches; the act it folds is decided",
+                "step '{}' is deciding its catches; the act it folds is decided",
                 execution_id.task_id
             )));
         }
@@ -5326,6 +5325,166 @@ mod tests {
             vec!["act1".to_string(), "init".to_string()],
             "the example's two acts, in key order"
         );
+    }
+
+    /// A step declaring both `catches` and `timeouts`. The tick fires a timeout
+    /// branch while the step waits on its act; the act then fails; the handler
+    /// answers the error — and the step still waits for the timeout branch it
+    /// fired (the legacy `auto_complete` gates on every child of the step), so
+    /// the *decision* comes only when that branch settles too, triggered by the
+    /// branch's own settlement rather than the handler's.
+    ///
+    /// Kernel only: the legacy engine wedges on this failure path (its failed
+    /// act never finishes propagating), which the catch matrix records.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn a_failed_step_waits_for_its_timeout_branch_before_the_catch_join() {
+        const PID: &str = "p_mixed_catch_timeout";
+        let mut config = crate::Config::default();
+        config.data.kernel_engine = true;
+        config.data.tick_interval_secs = Some(1);
+        let engine = crate::Engine::builder()
+            .set_config(&config)
+            .start()
+            .await
+            .unwrap();
+        let wait_for_created = |key: &'static str| {
+            let sig = engine.signal((String::new(), String::new()));
+            let (done, done_rx) = (sig.clone(), sig.clone());
+            engine.channel().on_message(move |e| {
+                let done = done_rx.clone();
+                async move {
+                    if e.is_params_key(key) && e.is_state(crate::MessageState::Created) {
+                        done.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+                        done.close();
+                    }
+                }
+            });
+            done
+        };
+        let act1_created = wait_for_created("act1");
+        let branch_created = wait_for_created("branch");
+        let handler_created = wait_for_created("handler");
+        let workflow = crate::model::Workflow::new()
+            .with_id("wf-mixed-catch-timeout")
+            .with_step(|step| {
+                step.with_id("s1")
+                    .with_uses(
+                        crate::utils::test::USES_IRQ,
+                        crate::Vars::new().with("key", "act1"),
+                    )
+                    .with_catch(|catch| {
+                        catch.with_id("c1").with_if("$ecode() == 'E1'").with_uses(
+                            crate::utils::test::USES_IRQ,
+                            crate::Vars::new().with("key", "handler"),
+                        )
+                    })
+                    .with_timeout(|timeout| {
+                        timeout.with_id("t1").with_if("$cost() >= 300").with_uses(
+                            crate::utils::test::USES_IRQ,
+                            crate::Vars::new().with("key", "branch"),
+                        )
+                    })
+            });
+        let runtime = engine.runtime();
+        runtime
+            .start(
+                &workflow,
+                crate::Vars::new().with(crate::utils::consts::PROCESS_ID, PID),
+            )
+            .await
+            .unwrap();
+        let host = runtime.kernel().expect("the kernel host").clone();
+        let (pid, act1) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), act1_created.recv())
+                .await
+                .expect("the working act never appeared")
+                .clone();
+        // The tick fires the timeout branch while the act still waits.
+        let (_, branch) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), branch_created.recv())
+                .await
+                .expect("the timeout branch never appeared")
+                .clone();
+        // The act fails: the handler is dispatched, the step keeps running.
+        runtime
+            .do_action(&crate::event::Action::new(
+                &pid,
+                &act1,
+                crate::event::EventAction::Error,
+                crate::Vars::new()
+                    .with(crate::utils::consts::ACT_ERR_CODE, "E1")
+                    .with(crate::utils::consts::ACT_ERR_MESSAGE, "boom"),
+            ))
+            .await
+            .expect("the act must error");
+        let (_, handler) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), handler_created.recv())
+                .await
+                .expect("the handler never appeared")
+                .clone();
+
+        // The handler settles, but the fired timeout branch has not: the step
+        // waits for it (the gate covers every child).
+        runtime
+            .do_action(&crate::event::Action::new(
+                &pid,
+                &handler,
+                crate::event::EventAction::Next,
+                crate::Vars::new(),
+            ))
+            .await
+            .expect("the handler must complete");
+        let snapshot = host.snapshot(PID).await.unwrap().expect("the aggregate");
+        assert_eq!(
+            state_of(&snapshot, "c1"),
+            crate::kernel::ExecutionState::Completed
+        );
+        assert_eq!(
+            state_of(&snapshot, "t1"),
+            crate::kernel::ExecutionState::Waiting,
+            "the timeout branch is still in flight"
+        );
+        assert_eq!(
+            state_of(&snapshot, "s1"),
+            crate::kernel::ExecutionState::Running,
+            "a settled handler does not decide the step while its branch runs"
+        );
+
+        // The branch settles: its settlement triggers the catch join, which
+        // catches the error and completes the step.
+        runtime
+            .do_action(&crate::event::Action::new(
+                &pid,
+                &branch,
+                crate::event::EventAction::Next,
+                crate::Vars::new(),
+            ))
+            .await
+            .expect("the timeout branch must complete");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !host.process_completed(PID).await.unwrap() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the run never settled: {:?}",
+                host.snapshot(PID)
+                    .await
+                    .unwrap()
+                    .expect("the aggregate")
+                    .executions
+                    .iter()
+                    .map(|(id, execution)| format!("{}:{:?}", id.task_id, execution.state))
+                    .collect::<Vec<_>>()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let snapshot = host.snapshot(PID).await.unwrap().expect("the aggregate");
+        assert_eq!(
+            state_of(&snapshot, "s1"),
+            crate::kernel::ExecutionState::Completed,
+            "the caught error completed the step"
+        );
+        engine.close().await;
     }
 
     /// A client's `act:error` carries the legacy inputs (`ecode`, `message`):
