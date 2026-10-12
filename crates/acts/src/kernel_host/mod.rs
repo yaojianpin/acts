@@ -2089,6 +2089,23 @@ impl KernelHost {
             tx: self.wake_tx.clone(),
         };
         for operation in &receipt.new_operations {
+            // A timer armed by an execution's *start* hop waits for the tick:
+            // the legacy engine had no round before its first process tick, so
+            // waking it here would let an already-open window fire up to one
+            // tick early. Waking it is the recovery scan's job (it re-wakes
+            // every pending operation on each tick). A timer a *round* re-armed
+            // (the branch chain of a timed-out execution) is woken at once:
+            // that is the legacy `Step::next` handing the turn to the branch
+            // declared after the one that just ran.
+            if record.kind == OperationKind::ExecuteTask
+                && loaded
+                    .snapshot
+                    .operations
+                    .get(operation)
+                    .is_some_and(|created| created.kind == OperationKind::DispatchTimeout)
+            {
+                continue;
+            }
             wake.wake(operation);
         }
         // The run's lifecycle, from the freshly committed state: a start while
@@ -6495,14 +6512,25 @@ mod tests {
         };
 
         // `s1` waits on the client — the live state a timed-out step is in.
-        // The timer's first round rides the start hop's own wake: an open
-        // window (`if: true` here) dispatches at once, a closed one
-        // (`if: false`) dispatches nothing and stays armed for the next tick.
+        // The timer is armed by the start hop, which is not a wake source for
+        // it: the legacy engine had no round before its first process tick, so
+        // nothing fires until the scan wakes the timer on a tick.
         let snapshot = host.snapshot(PID).await.unwrap().unwrap();
         assert_eq!(
             state_of(&snapshot, "s1"),
             crate::kernel::ExecutionState::Waiting
         );
+        assert!(
+            !has_task(&snapshot, "t1") && !has_task(&snapshot, "t2"),
+            "no branch fires before the first tick"
+        );
+        assert_eq!(marker(&snapshot, "s1"), Vec::<String>::new());
+
+        // One tick: the open window dispatches, the closed one stays armed.
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        host.recover(SystemClock.now_ms()).await.unwrap();
+        host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
+        let snapshot = host.snapshot(PID).await.unwrap().unwrap();
         assert_eq!(
             state_of(&snapshot, "t1"),
             crate::kernel::ExecutionState::Waiting,
@@ -6754,6 +6782,11 @@ mod tests {
         });
         let spec = ProcessSpec::from_workflow(PID, &workflow, &|_| None).unwrap();
         host.start_process(&spec).await.unwrap();
+        host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+        // The timer evaluates from the first tick on: the start hop that armed
+        // it does not wake it.
+        tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        host.recover(SystemClock.now_ms()).await.unwrap();
         host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
 
         let snapshot = host.snapshot(PID).await.unwrap().unwrap();

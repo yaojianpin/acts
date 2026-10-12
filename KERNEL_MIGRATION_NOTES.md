@@ -511,6 +511,16 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
   step `Completed`、run 结算。
   与 legacy 的终态对跑仍不可能:legacy 的失败 act 不跑自己的 `next`,step 永不结算(既有登记)。
 
+- **timer 的第一轮不再早于 tick(队列 2 收口)**:arm 那次 hop 之后,新操作会被宿主统一唤醒
+  (`receipt.new_operations`),于是「窗口本来就开着」的分支(`$cost() >= 0` 之类)会比 legacy
+  早至多一个 tick fire。修法在**唤醒路径**上区分(**不新增持久事实**):`execute_one` 收尾的唤醒
+  跳过「本次 hop 是 `ExecuteTask`(执行起点)刚 arm 的那个 `DispatchTimeout`」—— 起点 arm 的 timer
+  只由 recovery 扫描(每 tick)唤醒,与 legacy「第一个 tick 才有第一轮」一致;被**一次 round**
+  重新 arm 的 timer 仍被立刻唤醒,保住 legacy `Step::next` 的链式交接(上一分支结算后立即评估
+  下一分支)。单测两处改为「先断言 tick 前无派发,再 `sleep 2ms` + `recover` 驱动一次 tick」。
+  (两条走过的弯路记在此以免重走:①「首轮提交 arm 标记 + 替补 timer」—— 替补同样被宿主立刻唤醒,
+  标记挡不住那次评估;②「`cost_ms == 0` 才 Idle」—— 真实 hop 序列耗时已过毫秒,等于没生效。)
+
 ## 已对齐(无需动)
 
 - Complete/Submit/Skip/Fail on Running/Waiting:ActionPlanner 与 legacy 守卫一致
@@ -520,14 +530,11 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
 
 ## 剩余工作(按序)
 
-1. (登记,未排期)**timer 的第一轮不等 tick**:开着的窗随 start hop 的 wake 立刻 fire,比 legacy
-   早至多一个 tick;若要严格对齐可让首轮永远先 Idle 一次(代价:每个 timeout 步至少多一个 tick
-   延迟),当前不认为值得,故登记。
-2. (登记,未排期)**Cancel 的 legacy 守卫差异**(A′ 暴露):legacy 的 cancel 处理器要求被撤销的
+1. (登记,未排期)**Cancel 的 legacy 守卫差异**(A′ 暴露):legacy 的 cancel 处理器要求被撤销的
    **step** 处于 biz-success(它从 act 上溯到 step),内核的动作直接指向节点、`ActionPlanner`
    允许 `Ready|Running|Waiting` 上的 Cancel。park 改 Running 后需要状态表补 `Running → Cancelled`
    才不打断既有 cancel 用例;这条接受面在 park 前后都存在(内核独有),尚未与 legacy 守卫对跑。
-   (注:流事实归一(B)与 timeout+catches(队列 1)均已完成,见上。)
+   (注:流事实归一(B)、timeout+catches(队列 1)、timer 首轮等 tick(队列 2)均已完成,见上。)
 
 ## 语义结论(已核实,勿再猜测)
 
