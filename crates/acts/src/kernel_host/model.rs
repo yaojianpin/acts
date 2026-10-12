@@ -64,6 +64,46 @@ pub(crate) struct ProcessSpec {
     pub(crate) owner: crate::ScopePolicy,
 }
 
+/// Assign the ids the legacy tree assigns before it builds nodes
+/// (`prepare_workflow_ids` → `prepare_step_ids`/`prepare_branch_ids`): an
+/// unnamed step, branch, catch handler or timeout branch gets a fresh short id,
+/// and an unnamed workflow a long one (the `mid` every message carries). The
+/// kernel derives every node id from the model, so this runs before the import;
+/// the result is what lands in the aggregate as the durable model, which is how
+/// a hop addresses a node the model never named.
+fn assign_ids(workflow: &mut crate::model::Workflow) {
+    if workflow.id.is_empty() {
+        workflow.id = crate::utils::longid();
+    }
+    for step in workflow.steps.iter_mut() {
+        assign_step_ids(step);
+    }
+}
+
+fn assign_step_ids(step: &mut crate::model::Step) {
+    if step.id.is_empty() {
+        step.id = crate::utils::shortid();
+    }
+    for branch in step.branches.iter_mut() {
+        assign_branch_ids(branch);
+    }
+    for catch in step.catches.iter_mut() {
+        assign_step_ids(catch);
+    }
+    for timeout in step.timeouts.iter_mut() {
+        assign_step_ids(timeout);
+    }
+}
+
+fn assign_branch_ids(branch: &mut crate::model::Branch) {
+    if branch.id.is_empty() {
+        branch.id = crate::utils::shortid();
+    }
+    for step in branch.steps.iter_mut() {
+        assign_step_ids(step);
+    }
+}
+
 /// Whether a step self-completes once its act ran. The answer is the
 /// package's own `ActRunAs`: `Func` and `Msg` runs come to an end inside the
 /// execution, an `Irq` waits for a client response. A step without a package
@@ -124,13 +164,13 @@ fn import_step(
     seed_variables: &mut Vec<(Option<String>, String, String)>,
 ) -> Result<()> {
     if step.id.trim().is_empty() {
-        // The legacy tree assigns a random id (`prepare_step_ids`) before it
-        // builds nodes; the driver derives every id from the model, and an
-        // unnamed nested node would only fail later, when the hop that must
-        // address it runs. Refusing is the same contract the seeded top chain
-        // already enforces.
+        // `from_workflow` assigns the ids the legacy tree assigns, so only a
+        // *blank* (whitespace) id reaches here: it cannot address a node, and
+        // the legacy tree would keep it as-is (its `prepare_step_ids` tests
+        // `is_empty`), which is a model the kernel refuses to invent a meaning
+        // for.
         return Err(ActError::Runtime(
-            "a nested step has no id; the kernel derives node ids from the model, so nested steps must be named"
+            "a nested step has a blank id; the kernel derives node ids from the model, and a blank one cannot address the node"
                 .to_string(),
         ));
     }
@@ -229,7 +269,7 @@ fn import_step(
     for branch in step_branches(step).unwrap_or_default() {
         if branch.id.trim().is_empty() {
             return Err(ActError::Runtime(format!(
-                "branch of step '{}' has no id; the kernel derives node ids from the model, so branches must be named",
+                "branch of step '{}' has a blank id; the kernel derives node ids from the model, and a blank one cannot address the node",
                 step.id
             )));
         }
@@ -307,6 +347,14 @@ impl ProcessSpec {
         workflow: &crate::model::Workflow,
         run_as: &dyn Fn(&str) -> Option<crate::ActRunAs>,
     ) -> Result<Self> {
+        // The caller's model stays untouched: the ids the legacy tree assigns
+        // (`prepare_workflow_ids` before it builds nodes) are assigned on a
+        // copy, and that copy is what the aggregate carries as its durable
+        // model — so an unnamed nested node is addressable by the hops that
+        // must reach it, exactly as it is in the legacy run.
+        let mut assigned = workflow.clone();
+        assign_ids(&mut assigned);
+        let workflow = &assigned;
         let mut seed_variables: Vec<(Option<String>, String, String)> = Vec::new();
         for var in &workflow.vars {
             seed_variables.push((None, var.name.clone(), var.value.to_string()));
@@ -541,6 +589,63 @@ mod tests {
 
     fn spec(workflow: &crate::model::Workflow) -> Result<ProcessSpec> {
         ProcessSpec::from_workflow("p1", workflow, &|_| None)
+    }
+
+    /// The `examples/catches/model.yml` shape: an unnamed catch handler with
+    /// unnamed branches and unnamed inner steps. The legacy tree assigns ids
+    /// before it builds nodes (`prepare_step_ids`), and the import does the same
+    /// on a copy — the ids land in the durable model, which is the only way a
+    /// hop can address a node the model never named. The caller's model stays
+    /// untouched.
+    #[test]
+    fn unnamed_nested_nodes_get_ids_like_the_legacy_tree() {
+        let workflow = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("s1")
+                .with_uses(crate::utils::test::USES_IRQ, crate::Vars::new())
+                .with_catch(|catch| {
+                    catch.with_branch(|branch| {
+                        branch.with_if("$ecode() == 'e1'").with_step(|step| {
+                            step.with_uses(crate::utils::test::USES_MSG, crate::Vars::new())
+                        })
+                    })
+                })
+        });
+        let imported = spec(&workflow).unwrap();
+        let snapshot = imported.seed_snapshot().unwrap();
+        let root = ExecutionId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap();
+        let model: crate::model::Workflow = serde_json::from_str(
+            snapshot
+                .variables
+                .get(&(root.clone(), MODEL_VAR.to_string()))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(model.steps.len(), 1);
+        let catch = &model.steps[0].catches[0];
+        assert!(!catch.id.is_empty(), "the handler got an id");
+        let branch = &catch.branches[0];
+        assert!(!branch.id.is_empty(), "the branch got an id");
+        let inner = &branch.steps[0];
+        assert!(!inner.id.is_empty(), "the inner step got an id");
+        assert!(
+            !model.id.is_empty(),
+            "an unnamed workflow gets the id every message carries as `mid`"
+        );
+        // The auto map knows the assigned ids, so the fan-out that admits them
+        // can read their self-completion decision.
+        let auto: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
+            snapshot
+                .variables
+                .get(&(root, AUTO_MAP_VAR.to_string()))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(auto.contains_key(&catch.id), "auto map: {auto:?}");
+        assert!(auto.contains_key(&inner.id), "auto map: {auto:?}");
+        // The caller's model is not mutated.
+        assert!(workflow.steps[0].catches[0].id.is_empty());
+        assert!(workflow.steps[0].catches[0].branches[0].id.is_empty());
+        assert!(workflow.id.is_empty());
     }
 
     fn branched() -> crate::model::Workflow {

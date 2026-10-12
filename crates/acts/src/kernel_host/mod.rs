@@ -611,24 +611,22 @@ fn evaluate_predicate(
 }
 
 /// The model children of one container node, borrowed from the declaring
-/// model. `Branches` is a branched step's selection, `Catches` a failed
-/// step's handlers, `Steps` a branch's own chain — or the workflow root's
-/// seeded chain, which is why the root is a container over `model.steps`.
+/// model. `Branches` is a branched step's selection, `Steps` a branch's own
+/// chain — or the workflow root's seeded chain, which is why the root is a
+/// container over `model.steps`. A step's `catches` are deliberately absent:
+/// the legacy tree keeps them off the success path (see [`walk_step`]).
 enum ContainerShape<'a> {
     Branches(&'a [crate::model::Branch]),
-    Catches(&'a [crate::model::Step]),
     Steps(&'a [crate::model::Step]),
 }
 
 fn walk_step<'a>(step: &'a crate::model::Step, target: &str) -> Option<ContainerShape<'a>> {
     if step.id == target {
-        // A step with `catches` is a container over them: the legacy
-        // `check_in_children` schedules every child the step declares (the
-        // catch steps included), so a success also runs into them — their
-        // guards decide what a handler does without an error to answer.
-        if !step.catches.is_empty() {
-            return Some(ContainerShape::Catches(&step.catches));
-        }
+        // Only the step's *branches* are a fan-out. Its `catches` are not: the
+        // legacy tree builds them as `NodeOutputKind::Catch` children, which
+        // `Node::children()` (Normal kind) does not return, so a successful
+        // completion never runs into them — only `Step::on_error` dispatches
+        // them, on the failure path ([`KernelHost::catch_fanout`]).
         return model::step_branches(step).map(ContainerShape::Branches);
     }
     for branch in model::step_branches(step).unwrap_or_default() {
@@ -3611,9 +3609,6 @@ impl KernelHost {
             ContainerShape::Branches(branches) => {
                 branches.iter().map(|branch| branch.id.as_str()).collect()
             }
-            ContainerShape::Catches(catches) => {
-                catches.iter().map(|catch| catch.id.as_str()).collect()
-            }
             ContainerShape::Steps(steps) => steps.iter().map(|step| step.id.as_str()).collect(),
         };
         if snapshot.executions.values().any(|execution| {
@@ -3764,61 +3759,6 @@ impl KernelHost {
                     })
                 })
                 .collect::<Result<Vec<_>>>()?,
-            // The step's catch handlers, dispatched because the step ran into
-            // its children — not because it failed: their own guards decide
-            // what they do without an error to answer (`$ecode()` is null).
-            // The failure path fans the same children out with the CATCH sign
-            // (see `KernelHost::catch_fanout`).
-            ContainerShape::Catches(catches) => {
-                let mut children = Vec::with_capacity(catches.len());
-                for catch in catches {
-                    let mut vars: Vec<(String, String)> = catch
-                        .vars
-                        .iter()
-                        .map(|var| (var.name.clone(), var.value.to_string()))
-                        .collect();
-                    let mut plan = crate::kernel::ContainerChildPlan::Entry;
-                    if let Some(expr) = &catch.r#if {
-                        // The handler's own selection: the legacy `Step::init`
-                        // evaluates it on the dispatched task and skips the
-                        // handler when it does not hold.
-                        match self
-                            .evaluate_branch_predicate(snapshot, execution_id, expr, inputs)
-                            .await?
-                        {
-                            PredicateValue::True => {}
-                            PredicateValue::False => plan = crate::kernel::ContainerChildPlan::Skip,
-                            // A handler whose guard cannot be evaluated fails
-                            // in its `init` (the legacy `ctx.eval` error): it
-                            // is admitted and fails on its first hop.
-                            PredicateValue::Null => vars.push((
-                                BRANCH_ERROR_VAR.to_string(),
-                                serde_json::json!({
-                                    "code": "",
-                                    "message": format!(
-                                        "catch step '{}' guard evaluated to null",
-                                        catch.id
-                                    )
-                                })
-                                .to_string(),
-                            )),
-                            PredicateValue::Invalid { message } => vars.push((
-                                BRANCH_ERROR_VAR.to_string(),
-                                serde_json::json!({ "code": "", "message": message }).to_string(),
-                            )),
-                        }
-                    }
-                    children.push(crate::kernel::ContainerChild {
-                        task_id: catch.id.clone(),
-                        model_node: node_id(&catch.id)?,
-                        plan,
-                        predecessors: vec![crate::kernel::ContainerPredecessor::Source],
-                        vars,
-                        auto: auto_decision(snapshot, &catch.id)?,
-                    });
-                }
-                children
-            }
         };
         Ok(Some(ContainerFanoutCommand {
             process_id: snapshot.process_id.clone(),
@@ -5244,6 +5184,144 @@ mod tests {
         );
     }
 
+    /// The published example model (`examples/catches/model.yml`) runs as it is:
+    /// its catch handler, its branches and the handler's inner steps are all
+    /// unnamed, so the import assigns the ids the legacy tree assigns and the
+    /// run can address them. Both engines then run the same model — a
+    /// *successful* act completion, which leaves the handlers undispatched on
+    /// both sides (the legacy tree keeps `catches` off the success path) — and
+    /// announce the same act keys with the same settled states. The node ids are
+    /// random on both sides (the legacy tree also assigns them), so the streams
+    /// are compared by key, not by id. The example's error path is the catch
+    /// matrix' subject; the legacy engine wedges on it there.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn the_unnamed_catch_example_matches_the_legacy_run() {
+        const PID: &str = "p_unnamed_catch";
+
+        /// Drive one engine: complete the init act, then the working act
+        /// without an error, and hand back the act keys the run announced.
+        async fn run(kernel_engine: bool) -> Vec<String> {
+            // The published example, loaded as it is: its handler, branches and
+            // inner steps are unnamed.
+            let workflow = crate::model::Workflow::from_yml(include_str!(
+                "../../../../examples/catches/model.yml"
+            ))
+            .unwrap();
+            let mut config = crate::Config::default();
+            config.data.kernel_engine = kernel_engine;
+            config.data.tick_interval_secs = Some(1);
+            let engine = crate::Engine::builder()
+                .set_config(&config)
+                .start()
+                .await
+                .unwrap();
+            let keys = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+            let wait_for_created = |key: &'static str| {
+                let sig = engine.signal((String::new(), String::new()));
+                let (done, done_rx) = (sig.clone(), sig.clone());
+                engine.channel().on_message(move |e| {
+                    let done = done_rx.clone();
+                    async move {
+                        if e.is_params_key(key) && e.is_state(crate::MessageState::Created) {
+                            done.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+                            done.close();
+                        }
+                    }
+                });
+                done
+            };
+            let init_created = wait_for_created("init");
+            let act1_created = wait_for_created("act1");
+            {
+                let keys = keys.clone();
+                engine.channel().on_message(move |e| {
+                    let keys = keys.clone();
+                    async move {
+                        if let Some(params) = e.inputs.get::<crate::Vars>("params")
+                            && let Some(key) = params.get::<String>("key")
+                        {
+                            let mut keys = keys.lock();
+                            if !keys.iter().any(|seen| seen == &key) {
+                                keys.push(key);
+                            }
+                        }
+                    }
+                });
+            }
+            let sig = engine.signal(());
+            let done = sig.clone();
+            engine.channel().on_complete(move |_| {
+                let done = done.clone();
+                async move { done.close() }
+            });
+            let runtime = engine.runtime();
+            runtime
+                .start(
+                    &workflow,
+                    crate::Vars::new().with(crate::utils::consts::PROCESS_ID, PID),
+                )
+                .await
+                .unwrap();
+            let (pid, tid) =
+                tokio::time::timeout(std::time::Duration::from_secs(30), init_created.recv())
+                    .await
+                    .expect("the init act never appeared")
+                    .clone();
+            runtime
+                .do_action(&crate::event::Action::new(
+                    &pid,
+                    &tid,
+                    crate::event::EventAction::Next,
+                    crate::Vars::new(),
+                ))
+                .await
+                .expect("the init act must complete");
+            let (pid, tid) =
+                tokio::time::timeout(std::time::Duration::from_secs(30), act1_created.recv())
+                    .await
+                    .expect("the working act never appeared")
+                    .clone();
+            runtime
+                .do_action(&crate::event::Action::new(
+                    &pid,
+                    &tid,
+                    crate::event::EventAction::Next,
+                    crate::Vars::new(),
+                ))
+                .await
+                .expect("the working act must complete");
+            tokio::time::timeout(std::time::Duration::from_secs(30), sig.recv())
+                .await
+                .expect("the run never finished");
+            if let Some(host) = runtime.kernel() {
+                host.dispatch_outbox().await.unwrap();
+            }
+            let mut keys = keys.lock().clone();
+            keys.sort();
+            engine.close().await;
+            keys
+        }
+
+        let legacy = run(false).await;
+        let kernel = run(true).await;
+        assert_eq!(
+            legacy, kernel,
+            "the act keys both engines announced must match"
+        );
+        assert!(
+            !kernel
+                .iter()
+                .any(|key| key == "others" || key == "catch1" || key == "catch2"),
+            "a successful completion never dispatches the handlers: {kernel:?}"
+        );
+        assert_eq!(
+            kernel,
+            vec!["act1".to_string(), "init".to_string()],
+            "the example's two acts, in key order"
+        );
+    }
+
     /// A client's `act:error` carries the legacy inputs (`ecode`, `message`):
     /// the failure must land on the same node with the same code on both
     /// engines — what `$ecode()` reads for a catch is this code.
@@ -6008,12 +6086,14 @@ mod tests {
         legacy_engine.close().await;
     }
 
-    /// A successful completion dispatches the step's `catches` too (the legacy
-    /// `check_in_children` schedules every child of a running step, the catch
-    /// children included). With no error to answer, `$ecode()` is null: the
-    /// `if` handler declines and the `else` handler runs — the legacy branch
-    /// selection, and the one catch path both engines reach a terminal state
-    /// on, so it is compared end to end.
+    /// A successful completion does **not** run into a step's `catches`: the
+    /// legacy tree builds them as `NodeOutputKind::Catch` children, which
+    /// `Node::children()` (Normal kind) does not return, so
+    /// `check_in_children` never visits them — only `Step::on_error`
+    /// dispatches handlers, on the failure path. Both engines therefore finish
+    /// the step and the run with no handler task at all, which is what the fold
+    /// comparison pins (it is compared end to end because no handler exists to
+    /// diverge on).
     #[tokio::test(flavor = "multi_thread")]
     #[serial_test::serial]
     async fn kernel_catch_matches_legacy_when_the_step_completes_without_error() {
@@ -6074,6 +6154,10 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         let legacy_fold = folded_legacy_states(&legacy);
+        assert!(
+            !legacy_fold.iter().any(|(node, _)| node == "c1"),
+            "the legacy run leaves the handler undispatched: {legacy_fold:?}"
+        );
 
         let (kernel_engine, _ran) = run_catch_engine(true, PID, None, &workflow()).await;
         let host = kernel_engine
@@ -6083,32 +6167,22 @@ mod tests {
             .clone();
         let snapshot = wait_kernel_settled(&host, PID).await;
         assert_parity(&legacy_fold, &snapshot);
-        // The `if` handler declined and the `else` handler ran, in both
-        // engines.
+        // The step and the run complete; no handler ever existed.
         for (node, state) in [
-            ("c1", crate::kernel::ExecutionState::Completed),
-            ("b1", crate::kernel::ExecutionState::Skipped),
-            ("b2", crate::kernel::ExecutionState::Completed),
-            ("h2", crate::kernel::ExecutionState::Completed),
             ("s1", crate::kernel::ExecutionState::Completed),
+            (
+                crate::utils::consts::TASK_ROOT_TID,
+                crate::kernel::ExecutionState::Completed,
+            ),
         ] {
             assert_eq!(state_of(&snapshot, node), state, "node '{node}'");
         }
-        assert!(
-            !has_task(&snapshot, "h1"),
-            "the declining handler never dispatches its act"
-        );
-        // A nested node's declared vars are seeded by the hop that admits it,
-        // not by the aggregate seed (which knows no such execution).
-        let c1 = crate::kernel::ExecutionId::new("c1", 0).unwrap();
-        assert_eq!(
-            snapshot
-                .variables
-                .get(&(c1, "declared".to_string()))
-                .map(String::as_str),
-            Some("7"),
-            "the fan-out seeds the handler's declared vars"
-        );
+        for node in ["c1", "b1", "b2", "h1", "h2"] {
+            assert!(
+                !has_task(&snapshot, node),
+                "a successful completion never dispatches handlers ('{node}')"
+            );
+        }
         kernel_engine.close().await;
         legacy_engine.close().await;
     }

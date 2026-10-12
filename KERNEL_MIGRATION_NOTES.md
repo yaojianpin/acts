@@ -436,6 +436,37 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
   的消息由 (d) 补上。②act 的 *记录条数* 与 legacy 的 *任务条数* 不同(内核把 act 折进 step),
   折叠到(node, state, uses)后相等,与既有口径一致。
 
+- **driver 端节点 id 分配(队列 1 收口)**
+  (a) `ProcessSpec::from_workflow` 在导入前**克隆** model,并赋值 id —— 镜像 legacy `tree/build.rs`
+  的 `prepare_workflow_ids`/`prepare_step_ids`/`prepare_branch_ids`:空的 step/branch/catch/timeout
+  节点 → `utils::shortid()`,空 workflow id → `utils::longid()`(即每条消息的 `mid`);判定与 legacy
+  同(只看 `is_empty()`)。**调用方的 model 不被改写**(legacy 同样是先 clone 再赋值);赋完 id 的副本
+  既用于导入、也序列化进 `__model` —— 聚合即事实,hop 才能寻址。
+  于是「未命名嵌套节点 → 导入期拒绝」只剩**空白(trim 后为空)**id 一种(legacy 会原样保留空白 id,
+  内核拒绝替它发明语义;拒绝文案与注释已改)。
+  (b) **实测**:`unnamed_nested_nodes_get_ids_like_the_legacy_tree`(catch + branch + 内层 step 全无名
+  → 导入成功、`__model` 与 auto map 都带新 id、调用方 model 未被改写);`the_unnamed_catch_example_matches_the_legacy_run`
+  **直接加载 `examples/catches/model.yml`**(`include_str!`,即发布的那份文件)双引擎对跑:完成 init
+  与 work act(成功路径;两侧都**不**派发 handler,见上面的「catch 成功路径的修正」)→ 两引擎的 act
+  key 集合都是 `{init, act1}` 且落定节点集合一致(`$`/prepare/step1/final),run 都结算。
+  两引擎的节点 id 都是运行时随机(legacy 也是),故按 **act key** 比对(与既有「parity 不比 id」口径
+  一致)。
+
+- **catch 成功路径的修正(消息/id 片暴露:内核原先偏 legacy)**
+  实测:legacy 的 tree builder 把 `catches` 建成 `NodeOutputKind::Catch` 子节点,而
+  `Node::children()` 只回 `Normal` 类别 —— 所以 `check_in_children` **不会**访问 handler,
+  **成功完成不会派发 handler**(只有 `Step::on_error` 在失败时派发)。
+  实测证据:`examples/catches/model.yml` 成功路径的 legacy 任务树里**完全没有 handler/分支任务**
+  (只有 workflow/prepare/step1/final 与其 act);而内核原先会 fan-out 它们,handler 的 `else`
+  分支还真的会跑它的 msg 步骤 → 不只多出节点,**侧效应也分歧**。
+  修正:`walk_step` 只把 step 的 `branches` 当容器形状(`ContainerShape::Catches` 变体与
+  `fanout_command` 里那段 catch 构造整块删除;`catch_fanout` 自己按 `step.catches` 建子,不受影响)。
+  catch 失败路径(接住/上浮)用例不变;成功路径用例
+  `kernel_catch_matches_legacy_when_the_step_completes_without_error` 改成「两侧都没有 handler
+  执行」——它原先的折叠比较对该子树是**空对空**(legacy 根本没建那些节点),所以没抓到这条分歧。
+  ⚠️ 旧笔记与宿主注释里「`check_in_children` 调度 catch 子节点 ⇒ 成功也跑 handler」的说法**是错的**,
+  以本条为准。
+
 ## 已对齐(无需动)
 
 - Complete/Submit/Skip/Fail on Running/Waiting:ActionPlanner 与 legacy 守卫一致
@@ -445,18 +476,13 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
 
 ## 剩余工作(按序)
 
-1. (登记,未排期)**driver 未实现节点 id 分配**:legacy 的 `prepare_step_ids` 会为未命名的
-   step/branch/catch 补随机 id(`tree/build.rs`);driver 从 model 取 id,所以嵌套节点必须显式
-   命名(导入期拒绝,不再在 hop 里 wedge)。要跑 `examples/catches/model.yml` 这类模型,
-   需要在 `ProcessSpec::from_workflow` 里补一条等价于 `prepare_step_ids` 的赋值(结果写进
-   `__model`,聚合即事实),属独立小片。
-2. (登记,未排期)**timeout + catches 同一 step**:导入期拒绝(catch join 的判定集合与 timeout
+1. (登记,未排期)**timeout + catches 同一 step**:导入期拒绝(catch join 的判定集合与 timeout
    子的集合在同一个 child 集里)。要做需:catch join 按 `__sign=catch` 过滤判定子、且允许由
    timeout 子的结算触发判定,同时让 join 的「全子终态」门槛仍覆盖 timeout 子。
-3. (登记,未排期)**timer 的第一轮不等 tick**:开着的窗随 start hop 的 wake 立刻 fire,比 legacy
+2. (登记,未排期)**timer 的第一轮不等 tick**:开着的窗随 start hop 的 wake 立刻 fire,比 legacy
    早至多一个 tick;若要严格对齐可让首轮永远先 Idle 一次(代价:每个 timeout 步至少多一个 tick
    延迟),当前不认为值得,故登记。
-4. (登记,未排期)**Cancel 的 legacy 守卫差异**(A′ 暴露):legacy 的 cancel 处理器要求被撤销的
+3. (登记,未排期)**Cancel 的 legacy 守卫差异**(A′ 暴露):legacy 的 cancel 处理器要求被撤销的
    **step** 处于 biz-success(它从 act 上溯到 step),内核的动作直接指向节点、`ActionPlanner`
    允许 `Ready|Running|Waiting` 上的 Cancel。park 改 Running 后需要状态表补 `Running → Cancelled`
    才不打断既有 cancel 用例;这条接受面在 park 前后都存在(内核独有),尚未与 legacy 守卫对跑。
