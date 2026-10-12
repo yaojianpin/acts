@@ -467,6 +467,26 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
   ⚠️ 旧笔记与宿主注释里「`check_in_children` 调度 catch 子节点 ⇒ 成功也跑 handler」的说法**是错的**,
   以本条为准。
 
+- **流事实归一(队列「B」选项;替代 `__parked` + `__sign=error`)**
+  (a) `__flow`(私有)一个键、两个值:`children`(已 fan-out、等子结算 → 普通 join 判)与
+  `catches`(失败已定、在判 catch → catch join 判);**缺省 = 本执行处于自己 act 的流**
+  (act 在飞 = `Running`、等人应答 = `Waiting`、未开始)。读侧只经 `kernel::execution_flow()`
+  (返回 `ExecutionFlow`)与两个谓词 `parked_for_children`/`deciding_catches`:`plan_join` 读
+  `children`,`plan_catch_join` 读 `catches`。于是「`Running` + 有子」的两种流由**显式值**区分,
+  不再依赖「没有标记」这种隐式规则(将来新增 park 路径也不会被误读成 catch 判定)。
+  (b) `__sign` 只剩**角色**事实:`catch`(被派发的 handler 子,对应 legacy `TASK_SIGN=CATCH`),
+  与 `__flow` 是**两条轴**(谁决定我 vs 我是谁的子),必须分键 —— handler 自己常常是容器,它的
+  fan-out 只写 `__flow=children`,不再覆盖父 join 要读的角色(这就是本片之前踩到的 clobber 缺陷;
+  新增回归测试 `a_handler_container_keeps_its_role_while_parked_for_children`:handler 保持
+  `catch` 角色 + 自己进 `children` 流 + 普通 join 结它 + catch join 结失败步,全链跑通)。
+  (c) **timeout 故意不进流值域**:timer 与 act 的流**并行**(act 在跑/在等时都会 fire),单值流键
+  装不下它;「有个 timeout 在等」的准确表达就是 timer 操作本身(`DispatchTimeout`:持有节奏、
+  由 recovery index 每 tick 重新唤醒)。这条写进 `FLOW_VAR` 的文档注释,免得下一个人再想合并。
+  (d) 单测:`the_flow_fact_is_one_axis_with_two_values`(两值 + 缺省 + 未知值当缺省);
+  `join_waits_for_running_children_and_never_fires_on_an_aborted_one` 增补「判定中的父不被普通
+  join 判」;`catch_join_only_fires_for_a_flow_decided_step_and_its_catcher`(原 sign 版)改读新键并
+  增补「parked 父不被 catch join 判」;宿主 catch/timeout/root/cancel/example 用例全绿。
+
 ## 已对齐(无需动)
 
 - Complete/Submit/Skip/Fail on Running/Waiting:ActionPlanner 与 legacy 守卫一致
@@ -486,6 +506,8 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
    **step** 处于 biz-success(它从 act 上溯到 step),内核的动作直接指向节点、`ActionPlanner`
    允许 `Ready|Running|Waiting` 上的 Cancel。park 改 Running 后需要状态表补 `Running → Cancelled`
    才不打断既有 cancel 用例;这条接受面在 park 前后都存在(内核独有),尚未与 legacy 守卫对跑。
+   (注:流事实归一(B)已完成,见上;队列第 1 项 timeout+catches 现在直接建立在新键
+   `__flow`/`SIGN_CATCH` 上。)
 
 ## 语义结论(已核实,勿再猜测)
 

@@ -131,7 +131,8 @@ pub(crate) use branch::{
 pub(crate) use container::{
     CatchJoinCommand, CatchJoinOutcome, ContainerChild, ContainerChildPlan, ContainerError,
     ContainerFanoutCommand, ContainerJoinCommand, ContainerPlanner, ContainerPredecessor,
-    PARK_CHILDREN, PARK_VAR, SIGN_CATCH, SIGN_ERROR, SIGN_VAR, execution_sign, parked_for_children,
+    ExecutionFlow, FLOW_CATCHES, FLOW_CHILDREN, FLOW_VAR, SIGN_CATCH, SIGN_VAR, deciding_catches,
+    execution_flow, execution_sign, parked_for_children,
 };
 
 pub(crate) use timeout::{

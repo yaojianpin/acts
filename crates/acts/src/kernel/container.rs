@@ -4,10 +4,10 @@
 //! step with `catches`, a branch with its own `steps`, or the workflow root
 //! over its seeded chain. Instead of completing at its effect point, a
 //! container fans out — every child becomes an execution in one atomic plan —
-//! and stays `Running` (marked, see [`PARK_VAR`]) until all of its children
-//! are terminal (the join). That is the legacy engine's shape: a step stays
-//! running while `check_in_children`'s children run and `auto_complete`
-//! finishes it once they all settled.
+//! and stays `Running` (in the `children` flow, see [`FLOW_VAR`]) until all of
+//! its children are terminal (the join). That is the legacy engine's shape: a
+//! step stays running while `check_in_children`'s children run and
+//! `auto_complete` finishes it once they all settled.
 //!
 //! `Running` is the park state, not `Waiting`: `Waiting` is the legacy
 //! `Interrupt` — an execution whose own act nobody answered yet — and a child's
@@ -42,33 +42,81 @@ use std::fmt;
 /// sign is durable plan state, so a replay — or the catch join — reads the
 /// decision from the aggregate instead of from the declaring spec.
 pub(crate) const SIGN_VAR: &str = "__sign";
-/// The step that failed and is deciding whether its `catches` caught it.
-pub(crate) const SIGN_ERROR: &str = "error";
 /// A child the failed step dispatched as a CATCH handler.
+///
+/// The *role* fact: what this execution is to its parent. It is a separate axis
+/// from [`FLOW_VAR`] (who decides this execution next), and the two must stay
+/// separate keys — a handler is often itself a container, and its own fan-out
+/// would otherwise overwrite the role its parent's join reads back from it.
 pub(crate) const SIGN_CATCH: &str = "catch";
-/// A container that parked in `Waiting` for the children it admitted.
-///
-/// `Waiting` alone cannot carry this: it is also the state of an execution
-/// waiting for its own act (the legacy `Interrupt`), and a timeout branch
-/// settling under such an execution must not join it — the legacy
-/// `auto_complete` only ever counts the children of a step that already ran
-/// into them. The mark is durable plan state, so a replay and the join read it
-/// from the aggregate.
-///
-/// It is deliberately *not* the catch sign ([`SIGN_VAR`], whose values are
-/// [`SIGN_ERROR`]/[`SIGN_CATCH`]): a catch handler is often a container, and
-/// its own fan-out would otherwise overwrite the CATCH mark the catch join
-/// reads back from it.
-pub(crate) const PARK_VAR: &str = "__parked";
-/// The value of [`PARK_VAR`] on a container waiting for its children.
-pub(crate) const PARK_CHILDREN: &str = "children";
 
-/// Whether one execution is parked in `Waiting` for the children it admitted.
-pub(crate) fn parked_for_children(snapshot: &AggregateSnapshot, execution: &ExecutionId) -> bool {
-    snapshot
+/// The private variable holding which decision flow an execution is in, when it
+/// is not simply in its own act's flow (the flow fact's *absence*).
+///
+/// Two values, one axis:
+///
+/// - [`FLOW_CHILDREN`]: the execution admitted children and is `Running` while
+///   they settle; the plain join ([`ContainerPlanner::plan_join`]) decides it.
+/// - [`FLOW_CATCHES`]: its failure is durable and it dispatched its `catches`;
+///   the catch join ([`ContainerPlanner::plan_catch_join`]) decides it — and
+///   only that join, so a plain container join can never mistake a failed step
+///   for one waiting on its children (or a child's settlement for a completed
+///   step's).
+///
+/// Both values are needed as *durable* facts rather than derived from the
+/// state: after the park moved to `Running`, "`Running` with children" means
+/// either flow, and which one decides the execution is exactly the question a
+/// replay has to answer.
+///
+/// `timeout` is deliberately **not** a value here. A timer runs *in parallel*
+/// to the act's own flow (it fires while the act executes or waits), so a
+/// single-valued flow key could not hold it without losing the act flow; the
+/// accurate expression of "a timeout is pending" is the timer operation itself
+/// ([`super::OperationKind::DispatchTimeout`]), which holds the cadence and is
+/// re-woken by the recovery index.
+pub(crate) const FLOW_VAR: &str = "__flow";
+/// The value of [`FLOW_VAR`] on an execution waiting for the children it
+/// admitted.
+pub(crate) const FLOW_CHILDREN: &str = "children";
+/// The value of [`FLOW_VAR`] on a failed execution deciding its `catches`.
+pub(crate) const FLOW_CATCHES: &str = "catches";
+
+/// Which decision flow one execution is in, beyond its own act's.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ExecutionFlow {
+    /// Waiting for the children it admitted: the plain join decides it.
+    Children,
+    /// Deciding its `catches`: the catch join decides it.
+    Catches,
+}
+
+/// The flow fact ([`FLOW_VAR`]) of one execution, if any. `None` means the
+/// execution is in its own act's flow — `Running` with it in flight, `Waiting`
+/// for a client, or not started yet.
+pub(crate) fn execution_flow(
+    snapshot: &AggregateSnapshot,
+    execution: &ExecutionId,
+) -> Option<ExecutionFlow> {
+    match snapshot
         .variables
-        .get(&(execution.clone(), PARK_VAR.to_string()))
-        .is_some_and(|value| value == PARK_CHILDREN)
+        .get(&(execution.clone(), FLOW_VAR.to_string()))
+        .map(String::as_str)
+    {
+        Some(FLOW_CHILDREN) => Some(ExecutionFlow::Children),
+        Some(FLOW_CATCHES) => Some(ExecutionFlow::Catches),
+        _ => None,
+    }
+}
+
+/// Whether one execution is parked in `Running` for the children it admitted.
+pub(crate) fn parked_for_children(snapshot: &AggregateSnapshot, execution: &ExecutionId) -> bool {
+    execution_flow(snapshot, execution) == Some(ExecutionFlow::Children)
+}
+
+/// Whether one execution is deciding its `catches` (the legacy `Sign::ERROR`
+/// on the failed step).
+pub(crate) fn deciding_catches(snapshot: &AggregateSnapshot, execution: &ExecutionId) -> bool {
+    execution_flow(snapshot, execution) == Some(ExecutionFlow::Catches)
 }
 
 /// The sign fact ([`SIGN_VAR`]) of one execution, if any.
@@ -410,11 +458,11 @@ impl ContainerPlanner {
             .executions
             .get(&command.parent)
             .ok_or_else(|| ContainerError::ExecutionNotFound(command.parent.clone()))?;
-        // A parent waiting on its own act (the legacy `Interrupt`) is `Waiting`
-        // and owes the client; a parent whose children run stays `Running`,
-        // exactly like the legacy step (`auto_complete` decides a *running*
-        // step). Only the park mark tells the two apart, so a parent without it
-        // is never joined — nobody answered its act.
+        // A parent in its own act's flow is not a container: `Waiting` means it
+        // owes the client (the legacy `Interrupt`), `Running` means its act is
+        // in flight — and a child settling under either must not decide it. The
+        // flow fact is what tells a container apart from those; the state alone
+        // cannot, since a container is `Running` too.
         if parent.state != ExecutionState::Running {
             return Ok(None);
         }
@@ -504,11 +552,12 @@ impl ContainerPlanner {
             });
         }
         // Only the settlement of a CATCH child triggers the catch join, and
-        // only a step whose failure hop pinned the ERROR sign decides one.
+        // only an execution whose failure hop pinned the deciding flow decides
+        // one.
         if execution_sign(snapshot, &command.source) != Some(SIGN_CATCH) {
             return Ok(None);
         }
-        if execution_sign(snapshot, &command.parent) != Some(SIGN_ERROR) {
+        if !deciding_catches(snapshot, &command.parent) {
             return Ok(None);
         }
         let parent = snapshot
@@ -1099,13 +1148,55 @@ mod tests {
         assert!(matches!(error, ContainerError::SourceNotContainer { .. }));
     }
 
-    /// Mark one execution as a container parked for its children: the mark
-    /// the join reads (see [`PARK_VAR`]).
+    /// Mark one execution as a container parked for its children: the flow
+    /// the plain join reads (see [`FLOW_CHILDREN`]).
     fn mark_parked(snapshot: &mut AggregateSnapshot, parent: &str) {
         snapshot.variables.insert(
-            (id(parent, 0), PARK_VAR.to_string()),
-            PARK_CHILDREN.to_string(),
+            (id(parent, 0), FLOW_VAR.to_string()),
+            FLOW_CHILDREN.to_string(),
         );
+    }
+
+    /// The flow fact is one axis with two values, and it is what tells the two
+    /// joins apart: a `Running` execution with children decides by its flow and
+    /// by nothing else. An execution in its own act's flow carries no flow fact
+    /// at all.
+    #[test]
+    fn the_flow_fact_is_one_axis_with_two_values() {
+        let mut snapshot = snapshot(vec![execution("step1", 0, ExecutionState::Running)]);
+        let step1 = id("step1", 0);
+        assert_eq!(execution_flow(&snapshot, &step1), None);
+        assert!(!parked_for_children(&snapshot, &step1));
+        assert!(!deciding_catches(&snapshot, &step1));
+
+        snapshot.variables.insert(
+            (step1.clone(), FLOW_VAR.to_string()),
+            FLOW_CHILDREN.to_string(),
+        );
+        assert_eq!(
+            execution_flow(&snapshot, &step1),
+            Some(ExecutionFlow::Children)
+        );
+        assert!(parked_for_children(&snapshot, &step1));
+        assert!(!deciding_catches(&snapshot, &step1));
+
+        snapshot.variables.insert(
+            (step1.clone(), FLOW_VAR.to_string()),
+            FLOW_CATCHES.to_string(),
+        );
+        assert_eq!(
+            execution_flow(&snapshot, &step1),
+            Some(ExecutionFlow::Catches)
+        );
+        assert!(!parked_for_children(&snapshot, &step1));
+        assert!(deciding_catches(&snapshot, &step1));
+
+        // An unknown value is "no flow" rather than a crash: only the two
+        // values this module writes are meaningful.
+        snapshot
+            .variables
+            .insert((step1.clone(), FLOW_VAR.to_string()), "?".to_string());
+        assert_eq!(execution_flow(&snapshot, &step1), None);
     }
 
     #[test]
@@ -1254,11 +1345,23 @@ mod tests {
         // A settled child set under a parent nobody marked decides nothing:
         // an execution waiting for its own act (the legacy `Interrupt`) is
         // `Waiting`, and one whose act is in flight is `Running` — neither is
-        // a container until it marks itself one.
+        // a container until its flow says so.
         let mut unmarked = parked_child(ExecutionState::Completed, ExecutionState::Skipped);
         unmarked.variables.clear();
         assert!(
             ContainerPlanner::plan_join(&graph, &unmarked, &command)
+                .unwrap()
+                .is_none()
+        );
+        // A parent deciding its catches is never joined by the plain join
+        // either — that flow belongs to the catch join.
+        let mut decider = parked_child(ExecutionState::Completed, ExecutionState::Skipped);
+        decider.variables.insert(
+            (id("step1", 0), FLOW_VAR.to_string()),
+            FLOW_CATCHES.to_string(),
+        );
+        assert!(
+            ContainerPlanner::plan_join(&graph, &decider, &command)
                 .unwrap()
                 .is_none()
         );
@@ -1378,15 +1481,16 @@ mod tests {
                 },
             ),
         ]);
-        for task in ["step1", "c1", "c2"] {
-            let sign = if task == "step1" {
-                SIGN_ERROR
-            } else {
-                SIGN_CATCH
-            };
+        // The failed step carries the deciding flow; its children carry the
+        // handler role.
+        snapshot.variables.insert(
+            (id("step1", 0), FLOW_VAR.to_string()),
+            FLOW_CATCHES.to_string(),
+        );
+        for task in ["c1", "c2"] {
             snapshot
                 .variables
-                .insert((id(task, 0), SIGN_VAR.to_string()), sign.to_string());
+                .insert((id(task, 0), SIGN_VAR.to_string()), SIGN_CATCH.to_string());
         }
         snapshot
     }
@@ -1457,15 +1561,28 @@ mod tests {
     }
 
     #[test]
-    fn catch_join_only_fires_for_a_sign_decided_step_and_its_catcher() {
+    fn catch_join_only_fires_for_a_flow_decided_step_and_its_catcher() {
         let graph = catch_graph();
         let settled = || catch_snapshot(ExecutionState::Skipped, ExecutionState::Skipped);
 
-        // A step that never failed (no ERROR sign) is not deciding anything.
+        // A step that never failed (no deciding flow) is not deciding anything.
         let mut snapshot = settled();
         snapshot
             .variables
-            .remove(&(id("step1", 0), SIGN_VAR.to_string()));
+            .remove(&(id("step1", 0), FLOW_VAR.to_string()));
+        assert!(
+            ContainerPlanner::plan_catch_join(&graph, &snapshot, &catch_command())
+                .unwrap()
+                .is_none()
+        );
+
+        // A step parked for children is a plain container, not a decider: the
+        // catch join must not decide it either.
+        let mut snapshot = settled();
+        snapshot.variables.insert(
+            (id("step1", 0), FLOW_VAR.to_string()),
+            FLOW_CHILDREN.to_string(),
+        );
         assert!(
             ContainerPlanner::plan_catch_join(&graph, &snapshot, &catch_command())
                 .unwrap()

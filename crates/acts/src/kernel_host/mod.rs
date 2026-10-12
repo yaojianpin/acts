@@ -389,28 +389,34 @@ fn next_plan_sequence(
     from_snapshot.max(from_plan)
 }
 
-/// Record that one execution parked in `Waiting` for its children: the mark
-/// [`crate::kernel::ContainerPlanner::plan_join`] reads. `Waiting` alone is
-/// ambiguous — an execution waiting for its own act (the legacy `Interrupt`)
-/// carries it too — and a child's settlement must not decide the latter.
-fn mark_parked_for_children(plan: &mut TransitionPlan, execution: &crate::kernel::ExecutionId) {
+/// Record one execution's decision flow in the hop's plan (`children` for a
+/// container parking for the children it admitted, `catches` for a failed
+/// execution that dispatched its handlers). The planner's own fact wins over a
+/// client input of the same private name.
+fn mark_flow(plan: &mut TransitionPlan, execution: &crate::kernel::ExecutionId, value: &str) {
     plan.variable_writes
-        .retain(|write| !(write.scope == *execution && write.name == crate::kernel::PARK_VAR));
+        .retain(|write| !(write.scope == *execution && write.name == crate::kernel::FLOW_VAR));
     plan.variable_writes.push(VariableWrite {
         scope: execution.clone(),
-        name: crate::kernel::PARK_VAR.to_string(),
-        value: crate::kernel::PARK_CHILDREN.to_string(),
+        name: crate::kernel::FLOW_VAR.to_string(),
+        value: value.to_string(),
     });
 }
 
-/// Whether this execution is a step deciding a caught error: its failure hop
-/// pinned the ERROR sign (the legacy `Step::sign() == Sign::ERROR`), which the
-/// catch join answers and no later hop may override.
+/// Record that one execution parked for the children it admitted.
+fn mark_parked_for_children(plan: &mut TransitionPlan, execution: &crate::kernel::ExecutionId) {
+    mark_flow(plan, execution, crate::kernel::FLOW_CHILDREN);
+}
+
+/// Whether this execution is deciding a caught error: its failure hop pinned
+/// the deciding flow ([`crate::kernel::FLOW_CATCHES`], the legacy
+/// `Step::sign() == Sign::ERROR`), which the catch join answers and no later hop
+/// may override.
 fn is_catch_decider(
     snapshot: &crate::kernel::AggregateSnapshot,
     execution: &crate::kernel::ExecutionId,
 ) -> bool {
-    crate::kernel::execution_sign(snapshot, execution) == Some(crate::kernel::SIGN_ERROR)
+    crate::kernel::deciding_catches(snapshot, execution)
 }
 
 /// The failure one package error reports: the kernel's own code and the
@@ -3467,12 +3473,12 @@ impl KernelHost {
             ("error.code".to_string(), json_var(&failure.code)),
             ("error.message".to_string(), json_var(&failure.message)),
             (
-                crate::kernel::SIGN_VAR.to_string(),
-                // The sign is an engine fact (`__`-private, never part of a
-                // predicate's scope), so it is stored raw — the same form the
-                // fan-out writes on the handler children, which the catch join
-                // compares it against.
-                crate::kernel::SIGN_ERROR.to_string(),
+                // The deciding flow: durable plan state the catch join reads —
+                // it is what tells a failed step apart from a container parked
+                // for its children, both of which are `Running`. A raw engine
+                // fact (`__`-private, never part of a predicate's scope).
+                crate::kernel::FLOW_VAR.to_string(),
+                crate::kernel::FLOW_CATCHES.to_string(),
             ),
         ] {
             plan.variable_writes.push(VariableWrite {
@@ -6486,6 +6492,77 @@ mod tests {
             state_of(&snapshot, crate::utils::consts::TASK_ROOT_TID),
             crate::kernel::ExecutionState::Completed,
             "the root joins once its seeded chain settled"
+        );
+        assert!(host.process_completed(PID).await.unwrap());
+    }
+
+    /// The two durable facts are different axes and must not clobber each
+    /// other: a catch handler is often itself a container, so its own fan-out
+    /// records the `children` flow — while the *role* its parent's catch join
+    /// reads back from it (`catch`) stays untouched. The whole mechanism runs
+    /// on it: the handler's branch settles, the handler completes, and the
+    /// catch join then decides the failed step.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_handler_container_keeps_its_role_while_parked_for_children() {
+        const PID: &str = "p_handler_container";
+        let (host, mut wake_rx) = KernelHost::in_memory();
+        let workflow = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("s1")
+                .with_uses("acts.test.wait", crate::Vars::new())
+                .with_catch(|catch| {
+                    catch.with_id("c1").with_if("true").with_branch(|branch| {
+                        branch
+                            .with_id("b1")
+                            .with_if("true")
+                            .with_step(|step| step.with_id("s11"))
+                    })
+                })
+        });
+        let spec = ProcessSpec::from_workflow(PID, &workflow, &|_| None).unwrap();
+        host.start_process(&spec).await.unwrap();
+        host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+
+        // The client fails the waiting act: the step keeps running and
+        // dispatches its handler, which fans its own branch out.
+        host.apply_action(
+            PID,
+            "s1",
+            ActionKind::Fail {
+                code: "E1".into(),
+                message: "boom".into(),
+            },
+            Vec::new(),
+        )
+        .await
+        .unwrap();
+        host.run_until_quiescent(&mut wake_rx, 400).await.unwrap();
+
+        let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+        let c1 = crate::kernel::ExecutionId::new("c1", 0).unwrap();
+        assert_eq!(
+            crate::kernel::execution_sign(&snapshot, &c1),
+            Some(crate::kernel::SIGN_CATCH),
+            "the handler keeps the role its parent's join reads"
+        );
+        assert_eq!(
+            crate::kernel::execution_flow(&snapshot, &c1),
+            Some(crate::kernel::ExecutionFlow::Children),
+            "the handler's own fan-out recorded the children flow"
+        );
+        // Its branch settled and the plain join completed the handler; the
+        // catch join then caught the error on the step.
+        assert_eq!(
+            state_of(&snapshot, "c1"),
+            crate::kernel::ExecutionState::Completed
+        );
+        assert_eq!(
+            state_of(&snapshot, "b1"),
+            crate::kernel::ExecutionState::Completed
+        );
+        assert_eq!(
+            state_of(&snapshot, "s1"),
+            crate::kernel::ExecutionState::Completed,
+            "the catch join decided the failed step"
         );
         assert!(host.process_completed(PID).await.unwrap());
     }
