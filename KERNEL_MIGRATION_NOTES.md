@@ -373,8 +373,41 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
   ③timeout handler 的 `while` 拒绝;handler 内的 branches/catches 允许(容器机制通用)。
   ④投影口径:`__cost`/`__timeouts`/`__started` 是私有键,**不进** vars 行(legacy 会把
   `__cost`/`__timeouts` 写进任务 data 行)——属既有「私有键不入行」口径。
-  ⑤owner 的 act 完成但 timeout 子在飞时,内核的行状态是 Waiting(legacy 是 Running):与既有
-  「容器 fan-out 后 park 在 Waiting」同一处口径偏差。
+  ⑤owner 的 act 完成但 timeout 子在飞时,内核的行状态原先是 Waiting(legacy 是 Running):
+  **已由 A′ 片修正**(park 统一改 `Running`)。
+
+- **根的完成语义 = 容器 join(「剩余工作 1」收口;A′:park 状态改 `Running`)**
+  (a) **park 状态统一为 `Running`**(不再 `Waiting`):legacy 的 step 在子任务结算前一直
+  `running`(`auto_complete` 判的正是 running 的 step,实测 `__sign: IN_CHILDREN`),`Waiting`
+  只留给「自己的 act 没人应答」= legacy `Interrupt`。改动:容器 fan-out 的 `source_park` 用
+  `Running`(源若正 `Waiting`,即 act 刚被应答 → 同笔 `Waiting → Running`,对齐 legacy `next`
+  回 Running);timeout/等子 park 同理(等待计划写 `Waiting → Running`);`plan_join` 判
+  「`Running` + `__parked` 标记」,其 `from` 改为 `Running`。
+  (b) **根 = 对种子链的容器**:`container_shape(root)` 返回 `Steps(&model.steps)` —— 头节点
+  `Entry`(已存在 `Created` → Ready + ExecuteTask)、其余 `Queued`(保持 `Created`,由传播逐个
+  接纳);根在自己的 hop 不再判 `Completed`,而是 park(`Running` + 标记),由 join 在**全部种子
+  子执行**结算后完成并传播(rewind 产生的新代 parent 也是根,所以一起被等)。于是 `proc:get` 的
+  proc 行在子任务在飞时读 `running`(legacy 同)。线性(无 `__model`)的 P1 仓不受影响:
+  `fanout_command` 读不到 model 直接 None,P1 平链 parity 不变。
+  (c) **`Queued` 子遇「已存在」不再被 readmit**:`GenerationAdmissionPolicy` 对已存在且
+  `Created` 的子返回 `ReadmitExisting`(rewind 重建场景需要它),但 `Queued` 子由传播接纳;fan-out
+  把它 `Created → Ready` 却不发任何操作,它会停在那儿(既没跑也挡住 join)。现在 `Queued` +
+  已存在 → 原样保留。这同时修掉 rewind 后内部链 `Queued` 子被 readmit 的潜在 wedge。
+  (d) **状态表新增 `Running → Cancelled`**:park 改 Running 后,客户端 Cancel 一个「子在飞」的
+  父步(原先是 `Waiting → Cancelled`)需要这条转移 —— planner 早已允许(`ActionPlanner` 的
+  `Ready|Running|Waiting + Cancel → Cancelled`),表此前更严。legacy 的依据差异:legacy 的 cancel
+  处理器要求被撤销的 **step** 处于 biz-success(它是从 act 上溯到 step 的形态),与内核「动作直接
+  指向节点」的形态不同 —— 属既有 divergence,park 前后都是内核独有的接受面,登记在案(见剩余工作)。
+  **对跑实测**(`kernel_parent_state_matches_legacy_while_a_fired_branch_runs`):同 workflow
+  (s0 init irq / s1 irq + timeout t1 带 irq act),先让 t1 fire、再完成 act1(子仍在飞)——
+  此刻 **legacy 的 s1 step 任务与 legacy 根任务都是 `running`,内核的 s1 与 `$` 都是 `Running`**;
+  随后完成 t1,两引擎同一套终态结算且 `assert_parity` 逐节点相等。机制侧新增
+  `the_root_stays_running_until_its_seeded_chain_settled`(链头 act 未应答时根 `Running`、
+  `process_completed` false;应答后链尾与根 `Completed`)。既有 branches / cancel(含 rewind
+  readmit)/ catch / branch-selection 用例按新口径更新后全部转绿。
+  **已知边界**:①根的 gen0 比它关闭的 gen 活得久(`host_all_terminal_generations_0` 因此排除根)
+  —— 根是整条链(含 rewind 新代)的容器,是语义而非漏洞。②cancel 的 legacy 守卫差异见 (d)。
+  ③`proc`/`task` 行状态现在与 legacy 同(原先「park 在 Waiting、legacy 在 Running」的偏差消失)。
 
 ## 已对齐(无需动)
 
@@ -385,33 +418,30 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
 
 ## 剩余工作(按序)
 
-1. **workflow 根的完成语义与 legacy 不一致(登记)**:kernel 在根自己的 hop 就把它判
-   `Completed`(根不是 fan-out 容器,`container_shape(root)` 返回 None),legacy 的根要等它
-   **全部子实例**结算(Back/重入后根仍是 Running)。后果:驱动档下重入在飞时,`proc:get` 的
-   proc 行状态(投影取根的态)显示 completed,与 legacy 的 running 不符。修法方向:让种子出来的
-   根按容器/join 语义结算(根 park 等子结算,或 join 覆盖根),单独一片 + 对跑;`kernel_back_read_model_serves_the_redone_generation`
-   里已留了「不再往前断言根」的注释位。
-   (注:catch 场景里 legacy 的根同样卡在 running,但那是 legacy catch 缺陷所致,与这一条无关;
-   timeout 片里两侧结算后的根都是 Completed。)
-2. (登记,未排期)**无 `uses` 的 task 级消息**:纯 step 与 workflow 根在 legacy 也发 task
+1. (登记,未排期)**无 `uses` 的 task 级消息**:纯 step 与 workflow 根在 legacy 也发 task
    消息(见「语义结论」);driver 档目前只发 act 消息,根走 lifecycle 通道。若客户端按
    type=step/workflow 订阅,需给无包执行也写消息记录、并把节点种类带进
    `message_from_record`(其 type 目前恒为 "act")。
-3. (登记,未排期)**driver 未实现节点 id 分配**:legacy 的 `prepare_step_ids` 会为未命名的
+2. (登记,未排期)**driver 未实现节点 id 分配**:legacy 的 `prepare_step_ids` 会为未命名的
    step/branch/catch 补随机 id(`tree/build.rs`);driver 从 model 取 id,所以嵌套节点必须显式
    命名(导入期拒绝,不再在 hop 里 wedge)。要跑 `examples/catches/model.yml` 这类模型,
    需要在 `ProcessSpec::from_workflow` 里补一条等价于 `prepare_step_ids` 的赋值(结果写进
    `__model`,聚合即事实),属独立小片。
-4. (登记,未排期)**`uses`+容器的 act 完成消息**:step 同时有 `uses` 与 branches/catches 时,
+3. (登记,未排期)**`uses`+容器的 act 完成消息**:step 同时有 `uses` 与 branches/catches 时,
    完成走容器 fan-out 路径,不再发 act 的 Completed 记录(legacy 会发);leaf 的 `uses` step
    不受影响(仍走 ActionPlanner + `attach_act_message`)。timeout 的 park 路径**不受影响**
-   (park 走 `task_hop_plan` 的完成记录,act 消息照发)。
-5. (登记,未排期)**timeout + catches 同一 step**:本片在导入期拒绝(catch join 的判定集合与
-   timeout 子的集合在同一个 child 集里)。要做需:catch join 按 `__sign=catch` 过滤判定子、
-   且允许由 timeout 子的结算触发判定,同时让 join 的「全子终态」门槛仍覆盖 timeout 子。
-6. (登记,未排期)**timer 的第一轮不等 tick**:开着的窗随 start hop 的 wake 立刻 fire,比 legacy
+   (park 走 `task_hop_plan` 的完成记录,act 消息照发);A′ 之后根也走 fan-out,所以根自身的
+   task 消息同样落在这条(与消息片 1 合并做)。
+4. (登记,未排期)**timeout + catches 同一 step**:导入期拒绝(catch join 的判定集合与 timeout
+   子的集合在同一个 child 集里)。要做需:catch join 按 `__sign=catch` 过滤判定子、且允许由
+   timeout 子的结算触发判定,同时让 join 的「全子终态」门槛仍覆盖 timeout 子。
+5. (登记,未排期)**timer 的第一轮不等 tick**:开着的窗随 start hop 的 wake 立刻 fire,比 legacy
    早至多一个 tick;若要严格对齐可让首轮永远先 Idle 一次(代价:每个 timeout 步至少多一个 tick
    延迟),当前不认为值得,故登记。
+6. (登记,未排期)**Cancel 的 legacy 守卫差异**(A′ 暴露):legacy 的 cancel 处理器要求被撤销的
+   **step** 处于 biz-success(它从 act 上溯到 step),内核的动作直接指向节点、`ActionPlanner`
+   允许 `Ready|Running|Waiting` 上的 Cancel。park 改 Running 后需要状态表补 `Running → Cancelled`
+   才不打断既有 cancel 用例;这条接受面在 park 前后都存在(内核独有),尚未与 legacy 守卫对跑。
 
 ## 语义结论(已核实,勿再猜测)
 
@@ -495,6 +525,12 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
   `check_in_children` 不会调度它们,只有 tick 会。
   ⑦分支自己的 `next` 在完成时会调 `dispatch_next_timeout_branch` 交接给下一个分支;skip 的
   分支直接 Parent(不交接)。内核不需要这条链:每 tick 重评列表即可。
+- **父状态不变式(实测)**:legacy 的父任务(step 与 workflow 根)在**子任务结算前一直 `running`**
+  (`check_in_children` 之后 step 的 `next` 返回 Stop、`auto_complete` 只在全子 completed 时结算;
+  实测 step `state=running` + `__sign: IN_CHILDREN`,根 `running`),`Interrupt` 只表示「自己的 act
+  没人应答」。内核对应:容器 park 用 `Running` + 私有 `__parked=children` 标记,`Waiting` 仅留给
+  未应答的 act;`plan_join` 只判 `Running`+标记,所以子任务结算不会去判一个「还在等 act」的执行。
+  根是「对种子链(含 rewind 新代)的容器」,同样按此结算。
 
 ## 环境注意
 

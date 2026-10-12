@@ -184,6 +184,13 @@ fn validate_state_change(change: &StateChange) -> Result<(), PlanError> {
                 S::Running,
                 S::Completed | S::Submitted | S::Failed | S::Aborted | S::Skipped
             )
+            // A container whose children run stays `Running` (see the park
+            // mark in `container`), so cancelling one — the legacy cancel's
+            // rewind of a step whose children are mid-flight — moves it from
+            // `Running`. The planner already decides `Cancelled` for every
+            // `Ready`/`Running`/`Waiting` target (`ActionPlanner`'s
+            // vocabulary); the table only spells the transition out.
+            | (S::Running, S::Cancelled)
             | (
                 S::Waiting,
                 S::Completed

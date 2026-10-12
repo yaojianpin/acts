@@ -612,7 +612,8 @@ fn evaluate_predicate(
 
 /// The model children of one container node, borrowed from the declaring
 /// model. `Branches` is a branched step's selection, `Catches` a failed
-/// step's handlers, `Steps` a branch's own chain.
+/// step's handlers, `Steps` a branch's own chain — or the workflow root's
+/// seeded chain, which is why the root is a container over `model.steps`.
 enum ContainerShape<'a> {
     Branches(&'a [crate::model::Branch]),
     Catches(&'a [crate::model::Step]),
@@ -659,9 +660,13 @@ fn container_shape<'a>(
     model: &'a crate::model::Workflow,
     model_node: &crate::kernel::NodeId,
 ) -> Option<ContainerShape<'a>> {
-    // The root's children are the seeded chain, never a fan-out.
+    // The root's children are the seeded chain, and the root is a container
+    // over them like any other parent: the legacy workflow task stays running
+    // until every step it seeded settled (`auto_complete` counts them all), so
+    // the kernel root parks and lets the join finish it. The chain itself
+    // advances by propagation — the fan-out only admits the head.
     if model_node.as_str() == crate::utils::consts::TASK_ROOT_TID {
-        return None;
+        return Some(ContainerShape::Steps(&model.steps));
     }
     model
         .steps
@@ -3011,12 +3016,16 @@ impl KernelHost {
                 value: value.clone(),
             });
         }
-        if execution.state == crate::kernel::ExecutionState::Running {
+        // The act is answered, so the execution is no longer waiting for it:
+        // it resumes `Running` while the branches it fired settle (the legacy
+        // step's `next` after its act completed) — the state the join decides,
+        // marked as parked.
+        if execution.state == crate::kernel::ExecutionState::Waiting {
             plan.state_changes.push(StateChange {
                 execution: execution_id.clone(),
                 expected_revision: execution.revision,
-                from: crate::kernel::ExecutionState::Running,
-                to: crate::kernel::ExecutionState::Waiting,
+                from: crate::kernel::ExecutionState::Waiting,
+                to: crate::kernel::ExecutionState::Running,
             });
         }
         mark_parked_for_children(&mut plan, execution_id);
@@ -3669,10 +3678,12 @@ impl KernelHost {
             source_operation: claim.clone(),
             children,
             inputs: inputs.to_vec(),
-            // A container that fanned out on its own completion parks: the
-            // legacy step stays running until its children settled and the
-            // join finishes it.
-            source_park: crate::kernel::ExecutionState::Waiting,
+            // A container that fanned out on its own completion stays
+            // `Running` while its children run — the legacy step's state, which
+            // is what `auto_complete` decides when the last child settled. A
+            // source that was still `Waiting` (its act just answered) resumes
+            // `Running` here, exactly like the legacy step's `next`.
+            source_park: crate::kernel::ExecutionState::Running,
         }))
     }
 
@@ -5949,8 +5960,8 @@ mod tests {
         let snapshot = host.snapshot(PID).await.unwrap().unwrap();
         assert_eq!(
             state_of(&snapshot, "s1"),
-            crate::kernel::ExecutionState::Waiting,
-            "the step waits for the branch it fired"
+            crate::kernel::ExecutionState::Running,
+            "the step stays running while the branch it fired settles (the legacy step's state)"
         );
         assert_eq!(
             state_of(&snapshot, "s2"),
@@ -5983,6 +5994,61 @@ mod tests {
                 .all(|operation| matches!(operation.state, OperationState::Completed(_))),
             "a decided execution retires its timer"
         );
+    }
+
+    /// The workflow root is a container over the chain it seeded: it stays
+    /// `Running` until every seeded step settled (the legacy workflow task that
+    /// `auto_complete` finishes once its children are done), instead of
+    /// completing at its own hop while the chain still runs. That is the state
+    /// the read model projects for the run.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_root_stays_running_until_its_seeded_chain_settled() {
+        const PID: &str = "p_root_chain";
+        let (host, mut wake_rx) = KernelHost::in_memory();
+        // An unknown package: the first step waits for the client, so the chain
+        // cannot finish.
+        let workflow = crate::model::Workflow::new()
+            .with_step(|step| {
+                step.with_id("a")
+                    .with_uses("acts.test.wait", crate::Vars::new())
+            })
+            .with_step(|step| step.with_id("b"));
+        let spec = ProcessSpec::from_workflow(PID, &workflow, &|_| None).unwrap();
+        host.start_process(&spec).await.unwrap();
+        host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+
+        let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+        assert_eq!(
+            state_of(&snapshot, crate::utils::consts::TASK_ROOT_TID),
+            crate::kernel::ExecutionState::Running,
+            "the root waits for its chain"
+        );
+        assert_eq!(
+            state_of(&snapshot, "a"),
+            crate::kernel::ExecutionState::Waiting
+        );
+        assert_eq!(
+            state_of(&snapshot, "b"),
+            crate::kernel::ExecutionState::Created
+        );
+        assert!(!host.process_completed(PID).await.unwrap());
+
+        // The chain head's act completes: the step and then the root finish.
+        host.apply_action(PID, "a", ActionKind::Complete, Vec::new())
+            .await
+            .unwrap();
+        host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+        let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+        assert_eq!(
+            state_of(&snapshot, "b"),
+            crate::kernel::ExecutionState::Completed
+        );
+        assert_eq!(
+            state_of(&snapshot, crate::utils::consts::TASK_ROOT_TID),
+            crate::kernel::ExecutionState::Completed,
+            "the root joins once its seeded chain settled"
+        );
+        assert!(host.process_completed(PID).await.unwrap());
     }
 
     /// A step may declare both `branches` and `timeouts`: the tick fires a
@@ -6039,7 +6105,8 @@ mod tests {
         let snapshot = host.snapshot(PID).await.unwrap().unwrap();
         assert_eq!(
             state_of(&snapshot, "s1"),
-            crate::kernel::ExecutionState::Waiting
+            crate::kernel::ExecutionState::Running,
+            "the step keeps running while the branches and the timeout it fired settle"
         );
         assert_eq!(
             state_of(&snapshot, "b1"),
@@ -6403,13 +6470,15 @@ mod tests {
             state_of(&snapshot, "s11"),
             crate::kernel::ExecutionState::Waiting
         );
+        // A container whose children run stays Running (the legacy step whose
+        // `next` ran): b1 over s11, and step1 over b1.
         assert_eq!(
             state_of(&snapshot, "b1"),
-            crate::kernel::ExecutionState::Waiting
+            crate::kernel::ExecutionState::Running
         );
         assert_eq!(
             state_of(&snapshot, "step1"),
-            crate::kernel::ExecutionState::Waiting
+            crate::kernel::ExecutionState::Running
         );
 
         host.apply_action("p-wait", "s11", ActionKind::Complete, Vec::new())
@@ -6557,7 +6626,8 @@ mod tests {
         host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
 
         // b1/s11 wait mid-branches; the else branch skipped; step1 is parked
-        // by the fan-out.
+        // by the fan-out and therefore `Running` (the legacy step's state while
+        // its children run).
         let snapshot = host.snapshot("p-cancel-mid").await.unwrap().unwrap();
         assert_eq!(
             state_of(&snapshot, "s11"),
@@ -6565,7 +6635,7 @@ mod tests {
         );
         assert_eq!(
             state_of(&snapshot, "step1"),
-            crate::kernel::ExecutionState::Waiting
+            crate::kernel::ExecutionState::Running
         );
         assert_eq!(
             state_of(&snapshot, "b2"),
@@ -6578,9 +6648,29 @@ mod tests {
         host.run_until_quiescent(&mut wake_rx, 400).await.unwrap();
 
         // The gen0 branch subtree is closed by the cascade, and the rewind
-        // has already recreated the branches as Created generations.
+        // has already recreated the branches as Created generations. The root's
+        // own generation stays live: it is the container over the whole chain,
+        // the rewind's fresh generations included.
         let snapshot = host.snapshot("p-cancel-mid").await.unwrap().unwrap();
-        assert!(host_all_terminal_generations_0(&snapshot));
+        assert!(
+            host_all_terminal_generations_0(&snapshot),
+            "gen0 subtree left open: {:?}",
+            snapshot
+                .executions
+                .iter()
+                .filter(|(id, execution)| {
+                    id.generation == 0
+                        && id.task_id != crate::utils::consts::TASK_ROOT_TID
+                        && !execution.state.is_terminal()
+                })
+                .map(|(id, execution)| format!("{}:{:?}", id.task_id, execution.state))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            state_of(&snapshot, crate::utils::consts::TASK_ROOT_TID),
+            crate::kernel::ExecutionState::Running,
+            "the root outlives the generation its rewind closed"
+        );
         // step1 is auto: the re-entered generation re-fans out on its own,
         // READMITTING the rewound branch generations (never a third one).
         assert_eq!(
@@ -6590,7 +6680,8 @@ mod tests {
         );
         assert_eq!(
             state_of(&snapshot, "b1"),
-            crate::kernel::ExecutionState::Waiting
+            crate::kernel::ExecutionState::Running,
+            "the readmitted branch container runs over its own inner step"
         );
         assert_eq!(
             state_of(&snapshot, "s11"),
@@ -6704,13 +6795,16 @@ mod tests {
                 .all(|record| matches!(record.state, OperationState::Completed(_)))
     }
 
-    /// Generation-0-only terminality: a rewound run keeps fresh generations
-    /// in flight, so only the closed generations must be terminal.
+    /// Whether every generation-0 execution settled, the root excluded: the
+    /// root is the container over the whole seeded chain, so its own generation
+    /// stays live until every generation the rewinds created settled too.
     fn host_all_terminal_generations_0(snapshot: &Snapshot) -> bool {
         snapshot
             .executions
             .iter()
-            .filter(|(id, _)| id.generation == 0)
+            .filter(|(id, _)| {
+                id.generation == 0 && id.task_id != crate::utils::consts::TASK_ROOT_TID
+            })
             .all(|(_, execution)| execution.state.is_terminal())
     }
 
@@ -7116,6 +7210,285 @@ mod tests {
         }
     }
 
+    /// A parent's own state while a child it fired is still in flight. The
+    /// legacy step and the legacy workflow root stay `running` — `auto_complete`
+    /// has not seen every child settle — and the kernel's parked parent is
+    /// `Running` too, the root included now that it is a container over its
+    /// seeded chain. This is exactly the state the read model projects
+    /// (`proc:get` therefore reads `running` while children run), so it is
+    /// compared mid-flight rather than after the run settled.
+    ///
+    /// The branch's own state is deliberately not compared here: its act is
+    /// still unanswered, and the established fold reads a legacy act's
+    /// `Interrupt` as the node's `Waiting` (the kernel folds the act into the
+    /// node), while the legacy step task itself still says `running`.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn kernel_parent_state_matches_legacy_while_a_fired_branch_runs() {
+        const PID: &str = "p_timeout_parent";
+        let workflow = || {
+            crate::model::Workflow::new()
+                .with_id("wf-timeout-parent")
+                .with_step(|step| {
+                    step.with_id("s0").with_uses(
+                        crate::utils::test::USES_IRQ,
+                        crate::Vars::new().with("key", "init"),
+                    )
+                })
+                .with_step(|step| {
+                    step.with_id("s1")
+                        .with_uses(
+                            crate::utils::test::USES_IRQ,
+                            crate::Vars::new().with("key", "act1"),
+                        )
+                        .with_timeout(|timeout| {
+                            timeout.with_id("t1").with_if("$cost() >= 300").with_uses(
+                                crate::utils::test::USES_IRQ,
+                                crate::Vars::new().with("key", "branch"),
+                            )
+                        })
+                })
+        };
+        let mut config = crate::Config::default();
+        config.data.tick_interval_secs = Some(1);
+
+        // Legacy: run until the branch's act appeared, complete the owner's act
+        // (which ends the step's own work but not the step), and read the live
+        // states.
+        let legacy_config = {
+            let mut config = config.clone();
+            config.data.kernel_engine = false;
+            config
+        };
+        let legacy_engine = crate::Engine::builder()
+            .set_config(&legacy_config)
+            .start()
+            .await
+            .unwrap();
+        let wait_for = |key: &'static str, state: crate::MessageState| {
+            let sig = legacy_engine.signal((String::new(), String::new()));
+            let (done, done_rx) = (sig.clone(), sig.clone());
+            legacy_engine.channel().on_message(move |e| {
+                let done = done_rx.clone();
+                async move {
+                    if e.is_params_key(key) && e.is_state(state) {
+                        done.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+                        done.close();
+                    }
+                }
+            });
+            done
+        };
+        let init_created = wait_for("init", crate::MessageState::Created);
+        let act1_created = wait_for("act1", crate::MessageState::Created);
+        let act1_completed = wait_for("act1", crate::MessageState::Completed);
+        let branch_created = wait_for("branch", crate::MessageState::Created);
+        let legacy = legacy_engine
+            .runtime()
+            .start(
+                &workflow(),
+                crate::Vars::new().with(crate::utils::consts::PROCESS_ID, PID),
+            )
+            .await
+            .unwrap();
+        let (pid, tid) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), init_created.recv())
+                .await
+                .expect("the init act never appeared")
+                .clone();
+        legacy_engine
+            .runtime()
+            .do_action(&crate::event::Action::new(
+                &pid,
+                &tid,
+                crate::event::EventAction::Next,
+                crate::Vars::new(),
+            ))
+            .await
+            .expect("the init act must complete");
+        let (pid, act1) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), act1_created.recv())
+                .await
+                .expect("the act1 act never appeared")
+                .clone();
+        // The tick fires the branch while the owner's act still waits.
+        let (legacy_pid, legacy_branch) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), branch_created.recv())
+                .await
+                .expect("the timeout branch never appeared")
+                .clone();
+        legacy_engine
+            .runtime()
+            .do_action(&crate::event::Action::new(
+                &pid,
+                &act1,
+                crate::event::EventAction::Next,
+                crate::Vars::new(),
+            ))
+            .await
+            .expect("the act1 act must complete");
+        tokio::time::timeout(std::time::Duration::from_secs(30), act1_completed.recv())
+            .await
+            .expect("the act1 completion never appeared");
+        let legacy_root_state = legacy
+            .tasks()
+            .iter()
+            .find(|task| task.node().kind() == crate::NodeKind::Workflow)
+            .map(|task| task.state().to_string())
+            .expect("the workflow task");
+        assert_eq!(
+            legacy_node_states(&legacy, "s1"),
+            vec!["running"],
+            "the legacy step runs while its branch runs"
+        );
+        assert_eq!(
+            legacy_root_state, "running",
+            "the legacy workflow root runs while its children run"
+        );
+
+        // Kernel: the same flow, read from the aggregate.
+        let mut kernel_config = config.clone();
+        kernel_config.data.kernel_engine = true;
+        let kernel_engine = crate::Engine::builder()
+            .set_config(&kernel_config)
+            .start()
+            .await
+            .unwrap();
+        let wait_for = |key: &'static str| {
+            let sig = kernel_engine.signal((String::new(), String::new()));
+            let (done, done_rx) = (sig.clone(), sig.clone());
+            kernel_engine.channel().on_message(move |e| {
+                let done = done_rx.clone();
+                async move {
+                    if e.is_params_key(key) && e.is_state(crate::MessageState::Created) {
+                        done.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+                        done.close();
+                    }
+                }
+            });
+            done
+        };
+        let init_created = wait_for("init");
+        let act1_created = wait_for("act1");
+        let branch_created = wait_for("branch");
+        let _kernel = kernel_engine
+            .runtime()
+            .start(
+                &workflow(),
+                crate::Vars::new().with(crate::utils::consts::PROCESS_ID, PID),
+            )
+            .await
+            .unwrap();
+        let (pid, tid) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), init_created.recv())
+                .await
+                .expect("the init act never appeared")
+                .clone();
+        kernel_engine
+            .runtime()
+            .do_action(&crate::event::Action::new(
+                &pid,
+                &tid,
+                crate::event::EventAction::Next,
+                crate::Vars::new(),
+            ))
+            .await
+            .expect("the init act must complete");
+        let (pid, act1) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), act1_created.recv())
+                .await
+                .expect("the act1 act never appeared")
+                .clone();
+        let (_, branch) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), branch_created.recv())
+                .await
+                .expect("the timeout branch never appeared")
+                .clone();
+        kernel_engine
+            .runtime()
+            .do_action(&crate::event::Action::new(
+                &pid,
+                &act1,
+                crate::event::EventAction::Next,
+                crate::Vars::new(),
+            ))
+            .await
+            .expect("the act1 act must complete");
+        let host = kernel_engine
+            .runtime()
+            .kernel()
+            .expect("the kernel host")
+            .clone();
+        // The completion hop is the one that parks the step (`Waiting →
+        // Running`): poll until the aggregate says so.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        let snapshot = loop {
+            let snapshot = host.snapshot(PID).await.unwrap().expect("the aggregate");
+            if state_of(&snapshot, "s1") == crate::kernel::ExecutionState::Running {
+                break snapshot;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the kernel step never resumed running: {:?}",
+                snapshot
+                    .executions
+                    .iter()
+                    .map(|(id, execution)| format!("{}:{:?}", id.task_id, execution.state))
+                    .collect::<Vec<_>>()
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
+        assert_eq!(
+            state_of(&snapshot, "s1"),
+            crate::kernel::ExecutionState::Running,
+            "the kernel step runs while its branch runs"
+        );
+        assert_eq!(
+            state_of(&snapshot, crate::utils::consts::TASK_ROOT_TID),
+            crate::kernel::ExecutionState::Running,
+            "the kernel root runs while its children run"
+        );
+
+        // Completing the branch settles both runs the same way.
+        legacy_engine
+            .runtime()
+            .do_action(&crate::event::Action::new(
+                &legacy_pid,
+                &legacy_branch,
+                crate::event::EventAction::Next,
+                crate::Vars::new(),
+            ))
+            .await
+            .expect("the legacy branch act must complete");
+        kernel_engine
+            .runtime()
+            .do_action(&crate::event::Action::new(
+                &pid,
+                &branch,
+                crate::event::EventAction::Next,
+                crate::Vars::new(),
+            ))
+            .await
+            .expect("the branch act must complete");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !legacy.state().is_completed() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the legacy run never settled"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let host = kernel_engine
+            .runtime()
+            .kernel()
+            .expect("the kernel host")
+            .clone();
+        let settled = wait_kernel_settled(&host, PID).await;
+        assert_parity(&latest_folded_legacy_states(&legacy), &settled);
+        kernel_engine.close().await;
+        legacy_engine.close().await;
+    }
+
     /// The fold for a run whose nodes may carry several instances over time: a
     /// timeout branch whose window is not open yet is dispatched (and skipped)
     /// again on every legacy tick, while the kernel keeps one execution per
@@ -7137,6 +7510,9 @@ mod tests {
                 crate::TaskState::Backed => "Backed",
                 crate::TaskState::Cancelled => "Cancelled",
                 crate::TaskState::Interrupt => "Waiting",
+                // A live task: a mid-flight comparison reads these.
+                crate::TaskState::Running => "Running",
+                crate::TaskState::Ready => "Ready",
                 other => panic!("unexpected legacy state {other:?}"),
             };
             let node = if task.node().kind() == crate::NodeKind::Workflow {

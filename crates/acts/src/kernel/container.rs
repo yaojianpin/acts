@@ -1,12 +1,17 @@
 //! Container fan-out and join planning.
 //!
 //! A *container* execution holds model children: a step with `branches`, a
-//! step with `catches`, or a branch with its own `steps`. Instead of
-//! completing at its effect point, a container fans out — every child becomes
-//! an execution in one atomic plan — and parks in `Waiting` until all of its
-//! children are terminal (the join). This mirrors the legacy engine, where
-//! `check_in_children` schedules the children of a running step and
-//! `auto_complete` finishes the step once they all settled.
+//! step with `catches`, a branch with its own `steps`, or the workflow root
+//! over its seeded chain. Instead of completing at its effect point, a
+//! container fans out — every child becomes an execution in one atomic plan —
+//! and stays `Running` (marked, see [`PARK_VAR`]) until all of its children
+//! are terminal (the join). That is the legacy engine's shape: a step stays
+//! running while `check_in_children`'s children run and `auto_complete`
+//! finishes it once they all settled.
+//!
+//! `Running` is the park state, not `Waiting`: `Waiting` is the legacy
+//! `Interrupt` — an execution whose own act nobody answered yet — and a child's
+//! settlement must never decide one of those.
 //!
 //! A failed step fans its `catches` out through the same plan but parks in
 //! `Running`, and its join is the *catch* join ([`ContainerPlanner::plan_catch_join`]):
@@ -88,7 +93,10 @@ pub(crate) enum ContainerChildPlan {
     /// engine keeps the skipped branch task).
     Skip,
     /// A chain successor: created `Created`; ordinary propagation admits it
-    /// when its predecessor settles.
+    /// when its predecessor settles. An execution that already exists (the
+    /// root's seeded chain, or a rewind's recreation) is left exactly as it
+    /// is — the fan-out never readmits one, because the admission would hand
+    /// it `Ready` with no operation to run.
     Queued,
 }
 
@@ -124,12 +132,16 @@ pub(crate) struct ContainerFanoutCommand {
     /// none). They land on the container's own scope, exactly like the
     /// action-variable writes of a plain completion.
     pub(crate) inputs: Vec<(String, String)>,
-    /// Where the source parks while its children run. A container that fanned
-    /// out on its own completion parks in `Waiting` (the legacy step stays
-    /// `Running` and `auto_complete` finishes it once the children settled).
-    /// A step fanning out the CATCH children of its failure stays `Running`:
-    /// the legacy `Step::on_error` keeps the failed step running, and only
-    /// the catch join — not a plain container join — may decide it.
+    /// Where the source parks while its children run: `Running` for every
+    /// container — the legacy step stays running while `check_in_children`'s
+    /// children run, `auto_complete` finishes it once they settled, and the
+    /// failed step dispatching its CATCH children is running too
+    /// (`Step::on_error`). A source that is `Waiting` when it fans out (its
+    /// act was just answered) moves to `Running`, exactly like the legacy step
+    /// resuming its `next`.
+    ///
+    /// `Waiting` stays a valid park value only for the timeout dispatch, which
+    /// admits a branch under an execution that keeps waiting on its own act.
     pub(crate) source_park: ExecutionState,
 }
 
@@ -167,9 +179,10 @@ pub(crate) struct ContainerPlanner;
 
 impl ContainerPlanner {
     /// Fan the container's children out in one atomic plan. The source parks
-    /// in `command.source_park` (`Waiting` for a container that fanned out on
-    /// its own completion, `Running` for a failed step dispatching its CATCH
-    /// children); the join (see [`Self::plan_join`] /
+    /// in `command.source_park` — `Running` for every container (the legacy
+    /// step stays running while its children run, and a failed step
+    /// dispatching its CATCH children is running too); the join (see
+    /// [`Self::plan_join`] /
     /// [`Self::plan_catch_join`]) decides it once every child is terminal. An
     /// empty container completes immediately.
     pub(crate) fn plan_fanout(
@@ -284,11 +297,21 @@ impl ContainerPlanner {
                     execution
                 }
                 super::AdmissionDecision::ReadmitExisting => {
+                    let execution = latest_execution(snapshot, &child.task_id)
+                        .ok_or(ContainerError::ExecutionNotFound(command.source.clone()))?;
+                    // A queued chain successor is admitted by propagation, never
+                    // by the fan-out: an execution the seed (the root's own
+                    // chain) or a rewind already created stays `Created` until
+                    // its predecessor settles. Readmitting it would hand it
+                    // `Ready` with no operation to run — and take the admission
+                    // the propagation is about to perform.
+                    if child.plan == ContainerChildPlan::Queued {
+                        resolved.push(execution);
+                        continue;
+                    }
                     // The latest generation exists but never ran (a Cancel
                     // rewind recreated it): admit it in place instead of
                     // allocating a second live generation.
-                    let execution = latest_execution(snapshot, &child.task_id)
-                        .ok_or(ContainerError::ExecutionNotFound(command.source.clone()))?;
                     if let Some(change) = readmit_change(snapshot, &execution)? {
                         state_changes.push(change);
                     }
@@ -364,8 +387,11 @@ impl ContainerPlanner {
 
     /// The join: when a container's children are all terminal (and none was
     /// aborted — an abort owns the container's outcome, exactly like the
-    /// legacy `auto_complete`), the `Waiting` container completes and hands
-    /// propagation to its own chain successor. `None` means "not yet".
+    /// legacy `auto_complete`), the parked container completes and hands
+    /// propagation to its own chain successor. `None` means "not yet" — or
+    /// "not mine": only a `Running` container carrying the park mark joins,
+    /// so a child settling under an execution that is still waiting for its
+    /// own act decides nothing.
     pub(crate) fn plan_join(
         graph: &ExecutionGraph,
         snapshot: &AggregateSnapshot,
@@ -384,13 +410,14 @@ impl ContainerPlanner {
             .executions
             .get(&command.parent)
             .ok_or_else(|| ContainerError::ExecutionNotFound(command.parent.clone()))?;
-        if parent.state != ExecutionState::Waiting {
+        // A parent waiting on its own act (the legacy `Interrupt`) is `Waiting`
+        // and owes the client; a parent whose children run stays `Running`,
+        // exactly like the legacy step (`auto_complete` decides a *running*
+        // step). Only the park mark tells the two apart, so a parent without it
+        // is never joined — nobody answered its act.
+        if parent.state != ExecutionState::Running {
             return Ok(None);
         }
-        // Only a parent that parked for its children joins. `Waiting` is also
-        // the state of an execution waiting for its own act (the legacy
-        // `Interrupt`), and a timeout branch settling under such an execution
-        // must not decide it — nobody answered its act.
         if !parked_for_children(snapshot, &command.parent) {
             return Ok(None);
         }
@@ -430,7 +457,7 @@ impl ContainerPlanner {
             StateChange {
                 execution: command.parent.clone(),
                 expected_revision: parent.revision,
-                from: ExecutionState::Waiting,
+                from: ExecutionState::Running,
                 to: ExecutionState::Completed,
             },
             OperationIntent {
@@ -809,13 +836,16 @@ mod tests {
             source_operation: commit(source, 4),
             children,
             inputs: Vec::new(),
-            source_park: ExecutionState::Waiting,
+            // Every container parks `Running` while its children run (the
+            // legacy step's state); only a failed step's catch fan-out parks
+            // elsewhere, and that test overrides this.
+            source_park: ExecutionState::Running,
         };
         (snapshot, command)
     }
 
     #[test]
-    fn fanout_parks_the_source_and_admits_entry_and_skip_children() {
+    fn fanout_keeps_the_source_running_and_admits_entry_and_skip_children() {
         let (snapshot, command) = fanout_command(
             "step1",
             ExecutionState::Running,
@@ -862,9 +892,35 @@ mod tests {
                 .iter()
                 .any(|op| op.id.task_id == "b2" && op.kind == OperationKind::SkipTask)
         );
-        assert_eq!(plan.state_changes[0].to, ExecutionState::Waiting);
+        assert_eq!(
+            plan.state_changes.len(),
+            0,
+            "the running source stays running"
+        );
         // The auto decision is durable state for the created children.
         assert_eq!(plan.variable_writes.len(), 2);
+    }
+
+    /// A container fanning out from `Waiting` — a step whose act the client
+    /// just answered — resumes `Running`, exactly like the legacy step whose
+    /// `next` runs after its act completed.
+    #[test]
+    fn fanout_resumes_a_waiting_source_into_running() {
+        let (snapshot, command) = fanout_command(
+            "step1",
+            ExecutionState::Waiting,
+            vec![child(
+                "b1",
+                ContainerChildPlan::Entry,
+                vec![ContainerPredecessor::Source],
+            )],
+        );
+        let plan = ContainerPlanner::plan_fanout(&snapshot, &command).unwrap();
+        assert_eq!(plan.state_changes.len(), 1);
+        let change = &plan.state_changes[0];
+        assert_eq!(change.execution, id("step1", 0));
+        assert_eq!(change.from, ExecutionState::Waiting);
+        assert_eq!(change.to, ExecutionState::Running);
     }
 
     #[test]
@@ -944,14 +1000,16 @@ mod tests {
                 vec![ContainerPredecessor::Source],
             )],
             inputs: Vec::new(),
-            source_park: ExecutionState::Waiting,
+            source_park: ExecutionState::Running,
         };
         let plan = ContainerPlanner::plan_fanout(&snapshot, &command).unwrap();
         assert!(plan.execution_creates.is_empty(), "no duplicate generation");
-        assert_eq!(plan.state_changes.len(), 2);
-        assert_eq!(plan.state_changes[1].execution, id("b1", 1));
-        assert_eq!(plan.state_changes[1].from, ExecutionState::Created);
-        assert_eq!(plan.state_changes[1].to, ExecutionState::Ready);
+        // The running source stays running (the park is the state it is
+        // already in); the readmitted child is the only change.
+        assert_eq!(plan.state_changes.len(), 1);
+        assert_eq!(plan.state_changes[0].execution, id("b1", 1));
+        assert_eq!(plan.state_changes[0].from, ExecutionState::Created);
+        assert_eq!(plan.state_changes[0].to, ExecutionState::Ready);
         assert_eq!(
             plan.operations[0].id,
             OperationId {
@@ -988,7 +1046,7 @@ mod tests {
                 vec![ContainerPredecessor::Source],
             )],
             inputs: Vec::new(),
-            source_park: ExecutionState::Waiting,
+            source_park: ExecutionState::Running,
         };
         let plan = ContainerPlanner::plan_fanout(&snapshot, &command).unwrap();
         assert!(plan.execution_creates.is_empty());
@@ -1019,7 +1077,7 @@ mod tests {
                 vec![ContainerPredecessor::Source],
             )],
             inputs: Vec::new(),
-            source_park: ExecutionState::Waiting,
+            source_park: ExecutionState::Running,
         };
         let plan = ContainerPlanner::plan_fanout(&snapshot, &command).unwrap();
         let create = &plan.execution_creates[0];
@@ -1073,7 +1131,7 @@ mod tests {
                     model_node: node("step1"),
                     parent: None,
                     predecessors: vec![],
-                    state: ExecutionState::Waiting,
+                    state: ExecutionState::Running,
                     revision: 3,
                 },
             ),
@@ -1107,7 +1165,7 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(change.execution, id("step1", 0));
-        assert_eq!(change.from, ExecutionState::Waiting);
+        assert_eq!(change.from, ExecutionState::Running);
         assert_eq!(change.to, ExecutionState::Completed);
         assert_eq!(operation.kind, OperationKind::PropagateTask);
         assert_eq!(operation.id.task_id, "step1");
@@ -1136,15 +1194,17 @@ mod tests {
             process_id: "p1".into(),
             parent: id("step1", 0),
         };
-        let waiting_child = |b1: ExecutionState, b2: ExecutionState| {
-            snapshot(vec![
+        // The parent is a running container carrying the park mark: that is
+        // the state a child's settlement decides.
+        let parked_child = |b1: ExecutionState, b2: ExecutionState| {
+            let mut snapshot = snapshot(vec![
                 (
                     id("step1", 0),
                     ExecutionSnapshot {
                         model_node: node("step1"),
                         parent: None,
                         predecessors: vec![],
-                        state: ExecutionState::Waiting,
+                        state: ExecutionState::Running,
                         revision: 3,
                     },
                 ),
@@ -1168,12 +1228,14 @@ mod tests {
                         revision: 1,
                     },
                 ),
-            ])
+            ]);
+            mark_parked(&mut snapshot, "step1");
+            snapshot
         };
         assert!(
             ContainerPlanner::plan_join(
                 &graph,
-                &waiting_child(ExecutionState::Running, ExecutionState::Completed),
+                &parked_child(ExecutionState::Running, ExecutionState::Completed),
                 &command
             )
             .unwrap()
@@ -1183,27 +1245,39 @@ mod tests {
         assert!(
             ContainerPlanner::plan_join(
                 &graph,
-                &waiting_child(ExecutionState::Completed, ExecutionState::Aborted),
+                &parked_child(ExecutionState::Completed, ExecutionState::Aborted),
                 &command
             )
             .unwrap()
             .is_none()
         );
-        // A merely waiting parent is not a container: `Waiting` is also the
-        // state of an execution waiting for its own act (the legacy
-        // `Interrupt`), and a settled child under it must not decide it —
-        // nobody answered that act. The park mark is what tells the two apart.
-        let mut unmarked = waiting_child(ExecutionState::Completed, ExecutionState::Skipped);
+        // A settled child set under a parent nobody marked decides nothing:
+        // an execution waiting for its own act (the legacy `Interrupt`) is
+        // `Waiting`, and one whose act is in flight is `Running` — neither is
+        // a container until it marks itself one.
+        let mut unmarked = parked_child(ExecutionState::Completed, ExecutionState::Skipped);
+        unmarked.variables.clear();
         assert!(
             ContainerPlanner::plan_join(&graph, &unmarked, &command)
                 .unwrap()
                 .is_none()
         );
-        mark_parked(&mut unmarked, "step1");
+        // A `Waiting` parent is never joined either: its act is unanswered.
+        let mut waiting = parked_child(ExecutionState::Completed, ExecutionState::Skipped);
+        waiting.executions.insert(
+            id("step1", 0),
+            ExecutionSnapshot {
+                model_node: node("step1"),
+                parent: None,
+                predecessors: vec![],
+                state: ExecutionState::Waiting,
+                revision: 3,
+            },
+        );
         assert!(
-            ContainerPlanner::plan_join(&graph, &unmarked, &command)
+            ContainerPlanner::plan_join(&graph, &waiting, &command)
                 .unwrap()
-                .is_some()
+                .is_none()
         );
     }
 
