@@ -1781,7 +1781,7 @@ impl KernelHost {
                 )?;
                 // A skipped act emits its Skipped message (the legacy act
                 // row's own message).
-                if let Some(payload) = self.act_message_payload(
+                if let Some(payload) = self.hop_message_payload(
                     &snapshot,
                     &execution_id,
                     &id.task_id,
@@ -1846,6 +1846,18 @@ impl KernelHost {
                         from: crate::kernel::ExecutionState::Running,
                         to: crate::kernel::ExecutionState::Aborted,
                     });
+                    // The aborted execution announces itself (the legacy
+                    // `on_task` emitted its Aborted message like any other).
+                    if let Some(payload) = self.hop_message_payload(
+                        &snapshot,
+                        &execution_id,
+                        &id.task_id,
+                        act_facts(&snapshot, &execution_id).as_ref(),
+                        None,
+                        None,
+                    )? {
+                        plan.outbox[0].payload = payload.to_string();
+                    }
                     if !snapshot.operations.contains_key(&propagate_id) {
                         plan.operations.push(OperationIntent {
                             id: propagate_id,
@@ -1972,7 +1984,7 @@ impl KernelHost {
                             let text = execution_variable(&snapshot, &parent, "error.message")
                                 .map(json_text)
                                 .unwrap_or_default();
-                            if let Some(payload) = self.act_message_payload(
+                            if let Some(payload) = self.hop_message_payload(
                                 &snapshot,
                                 &parent,
                                 &parent.task_id,
@@ -1988,6 +2000,7 @@ impl KernelHost {
                             }
                         }
                         Some(crate::kernel::CatchJoinOutcome::Caught(change, operation)) => {
+                            self.attach_join_message(&snapshot, &mut plan, &parent, &operation)?;
                             plan.state_changes.push(change);
                             plan.operations.push(operation);
                         }
@@ -2000,6 +2013,12 @@ impl KernelHost {
                                 crate::kernel::ContainerPlanner::plan_join(&graph, &snapshot, &join)
                                     .map_err(runtime)?
                             {
+                                self.attach_join_message(
+                                    &snapshot,
+                                    &mut plan,
+                                    &join.parent,
+                                    &operation,
+                                )?;
                                 plan.state_changes.push(change);
                                 plan.operations.push(operation);
                             }
@@ -2198,37 +2217,40 @@ impl KernelHost {
         // it, Msg informs, Func pairs it with the later completion). The
         // durable record rides the outbox; the attached transport turns it
         // into the engine's message.
-        if has_package {
-            if let Some(facts) = &facts
-                && fresh
-            {
-                plan.variable_writes.push(VariableWrite {
-                    scope: execution_id.clone(),
-                    name: PARAMS_VAR.to_string(),
-                    value: facts.params.to_string(),
-                });
-                plan.variable_writes.push(VariableWrite {
-                    scope: execution_id.clone(),
-                    name: OPTIONS_VAR.to_string(),
-                    value: facts.options.to_string(),
-                });
-            }
-            if !created_exists
-                && let Some(payload) = self.act_message_payload(
-                    snapshot,
-                    execution_id,
-                    &id.task_id,
-                    facts.as_ref(),
-                    None,
-                    None,
-                )?
-            {
-                plan.outbox.push(crate::kernel::OutboxIntent {
-                    key: created_key,
-                    topic: "message.created".into(),
-                    payload: payload.to_string(),
-                });
-            }
+        if has_package
+            && let Some(facts) = &facts
+            && fresh
+        {
+            plan.variable_writes.push(VariableWrite {
+                scope: execution_id.clone(),
+                name: PARAMS_VAR.to_string(),
+                value: facts.params.to_string(),
+            });
+            plan.variable_writes.push(VariableWrite {
+                scope: execution_id.clone(),
+                name: OPTIONS_VAR.to_string(),
+                value: facts.options.to_string(),
+            });
+        }
+        // The execution announces itself: the act's Created message for a
+        // `uses` step, the task-level one (type = the node kind) for a
+        // package-less execution — the legacy engine's `on_task` fired for
+        // every task, not only the acts.
+        if !created_exists
+            && let Some(payload) = self.hop_message_payload(
+                snapshot,
+                execution_id,
+                &id.task_id,
+                facts.as_ref(),
+                None,
+                None,
+            )?
+        {
+            plan.outbox.push(crate::kernel::OutboxIntent {
+                key: created_key,
+                topic: "message.created".into(),
+                payload: payload.to_string(),
+            });
         }
         if !action_exists && auto {
             plan.operations.push(OperationIntent {
@@ -2423,7 +2445,7 @@ impl KernelHost {
                     )
                     .await?
                 {
-                    let mut plan = Self::container_fanout_plan(snapshot, &command)?;
+                    let mut plan = self.container_fanout_plan(snapshot, &command)?;
                     if let Some(outcome) = &effect {
                         self.fold_effect_outcome(snapshot, execution_id, outcome, &mut plan);
                         plan.validate().map_err(runtime)?;
@@ -2463,7 +2485,7 @@ impl KernelHost {
                     self.fold_effect_outcome(snapshot, execution_id, outcome, &mut plan);
                 }
                 // The act's Completed message rides the completion record.
-                if let Some(payload) = self.act_message_payload(
+                if let Some(payload) = self.hop_message_payload(
                     snapshot,
                     execution_id,
                     &id.task_id,
@@ -2503,7 +2525,7 @@ impl KernelHost {
                         )
                         .await?
                 {
-                    return Self::container_fanout_plan(snapshot, &command);
+                    return self.container_fanout_plan(snapshot, &command);
                 }
                 // A completion of a step whose timeout branches are still in
                 // flight is its *act* completing, not the step: the execution
@@ -2548,7 +2570,7 @@ impl KernelHost {
                     crate::kernel::ActionPlanner::plan(snapshot, &command).map_err(runtime)?;
                 // A client action that decides a `uses` execution announces it
                 // on the act's own message, exactly like the legacy act.
-                self.attach_act_message(snapshot, execution_id, &mut plan)?;
+                self.attach_hop_message(snapshot, execution_id, &mut plan)?;
                 Ok(plan)
             }
         }
@@ -2644,22 +2666,78 @@ impl KernelHost {
         if let Some((code, message)) = error {
             payload["error"] = serde_json::json!({ "code": code, "message": message });
         } else if let Some(outputs) = outputs {
-            let vars: serde_json::Map<String, serde_json::Value> = outputs
-                .iter()
-                .filter(|write| {
-                    !crate::utils::consts::is_private_key(&write.name)
-                        && !write.name.starts_with("error.")
-                })
-                .map(|write| {
-                    (
-                        write.name.clone(),
-                        serde_json::from_str(&write.value).unwrap_or(serde_json::Value::Null),
-                    )
-                })
-                .collect();
-            payload["outputs"] = serde_json::Value::Object(vars);
+            payload["outputs"] = message_outputs(outputs, execution_id);
         }
         Ok(Some(payload))
+    }
+
+    /// The task-level message payload of one execution *without* a package: the
+    /// fact set the driver's transport maps onto the engine's `Message`. The
+    /// legacy engine announced every task it created, settled or skipped — not
+    /// only the acts (its `on_task` emits each state change that is neither
+    /// `pending` nor `running`) — with `type` = the node kind and `name` the
+    /// node's name.
+    fn task_message_payload(
+        &self,
+        snapshot: &crate::kernel::AggregateSnapshot,
+        execution_id: &crate::kernel::ExecutionId,
+        task_id: &str,
+        outputs: Option<&[VariableWrite]>,
+        error: Option<(&str, &str)>,
+    ) -> Result<Option<serde_json::Value>> {
+        let Some(model) = model_of(snapshot)? else {
+            return Ok(None);
+        };
+        let (kind, name) = node_kind_and_name(&model, task_id);
+        // A branch task emits nothing: the legacy `Branch::init` clears its
+        // emit flag and never re-enables it (only an act's `run` does), so a
+        // branch's own state changes are invisible to clients on both engines.
+        if kind == "branch" {
+            return Ok(None);
+        }
+        let mut inputs = input_vars(snapshot, execution_id);
+        // The workflow model rides every legacy message; a package-less task
+        // carries no params and no `step` link of its own.
+        inputs.insert(
+            crate::utils::consts::WORKFLOW_MODEL_KEY.to_string(),
+            serde_json::json!({
+                "id": model.id,
+                "name": model.name,
+                "options": model.options,
+            }),
+        );
+        let mut payload = serde_json::json!({
+            "nid": task_id,
+            "name": name,
+            "kind": kind,
+            "inputs": serde_json::Value::Object(inputs),
+        });
+        if let Some((code, message)) = error {
+            payload["error"] = serde_json::json!({ "code": code, "message": message });
+        } else if let Some(outputs) = outputs {
+            payload["outputs"] = message_outputs(outputs, execution_id);
+        }
+        Ok(Some(payload))
+    }
+
+    /// The message payload of one hop's record: the act payload for a `uses`
+    /// step, the task payload otherwise. Both are the same legacy emission
+    /// (`Task::create_message`); only the fact set differs.
+    fn hop_message_payload(
+        &self,
+        snapshot: &crate::kernel::AggregateSnapshot,
+        execution_id: &crate::kernel::ExecutionId,
+        task_id: &str,
+        facts: Option<&ActFacts>,
+        outputs: Option<&[VariableWrite]>,
+        error: Option<(&str, &str)>,
+    ) -> Result<Option<serde_json::Value>> {
+        if let Some(payload) =
+            self.act_message_payload(snapshot, execution_id, task_id, facts, outputs, error)?
+        {
+            return Ok(Some(payload));
+        }
+        self.task_message_payload(snapshot, execution_id, task_id, outputs, error)
     }
 
     /// The variable space the evaluation seams see for one execution: its
@@ -2965,6 +3043,40 @@ impl KernelHost {
             && crate::kernel::timeout_has_live_children(snapshot, execution_id, &branches))
     }
 
+    /// The joined container's own completion message: a package-less
+    /// container speaks here (its children settled and it reached its terminal
+    /// state — the record is sequence-qualified, so a container that also
+    /// announced an act keeps both). A `uses` step's act announced itself at
+    /// the fan-out, so the join adds nothing for it: the legacy step's own
+    /// messages are suppressed once it carries an act.
+    fn attach_join_message(
+        &self,
+        snapshot: &crate::kernel::AggregateSnapshot,
+        plan: &mut TransitionPlan,
+        parent: &crate::kernel::ExecutionId,
+        operation: &OperationIntent,
+    ) -> Result<()> {
+        let Some(execution) = snapshot.executions.get(parent) else {
+            return Ok(());
+        };
+        if self.step_uses(snapshot, &execution.model_node)?.is_some() {
+            return Ok(());
+        }
+        if let Some(payload) =
+            self.task_message_payload(snapshot, parent, &parent.task_id, None, None)?
+        {
+            plan.outbox.push(crate::kernel::OutboxIntent {
+                key: format!(
+                    "completed:{}:{}:{}:{}",
+                    snapshot.process_id, parent.task_id, parent.generation, operation.id.sequence
+                ),
+                topic: "task.completed".into(),
+                payload: payload.to_string(),
+            });
+        }
+        Ok(())
+    }
+
     /// The container fan-out plan: [`ContainerPlanner::plan_fanout`] plus the
     /// park mark the join reads.
     ///
@@ -2975,6 +3087,7 @@ impl KernelHost {
     /// settlement complete a step nobody answered (see
     /// [`crate::kernel::PARK_CHILDREN`]).
     fn container_fanout_plan(
+        &self,
         snapshot: &crate::kernel::AggregateSnapshot,
         command: &crate::kernel::ContainerFanoutCommand,
     ) -> Result<TransitionPlan> {
@@ -2984,6 +3097,38 @@ impl KernelHost {
         // parks, so it carries no mark.
         if !command.children.is_empty() {
             mark_parked_for_children(&mut plan, &command.source);
+        }
+        // The container's own message, and only for a `uses` step: its act
+        // completed here (the legacy act's task event fired before the step's
+        // `auto_complete` saw the children). A package-less container is still
+        // `Running` — the legacy step's emit rule skips that state — and its
+        // task message belongs to the join that completes it.
+        let source_node = snapshot
+            .executions
+            .get(&command.source)
+            .map(|execution| execution.model_node.clone());
+        let source_has_package = match &source_node {
+            Some(node) => self.step_uses(snapshot, node)?.is_some(),
+            None => false,
+        };
+        if source_has_package
+            && let Some(payload) = self.hop_message_payload(
+                snapshot,
+                &command.source,
+                &command.source.task_id,
+                act_facts(snapshot, &command.source).as_ref(),
+                Some(&plan.variable_writes),
+                None,
+            )?
+        {
+            plan.outbox.push(crate::kernel::OutboxIntent {
+                key: format!(
+                    "completed:{}:{}:{}",
+                    command.process_id, command.source.task_id, command.source.generation
+                ),
+                topic: "task.completed".into(),
+                payload: payload.to_string(),
+            });
         }
         plan.validate().map_err(runtime)?;
         Ok(plan)
@@ -3030,15 +3175,18 @@ impl KernelHost {
         }
         mark_parked_for_children(&mut plan, execution_id);
         // The act did complete: its message rides the record, exactly like a
-        // leaf completion's.
-        if let Some(payload) = self.act_message_payload(
-            snapshot,
-            execution_id,
-            &id.task_id,
-            act_facts(snapshot, execution_id).as_ref(),
-            Some(&plan.variable_writes),
-            None,
-        )? {
+        // leaf completion's. A package-less execution announces nothing here —
+        // it is still running, and only its terminal decision is a message.
+        if self.step_uses(snapshot, &execution.model_node)?.is_some()
+            && let Some(payload) = self.hop_message_payload(
+                snapshot,
+                execution_id,
+                &id.task_id,
+                act_facts(snapshot, execution_id).as_ref(),
+                Some(&plan.variable_writes),
+                None,
+            )?
+        {
             plan.outbox[0].payload = payload.to_string();
         }
         plan.validate().map_err(runtime)?;
@@ -3155,7 +3303,7 @@ impl KernelHost {
                 kind: OperationKind::PropagateTask,
             });
         }
-        if let Some(payload) = self.act_message_payload(
+        if let Some(payload) = self.hop_message_payload(
             snapshot,
             execution_id,
             &id.task_id,
@@ -3340,7 +3488,7 @@ impl KernelHost {
         // the step recovered, so the client sees the failure the handler is
         // answering. Sequence-qualified, so the step's own later decision (a
         // resumed error) carries a record of its own.
-        if let Some(payload) = self.act_message_payload(
+        if let Some(payload) = self.hop_message_payload(
             snapshot,
             execution_id,
             &execution_id.task_id,
@@ -3364,12 +3512,13 @@ impl KernelHost {
         Ok(Some(plan))
     }
 
-    /// Announce a `uses` execution's decided state on the planner's own outbox
-    /// record: the legacy act emitted one message per state transition, so a
-    /// client action that decides the act (complete/submit/skip/cancel/abort/
-    /// fail) must speak the same message. The record's topic already names the
-    /// state; its opaque lifecycle payload becomes the act payload.
-    fn attach_act_message(
+    /// Announce one execution's decided state on the planner's own outbox
+    /// record: the legacy engine emitted a message per state transition — the
+    /// act's for a `uses` step, the task's for a package-less one — so a client
+    /// action that decides it (complete/submit/skip/cancel/abort/fail) must
+    /// speak the same message. The record's topic already names the state; its
+    /// opaque lifecycle payload becomes the hop's payload.
+    fn attach_hop_message(
         &self,
         snapshot: &crate::kernel::AggregateSnapshot,
         execution_id: &crate::kernel::ExecutionId,
@@ -3382,15 +3531,14 @@ impl KernelHost {
         else {
             return Ok(());
         };
-        let Some(execution) = snapshot.executions.get(execution_id) else {
+        if !snapshot.executions.contains_key(execution_id) {
             return Ok(());
-        };
+        }
         let Some(topic) = message_topic(change.to) else {
             return Ok(());
         };
-        if self.step_uses(snapshot, &execution.model_node)?.is_none() {
-            return Ok(());
-        }
+        // A `uses` step announces its act; a package-less execution announces
+        // the task itself (`hop_message_payload` picks the shape).
         // The action's own writes carry the error variables a `Fail` action
         // supplies; later writes win, like the commit's own order.
         let read = |name: &str| {
@@ -3407,7 +3555,7 @@ impl KernelHost {
             .as_ref()
             .map(|(code, message)| (code.as_str(), message.as_str()));
         let facts = act_facts(snapshot, execution_id);
-        if let Some(payload) = self.act_message_payload(
+        if let Some(payload) = self.hop_message_payload(
             snapshot,
             execution_id,
             &execution_id.task_id,
@@ -3419,7 +3567,7 @@ impl KernelHost {
                 Some(record) => record.payload = payload.to_string(),
                 None => plan.outbox.push(crate::kernel::OutboxIntent {
                     key: format!(
-                        "act:{}:{}:{}",
+                        "message:{}:{}:{}",
                         plan.process_id, execution_id.task_id, execution_id.generation
                     ),
                     topic: topic.to_string(),
@@ -3927,6 +4075,78 @@ impl KernelHost {
         }
         Ok(delivered)
     }
+}
+
+/// The message payload's `outputs` bag: the acting execution's own scope writes
+/// minus the private engine facts and the error variables (the legacy
+/// `Task::outputs`). A hop's plan may carry writes for other scopes too (the
+/// children a fan-out admitted), which are not this message's outputs.
+fn message_outputs(
+    outputs: &[VariableWrite],
+    execution: &crate::kernel::ExecutionId,
+) -> serde_json::Value {
+    let vars: serde_json::Map<String, serde_json::Value> = outputs
+        .iter()
+        .filter(|write| {
+            write.scope == *execution
+                && !crate::utils::consts::is_private_key(&write.name)
+                && !write.name.starts_with("error.")
+        })
+        .map(|write| {
+            (
+                write.name.clone(),
+                serde_json::from_str(&write.value).unwrap_or(serde_json::Value::Null),
+            )
+        })
+        .collect();
+    serde_json::Value::Object(vars)
+}
+
+/// The legacy node kind and node name of one model node: what a `Message`'s
+/// `type`/`name` carried (`Task::create_message` reads `node.kind()` and
+/// `node.content.name()`). The kernel's own model nodes are steps, branches and
+/// the workflow root; an act is a `uses` step, whose message takes the act
+/// payload path instead.
+fn node_kind_and_name(model: &crate::model::Workflow, node: &str) -> (&'static str, String) {
+    if node == crate::utils::consts::TASK_ROOT_TID {
+        return ("workflow", model.name.clone());
+    }
+    for step in &model.steps {
+        if let Some(name) = branch_name(step, node) {
+            return ("branch", name);
+        }
+    }
+    (
+        "step",
+        find_step_in_model(model, node)
+            .map(|step| step.name.clone())
+            .unwrap_or_default(),
+    )
+}
+
+/// The name of the branch with this id anywhere under one step, if any.
+fn branch_name(step: &crate::model::Step, target: &str) -> Option<String> {
+    for branch in model::step_branches(step).unwrap_or_default() {
+        if branch.id == target {
+            return Some(branch.name.clone());
+        }
+        for inner in &branch.steps {
+            if let Some(name) = branch_name(inner, target) {
+                return Some(name);
+            }
+        }
+    }
+    for catch in &step.catches {
+        if let Some(name) = branch_name(catch, target) {
+            return Some(name);
+        }
+    }
+    for timeout in &step.timeouts {
+        if let Some(name) = branch_name(timeout, target) {
+            return Some(name);
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -4666,13 +4886,18 @@ mod tests {
         engine.close().await;
     }
 
-    /// The act message stream of one workflow, on both engines: the legacy
+    /// The message stream of one workflow, on both engines: the legacy
     /// engine's per-task messages folded onto their owning node (an act folds
     /// into its step; the workflow root is `$`) and the kernel driver's
     /// forwarded messages must agree per (node, state, uses).
+    ///
+    /// The workflow carries a package-less step beside the acts: the legacy
+    /// engine announced every task it created and settled, not only the acts
+    /// (its `on_task` emits each state change that is neither `pending` nor
+    /// `running`), and the kernel's task-level payload must reproduce it.
     #[tokio::test(flavor = "multi_thread")]
     #[serial_test::serial]
-    async fn kernel_act_messages_match_the_legacy_run() {
+    async fn kernel_task_and_act_messages_match_the_legacy_run() {
         use crate::event::EventAction;
 
         // One run, ONE engine flavour, per call: both sides speak the same
@@ -4684,7 +4909,7 @@ mod tests {
         // and the rows are what `proc:get`/`task:get` read, folded the same
         // way on both engines (an act row folds to its owning step's node;
         // only its states are compared).
-        async fn run(kernel_engine: bool) -> (Vec<String>, bool, bool, Vec<String>) {
+        async fn run(kernel_engine: bool) -> (Vec<String>, bool, bool, Vec<String>, bool) {
             let workflow = crate::model::Workflow::new()
                 .with_id("wf-msg-parity")
                 .with_step(|step| {
@@ -4698,7 +4923,8 @@ mod tests {
                         crate::utils::test::USES_IRQ,
                         crate::Vars::new().with("key", "irq-1"),
                     )
-                });
+                })
+                .with_step(|step| step.with_id("s3"));
             let mut config = crate::Config::default();
             config.data.kernel_engine = kernel_engine;
             config.data.tick_interval_secs = Some(1);
@@ -4733,17 +4959,23 @@ mod tests {
             }
             let folded: Arc<parking_lot::Mutex<Vec<String>>> =
                 Arc::new(parking_lot::Mutex::new(Vec::new()));
+            let saw_workflow = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let runtime = engine.runtime();
             {
                 let folded = folded.clone();
+                let saw_workflow = saw_workflow.clone();
                 engine.channel().on_message(move |e| {
                     let folded = folded.clone();
+                    let saw_workflow = saw_workflow.clone();
                     async move {
                         let uses = e.uses.clone().unwrap_or_default();
                         // The workflow root's task messages are the process
                         // lifecycle, which the kernel reports on the lifecycle
-                        // channel (asserted below) — not act messages.
+                        // channel *and* — like the legacy engine — as a task
+                        // message on this one; the fold counts their arrival but
+                        // compares only act/step messages (asserted below).
                         if e.r#type == "workflow" {
+                            saw_workflow.store(true, std::sync::atomic::Ordering::SeqCst);
                             return;
                         }
                         // Fold onto the owning node: an act belongs to its step
@@ -4862,21 +5094,154 @@ mod tests {
                 started.load(std::sync::atomic::Ordering::SeqCst),
                 completed.load(std::sync::atomic::Ordering::SeqCst),
                 rows,
+                saw_workflow.load(std::sync::atomic::Ordering::SeqCst),
             )
         }
 
-        let (legacy, legacy_started, legacy_completed, legacy_rows) = run(false).await;
-        let (kernel, kernel_started, kernel_completed, kernel_rows) = run(true).await;
+        let (legacy, legacy_started, legacy_completed, legacy_rows, legacy_workflow) =
+            run(false).await;
+        let (kernel, kernel_started, kernel_completed, kernel_rows, kernel_workflow) =
+            run(true).await;
         assert_eq!(legacy, kernel, "the folded act message sets must match");
         assert_eq!(
             legacy_rows, kernel_rows,
             "the folded read-model rows must match"
+        );
+        // The workflow root's task message: the legacy engine emitted it on the
+        // task channel as well as the lifecycle one, and the kernel now does
+        // the same (the root is a package-less container like any other).
+        assert!(
+            legacy_workflow,
+            "the legacy root announces itself as a task"
+        );
+        assert_eq!(
+            kernel_workflow, legacy_workflow,
+            "the kernel root must announce itself as a task too"
         );
         // The workflow root's messages are the process lifecycle on both
         // engines: one start and one completion.
         assert!(legacy_started && legacy_completed);
         assert_eq!(kernel_started, legacy_started);
         assert_eq!(kernel_completed, legacy_completed);
+    }
+
+    /// A container step's own message, on both engines. A `uses` step announces
+    /// its act's completion when the act finishes — the hop that fans its
+    /// children out — while a package-less one announces the task when its
+    /// children settled and the join completed it (the legacy step is still
+    /// `running` at the fan-out, a state its emit rule skips). A branch task
+    /// announces nothing at all: the legacy `Branch::init` clears its emit flag
+    /// and never re-enables it.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn kernel_container_messages_match_the_legacy_run() {
+        /// One run per engine flavour: the folded (node, state, uses) message
+        /// set of a workflow whose containers are a package-less step and a
+        /// `uses` step, both with a branch child.
+        async fn run(kernel_engine: bool) -> Vec<String> {
+            let mut config = crate::Config::default();
+            config.data.kernel_engine = kernel_engine;
+            config.data.tick_interval_secs = Some(1);
+            let engine = crate::Engine::builder()
+                .set_config(&config)
+                .start()
+                .await
+                .unwrap();
+            let folded: Arc<parking_lot::Mutex<Vec<String>>> =
+                Arc::new(parking_lot::Mutex::new(Vec::new()));
+            {
+                let folded = folded.clone();
+                engine.channel().on_message(move |e| {
+                    let folded = folded.clone();
+                    async move {
+                        if e.r#type == "workflow" {
+                            return;
+                        }
+                        let node = if e.r#type == "act" {
+                            e.inputs
+                                .get::<crate::Vars>(crate::utils::consts::STEP_KEY)
+                                .and_then(|step| {
+                                    step.get::<String>(crate::utils::consts::STEP_NODE_ID)
+                                })
+                                .unwrap_or_else(|| e.nid.clone())
+                        } else {
+                            e.nid.clone()
+                        };
+                        folded
+                            .lock()
+                            .push(format!("{node}|{}|{}", e.state, e.uses.is_some()));
+                    }
+                });
+            }
+            let sig = engine.signal(());
+            let done = sig.clone();
+            engine.channel().on_complete(move |_| {
+                let done = done.clone();
+                async move { done.close() }
+            });
+            let workflow = crate::model::Workflow::new()
+                .with_id("wf-container-messages")
+                .with_step(|step| {
+                    step.with_id("s1").with_branch(|branch| {
+                        branch
+                            .with_id("b1")
+                            .with_if("true")
+                            .with_step(|step| step.with_id("s11"))
+                    })
+                })
+                .with_step(|step| {
+                    step.with_id("s2")
+                        .with_uses(
+                            crate::utils::test::USES_SET,
+                            crate::Vars::new().with("k1", "v1"),
+                        )
+                        .with_branch(|branch| {
+                            branch
+                                .with_id("b2")
+                                .with_if("true")
+                                .with_step(|step| step.with_id("s21"))
+                        })
+                });
+            let runtime = engine.runtime();
+            runtime.start(&workflow, crate::Vars::new()).await.unwrap();
+            tokio::time::timeout(std::time::Duration::from_secs(30), sig.recv())
+                .await
+                .expect("the run never finished");
+            if let Some(host) = runtime.kernel() {
+                host.dispatch_outbox().await.unwrap();
+            }
+            let mut folded = folded.lock().clone();
+            folded.sort();
+            folded.dedup();
+            engine.close().await;
+            folded
+        }
+
+        let legacy = run(false).await;
+        let kernel = run(true).await;
+        assert_eq!(
+            legacy, kernel,
+            "the folded container message sets must match"
+        );
+        // The package-less container's own completion, and the act's: both
+        // steps speak.
+        assert!(
+            kernel.iter().any(|entry| entry == "s1|completed|false"),
+            "a package-less container announces its own completion: {kernel:?}"
+        );
+        assert!(
+            kernel
+                .iter()
+                .any(|entry| entry.starts_with("s2|completed") && entry.ends_with("true")),
+            "a `uses` container announces its act's completion: {kernel:?}"
+        );
+        // A branch task is silent on both engines.
+        assert!(
+            !kernel
+                .iter()
+                .any(|entry| entry.starts_with("b1|") || entry.starts_with("b2|")),
+            "branch tasks announce nothing: {kernel:?}"
+        );
     }
 
     /// A client's `act:error` carries the legacy inputs (`ecode`, `message`):
@@ -7961,8 +8326,20 @@ mod tests {
                 .iter()
                 .filter(|topic| *topic == "message.created")
                 .count(),
-            2,
-            "both uses steps announced themselves: {delivered:?}"
+            3,
+            "two uses steps and the workflow root announced themselves: {delivered:?}"
+        );
+        // The root's own message is task-shaped (kind = workflow), the acts'
+        // carry their package.
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&message_of("$").payload).unwrap()["kind"],
+            "workflow"
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&message_of("$").payload)
+                .unwrap()
+                .get("uses"),
+            None
         );
         // A second pass delivers nothing: every record was confirmed.
         let redelivered = host.dispatch_outbox().await.unwrap();

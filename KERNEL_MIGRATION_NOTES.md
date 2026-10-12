@@ -409,6 +409,33 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
   —— 根是整条链(含 rewind 新代)的容器,是语义而非漏洞。②cancel 的 legacy 守卫差异见 (d)。
   ③`proc`/`task` 行状态现在与 legacy 同(原先「park 在 Waiting、legacy 在 Running」的偏差消失)。
 
+- **消息 parity 收口:task 级消息 + 容器的 act 完成消息(队列 1+3 本片)**
+  (a) **记录→消息映射**(`kernel_host/message.rs`):payload 的 `uses` 变为可选,`type` 取 `kind`
+  (缺省 "act")。于是同一个 outbox 记录机制承载两种形状:act 形状(`uses` 步:uses/params/step)
+  与 task 形状(nid/name/kind/inputs{model}/outputs)。
+  (b) **谁发/何时发 = legacy `Runtime::initialize` 的 `on_task` 规则**(实测+源码):任务状态
+  **不是 pending/running** 就发(`Ready|Interrupt → MessageState::Created`),且 `is_emit()` 为真;
+  `Act::init` 关 emit、`Act::run` 开(所以 act 的 Created 只在 Irq 出现),`Branch::init` 关 emit
+  且从不打开 ⇒ **branch 任务全程静默**。内核对应:`hop_message_payload`(uses → act payload,
+  其余 → task payload,**branch 节点返回 None**),覆盖创建(`message.created`,现在对**所有**执行写,
+  不再只看 has_package)、终态(complete/skip/fail/abort)、客户端动作(经 `attach_hop_message`,
+  原先对无包执行直接返回、现改名为 `attach_hop_message`)、失败路径与 cascade hop(abort 也补发)。
+  (c) **容器**:`uses`+branches/catches 的步在 **fan-out 那一笔**发 act 完成记录(legacy 的 act
+  正好在那时完成);**无包容器**改在 **join 那一笔**发自己的 task 完成记录(`attach_join_message`;
+  legacy 的 step 在 fan-out 时是 `running`,按 (b) 不发),键带 join 的 op sequence
+  `completed:<pid>:<tid>:<gen>:<seq>`,与 fan-out 的 `completed:<pid>:<tid>:<gen>` 不撞键。
+  (d) **根**:根现在既走 lifecycle 通道(on_start/on_complete)**也**在 on_message 上发 workflow
+  类型的 task 消息 —— legacy 两者都做(实测断言两侧 workflow-type 消息均为 true)。
+  **对跑实测 1**(`kernel_task_and_act_messages_match_the_legacy_run`,workflow 现含一个纯 step
+  s3):两侧折叠集合逐项相等(`s1|created|true` / `s1|completed|true` / `s2|created|true` /
+  `s2|completed|true` / `s3|created|false` / `s3|completed|false`,实测 dump 逐项打印核对),
+  读模型行折叠相等,workflow 类型消息两侧都出现。
+  **对跑实测 2**(`kernel_container_messages_match_the_legacy_run`:s1 纯 step+branch、s2
+  uses+branch):容器自身的完成消息两侧折叠相等,且 branch 任务在两侧都静默。
+  **已知边界**:①`Proc::state()`/lifecycle 的触发时点未变(仍是全执行终态),根在 on_message 上
+  的消息由 (d) 补上。②act 的 *记录条数* 与 legacy 的 *任务条数* 不同(内核把 act 折进 step),
+  折叠到(node, state, uses)后相等,与既有口径一致。
+
 ## 已对齐(无需动)
 
 - Complete/Submit/Skip/Fail on Running/Waiting:ActionPlanner 与 legacy 守卫一致
@@ -418,27 +445,18 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
 
 ## 剩余工作(按序)
 
-1. (登记,未排期)**无 `uses` 的 task 级消息**:纯 step 与 workflow 根在 legacy 也发 task
-   消息(见「语义结论」);driver 档目前只发 act 消息,根走 lifecycle 通道。若客户端按
-   type=step/workflow 订阅,需给无包执行也写消息记录、并把节点种类带进
-   `message_from_record`(其 type 目前恒为 "act")。
-2. (登记,未排期)**driver 未实现节点 id 分配**:legacy 的 `prepare_step_ids` 会为未命名的
+1. (登记,未排期)**driver 未实现节点 id 分配**:legacy 的 `prepare_step_ids` 会为未命名的
    step/branch/catch 补随机 id(`tree/build.rs`);driver 从 model 取 id,所以嵌套节点必须显式
    命名(导入期拒绝,不再在 hop 里 wedge)。要跑 `examples/catches/model.yml` 这类模型,
    需要在 `ProcessSpec::from_workflow` 里补一条等价于 `prepare_step_ids` 的赋值(结果写进
    `__model`,聚合即事实),属独立小片。
-3. (登记,未排期)**`uses`+容器的 act 完成消息**:step 同时有 `uses` 与 branches/catches 时,
-   完成走容器 fan-out 路径,不再发 act 的 Completed 记录(legacy 会发);leaf 的 `uses` step
-   不受影响(仍走 ActionPlanner + `attach_act_message`)。timeout 的 park 路径**不受影响**
-   (park 走 `task_hop_plan` 的完成记录,act 消息照发);A′ 之后根也走 fan-out,所以根自身的
-   task 消息同样落在这条(与消息片 1 合并做)。
-4. (登记,未排期)**timeout + catches 同一 step**:导入期拒绝(catch join 的判定集合与 timeout
+2. (登记,未排期)**timeout + catches 同一 step**:导入期拒绝(catch join 的判定集合与 timeout
    子的集合在同一个 child 集里)。要做需:catch join 按 `__sign=catch` 过滤判定子、且允许由
    timeout 子的结算触发判定,同时让 join 的「全子终态」门槛仍覆盖 timeout 子。
-5. (登记,未排期)**timer 的第一轮不等 tick**:开着的窗随 start hop 的 wake 立刻 fire,比 legacy
+3. (登记,未排期)**timer 的第一轮不等 tick**:开着的窗随 start hop 的 wake 立刻 fire,比 legacy
    早至多一个 tick;若要严格对齐可让首轮永远先 Idle 一次(代价:每个 timeout 步至少多一个 tick
    延迟),当前不认为值得,故登记。
-6. (登记,未排期)**Cancel 的 legacy 守卫差异**(A′ 暴露):legacy 的 cancel 处理器要求被撤销的
+4. (登记,未排期)**Cancel 的 legacy 守卫差异**(A′ 暴露):legacy 的 cancel 处理器要求被撤销的
    **step** 处于 biz-success(它从 act 上溯到 step),内核的动作直接指向节点、`ActionPlanner`
    允许 `Ready|Running|Waiting` 上的 Cancel。park 改 Running 后需要状态表补 `Running → Cancelled`
    才不打断既有 cancel 用例;这条接受面在 park 前后都存在(内核独有),尚未与 legacy 守卫对跑。
@@ -525,6 +543,13 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
   `check_in_children` 不会调度它们,只有 tick 会。
   ⑦分支自己的 `next` 在完成时会调 `dispatch_next_timeout_branch` 交接给下一个分支;skip 的
   分支直接 Parent(不交接)。内核不需要这条链:每 tick 重评列表即可。
+- **task 消息的发出规则(实测 + 源码)**:legacy `Runtime::initialize` 的 `on_task` 在任务状态
+  **不是 pending/running** 且 `is_emit()` 为真时,用 `Task::create_message` 发一条消息到
+  `on_message`(type = `node.kind()`,`uses` = `node.uses()`,所以*带 uses 的 step* 的消息也带
+  uses → 折叠口径下与 act 消息同形)。`Ready|Interrupt → Created`;`Act::init` 关 emit、`run` 开
+  (⇒ act 的 Created 只在 Irq 出现),`Branch::init` 关 emit 且从不打开(⇒ branch 任务静默,
+  只有其内部 step 发)。根任务既走 `on_task`(on_message,type=workflow)也走 `on_proc`
+  (on_start/on_complete)。内核:同一形状的记录由每个 hop 的 outbox 承载,`branch` 节点不写 payload。
 - **父状态不变式(实测)**:legacy 的父任务(step 与 workflow 根)在**子任务结算前一直 `running`**
   (`check_in_children` 之后 step 的 `next` 返回 Stop、`auto_complete` 只在全子 completed 时结算;
   实测 step `state=running` + `__sign: IN_CHILDREN`,根 `running`),`Interrupt` 只表示「自己的 act

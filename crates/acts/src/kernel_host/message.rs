@@ -12,7 +12,15 @@ use crate::{Message, MessageState, Vars, utils::consts};
 use std::collections::VecDeque;
 
 /// Map one delivered record onto its engine message, or `None` when the
-/// record is not an act message (lifecycle notes with empty payloads).
+/// record carries no payload (lifecycle notes such as `task.started` on a hop
+/// that announced nothing).
+///
+/// Two payload shapes arrive here, both faithful to the legacy
+/// `Task::create_message`: an *act* payload (a `uses` step's message, with its
+/// package and resolved params) and a *task* payload (a package-less step, a
+/// branch or the workflow root, which the legacy engine also announced — its
+/// `on_task` emits every state change that is not `pending`/`running`). The
+/// `type` is the legacy node kind; the act shape omits it.
 pub(crate) fn message_from_record(record: &OutboxRecord) -> Option<Message> {
     let state = match record.topic.as_str() {
         "message.created" => MessageState::Created,
@@ -26,14 +34,18 @@ pub(crate) fn message_from_record(record: &OutboxRecord) -> Option<Message> {
         "task.removed" => MessageState::Removed,
         _ => return None,
     };
-    // Only records carrying the act payload are act messages.
     let payload: serde_json::Value = serde_json::from_str(&record.payload).ok()?;
     let nid = payload.get("nid")?.as_str()?.to_string();
-    let uses = payload.get("uses")?.as_str()?.to_string();
+    let uses = payload.get("uses").and_then(|value| value.as_str());
     let name = payload
         .get("name")
         .and_then(|value| value.as_str())
         .unwrap_or(&nid)
+        .to_string();
+    let kind = payload
+        .get("kind")
+        .and_then(|value| value.as_str())
+        .unwrap_or("act")
         .to_string();
     let mid = payload
         .get("mid")
@@ -41,8 +53,9 @@ pub(crate) fn message_from_record(record: &OutboxRecord) -> Option<Message> {
         .unwrap_or_default()
         .to_string();
 
-    // The act's inputs: the scope inputs the hop recorded, plus the resolved
-    // params/options the message carries (the legacy `Task::create_message`).
+    // The message's inputs: the scope inputs the hop recorded, plus the
+    // resolved params/options the message carries (the legacy
+    // `Task::create_message`).
     let mut inputs = Vars::new();
     if let Some(bag) = payload.get("inputs").and_then(|value| value.as_object()) {
         for (key, value) in bag {
@@ -70,11 +83,11 @@ pub(crate) fn message_from_record(record: &OutboxRecord) -> Option<Message> {
         tid: nid.clone(),
         name,
         state,
-        r#type: "act".into(),
+        r#type: kind,
         pid: record.id.process_id.clone(),
         nid,
         mid,
-        uses: Some(uses),
+        uses: uses.map(String::from),
         inputs,
         outputs,
         start_time: 0,
