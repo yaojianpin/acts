@@ -32,6 +32,15 @@ pub(crate) enum OperationKind {
     /// the kernel's dispatch cadence, the legacy process tick's equivalent —
     /// and retires once the execution is decided or every branch fired.
     DispatchTimeout,
+    /// The durable rewind a `Cancel`/`Back` decision leaves behind: the
+    /// deciding commit closes the source generation (`Backed`) and creates
+    /// this operation in the *same* atomic batch, so the re-entry cannot be
+    /// lost to a crash or a lost compare-and-swap — its hop plans the fresh
+    /// generations ([`super::GenerationPlanner::plan_reentry`]) and the
+    /// recovery scan re-drives it if that hop fails. The target task id is
+    /// the durable fact `__reenter_target` the deciding commit writes (`Back`
+    /// names an earlier step, `Cancel` the closed execution itself).
+    ReenterTask,
     DeliverMessage,
     FireTrigger,
     RunPostCommit,

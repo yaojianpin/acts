@@ -521,6 +521,26 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
   (两条走过的弯路记在此以免重走:①「首轮提交 arm 标记 + 替补 timer」—— 替补同样被宿主立刻唤醒,
   标记挡不住那次评估;②「`cost_ms == 0` 才 Idle」—— 真实 hop 序列耗时已过毫秒,等于没生效。)
 
+- **重入做成持久操作(「剩余工作 1」settle 的前置修复;本片)**:驱动档的 Cancel/Back 重入原先由
+  宿主侧 `run_reentry` 在效果提交**之后**单独规划(每笔 cancel 还要多 3~4 笔提交),与 serve 循环的
+  hop 抢同一 aggregate ⇒ 重试风暴。实测 trace(上一笔 pinning 测试 5/6 红):
+  ①效果提交成功但随后的 `Complete` 事件丢 CAS → 重试的 preflight 看到自己刚改过的状态,把**成功
+  报成拒绝**(`ActionNotAllowed{state: Cancelled}`);②`run_reentry` 的 8 次重试被并发 hop 耗尽 ⇒
+  **重入丢失**(没有新代,run 卡死);③每次失败留下的 carrier op 堆积 ⇒ 仓库抛
+  `RecoveryIndexMismatch{process_id}`(硬完整性错误)。
+  修法:新增 `OperationKind::ReenterTask`(codec tag **追加 9**,不重排;`commit.rs` 的 digtag 同步)
+  —— 决定那一笔**原子提交**里同时写 `__reenter_target`(私有事实:`Back`=客户端 `to`,`Cancel`=被
+  关闭的执行自身)并建这个 op;其 hop 跑 `GenerationPlanner::plan_reentry` 并提交(丢 CAS 由
+  recovery 收敛),宿主侧 `run_reentry`/`run_reentry_once` 整体删除。`apply_action` 另外**钉住
+  intent 身份**(首个 attempt 定的 execution+operation id):重试先看这条 op —— 已
+  `Committed`/`Completed` ⇒ 直接 `Ok`(自己的提交永不报成拒绝),仍在 `Claimed`/`CommitPrepared`
+  ⇒ 先 `ScheduleRetry` 再复用同一条 op(claim fence = attempt+1),不从已移动的快照上重新推导 id。
+  顺带:`Back` 缺 `to` 的拒绝移到 durable intent **之前**(对齐 legacy 在 `back_task` 之前读 `to`);
+  旧测试 `back_without_to_is_refused_without_consuming_state` 钉的是「效果已落盘、再报错」的旧行为,
+  已改为「拒绝即不消费聚合版本、步骤仍在 Waiting」。
+  实测:pinning 用例 8/8 绿(修复前 5/6 红),全量 `-p acts --lib --tests` **1260 passed**(只剩已登记
+  的 stall 红),该用例耗时从 ~1.8s 降到 ~0.17s(重试风暴消失)。
+
 ## 已对齐(无需动)
 
 - Complete/Submit/Skip/Fail on Running/Waiting:ActionPlanner 与 legacy 守卫一致

@@ -65,6 +65,31 @@ const CONFLICT_ECODE: &str = "ECONFLICT";
 const DELIVERY_LEASE_MS: i64 = 30_000;
 const PAGE_SIZE: usize = 128;
 
+/// The durable target of a `Cancel`/`Back` rewind, written by the deciding
+/// commit for the `ReenterTask` operation its batch creates: `Back` names an
+/// earlier step (the client's `to`), `Cancel` the closed execution itself.
+/// A private fact (the `__` prefix keeps it out of the expression space and
+/// the read model), like every other engine fact the hops address each other
+/// with.
+const REENTER_TARGET_VAR: &str = "__reenter_target";
+
+/// The durable identity of one client action: the execution it targets and
+/// the operation that carries its intent. Pinned by the first attempt so
+/// every retry re-drives the same operation instead of re-deriving ids from a
+/// snapshot the action's own commit moved.
+struct ActionIntent {
+    execution: crate::kernel::ExecutionId,
+    operation: OperationId,
+}
+
+/// What a retried action's pinned intent says about the previous attempt.
+enum ActionResume {
+    /// The intent's commit is durable: the action applied.
+    Applied,
+    /// The intent is still open (or its ownership was released): re-drive it.
+    Retry,
+}
+
 fn runtime(error: impl std::fmt::Display) -> ActError {
     ActError::Runtime(error.to_string())
 }
@@ -1153,17 +1178,35 @@ impl KernelHost {
         // The serving loop commits hops of the same aggregate concurrently, so
         // a client's plan can go stale before its commit. A retry re-plans
         // against the fresh snapshot: the action either applies or is
-        // legitimately refused, and a refusal is never retried.
+        // legitimately refused — and a refusal is never retried. The retry
+        // pins the intent's identity (see [`ActionIntent`]) and consults it
+        // first: an attempt that committed its intent and then lost the
+        // completion compare-and-swap must report success, never a refusal
+        // caused by the state its own commit moved.
+        let mut pinned: Option<ActionIntent> = None;
         let mut attempt = 0;
         loop {
             match self
-                .apply_action_once(process_id, task_id, action.clone(), inputs.clone())
+                .apply_action_once(
+                    process_id,
+                    task_id,
+                    action.clone(),
+                    inputs.clone(),
+                    attempt,
+                    &mut pinned,
+                )
                 .await
             {
                 Ok(()) => return Ok(()),
                 Err(error) => {
                     if !is_conflict(&error) || attempt + 1 >= ACTION_ATTEMPTS {
                         return Err(error);
+                    }
+                    if let Some(intent) = &pinned {
+                        match self.resume_action_intent(intent).await? {
+                            ActionResume::Applied => return Ok(()),
+                            ActionResume::Retry => {}
+                        }
                     }
                     tracing::debug!(
                         pid = %process_id,
@@ -1177,50 +1220,105 @@ impl KernelHost {
         }
     }
 
+    /// Whether a retried action's pinned intent already carries its commit —
+    /// the action applied, so the retry reports success — and the release of
+    /// an intent whose effect never committed (the attempt lost its
+    /// compare-and-swap mid-sequence), so the next attempt re-drives the same
+    /// operation instead of stranding it.
+    async fn resume_action_intent(&self, intent: &ActionIntent) -> Result<ActionResume> {
+        let Some(snapshot) = self.load(&intent.operation.process_id).await? else {
+            return Ok(ActionResume::Retry);
+        };
+        let Some(operation) = snapshot.snapshot.operations.get(&intent.operation) else {
+            return Ok(ActionResume::Retry);
+        };
+        match &operation.state {
+            // The effect commit is durable, the rewind operation it created
+            // included: recovery completes the bookkeeping and drives the
+            // rewind, the client's action has applied.
+            crate::kernel::OperationState::Committed(_)
+            | crate::kernel::OperationState::Completed(_) => Ok(ActionResume::Applied),
+            crate::kernel::OperationState::Claimed(claim)
+            | crate::kernel::OperationState::CommitPrepared(claim) => {
+                self.operation_event(
+                    &intent.operation,
+                    operation.revision,
+                    OperationEvent::ScheduleRetry {
+                        claim: claim.clone(),
+                        attempt: claim.fence as u32,
+                    },
+                )
+                .await?;
+                Ok(ActionResume::Retry)
+            }
+            crate::kernel::OperationState::EffectUnknown { .. }
+            | crate::kernel::OperationState::Quarantined { .. } => Err(runtime(format!(
+                "action intent {:?} needs reconciliation: {:?}",
+                intent.operation, operation.state
+            ))),
+            _ => Ok(ActionResume::Retry),
+        }
+    }
+
     /// One action application: the durable intent, ownership, the re-plan
     /// against the authoritative snapshot, the commit and the completion (see
-    /// [`Self::apply_action`] for the retry around it).
+    /// [`Self::apply_action`] for the retry around it). `attempt` fences the
+    /// claim (a released intent's next claim must carry a higher fence) and
+    /// `pinned` carries the identity the first attempt fixed.
     async fn apply_action_once(
         &self,
         process_id: &str,
         task_id: &str,
         action: crate::kernel::ActionKind,
         inputs: Vec<(String, String)>,
+        attempt: usize,
+        pinned: &mut Option<ActionIntent>,
     ) -> Result<()> {
         let snapshot = self
             .load(process_id)
             .await?
             .ok_or_else(|| ActError::Runtime(format!("aggregate {process_id} not found")))?
             .snapshot;
-        let execution_id = snapshot
-            .executions
-            .keys()
-            .filter(|id| id.task_id == task_id)
-            .max_by_key(|id| id.generation)
-            .cloned()
-            .ok_or_else(|| ActError::Runtime(format!("execution {task_id} not found")))?;
-        let next_sequence = snapshot
-            .operations
-            .keys()
-            .filter(|id| {
-                id.process_id == process_id
-                    && id.task_id == task_id
-                    && id.generation == execution_id.generation
-            })
-            .map(|id| id.sequence)
-            .max()
-            .unwrap_or(0)
-            + 1;
-        let operation_id = OperationId {
-            process_id: process_id.into(),
-            task_id: task_id.into(),
-            generation: execution_id.generation,
-            sequence: next_sequence,
+        let (execution_id, operation_id) = match pinned {
+            Some(intent) => (intent.execution.clone(), intent.operation.clone()),
+            None => {
+                let execution_id = snapshot
+                    .executions
+                    .keys()
+                    .filter(|id| id.task_id == task_id)
+                    .max_by_key(|id| id.generation)
+                    .cloned()
+                    .ok_or_else(|| ActError::Runtime(format!("execution {task_id} not found")))?;
+                let next_sequence = snapshot
+                    .operations
+                    .keys()
+                    .filter(|id| {
+                        id.process_id == process_id
+                            && id.task_id == task_id
+                            && id.generation == execution_id.generation
+                    })
+                    .map(|id| id.sequence)
+                    .max()
+                    .unwrap_or(0)
+                    + 1;
+                let operation_id = OperationId {
+                    process_id: process_id.into(),
+                    task_id: task_id.into(),
+                    generation: execution_id.generation,
+                    sequence: next_sequence,
+                };
+                let intent = ActionIntent {
+                    execution: execution_id.clone(),
+                    operation: operation_id.clone(),
+                };
+                *pinned = Some(intent);
+                (execution_id, operation_id)
+            }
         };
         let now = SystemClock.now_ms();
         let claim = crate::kernel::ClaimToken {
             owner: OWNER.into(),
-            fence: 1,
+            fence: attempt as u64 + 1,
             lease_until_ms: now + LEASE_MS,
             heartbeat_revision: 0,
         };
@@ -1238,6 +1336,19 @@ impl KernelHost {
         // Preflight against the current snapshot: a caller-correctable
         // rejection (terminal task, unknown execution) consumes nothing.
         crate::kernel::ActionPlanner::plan(&snapshot, &command).map_err(runtime)?;
+        // A `Back` without the step it names is the legacy refusal, checked
+        // before the durable intent: the rewind target is the client's own
+        // input, not something the kernel can invent.
+        if matches!(command.action, crate::kernel::ActionKind::Back)
+            && !command
+                .inputs
+                .iter()
+                .any(|(name, _)| name == crate::utils::consts::ACT_TO)
+        {
+            return Err(ActError::Runtime(
+                "cannot find 'to' value in options".to_string(),
+            ));
+        }
         // A step declaring `catches` is not a client target once it is deciding
         // its caught error: the legacy act it folds is already terminal, and the
         // legacy `do_action` refuses every action on it. The durable flow fact
@@ -1379,27 +1490,11 @@ impl KernelHost {
                 for operation in &receipt.new_operations {
                     wake.wake(operation);
                 }
-                // A Cancel ends this path AND re-runs it: the cancelled
-                // execution is re-entered with a fresh generation (the
-                // legacy rewind), its downstream recreated by the planner.
-                // A Back re-enters the step the client named (`to`): the
-                // backed execution stays terminal; the named step and its
-                // downstream get fresh generations.
-                if matches!(command.action, crate::kernel::ActionKind::Cancel) {
-                    self.run_reentry(process_id, &execution_id, task_id).await?;
-                } else if matches!(command.action, crate::kernel::ActionKind::Back) {
-                    let to = command
-                        .inputs
-                        .iter()
-                        .find(|(name, _)| name == crate::utils::consts::ACT_TO)
-                        .map(|(_, value)| value.clone())
-                        .ok_or_else(|| {
-                            ActError::Runtime("cannot find 'to' value in options".to_string())
-                        })?;
-                    self.run_reentry(process_id, &execution_id, &to).await?;
-                }
-                // The read model follows the action's commits (the re-entry
-                // included).
+                // The read model follows the action's commits. A `Cancel` or
+                // `Back` re-enters through the durable `ReenterTask` operation
+                // the effect commit created (and this wake dispatched), so the
+                // rewind survives a lost completion compare-and-swap or a
+                // crash exactly like every other hop.
                 self.refresh_projection(process_id).await;
                 Ok(())
             }
@@ -1419,185 +1514,6 @@ impl KernelHost {
                 Err(ActError::Runtime(format!("action re-plan failed: {error}")))
             }
         }
-    }
-
-    /// Re-enter one cancelled execution with a fresh generation through
-    /// [`crate::kernel::GenerationPlanner`]: a carrier operation on the same
-    /// execution is created, owned, and committed with the planner's re-entry
-    /// plan (new generations for the forward closure).
-    ///
-    /// The retry is *inside* this method, not around the action: the re-entry
-    /// is the substance of a cancel/back, so a lost compare-and-swap must not
-    /// leave the source terminal with no successor. Each attempt recomputes
-    /// the carrier against the fresh snapshot — a stranded carrier from a
-    /// failed attempt is inert (its execution is already decided, so the hop
-    /// commits the empty remainder).
-    async fn run_reentry(
-        &self,
-        process_id: &str,
-        execution_id: &crate::kernel::ExecutionId,
-        task_id: &str,
-    ) -> Result<()> {
-        let mut attempt = 0;
-        loop {
-            match self
-                .run_reentry_once(process_id, execution_id, task_id)
-                .await
-            {
-                Ok(()) => return Ok(()),
-                Err(error) => {
-                    if !is_conflict(&error) || attempt + 1 >= ACTION_ATTEMPTS {
-                        return Err(error);
-                    }
-                    tracing::debug!(
-                        pid = %process_id,
-                        task = %execution_id.task_id,
-                        attempt,
-                        "reentry lost a compare-and-swap; re-planning"
-                    );
-                    attempt += 1;
-                }
-            }
-        }
-    }
-
-    /// One re-entry attempt (see [`Self::run_reentry`]).
-    async fn run_reentry_once(
-        &self,
-        process_id: &str,
-        execution_id: &crate::kernel::ExecutionId,
-        task_id: &str,
-    ) -> Result<()> {
-        let snapshot = self
-            .load(process_id)
-            .await?
-            .ok_or_else(|| ActError::Runtime("aggregate lost before reentry".into()))?
-            .snapshot;
-        let next_sequence = snapshot
-            .operations
-            .keys()
-            .filter(|id| {
-                id.process_id == process_id
-                    && id.task_id == execution_id.task_id
-                    && id.generation == execution_id.generation
-            })
-            .map(|id| id.sequence)
-            .max()
-            .unwrap_or(0)
-            + 1;
-        let carrier_id = OperationId {
-            process_id: process_id.into(),
-            task_id: execution_id.task_id.clone(),
-            generation: execution_id.generation,
-            sequence: next_sequence,
-        };
-        let intent = TransitionPlan {
-            process_id: process_id.into(),
-            expected: snapshot.version.clone(),
-            execution_creates: Vec::new(),
-            state_changes: Vec::new(),
-            variable_writes: Vec::new(),
-            source_operation: None,
-            operations: vec![OperationIntent {
-                id: carrier_id.clone(),
-                kind: OperationKind::ApplyAction,
-            }],
-            outbox: Vec::new(),
-        };
-        match self
-            .aggregates
-            .commit_transition(&intent)
-            .await
-            .map_err(repository_error)?
-        {
-            crate::kernel::TransitionCommitOutcome::Committed { .. }
-            | crate::kernel::TransitionCommitOutcome::AlreadyCommitted { .. } => {}
-            crate::kernel::TransitionCommitOutcome::Conflict { .. } => {
-                return Err(conflict("reentry intent conflict"));
-            }
-        }
-        let now = SystemClock.now_ms();
-        let claim = crate::kernel::ClaimToken {
-            owner: OWNER.into(),
-            fence: 1,
-            lease_until_ms: now + LEASE_MS,
-            heartbeat_revision: 0,
-        };
-        let revision = self
-            .load(process_id)
-            .await?
-            .ok_or_else(|| ActError::Runtime("aggregate lost during reentry".into()))?
-            .snapshot
-            .operations
-            .get(&carrier_id)
-            .map(|record| record.revision)
-            .ok_or_else(|| ActError::Runtime("reentry carrier lost".into()))?;
-        let claimed = self
-            .operation_event(&carrier_id, revision, OperationEvent::Claim(claim.clone()))
-            .await?;
-        let prepared = self
-            .operation_event(
-                &carrier_id,
-                claimed.revision,
-                OperationEvent::PrepareCommit {
-                    claim: claim.clone(),
-                },
-            )
-            .await?;
-        let snapshot = self
-            .load(process_id)
-            .await?
-            .ok_or_else(|| ActError::Runtime("aggregate lost during reentry".into()))?
-            .snapshot;
-        let graph = execution_graph(&snapshot)?;
-        let command = crate::kernel::ReenterCommand {
-            process_id: process_id.into(),
-            source: execution_id.clone(),
-            target_task_id: task_id.into(),
-            source_operation: OperationCommit {
-                id: carrier_id.clone(),
-                claim: claim.clone(),
-            },
-        };
-        let plan = crate::kernel::GenerationPlanner::plan_reentry(&graph, &snapshot, &command)
-            .map_err(runtime)?;
-        let receipt = match self
-            .aggregates
-            .commit_transition(&plan)
-            .await
-            .map_err(repository_error)?
-        {
-            crate::kernel::TransitionCommitOutcome::Committed { receipt, .. }
-            | crate::kernel::TransitionCommitOutcome::AlreadyCommitted { receipt, .. } => receipt,
-            crate::kernel::TransitionCommitOutcome::Conflict { .. } => {
-                return Err(conflict("reentry commit conflict"));
-            }
-        };
-        let committed = self
-            .load(process_id)
-            .await?
-            .ok_or_else(|| ActError::Runtime("aggregate lost after reentry".into()))?
-            .snapshot
-            .operations
-            .get(&carrier_id)
-            .cloned()
-            .ok_or_else(|| ActError::Runtime("carrier lost after reentry".into()))?;
-        let _ = prepared;
-        self.operation_event(
-            &carrier_id,
-            committed.revision,
-            OperationEvent::Complete {
-                commit: receipt.token.clone(),
-            },
-        )
-        .await?;
-        let wake = QueueWake {
-            tx: self.wake_tx.clone(),
-        };
-        for operation in &receipt.new_operations {
-            wake.wake(operation);
-        }
-        Ok(())
     }
 
     /// One durable hop. Returns `Ok(false)` when the operation needed nothing
@@ -2043,6 +1959,28 @@ impl KernelHost {
                 }
                 plan.validate().map_err(runtime)?;
                 plan
+            }
+            OperationKind::ReenterTask => {
+                // The durable rewind: the deciding commit closed the source
+                // generation and wrote the target it names (`Back` an earlier
+                // step, `Cancel` the closed execution itself). Planning here —
+                // not in the deciding call — is what makes the rewind survive
+                // a lost compare-and-swap or a crash: this hop is re-driven by
+                // the recovery scan until its commit lands.
+                let target = snapshot
+                    .variables
+                    .get(&(execution_id.clone(), REENTER_TARGET_VAR.to_string()))
+                    .cloned()
+                    .unwrap_or_else(|| id.task_id.clone());
+                let graph = execution_graph(&snapshot)?;
+                let command = crate::kernel::ReenterCommand {
+                    process_id: id.process_id.clone(),
+                    source: execution_id.clone(),
+                    target_task_id: target,
+                    source_operation: commit_claim.clone(),
+                };
+                crate::kernel::GenerationPlanner::plan_reentry(&graph, &snapshot, &command)
+                    .map_err(runtime)?
             }
             other => {
                 return Err(ActError::Runtime(format!(
@@ -2579,6 +2517,11 @@ impl KernelHost {
                 {
                     return Ok(plan);
                 }
+                let rewinds = matches!(
+                    kind,
+                    crate::kernel::ActionKind::Cancel | crate::kernel::ActionKind::Back
+                );
+                let back = matches!(kind, crate::kernel::ActionKind::Back);
                 let command = crate::kernel::ApplyActionCommand {
                     process_id: id.process_id.clone(),
                     execution: execution_id.clone(),
@@ -2588,6 +2531,44 @@ impl KernelHost {
                 };
                 let mut plan =
                     crate::kernel::ActionPlanner::plan(snapshot, &command).map_err(runtime)?;
+                // A `Cancel`/`Back` rewinds: the decision closes the source
+                // generation and the re-entry that follows is a durable
+                // operation created in this same commit, so the rewind can be
+                // neither lost to a crash nor confused with a state the
+                // client never decided. The target it names is a durable fact
+                // too (`Back` the client's `to`, `Cancel` this execution).
+                if rewinds {
+                    let target = if back {
+                        command
+                            .inputs
+                            .iter()
+                            .find(|(name, _)| name == crate::utils::consts::ACT_TO)
+                            .map(|(_, value)| value.clone())
+                            .ok_or_else(|| {
+                                ActError::Runtime("cannot find 'to' value in options".to_string())
+                            })?
+                    } else {
+                        execution_id.task_id.clone()
+                    };
+                    plan.variable_writes.push(VariableWrite {
+                        scope: execution_id.clone(),
+                        name: REENTER_TARGET_VAR.to_string(),
+                        value: target,
+                    });
+                    let reenter_id = OperationId {
+                        process_id: id.process_id.clone(),
+                        task_id: execution_id.task_id.clone(),
+                        generation: execution_id.generation,
+                        sequence: id.sequence + 2,
+                    };
+                    if !snapshot.operations.contains_key(&reenter_id) {
+                        plan.operations.push(OperationIntent {
+                            id: reenter_id,
+                            kind: OperationKind::ReenterTask,
+                        });
+                    }
+                    plan.validate().map_err(runtime)?;
+                }
                 // A client action that decides a `uses` execution announces it
                 // on the act's own message, exactly like the legacy act.
                 self.attach_hop_message(snapshot, execution_id, &mut plan)?;
@@ -5606,7 +5587,7 @@ mod tests {
         }
         runtime
             .do_action(&crate::event::Action::new(
-                &PID,
+                PID,
                 "s1",
                 crate::event::EventAction::Cancel,
                 crate::Vars::new(),
@@ -7682,6 +7663,97 @@ mod tests {
         generations
     }
 
+    /// A rewind is part of the decision that asks for it: the `Cancel`'s own
+    /// atomic commit closes the source generation, pins the target fact and
+    /// creates the `ReenterTask` operation whose hop plans the fresh
+    /// generations. Recovery alone drives that hop — the property that makes
+    /// the rewind survive a lost compare-and-swap or a crash between the
+    /// decision and the re-entry (the host used to plan it inline, after the
+    /// commit, where both failures lost it).
+    #[tokio::test]
+    async fn a_cancel_carries_its_rewind_in_the_deciding_commit() {
+        const PID: &str = "p-cancel-durable";
+        let workflow = crate::model::Workflow::new()
+            .with_step(|step| {
+                step.with_id("s1").with_uses(
+                    crate::utils::test::USES_IRQ,
+                    crate::Vars::new().with("key", "act1"),
+                )
+            })
+            .with_step(|step| {
+                step.with_id("s2").with_uses(
+                    crate::utils::test::USES_IRQ,
+                    crate::Vars::new().with("key", "act2"),
+                )
+            });
+        let (host, mut wake_rx) = KernelHost::in_memory();
+        let spec = ProcessSpec::from_workflow(PID, &workflow, &|_| None).unwrap();
+        host.start_process(&spec).await.unwrap();
+        host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+
+        host.apply_action(PID, "s1", ActionKind::Cancel, Vec::new())
+            .await
+            .unwrap();
+        // Durable before any hop ran: the decision closed the source, pinned
+        // the rewind target and created the operation that plans it.
+        let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+        assert_eq!(
+            state_of(&snapshot, "s1"),
+            crate::kernel::ExecutionState::Cancelled
+        );
+        let source = crate::kernel::ExecutionId {
+            task_id: "s1".into(),
+            generation: 0,
+        };
+        assert_eq!(
+            snapshot
+                .variables
+                .get(&(source.clone(), REENTER_TARGET_VAR.to_string()))
+                .map(String::as_str),
+            Some("s1"),
+            "the deciding commit pins the target the rewind re-enters"
+        );
+        let rewind = snapshot
+            .operations
+            .iter()
+            .find(|(_, operation)| operation.kind == OperationKind::ReenterTask)
+            .map(|(id, operation)| (id.clone(), operation.state.clone()));
+        let (rewind_id, rewind_state) = rewind.expect("the deciding commit creates the rewind");
+        assert!(
+            matches!(rewind_state, crate::kernel::OperationState::Pending),
+            "the rewind starts pending: recovery owns it until it commits, got {rewind_state:?}"
+        );
+
+        // No wake survives from the deciding call: the rewind below is driven
+        // by the recovery scan, exactly like a rewind whose deciding call died
+        // before it could dispatch anything.
+        while wake_rx.try_recv().is_ok() {}
+        host.recover(SystemClock.now_ms()).await.unwrap();
+        host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
+
+        let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+        assert_eq!(
+            executions_of(&snapshot, "s1"),
+            vec![0, 1],
+            "the rewind created one fresh generation"
+        );
+        assert_eq!(
+            state_of(&snapshot, "s1"),
+            crate::kernel::ExecutionState::Waiting,
+            "the redone step waits on its own act again"
+        );
+        let rewind = snapshot.operations.get(&rewind_id).expect("the rewind exists");
+        assert!(
+            matches!(
+                rewind.state,
+                crate::kernel::OperationState::Committed(_)
+                    | crate::kernel::OperationState::Completed(_)
+            ),
+            "the rewind hop carried its own commit, got {:?}",
+            rewind.state
+        );
+    }
+
     // ---- parity matrix: Abort / Back / Fail (Error) ----
 
     /// Abort × IRQ: aborting a waiting step decides it `Aborted`, rewrites
@@ -7817,6 +7889,11 @@ mod tests {
     }
 
     /// Back without the client's `to` is refused before anything durable.
+    ///
+    /// The refusal happens before the durable intent, exactly like the legacy
+    /// `EventAction::Back`, which reads `to` before it touches the task: the
+    /// state phase and the aggregate are untouched, and the client can retry
+    /// with the step it means.
     #[tokio::test]
     async fn back_without_to_is_refused_without_consuming_state() {
         let workflow = crate::model::Workflow::new().with_step(|step| {
@@ -7837,12 +7914,15 @@ mod tests {
             .unwrap_err();
         assert!(format!("{error}").contains("'to'"));
 
-        // The effect (Backed) committed before the reentry dispatch — the
-        // refusal is the missing redo target, not the action itself.
         let after = host.snapshot("p-back-no-to").await.unwrap().unwrap();
-        assert_ne!(
+        assert_eq!(
             before.version, after.version,
-            "the back effect itself is durable"
+            "a refused back consumes nothing"
+        );
+        assert_eq!(
+            state_of(&after, "s1"),
+            crate::kernel::ExecutionState::Waiting,
+            "the step keeps waiting on its act"
         );
     }
 
