@@ -100,6 +100,12 @@ enum StepPlace {
     /// selection — the legacy `Step::init` guard, evaluated when the failed
     /// step dispatches its handlers — so it is imported, not refused.
     Catch,
+    /// A `timeouts` branch of a step. Its `if` is the branch's window, the
+    /// expression the legacy `Step::init` evaluated when the tick dispatched
+    /// the branch (`$cost_in(...)`), so it is imported and evaluated by the
+    /// dispatcher; a `while` would loop the branch, which neither the tick nor
+    /// the kernel has a driver for.
+    Timeout,
     /// A step inside a branch: its guard would silently change meaning (the
     /// kernel join treats `Skipped` as a dead path, while a legacy step guard
     /// falls through to the chain), so it is refused.
@@ -155,22 +161,29 @@ fn import_step(
     }
     // A handler's `if` selects it (legacy `Step::init`); its `while` would
     // loop the handler, which needs step-loop machinery the kernel has no
-    // driver for.
-    if place == StepPlace::Catch && step.r#while.is_some() {
+    // driver for. A timeout branch is the same shape: its `if` is its window
+    // (evaluated by the tick's dispatcher), its `while` would loop it.
+    if matches!(place, StepPlace::Catch | StepPlace::Timeout) && step.r#while.is_some() {
+        let kind = if place == StepPlace::Catch {
+            "catch step"
+        } else {
+            "timeout step"
+        };
         return Err(ActError::Runtime(format!(
-            "catch step '{}' carries a 'while' guard; looping catch handlers are not imported yet",
+            "{kind} '{}' carries a 'while' guard; looping handlers are not imported yet",
             step.id
         )));
     }
-    // Timeout branches are real legacy behavior (`Step::on_timeout`
-    // dispatches them from the process tick, guarded by `$cost_in`), but the
-    // aggregate carries no time fact: firing them faithfully needs a durable
-    // cost start per execution plus a tick-driven dispatcher, which the
-    // driver does not have yet. Importing them while never firing them would
-    // silently drop the model's timeout path, so the import refuses.
-    if !step.timeouts.is_empty() {
+    // The legacy tree builds `catches` as Catch children and `timeouts` as
+    // Timeout children; `Step::on_error` dispatches the handlers of a failed
+    // step while the tick dispatches the branches of a running one — two
+    // independent dispatch shapes over the same node. The catch join decides
+    // the step from its handler set and the timeout branches join the same
+    // child set, so the decision would have to filter the two apart: refused
+    // rather than silently reduced to one of them.
+    if !step.catches.is_empty() && !step.timeouts.is_empty() {
         return Err(ActError::Runtime(format!(
-            "step '{}' declares 'timeouts'; the kernel has no durable cost clock to fire them yet",
+            "step '{}' declares both 'catches' and 'timeouts'; the kernel's catch join cannot tell the two child sets apart yet",
             step.id
         )));
     }
@@ -197,6 +210,21 @@ fn import_step(
                 seed_variables,
             )?;
         }
+    }
+    // A step's timeout branches are dispatched by the tick, not by a fan-out:
+    // the timed-out execution keeps running (or waiting) while the tick fires
+    // them, one per evaluation round, in declaration order (see
+    // `kernel::timeout`). They are imported (their guards included) and, like
+    // a catch handler, may be a container over their own children.
+    for timeout in &step.timeouts {
+        import_step(
+            timeout,
+            run_as,
+            StepPlace::Timeout,
+            auto,
+            auto_map,
+            seed_variables,
+        )?;
     }
     for branch in step_branches(step).unwrap_or_default() {
         if branch.id.trim().is_empty() {
@@ -269,10 +297,11 @@ impl ProcessSpec {
     ///
     /// Not imported (rejected instead of silently flattened into wrong
     /// semantics): branch `needs` (a dependency deferral the shadow has no
-    /// re-evaluation driver for yet) and `if`/`while` guards on steps inside
-    /// a branch (the kernel join treats `Skipped` as a dead path, while a
+    /// re-evaluation driver for yet), `if`/`while` guards on steps inside a
+    /// branch (the kernel join treats `Skipped` as a dead path, while a
     /// legacy step guard falls through to the chain — one state cannot mean
-    /// both).
+    /// both) and a step declaring both `catches` and `timeouts` (two child
+    /// sets the kernel's catch join cannot tell apart).
     pub(crate) fn from_workflow(
         process_id: impl Into<String>,
         workflow: &crate::model::Workflow,
@@ -620,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    fn catch_declarations_import_and_timeouts_are_still_refused() {
+    fn catch_and_timeout_declarations_import_and_the_contradictory_ones_are_refused() {
         // A catch step is a nested step: its auto decision and declared vars
         // become durable facts like a branch's, but it seeds no execution —
         // it comes alive when the failed step fans it out, and that hop seeds
@@ -667,11 +696,56 @@ mod tests {
             "a nested node's vars are seeded when its hop admits it"
         );
 
-        // A timeout needs a durable cost start the aggregate does not carry.
-        let with_timeout = crate::model::Workflow::new()
-            .with_step(|step| step.with_id("s1").with_timeout(|step| step.with_id("t1")));
-        let error = spec(&with_timeout).unwrap_err();
-        assert!(format!("{error}").contains("'s1' declares 'timeouts'"));
+        // A step's `timeouts` import like its catches: the branch is dispatched
+        // by the tick, which evaluates its guard, so both the branch and its
+        // guard are durable model facts. Nothing seeds an execution for it —
+        // the dispatch hop admits it.
+        let with_timeout = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("s1")
+                .with_uses("acts.transform.set", crate::Vars::new())
+                .with_timeout(|timeout| timeout.with_id("t1").with_if("$cost() >= 1000"))
+        });
+        let imported = spec(&with_timeout).unwrap();
+        assert_eq!(imported.children, vec!["s1".to_string()]);
+        let snapshot = imported.seed_snapshot().unwrap();
+        assert!(
+            snapshot
+                .executions
+                .values()
+                .all(|execution| execution.model_node.as_str() != "t1"),
+            "the timer's hop admits the branch, not the seed"
+        );
+        // The branch's auto decision is a durable fact like a catch's.
+        let root = ExecutionId::new(crate::utils::consts::TASK_ROOT_TID, 0).unwrap();
+        let timeout_auto: serde_json::Map<String, serde_json::Value> = serde_json::from_str(
+            snapshot
+                .variables
+                .get(&(root, AUTO_MAP_VAR.to_string()))
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(timeout_auto["t1"], serde_json::Value::Bool(true));
+
+        // A looping timeout branch needs step-loop machinery the kernel has
+        // none of, like a looping handler.
+        let looping_timeout = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("s1")
+                .with_uses("acts.transform.set", crate::Vars::new())
+                .with_timeout(|timeout| timeout.with_id("t1").with_while("v < 3"))
+        });
+        let error = spec(&looping_timeout).unwrap_err();
+        assert!(format!("{error}").contains("'while' guard"));
+
+        // The catch join decides a failed step from its handler set while the
+        // tick dispatches the timeout branches into that same child set: one
+        // decision cannot tell the two apart yet, so the pair is refused.
+        let mixed_timeouts = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("s1")
+                .with_catch(|catch| catch.with_id("c1"))
+                .with_timeout(|timeout| timeout.with_id("t1"))
+        });
+        let error = spec(&mixed_timeouts).unwrap_err();
+        assert!(format!("{error}").contains("both 'catches' and 'timeouts'"));
 
         // The legacy tree schedules branches and catches as one child set and
         // the import has one fan-out shape, so declaring both is refused.

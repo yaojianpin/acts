@@ -48,6 +48,7 @@ mod recovery_format;
 mod recovery_index;
 mod replay_policy;
 mod snapshot_codec;
+mod timeout;
 mod transition_plan;
 mod upward;
 
@@ -130,5 +131,12 @@ pub(crate) use branch::{
 pub(crate) use container::{
     CatchJoinCommand, CatchJoinOutcome, ContainerChild, ContainerChildPlan, ContainerError,
     ContainerFanoutCommand, ContainerJoinCommand, ContainerPlanner, ContainerPredecessor,
-    SIGN_CATCH, SIGN_ERROR, SIGN_VAR, execution_sign,
+    PARK_CHILDREN, PARK_VAR, SIGN_CATCH, SIGN_ERROR, SIGN_VAR, execution_sign, parked_for_children,
+};
+
+pub(crate) use timeout::{
+    STARTED_VAR, TimeoutBranch, TimeoutCandidate, TimeoutDispatch, candidate as timeout_candidate,
+    claim as timeout_claim, claimed as timeout_claimed, cost_ms as timeout_cost_ms,
+    dispatch as timeout_dispatch, has_live_children as timeout_has_live_children,
+    start_write as timeout_start_write,
 };

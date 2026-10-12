@@ -41,6 +41,30 @@ pub(crate) const SIGN_VAR: &str = "__sign";
 pub(crate) const SIGN_ERROR: &str = "error";
 /// A child the failed step dispatched as a CATCH handler.
 pub(crate) const SIGN_CATCH: &str = "catch";
+/// A container that parked in `Waiting` for the children it admitted.
+///
+/// `Waiting` alone cannot carry this: it is also the state of an execution
+/// waiting for its own act (the legacy `Interrupt`), and a timeout branch
+/// settling under such an execution must not join it — the legacy
+/// `auto_complete` only ever counts the children of a step that already ran
+/// into them. The mark is durable plan state, so a replay and the join read it
+/// from the aggregate.
+///
+/// It is deliberately *not* the catch sign ([`SIGN_VAR`], whose values are
+/// [`SIGN_ERROR`]/[`SIGN_CATCH`]): a catch handler is often a container, and
+/// its own fan-out would otherwise overwrite the CATCH mark the catch join
+/// reads back from it.
+pub(crate) const PARK_VAR: &str = "__parked";
+/// The value of [`PARK_VAR`] on a container waiting for its children.
+pub(crate) const PARK_CHILDREN: &str = "children";
+
+/// Whether one execution is parked in `Waiting` for the children it admitted.
+pub(crate) fn parked_for_children(snapshot: &AggregateSnapshot, execution: &ExecutionId) -> bool {
+    snapshot
+        .variables
+        .get(&(execution.clone(), PARK_VAR.to_string()))
+        .is_some_and(|value| value == PARK_CHILDREN)
+}
 
 /// The sign fact ([`SIGN_VAR`]) of one execution, if any.
 pub(crate) fn execution_sign<'a>(
@@ -361,6 +385,13 @@ impl ContainerPlanner {
             .get(&command.parent)
             .ok_or_else(|| ContainerError::ExecutionNotFound(command.parent.clone()))?;
         if parent.state != ExecutionState::Waiting {
+            return Ok(None);
+        }
+        // Only a parent that parked for its children joins. `Waiting` is also
+        // the state of an execution waiting for its own act (the legacy
+        // `Interrupt`), and a timeout branch settling under such an execution
+        // must not decide it — nobody answered its act.
+        if !parked_for_children(snapshot, &command.parent) {
             return Ok(None);
         }
         let children = graph.children(&command.parent);
@@ -1010,6 +1041,15 @@ mod tests {
         assert!(matches!(error, ContainerError::SourceNotContainer { .. }));
     }
 
+    /// Mark one execution as a container parked for its children: the mark
+    /// the join reads (see [`PARK_VAR`]).
+    fn mark_parked(snapshot: &mut AggregateSnapshot, parent: &str) {
+        snapshot.variables.insert(
+            (id(parent, 0), PARK_VAR.to_string()),
+            PARK_CHILDREN.to_string(),
+        );
+    }
+
     #[test]
     fn join_completes_the_parent_when_every_child_is_terminal() {
         let mut b = super::super::ExecutionGraphBuilder::new("p1", 1).unwrap();
@@ -1026,7 +1066,7 @@ mod tests {
         b.add_child(id("step1", 0), id("b1", 0)).unwrap();
         b.add_child(id("step1", 0), id("b2", 0)).unwrap();
         let graph = b.build().unwrap();
-        let snapshot = snapshot(vec![
+        let mut snapshot = snapshot(vec![
             (
                 id("step1", 0),
                 ExecutionSnapshot {
@@ -1058,6 +1098,7 @@ mod tests {
                 },
             ),
         ]);
+        mark_parked(&mut snapshot, "step1");
         let command = ContainerJoinCommand {
             process_id: "p1".into(),
             parent: id("step1", 0),
@@ -1147,6 +1188,22 @@ mod tests {
             )
             .unwrap()
             .is_none()
+        );
+        // A merely waiting parent is not a container: `Waiting` is also the
+        // state of an execution waiting for its own act (the legacy
+        // `Interrupt`), and a settled child under it must not decide it —
+        // nobody answered that act. The park mark is what tells the two apart.
+        let mut unmarked = waiting_child(ExecutionState::Completed, ExecutionState::Skipped);
+        assert!(
+            ContainerPlanner::plan_join(&graph, &unmarked, &command)
+                .unwrap()
+                .is_none()
+        );
+        mark_parked(&mut unmarked, "step1");
+        assert!(
+            ContainerPlanner::plan_join(&graph, &unmarked, &command)
+                .unwrap()
+                .is_some()
         );
     }
 

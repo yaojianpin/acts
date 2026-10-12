@@ -152,9 +152,15 @@ fn auto_decision(snapshot: &crate::kernel::AggregateSnapshot, node: &str) -> Res
 /// branch predicate resolve against.
 ///
 /// Private (`__`-prefixed) variables are the engine's own aggregate facts —
-/// the declaring model, the auto map, the run's owner — not the variable space
-/// a legacy task ever reads, so they are left out (a `${{ __model }}` in a
-/// step's params must not resolve where the legacy run would fail it).
+/// the declaring model, the auto map, the run's owner, the cost start of a
+/// timed-out execution — not the variable space a legacy task ever reads, so
+/// they are left out (a `${{ __model }}` in a step's params must not resolve
+/// where the legacy run would fail it).
+///
+/// One name is the exception: `__cost` is the legacy task *datum* the engine's
+/// own `$cost()`/`$cost_in(...)` read (frozen by the tick that dispatched a
+/// timeout branch), so it travels with the scope — a timeout branch's effect
+/// params answer the same cost the legacy branch task did.
 pub(crate) fn scope_vars(
     snapshot: &crate::kernel::AggregateSnapshot,
     scope: &crate::kernel::ExecutionId,
@@ -175,7 +181,8 @@ pub(crate) fn scope_vars(
     for scope in &chain {
         for ((key_scope, name), value) in &snapshot.variables {
             if key_scope == scope
-                && !crate::utils::consts::is_private_key(name)
+                && (!crate::utils::consts::is_private_key(name)
+                    || name == crate::utils::consts::TASK_COST)
                 && !merged.iter().any(|(existing, _)| existing == name)
             {
                 merged.push((name.clone(), value.clone()));
@@ -328,6 +335,72 @@ fn execution_variable<'a>(
         .variables
         .get(&(execution.clone(), name.to_string()))
         .map(String::as_str)
+}
+
+/// What one timeout dispatch round decided (see
+/// [`KernelHost::timeout_round`]).
+enum TimeoutRound {
+    /// The due branch and its decided guard: the hop dispatches it.
+    Dispatch {
+        branch: crate::kernel::TimeoutBranch,
+        guard: TimeoutGuard,
+        cost_ms: i64,
+        /// How many branches the node declares: the hop re-arms the timer while
+        /// the one-shot marker is shorter than that.
+        declared: usize,
+    },
+    /// Something can still fire, but not now: the guard's window is not open
+    /// (the legacy branch's `init` skipping without claiming) or the first
+    /// un-fired branch is in flight. The timer stays armed.
+    Idle,
+    /// Nothing can fire any more: the owner is decided, its node declares no
+    /// `timeouts`, or every branch already fired.
+    Retire,
+}
+
+/// One branch guard's verdict.
+enum TimeoutGuard {
+    /// The guard holds (or the branch declares none): dispatch the branch.
+    Fire,
+    /// The guard could not be evaluated (a non-boolean value or a compile/eval
+    /// error): the branch is admitted and fails on its first hop, exactly like
+    /// the legacy branch task whose `init` errored. The message is the pinned
+    /// failure.
+    Fail(String),
+}
+
+/// The next free operation sequence on one execution, counting both the
+/// snapshot's records and the intents this plan already claims: a hop that adds
+/// its own timer next to the act's completion op must not collide with it.
+fn next_plan_sequence(
+    snapshot: &crate::kernel::AggregateSnapshot,
+    plan: &TransitionPlan,
+    task_id: &str,
+    generation: u64,
+) -> u64 {
+    let from_snapshot = snapshot.next_operation_sequence(task_id, generation);
+    let from_plan = plan
+        .operations
+        .iter()
+        .filter(|intent| intent.id.task_id == task_id && intent.id.generation == generation)
+        .map(|intent| intent.id.sequence.saturating_add(1))
+        .max()
+        .unwrap_or(0);
+    from_snapshot.max(from_plan)
+}
+
+/// Record that one execution parked in `Waiting` for its children: the mark
+/// [`crate::kernel::ContainerPlanner::plan_join`] reads. `Waiting` alone is
+/// ambiguous — an execution waiting for its own act (the legacy `Interrupt`)
+/// carries it too — and a child's settlement must not decide the latter.
+fn mark_parked_for_children(plan: &mut TransitionPlan, execution: &crate::kernel::ExecutionId) {
+    plan.variable_writes
+        .retain(|write| !(write.scope == *execution && write.name == crate::kernel::PARK_VAR));
+    plan.variable_writes.push(VariableWrite {
+        scope: execution.clone(),
+        name: crate::kernel::PARK_VAR.to_string(),
+        value: crate::kernel::PARK_CHILDREN.to_string(),
+    });
 }
 
 /// Whether this execution is a step deciding a caught error: its failure hop
@@ -572,6 +645,13 @@ fn walk_step<'a>(step: &'a crate::model::Step, target: &str) -> Option<Container
             return Some(found);
         }
     }
+    // A timeout branch can be a container of its own (a step with branches or
+    // catches): the fan-out that runs it looks its shape up here too.
+    for timeout in &step.timeouts {
+        if let Some(found) = walk_step(timeout, target) {
+            return Some(found);
+        }
+    }
     None
 }
 
@@ -615,6 +695,11 @@ fn find_step<'a>(step: &'a crate::model::Step, target: &str) -> Option<&'a crate
     }
     for catch in &step.catches {
         if let Some(found) = find_step(catch, target) {
+            return Some(found);
+        }
+    }
+    for timeout in &step.timeouts {
+        if let Some(found) = find_step(timeout, target) {
             return Some(found);
         }
     }
@@ -1526,6 +1611,27 @@ impl KernelHost {
             _ => return Ok(false),
         }
 
+        // The timeout timer wakes once per tick and usually has nothing to do:
+        // evaluating its branches before the claim keeps an idle round from
+        // consuming the operation (it stays `Pending`, so the next recovery
+        // scan re-wakes it — the kernel's tick cadence) and from writing
+        // anything. Only the *idle* verdict short-circuits here; the round is
+        // decided again after the claim, against the authoritative snapshot.
+        if record.kind == OperationKind::DispatchTimeout {
+            let execution_id = crate::kernel::ExecutionId {
+                task_id: id.task_id.clone(),
+                generation: id.generation,
+            };
+            let execution = snapshot.executions.get(&execution_id);
+            if matches!(
+                self.timeout_round(&snapshot, &execution_id, execution, now)
+                    .await?,
+                TimeoutRound::Idle
+            ) {
+                return Ok(false);
+            }
+        }
+
         let claim = crate::kernel::ClaimToken {
             owner: OWNER.into(),
             fence: 1,
@@ -1593,6 +1699,7 @@ impl KernelHost {
                     &action_id,
                     action_exists,
                     auto,
+                    now,
                 )
                 .await?
             }
@@ -1741,6 +1848,52 @@ impl KernelHost {
                         });
                     }
                     plan
+                }
+            }
+            OperationKind::DispatchTimeout => {
+                // The timer of a timed-out execution: the round was already
+                // decided before the claim (an idle round never gets here), so
+                // this hop either dispatches the due branch, retires a timer
+                // with nothing left to fire, or — when a decision landed
+                // between the preflight and the claim — re-arms itself for the
+                // next tick instead of consuming its own operation.
+                match self
+                    .timeout_round(&snapshot, &execution_id, execution.as_ref(), now)
+                    .await?
+                {
+                    TimeoutRound::Dispatch {
+                        branch,
+                        guard,
+                        cost_ms,
+                        declared,
+                    } => self.timeout_plan(
+                        &snapshot,
+                        id,
+                        &execution_id,
+                        execution.as_ref(),
+                        &commit_claim,
+                        branch,
+                        guard,
+                        cost_ms,
+                        declared,
+                    )?,
+                    // Nothing can fire any more: the owner is decided or its
+                    // node declares no timeouts. The operation's own commit is
+                    // its whole remainder.
+                    TimeoutRound::Retire => Self::empty_remainder(&snapshot, id, &commit_claim),
+                    TimeoutRound::Idle => {
+                        let _ = self
+                            .operation_event(
+                                id,
+                                prepared.revision,
+                                OperationEvent::ScheduleRetry {
+                                    claim: claim.clone(),
+                                    attempt: 1,
+                                },
+                            )
+                            .await;
+                        return Ok(false);
+                    }
                 }
             }
             OperationKind::PropagateTask => {
@@ -1953,6 +2106,7 @@ impl KernelHost {
         action_id: &OperationId,
         action_exists: bool,
         auto: bool,
+        now_ms: i64,
     ) -> Result<TransitionPlan> {
         let mut plan = self.task_hop_plan(
             snapshot,
@@ -2093,6 +2247,34 @@ impl KernelHost {
                 from: crate::kernel::ExecutionState::Ready,
                 to: target,
             });
+            // A node that declares `timeouts` starts its cost clock here and
+            // arms the timer that fires them (see `kernel::timeout` and
+            // `KernelHost::timeout_round`): the timer is durable, so a tick
+            // after a crash still fires a branch whose window opened while the
+            // host was down. Only timeout owners carry the stamp — it is a
+            // kernel fact, never a variable a model reads.
+            if !self
+                .timeout_branches(snapshot, &ready.model_node)?
+                .is_empty()
+            {
+                plan.variable_writes
+                    .push(crate::kernel::timeout_start_write(execution_id, now_ms));
+                let sequence = next_plan_sequence(
+                    snapshot,
+                    &plan,
+                    &execution_id.task_id,
+                    execution_id.generation,
+                );
+                plan.operations.push(OperationIntent {
+                    id: OperationId {
+                        process_id: id.process_id.clone(),
+                        task_id: execution_id.task_id.clone(),
+                        generation: execution_id.generation,
+                        sequence,
+                    },
+                    kind: OperationKind::DispatchTimeout,
+                });
+            }
         }
         Ok(plan)
     }
@@ -2236,8 +2418,27 @@ impl KernelHost {
                     )
                     .await?
                 {
-                    let mut plan = crate::kernel::ContainerPlanner::plan_fanout(snapshot, &command)
-                        .map_err(runtime)?;
+                    let mut plan = Self::container_fanout_plan(snapshot, &command)?;
+                    if let Some(outcome) = &effect {
+                        self.fold_effect_outcome(snapshot, execution_id, outcome, &mut plan);
+                        plan.validate().map_err(runtime)?;
+                    }
+                    return Ok(plan);
+                }
+                // A step whose timeout branches are still in flight may not
+                // complete yet: the legacy `auto_complete` counts every child
+                // task, the timeout branches included. The act's own completion
+                // is recorded and the execution waits for them (the container
+                // join finishes it when the last one settles).
+                if self.waits_for_timeouts(snapshot, execution_id, execution)? {
+                    let mut plan = self.park_for_children_plan(
+                        snapshot,
+                        id,
+                        execution_id,
+                        execution,
+                        claim,
+                        &inputs,
+                    )?;
                     if let Some(outcome) = &effect {
                         self.fold_effect_outcome(snapshot, execution_id, outcome, &mut plan);
                         plan.validate().map_err(runtime)?;
@@ -2297,8 +2498,22 @@ impl KernelHost {
                         )
                         .await?
                 {
-                    return crate::kernel::ContainerPlanner::plan_fanout(snapshot, &command)
-                        .map_err(runtime);
+                    return Self::container_fanout_plan(snapshot, &command);
+                }
+                // A completion of a step whose timeout branches are still in
+                // flight is its *act* completing, not the step: the execution
+                // waits for the branches it fired (see `park_for_children_plan`).
+                if matches!(kind, crate::kernel::ActionKind::Complete)
+                    && self.waits_for_timeouts(snapshot, execution_id, execution)?
+                {
+                    return self.park_for_children_plan(
+                        snapshot,
+                        id,
+                        execution_id,
+                        execution,
+                        claim,
+                        &inputs,
+                    );
                 }
                 // A client's error on a step declaring `catches` is the legacy
                 // `Step::on_error`: the step stays running and dispatches its
@@ -2507,6 +2722,318 @@ impl KernelHost {
             params: resolved.params,
             options: resolved.options,
         }))
+    }
+
+    /// The declared timeout branches of one model node, in declaration order.
+    ///
+    /// An empty list means the node's step declares no `timeouts`: the timer
+    /// has nothing to fire (`Retire`). Each branch carries the durable facts a
+    /// dispatch needs; its guard stays in the model and is evaluated by the
+    /// round.
+    fn timeout_branches(
+        &self,
+        snapshot: &crate::kernel::AggregateSnapshot,
+        model_node: &crate::kernel::NodeId,
+    ) -> Result<Vec<crate::kernel::TimeoutBranch>> {
+        let Some(model) = model_of(snapshot)? else {
+            return Ok(Vec::new());
+        };
+        let Some(step) = find_step_in_model(&model, model_node.as_str()) else {
+            return Ok(Vec::new());
+        };
+        let mut branches = Vec::with_capacity(step.timeouts.len());
+        for timeout in &step.timeouts {
+            branches.push(crate::kernel::TimeoutBranch {
+                task_id: timeout.id.clone(),
+                model_node: node_id(&timeout.id)?,
+                vars: timeout
+                    .vars
+                    .iter()
+                    .map(|var| (var.name.clone(), var.value.to_string()))
+                    .collect(),
+                auto: auto_decision(snapshot, &timeout.id)?,
+            });
+        }
+        Ok(branches)
+    }
+
+    /// The `if` of one declared branch, from the declaring model: the window the
+    /// tick evaluates (`$cost_in(...)` in the models this ports). A branch
+    /// without a guard fires as soon as the round reaches it — a legacy branch
+    /// whose `Step::init` had nothing to test.
+    fn timeout_guard(
+        &self,
+        snapshot: &crate::kernel::AggregateSnapshot,
+        branch: &str,
+    ) -> Result<Option<String>> {
+        let Some(model) = model_of(snapshot)? else {
+            return Ok(None);
+        };
+        Ok(find_step_in_model(&model, branch).and_then(|step| step.r#if.clone()))
+    }
+
+    /// One dispatch round of a timed-out execution: the legacy tick's
+    /// `Step::on_timeout` + `dispatch_next_timeout_branch` + the branch's own
+    /// `Step::init` guard, decided against the aggregate.
+    ///
+    /// The cost is what passed since the execution's own start hop (the legacy
+    /// task's creation stamp); it is frozen into the branch's evaluation as the
+    /// `__cost` task datum `$cost()`/`$cost_in(...)` read.
+    async fn timeout_round(
+        &self,
+        snapshot: &crate::kernel::AggregateSnapshot,
+        owner: &crate::kernel::ExecutionId,
+        execution: Option<&crate::kernel::ExecutionSnapshot>,
+        now_ms: i64,
+    ) -> Result<TimeoutRound> {
+        // Only a running or waiting execution times out (the legacy tick's
+        // `is_timeouts() && (running || interrupted)`); anything else — a
+        // re-entered generation's stale timer included — has nothing left.
+        let Some(execution) = execution.filter(|execution| {
+            matches!(
+                execution.state,
+                crate::kernel::ExecutionState::Running | crate::kernel::ExecutionState::Waiting
+            )
+        }) else {
+            return Ok(TimeoutRound::Retire);
+        };
+        let branches = self.timeout_branches(snapshot, &execution.model_node)?;
+        if branches.is_empty() {
+            return Ok(TimeoutRound::Retire);
+        }
+        let cost_ms = crate::kernel::timeout_cost_ms(
+            now_ms,
+            snapshot
+                .variables
+                .get(&(owner.clone(), crate::kernel::STARTED_VAR.to_string()))
+                .map(String::as_str),
+        );
+        match crate::kernel::timeout_candidate(snapshot, owner, &branches) {
+            crate::kernel::TimeoutCandidate::None => Ok(TimeoutRound::Retire),
+            crate::kernel::TimeoutCandidate::Blocked => Ok(TimeoutRound::Idle),
+            crate::kernel::TimeoutCandidate::Branch(index) => {
+                let branch = branches[index].clone();
+                let guard = match self.timeout_guard(snapshot, &branch.task_id)? {
+                    None => TimeoutGuard::Fire,
+                    Some(expr) => {
+                        // The window is decided on the engine's own
+                        // environment (the legacy branch task's `init`), with
+                        // the frozen cost the legacy `on_timeout` wrote into
+                        // the task data.
+                        let predicate = self
+                            .evaluate_branch_predicate(
+                                snapshot,
+                                owner,
+                                &expr,
+                                &[(
+                                    crate::utils::consts::TASK_COST.to_string(),
+                                    cost_ms.to_string(),
+                                )],
+                            )
+                            .await?;
+                        match predicate {
+                            crate::kernel::PredicateValue::True => TimeoutGuard::Fire,
+                            // The window is not open: no claim, the round ends
+                            // (the legacy branch skips without claiming, so a
+                            // later round re-evaluates it).
+                            crate::kernel::PredicateValue::False => return Ok(TimeoutRound::Idle),
+                            // A guard that cannot be evaluated is the legacy
+                            // branch's `init` error: the branch is admitted and
+                            // fails on its first hop.
+                            crate::kernel::PredicateValue::Null => TimeoutGuard::Fail(format!(
+                                "timeout step '{}' guard evaluated to null",
+                                branch.task_id
+                            )),
+                            crate::kernel::PredicateValue::Invalid { message } => {
+                                TimeoutGuard::Fail(message)
+                            }
+                        }
+                    }
+                };
+                Ok(TimeoutRound::Dispatch {
+                    branch,
+                    guard,
+                    cost_ms,
+                    declared: branches.len(),
+                })
+            }
+        }
+    }
+
+    /// The plan of one dispatch round: the due branch admitted `Entry` through
+    /// the container machinery (its execution, the owner's frozen cost and the
+    /// advanced one-shot marker in one atomic commit) plus the timer's own
+    /// replacement intent, so a later window still fires.
+    #[allow(clippy::too_many_arguments)]
+    fn timeout_plan(
+        &self,
+        snapshot: &crate::kernel::AggregateSnapshot,
+        id: &OperationId,
+        execution_id: &crate::kernel::ExecutionId,
+        execution: Option<&crate::kernel::ExecutionSnapshot>,
+        claim: &OperationCommit,
+        branch: crate::kernel::TimeoutBranch,
+        guard: TimeoutGuard,
+        cost_ms: i64,
+        declared: usize,
+    ) -> Result<TransitionPlan> {
+        execution
+            .ok_or_else(|| ActError::Runtime(format!("execution {execution_id:?} not found")))?;
+        let mut pinned = Vec::new();
+        if let TimeoutGuard::Fail(message) = guard {
+            pinned.push((
+                BRANCH_ERROR_VAR.to_string(),
+                serde_json::json!({ "code": "", "message": message }).to_string(),
+            ));
+        }
+        let claimed_after = crate::kernel::timeout_claim(
+            &crate::kernel::timeout_claimed(snapshot, execution_id),
+            &branch.task_id,
+        );
+        let dispatch = crate::kernel::timeout_dispatch(
+            snapshot,
+            execution_id,
+            claim.clone(),
+            &branch,
+            pinned,
+            &claimed_after,
+            cost_ms,
+        );
+        let mut plan = crate::kernel::ContainerPlanner::plan_fanout(snapshot, &dispatch.command)
+            .map_err(runtime)?;
+        if dispatch.claimed_after.len() < declared {
+            // Declared branches remain unfired: the timer re-arms for them
+            // instead of retiring (a window that has not opened yet must still
+            // fire, and only a fresh round can see it).
+            let sequence = next_plan_sequence(
+                snapshot,
+                &plan,
+                &execution_id.task_id,
+                execution_id.generation,
+            );
+            plan.operations.push(OperationIntent {
+                id: OperationId {
+                    process_id: id.process_id.clone(),
+                    task_id: execution_id.task_id.clone(),
+                    generation: execution_id.generation,
+                    sequence,
+                },
+                kind: OperationKind::DispatchTimeout,
+            });
+        }
+        plan.validate().map_err(runtime)?;
+        Ok(plan)
+    }
+
+    /// The bare remainder of an operation with nothing to do: its own commit
+    /// and nothing else. Completing the operation is the whole effect.
+    fn empty_remainder(
+        snapshot: &crate::kernel::AggregateSnapshot,
+        id: &OperationId,
+        claim: &OperationCommit,
+    ) -> TransitionPlan {
+        TransitionPlan {
+            process_id: id.process_id.clone(),
+            expected: snapshot.version.clone(),
+            execution_creates: Vec::new(),
+            state_changes: Vec::new(),
+            variable_writes: Vec::new(),
+            source_operation: Some(claim.clone()),
+            operations: Vec::new(),
+            outbox: Vec::new(),
+        }
+    }
+
+    /// Whether an execution may not complete yet because a timeout branch it
+    /// fired is still in flight. The legacy `auto_complete` counts every child
+    /// task — the timeout branches included — so a step whose act is done waits
+    /// for them; the kernel parks the execution in `Waiting` (a waiting act is
+    /// already parked) and the container join finishes it.
+    fn waits_for_timeouts(
+        &self,
+        snapshot: &crate::kernel::AggregateSnapshot,
+        execution_id: &crate::kernel::ExecutionId,
+        execution: &crate::kernel::ExecutionSnapshot,
+    ) -> Result<bool> {
+        let branches = self.timeout_branches(snapshot, &execution.model_node)?;
+        Ok(!branches.is_empty()
+            && crate::kernel::timeout_has_live_children(snapshot, execution_id, &branches))
+    }
+
+    /// The container fan-out plan: [`ContainerPlanner::plan_fanout`] plus the
+    /// park mark the join reads.
+    ///
+    /// The mark belongs to this path, not to the planner: the container path is
+    /// the one that parks an execution for the children it admitted, while a
+    /// timeout dispatch admits a branch under an execution that is still
+    /// waiting for its own act — marking that one would let the branch's
+    /// settlement complete a step nobody answered (see
+    /// [`crate::kernel::PARK_CHILDREN`]).
+    fn container_fanout_plan(
+        snapshot: &crate::kernel::AggregateSnapshot,
+        command: &crate::kernel::ContainerFanoutCommand,
+    ) -> Result<TransitionPlan> {
+        let mut plan =
+            crate::kernel::ContainerPlanner::plan_fanout(snapshot, command).map_err(runtime)?;
+        // A container without children completes in this very hop: it never
+        // parks, so it carries no mark.
+        if !command.children.is_empty() {
+            mark_parked_for_children(&mut plan, &command.source);
+        }
+        plan.validate().map_err(runtime)?;
+        Ok(plan)
+    }
+
+    /// Record that `execution` parked in `Waiting` for its children. The
+    /// planner's own fact wins over a client input of the same private name.
+    fn park_for_children_plan(
+        &self,
+        snapshot: &crate::kernel::AggregateSnapshot,
+        id: &OperationId,
+        execution_id: &crate::kernel::ExecutionId,
+        execution: &crate::kernel::ExecutionSnapshot,
+        claim: &OperationCommit,
+        inputs: &[(String, String)],
+    ) -> Result<TransitionPlan> {
+        let mut plan = self.task_hop_plan(
+            snapshot,
+            id,
+            execution_id,
+            Some(execution),
+            claim,
+            "completed",
+            "task.completed",
+        )?;
+        for (name, value) in inputs {
+            plan.variable_writes.push(VariableWrite {
+                scope: execution_id.clone(),
+                name: name.clone(),
+                value: value.clone(),
+            });
+        }
+        if execution.state == crate::kernel::ExecutionState::Running {
+            plan.state_changes.push(StateChange {
+                execution: execution_id.clone(),
+                expected_revision: execution.revision,
+                from: crate::kernel::ExecutionState::Running,
+                to: crate::kernel::ExecutionState::Waiting,
+            });
+        }
+        mark_parked_for_children(&mut plan, execution_id);
+        // The act did complete: its message rides the record, exactly like a
+        // leaf completion's.
+        if let Some(payload) = self.act_message_payload(
+            snapshot,
+            execution_id,
+            &id.task_id,
+            act_facts(snapshot, execution_id).as_ref(),
+            Some(&plan.variable_writes),
+            None,
+        )? {
+            plan.outbox[0].payload = payload.to_string();
+        }
+        plan.validate().map_err(runtime)?;
+        Ok(plan)
     }
 
     /// Fold one package outcome into the hop's plan: the returned outputs and
@@ -2917,8 +3444,24 @@ impl KernelHost {
         // legacy client `Next` on a running step), not a second fan-out. A
         // rewound container's recreated children are all `Created` — exactly
         // like a never-fanned one — so they fan out (and readmit) again.
+        //
+        // Only the shape's own children count: a step that declares both
+        // `branches` and `timeouts` has a live timeout branch under it as soon
+        // as the tick fires one, and that branch must not read as "already
+        // fanned out" — the legacy step schedules its branch children when it
+        // runs into them, whatever a timeout did meanwhile.
+        let declared: Vec<&str> = match &shape {
+            ContainerShape::Branches(branches) => {
+                branches.iter().map(|branch| branch.id.as_str()).collect()
+            }
+            ContainerShape::Catches(catches) => {
+                catches.iter().map(|catch| catch.id.as_str()).collect()
+            }
+            ContainerShape::Steps(steps) => steps.iter().map(|step| step.id.as_str()).collect(),
+        };
         if snapshot.executions.values().any(|execution| {
             execution.parent.as_ref() == Some(execution_id)
+                && declared.contains(&execution.model_node.as_str())
                 && execution.state != crate::kernel::ExecutionState::Created
         }) {
             return Ok(None);
@@ -5295,6 +5838,228 @@ mod tests {
         assert!(host.process_completed("p4").await.unwrap());
     }
 
+    /// A step declaring `timeouts` arms a durable timer at its start hop: while
+    /// the execution is live, a tick dispatches the first branch that has
+    /// neither fired (the one-shot marker) nor is in flight — one per round, in
+    /// declaration order, its window evaluated on the engine's environment (the
+    /// built-in evaluator decides the plain guards here). The owner may not
+    /// complete before the branch it fired settles, and the timer retires once
+    /// nothing can fire instead of waking forever.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_timeout_timer_fires_a_branch_once_and_the_owner_waits_for_it() {
+        const PID: &str = "p_timeout";
+        let (host, mut wake_rx) = KernelHost::in_memory();
+        // An unknown package: every `uses` step waits for a client action,
+        // without a runner this host has none of.
+        let workflow = crate::model::Workflow::new()
+            .with_step(|step| {
+                step.with_id("s1")
+                    .with_uses("acts.test.wait", crate::Vars::new())
+                    .with_timeout(|timeout| {
+                        timeout
+                            .with_id("t1")
+                            .with_if("true")
+                            .with_uses("acts.test.wait", crate::Vars::new())
+                    })
+                    .with_timeout(|timeout| timeout.with_id("t2").with_if("false"))
+            })
+            .with_step(|step| step.with_id("s2"));
+        let spec = ProcessSpec::from_workflow(PID, &workflow, &|_| None).unwrap();
+        host.start_process(&spec).await.unwrap();
+        host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
+
+        let marker = |snapshot: &Snapshot, node: &str| -> Vec<String> {
+            snapshot
+                .variables
+                .get(&(
+                    crate::kernel::ExecutionId::new(node, 0).unwrap(),
+                    crate::utils::consts::TASK_TIMEOUTS.to_string(),
+                ))
+                .map(|raw| serde_json::from_str(raw).unwrap())
+                .unwrap_or_default()
+        };
+
+        // `s1` waits on the client — the live state a timed-out step is in.
+        // The timer's first round rides the start hop's own wake: an open
+        // window (`if: true` here) dispatches at once, a closed one
+        // (`if: false`) dispatches nothing and stays armed for the next tick.
+        let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+        assert_eq!(
+            state_of(&snapshot, "s1"),
+            crate::kernel::ExecutionState::Waiting
+        );
+        assert_eq!(
+            state_of(&snapshot, "t1"),
+            crate::kernel::ExecutionState::Waiting,
+            "the branch ran into its own client wait"
+        );
+        assert_eq!(
+            marker(&snapshot, "s1"),
+            vec!["t1".to_string()],
+            "the branch is claimed one-shot"
+        );
+        assert!(
+            !has_task(&snapshot, "t2"),
+            "a window that is not open dispatches nothing"
+        );
+        // The legacy task data the tick freezes: the owner's cost start and
+        // the frozen cost, and the branch reads the cost through its scope
+        // chain exactly like a legacy timeout child read its parent's.
+        let owner = crate::kernel::ExecutionId::new("s1", 0).unwrap();
+        assert!(
+            snapshot
+                .variables
+                .contains_key(&(owner.clone(), crate::kernel::STARTED_VAR.to_string())),
+            "the start hop stamps the cost start"
+        );
+        assert!(
+            snapshot
+                .variables
+                .contains_key(&(owner, crate::utils::consts::TASK_COST.to_string())),
+            "the tick freezes the cost (the legacy __cost datum)"
+        );
+        assert!(
+            scope_vars(
+                &snapshot,
+                &crate::kernel::ExecutionId::new("t1", 0).unwrap()
+            )
+            .iter()
+            .any(|(name, _)| name == crate::utils::consts::TASK_COST),
+            "a timeout branch reads the frozen cost"
+        );
+
+        // A later tick re-evaluates (the timer stays armed) without ever
+        // dispatching a branch that already fired.
+        host.recover(SystemClock.now_ms()).await.unwrap();
+        host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
+        let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+        assert_eq!(
+            executions_of(&snapshot, "t1").len(),
+            1,
+            "a one-shot branch fires once"
+        );
+        assert_eq!(marker(&snapshot, "s1"), vec!["t1".to_string()]);
+
+        // The owner's act completing while its branch runs is only the act:
+        // the step waits for the branch and the chain successor keeps waiting.
+        host.apply_action(PID, "s1", ActionKind::Complete, Vec::new())
+            .await
+            .unwrap();
+        host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
+        let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+        assert_eq!(
+            state_of(&snapshot, "s1"),
+            crate::kernel::ExecutionState::Waiting,
+            "the step waits for the branch it fired"
+        );
+        assert_eq!(
+            state_of(&snapshot, "s2"),
+            crate::kernel::ExecutionState::Created
+        );
+
+        // The branch settles: the join completes the owner, the flow moves on,
+        // and the next tick retires the timer.
+        host.apply_action(PID, "t1", ActionKind::Complete, Vec::new())
+            .await
+            .unwrap();
+        host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
+        host.recover(SystemClock.now_ms()).await.unwrap();
+        host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
+        let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+        assert_eq!(
+            state_of(&snapshot, "s1"),
+            crate::kernel::ExecutionState::Completed
+        );
+        assert_eq!(
+            state_of(&snapshot, "s2"),
+            crate::kernel::ExecutionState::Completed
+        );
+        assert!(host.process_completed(PID).await.unwrap());
+        assert!(
+            snapshot
+                .operations
+                .values()
+                .filter(|operation| operation.kind == OperationKind::DispatchTimeout)
+                .all(|operation| matches!(operation.state, OperationState::Completed(_))),
+            "a decided execution retires its timer"
+        );
+    }
+
+    /// A step may declare both `branches` and `timeouts`: the tick fires a
+    /// branch while the step is still waiting on its act, and the act's
+    /// completion must still fan the step's declared branches out — a fired
+    /// timeout branch is not an "already fanned out" container child. The step
+    /// then waits for both child sets (the legacy `auto_complete` counts every
+    /// child task) and joins when the last one settles.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_timeout_branch_does_not_mask_the_branches_of_the_same_step() {
+        const PID: &str = "p_timeout_branch";
+        let (host, mut wake_rx) = KernelHost::in_memory();
+        let workflow = crate::model::Workflow::new().with_step(|step| {
+            step.with_id("s1")
+                .with_uses("acts.test.wait", crate::Vars::new())
+                .with_branch(|branch| {
+                    branch
+                        .with_id("b1")
+                        .with_if("true")
+                        .with_step(|step| step.with_id("s11"))
+                })
+                .with_timeout(|timeout| {
+                    timeout
+                        .with_id("t1")
+                        .with_if("true")
+                        .with_uses("acts.test.wait", crate::Vars::new())
+                })
+        });
+        let spec = ProcessSpec::from_workflow(PID, &workflow, &|_| None).unwrap();
+        host.start_process(&spec).await.unwrap();
+        host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+
+        let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+        assert_eq!(
+            state_of(&snapshot, "s1"),
+            crate::kernel::ExecutionState::Waiting
+        );
+        assert_eq!(
+            state_of(&snapshot, "t1"),
+            crate::kernel::ExecutionState::Waiting,
+            "the timer fired its branch while the step waited on its act"
+        );
+        assert!(
+            !has_task(&snapshot, "b1"),
+            "the declared branches fan out on the act's completion"
+        );
+
+        // The act's completion: the step is not done (t1 is in flight) but its
+        // branch child set comes alive.
+        host.apply_action(PID, "s1", ActionKind::Complete, Vec::new())
+            .await
+            .unwrap();
+        host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+        let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+        assert_eq!(
+            state_of(&snapshot, "s1"),
+            crate::kernel::ExecutionState::Waiting
+        );
+        assert_eq!(
+            state_of(&snapshot, "b1"),
+            crate::kernel::ExecutionState::Completed,
+            "the selected branch ran (its own inner step is auto)"
+        );
+
+        // The last child settles: the join completes the step.
+        host.apply_action(PID, "t1", ActionKind::Complete, Vec::new())
+            .await
+            .unwrap();
+        host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+        let snapshot = host.snapshot(PID).await.unwrap().unwrap();
+        assert_eq!(
+            state_of(&snapshot, "s1"),
+            crate::kernel::ExecutionState::Completed
+        );
+        assert!(host.process_completed(PID).await.unwrap());
+    }
+
     #[tokio::test]
     async fn completing_a_terminal_task_is_rejected_without_consuming_state() {
         let (host, mut wake_rx) = KernelHost::in_memory();
@@ -6349,6 +7114,294 @@ mod tests {
             }),
             _ => true,
         }
+    }
+
+    /// The fold for a run whose nodes may carry several instances over time: a
+    /// timeout branch whose window is not open yet is dispatched (and skipped)
+    /// again on every legacy tick, while the kernel keeps one execution per
+    /// node. So the comparison takes the *latest* instance per node — creation
+    /// order, which is instance order for a node re-dispatched by the tick —
+    /// with acts folded into their owning step like [`folded_legacy_states`].
+    fn latest_folded_legacy_states(proc: &Arc<crate::scheduler::Process>) -> Vec<(String, String)> {
+        let mut latest: std::collections::BTreeMap<String, (i64, String)> =
+            std::collections::BTreeMap::new();
+        for task in proc.tasks() {
+            if task.state().is_none() {
+                continue;
+            }
+            let state = match task.state() {
+                crate::TaskState::Completed | crate::TaskState::Submitted => "Completed",
+                crate::TaskState::Skipped => "Skipped",
+                crate::TaskState::Aborted => "Aborted",
+                crate::TaskState::Error => "Failed",
+                crate::TaskState::Backed => "Backed",
+                crate::TaskState::Cancelled => "Cancelled",
+                crate::TaskState::Interrupt => "Waiting",
+                other => panic!("unexpected legacy state {other:?}"),
+            };
+            let node = if task.node().kind() == crate::NodeKind::Workflow {
+                crate::utils::consts::TASK_ROOT_TID.to_string()
+            } else if task.node().kind() == crate::NodeKind::Act {
+                task.parent(proc)
+                    .expect("act without a step")
+                    .node()
+                    .id()
+                    .to_string()
+            } else {
+                task.node().id().to_string()
+            };
+            let entry = latest.entry(node).or_insert((i64::MIN, state.to_string()));
+            if task.timestamp >= entry.0 {
+                *entry = (task.timestamp, state.to_string());
+            }
+        }
+        latest
+            .into_iter()
+            .map(|(node, (_, state))| (node, state))
+            .collect()
+    }
+
+    /// Run the timeout workflow on one engine the way a client would: complete
+    /// the init act, watch the branch acts' messages until both windows opened,
+    /// then complete the owner's act and wait for the run to settle. The branch
+    /// acts' messages are the observable both engines share on this path (the
+    /// legacy tick's intermediate skipped instances are its own).
+    async fn run_timeout_engine(
+        kernel_engine: bool,
+        pid: &str,
+        workflow: &crate::model::Workflow,
+    ) -> (crate::Engine, Arc<crate::scheduler::Process>) {
+        let mut config = crate::Config::default();
+        config.data.kernel_engine = kernel_engine;
+        config.data.tick_interval_secs = Some(1);
+        let engine = crate::Engine::builder()
+            .set_config(&config)
+            .start()
+            .await
+            .unwrap();
+        let runtime = engine.runtime().clone();
+        let wait_for_created = |key: &'static str| {
+            let sig = engine.signal((String::new(), String::new()));
+            let (done, done_rx) = (sig.clone(), sig.clone());
+            engine.channel().on_message(move |e| {
+                let done = done_rx.clone();
+                async move {
+                    if e.is_params_key(key) && e.is_state(crate::MessageState::Created) {
+                        done.update(|d| *d = (e.pid.clone(), e.tid.clone()));
+                        done.close();
+                    }
+                }
+            });
+            done
+        };
+        let init_created = wait_for_created("init");
+        let act1_created = wait_for_created("act1");
+        let fired = Arc::new(parking_lot::Mutex::new(Vec::<String>::new()));
+        {
+            let fired = fired.clone();
+            engine.channel().on_message(move |e| {
+                let fired = fired.clone();
+                async move {
+                    for key in ["msg1", "msg2"] {
+                        if !e.is_params_key(key) {
+                            continue;
+                        }
+                        let mut fired = fired.lock();
+                        if !fired.iter().any(|seen| seen == key) {
+                            fired.push(key.to_string());
+                        }
+                    }
+                }
+            });
+        }
+        let ran = runtime
+            .start(
+                workflow,
+                crate::Vars::new().with(crate::utils::consts::PROCESS_ID, pid),
+            )
+            .await
+            .unwrap();
+        let (pid_now, tid) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), init_created.recv())
+                .await
+                .expect("the init act never appeared")
+                .clone();
+        runtime
+            .do_action(&crate::event::Action::new(
+                &pid_now,
+                &tid,
+                crate::event::EventAction::Next,
+                crate::Vars::new(),
+            ))
+            .await
+            .expect("the init act must complete");
+        let (pid_now, act1) =
+            tokio::time::timeout(std::time::Duration::from_secs(30), act1_created.recv())
+                .await
+                .expect("the act1 act never appeared")
+                .clone();
+        // The owner waits on its act; the ticks fire the declared windows in
+        // order, so the second branch only appears after its own window opened.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(12);
+        while fired.lock().len() < 2 {
+            if std::time::Instant::now() >= deadline {
+                let dump = if kernel_engine {
+                    let host = engine.runtime().kernel().expect("the kernel host").clone();
+                    let snapshot = host.snapshot(pid).await.unwrap().expect("the aggregate");
+                    format!(
+                        "executions={:?} operations={:?} owner_vars={:?}",
+                        snapshot
+                            .executions
+                            .iter()
+                            .map(|(id, execution)| format!("{id:?}:{:?}", execution.state))
+                            .collect::<Vec<_>>(),
+                        snapshot
+                            .operations
+                            .values()
+                            .map(|operation| format!(
+                                "{:?}:{:?}:{:?}",
+                                operation.id, operation.kind, operation.state
+                            ))
+                            .collect::<Vec<_>>(),
+                        snapshot
+                            .variables
+                            .iter()
+                            .filter(|((scope, _), _)| scope.task_id == "s1")
+                            .map(|((_, name), value)| format!("{name}={value}"))
+                            .collect::<Vec<_>>(),
+                    )
+                } else {
+                    format!(
+                        "tasks={:?}",
+                        ran.tasks()
+                            .iter()
+                            .map(|task| format!(
+                                "{}:{}:{}",
+                                task.node().id(),
+                                task.node().kind(),
+                                task.state()
+                            ))
+                            .collect::<Vec<_>>()
+                    )
+                };
+                panic!(
+                    "the timeout branches never fired: {:?}; kernel_engine={kernel_engine}; {dump}",
+                    fired.lock()
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        // Both branches fired and settled: the owner's act completes, and the
+        // step with it.
+        runtime
+            .do_action(&crate::event::Action::new(
+                &pid_now,
+                &act1,
+                crate::event::EventAction::Next,
+                crate::Vars::new(),
+            ))
+            .await
+            .expect("the act1 act must complete");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            let settled = if kernel_engine {
+                engine
+                    .runtime()
+                    .kernel()
+                    .expect("the kernel host")
+                    .process_completed(pid)
+                    .await
+                    .unwrap()
+            } else {
+                ran.state().is_completed()
+            };
+            if settled {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the run never settled"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        (engine, ran)
+    }
+
+    /// The timeout branches of a step fire from the tick, one declaration-ordered
+    /// round at a time, their window the cost since the step started — both
+    /// engines, end to end. The second window opens a tick after the first, and
+    /// the step completes only once its act is done *and* the branches it fired
+    /// settled, which is what lets the run end.
+    ///
+    /// The legacy side is folded by latest instance (see
+    /// [`latest_folded_legacy_states`]): the legacy tick re-dispatches a branch
+    /// whose window is not open yet, so the node has a skipped instance before
+    /// the fired one, and the kernel's per-node read model has no counterpart.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn kernel_timeout_branches_match_the_legacy_run() {
+        const PID: &str = "p_timeout_parity";
+        let workflow = || {
+            crate::model::Workflow::new()
+                .with_id("wf-timeout")
+                .with_step(|step| {
+                    step.with_id("s0").with_uses(
+                        crate::utils::test::USES_IRQ,
+                        crate::Vars::new().with("key", "init"),
+                    )
+                })
+                .with_step(|step| {
+                    step.with_id("s1")
+                        .with_uses(
+                            crate::utils::test::USES_IRQ,
+                            crate::Vars::new().with("key", "act1"),
+                        )
+                        .with_timeout(|timeout| {
+                            timeout.with_id("t1").with_if("$cost() >= 300").with_uses(
+                                crate::utils::test::USES_MSG,
+                                crate::Vars::new().with("key", "msg1"),
+                            )
+                        })
+                        .with_timeout(|timeout| {
+                            timeout.with_id("t2").with_if("$cost() >= 1500").with_uses(
+                                crate::utils::test::USES_MSG,
+                                crate::Vars::new().with("key", "msg2"),
+                            )
+                        })
+                })
+                .with_step(|step| step.with_id("s2"))
+        };
+
+        let (legacy_engine, legacy) = run_timeout_engine(false, PID, &workflow()).await;
+        let legacy_fold = latest_folded_legacy_states(&legacy);
+        let (kernel_engine, _ran) = run_timeout_engine(true, PID, &workflow()).await;
+        let host = kernel_engine
+            .runtime()
+            .kernel()
+            .expect("the kernel host")
+            .clone();
+        let snapshot = host.snapshot(PID).await.unwrap().expect("the aggregate");
+
+        for node in ["t1", "t2"] {
+            assert_eq!(
+                legacy_fold
+                    .iter()
+                    .find(|(name, _)| name == node)
+                    .map(|(_, state)| state.as_str()),
+                Some("Completed"),
+                "the legacy branch '{node}' must have fired and settled"
+            );
+            assert_eq!(
+                state_of(&snapshot, node),
+                crate::kernel::ExecutionState::Completed,
+                "the kernel branch '{node}' must have fired and settled"
+            );
+        }
+        // Every node either engine decided carries the same state, the kernel's
+        // extras (the pre-created chain) included.
+        assert_parity(&legacy_fold, &snapshot);
+        kernel_engine.close().await;
+        legacy_engine.close().await;
     }
 
     /// Every legacy task, folded onto the kernel's node vocabulary: acts

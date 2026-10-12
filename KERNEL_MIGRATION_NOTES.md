@@ -306,6 +306,76 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
    - 已知边界(明确登记,未静默降级):`uses`+容器(branches/catches)的 **act 完成消息**仍不在
      fan-out 路径发(既有 fan-out 抢占 completion 所致;legacy 会发 act Completed)。
 
+- **timeout 的导入与派发(本片,「剩余工作 1」收口)**
+  (a) **导入**(`kernel_host/model.rs`):接受 `step.timeouts`(handler 是嵌套 Step,可带自己的
+  uses/vars 以及 branches/catches,递归走同一套 place 规则)。分支的 `if` 是它的**窗口**——由
+  派发器在引擎表达式环境上求值(`$cost_in(...)`/`$cost()`),故允许;`while` 拒绝(需要 step
+  循环机)。**新增拒绝**:同一 step 同时声明 `catches`+`timeouts`——catch join 用一个子集决定
+  父步,而 timeout 子也落进同一个 child 集,两个集合暂时分不开(同 branches+catches 的理由)。
+  模型查找(`walk_step`/`find_step`)与容器形状查找现在都下钻 `timeouts`(handler 自己可以是
+  容器)。
+  (b) **时间事实**:新增每执行的持久 cost 起点 `__started`(JSON 毫秒,私有变量),在 start hop
+  (`Ready → Running|Waiting`)那一笔原子提交里写入,**只为声明了 `timeouts` 的节点**写(它是内核
+  事实,不进表达式/行)。没有动 `ExecutionSnapshot`/snapshot codec——聚合变量是既有机制。legacy
+  的 `Task::cost()` 从任务**创建**计时,而内核的链执行在 seed 时就预建(创建时间 = 整个 run 的
+  年龄),所以取「该执行开始自己的活」那一刻作锚(语义最近、durable 的对应物)。tick 的 cost =
+  注入的 now − `__started`(缺省/时钟回退 → 0,不会凭空开窗)。
+  (c) **tick 派发 = 一个自续期的持久操作** `OperationKind::DispatchTimeout`(codec tag **追加 8**,
+  不重排;commit digtag 同步)。start hop 在同一笔提交里 arm 这个 timer;`Pending`/`RetryScheduled`
+  在 recovery 扫描里**每 tick 都被 Wake**,所以 tick 节奏 = 引擎 tick(`config.tick_interval_secs`,
+  默认 15s)= legacy 的 process tick。一轮 = legacy 的 `Step::on_timeout` +
+  `dispatch_next_timeout_branch` + 分支自己的 `Step::init`:声明序里第一个「未 claim 且无 live
+  执行」的分支,`Blocked`(首个未 claim 分支在飞)→ 本轮结束;**guard 在引擎表达式环境上求值**
+  (headless scope + 覆盖层 `__cost` = 冻住的 cost):`True` → 派发(Entry,复用
+  `ContainerPlanner::plan_fanout` 的单子形状),`False` → 本轮不派发也不 claim(下轮重评,
+  纯读的 preflight 让 `Idle` 直接 `Ok(false)`、**不消耗 timer 操作**),`null`/`Invalid` → 该分支
+  带 `__branch_error` 准 Entry、首 hop Failed(legacy 分支 init 求值错误)。派发那一笔里同时写
+  owner 的 `__cost`(冻结值)与 `__timeouts`(one-shot 标记,与 legacy 同名同义),并在还有未
+  claim 分支时 arm 下一个 timer;所有分支都 claim 完或 owner 已决 → timer 提交空余量 retire
+  (不再唤醒)。**没有照抄 catch**:timeout 不是失败路由,park/失败/上浮都不参与。
+  (d) **owner 等待**:legacy `auto_complete` 数**全部**子任务(timeout 子含),所以 act 已完成但
+  还有 timeout 子在飞时,内核**不**在此 hop 完成该执行:act 的完成记录(含 act 消息)照写,执行
+  `Running → Waiting` park(act 本来就在 Waiting 的则无需状态变更),由容器 join(全子终态且无
+  Aborted)在最后一个子结算时完成并传播。收敛论证(未构造竞态测试):子先结算、park 后提交时
+  park 的计划版本过期 → CAS 冲突重试后按「无 live 子」走正常完成,不会 wedge。
+  (e) **表达式空间的例外**:`scope_vars` 放行 legacy 自己的 `__cost` 数据(`$cost()`/`$cost_in`
+  读的正是它,legacy 从任务 data / 父链读),其余 `__` 私有事实(`__model`/`__auto`/`__owner`/
+  `__sign`/`__started`/`__timeouts`)仍不进表达式。
+  (f) **容器 join 的 park 标记(本片暴露的既有 bug)**:`plan_join` 原来只要求父在 `Waiting`,
+  但 `Waiting` 也是「在等自己的 act」(legacy `Interrupt`)的状态 —— 于是 timeout 子一结算,
+  它的传播 hop 就把**还在等 act 的 owner 判成 `Completed`**(对跑实测:内核侧 s1 在 t1 fire
+  后立刻 Completed,t2 永远没机会 fire;legacy 侧 s1 仍 running)。修法:新增私有变量
+  `__parked=children`(**独立于 catch 的 `__sign`**,理由见下),由**宿主**两条路径写
+  (容器 fan-out `container_fanout_plan`、timeout/等待 park `park_for_children_plan`),
+  `plan_join` 只判带标记的父。踩到的第二个坑:最初把 park 标记复用 `__sign`,而 **catch handler
+  自己常常是容器**(它的 fan-out 会覆写 handler 的 `__sign`),把 catch join 要读的
+  CATCH 标记冲掉 → 失败步永不结算(实测 `kernel_catch_matches_legacy_when_the_error_is_caught`
+  的内核侧卡在 s1 Running)。分成两个键后 catch 路径不受影响。纯 planner 侧新增
+  `parked_for_children` + `PARK_VAR`/`PARK_CHILDREN`,单测覆盖「未标记的 Waiting 父不 join、
+  标记后才 join」。
+  (g) **顺带修 `fanout_command` 的「已 fan-out」判定**:它原来数**所有** parent 相同的子执行,
+  于是一个 step 上已经 fire 的 timeout 子会把它的 branches 误判成「已经 fan 过」→ branches
+  永不 fan-out(legacy 是 step 跑到 children 时调度 branches,与 timeout 无关)。现在只数该容器
+  形状声明的子节点。新增机制单测
+  `a_timeout_branch_does_not_mask_the_branches_of_the_same_step` 钉住(branches+timeouts 同
+  step:先 fire timeout 子、再完成 act → branches 仍 fan-out、step 等两套子、最后一个结算时 join)。
+  **对跑实测**(`kernel_timeout_branches_match_the_legacy_run`,同 workflow 双引擎,`tick=1s`):
+  s1 为 irq 步(act1 等待客户端)+ 两个 timeout(`$cost() >= 300` / `$cost() >= 1500`,各带 msg
+  act);两引擎都按声明序先 fire t1(msg1)再 fire t2(msg2),act1 `act:complete` 后 s1/根/s2 结算
+  且 run 结束。legacy 折叠取**每节点最新实例**(`latest_folded_legacy_states`:legacy 每 tick 给未
+  开窗的分支重派一个 Skipped 实例,内核每节点只有一个执行),逐节点与 kernel **相等**
+  (`assert_parity`)。内核侧机制另外单测收口(`the_timeout_timer_fires_a_branch_once_and_the_owner_waits_for_it`):
+  开着的窗随 start hop 的 wake 立刻派发、one-shot 不重派、owner 的 act 完成后 park 等子、子结算后
+  join 完成、owner 决出后 timer retire;`__cost` 经 scope 链可读。
+  **已知边界(明确登记,未静默降级)**:①timer 的第一轮随 start hop 的 wake 立刻跑(不等 tick),
+  所以「窗口本来就开着」的分支(`$cost() >= 0` 之类)比 legacy 早至多一个 tick fire;未开窗的
+  行为与 legacy 一致(下个 tick 重评)。②`timeouts` + `catches` 同一 step 拒绝(理由见 (a))。
+  ③timeout handler 的 `while` 拒绝;handler 内的 branches/catches 允许(容器机制通用)。
+  ④投影口径:`__cost`/`__timeouts`/`__started` 是私有键,**不进** vars 行(legacy 会把
+  `__cost`/`__timeouts` 写进任务 data 行)——属既有「私有键不入行」口径。
+  ⑤owner 的 act 完成但 timeout 子在飞时,内核的行状态是 Waiting(legacy 是 Running):与既有
+  「容器 fan-out 后 park 在 Waiting」同一处口径偏差。
+
 ## 已对齐(无需动)
 
 - Complete/Submit/Skip/Fail on Running/Waiting:ActionPlanner 与 legacy 守卫一致
@@ -315,37 +385,33 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
 
 ## 剩余工作(按序)
 
-1. **timeout 的导入与派发**(catch 已在上片完成;本项只剩 timeout):legacy 的语义 =
-   `Process::do_tick` 对 `is_timeouts()` 且 Running/Interrupt 的任务调 `Step::on_timeout`,
-   它先把 `cost` 落进 step 的任务数据(`$cost_in` 读它),再派发「首个未触发且不在飞」的
-   timeout 分支(声明序,每分支 one-shot 标记 `claim_timeout`)。
-   **为什么还没做(需要新事实)**:聚合(`AggregateSnapshot`/`ExecutionSnapshot`)没有任何
-   时间戳、也没有时钟;`projection` 的时间戳是*投影时刻*的墙钟,纯 planner 读不到。忠实实现
-   必须:①新增**每执行的持久 cost 起点**(动 snapshot codec/投影)或在 hop 里注入显式
-   `now` 并把 `now - started_at` 当 cost;②host 的 tick 扫出到期的 timeout 分支并派发
-   (复用 `ContainerChildPlan::Entry/Skip` 与谓词 seam 求值 `$cost_in(...)`);③每分支
-   one-shot 标记(聚合事实,防重派)。⚠️ 不要照抄 catch 的做法:timeout 不是失败路由,而是
-   时间驱动的派发。
-2. **workflow 根的完成语义与 legacy 不一致(登记)**:kernel 在根自己的 hop 就把它判
+1. **workflow 根的完成语义与 legacy 不一致(登记)**:kernel 在根自己的 hop 就把它判
    `Completed`(根不是 fan-out 容器,`container_shape(root)` 返回 None),legacy 的根要等它
    **全部子实例**结算(Back/重入后根仍是 Running)。后果:驱动档下重入在飞时,`proc:get` 的
    proc 行状态(投影取根的态)显示 completed,与 legacy 的 running 不符。修法方向:让种子出来的
    根按容器/join 语义结算(根 park 等子结算,或 join 覆盖根),单独一片 + 对跑;`kernel_back_read_model_serves_the_redone_generation`
    里已留了「不再往前断言根」的注释位。
-   (注:本片的 catch 场景里 legacy 的根同样卡在 running,但那是上面的 legacy catch 缺陷所致,
-   与这一条无关——成功路径的根两侧一致。)
-3. (登记,未排期)**无 `uses` 的 task 级消息**:纯 step 与 workflow 根在 legacy 也发 task
+   (注:catch 场景里 legacy 的根同样卡在 running,但那是 legacy catch 缺陷所致,与这一条无关;
+   timeout 片里两侧结算后的根都是 Completed。)
+2. (登记,未排期)**无 `uses` 的 task 级消息**:纯 step 与 workflow 根在 legacy 也发 task
    消息(见「语义结论」);driver 档目前只发 act 消息,根走 lifecycle 通道。若客户端按
    type=step/workflow 订阅,需给无包执行也写消息记录、并把节点种类带进
    `message_from_record`(其 type 目前恒为 "act")。
-4. (登记,未排期)**driver 未实现节点 id 分配**:legacy 的 `prepare_step_ids` 会为未命名的
+3. (登记,未排期)**driver 未实现节点 id 分配**:legacy 的 `prepare_step_ids` 会为未命名的
    step/branch/catch 补随机 id(`tree/build.rs`);driver 从 model 取 id,所以嵌套节点必须显式
-   命名(本片改为导入期拒绝,不再在 hop 里 wedge)。要跑 `examples/catches/model.yml` 这类模型,
+   命名(导入期拒绝,不再在 hop 里 wedge)。要跑 `examples/catches/model.yml` 这类模型,
    需要在 `ProcessSpec::from_workflow` 里补一条等价于 `prepare_step_ids` 的赋值(结果写进
    `__model`,聚合即事实),属独立小片。
-5. (登记,未排期)**`uses`+容器的 act 完成消息**:step 同时有 `uses` 与 branches/catches 时,
+4. (登记,未排期)**`uses`+容器的 act 完成消息**:step 同时有 `uses` 与 branches/catches 时,
    完成走容器 fan-out 路径,不再发 act 的 Completed 记录(legacy 会发);leaf 的 `uses` step
-   不受影响(仍走 ActionPlanner + `attach_act_message`)。
+   不受影响(仍走 ActionPlanner + `attach_act_message`)。timeout 的 park 路径**不受影响**
+   (park 走 `task_hop_plan` 的完成记录,act 消息照发)。
+5. (登记,未排期)**timeout + catches 同一 step**:本片在导入期拒绝(catch join 的判定集合与
+   timeout 子的集合在同一个 child 集里)。要做需:catch join 按 `__sign=catch` 过滤判定子、
+   且允许由 timeout 子的结算触发判定,同时让 join 的「全子终态」门槛仍覆盖 timeout 子。
+6. (登记,未排期)**timer 的第一轮不等 tick**:开着的窗随 start hop 的 wake 立刻 fire,比 legacy
+   早至多一个 tick;若要严格对齐可让首轮永远先 Idle 一次(代价:每个 timeout 步至少多一个 tick
+   延迟),当前不认为值得,故登记。
 
 ## 语义结论(已核实,勿再猜测)
 
@@ -410,6 +476,25 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
   是聚合里的私有事实(handler 上的对应 legacy `TASK_SIGN=CATCH` 已实测),catch join 完全
   读它们;判定只由 catch join 做,`Running → Completed`(接住)/`Running → Failed`(上浮)
   都在状态表内。
+- **timeout 的实测事实**:
+  ①legacy `Process::do_tick` 只对 `is_timeouts()`(NodeContent::Step 且 `timeouts` 非空)且
+  `running || interrupted` 的任务派发;`Step::on_timeout` 先 `task.set_data(__cost = task.cost())`
+  (即 `$cost()`/`$cost_in()` 读的是冻结值),再 `dispatch_next_timeout_branch`。
+  ②派发规则(实测 `sch_step_timeout_many` 的 proc dump):声明序里第一个**未 claim 且不在飞**
+  的分支被 `schedule_once`;分支自己的 `Step::init` 才求值窗口(`if`),不成立就 Skipped 且
+  **不 claim**,于是下一个 tick 又派一次(实测同一节点出现 Skipped + Completed 两个实例,
+  间隔 = tick 周期);已 claim 的分支跳过,不在飞检查只针对候选分支自己。
+  ③claim 标记 `__timeouts`(Vec<String>)与冻结的 `__cost` 都写在**owner(被计时 step)的
+  task data** 里(实测 `data={"__cost":1617,"__timeouts":["timout1"]}`),即聚合事实的同名同义物。
+  ④分支读 `$cost()` 走 **data 的父链**(`env::functions::current_cost`:先本任务 data 的 `__cost`、
+  再逐级父任务的 `__cost`、最后 `task.cost()`),所以 timeout 子读到的就是 owner 的冻结 cost。
+  ⑤legacy `auto_complete` 数**全部**子任务(`Process::children` = parent_id 相同者,timeout 子
+  含),`is_completed()` 含 Skipped/Error/Aborted;所以 act 完成但 timeout 子在飞时 step 不结算
+  (内核对应 park + join)。
+  ⑥`timeouts` 是 NodeOutputKind::Timeout 子节点,`Node::children()`(Normal)看不到它们——
+  `check_in_children` 不会调度它们,只有 tick 会。
+  ⑦分支自己的 `next` 在完成时会调 `dispatch_next_timeout_branch` 交接给下一个分支;skip 的
+  分支直接 Parent(不交接)。内核不需要这条链:每 tick 重评列表即可。
 
 ## 环境注意
 
@@ -422,3 +507,8 @@ examples 链接验证用 `cargo build -p acts --example <name>`(单跑均成功)
 `...::error::sch_error_duplicate_delivery_is_terminal_noop` 也在全量负载下偶发失败。
 catch 片实测:该 stall 红在**改动 stash 掉的基线**上单跑同样失败(1/1 failed),所以它与内核
 改动无关;判定回归时以「stash 基线对照 + 与本次改动是否同路径」为准,不要只看单测复跑。
+
+timeout 片实测补充:`kernel_host::tests::kernel_catch_*` 这批「双引擎 + 真 tick」的用例在**同
+进程并行**跑时会翻 —— 翻的是 **legacy 侧**断言(`legacy_node_states` 读到 `["none"]`,或失败 act
+的 error 竞过 auto_complete 把 legacy 判成 completed),同批单跑即绿;这类翻转与本次改动不同路径
+(legacy scheduler 未动),按上面的口径判定。

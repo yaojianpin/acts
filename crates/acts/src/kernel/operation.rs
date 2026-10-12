@@ -23,6 +23,15 @@ pub(crate) enum OperationKind {
     /// (pending ones skip). Like `SkipTask` it is one atomic
     /// `Running → Aborted` commit plus a `PropagateTask` hand-off.
     AbortTask,
+    /// The timer of an execution whose node declares `timeouts`: while that
+    /// execution is `Running`/`Waiting`, the tick evaluates its declared
+    /// branches in declaration order (the one-shot `__timeouts` marker, the
+    /// in-flight check) and admits the first due one. The operation re-arms
+    /// itself with a fresh intent after every dispatch and stays `Pending`
+    /// while nothing is due, so the recovery scan re-wakes it once per tick —
+    /// the kernel's dispatch cadence, the legacy process tick's equivalent —
+    /// and retires once the execution is decided or every branch fired.
+    DispatchTimeout,
     DeliverMessage,
     FireTrigger,
     RunPostCommit,

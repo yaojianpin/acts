@@ -770,6 +770,7 @@ fn operation_kind_tag(kind: super::OperationKind) -> &'static str {
         super::OperationKind::ApplyAction => "ApplyAction",
         super::OperationKind::SkipTask => "SkipTask",
         super::OperationKind::AbortTask => "AbortTask",
+        super::OperationKind::DispatchTimeout => "DispatchTimeout",
         super::OperationKind::DeliverMessage => "DeliverMessage",
         super::OperationKind::FireTrigger => "FireTrigger",
         super::OperationKind::RunPostCommit => "RunPostCommit",
