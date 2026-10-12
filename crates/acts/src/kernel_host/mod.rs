@@ -1220,6 +1220,65 @@ impl KernelHost {
         }
     }
 
+    /// The forward half of the legacy cancel guard: the work a cancel rewinds.
+    /// The legacy `follows` walk collects the *package* steps ahead of the
+    /// cancelled act — the ones that own acts, walking the step *chain* (a
+    /// container's children are not `next` tasks there) — and refuses both when
+    /// there is none (`cannot find cancelled tasks`) and when every one of them
+    /// already settled (`is_completed`, the duplicate-delivery guard: the
+    /// rewind it would run was already applied). A specification without a
+    /// model — the kernel's linear specs, which the legacy tree cannot express
+    /// — keeps the rule's spirit: any forward execution still live is work to
+    /// rewind.
+    fn validate_cancel_forward_work(
+        &self,
+        snapshot: &crate::kernel::AggregateSnapshot,
+        source: &crate::kernel::ExecutionId,
+    ) -> Result<()> {
+        let graph = execution_graph(snapshot)?;
+        let modelled = model_of(snapshot)?.is_some();
+        let mut seen = std::collections::HashSet::new();
+        let mut queue: std::collections::VecDeque<crate::kernel::ExecutionId> =
+            std::collections::VecDeque::from([source.clone()]);
+        let mut forward: Vec<&crate::kernel::ExecutionSnapshot> = Vec::new();
+        while let Some(current) = queue.pop_front() {
+            if !seen.insert(current.clone()) {
+                continue;
+            }
+            for successor in graph.successors(&current) {
+                let Some(execution) = snapshot.executions.get(successor) else {
+                    continue;
+                };
+                // A child of `current` is the container's own work, not the
+                // chain's next step — the legacy walk follows `next` tasks, so
+                // children stay out of the guard. The rewind still recreates
+                // them: they belong to the closure the planner rebuilds.
+                if execution.parent.as_ref() == Some(&current) {
+                    continue;
+                }
+                let package_step =
+                    !modelled || self.step_uses(snapshot, &execution.model_node)?.is_some();
+                if package_step {
+                    forward.push(execution);
+                }
+                queue.push_back(successor.clone());
+            }
+        }
+        if forward.is_empty() {
+            return Err(ActError::Action("cannot find cancelled tasks".to_string()));
+        }
+        if forward
+            .iter()
+            .all(|execution| execution.state.is_terminal())
+        {
+            return Err(ActError::Action(format!(
+                "task('{}') is not allowed to cancel",
+                source.task_id
+            )));
+        }
+        Ok(())
+    }
+
     /// Whether a retried action's pinned intent already carries its commit —
     /// the action applied, so the retry reports success — and the release of
     /// an intent whose effect never committed (the attempt lost its
@@ -1348,6 +1407,12 @@ impl KernelHost {
             return Err(ActError::Runtime(
                 "cannot find 'to' value in options".to_string(),
             ));
+        }
+        // A cancel rewinds the work *forward* of the step the client names:
+        // the legacy handler refuses when there is no package step ahead to
+        // undo, and when that forward work already settled.
+        if matches!(command.action, crate::kernel::ActionKind::Cancel) {
+            self.validate_cancel_forward_work(&snapshot, &execution_id)?;
         }
         // A step declaring `catches` is not a client target once it is deciding
         // its caught error: the legacy act it folds is already terminal, and the
@@ -5489,10 +5554,8 @@ mod tests {
     /// handler acts on an *act*, walks up to that act's owning step, and
     /// refuses unless the step's own work is done (`is_biz_success`) — its
     /// cancel redoes that step and undoes the chain forward from it, which only
-    /// makes sense once the step ran. The kernel's action targets the node
-    /// itself and `ActionPlanner` accepts `Cancel` on `Ready`/`Running`/
-    /// `Waiting`, so it is the broader surface. This test pins both sides of
-    /// that divergence until it is settled.
+    /// makes sense once the step ran. The kernel's action targets the node the
+    /// act folds into and refuses on the same surface, consuming nothing.
     #[tokio::test(flavor = "multi_thread")]
     #[serial_test::serial]
     async fn legacy_cancel_refuses_a_step_whose_work_is_not_done() {
@@ -5559,8 +5622,8 @@ mod tests {
         );
         engine.close().await;
 
-        // Kernel: the same client action lands on the node and cancels it,
-        // re-entering it with a fresh generation.
+        // Kernel: the same client action lands on the node and is refused on
+        // the same surface — the step waits on for its act.
         config.data.kernel_engine = true;
         let engine = crate::Engine::builder()
             .set_config(&config)
@@ -5577,15 +5640,14 @@ mod tests {
             .unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
-            if host_state(&engine.runtime(), PID, "s1").await
-                == Some(crate::kernel::ExecutionState::Waiting)
+            if host_state(&runtime, PID, "s1").await == Some(crate::kernel::ExecutionState::Waiting)
             {
                 break;
             }
             assert!(std::time::Instant::now() < deadline, "s1 never waited");
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        runtime
+        let refused = runtime
             .do_action(&crate::event::Action::new(
                 PID,
                 "s1",
@@ -5593,35 +5655,294 @@ mod tests {
                 crate::Vars::new(),
             ))
             .await
-            .expect("the kernel accepts the cancel");
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        loop {
-            let Some(snapshot) = engine
-                .runtime()
-                .kernel()
-                .expect("the kernel host")
-                .snapshot(PID)
-                .await
-                .unwrap()
-            else {
-                panic!("the aggregate exists");
-            };
-            let generations = snapshot
-                .executions
-                .keys()
-                .filter(|id| id.task_id == "s1")
-                .map(|id| id.generation)
-                .max();
-            if generations == Some(1) {
-                break;
-            }
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the kernel re-entry never produced a fresh generation: {snapshot:?}"
-            );
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
+            .expect_err("the kernel refuses a cancel whose step work is not done");
+        assert!(
+            format!("{refused:?}").contains("ActionNotAllowed"),
+            "the kernel refuses on the same surface: {refused:?}"
+        );
+        // … and the refusal consumed nothing: the step is still waiting on its
+        // act, one generation, nothing rewound.
+        assert_eq!(
+            host_state(&runtime, PID, "s1").await,
+            Some(crate::kernel::ExecutionState::Waiting)
+        );
+        let host = runtime.kernel().expect("the kernel host");
+        let snapshot = host.snapshot(PID).await.unwrap().expect("the aggregate");
+        assert_eq!(executions_of(&snapshot, "s1"), vec![0]);
         engine.close().await;
+    }
+
+    /// Drive one legacy-shaped cancel flow on one engine, the way a client
+    /// would (the `pack_irq_cancel_normal` shape): complete the head act,
+    /// cancel it once the chain's next act shows up, then answer the redone
+    /// acts until the run settles. Returns the engine, the run and the
+    /// cancel's outcome, so both engines run the same script.
+    async fn run_cancel_engine(
+        kernel_engine: bool,
+        pid: &str,
+        workflow: &crate::model::Workflow,
+    ) -> (
+        crate::Engine,
+        Arc<crate::scheduler::Process>,
+        std::result::Result<(), String>,
+    ) {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(String, String)>();
+        let mut config = crate::Config::default();
+        config.data.kernel_engine = kernel_engine;
+        config.data.tick_interval_secs = Some(1);
+        let engine = crate::Engine::builder()
+            .set_config(&config)
+            .start()
+            .await
+            .unwrap();
+        engine.channel().on_message(move |e| {
+            let tx = tx.clone();
+            async move {
+                if !e.is_type("act") || !e.is_state(crate::MessageState::Created) {
+                    return;
+                }
+                let key = e
+                    .params()
+                    .and_then(|params| params.get::<String>("key"))
+                    .unwrap_or_default();
+                let _ = tx.send((key, e.tid.clone()));
+            }
+        });
+        let runtime = engine.runtime().clone();
+        let ran = runtime
+            .start(
+                workflow,
+                crate::Vars::new().with(crate::utils::consts::PROCESS_ID, pid),
+            )
+            .await
+            .unwrap();
+        let act1 = next_created_for(&mut rx, "act1").await;
+        runtime
+            .do_action(&crate::event::Action::new(
+                pid,
+                &act1,
+                crate::event::EventAction::Next,
+                crate::Vars::new(),
+            ))
+            .await
+            .expect("the head act completes");
+        next_created_for(&mut rx, "act2").await;
+        // The cancelled act's own step has finished its work and the chain's
+        // next act waits: the cancel both guards accept.
+        let cancel = runtime
+            .do_action(&crate::event::Action::new(
+                pid,
+                &act1,
+                crate::event::EventAction::Cancel,
+                crate::Vars::new(),
+            ))
+            .await
+            .map_err(|error| error.to_string());
+        if cancel.is_ok() {
+            // The rewind redid the head step: answer it and its downstream.
+            let redo = next_created_for(&mut rx, "act1").await;
+            runtime
+                .do_action(&crate::event::Action::new(
+                    pid,
+                    &redo,
+                    crate::event::EventAction::Next,
+                    crate::Vars::new(),
+                ))
+                .await
+                .expect("the redone act completes");
+            let again = next_created_for(&mut rx, "act2").await;
+            runtime
+                .do_action(&crate::event::Action::new(
+                    pid,
+                    &again,
+                    crate::event::EventAction::Next,
+                    crate::Vars::new(),
+                ))
+                .await
+                .expect("the redone downstream completes");
+        }
+        if kernel_engine {
+            let runtime = engine.runtime().clone();
+            let host = runtime.kernel().expect("the kernel host");
+            wait_kernel_settled(host, pid).await;
+        } else {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+            while !ran.state().is_biz_success() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "the legacy run never settled: {:?}",
+                    ran.state()
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        }
+        (engine, ran, cancel)
+    }
+
+    /// `Cancel` is the legacy rewind on both engines: a client cancels the head
+    /// act once its step finished its own work and the chain's next act waits,
+    /// and both redo that step while undoing the chain forward of it. The
+    /// comparison reads the surviving instance per node — the legacy act of a
+    /// cancelled path keeps its own history (`folded_legacy_states` would see
+    /// both), which is exactly the row-projection rule the notes record.
+    #[tokio::test(flavor = "multi_thread")]
+    #[serial_test::serial]
+    async fn kernel_cancel_matches_the_legacy_rewind() {
+        const PID: &str = "p_cancel_parity";
+        let workflow = || {
+            crate::model::Workflow::new()
+                .with_id("wf-cancel-parity")
+                .with_step(|step| {
+                    step.with_id("s1").with_uses(
+                        crate::utils::test::USES_IRQ,
+                        crate::Vars::new().with("key", "act1"),
+                    )
+                })
+                .with_step(|step| {
+                    step.with_id("s2").with_uses(
+                        crate::utils::test::USES_IRQ,
+                        crate::Vars::new().with("key", "act2"),
+                    )
+                })
+        };
+        let (legacy_engine, legacy_proc, legacy_cancel) =
+            run_cancel_engine(false, PID, &workflow()).await;
+        let (kernel_engine, _kernel_proc, kernel_cancel) =
+            run_cancel_engine(true, PID, &workflow()).await;
+        assert!(
+            legacy_cancel.is_ok(),
+            "the legacy guard accepts a cancel of a finished step: {legacy_cancel:?}"
+        );
+        assert!(
+            kernel_cancel.is_ok(),
+            "the kernel mirrors the legacy guard: {kernel_cancel:?}"
+        );
+
+        let legacy = latest_folded_legacy_states(&legacy_proc);
+        let kernel_runtime = kernel_engine.runtime();
+        let host = kernel_runtime.kernel().expect("the kernel host");
+        let snapshot = host.snapshot(PID).await.unwrap().expect("the aggregate");
+        assert_parity(&legacy, &snapshot);
+        assert_eq!(
+            state_of(&snapshot, "s1"),
+            crate::kernel::ExecutionState::Completed
+        );
+        assert_eq!(
+            state_of(&snapshot, "s2"),
+            crate::kernel::ExecutionState::Completed
+        );
+        assert_eq!(
+            executions_of(&snapshot, "s1"),
+            vec![0, 1],
+            "the rewind redid the head step once"
+        );
+        kernel_engine.close().await;
+        legacy_engine.close().await;
+    }
+
+    /// The refusals the legacy guard makes, mirrored: a step whose own work is
+    /// not done, a step whose forward chain already settled (the
+    /// duplicate-delivery guard), and a step with no forward work at all.
+    #[tokio::test]
+    async fn a_cancel_needs_a_finished_step_with_live_forward_work() {
+        let (host, mut wake_rx) = KernelHost::in_memory();
+        let workflow = crate::model::Workflow::new()
+            .with_id("wf-cancel-guard")
+            .with_step(|step| {
+                step.with_id("s1").with_uses(
+                    crate::utils::test::USES_IRQ,
+                    crate::Vars::new().with("key", "act1"),
+                )
+            })
+            .with_step(|step| {
+                step.with_id("s2").with_uses(
+                    crate::utils::test::USES_IRQ,
+                    crate::Vars::new().with("key", "act2"),
+                )
+            });
+        let spec = ProcessSpec::from_workflow("p-cancel-guard", &workflow, &|_| None).unwrap();
+        host.start_process(&spec).await.unwrap();
+        host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+
+        // The head step's own work is not done (its act waits): the legacy
+        // `is_biz_success` refusal, consuming nothing.
+        let before = host.snapshot("p-cancel-guard").await.unwrap().unwrap();
+        let waiting = host
+            .apply_action("p-cancel-guard", "s1", ActionKind::Cancel, Vec::new())
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{waiting}").contains("ActionNotAllowed"),
+            "a waiting step is not cancelable: {waiting}"
+        );
+        let after = host.snapshot("p-cancel-guard").await.unwrap().unwrap();
+        assert_eq!(
+            before.version, after.version,
+            "a refused cancel consumes nothing"
+        );
+
+        // Finished, but the chain forward of it settled: the legacy
+        // duplicate-delivery guard ("not allowed to cancel").
+        host.apply_action("p-cancel-guard", "s1", ActionKind::Complete, Vec::new())
+            .await
+            .unwrap();
+        host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+        host.apply_action("p-cancel-guard", "s2", ActionKind::Complete, Vec::new())
+            .await
+            .unwrap();
+        host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+        assert!(host.process_completed("p-cancel-guard").await.unwrap());
+        let settled = host
+            .apply_action("p-cancel-guard", "s1", ActionKind::Cancel, Vec::new())
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{settled}").contains("not allowed to cancel"),
+            "a settled chain refuses the rewind: {settled}"
+        );
+
+        // A lone step has no forward work to rewind at all: the legacy
+        // "cannot find cancelled tasks".
+        let lone = crate::model::Workflow::new()
+            .with_id("wf-cancel-lone")
+            .with_step(|step| {
+                step.with_id("s1").with_uses(
+                    crate::utils::test::USES_IRQ,
+                    crate::Vars::new().with("key", "act1"),
+                )
+            });
+        let spec = ProcessSpec::from_workflow("p-cancel-lone", &lone, &|_| None).unwrap();
+        host.start_process(&spec).await.unwrap();
+        host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+        host.apply_action("p-cancel-lone", "s1", ActionKind::Complete, Vec::new())
+            .await
+            .unwrap();
+        host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+        let empty = host
+            .apply_action("p-cancel-lone", "s1", ActionKind::Cancel, Vec::new())
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{empty}").contains("cannot find cancelled tasks"),
+            "a lone step has nothing to rewind: {empty}"
+        );
+    }
+
+    /// Await the next act `Created` message for one params key (the cancel
+    /// script's only interesting event).
+    async fn next_created_for(
+        rx: &mut tokio::sync::mpsc::UnboundedReceiver<(String, String)>,
+        key: &str,
+    ) -> String {
+        loop {
+            let (seen, tid) = tokio::time::timeout(std::time::Duration::from_secs(30), rx.recv())
+                .await
+                .unwrap_or_else(|_| panic!("the act '{key}' never appeared"))
+                .expect("the channel is open");
+            if seen == key {
+                return tid;
+            }
+        }
     }
 
     /// One node's state in a running kernel driver, or `None` while the
@@ -7001,16 +7322,27 @@ mod tests {
         let (host, mut wake_rx) = KernelHost::in_memory();
         let mut spec = ProcessSpec::linear("p6", "root", &["head", "mid", "tail"]);
         spec.auto.remove("head"); // the head waits for a client action
+        // … and so does the step its cancel rewinds: an auto downstream would
+        // settle the moment the head did, leaving the rewind nothing to do
+        // (the legacy guard refuses that).
+        spec.auto.remove("mid");
         host.start_process(&spec).await.unwrap();
         host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
 
+        // The head's own work first: a linear spec has no acts, so the client
+        // action is the work itself.
+        host.apply_action("p6", "head", ActionKind::Complete, Vec::new())
+            .await
+            .unwrap();
+        host.run_until_quiescent(&mut wake_rx, 100).await.unwrap();
+        // The rewind: head gen0 keeps the legacy act's `Backed` fact, the
+        // chain forward of it is skipped, and a fresh head generation is
+        // already parked waiting for its own action.
         host.apply_action("p6", "head", ActionKind::Cancel, Vec::new())
             .await
             .unwrap();
         host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
 
-        // The rewind: head gen0 is Cancelled, the downstream is Skipped, and
-        // a fresh head generation is already parked waiting again.
         let snapshot = host.snapshot("p6").await.unwrap().unwrap();
         let state_of = |task: &str, generation: u64| {
             snapshot
@@ -7019,16 +7351,17 @@ mod tests {
                 .map(|execution| execution.state)
                 .unwrap()
         };
-        assert_eq!(
-            state_of("head", 0),
-            crate::kernel::ExecutionState::Cancelled
-        );
+        assert_eq!(state_of("head", 0), crate::kernel::ExecutionState::Backed);
         assert_eq!(state_of("mid", 0), crate::kernel::ExecutionState::Skipped);
         assert_eq!(state_of("tail", 0), crate::kernel::ExecutionState::Skipped);
         assert_eq!(state_of("head", 1), crate::kernel::ExecutionState::Waiting);
 
         // The re-run answers its own action; the recreated downstream runs.
         host.apply_action("p6", "head", ActionKind::Complete, Vec::new())
+            .await
+            .unwrap();
+        host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
+        host.apply_action("p6", "mid", ActionKind::Complete, Vec::new())
             .await
             .unwrap();
         host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
@@ -7385,10 +7718,12 @@ mod tests {
         );
     }
 
-    /// Cancelling before the fan-out rewinds the chain; the re-entered step
-    /// fans out fresh generations of its branches when it completes again.
+    /// Cancelling a step that finished its own work rewinds the chain (the
+    /// legacy guard): the closed generation keeps the legacy act's own `Backed`
+    /// fact, and the re-entered step fans out fresh generations of its branches
+    /// when it completes again.
     #[tokio::test]
-    async fn cancel_before_fanout_reruns_branches_as_fresh_generations() {
+    async fn cancelling_a_finished_container_rewinds_its_branches() {
         let workflow = crate::model::Workflow::new()
             .with_var("v", 1)
             .with_step(|step| {
@@ -7401,20 +7736,65 @@ mod tests {
                             .with_step(|step| step.with_id("s11"))
                     })
             })
-            .with_step(|step| step.with_id("step2"));
+            .with_step(|step| {
+                step.with_id("step2")
+                    .with_uses(crate::utils::test::USES_IRQ, crate::Vars::new())
+            });
         let (host, mut wake_rx) = KernelHost::in_memory();
         let spec = ProcessSpec::from_workflow("p-cancel-early", &workflow, &|_| None).unwrap();
         host.start_process(&spec).await.unwrap();
         host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
 
+        // The step's own work first: its act, then the branches it dispatched.
+        host.apply_action("p-cancel-early", "step1", ActionKind::Complete, Vec::new())
+            .await
+            .unwrap();
+        host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
+        let snapshot = host.snapshot("p-cancel-early").await.unwrap().unwrap();
+        assert_eq!(
+            state_of(&snapshot, "step1"),
+            crate::kernel::ExecutionState::Completed,
+            "the container settled after its branches ran"
+        );
+        assert_eq!(
+            state_of(&snapshot, "b1"),
+            crate::kernel::ExecutionState::Completed
+        );
+        assert_eq!(
+            state_of(&snapshot, "s11"),
+            crate::kernel::ExecutionState::Completed
+        );
+
         host.apply_action("p-cancel-early", "step1", ActionKind::Cancel, Vec::new())
             .await
             .unwrap();
         host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
+        let snapshot = host.snapshot("p-cancel-early").await.unwrap().unwrap();
+        let state_at = |task: &str, generation: u64| {
+            snapshot
+                .executions
+                .get(&crate::kernel::ExecutionId::new(task, generation).unwrap())
+                .map(|execution| execution.state)
+                .unwrap()
+        };
+        assert_eq!(
+            state_at("step1", 0),
+            crate::kernel::ExecutionState::Backed,
+            "the decided generation took the legacy cancelled act's fact"
+        );
+        assert_eq!(
+            state_at("step1", 1),
+            crate::kernel::ExecutionState::Waiting,
+            "the redone step waits on its own act"
+        );
 
-        // The re-entered step waits again; completing it fans out branches
-        // for the first time (generation 0 — none existed to rewind).
+        // The re-entered step waits again; completing it fans out its branches
+        // as fresh generations.
         host.apply_action("p-cancel-early", "step1", ActionKind::Complete, Vec::new())
+            .await
+            .unwrap();
+        host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
+        host.apply_action("p-cancel-early", "step2", ActionKind::Complete, Vec::new())
             .await
             .unwrap();
         host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
@@ -7422,6 +7802,10 @@ mod tests {
 
         let snapshot = host.snapshot("p-cancel-early").await.unwrap().unwrap();
         assert!(host_all_terminal(&snapshot));
+        assert_eq!(
+            state_of(&snapshot, "step1"),
+            crate::kernel::ExecutionState::Completed
+        );
         assert_eq!(
             state_of(&snapshot, "b1"),
             crate::kernel::ExecutionState::Completed
@@ -7434,18 +7818,20 @@ mod tests {
             state_of(&snapshot, "step2"),
             crate::kernel::ExecutionState::Completed
         );
+        assert_eq!(executions_of(&snapshot, "step1"), vec![0, 1]);
         assert_eq!(
-            executions_of(&snapshot, "step1").len(),
-            2,
-            "gen0 cancelled + gen1 completed"
+            executions_of(&snapshot, "b1"),
+            vec![0, 1],
+            "the re-entered container redrew its branches exactly once"
         );
     }
 
-    /// Cancelling mid-branches: the cascade closes the in-flight branch
-    /// subtree, the rewind recreates it as fresh generations, and the
-    /// fan-out READMITS those instead of allocating duplicates.
+    /// Cancelling a container that finished its own work rewinds it: the
+    /// cascade closes the settled branch subtree, the rewind recreates it as
+    /// fresh generations, and the re-entered container's fan-out READMITS those
+    /// instead of allocating duplicates.
     #[tokio::test]
-    async fn cancel_mid_branches_cascades_then_reenters_through_readmission() {
+    async fn cancelling_a_finished_container_readmits_the_rewound_branches() {
         let workflow = crate::model::Workflow::new()
             .with_var("v", 1)
             .with_step(|step| {
@@ -7463,15 +7849,18 @@ mod tests {
                             .with_step(|step| step.with_id("s21"))
                     })
             })
-            .with_step(|step| step.with_id("step2"));
+            .with_step(|step| {
+                step.with_id("step2")
+                    .with_uses(crate::utils::test::USES_IRQ, crate::Vars::new())
+            });
         let (host, mut wake_rx) = KernelHost::in_memory();
         let spec = ProcessSpec::from_workflow("p-cancel-mid", &workflow, &|_| None).unwrap();
         host.start_process(&spec).await.unwrap();
         host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
 
-        // b1/s11 wait mid-branches; the else branch skipped; step1 is parked
-        // by the fan-out and therefore `Running` (the legacy step's state while
-        // its children run).
+        // The branches first: s11 waits on its act while the else branch is
+        // skipped, so the container is parked `Running` (the legacy step's
+        // state while its children run).
         let snapshot = host.snapshot("p-cancel-mid").await.unwrap().unwrap();
         assert_eq!(
             state_of(&snapshot, "s11"),
@@ -7485,16 +7874,26 @@ mod tests {
             state_of(&snapshot, "b2"),
             crate::kernel::ExecutionState::Skipped
         );
+        host.apply_action("p-cancel-mid", "s11", ActionKind::Complete, Vec::new())
+            .await
+            .unwrap();
+        host.run_until_quiescent(&mut wake_rx, 300).await.unwrap();
+        let snapshot = host.snapshot("p-cancel-mid").await.unwrap().unwrap();
+        assert_eq!(
+            state_of(&snapshot, "step1"),
+            crate::kernel::ExecutionState::Completed,
+            "the container settled once its branches did"
+        );
 
         host.apply_action("p-cancel-mid", "step1", ActionKind::Cancel, Vec::new())
             .await
             .unwrap();
         host.run_until_quiescent(&mut wake_rx, 400).await.unwrap();
 
-        // The gen0 branch subtree is closed by the cascade, and the rewind
-        // has already recreated the branches as Created generations. The root's
-        // own generation stays live: it is the container over the whole chain,
-        // the rewind's fresh generations included.
+        // The gen0 subtree is closed by the cascade, and the rewind has already
+        // recreated it as Created generations. The root's own generation stays
+        // live: it is the container over the whole chain, the rewind's fresh
+        // generations included.
         let snapshot = host.snapshot("p-cancel-mid").await.unwrap().unwrap();
         assert!(
             host_all_terminal_generations_0(&snapshot),
@@ -7536,6 +7935,10 @@ mod tests {
             .await
             .unwrap();
         host.run_until_quiescent(&mut wake_rx, 400).await.unwrap();
+        host.apply_action("p-cancel-mid", "step2", ActionKind::Complete, Vec::new())
+            .await
+            .unwrap();
+        host.run_until_quiescent(&mut wake_rx, 400).await.unwrap();
         assert!(host.process_completed("p-cancel-mid").await.unwrap());
         let snapshot = host.snapshot("p-cancel-mid").await.unwrap().unwrap();
         assert!(host_all_terminal(&snapshot));
@@ -7546,6 +7949,11 @@ mod tests {
         assert_eq!(
             state_of(&snapshot, "step2"),
             crate::kernel::ExecutionState::Completed
+        );
+        assert_eq!(
+            executions_of(&snapshot, "b1"),
+            vec![0, 1],
+            "the redone container redrew its branches exactly once"
         );
     }
 
@@ -7691,6 +8099,12 @@ mod tests {
         host.start_process(&spec).await.unwrap();
         host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
 
+        // The step's own work first: the legacy guard (which the kernel
+        // mirrors) refuses a cancel before it.
+        host.apply_action(PID, "s1", ActionKind::Complete, Vec::new())
+            .await
+            .unwrap();
+        host.run_until_quiescent(&mut wake_rx, 200).await.unwrap();
         host.apply_action(PID, "s1", ActionKind::Cancel, Vec::new())
             .await
             .unwrap();
@@ -7699,7 +8113,7 @@ mod tests {
         let snapshot = host.snapshot(PID).await.unwrap().unwrap();
         assert_eq!(
             state_of(&snapshot, "s1"),
-            crate::kernel::ExecutionState::Cancelled
+            crate::kernel::ExecutionState::Backed
         );
         let source = crate::kernel::ExecutionId {
             task_id: "s1".into(),
@@ -7742,7 +8156,10 @@ mod tests {
             crate::kernel::ExecutionState::Waiting,
             "the redone step waits on its own act again"
         );
-        let rewind = snapshot.operations.get(&rewind_id).expect("the rewind exists");
+        let rewind = snapshot
+            .operations
+            .get(&rewind_id)
+            .expect("the rewind exists");
         assert!(
             matches!(
                 rewind.state,

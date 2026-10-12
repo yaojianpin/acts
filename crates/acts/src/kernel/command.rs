@@ -177,7 +177,15 @@ fn action_target(
         (S::Running | S::Waiting, A::Complete) => Ok(S::Completed),
         (S::Running | S::Waiting, A::Submit) => Ok(S::Submitted),
         (S::Ready | S::Running | S::Waiting, A::Skip) => Ok(S::Skipped),
-        (S::Ready | S::Running | S::Waiting, A::Cancel) => Ok(S::Cancelled),
+        // `Cancel` is the legacy rewind, guard included: the legacy handler
+        // walks from the act up to its step and refuses unless that step's own
+        // work is done (`is_biz_success` = Completed/Submitted/Backed) — a
+        // cancel redoes the step and undoes the chain forward from it, which
+        // only makes sense once the step ran. The kernel's action targets the
+        // node the act folds into, so the same surface decides here: a
+        // finished node is closed `Backed` (the legacy cancelled act's own
+        // fact) and re-entered, everything else is refused.
+        (S::Completed | S::Submitted, A::Cancel) => Ok(S::Backed),
         (S::Running | S::Waiting, A::Abort) => Ok(S::Aborted),
         (S::Waiting, A::Back) => Ok(S::Backed),
         (S::Running | S::Waiting, A::Fail { .. }) => Ok(S::Failed),
@@ -303,10 +311,47 @@ mod tests {
         assert!(matches!(
             ActionPlanner::plan(
                 &snapshot(ExecutionState::Completed),
-                &command(ActionKind::Cancel),
+                &command(ActionKind::Abort),
             ),
             Err(CommandError::ActionNotAllowed { .. })
         ));
+        assert!(matches!(
+            ActionPlanner::plan(
+                &snapshot(ExecutionState::Backed),
+                &command(ActionKind::Fail {
+                    code: "E".into(),
+                    message: String::new(),
+                }),
+            ),
+            Err(CommandError::ActionNotAllowed { .. })
+        ));
+    }
+
+    /// `Cancel` is the legacy rewind, guard included: accepted where the legacy
+    /// handler is (the target's own work done, `is_biz_success`), closing that
+    /// generation `Backed` — the legacy cancelled act's own fact — and refused
+    /// while the work is not done (`Ready`/`Running`/`Waiting`).
+    #[test]
+    fn cancel_accepts_only_a_finished_execution() {
+        let plan = ActionPlanner::plan(
+            &snapshot(ExecutionState::Completed),
+            &command(ActionKind::Cancel),
+        )
+        .unwrap();
+        assert_eq!(plan.state_changes[0].to, ExecutionState::Backed);
+        for state in [
+            ExecutionState::Ready,
+            ExecutionState::Running,
+            ExecutionState::Waiting,
+        ] {
+            assert!(
+                matches!(
+                    ActionPlanner::plan(&snapshot(state), &command(ActionKind::Cancel)),
+                    Err(CommandError::ActionNotAllowed { .. })
+                ),
+                "a cancel whose work is not done is refused from {state:?}"
+            );
+        }
     }
 
     #[test]

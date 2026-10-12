@@ -541,6 +541,41 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
   实测:pinning 用例 8/8 绿(修复前 5/6 红),全量 `-p acts --lib --tests` **1260 passed**(只剩已登记
   的 stall 红),该用例耗时从 ~1.8s 降到 ~0.17s(重试风暴消失)。
 
+- **Cancel 守卫对齐 legacy(「剩余工作 1」收口;本片)** —— 内核不再有「Cancel 独有的接受面」。
+  (a) **实测 legacy**(临时脚本单跑 legacy,逐任务 dump;`Cancel` 处理器源码 `task.rs:820-883`):
+      处理器从 act 上溯到它的 parent step,要求该 step `is_biz_success`(Completed/Submitted/Backed);
+      再 `follows(is Step && is_acts)` 收集**链上**(走 `next`,容器 children 不算)前向的 uses 步:
+      空 ⇒ `cannot find cancelled tasks`,全部 `is_completed` ⇒ `not allowed to cancel`(重复投递守卫)。
+      实测(2 个 irq 步,act1 完成后 act2 在等):
+      - 接受流:cancel(act1 的 tid)→ Ok;**旧的 act1/step1 保持 Completed**、**新增一个 step1 实例**
+        (Running + 新 act Interrupt)、**act2 → Cancelled**、**step2 → Completed**;答 redo act1 与新的
+        act2 后整条 run 结算(根 Completed)。
+      - 整条 run 结算后再 cancel ⇒ `task('<step>') is not allowed to cancel`;
+      - 链上没有前向 uses 步(唯一一个 irq 步)⇒ `cannot find cancelled tasks`。
+  (b) **内核接受面**(`ActionPlanner::action_target`):`(Completed|Submitted) + Cancel → Backed`,其余
+      状态一律 `ActionNotAllowed`。被撤销的那一代取 legacy **act 侧的事实 `Backed`**(`plan_reentry`
+      的 source 也接受它);状态表删掉不再有生产者的 `(Ready|Running|Waiting) → Cancelled`,加
+      `(Completed|Submitted) → Backed`。(`Cancelled` 状态与 codec 保留,见下面的边界 ③。)
+  (c) **前向守卫**(`KernelHost::validate_cancel_forward_work`,durable intent 之前的 preflight):沿
+      **链**走 source 那一代的前向闭包(容器 child 用 `parent == current` 排除 —— legacy 的 `follows`
+      只走 `next`),取 uses 节点(无 `__model` 的线性 spec 是 legacy 表达不了的形状 ⇒ 回落「任一前向
+      执行还在飞」的精神);空 ⇒ `cannot find cancelled tasks`,全终态 ⇒ `not allowed to cancel`
+      (与 legacy 文案一致,拒绝不消费聚合版本)。
+  (d) **对跑实测**:`kernel_cancel_matches_the_legacy_rewind`(同 workflow + 同一客户端脚本,两引擎
+      cancel 都 Ok;结算后 `assert_parity` 逐节点相等,s1 两代、b1/s11 各两代)与
+      `a_cancel_needs_a_finished_step_with_live_forward_work`(三条拒绝);
+      `legacy_cancel_refuses_a_step_whose_work_is_not_done` 改为**两侧都拒绝**(分歧消失,内核侧另断言
+      「拒绝不消费、s1 仍只有一代」)。既有「在飞 cancel」用例按新口径重写:
+      `cancelling_a_finished_container_rewinds_its_branches`、
+      `cancelling_a_finished_container_readmits_the_rewound_branches`(readmission 仍覆盖)、
+      `cancelled_head_cascades_skip_through_the_chain`(线性 spec:头与下游步都设为手动;head gen0
+      现在断言 `Backed`)。
+  **登记边界(未静默降级)**:①被撤销那一代的**前向旧代**在内核是 `Skipped`(死源级联),legacy 的对应
+      事实是前向 act `Cancelled` + 它所属 step `Completed`;parity 用「每节点最新一代」口径(两引擎在
+      那一层相等),旧代的差异登记在此。②被撤销节点自身:内核把该代记 `Backed`(legacy act 的事实),
+      legacy 的 step 事实(Completed)折叠不进同一个节点行。③`Cancelled` 不再由客户端动作产生。
+      ④`KernelHost` 的「动作 intent op 不带动作载荷」老洞仍在:见剩余工作 2。
+
 ## 已对齐(无需动)
 
 - Complete/Submit/Skip/Fail on Running/Waiting:ActionPlanner 与 legacy 守卫一致
@@ -550,18 +585,33 @@ kernel 影子迁移的工作状态与对账结论。续做任何 P2 切片前先
 
 ## 剩余工作(按序)
 
-1. (登记,未排期)**Cancel 的 legacy 守卫差异**(A′ 暴露):legacy 的 cancel 处理器要求被撤销的
-   **step** 处于 biz-success(它从 act 上溯到 step),内核的动作直接指向节点、`ActionPlanner`
-   允许 `Ready|Running|Waiting` 上的 Cancel。park 改 Running 后需要状态表补 `Running → Cancelled`
-   才不打断既有 cancel 用例;这条接受面在 park 前后都存在(内核独有),尚未与 legacy 守卫对跑。
-   (注:流事实归一(B)、timeout+catches(队列 1)、timer 首轮等 tick(队列 2)均已完成,见上。)
+1. (登记,未排期)**`load()` 的多键读不是原子的**:`AsyncAggregateRepository::load` 用
+   `store.read_many` 一次读 aggregate + recovery index + outbox index,而 `KvStore::many` 的默认
+   实现是**逐个 `one()`**(`MemoryStore` 未覆写 ⇒ 三次独立加读锁)。并发提交落在两次读之间时,三个
+   文档来自不同版本,`decode_loaded_aggregate` 直接抛
+   `RecoveryIndexMismatch`/`OutboxIndexMismatch` —— 被当成硬完整性错误抛给调用方(实测:上一片的
+   重入重试风暴里出现过一次 `RecoveryIndexMismatch{process_id}`)。重入改持久操作后风暴消失,但
+   「客户端动作 × hop」或两个客户端动作并发时仍可能命中。修法候选:`MemoryStore` 覆写 `many`
+   (一次读锁),或让 loader 在 mismatch 时有限重试(与 store 无关、更保守)。
+   注:这次不做,是因为它属于仓库/存储层、与本项(内核 Cancel 语义)不同路径,且需要单独的设计选择。
+
+2. (登记,未排期)**动作 intent op 不携带动作载荷**:客户端动作的 durable intent 是
+   `OperationKind::ApplyAction`,不带动作类型与 inputs,于是崩溃/租约过期后由 recovery 驱那条 hop
+   时走的是 `effect_plan(None)` = **自动完成**,而不是客户端原本的动作(Fail/Abort/Skip/Submit/
+   Cancel 的「决定」本身没有 durable 载荷)。Cancel/Back 的重入已由同笔提交的 `ReenterTask` 兜住,
+   但决定本身仍会漂。修法:把动作类型 + inputs 编进操作(需要 codec 载荷,不是单纯追加 tag)。
 
 ## 语义结论(已核实,勿再猜测)
 
 - legacy `TaskState::Interrupt` ↔ kernel `ExecutionState::Waiting`;
   Back 仅 Waiting 合法(action_target)。
-- legacy Cancel = 回退重做(task.rs:820-883):redos step 新一代 + 前向 undo/skip;
-  已由重入实现。legacy Abort = 终止链路(祖先 Aborted + 子孙 Skipped)。
+- legacy Cancel = 回退重做(task.rs:820-883):**守卫** = act 的 parent step 处于 biz-success
+  (Completed/Submitted/Backed),且链上(`follows` 走 `next`)要有 uses 步、不全是终态(否则
+  `cannot find cancelled tasks` / `not allowed to cancel`);**效果** = 被撤销 act 所属 step 新增一代
+  (redo;旧 step 保持 Completed)+ 前向链的 act → Cancelled、其 step → Completed;被撤销的那个 act
+  实测保持 Completed。内核对应:目标节点 `Completed|Submitted` → `Backed` + `ReenterTask` 重入
+  (与 Back 共用同一条重入),前向旧代走死源级联 → Skipped(登记差异,见「Cancel 守卫对齐」片)。
+  legacy Abort = 终止链路(祖先 Aborted + 子孙 Skipped)。
 - join:Skipped 不算 success(死路传播);Backed 等待;JoinBlocked 错误已删除。
 - 容器 join(branch/分支步)与链 join 不同:legacy `auto_complete` 数**全终态**子
   (Skipped 算已结算)且任一子 Aborted 时让位;kernel `plan_join` 同——Skipped 分支

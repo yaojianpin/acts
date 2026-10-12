@@ -184,25 +184,24 @@ fn validate_state_change(change: &StateChange) -> Result<(), PlanError> {
                 S::Running,
                 S::Completed | S::Submitted | S::Failed | S::Aborted | S::Skipped
             )
-            // A container whose children run stays `Running` (see the park
-            // mark in `container`), so cancelling one — the legacy cancel's
-            // rewind of a step whose children are mid-flight — moves it from
-            // `Running`. The planner already decides `Cancelled` for every
-            // `Ready`/`Running`/`Waiting` target (`ActionPlanner`'s
-            // vocabulary); the table only spells the transition out.
-            | (S::Running, S::Cancelled)
+            // A `Cancel` *is* the legacy rewind: the legacy handler refuses
+            // unless the act's step already finished its own work, then closes
+            // that act `Backed` and redoes the step (see `ActionPlanner`). So
+            // the decided generation of a finished step moves to `Backed`,
+            // exactly like a `Back`'s source — never from `Ready`/`Running`/
+            // `Waiting`, which the legacy guard refuses.
+            | (S::Completed | S::Submitted, S::Backed)
             | (
                 S::Waiting,
                 S::Completed
                     | S::Submitted
                     | S::Backed
-                    | S::Cancelled
                     | S::Failed
                     | S::Aborted
                     | S::Skipped
                     | S::Removed
             )
-            | (S::Ready, S::Cancelled | S::Skipped | S::Removed)
+            | (S::Ready, S::Skipped | S::Removed)
             // A branch predicate is evaluated in the branch task's `init` (the
             // legacy `Branch::init`), before the task ever runs: one that
             // cannot be evaluated decides that branch `Error` straight from
